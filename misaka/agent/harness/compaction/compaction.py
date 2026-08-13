@@ -1,0 +1,780 @@
+"""Conversation compaction helpers for the harness session tree."""
+
+from __future__ import annotations
+
+import json
+import time
+from dataclasses import dataclass
+from typing import Any
+
+from misaka.ai.stream import complete_simple
+from misaka.ai.types import Model, SimpleStreamOptions, Usage, UserMessage
+
+from misaka.agent.harness.compaction.utils import (
+    compute_file_lists,
+    create_file_ops,
+    extract_file_ops_from_message,
+    format_file_operations,
+    serialize_conversation,
+)
+from misaka.agent.harness.messages import (
+    convert_to_llm,
+    create_branch_summary_message,
+    create_compaction_summary_message,
+    create_custom_message,
+)
+from misaka.agent.harness.session.session import build_session_context
+from misaka.agent.harness.types import (
+    AgentMessage,
+    CompactionError,
+    CompactionPreparation,
+    CompactionSettings,
+    CompactResult,
+    FileOperations,
+    SessionTreeEntry,
+    err,
+    ok,
+)
+
+
+@dataclass(slots=True)
+class ContextUsageEstimate:
+    tokens: int
+    usageTokens: int
+    trailingTokens: int
+    lastUsageIndex: int | None
+
+
+@dataclass(slots=True)
+class CutPointResult:
+    firstKeptEntryIndex: int
+    turnStartIndex: int
+    isSplitTurn: bool
+
+
+@dataclass(slots=True)
+class CompactionDetails:
+    readFiles: list[str]
+    modifiedFiles: list[str]
+
+
+DEFAULT_COMPACTION_SETTINGS = CompactionSettings(
+    enabled=True,
+    reserveTokens=16384,
+    keepRecentTokens=20000,
+)
+
+SUMMARIZATION_SYSTEM_PROMPT = """You are a context summarization assistant. Your task is to read a conversation
+between a user and an AI coding assistant, then produce a structured summary following the exact format specified.
+
+Do NOT continue the conversation. Do NOT respond to any questions in the conversation.
+ONLY output the structured summary."""
+
+SUMMARIZATION_PROMPT = """The messages above are a conversation to summarize. Create a structured
+context checkpoint summary that another LLM will use to continue the work.
+
+Use this EXACT format:
+
+## Goal
+[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]
+
+## Constraints & Preferences
+- [Any constraints, preferences, or requirements mentioned by user]
+- [Or "(none)" if none were mentioned]
+
+## Progress
+### Done
+- [x] [Completed tasks/changes]
+
+### In Progress
+- [ ] [Current work]
+
+### Blocked
+- [Issues preventing progress, if any]
+
+## Key Decisions
+- **[Decision]**: [Brief rationale]
+
+## Next Steps
+1. [Ordered list of what should happen next]
+
+## Critical Context
+- [Any data, examples, or references needed to continue]
+- [Or "(none)" if not applicable]
+
+Keep each section concise. Preserve exact file paths, function names, and error messages."""
+
+UPDATE_SUMMARIZATION_PROMPT = """The messages above are NEW conversation messages to incorporate into
+the existing summary provided in <previous-summary> tags.
+
+Update the existing structured summary with new information. RULES:
+- PRESERVE all existing information from the previous summary
+- ADD new progress, decisions, and context from the new messages
+- UPDATE the Progress section: move items from "In Progress" to "Done" when completed
+- UPDATE "Next Steps" based on what was accomplished
+- PRESERVE exact file paths, function names, and error messages
+- If something is no longer relevant, you may remove it
+
+Use this EXACT format:
+
+## Goal
+[Preserve existing goals, add new ones if the task expanded]
+
+## Constraints & Preferences
+- [Preserve existing, add new ones discovered]
+
+## Progress
+### Done
+- [x] [Include previously done items AND newly completed items]
+
+### In Progress
+- [ ] [Current work - update based on progress]
+
+### Blocked
+- [Current blockers - remove if resolved]
+
+## Key Decisions
+- **[Decision]**: [Brief rationale] (preserve all previous, add new)
+
+## Next Steps
+1. [Update based on current state]
+
+## Critical Context
+- [Preserve important context, add new if needed]
+
+Keep each section concise. Preserve exact file paths, function names, and error messages."""
+
+TURN_PREFIX_SUMMARIZATION_PROMPT = """This is the PREFIX of a turn that was too large to keep.
+The SUFFIX (recent work) is retained.
+
+Summarize the prefix to provide context for the retained suffix:
+
+## Original Request
+[What did the user ask for in this turn?]
+
+## Early Progress
+- [Key decisions and work done in the prefix]
+
+## Context for Suffix
+- [Information needed to understand the retained recent work]
+
+Be concise. Focus on what's needed to understand the kept suffix."""
+
+
+def calculate_context_tokens(usage: Usage | dict[str, Any]) -> int:
+    total_tokens = _usage_field(usage, "totalTokens")
+    if isinstance(total_tokens, int) and total_tokens:
+        return total_tokens
+    return sum(int(_usage_field(usage, name) or 0) for name in ("input", "output", "cacheRead", "cacheWrite"))
+
+
+def get_last_assistant_usage(entries: list[Any]) -> Usage | dict[str, Any] | None:
+    for entry in reversed(entries):
+        if _entry_field(entry, "type") != "message":
+            continue
+        usage = _assistant_usage(_entry_field(entry, "message"))
+        if usage is not None:
+            return usage
+    return None
+
+
+def estimate_context_tokens(messages: list[AgentMessage]) -> ContextUsageEstimate:
+    usage_info = _last_assistant_usage_info(messages)
+    if usage_info is None:
+        estimated = sum(estimate_tokens(message) for message in messages)
+        return ContextUsageEstimate(
+            tokens=estimated,
+            usageTokens=0,
+            trailingTokens=estimated,
+            lastUsageIndex=None,
+        )
+
+    usage_tokens = calculate_context_tokens(usage_info["usage"])
+    trailing_tokens = sum(estimate_tokens(message) for message in messages[usage_info["index"] + 1 :])
+    return ContextUsageEstimate(
+        tokens=usage_tokens + trailing_tokens,
+        usageTokens=usage_tokens,
+        trailingTokens=trailing_tokens,
+        lastUsageIndex=usage_info["index"],
+    )
+
+
+def should_compact(context_tokens: int, context_window: int, settings: CompactionSettings) -> bool:
+    return settings.enabled and context_tokens > context_window - settings.reserveTokens
+
+
+def estimate_tokens(message: AgentMessage) -> int:
+    role = _message_field(message, "role")
+    chars = 0
+
+    if role == "user":
+        content = _message_field(message, "content")
+        if isinstance(content, str):
+            chars = len(content)
+        elif isinstance(content, list):
+            for block in content:
+                if _block_field(block, "type") == "text":
+                    text = _block_field(block, "text")
+                    if isinstance(text, str):
+                        chars += len(text)
+        return _chars_to_tokens(chars)
+
+    if role == "assistant":
+        for block in _message_field(message, "content") or []:
+            block_type = _block_field(block, "type")
+            if block_type == "text":
+                text = _block_field(block, "text")
+                if isinstance(text, str):
+                    chars += len(text)
+            elif block_type == "thinking":
+                thinking = _block_field(block, "thinking")
+                if isinstance(thinking, str):
+                    chars += len(thinking)
+            elif block_type == "toolCall":
+                name = _block_field(block, "name")
+                chars += len(name) if isinstance(name, str) else 0
+                chars += len(_safe_json_stringify(_block_field(block, "arguments")))
+        return _chars_to_tokens(chars)
+
+    if role in {"custom", "toolResult"}:
+        content = _message_field(message, "content")
+        if isinstance(content, str):
+            chars = len(content)
+        elif isinstance(content, list):
+            for block in content:
+                block_type = _block_field(block, "type")
+                if block_type == "text":
+                    text = _block_field(block, "text")
+                    if isinstance(text, str):
+                        chars += len(text)
+                elif block_type == "image":
+                    chars += 4800
+        return _chars_to_tokens(chars)
+
+    if role == "bashExecution":
+        command = _message_field(message, "command")
+        output = _message_field(message, "output")
+        chars = len(command) if isinstance(command, str) else 0
+        chars += len(output) if isinstance(output, str) else 0
+        return _chars_to_tokens(chars)
+
+    if role in {"branchSummary", "compactionSummary"}:
+        summary = _message_field(message, "summary")
+        return _chars_to_tokens(len(summary) if isinstance(summary, str) else 0)
+
+    return 0
+
+
+def find_turn_start_index(entries: list[SessionTreeEntry], entry_index: int, start_index: int) -> int:
+    for index in range(entry_index, start_index - 1, -1):
+        entry = entries[index]
+        entry_type = _entry_field(entry, "type")
+        if entry_type in {"branch_summary", "custom_message"}:
+            return index
+        if entry_type == "message":
+            role = _message_field(_entry_field(entry, "message"), "role")
+            if role in {"user", "bashExecution"}:
+                return index
+    return -1
+
+
+def find_cut_point(
+    entries: list[SessionTreeEntry],
+    start_index: int,
+    end_index: int,
+    keep_recent_tokens: int,
+) -> CutPointResult:
+    cut_points = _find_valid_cut_points(entries, start_index, end_index)
+    if not cut_points:
+        return CutPointResult(firstKeptEntryIndex=start_index, turnStartIndex=-1, isSplitTurn=False)
+
+    accumulated_tokens = 0
+    cut_index = cut_points[0]
+
+    for index in range(end_index - 1, start_index - 1, -1):
+        entry = entries[index]
+        if _entry_field(entry, "type") != "message":
+            continue
+        accumulated_tokens += estimate_tokens(_entry_field(entry, "message"))
+        if accumulated_tokens >= keep_recent_tokens:
+            for candidate in cut_points:
+                if candidate >= index:
+                    cut_index = candidate
+                    break
+            break
+
+    while cut_index > start_index:
+        previous = entries[cut_index - 1]
+        previous_type = _entry_field(previous, "type")
+        if previous_type == "compaction":
+            break
+        if previous_type == "message":
+            break
+        cut_index -= 1
+
+    cut_entry = entries[cut_index]
+    cut_message = _entry_field(cut_entry, "message")
+    is_user_message = _entry_field(cut_entry, "type") == "message" and _message_field(cut_message, "role") == "user"
+    turn_start_index = -1 if is_user_message else find_turn_start_index(entries, cut_index, start_index)
+    return CutPointResult(
+        firstKeptEntryIndex=cut_index,
+        turnStartIndex=turn_start_index,
+        isSplitTurn=(not is_user_message and turn_start_index != -1),
+    )
+
+
+async def generate_summary(
+    current_messages: list[AgentMessage],
+    model: Model,
+    reserve_tokens: int,
+    api_key: str,
+    headers: dict[str, str] | None = None,
+    signal: Any = None,
+    custom_instructions: str | None = None,
+    previous_summary: str | None = None,
+    thinking_level: str | None = None,
+):
+    max_tokens = _summary_max_tokens(reserve_tokens, model, 0.8)
+    base_prompt = UPDATE_SUMMARIZATION_PROMPT if previous_summary else SUMMARIZATION_PROMPT
+    if custom_instructions:
+        base_prompt = f"{base_prompt}\n\nAdditional focus: {custom_instructions}"
+
+    conversation_text = serialize_conversation(convert_to_llm(current_messages))
+    prompt_text = f"<conversation>\n{conversation_text}\n</conversation>\n\n"
+    if previous_summary:
+        prompt_text += f"<previous-summary>\n{previous_summary}\n</previous-summary>\n\n"
+    prompt_text += base_prompt
+
+    response = await complete_simple(
+        model,
+        {
+            "systemPrompt": SUMMARIZATION_SYSTEM_PROMPT,
+            "messages": [UserMessage(content=[{"type": "text", "text": prompt_text}], timestamp=_timestamp_ms())],
+        },
+        _build_summary_options(
+            max_tokens=max_tokens,
+            api_key=api_key,
+            headers=headers,
+            signal=signal,
+            reasoning=model.reasoning and thinking_level is not None and thinking_level != "off",
+            thinking_level=thinking_level,
+        ),
+    )
+    if response.stopReason == "aborted":
+        return err(CompactionError("aborted", response.errorMessage or "Summarization aborted"))
+    if response.stopReason == "error":
+        return err(
+            CompactionError(
+                "summarization_failed",
+                f"Summarization failed: {response.errorMessage or 'Unknown error'}",
+            )
+        )
+
+    return ok(_assistant_text(response))
+
+
+def prepare_compaction(path_entries: list[SessionTreeEntry], settings: CompactionSettings):
+    if not path_entries or _entry_field(path_entries[-1], "type") == "compaction":
+        return ok(None)
+
+    previous_summary: str | None = None
+    previous_compaction_index = -1
+    for index in range(len(path_entries) - 1, -1, -1):
+        if _entry_field(path_entries[index], "type") == "compaction":
+            previous_compaction_index = index
+            previous_summary = _entry_field(path_entries[index], "summary")
+            break
+
+    boundary_start = 0
+    if previous_compaction_index >= 0:
+        previous_first_kept = _entry_field(path_entries[previous_compaction_index], "firstKeptEntryId")
+        first_kept_index = next(
+            (index for index, entry in enumerate(path_entries) if _entry_field(entry, "id") == previous_first_kept),
+            -1,
+        )
+        boundary_start = first_kept_index if first_kept_index >= 0 else previous_compaction_index + 1
+
+    tokens_before = estimate_context_tokens(build_session_context(path_entries).messages).tokens
+    cut_point = find_cut_point(path_entries, boundary_start, len(path_entries), settings.keepRecentTokens)
+    first_kept_entry = path_entries[cut_point.firstKeptEntryIndex]
+    first_kept_entry_id = _entry_field(first_kept_entry, "id")
+    if not first_kept_entry_id:
+        return err(CompactionError("invalid_session", "First kept entry has no UUID - session may need migration"))
+
+    history_end = cut_point.turnStartIndex if cut_point.isSplitTurn else cut_point.firstKeptEntryIndex
+    messages_to_summarize: list[AgentMessage] = []
+    for entry in path_entries[boundary_start:history_end]:
+        message = _get_message_from_entry_for_compaction(entry)
+        if message is not None:
+            messages_to_summarize.append(message)
+
+    turn_prefix_messages: list[AgentMessage] = []
+    if cut_point.isSplitTurn:
+        for entry in path_entries[cut_point.turnStartIndex : cut_point.firstKeptEntryIndex]:
+            message = _get_message_from_entry_for_compaction(entry)
+            if message is not None:
+                turn_prefix_messages.append(message)
+
+    file_ops = _extract_file_operations(messages_to_summarize, path_entries, previous_compaction_index)
+    if cut_point.isSplitTurn:
+        for message in turn_prefix_messages:
+            extract_file_ops_from_message(message, file_ops)
+
+    return ok(
+        CompactionPreparation(
+            firstKeptEntryId=str(first_kept_entry_id),
+            messagesToSummarize=messages_to_summarize,
+            turnPrefixMessages=turn_prefix_messages,
+            isSplitTurn=cut_point.isSplitTurn,
+            tokensBefore=tokens_before,
+            previousSummary=previous_summary,
+            fileOps=file_ops,
+            settings=settings,
+        )
+    )
+
+
+async def compact(
+    preparation: CompactionPreparation,
+    model: Model,
+    api_key: str,
+    headers: dict[str, str] | None = None,
+    custom_instructions: str | None = None,
+    signal: Any = None,
+    thinking_level: str | None = None,
+):
+    if not preparation.firstKeptEntryId:
+        return err(CompactionError("invalid_session", "First kept entry has no UUID - session may need migration"))
+
+    if preparation.isSplitTurn and preparation.turnPrefixMessages:
+        history_task = (
+            generate_summary(
+                preparation.messagesToSummarize,
+                model,
+                preparation.settings.reserveTokens,
+                api_key,
+                headers,
+                signal,
+                custom_instructions,
+                preparation.previousSummary,
+                thinking_level,
+            )
+            if preparation.messagesToSummarize
+            else _ok_async("No prior history.")
+        )
+        turn_prefix_task = _generate_turn_prefix_summary(
+            preparation.turnPrefixMessages,
+            model,
+            preparation.settings.reserveTokens,
+            api_key,
+            headers,
+            signal,
+            thinking_level,
+        )
+        history_result, turn_prefix_result = await _gather_results(history_task, turn_prefix_task)
+        if not history_result.ok:
+            return err(history_result.error)
+        if not turn_prefix_result.ok:
+            return err(turn_prefix_result.error)
+        summary = f"{history_result.value}\n\n---\n\n**Turn Context (split turn):**\n\n{turn_prefix_result.value}"
+    else:
+        summary_result = await generate_summary(
+            preparation.messagesToSummarize,
+            model,
+            preparation.settings.reserveTokens,
+            api_key,
+            headers,
+            signal,
+            custom_instructions,
+            preparation.previousSummary,
+            thinking_level,
+        )
+        if not summary_result.ok:
+            return err(summary_result.error)
+        summary = summary_result.value
+
+    read_files, modified_files = compute_file_lists(preparation.fileOps)
+    summary += format_file_operations(read_files, modified_files)
+    return ok(
+        CompactResult(
+            summary=summary,
+            firstKeptEntryId=preparation.firstKeptEntryId,
+            tokensBefore=preparation.tokensBefore,
+            details={"readFiles": read_files, "modifiedFiles": modified_files},
+        )
+    )
+
+
+def _extract_file_operations(
+    messages: list[AgentMessage],
+    entries: list[SessionTreeEntry],
+    previous_compaction_index: int,
+) -> FileOperations:
+    file_ops = create_file_ops()
+    if previous_compaction_index >= 0:
+        previous = entries[previous_compaction_index]
+        if not _entry_field(previous, "fromHook") and _entry_field(previous, "details") is not None:
+            details = _entry_field(previous, "details")
+            if isinstance(details, dict):
+                read_files = details.get("readFiles")
+                modified_files = details.get("modifiedFiles")
+            else:
+                read_files = getattr(details, "readFiles", None)
+                modified_files = getattr(details, "modifiedFiles", None)
+            if isinstance(read_files, list):
+                for path in read_files:
+                    if isinstance(path, str):
+                        file_ops.read.add(path)
+            if isinstance(modified_files, list):
+                for path in modified_files:
+                    if isinstance(path, str):
+                        file_ops.edited.add(path)
+    for message in messages:
+        extract_file_ops_from_message(message, file_ops)
+    return file_ops
+
+
+def _get_message_from_entry(entry: Any) -> AgentMessage | None:
+    entry_type = _entry_field(entry, "type")
+    if entry_type == "message":
+        return _entry_field(entry, "message")
+    if entry_type == "custom_message":
+        return create_custom_message(
+            str(_entry_field(entry, "customType")),
+            _entry_field(entry, "content"),
+            bool(_entry_field(entry, "display")),
+            _entry_field(entry, "details"),
+            _entry_field(entry, "timestamp") or _timestamp_ms(),
+        )
+    if entry_type == "branch_summary":
+        return create_branch_summary_message(
+            str(_entry_field(entry, "summary")),
+            str(_entry_field(entry, "fromId")),
+            _entry_field(entry, "timestamp") or _timestamp_ms(),
+        )
+    if entry_type == "compaction":
+        return create_compaction_summary_message(
+            str(_entry_field(entry, "summary")),
+            int(_entry_field(entry, "tokensBefore")),
+            _entry_field(entry, "timestamp") or _timestamp_ms(),
+        )
+    return None
+
+
+def _get_message_from_entry_for_compaction(entry: Any) -> AgentMessage | None:
+    if _entry_field(entry, "type") == "compaction":
+        return None
+    return _get_message_from_entry(entry)
+
+
+def _find_valid_cut_points(entries: list[SessionTreeEntry], start_index: int, end_index: int) -> list[int]:
+    cut_points: list[int] = []
+    for index in range(start_index, end_index):
+        entry = entries[index]
+        entry_type = _entry_field(entry, "type")
+        if entry_type == "message":
+            role = _message_field(_entry_field(entry, "message"), "role")
+            if role in {"bashExecution", "custom", "branchSummary", "compactionSummary", "user", "assistant"}:
+                cut_points.append(index)
+        if entry_type in {"branch_summary", "custom_message"}:
+            cut_points.append(index)
+    return cut_points
+
+
+async def _generate_turn_prefix_summary(
+    messages: list[AgentMessage],
+    model: Model,
+    reserve_tokens: int,
+    api_key: str,
+    headers: dict[str, str] | None = None,
+    signal: Any = None,
+    thinking_level: str | None = None,
+):
+    response = await complete_simple(
+        model,
+        {
+            "systemPrompt": SUMMARIZATION_SYSTEM_PROMPT,
+            "messages": [
+                UserMessage(
+                    content=[
+                        {
+                            "type": "text",
+                            "text": (
+                                "<conversation>\n"
+                                f"{serialize_conversation(convert_to_llm(messages))}\n"
+                                f"</conversation>\n\n{TURN_PREFIX_SUMMARIZATION_PROMPT}"
+                            ),
+                        }
+                    ],
+                    timestamp=_timestamp_ms(),
+                )
+            ],
+        },
+        _build_summary_options(
+            max_tokens=_summary_max_tokens(reserve_tokens, model, 0.5),
+            api_key=api_key,
+            headers=headers,
+            signal=signal,
+            reasoning=model.reasoning and thinking_level is not None and thinking_level != "off",
+            thinking_level=thinking_level,
+        ),
+    )
+    if response.stopReason == "aborted":
+        return err(CompactionError("aborted", response.errorMessage or "Turn prefix summarization aborted"))
+    if response.stopReason == "error":
+        return err(
+            CompactionError(
+                "summarization_failed",
+                f"Turn prefix summarization failed: {response.errorMessage or 'Unknown error'}",
+            )
+        )
+    return ok(_assistant_text(response))
+
+
+def _summary_max_tokens(reserve_tokens: int, model: Model, fraction: float) -> int:
+    max_tokens = int(fraction * reserve_tokens)
+    if model.maxTokens > 0:
+        return min(max_tokens, model.maxTokens)
+    return max_tokens
+
+
+def _build_summary_options(
+    *,
+    max_tokens: int,
+    api_key: str,
+    headers: dict[str, str] | None,
+    signal: Any,
+    reasoning: bool,
+    thinking_level: str | None,
+) -> SimpleStreamOptions:
+    kwargs: dict[str, Any] = {
+        "maxTokens": max_tokens,
+        "signal": signal,
+        "apiKey": api_key,
+        "headers": headers,
+    }
+    if reasoning and thinking_level is not None and thinking_level != "off":
+        kwargs["reasoning"] = thinking_level
+    return SimpleStreamOptions(**kwargs)
+
+
+def _assistant_usage(message: Any) -> Usage | dict[str, Any] | None:
+    if _message_field(message, "role") != "assistant":
+        return None
+    stop_reason = _message_field(message, "stopReason")
+    if stop_reason in {"aborted", "error"}:
+        return None
+    usage = _message_field(message, "usage")
+    return usage if usage is not None else None
+
+
+def _last_assistant_usage_info(messages: list[AgentMessage]) -> dict[str, Any] | None:
+    for index in range(len(messages) - 1, -1, -1):
+        usage = _assistant_usage(messages[index])
+        if usage is not None:
+            return {"usage": usage, "index": index}
+    return None
+
+
+def _assistant_text(message: Any) -> str:
+    parts: list[str] = []
+    for block in _message_field(message, "content") or []:
+        if _block_field(block, "type") == "text":
+            text = _block_field(block, "text")
+            if isinstance(text, str):
+                parts.append(text)
+    return "\n".join(parts)
+
+
+def _safe_json_stringify(value: Any) -> str:
+    try:
+        serialized = json.dumps(value)
+    except Exception:
+        return "[unserializable]"
+    return serialized if serialized is not None else "undefined"
+
+
+def _chars_to_tokens(chars: int) -> int:
+    return (chars + 3) // 4
+
+
+def _usage_field(usage: Usage | dict[str, Any], name: str) -> Any:
+    if isinstance(usage, dict):
+        return usage.get(name)
+    return getattr(usage, name, None)
+
+
+def _entry_field(entry: Any, name: str) -> Any:
+    if isinstance(entry, dict):
+        return entry.get(name)
+    return getattr(entry, name, None)
+
+
+def _message_field(message: Any, name: str) -> Any:
+    if isinstance(message, dict):
+        return message.get(name)
+    return getattr(message, name, None)
+
+
+def _block_field(block: Any, name: str) -> Any:
+    if isinstance(block, dict):
+        return block.get(name)
+    return getattr(block, name, None)
+
+
+def _timestamp_ms() -> int:
+    return int(time.time() * 1000)
+
+
+async def _ok_async(value: str):
+    return ok(value)
+
+
+async def _gather_results(history_task, turn_prefix_task):
+    import asyncio
+
+    return await asyncio.gather(history_task, turn_prefix_task)
+
+
+calculateContextTokens = calculate_context_tokens
+compactResult = compact
+estimateContextTokens = estimate_context_tokens
+estimateTokens = estimate_tokens
+findCutPoint = find_cut_point
+findTurnStartIndex = find_turn_start_index
+generateSummary = generate_summary
+getLastAssistantUsage = get_last_assistant_usage
+prepareCompaction = prepare_compaction
+serializeConversation = serialize_conversation
+shouldCompact = should_compact
+
+__all__ = [
+    "ContextUsageEstimate",
+    "CompactionDetails",
+    "CutPointResult",
+    "DEFAULT_COMPACTION_SETTINGS",
+    "FileOperations",
+    "SUMMARIZATION_SYSTEM_PROMPT",
+    "TURN_PREFIX_SUMMARIZATION_PROMPT",
+    "calculateContextTokens",
+    "calculate_context_tokens",
+    "compact",
+    "estimateContextTokens",
+    "estimateTokens",
+    "estimate_context_tokens",
+    "estimate_tokens",
+    "findCutPoint",
+    "findTurnStartIndex",
+    "find_cut_point",
+    "find_turn_start_index",
+    "generateSummary",
+    "generate_summary",
+    "getLastAssistantUsage",
+    "get_last_assistant_usage",
+    "prepareCompaction",
+    "prepare_compaction",
+    "serializeConversation",
+    "serialize_conversation",
+    "shouldCompact",
+    "should_compact",
+]

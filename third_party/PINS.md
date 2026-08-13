@@ -1,0 +1,23 @@
+# third_party 钉版记录
+
+| 仓 | 上游 | commit | 用途 |
+|---|---|---|---|
+| PageIndex | github.com/VectifyAI/PageIndex | d5c4e62c20172ce400aef84545dfba3a0580b9ae | 文档结构层（树导航），只调用不改 |
+
+## 设计移植（不含代码拷贝）
+
+- **herdr**（github.com/herdrdev/herdr，Apache-2.0）——`misaka/net/` 是其核心设计的
+  Python 重写（守护进程独占伪终端／瘦客户端／结构快照恢复／套接字单例）；
+  `misaka/cli/herdr_ui.py` 是其客户端布局的逐函数移植（ui.rs / ui/sidebar.rs /
+  ui/tabs.rs 的几何算法，每个函数注明源码行号）。Apache-2.0 允许衍生；
+  面板渲染是本仓自写、只复用其几何语义（2026-08-11，其 0.8.0 时期）。
+
+## 已离开 third_party 的（2026-08-06 fork 内联）
+
+- **harn**（github.com/secemp9/harn @0bd413b1，MIT）——**已整体改姓融入 `misaka/` 单包**
+  （2026-08-06 二段式：先内联为 engine/，后与研究系统合为一包）。上游更新须手动挑拣；
+  内联时带上了全部 9 组本地补丁（全量 diff 存档：momoi/misaka-build/harn-local-diff-full-20260805.patch），
+  之后又叠加了 TUI 对表审计修复批（见 build-log Step-22）。上游文档在 `docs/harn-upstream/`。
+- **pi-mono**（github.com/badlogic/pi-mono @686f193e，MIT）——语义上游图纸，不是代码，已移出仓外。
+  需要对表时按 commit 重取：`git clone https://github.com/badlogic/pi-mono && git checkout 686f193e`。
+  符号对照台账在 `misaka/protocol/PORTMAP.tsv`。

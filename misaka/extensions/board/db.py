@@ -1,0 +1,882 @@
+"""MISAKA board — SQLite 任务板（M0：两张表）。设计：momoi/misaka-build/m0-design.md。
+
+并发策略照抄 Hermes kanban：WAL + 单条 CAS UPDATE 抢单，输家 rowcount==0 走人。
+"""
+import json
+import os
+import secrets
+import sqlite3
+import threading
+import time
+from contextlib import contextmanager
+from functools import wraps
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS tasks (
+  id            TEXT PRIMARY KEY,
+  title         TEXT NOT NULL,
+  body          TEXT,
+  assignee      TEXT NOT NULL,
+  executor      TEXT,               -- NULL=御坂(card-shell)；JSON argv=协力者的第三方 CLI
+  model         TEXT,
+  status        TEXT NOT NULL DEFAULT 'ready',
+  project       TEXT,
+  priority      INTEGER NOT NULL DEFAULT 0,
+  timeout_seconds INTEGER NOT NULL DEFAULT 900,
+  workspace     TEXT,
+  agent_id      TEXT,
+  session_file  TEXT,
+  claim_lock    TEXT,
+  claim_expires INTEGER,
+  worker_pid    INTEGER,
+  worker_identity TEXT,
+  generation    INTEGER NOT NULL DEFAULT 1,
+  notified_generation INTEGER NOT NULL DEFAULT 0,
+  verify_rounds INTEGER NOT NULL DEFAULT 0,
+  verify_lock   TEXT,
+  verify_expires INTEGER,
+  verify_pid    INTEGER,
+  verify_identity TEXT,
+  created_at    INTEGER NOT NULL,
+  started_at    INTEGER,
+  completed_at  INTEGER
+);
+CREATE TABLE IF NOT EXISTS events (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id    TEXT NOT NULL,
+  kind       TEXT NOT NULL,
+  payload    TEXT,
+  generation INTEGER,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS budget_reservations (
+  id         TEXT PRIMARY KEY,
+  task_id    TEXT NOT NULL,
+  generation INTEGER NOT NULL,
+  tokens     INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS projects (
+  name      TEXT PRIMARY KEY,   -- =目录名；目录仍是课题的"真相"，这里只存状态
+  archived  INTEGER NOT NULL DEFAULT 0,
+  pinned_at REAL                -- NULL=不置顶；数值越大越靠前（后置顶的在上）
+);
+"""
+# ponytail: 无索引——五张卡的规模，SQLite 全表扫都嫌快；事件破万再加。
+RECLAIM_CAP = 2   # ponytail: 白死重跑上限写死；要可调时再提 CFG
+
+
+class _SerializedCursor(sqlite3.Cursor):
+    """Serialize every operation that can advance a SQLite statement."""
+
+    @property
+    def _lock(self):
+        return self.connection._misaka_lock
+
+    def execute(self, sql, parameters=()):
+        with self._lock:
+            return super().execute(sql, parameters)
+
+    def executemany(self, sql, seq_of_parameters):
+        with self._lock:
+            return super().executemany(sql, seq_of_parameters)
+
+    def executescript(self, sql_script):
+        with self._lock:
+            return super().executescript(sql_script)
+
+    def fetchone(self):
+        with self._lock:
+            return super().fetchone()
+
+    def fetchmany(self, size=None):
+        with self._lock:
+            return super().fetchmany() if size is None else super().fetchmany(size)
+
+    def fetchall(self):
+        with self._lock:
+            return super().fetchall()
+
+    def __next__(self):
+        with self._lock:
+            return super().__next__()
+
+    def close(self):
+        with self._lock:
+            return super().close()
+
+
+class SerializedConnection(sqlite3.Connection):
+    """One SQLite connection shared by the LO loop and its worker callback.
+
+    ``check_same_thread=False`` only removes Python's ownership check; callers
+    must still serialize writes themselves.  The re-entrant lock also lets a
+    board operation call another board operation (``create_task`` emits an
+    event) without deadlocking.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._misaka_lock = threading.RLock()
+
+    @contextmanager
+    def serialized(self):
+        with self._misaka_lock:
+            yield self
+
+    def cursor(self, factory=_SerializedCursor):
+        with self._misaka_lock:
+            return super().cursor(factory)
+
+    def execute(self, sql, parameters=()):
+        with self._misaka_lock:
+            return self.cursor().execute(sql, parameters)
+
+    def executemany(self, sql, seq_of_parameters):
+        with self._misaka_lock:
+            return self.cursor().executemany(sql, seq_of_parameters)
+
+    def executescript(self, sql_script):
+        with self._misaka_lock:
+            return self.cursor().executescript(sql_script)
+
+    def commit(self):
+        with self._misaka_lock:
+            return super().commit()
+
+    def rollback(self):
+        with self._misaka_lock:
+            return super().rollback()
+
+    def close(self):
+        with self._misaka_lock:
+            return super().close()
+
+
+def _serialized(operation):
+    """Keep a multi-statement board operation inside one connection lock."""
+
+    @wraps(operation)
+    def call(con, *args, **kwargs):
+        serialized = getattr(con, "serialized", None)
+        if serialized is None:  # Preserve compatibility with caller-owned connections.
+            return operation(con, *args, **kwargs)
+        with serialized():
+            return operation(con, *args, **kwargs)
+    return call
+
+
+def connect(path: str) -> sqlite3.Connection:
+    path = os.path.expanduser(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    con = sqlite3.connect(
+        path,
+        timeout=5,
+        isolation_level=None,  # autocommit：CAS 是单语句，天然原子
+        check_same_thread=False,
+        factory=SerializedConnection,
+    )
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA journal_mode=WAL")
+    con.executescript(SCHEMA)   # SCHEMA 即唯一真源;开发期改表=改 SCHEMA+重建库(2026-08-09 裁定,迁移机制已删)
+    return con
+
+
+@_serialized
+def create_task(con, title, body="", assignee="", model=None, priority=0, timeout_seconds=900,
+                project=None, executor=None):
+    """executor=None 走御坂（card-shell）；给一串 argv 就是协力者的第三方 CLI。
+    卡的其余一切（状态机/验收/课题/审计）与执行主体无关，两者共用。"""
+    tid = "t_" + secrets.token_hex(3)
+    con.execute(
+        "INSERT INTO tasks (id, title, body, assignee, executor, model, priority,"
+        " timeout_seconds, project, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (tid, title, body, assignee, json.dumps(executor) if executor else None,
+         model, priority, timeout_seconds, project, int(time.time())),
+    )
+    add_event(con, tid, "created", {"title": title, "assignee": assignee,
+                                    "project": project, "executor": executor})
+    return tid
+
+
+@_serialized
+def add_event(
+    con,
+    task_id,
+    kind,
+    payload=None,
+    generation=None,
+    claim_lock=None,
+    verify_lock=None,
+):
+    """Append an event, optionally fenced by generation and running owner.
+
+    The conditional form is one SQLite statement, so a late supervisor cannot
+    append generation-N output after another Last Order has resumed N+1.  An
+    owner-fenced event additionally requires the still-live running lease, so
+    an expired worker cannot publish output after an orphan takeover in the
+    same generation.
+    """
+    if isinstance(payload, (dict, list)):
+        payload = json.dumps(payload, ensure_ascii=False)
+    now = int(time.time())
+    if claim_lock is not None and verify_lock is not None:
+        raise ValueError("an event has one owner fence")
+    if claim_lock is not None:
+        if generation is None:
+            raise ValueError("an owner-fenced event requires generation")
+        cur = con.execute(
+            "INSERT INTO events (task_id, kind, payload, generation, created_at) "
+            "SELECT ?,?,?,?,? WHERE EXISTS "
+            "(SELECT 1 FROM tasks WHERE id=? AND generation=? "
+            "AND status='running' AND claim_lock=? AND claim_expires>=?)",
+            (
+                task_id,
+                kind,
+                payload,
+                generation,
+                now,
+                task_id,
+                generation,
+                claim_lock,
+                now,
+            ),
+        )
+    elif verify_lock is not None:
+        if generation is None:
+            raise ValueError("a verifier-fenced event requires generation")
+        cur = con.execute(
+            "INSERT INTO events (task_id, kind, payload, generation, created_at) "
+            "SELECT ?,?,?,?,? WHERE EXISTS "
+            "(SELECT 1 FROM tasks WHERE id=? AND generation=? "
+            "AND status IN ('verifying','finalizing') AND verify_lock=? "
+            "AND verify_expires>=?)",
+            (
+                task_id,
+                kind,
+                payload,
+                generation,
+                now,
+                task_id,
+                generation,
+                verify_lock,
+                now,
+            ),
+        )
+    elif generation is None:
+        cur = con.execute(
+            "INSERT INTO events (task_id, kind, payload, generation, created_at) "
+            "SELECT ?,?,?,generation,? FROM tasks WHERE id=?",
+            (task_id, kind, payload, now, task_id),
+        )
+    else:
+        cur = con.execute(
+            "INSERT INTO events (task_id, kind, payload, generation, created_at) "
+            "SELECT ?,?,?,?,? WHERE EXISTS "
+            "(SELECT 1 FROM tasks WHERE id=? AND generation=?)",
+            (task_id, kind, payload, generation, now, task_id, generation),
+        )
+    return cur.rowcount == 1
+
+
+@_serialized
+def claim(
+    con,
+    task_id,
+    lock,
+    ttl_seconds=1800,
+    generation=None,
+    pid=None,
+    worker_identity=None,
+) -> bool:
+    now = int(time.time())
+    generation_clause = " AND generation=?" if generation is not None else ""
+    params = [lock, now + ttl_seconds, now, pid, worker_identity, task_id]
+    if generation is not None:
+        params.append(generation)
+    cur = con.execute(
+        "UPDATE tasks SET status='running', claim_lock=?, claim_expires=?, started_at=?, "
+        "worker_pid=?, worker_identity=? "
+        "WHERE id=? AND status='ready' AND claim_lock IS NULL"
+        + generation_clause,
+        tuple(params),
+    )
+    return cur.rowcount == 1
+
+
+@_serialized
+def get(con, task_id):
+    return con.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+
+
+@_serialized
+def delete_task(con, task_id, *, allow_active=False):
+    """硬删一张卡＋它的 events / 预算预留（board 保持干净，审计记录一并抹）。
+    在跑的卡（认领中/验收中）默认拒删——先 stop 再删。返回 (成功?, 消息)。
+    ⚠️ 破坏性：卡是审计记录，删除违留痕原则——入口必须要人显式点头（宪法）。"""
+    row = con.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if row is None:
+        return False, f"没有这张卡：{task_id}"
+    if not allow_active and row["status"] in ("running", "verifying", "finalizing"):
+        return False, f"卡 {task_id} 正在「{row['status']}」，先 stop 再删"
+    con.execute("DELETE FROM budget_reservations WHERE task_id=?", (task_id,))
+    con.execute("DELETE FROM events WHERE task_id=?", (task_id,))
+    con.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+    return True, f"卡 {task_id} 已删（连同事件与预算记录）"
+
+
+@_serialized
+def by_status(con, status):
+    return con.execute(
+        "SELECT * FROM tasks WHERE status=? ORDER BY priority DESC, created_at", (status,)
+    ).fetchall()
+
+
+@_serialized
+def set_workspace(con, task_id, workspace, generation=None, claim_lock=None):
+    clauses = ["id=?"]
+    values = [workspace, task_id]
+    if generation is not None:
+        clauses.append("generation=?")
+        values.append(generation)
+    if claim_lock is not None:
+        clauses.extend(["status='running'", "claim_lock=?", "claim_expires>=?"])
+        values.extend([claim_lock, int(time.time())])
+    cur = con.execute(
+        f"UPDATE tasks SET workspace=? WHERE {' AND '.join(clauses)}",
+        tuple(values),
+    )
+    return cur.rowcount == 1
+
+
+@_serialized
+def set_runtime(con, task_id, agent_id, session_file, generation=None, claim_lock=None):
+    """Attach the addressable Sister runtime to its durable board card."""
+    clauses = ["id=?"]
+    values = [agent_id, session_file, task_id]
+    if generation is not None:
+        clauses.append("generation=?")
+        values.append(generation)
+    if claim_lock is not None:
+        clauses.extend(["status='running'", "claim_lock=?"])
+        values.append(claim_lock)
+    cur = con.execute(
+        f"UPDATE tasks SET agent_id=?, session_file=? WHERE {' AND '.join(clauses)}",
+        tuple(values),
+    )
+    return cur.rowcount == 1
+
+
+@_serialized
+def clear_runtime(con, task_id, generation=None, claim_lock=None):
+    clauses = ["id=?"]
+    values = [task_id]
+    if generation is not None:
+        clauses.append("generation=?")
+        values.append(generation)
+    if claim_lock is not None:
+        clauses.extend(["status='running'", "claim_lock=?"])
+        values.append(claim_lock)
+    cur = con.execute(
+        f"UPDATE tasks SET agent_id=NULL, session_file=NULL WHERE {' AND '.join(clauses)}",
+        tuple(values),
+    )
+    return cur.rowcount == 1
+
+
+@_serialized
+def set_pid(con, task_id, pid, worker_identity=None, generation=None, claim_lock=None):
+    clauses = ["id=?"]
+    values = [pid, worker_identity, task_id]
+    if generation is not None:
+        clauses.append("generation=?")
+        values.append(generation)
+    if claim_lock is not None:
+        clauses.extend(["status='running'", "claim_lock=?", "claim_expires>=?"])
+        values.extend([claim_lock, int(time.time())])
+    cur = con.execute(
+        f"UPDATE tasks SET worker_pid=?, worker_identity=? WHERE {' AND '.join(clauses)}",
+        tuple(values),
+    )
+    return cur.rowcount == 1
+
+
+def _terminal_transition(
+    con, task_id, status, verify_token=None, generation=None, claim_lock=None
+):
+    if verify_token is not None and claim_lock is not None:
+        raise ValueError("a terminal transition has one owner")
+    now = int(time.time())
+    clauses = ["id=?"]
+    values = [task_id]
+    if verify_token is not None:
+        clauses.extend([
+            "status IN ('verifying','finalizing')",
+            "verify_lock=?",
+            "verify_expires>=?",
+        ])
+        values.extend([verify_token, now])
+    elif claim_lock is not None:
+        clauses.extend(["status='running'", "claim_lock=?", "claim_expires>=?"])
+        values.extend([claim_lock, now])
+    if generation is not None:
+        clauses.append("generation=?")
+        values.append(generation)
+    cur = con.execute(
+        f"UPDATE tasks SET status='{status}', completed_at=?, worker_pid=NULL, "
+        "worker_identity=NULL, claim_lock=NULL, claim_expires=NULL, "
+        "verify_lock=NULL, verify_expires=NULL, verify_pid=NULL, verify_identity=NULL "
+        f"WHERE {' AND '.join(clauses)}",
+        (now, *values),
+    )
+    return cur.rowcount == 1
+
+
+@_serialized
+def mark_done(con, task_id, verify_token=None, generation=None, claim_lock=None):
+    return _terminal_transition(
+        con, task_id, "done", verify_token, generation, claim_lock
+    )
+
+
+@_serialized
+def mark_failed(con, task_id, verify_token=None, generation=None, claim_lock=None):
+    return _terminal_transition(
+        con, task_id, "failed", verify_token, generation, claim_lock
+    )
+
+
+@_serialized
+def mark_stopped(con, task_id, generation=None, claim_lock=None):
+    clauses = ["id=?"]
+    values = [int(time.time()), task_id]
+    if generation is not None:
+        clauses.append("generation=?")
+        values.append(generation)
+    if claim_lock is not None:
+        clauses.extend(["status='running'", "claim_lock=?", "claim_expires>=?"])
+        values.extend([claim_lock, int(time.time())])
+        status_clause = ""
+    else:
+        status_clause = " AND status IN ('running','verifying','finalizing','ready')"
+    cur = con.execute(
+        "UPDATE tasks SET status='stopped', completed_at=?, worker_pid=NULL, "
+        "worker_identity=NULL, claim_lock=NULL, claim_expires=NULL, "
+        "verify_lock=NULL, verify_expires=NULL, verify_pid=NULL, verify_identity=NULL "
+        f"WHERE {' AND '.join(clauses)}{status_clause}",
+        tuple(values),
+    )
+    return cur.rowcount == 1
+
+
+@_serialized
+def stop_and_take_verifier(con, task_id, generation=None, claim_lock=None):
+    """Atomically revoke a run and return the verifier process it owned.
+
+    The PID fields deliberately survive this UPDATE until the caller sends the
+    signal.  A verifier attaching before the statement is returned; one trying
+    after it sees ``status='stopped'`` and terminates itself.
+    """
+    clauses = ["id=?"]
+    values = [int(time.time()), task_id]
+    if generation is not None:
+        clauses.append("generation=?")
+        values.append(generation)
+    if claim_lock is not None:
+        clauses.extend(["status='running'", "claim_lock=?", "claim_expires>=?"])
+        values.extend([claim_lock, int(time.time())])
+        status_clause = ""
+    else:
+        status_clause = " AND status IN ('running','verifying','finalizing','ready')"
+    row = con.execute(
+        "UPDATE tasks SET status='stopped', completed_at=?, worker_pid=NULL, "
+        "worker_identity=NULL, claim_lock=NULL, claim_expires=NULL, "
+        "verify_lock=NULL, verify_expires=NULL "
+        f"WHERE {' AND '.join(clauses)}{status_clause} "
+        "RETURNING verify_pid, verify_identity",
+        tuple(values),
+    ).fetchone()
+    return (row is not None, row["verify_pid"] if row else None, row["verify_identity"] if row else None)
+
+
+@_serialized
+def clear_verifier_process(
+    con, task_id, pid, identity, generation=None
+) -> bool:
+    generation_clause = " AND generation=?" if generation is not None else ""
+    params = [task_id, pid, identity]
+    if generation is not None:
+        params.append(generation)
+    cur = con.execute(
+        "UPDATE tasks SET verify_pid=NULL, verify_identity=NULL "
+        "WHERE id=? AND verify_pid IS ? AND verify_identity IS ?"
+        + generation_clause,
+        tuple(params),
+    )
+    return cur.rowcount == 1
+
+
+@_serialized
+def mark_verifying(con, task_id, generation=None, claim_lock=None):
+    clauses = ["id=?"]
+    values = [task_id]
+    if generation is not None:
+        clauses.append("generation=?")
+        values.append(generation)
+    if claim_lock is not None:
+        clauses.extend(["status='running'", "claim_lock=?", "claim_expires>=?"])
+        values.extend([claim_lock, int(time.time())])
+    cur = con.execute(
+        "UPDATE tasks SET status='verifying', worker_pid=NULL, claim_lock=NULL, "
+        "worker_identity=NULL, claim_expires=NULL, verify_lock=NULL, verify_expires=NULL, "
+        "verify_pid=NULL, verify_identity=NULL "
+        f"WHERE {' AND '.join(clauses)}",
+        tuple(values),
+    )
+    return cur.rowcount == 1
+
+
+@_serialized
+def bump_verify(con, task_id, verify_token=None, generation=None) -> int | None:
+    generation_clause = " AND generation=?" if generation is not None else ""
+    if verify_token is None:
+        params = (task_id, generation) if generation is not None else (task_id,)
+        cur = con.execute(
+            "UPDATE tasks SET verify_rounds=verify_rounds+1 WHERE id=?"
+            + generation_clause,
+            params,
+        )
+    else:
+        params = [task_id, verify_token, int(time.time())]
+        if generation is not None:
+            params.append(generation)
+        cur = con.execute(
+            "UPDATE tasks SET verify_rounds=verify_rounds+1 "
+            "WHERE id=? AND status='verifying' AND verify_lock=? AND verify_expires>=?"
+            + generation_clause,
+            tuple(params),
+        )
+    if cur.rowcount != 1:
+        return None
+    return con.execute("SELECT verify_rounds FROM tasks WHERE id=?", (task_id,)).fetchone()[0]
+
+
+@_serialized
+def latest_payload(con, task_id, kind, generation=None):
+    generation_clause = " AND generation=?" if generation is not None else ""
+    params = [task_id, kind]
+    if generation is not None:
+        params.append(generation)
+    row = con.execute(
+        "SELECT payload FROM events WHERE task_id=? AND kind=?"
+        + generation_clause
+        + " ORDER BY id DESC LIMIT 1",
+        tuple(params),
+    ).fetchone()
+    return row["payload"] if row else None
+
+
+@_serialized
+def back_to_ready(
+    con, task_id, verify_token=None, generation=None, claim_lock=None
+):
+    if verify_token is not None and claim_lock is not None:
+        raise ValueError("a ready transition has one owner")
+    clauses = ["id=?"]
+    values = [task_id]
+    if verify_token is not None:
+        clauses.extend([
+            "status IN ('verifying','finalizing')",
+            "verify_lock=?",
+            "verify_expires>=?",
+        ])
+        values.extend([verify_token, int(time.time())])
+    elif claim_lock is not None:
+        clauses.extend(["status='running'", "claim_lock=?", "claim_expires>=?"])
+        values.extend([claim_lock, int(time.time())])
+    if generation is not None:
+        clauses.append("generation=?")
+        values.append(generation)
+    cur = con.execute(
+        "UPDATE tasks SET status='ready', claim_lock=NULL, claim_expires=NULL, worker_pid=NULL, "
+        "worker_identity=NULL, verify_lock=NULL, verify_expires=NULL, "
+        "verify_pid=NULL, verify_identity=NULL "
+        f"WHERE {' AND '.join(clauses)}",
+        tuple(values),
+    )
+    return cur.rowcount == 1
+
+
+@_serialized
+def reclaim_abandoned(
+    con,
+    task_id,
+    *,
+    generation,
+    claim_lock,
+    worker_pid,
+    worker_identity,
+    claim_expires,
+    submitted=False,
+) -> bool:
+    """Release an observed orphan only if every ownership field is unchanged.
+
+    崩溃重跑上限（2026-08-08）：无产物打回 ready＝下一轮再烧一次模型。此前无界
+    ——一张确定性崩溃的卡会被永远重跑（token_cap 默认 0，宪法⑦的顶形同虚设）。
+    events 里的 `reclaimed` 就是现成计数器：白死满 RECLAIM_CAP 次改判 failed，
+    留 `crash_gave_up` 事件，经完成通知/开机收信送到 Last Order 面前由人裁决
+    （failed 卡仍可 retry/续聊复活）。有产物（submitted）不受限——那走验收，
+    自有 MAX_VERIFY_ROUNDS 封顶。
+    """
+    ownership_where = (
+        "WHERE id=? AND generation=? AND status='running' AND claim_lock IS ? "
+        "AND worker_pid IS ? AND worker_identity IS ? AND claim_expires IS ?"
+    )
+    ownership = (task_id, generation, claim_lock, worker_pid, worker_identity, claim_expires)
+    if not submitted:
+        crashes = con.execute(
+            "SELECT COUNT(*) FROM events WHERE task_id=? AND kind='reclaimed'",
+            (task_id,),
+        ).fetchone()[0]
+        if crashes >= RECLAIM_CAP:
+            cur = con.execute(
+                "UPDATE tasks SET status='failed', completed_at=?, claim_lock=NULL, "
+                "claim_expires=NULL, worker_pid=NULL, worker_identity=NULL, "
+                "verify_lock=NULL, verify_expires=NULL, verify_pid=NULL, verify_identity=NULL "
+                + ownership_where,
+                (int(time.time()), *ownership),
+            )
+            if cur.rowcount == 1:
+                add_event(con, task_id, "crash_gave_up",
+                          {"reclaimed_times": crashes, "cap": RECLAIM_CAP},
+                          generation=generation)
+            return False
+    status = "verifying" if submitted else "ready"
+    cur = con.execute(
+        f"UPDATE tasks SET status='{status}', claim_lock=NULL, claim_expires=NULL, "
+        "worker_pid=NULL, worker_identity=NULL, verify_lock=NULL, verify_expires=NULL, "
+        "verify_pid=NULL, verify_identity=NULL " + ownership_where,
+        ownership,
+    )
+    return cur.rowcount == 1
+
+
+@_serialized
+def claim_resume(
+    con,
+    task_id,
+    lock,
+    pid,
+    ttl_seconds=1800,
+    worker_identity=None,
+    expected_generation=None,
+) -> bool:
+    """Atomically reopen and claim one terminal generation for continuation."""
+    now = int(time.time())
+    generation_clause = (
+        " AND generation=?" if expected_generation is not None else ""
+    )
+    params = [lock, now + ttl_seconds, pid, worker_identity, task_id]
+    if expected_generation is not None:
+        params.append(expected_generation)
+    cur = con.execute(
+        "UPDATE tasks SET status='running', verify_rounds=0, completed_at=NULL, "
+        "claim_lock=?, claim_expires=?, worker_pid=?, worker_identity=?, "
+        "verify_lock=NULL, verify_expires=NULL, verify_pid=NULL, verify_identity=NULL, "
+        "generation=generation+1 WHERE id=? AND status IN ('done','failed','stopped')"
+        + generation_clause,
+        tuple(params),
+    )
+    return cur.rowcount == 1
+
+
+@_serialized
+def claim_verification(con, task_id, lock, ttl_seconds=4500, generation=None) -> bool:
+    """Acquire a cross-process lease for a verifying card."""
+    now = int(time.time())
+    generation_clause = " AND generation=?" if generation is not None else ""
+    params = [lock, now + ttl_seconds, task_id, now, lock]
+    if generation is not None:
+        params.append(generation)
+    cur = con.execute(
+        "UPDATE tasks SET verify_lock=?, verify_expires=?, verify_pid=NULL, verify_identity=NULL "
+        "WHERE id=? AND status IN ('verifying','finalizing') "
+        "AND (verify_lock IS NULL OR verify_expires IS NULL OR verify_expires<? OR verify_lock=?)"
+        + generation_clause,
+        tuple(params),
+    )
+    return cur.rowcount == 1
+
+
+@_serialized
+def owns_verification(con, task_id, lock, generation=None) -> bool:
+    generation_clause = " AND generation=?" if generation is not None else ""
+    params = [task_id, lock, int(time.time())]
+    if generation is not None:
+        params.append(generation)
+    row = con.execute(
+        "SELECT 1 FROM tasks WHERE id=? AND status IN ('verifying','finalizing') "
+        "AND verify_lock=? "
+        "AND verify_expires>=?" + generation_clause,
+        tuple(params),
+    ).fetchone()
+    return row is not None
+
+
+@_serialized
+def set_verifier_process(
+    con, task_id, lock, pid, identity, generation=None
+) -> bool:
+    generation_clause = " AND generation=?" if generation is not None else ""
+    params = [pid, identity, task_id, lock, int(time.time())]
+    if generation is not None:
+        params.append(generation)
+    cur = con.execute(
+        "UPDATE tasks SET verify_pid=?, verify_identity=? "
+        "WHERE id=? AND status IN ('verifying','finalizing') "
+        "AND verify_lock=? AND verify_expires>=?"
+        + generation_clause,
+        tuple(params),
+    )
+    return cur.rowcount == 1
+
+
+@_serialized
+def begin_finalize(con, task_id, lock, generation=None) -> bool:
+    generation_clause = " AND generation=?" if generation is not None else ""
+    params = [task_id, lock, int(time.time())]
+    if generation is not None:
+        params.append(generation)
+    cur = con.execute(
+        "UPDATE tasks SET status='finalizing' "
+        "WHERE id=? AND status='verifying' AND verify_lock=? AND verify_expires>=?"
+        + generation_clause,
+        tuple(params),
+    )
+    return cur.rowcount == 1
+
+
+@_serialized
+def finish_finalize(con, task_id, lock, generation=None) -> bool:
+    now = int(time.time())
+    generation_clause = " AND generation=?" if generation is not None else ""
+    params = [now, task_id, lock, now]
+    if generation is not None:
+        params.append(generation)
+    cur = con.execute(
+        "UPDATE tasks SET status='done', completed_at=?, worker_pid=NULL, "
+        "worker_identity=NULL, claim_lock=NULL, claim_expires=NULL, "
+        "verify_lock=NULL, verify_expires=NULL, verify_pid=NULL, verify_identity=NULL "
+        "WHERE id=? AND status='finalizing' AND verify_lock=? AND verify_expires>=?"
+        + generation_clause,
+        tuple(params),
+    )
+    return cur.rowcount == 1
+
+
+@_serialized
+def release_verification(con, task_id, lock, generation=None) -> bool:
+    generation_clause = " AND generation=?" if generation is not None else ""
+    params = [task_id, lock]
+    if generation is not None:
+        params.append(generation)
+    cur = con.execute(
+        "UPDATE tasks SET verify_lock=NULL, verify_expires=NULL, "
+        "verify_pid=NULL, verify_identity=NULL "
+        "WHERE id=? AND status IN ('verifying','finalizing') AND verify_lock=?"
+        + generation_clause,
+        tuple(params),
+    )
+    return cur.rowcount == 1
+
+
+def pending_completions(con):
+    """终态但一次都没通知出去的卡（发起方会话已关或无头 dispatch 跑的）。"""
+    return con.execute(
+        "SELECT * FROM tasks WHERE status IN ('done','failed','stopped') "
+        "AND notified_generation<generation ORDER BY completed_at"
+    ).fetchall()
+
+
+@_serialized
+def claim_notification(con, task_id, generation=None) -> bool:
+    """Claim this run generation's one completion notification."""
+    generation_clause = " AND generation=?" if generation is not None else ""
+    params = (task_id, generation) if generation is not None else (task_id,)
+    cur = con.execute(
+        "UPDATE tasks SET notified_generation=generation WHERE id=? "
+        "AND status IN ('done','failed','stopped') AND notified_generation<generation"
+        + generation_clause,
+        params,
+    )
+    return cur.rowcount == 1
+
+
+@_serialized
+def release_notification(con, task_id, *, generation) -> bool:
+    """认领了却没送出去：退回待送，让任何下一个会话重投（恰一次而非至多一次）。"""
+    cur = con.execute(
+        "UPDATE tasks SET notified_generation=generation-1 WHERE id=? "
+        "AND generation=? AND notified_generation=generation",
+        (task_id, generation),
+    )
+    return cur.rowcount == 1
+
+
+if __name__ == "__main__":
+    # 自检：两线程同抢一卡，恰一胜（CAS 正确性）
+    import tempfile
+    import threading
+
+    path = os.path.join(tempfile.mkdtemp(), "board.db")
+    con0 = connect(path)
+    tid = create_task(con0, "抢单自检", assignee="x")
+    wins = []
+
+    def racer(name):
+        c = connect(path)
+        wins.append((name, claim(c, tid, f"lock-{name}")))
+
+    threads = [threading.Thread(target=racer, args=(str(i),)) for i in range(2)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert sum(1 for _, w in wins if w) == 1, wins
+    assert get(con0, tid)["status"] == "running"
+
+    # 自检：崩溃重跑上限——白死 RECLAIM_CAP 次后改判 failed，不再打回 ready
+    def observed(row):
+        return dict(generation=row["generation"], claim_lock=row["claim_lock"],
+                    worker_pid=row["worker_pid"], worker_identity=row["worker_identity"],
+                    claim_expires=row["claim_expires"])
+
+    for i in range(RECLAIM_CAP):
+        row = get(con0, tid)
+        assert reclaim_abandoned(con0, tid, **observed(row), submitted=False) is True, f"第{i+1}次白死该打回"
+        add_event(con0, tid, "reclaimed", {"n": i + 1})          # 对账方记账（与 dispatch.reconcile 同步骤）
+        assert get(con0, tid)["status"] == "ready"
+        assert claim(con0, tid, f"lock-r{i}")                     # 再抢再跑
+    row = get(con0, tid)
+    assert reclaim_abandoned(con0, tid, **observed(row), submitted=False) is False, "到顶该拒绝打回"
+    assert get(con0, tid)["status"] == "failed", get(con0, tid)["status"]
+    gave = con0.execute("SELECT payload FROM events WHERE task_id=? AND kind='crash_gave_up'", (tid,)).fetchone()
+    assert gave and json.loads(gave[0])["reclaimed_times"] == RECLAIM_CAP, gave
+    # 自检：删卡硬删卡＋events＋预算；在跑的拒删
+    con0.execute("INSERT INTO tasks(id,title,assignee,status,created_at) "
+                 "VALUES('t_del','删我','10032','done',0)")
+    add_event(con0, "t_del", "done", {})
+    con0.execute("INSERT INTO budget_reservations(id,task_id,generation,tokens,"
+                 "expires_at,created_at) VALUES('b1','t_del',1,100,0,0)")
+    assert delete_task(con0, "t_del")[0]
+    assert get(con0, "t_del") is None, "卡没了"
+    assert con0.execute("SELECT COUNT(*) AS n FROM events WHERE task_id='t_del'"
+                        ).fetchone()["n"] == 0, "事件一并抹"
+    assert con0.execute("SELECT COUNT(*) AS n FROM budget_reservations WHERE task_id='t_del'"
+                        ).fetchone()["n"] == 0, "预算预留一并抹"
+    assert not delete_task(con0, "t_del")[0], "删不存在的卡返回失败"
+    con0.execute("INSERT INTO tasks(id,title,assignee,status,created_at) "
+                 "VALUES('t_busy','跑','10032','running',0)")
+    assert not delete_task(con0, "t_busy")[0], "在跑的卡默认拒删（先 stop）"
+    assert delete_task(con0, "t_busy", allow_active=True)[0], "allow_active 强删在跑的"
+    print(f"db selfcheck ok — CAS 抢单恰一胜: {wins}；崩溃重跑 {RECLAIM_CAP} 次封顶；"
+          f"删卡级联 events+预算、拒删在跑")

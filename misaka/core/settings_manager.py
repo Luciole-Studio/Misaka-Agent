@@ -1,0 +1,791 @@
+"""Hierarchical settings management for coding-agent runtime behavior."""
+
+from __future__ import annotations
+
+import asyncio
+import copy
+import json
+import os
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Literal
+
+from filelock import FileLock, Timeout
+from misaka.ai.types import Transport
+
+from misaka.config import CONFIG_DIR_NAME, get_agent_dir
+from misaka.core.http_dispatcher import (
+    DEFAULT_HTTP_IDLE_TIMEOUT_MS,
+    parseHttpIdleTimeoutMs,
+)
+from misaka.utils.paths import normalize_path, resolve_path
+
+type CompactionSettings = dict[str, Any]
+type BranchSummarySettings = dict[str, Any]
+type ProviderRetrySettings = dict[str, Any]
+type RetrySettings = dict[str, Any]
+type TerminalSettings = dict[str, Any]
+type ImageSettings = dict[str, Any]
+type ThinkingBudgetsSettings = dict[str, Any]
+type MarkdownSettings = dict[str, Any]
+type WarningSettings = dict[str, Any]
+type Settings = dict[str, Any]
+type PackageSource = str | dict[str, Any]
+type SettingsScope = Literal["global", "project"]
+type TransportSetting = Transport
+
+
+def deep_merge_settings(base: Settings, overrides: Settings) -> Settings:
+    """Deep merge settings: overrides take precedence, nested objects merge recursively.
+    (pi 97f0ccd #7572——此前第二层起整个被覆盖,丢 base 里的兄弟键。)"""
+    result = dict(base)
+    for key, override_value in overrides.items():
+        base_value = base.get(key)
+        result[key] = (
+            deep_merge_settings(base_value, override_value)
+            if isinstance(base_value, dict) and isinstance(override_value, dict)
+            else override_value
+        )
+    return result
+
+
+@dataclass(slots=True)
+class SettingsError:
+    scope: SettingsScope
+    error: Exception
+
+
+class SettingsStorage:
+    def withLock(self, scope: SettingsScope, fn: Any) -> None:  # pragma: no cover - protocol-like
+        raise NotImplementedError
+
+
+class FileSettingsStorage(SettingsStorage):
+    def __init__(self, cwd: str, agent_dir: str):
+        resolved_cwd = resolve_path(cwd)
+        resolved_agent_dir = resolve_path(agent_dir)
+        self.globalSettingsPath = str(Path(resolved_agent_dir) / "settings.json")
+        self.projectSettingsPath = str(Path(resolved_cwd) / CONFIG_DIR_NAME / "settings.json")
+
+    @staticmethod
+    def _lock_path(path: str) -> str:
+        return f"{path}.lock"
+
+    def acquireLockSyncWithRetry(self, path: str) -> Any:
+        max_attempts = 10
+        delay_ms = 20
+        last_error: Exception | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            lock = FileLock(self._lock_path(path), timeout=0)
+            try:
+                lock.acquire()
+                return lock.release
+            except Timeout as error:
+                if attempt == max_attempts:
+                    raise error
+                last_error = error
+                start = time.perf_counter()
+                while (time.perf_counter() - start) * 1000 < delay_ms:
+                    pass
+
+        raise last_error or Exception("Failed to acquire settings lock")
+
+    def withLock(self, scope: SettingsScope, fn: Any) -> None:
+        path = self.globalSettingsPath if scope == "global" else self.projectSettingsPath
+        directory = os.path.dirname(path)
+        release_lock: Any = None
+
+        try:
+            file_exists = os.path.exists(path)
+            current: str | None = None
+
+            if file_exists:
+                release_lock = self.acquireLockSyncWithRetry(path)
+                with open(path, encoding="utf-8") as handle:
+                    current = handle.read()
+
+            next_value = fn(current)
+            if next_value is None:
+                return
+
+            if not os.path.exists(directory):
+                os.makedirs(directory, exist_ok=True)
+            if release_lock is None:
+                release_lock = self.acquireLockSyncWithRetry(path)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(next_value)
+        finally:
+            if release_lock is not None:
+                release_lock()
+
+
+class InMemorySettingsStorage(SettingsStorage):
+    def __init__(self) -> None:
+        self.global_value: str | None = None
+        self.project_value: str | None = None
+
+    def withLock(self, scope: SettingsScope, fn: Any) -> None:
+        current = self.global_value if scope == "global" else self.project_value
+        next_value = fn(current)
+        if next_value is None:
+            return
+        if scope == "global":
+            self.global_value = next_value
+        else:
+            self.project_value = next_value
+
+
+class SettingsManager:
+    def __init__(
+        self,
+        storage: SettingsStorage,
+        initialGlobal: Settings,
+        initialProject: Settings,
+        globalLoadError: Exception | None = None,
+        projectLoadError: Exception | None = None,
+        initialErrors: list[SettingsError] | None = None,
+    ) -> None:
+        self.storage = storage
+        self.globalSettings = copy.deepcopy(initialGlobal)
+        self.projectSettings = copy.deepcopy(initialProject)
+        self.settings = deep_merge_settings(self.globalSettings, self.projectSettings)
+        self.modifiedFields: set[str] = set()
+        self.modifiedNestedFields: dict[str, set[str]] = {}
+        self.modifiedProjectFields: set[str] = set()
+        self.modifiedProjectNestedFields: dict[str, set[str]] = {}
+        self.globalSettingsLoadError = globalLoadError
+        self.projectSettingsLoadError = projectLoadError
+        self.errors: list[SettingsError] = list(initialErrors or [])
+        self.writeQueue: asyncio.Future[None] | None = None
+
+    @classmethod
+    def create(cls, cwd: str, agentDir: str | None = None) -> SettingsManager:
+        storage = FileSettingsStorage(cwd, get_agent_dir() if agentDir is None else agentDir)
+        return cls.fromStorage(storage)
+
+    @classmethod
+    def fromStorage(cls, storage: SettingsStorage) -> SettingsManager:
+        global_load = cls.tryLoadFromStorage(storage, "global")
+        project_load = cls.tryLoadFromStorage(storage, "project")
+        initial_errors: list[SettingsError] = []
+        if global_load["error"] is not None:
+            initial_errors.append(SettingsError(scope="global", error=global_load["error"]))
+        if project_load["error"] is not None:
+            initial_errors.append(SettingsError(scope="project", error=project_load["error"]))
+        return cls(
+            storage,
+            global_load["settings"],
+            project_load["settings"],
+            global_load["error"],
+            project_load["error"],
+            initial_errors,
+        )
+
+    @classmethod
+    def inMemory(cls, settings: dict[str, Any] | None = None) -> SettingsManager:
+        storage = InMemorySettingsStorage()
+        initial_settings = cls.migrateSettings(copy.deepcopy(settings or {}))
+        storage.withLock("global", lambda _current: json.dumps(initial_settings, indent=2, ensure_ascii=False))
+        return cls.fromStorage(storage)
+
+    @classmethod
+    def loadFromStorage(cls, storage: SettingsStorage, scope: SettingsScope) -> Settings:
+        content: str | None = None
+
+        def capture(current: str | None) -> None:
+            nonlocal content
+            content = current
+            return None
+
+        storage.withLock(scope, capture)
+        if not content:
+            return {}
+        return cls.migrateSettings(json.loads(content))
+
+    @classmethod
+    def tryLoadFromStorage(cls, storage: SettingsStorage, scope: SettingsScope) -> dict[str, Any]:
+        try:
+            return {"settings": cls.loadFromStorage(storage, scope), "error": None}
+        except Exception as error:  # noqa: BLE001
+            return {"settings": {}, "error": error}
+
+    @classmethod
+    def migrateSettings(cls, settings: dict[str, Any]) -> Settings:
+        migrated = copy.deepcopy(settings)
+        if "queueMode" in migrated and "steeringMode" not in migrated:
+            migrated["steeringMode"] = migrated.pop("queueMode")
+
+        if "transport" not in migrated and isinstance(migrated.get("websockets"), bool):
+            migrated["transport"] = "websocket" if migrated.pop("websockets") else "sse"
+
+        skills = migrated.get("skills")
+        if isinstance(skills, dict):
+            if skills.get("enableSkillCommands") is not None and migrated.get("enableSkillCommands") is None:
+                migrated["enableSkillCommands"] = skills["enableSkillCommands"]
+            custom_directories = skills.get("customDirectories")
+            if isinstance(custom_directories, list) and custom_directories:
+                migrated["skills"] = custom_directories
+            else:
+                migrated.pop("skills", None)
+
+        retry_settings = migrated.get("retry")
+        if isinstance(retry_settings, dict):
+            provider_settings = retry_settings.get("provider")
+            if not isinstance(provider_settings, dict):
+                provider_settings = {}
+            max_delay = retry_settings.get("maxDelayMs")
+            if isinstance(max_delay, (int, float)) and not isinstance(max_delay, bool) and provider_settings.get("maxRetryDelayMs") is None:
+                retry_settings["provider"] = {**provider_settings, "maxRetryDelayMs": max_delay}
+            retry_settings.pop("maxDelayMs", None)
+
+        return migrated
+
+    def getGlobalSettings(self) -> Settings:
+        return copy.deepcopy(self.globalSettings)
+
+    def getProjectSettings(self) -> Settings:
+        return copy.deepcopy(self.projectSettings)
+
+    async def reload(self) -> None:
+        await self.flush()
+        global_load = self.tryLoadFromStorage(self.storage, "global")
+        if global_load["error"] is None:
+            self.globalSettings = global_load["settings"]
+            self.globalSettingsLoadError = None
+        else:
+            self.globalSettingsLoadError = global_load["error"]
+            self.recordError("global", global_load["error"])
+
+        self.modifiedFields.clear()
+        self.modifiedNestedFields.clear()
+        self.modifiedProjectFields.clear()
+        self.modifiedProjectNestedFields.clear()
+
+        project_load = self.tryLoadFromStorage(self.storage, "project")
+        if project_load["error"] is None:
+            self.projectSettings = project_load["settings"]
+            self.projectSettingsLoadError = None
+        else:
+            self.projectSettingsLoadError = project_load["error"]
+            self.recordError("project", project_load["error"])
+
+        self.settings = deep_merge_settings(self.globalSettings, self.projectSettings)
+
+    def applyOverrides(self, overrides: Settings) -> None:
+        self.settings = deep_merge_settings(self.settings, overrides)
+
+    def markModified(self, field: str, nestedKey: str | None = None) -> None:
+        self.modifiedFields.add(field)
+        if nestedKey is not None:
+            self.modifiedNestedFields.setdefault(field, set()).add(nestedKey)
+
+    def markProjectModified(self, field: str, nestedKey: str | None = None) -> None:
+        self.modifiedProjectFields.add(field)
+        if nestedKey is not None:
+            self.modifiedProjectNestedFields.setdefault(field, set()).add(nestedKey)
+
+    def recordError(self, scope: SettingsScope, error: Exception | BaseException) -> None:
+        normalized = error if isinstance(error, Exception) else Exception(str(error))
+        self.errors.append(SettingsError(scope=scope, error=normalized))
+
+    def clearModifiedScope(self, scope: SettingsScope) -> None:
+        if scope == "global":
+            self.modifiedFields.clear()
+            self.modifiedNestedFields.clear()
+            return
+
+        self.modifiedProjectFields.clear()
+        self.modifiedProjectNestedFields.clear()
+
+    @staticmethod
+    def _clone_modified_nested_fields(source: dict[str, set[str]]) -> dict[str, set[str]]:
+        return {key: set(value) for key, value in source.items()}
+
+    def _persistScopedSettings(
+        self,
+        scope: SettingsScope,
+        snapshotSettings: Settings,
+        modifiedFields: set[str],
+        modifiedNestedFields: dict[str, set[str]],
+    ) -> None:
+        def persist(current: str | None) -> str:
+            current_file_settings = (
+                self.migrateSettings(json.loads(current))
+                if current
+                else {}
+            )
+            merged_settings: Settings = copy.deepcopy(current_file_settings)
+            for field in modifiedFields:
+                value = snapshotSettings.get(field)
+                if field in modifiedNestedFields and isinstance(value, dict):
+                    nested_modified = modifiedNestedFields[field]
+                    base_nested = copy.deepcopy(current_file_settings.get(field) or {})
+                    for nested_key in nested_modified:
+                        base_nested[nested_key] = value.get(nested_key)
+                    merged_settings[field] = base_nested
+                else:
+                    if value is None:
+                        merged_settings.pop(field, None)
+                    else:
+                        merged_settings[field] = copy.deepcopy(value)
+            return json.dumps(merged_settings, indent=2, ensure_ascii=False)
+
+        self.storage.withLock(scope, persist)
+
+    def _run_write_task(self, scope: SettingsScope, task: Any) -> None:
+        try:
+            task()
+            self.clearModifiedScope(scope)
+        except Exception as error:  # noqa: BLE001
+            self.recordError(scope, error)
+
+    def enqueueWrite(self, scope: SettingsScope, task: Any) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._run_write_task(scope, task)
+            return
+
+        previous = self.writeQueue
+
+        async def runner() -> None:
+            if previous is not None:
+                await previous
+            self._run_write_task(scope, task)
+
+        self.writeQueue = loop.create_task(runner())
+
+    def save(self) -> None:
+        self.settings = deep_merge_settings(self.globalSettings, self.projectSettings)
+        if self.globalSettingsLoadError is not None:
+            return
+
+        snapshot_global_settings = copy.deepcopy(self.globalSettings)
+        modified_fields = set(self.modifiedFields)
+        modified_nested_fields = self._clone_modified_nested_fields(self.modifiedNestedFields)
+        self.enqueueWrite(
+            "global",
+            lambda: self._persistScopedSettings("global", snapshot_global_settings, modified_fields, modified_nested_fields),
+        )
+
+    def saveProjectSettings(self, settings: Settings) -> None:
+        self.projectSettings = copy.deepcopy(settings)
+        self.settings = deep_merge_settings(self.globalSettings, self.projectSettings)
+        if self.projectSettingsLoadError is not None:
+            return
+
+        snapshot_project_settings = copy.deepcopy(self.projectSettings)
+        modified_fields = set(self.modifiedProjectFields)
+        modified_nested_fields = self._clone_modified_nested_fields(self.modifiedProjectNestedFields)
+        self.enqueueWrite(
+            "project",
+            lambda: self._persistScopedSettings("project", snapshot_project_settings, modified_fields, modified_nested_fields),
+        )
+
+    async def flush(self) -> None:
+        if self.writeQueue is not None:
+            await self.writeQueue
+
+    def drainErrors(self) -> list[SettingsError]:
+        drained = list(self.errors)
+        self.errors = []
+        return drained
+
+    def _set_global_value(self, key: str, value: Any) -> None:
+        if value is None:
+            self.globalSettings.pop(key, None)
+        else:
+            self.globalSettings[key] = value
+        self.markModified(key)
+        self.save()
+
+    def _ensure_global_nested(self, key: str) -> dict[str, Any]:
+        value = self.globalSettings.get(key)
+        if not isinstance(value, dict):
+            value = {}
+            self.globalSettings[key] = value
+        return value
+
+    def _settings_object(self, key: str) -> dict[str, Any]:
+        value = self.settings.get(key)
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _nullish(value: Any, default: Any) -> Any:
+        return default if value is None else value
+
+    def getLastChangelogVersion(self) -> str | None:
+        return self.settings.get("lastChangelogVersion")
+
+    def setLastChangelogVersion(self, version: str) -> None:
+        self._set_global_value("lastChangelogVersion", version)
+
+    def getSessionDir(self) -> str | None:
+        session_dir = self.settings.get("sessionDir")
+        return normalize_path(session_dir) if session_dir else session_dir
+
+    def getDefaultProvider(self) -> str | None:
+        return self.settings.get("defaultProvider")
+
+    def getDefaultModel(self) -> str | None:
+        return self.settings.get("defaultModel")
+
+    def setDefaultProvider(self, provider: str) -> None:
+        self._set_global_value("defaultProvider", provider)
+
+    def setDefaultModel(self, modelId: str) -> None:
+        self._set_global_value("defaultModel", modelId)
+
+    def setDefaultModelAndProvider(self, provider: str, modelId: str) -> None:
+        self.globalSettings["defaultProvider"] = provider
+        self.globalSettings["defaultModel"] = modelId
+        self.markModified("defaultProvider")
+        self.markModified("defaultModel")
+        self.save()
+
+    def getSteeringMode(self) -> str:
+        return self.settings.get("steeringMode") or "one-at-a-time"
+
+    def setSteeringMode(self, mode: str) -> None:
+        self._set_global_value("steeringMode", mode)
+
+    def getFollowUpMode(self) -> str:
+        return self.settings.get("followUpMode") or "one-at-a-time"
+
+    def setFollowUpMode(self, mode: str) -> None:
+        self._set_global_value("followUpMode", mode)
+
+    def getTheme(self) -> str | None:
+        return self.settings.get("theme")
+
+    def setTheme(self, theme: str) -> None:
+        self._set_global_value("theme", theme)
+
+    def getDefaultThinkingLevel(self) -> str | None:
+        return self.settings.get("defaultThinkingLevel")
+
+    def setDefaultThinkingLevel(self, level: str) -> None:
+        self._set_global_value("defaultThinkingLevel", level)
+
+    def getTransport(self) -> TransportSetting:
+        return self._nullish(self.settings.get("transport"), "auto")
+
+    def setTransport(self, transport: TransportSetting) -> None:
+        self._set_global_value("transport", transport)
+
+    def getCompactionEnabled(self) -> bool:
+        return self._nullish(self._settings_object("compaction").get("enabled"), True)
+
+    def setCompactionEnabled(self, enabled: bool) -> None:
+        compaction = self._ensure_global_nested("compaction")
+        compaction["enabled"] = enabled
+        self.markModified("compaction", "enabled")
+        self.save()
+
+    def getCompactionReserveTokens(self) -> int:
+        return self._nullish(self._settings_object("compaction").get("reserveTokens"), 16384)
+
+    def getCompactionKeepRecentTokens(self) -> int:
+        return self._nullish(self._settings_object("compaction").get("keepRecentTokens"), 20000)
+
+    def getCompactionSettings(self) -> dict[str, Any]:
+        return {
+            "enabled": self.getCompactionEnabled(),
+            "reserveTokens": self.getCompactionReserveTokens(),
+            "keepRecentTokens": self.getCompactionKeepRecentTokens(),
+        }
+
+    def getBranchSummarySettings(self) -> dict[str, Any]:
+        branch_summary = self._settings_object("branchSummary")
+        return {
+            "reserveTokens": self._nullish(branch_summary.get("reserveTokens"), 16384),
+            "skipPrompt": self._nullish(branch_summary.get("skipPrompt"), False),
+        }
+
+    def getBranchSummarySkipPrompt(self) -> bool:
+        return self._nullish(self._settings_object("branchSummary").get("skipPrompt"), False)
+
+    def getRetryEnabled(self) -> bool:
+        return self._nullish(self._settings_object("retry").get("enabled"), True)
+
+    def setRetryEnabled(self, enabled: bool) -> None:
+        retry_settings = self._ensure_global_nested("retry")
+        retry_settings["enabled"] = enabled
+        self.markModified("retry", "enabled")
+        self.save()
+
+    def getRetrySettings(self) -> dict[str, Any]:
+        retry_settings = self._settings_object("retry")
+        return {
+            "enabled": self.getRetryEnabled(),
+            "maxRetries": self._nullish(retry_settings.get("maxRetries"), 3),
+            "baseDelayMs": self._nullish(retry_settings.get("baseDelayMs"), 2000),
+        }
+
+    def getHttpIdleTimeoutMs(self) -> int:
+        value = self.settings.get("httpIdleTimeoutMs")
+        timeout_ms = parseHttpIdleTimeoutMs(value)
+        if timeout_ms is not None:
+            return timeout_ms
+        if value is not None:
+            raise Exception(f"Invalid httpIdleTimeoutMs setting: {value}")
+        return DEFAULT_HTTP_IDLE_TIMEOUT_MS
+
+    def setHttpIdleTimeoutMs(self, timeoutMs: int) -> None:
+        if not isinstance(timeoutMs, (int, float)) or isinstance(timeoutMs, bool) or timeoutMs < 0 or not float(timeoutMs) < float("inf"):
+            raise Exception(f"Invalid httpIdleTimeoutMs setting: {timeoutMs}")
+        self._set_global_value("httpIdleTimeoutMs", int(timeoutMs // 1))
+
+    def getProviderRetrySettings(self) -> dict[str, Any]:
+        provider = self._settings_object("retry").get("provider")
+        provider_settings = provider if isinstance(provider, dict) else {}
+        return {
+            "timeoutMs": provider_settings.get("timeoutMs"),
+            "maxRetries": provider_settings.get("maxRetries"),
+            "maxRetryDelayMs": self._nullish(provider_settings.get("maxRetryDelayMs"), 60000),
+        }
+
+    def getHideThinkingBlock(self) -> bool:
+        return self._nullish(self.settings.get("hideThinkingBlock"), False)
+
+    def setHideThinkingBlock(self, hide: bool) -> None:
+        self._set_global_value("hideThinkingBlock", hide)
+
+    def getShellPath(self) -> str | None:
+        return self.settings.get("shellPath")
+
+    def setShellPath(self, path: str | None) -> None:
+        self._set_global_value("shellPath", path)
+
+    def getQuietStartup(self) -> bool:
+        return self._nullish(self.settings.get("quietStartup"), False)
+
+    def setQuietStartup(self, quiet: bool) -> None:
+        self._set_global_value("quietStartup", quiet)
+
+    def getShellCommandPrefix(self) -> str | None:
+        return self.settings.get("shellCommandPrefix")
+
+    def setShellCommandPrefix(self, prefix: str | None) -> None:
+        self._set_global_value("shellCommandPrefix", prefix)
+
+    def getNpmCommand(self) -> list[str] | None:
+        npm_command = self.settings.get("npmCommand")
+        return list(npm_command) if isinstance(npm_command, list) else None
+
+    def setNpmCommand(self, command: list[str] | None) -> None:
+        self._set_global_value("npmCommand", list(command) if command is not None else None)
+
+    def getCollapseChangelog(self) -> bool:
+        return self._nullish(self.settings.get("collapseChangelog"), False)
+
+    def setCollapseChangelog(self, collapse: bool) -> None:
+        self._set_global_value("collapseChangelog", collapse)
+
+    def getEnableInstallTelemetry(self) -> bool:
+        return self._nullish(self.settings.get("enableInstallTelemetry"), True)
+
+    def setEnableInstallTelemetry(self, enabled: bool) -> None:
+        self._set_global_value("enableInstallTelemetry", enabled)
+
+    def getPackages(self) -> list[PackageSource]:
+        return list(self.settings.get("packages") or [])
+
+    def setPackages(self, packages: list[PackageSource]) -> None:
+        self._set_global_value("packages", packages)
+
+    def setProjectPackages(self, packages: list[PackageSource]) -> None:
+        project_settings = copy.deepcopy(self.projectSettings)
+        project_settings["packages"] = packages
+        self.markProjectModified("packages")
+        self.saveProjectSettings(project_settings)
+
+    def getExtensionPaths(self) -> list[str]:
+        return list(self.settings.get("extensions") or [])
+
+    def setExtensionPaths(self, paths: list[str]) -> None:
+        self._set_global_value("extensions", paths)
+
+    def setProjectExtensionPaths(self, paths: list[str]) -> None:
+        project_settings = copy.deepcopy(self.projectSettings)
+        project_settings["extensions"] = paths
+        self.markProjectModified("extensions")
+        self.saveProjectSettings(project_settings)
+
+    def getSkillPaths(self) -> list[str]:
+        return list(self.settings.get("skills") or [])
+
+    def setSkillPaths(self, paths: list[str]) -> None:
+        self._set_global_value("skills", paths)
+
+    def setProjectSkillPaths(self, paths: list[str]) -> None:
+        project_settings = copy.deepcopy(self.projectSettings)
+        project_settings["skills"] = paths
+        self.markProjectModified("skills")
+        self.saveProjectSettings(project_settings)
+
+    def getPromptTemplatePaths(self) -> list[str]:
+        return list(self.settings.get("prompts") or [])
+
+    def setPromptTemplatePaths(self, paths: list[str]) -> None:
+        self._set_global_value("prompts", paths)
+
+    def setProjectPromptTemplatePaths(self, paths: list[str]) -> None:
+        project_settings = copy.deepcopy(self.projectSettings)
+        project_settings["prompts"] = paths
+        self.markProjectModified("prompts")
+        self.saveProjectSettings(project_settings)
+
+    def getThemePaths(self) -> list[str]:
+        return list(self.settings.get("themes") or [])
+
+    def setThemePaths(self, paths: list[str]) -> None:
+        self._set_global_value("themes", paths)
+
+    def setProjectThemePaths(self, paths: list[str]) -> None:
+        project_settings = copy.deepcopy(self.projectSettings)
+        project_settings["themes"] = paths
+        self.markProjectModified("themes")
+        self.saveProjectSettings(project_settings)
+
+    def getEnableSkillCommands(self) -> bool:
+        return self._nullish(self.settings.get("enableSkillCommands"), True)
+
+    def setEnableSkillCommands(self, enabled: bool) -> None:
+        self._set_global_value("enableSkillCommands", enabled)
+
+    def getThinkingBudgets(self) -> dict[str, Any] | None:
+        budgets = self.settings.get("thinkingBudgets")
+        return budgets if isinstance(budgets, dict) else budgets
+
+    def getShowImages(self) -> bool:
+        return self._nullish(self._settings_object("terminal").get("showImages"), True)
+
+    def setShowImages(self, show: bool) -> None:
+        terminal = self._ensure_global_nested("terminal")
+        terminal["showImages"] = show
+        self.markModified("terminal", "showImages")
+        self.save()
+
+    def getImageWidthCells(self) -> int:
+        width = self._settings_object("terminal").get("imageWidthCells")
+        if not isinstance(width, (int, float)) or isinstance(width, bool) or not float("-inf") < float(width) < float("inf"):
+            return 60
+        return max(1, int(width // 1))
+
+    def setImageWidthCells(self, width: int) -> None:
+        terminal = self._ensure_global_nested("terminal")
+        terminal["imageWidthCells"] = max(1, int(width))
+        self.markModified("terminal", "imageWidthCells")
+        self.save()
+
+    def getClearOnShrink(self) -> bool:
+        terminal = self._settings_object("terminal")
+        if terminal.get("clearOnShrink") is not None:
+            return terminal["clearOnShrink"]
+        return os.environ.get("MISAKA_CLEAR_ON_SHRINK") == "1"
+
+    def setClearOnShrink(self, enabled: bool) -> None:
+        terminal = self._ensure_global_nested("terminal")
+        terminal["clearOnShrink"] = enabled
+        self.markModified("terminal", "clearOnShrink")
+        self.save()
+
+    def getShowTerminalProgress(self) -> bool:
+        return self._nullish(self._settings_object("terminal").get("showTerminalProgress"), False)
+
+    def setShowTerminalProgress(self, enabled: bool) -> None:
+        terminal = self._ensure_global_nested("terminal")
+        terminal["showTerminalProgress"] = enabled
+        self.markModified("terminal", "showTerminalProgress")
+        self.save()
+
+    def getImageAutoResize(self) -> bool:
+        return self._nullish(self._settings_object("images").get("autoResize"), True)
+
+    def setImageAutoResize(self, enabled: bool) -> None:
+        images = self._ensure_global_nested("images")
+        images["autoResize"] = enabled
+        self.markModified("images", "autoResize")
+        self.save()
+
+    def getBlockImages(self) -> bool:
+        return self._nullish(self._settings_object("images").get("blockImages"), False)
+
+    def setBlockImages(self, blocked: bool) -> None:
+        images = self._ensure_global_nested("images")
+        images["blockImages"] = blocked
+        self.markModified("images", "blockImages")
+        self.save()
+
+    def getEnabledModels(self) -> list[str] | None:
+        return self.settings.get("enabledModels")
+
+    def setEnabledModels(self, patterns: list[str] | None) -> None:
+        self._set_global_value("enabledModels", patterns)
+
+    def getDoubleEscapeAction(self) -> str:
+        return self._nullish(self.settings.get("doubleEscapeAction"), "tree")
+
+    def setDoubleEscapeAction(self, action: str) -> None:
+        self._set_global_value("doubleEscapeAction", action)
+
+    def getTreeFilterMode(self) -> str:
+        mode = self.settings.get("treeFilterMode")
+        valid = {"default", "no-tools", "user-only", "labeled-only", "all"}
+        return mode if mode in valid else "default"
+
+    def setTreeFilterMode(self, mode: str) -> None:
+        self._set_global_value("treeFilterMode", mode)
+
+    def getShowHardwareCursor(self) -> bool:
+        if self.settings.get("showHardwareCursor") is not None:
+            return self.settings["showHardwareCursor"]
+        return os.environ.get("MISAKA_HARDWARE_CURSOR") == "1"
+
+    def setShowHardwareCursor(self, enabled: bool) -> None:
+        self._set_global_value("showHardwareCursor", enabled)
+
+    def getEditorPaddingX(self) -> int:
+        return self._nullish(self.settings.get("editorPaddingX"), 0)
+
+    def setEditorPaddingX(self, padding: int) -> None:
+        self._set_global_value("editorPaddingX", max(0, min(3, int(padding))))
+
+    def getAutocompleteMaxVisible(self) -> int:
+        return self._nullish(self.settings.get("autocompleteMaxVisible"), 5)
+
+    def setAutocompleteMaxVisible(self, maxVisible: int) -> None:
+        self._set_global_value("autocompleteMaxVisible", max(3, min(20, int(maxVisible))))
+
+    def getCodeBlockIndent(self) -> str:
+        return self._nullish(self._settings_object("markdown").get("codeBlockIndent"), "  ")
+
+    def getWarnings(self) -> dict[str, Any]:
+        return dict(self._settings_object("warnings"))
+
+    def setWarnings(self, warnings: dict[str, Any]) -> None:
+        self._set_global_value("warnings", {**warnings})
+
+__all__ = [
+    "CompactionSettings",
+    "BranchSummarySettings",
+    "ProviderRetrySettings",
+    "RetrySettings",
+    "TerminalSettings",
+    "ImageSettings",
+    "ThinkingBudgetsSettings",
+    "MarkdownSettings",
+    "WarningSettings",
+    "TransportSetting",
+    "PackageSource",
+    "Settings",
+    "SettingsScope",
+    "SettingsStorage",
+    "SettingsError",
+    "FileSettingsStorage",
+    "InMemorySettingsStorage",
+    "SettingsManager",
+]

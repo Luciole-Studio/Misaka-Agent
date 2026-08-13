@@ -1,0 +1,64 @@
+# MISAKA——依赖=原 harn 四包（engine/ 内联件）的并集。
+# 重建环境（两步）：
+#   uv venv .venv --python 3.13
+#   uv pip install --python .venv -e .      # 装依赖＋生成 .venv/bin/misaka 命令＋包可 import
+[project]
+name = "misaka"
+version = "0.5.0"
+description = "御坂网络——人文社科多智能体研究系统（harn fork 内联为 engine/）"
+requires-python = ">=3.12"
+dependencies = [
+    # engine/ai（原 harn_ai）
+    "pydantic>=2.10",
+    "jsonschema>=4.23",
+    "httpx>=0.28",
+    "httpx-sse>=0.4",
+    "openai>=1.60",
+    "anthropic>=0.45",
+    "google-genai>=1.0",
+    "boto3>=1.35",
+    "mistralai>=1.5",
+    "json-repair>=0.30",
+    "websockets>=16",
+    # engine/agent（原 harn_agent）
+    "aiofiles>=24.1",
+    "ruamel.yaml>=0.18",
+    "jsonlines>=4.0",
+    "pathspec>=0.12",
+    # net（格子托管：每格一个终端仿真屏）
+    "pyte>=0.8.2",
+    # engine/tui（原 harn_tui）
+    "blessed>=1.20",
+    "markdown-it-py>=4.2",
+    "mdit-py-plugins>=0.4",   # dollarmath:LaTeX 数学识别(pi 05e89b4 对齐)
+    "pylatexenc>=2.10",       # LaTeX→Unicode 渲染层
+    "rich>=13.9",
+    "wcwidth>=0.2",
+    "rapidfuzz>=3.10",
+    "term-image>=0.7",
+    # engine/coding_agent（原 harn_coding_agent）
+    "click>=8.1",
+    "psutil>=6.1",
+    "wcmatch>=10.0",
+    "filelock>=3.16",
+    "pygments>=2.18",
+    "diff-match-patch>=20230430",
+    "python-frontmatter>=1.1",
+    # misaka 自有（mcp.py 读 config.yaml）
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+misaka = "misaka.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# 仓根的全部可 import 包（editable 安装即暴露，替代手写 .pth）
+packages = ["misaka"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
