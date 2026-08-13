@@ -182,12 +182,13 @@ async def run_loop(con, cfg, runner, worker, *, project, assignee,
             frontier_empty=False,
             stop_requested=bool(stop_event and stop_event.is_set()))
         active = [r for status in ACTIVE_STATUSES for r in _project_cards(con, status, proj)]
+        # 在跑的每拍全量回喂执行体：验收悬卡重试、死主 running 回收、健康卡无操作。
+        # 只喂 verifying 会饿死死主 running 卡——排空期或前沿干涸期没人救场，循环被钉死。
+        stalled = [r["id"] for r in active]
         if halt:
             if active:                      # 触闸先排空在跑的（成果照常入图），再收场
-                # 排空不是干等：验收悬卡与死主 running 卡都要继续喂执行体，
-                # 否则崩溃重启进触闸态时没人驱动验收，active 永不清空
                 await runner.launch_ready(context=context, tool_call_id=tool_call_id,
-                                          task_ids=[r["id"] for r in active])
+                                          task_ids=stalled)
                 await asyncio.sleep(poll_seconds)
                 continue
             reason = why
@@ -198,10 +199,9 @@ async def run_loop(con, cfg, runner, worker, *, project, assignee,
         if free > 0:
             new_ids += _expand_picks(
                 con, frontier.pick(con, store, k=free, project=proj), assignee, proj)
-        heal = [r["id"] for r in active if r["status"] in ("verifying", "finalizing")]
-        if new_ids or heal:                 # heal＝会话重开后把悬着的验收捡起来（无状态续跑）
+        if new_ids or stalled:
             await runner.launch_ready(context=context, tool_call_id=tool_call_id,
-                                      task_ids=[*new_ids, *heal])
+                                      task_ids=[*new_ids, *stalled])
         if new_ids:
             reading = budget.status(con, cfg.get("token_cap"))
             rounds.append_round(
