@@ -88,8 +88,12 @@ def launch(who, model=None, cont=False, pick=False, session=None):
                                  f"~/.misaka/sister-sessions/{who}")
         model_default = "claude-sonnet-5"
         extra = []
-        for sk in profiles.skills(prof):   # 技能在 ~/.misaka/profiles/<角色>/skills/
-            extra += ["--skill", sk]
+        from misaka.orchestration import skill_layers
+        for sk in skill_layers.skills_stack(prof, cwd=os.getcwd()):
+            extra += ["--skill", sk]      # 三层栈：项目（信任＋扫描）→ 角色 → 共享
+        hint = skill_layers.get_untrusted_project_skills_root(cwd=os.getcwd())
+        if hint:
+            print(f"（本仓有 {hint[1]} 个项目技能未加载——信任它：misaka skills trust）")
     else:  # 找 Last Order：pi 的内置工具照给，只是不给子代理——Sisters 就是她的子代理
         # （2026-08-07 用户勘误：此前 -nbt 把内置工具一并没收，是把"不给子代理"过度执行；
         #  不给子代理靠 _extension_factories 不注册 subagent 扩展，与内置工具无关。）

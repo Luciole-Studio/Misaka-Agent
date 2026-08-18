@@ -10,6 +10,11 @@
   是其数据层与压缩链的移植（2026-08-18 起，设计 docs/design/lcm.md）：
   `search_query.py` 逐字整搬；store/dag/tokens 为骨架移植（schema 与算法忠实、
   接口面按 misaka 削减）。上游 v0.21.0-rc2 时期。
+- **hermes-agent**（github.com/NousResearch/hermes-agent，MIT）——
+  `misaka/orchestration/skills_guard.py` 是其 tools/skills_guard.py 的逐字整搬
+  （仅改头注释＋加自检段）；`skill_layers.py` 是 agent/skill_utils.py
+  项目技能层/信任闸/隔离段的严格移植；`extensions/moa.py`＋`orchestration/moa.py`
+  是其 MoA（agent/moa_loop.py 等）的忠实移植（2026-08-18，设计 docs/design/moa.md）。
 
 ## 设计移植（不含代码拷贝）
 

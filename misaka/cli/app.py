@@ -123,6 +123,11 @@ def _parser():
     lc = sub.add_parser("lcm", help="无损上下文运维：status 存量 / doctor 只读体检 / backup 热备快照")
     lc.add_argument("op", nargs="?", default="status", choices=["status", "doctor", "backup"])
 
+    sk = sub.add_parser("skills", help="技能三层栈：trust 信任当前仓 / list 看装配栈 / scan 扫描项目技能")
+    sk.add_argument("op", nargs="?", default="list", choices=["trust", "list", "scan"])
+    sk.add_argument("--dir", help="项目根（缺省＝当前目录向上找 .git）")
+    sk.add_argument("--as", dest="role", default="sisters/10032", help="以哪个角色的视角看栈")
+
     au = sub.add_parser("selftest", help="免疫系统：安慰剂抽验判官（破坏产物看抓不抓得住）")
     au.add_argument("-k", type=int, default=1, help="抽几张已通过的卡")
     au.add_argument("--seed", type=int)
@@ -408,6 +413,36 @@ def main():
         else:
             dest, err = lcm_maint.backup(lcm_db)
             print(err if err else f"已备份：{dest}")
+    elif args.cmd == "skills":
+        import os as _os
+
+        from misaka.orchestration import skill_layers
+        if args.op == "trust":
+            target = args.dir or skill_layers.find_project_root()
+            if not target:
+                print("当前目录不在 git 仓里；用 --dir 指定项目根")
+            else:
+                print(skill_layers.trust_project_root(target)[1])
+        elif args.op == "scan":
+            rt = args.dir or skill_layers.find_project_root()
+            if not rt:
+                print("当前目录不在 git 仓里")
+            else:
+                from misaka.orchestration.skills_guard import format_scan_report, scan_skill
+                found = False
+                for d in skill_layers._candidate_project_skills_dirs(rt):
+                    for md in __import__("pathlib").Path(d).rglob("SKILL.md"):
+                        found = True
+                        print(format_scan_report(scan_skill(md.parent, source="project-local")))
+                if not found:
+                    print("该仓没有项目技能（.misaka/skills 或 .agents/skills）")
+        else:
+            prof = _os.path.join(_os.path.expanduser(CFG["roles_root"]), args.role)
+            for d in skill_layers.skills_stack(prof, cwd=_os.getcwd()):
+                print(d)
+            hint = skill_layers.get_untrusted_project_skills_root(cwd=_os.getcwd())
+            if hint:
+                print(f"（{hint[0]} 有 {hint[1]} 个技能未信任——misaka skills trust 解锁）")
     elif args.cmd == "graph":
         rows, nedges = store.stats(con)
         print("边:", nedges)

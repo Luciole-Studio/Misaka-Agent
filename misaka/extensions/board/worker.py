@@ -377,9 +377,12 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
     返回 (flags, factories, prompt, ro_root, role)：引擎旗标、扩展工厂、
     开场合同（含验收反馈与交卷规矩）、技能只读副本根、角色名。
     """
-    soul, cfg, skills = _load_profile(profile_dir)
+    soul, cfg, _profile_skills = _load_profile(profile_dir)
     model = os.environ.get("MISAKA_FORCE_MODEL") or task["model"] or cfg.get("model") or default_model
     os.makedirs(workspace, exist_ok=True)
+    # 技能三层栈：项目（信任＋扫描）→ 角色 → 共享；project 同名压过角色层
+    from misaka.orchestration import skill_layers
+    skills = skill_layers.skills_stack(profile_dir, cwd=workspace)
     beast = isinstance(task, dict) and task.get("beast")
     prompt = card_prompt(task)
 
