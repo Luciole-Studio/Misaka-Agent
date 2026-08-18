@@ -38,6 +38,7 @@ run "可观测性" .venv/bin/python -m pytest -q tests/contract/test_observabili
 run "微观代办工具" .venv/bin/python -m pytest -q tests/contract/test_todo_tools.py
 run "面板召唤树" .venv/bin/python -m pytest -q tests/unit/test_tree_summon.py
 run "心虚点回流" .venv/bin/python -m pytest -q tests/contract/test_harvest_uncertain.py
+run "共同魂" .venv/bin/python -m pytest -q tests/contract/test_shared_soul.py
 run "协力者工具执行面" .venv/bin/python -m pytest -q tests/contract/test_ally_tools.py
 run "Sister控制面" .venv/bin/python -m pytest -q tests/contract/test_sister_contract.py
 run "Sister持久生命周期" .venv/bin/python -m pytest -q tests/integration/test_sister_durable.py

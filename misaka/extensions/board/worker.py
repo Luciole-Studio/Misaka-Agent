@@ -435,8 +435,9 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
         # 宪法④：技能只读——Sister 拿到的是去写权副本，够不到真技能树
         for d in skill_sandbox.readonly_copies(skills, ro_root):
             flags += ["--skill", d]
+    flags += ["--append-system-prompt", profiles.shared_soul()]   # 共同魂在前
     if soul:
-        flags += ["--append-system-prompt", soul]
+        flags += ["--append-system-prompt", soul]                 # 角色个性在后
     return flags, factories, prompt, ro_root, role
 
 

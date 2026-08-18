@@ -266,7 +266,8 @@ class _SisterManager(SubagentManager):
         if requested not in (None, self.agent_type, "general", "general-purpose"):
             raise ValueError(f"Sister card cannot change identity to {requested!r}")
         soul_path = Path(self.profile_dir) / "SOUL.md"
-        soul = soul_path.read_text(encoding="utf-8")
+        soul = (Path(profiles.shared_soul()).read_text(encoding="utf-8")
+                + "\n\n" + soul_path.read_text(encoding="utf-8"))   # 共同魂在前
         copies = skill_sandbox.readonly_copies(
             profiles.skills(self.profile_dir), self.skill_root
         )

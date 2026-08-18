@@ -251,7 +251,7 @@ misaka survey "你的命题" --scheme OCM     # 逐格判"这格与命题通不�
   `extensions/subagent/` 负责递归 Agent，`extensions/messages.py` 是统一消息层（`SendMessage`＋落盘信箱），
   `extensions/docs.py`、`mcp.py`、`switch.py` 是单文件扩展；
   `core/extensions/` 只保留加载器、Runner 和协议，`core/tools/` 只保留引擎内置工具
-- 板与图 `~/.misaka/board.db`｜信箱 `~/.misaka/messages.db`｜底图 `~/.misaka/basemap.db`｜协力者手敲识别名单 `~/.misaka/allies.json`｜自由对话会话 `~/.misaka/sessions/<角色>/`（首启自动从旧的 last-order-sessions/sister-sessions 搬家；卡的现场不在这，随卡在工作区 `session/`）｜角色档案（人格 SOUL.md＋config.json＋技能＋MCP，照 pi 全在用户态）`~/.misaka/profiles/<角色>/`
+- 板与图 `~/.misaka/board.db`｜信箱 `~/.misaka/messages.db`｜底图 `~/.misaka/basemap.db`｜协力者手敲识别名单 `~/.misaka/allies.json`｜自由对话会话 `~/.misaka/sessions/<角色>/`（首启自动从旧的 last-order-sessions/sister-sessions 搬家；卡的现场不在这，随卡在工作区 `session/`）｜角色档案（人格 SOUL.md＋config.json＋技能＋MCP，照 pi 全在用户态）`~/.misaka/profiles/<角色>/`｜**共同魂** `~/.misaka/profiles/MISAKA.md`（LO 与 Sisters——含分身——共用的开场人格，装配在各自 SOUL.md 之前，首跑落骨架；收割官/思辨红队/判官不读它，审计姿态不受共同人格影响）
 - engine 运行时资产（models.json/auth/主题/设置）`~/.misaka/agent/`（已与 ~/.harn 脱钩，真文件）
 - 每张卡的工作区与产物 `~/Documents/Misaka/workspaces/<卡id>/`（含 `report.json` 和会话现场）
 - 证据库（按内容哈希）`~/Documents/Misaka/evidence/`

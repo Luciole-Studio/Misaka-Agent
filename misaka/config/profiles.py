@@ -36,6 +36,30 @@ def config_yaml(profile_dir):
     return os.path.join(profile_dir, "config.yaml")
 
 
+SHARED_SOUL_TEMPLATE = """# 御坂网络・共同魂
+
+（Last Order 与全体 Sisters——含她们的分身——共同的开场约定：语气、价值观、纪律。
+各角色自己的 SOUL.md 在这之后加载，个性与专长写在那边。改这个文件即全网生效。）
+
+- 文件即真相：结论落盘成产物，不留在对话里。
+- 查不到就明写「未能确证」，绝不编造出处。
+"""
+
+
+def shared_soul():
+    """共同魂 ~/.misaka/profiles/MISAKA.md：LO 与 Sisters（含分身）共用的开场人格，
+    装配序＝共同魂在前、角色 SOUL 在后。首次调用落骨架（绝不覆盖已有）。
+    一次性角色（收割官/思辨红队/判官）不读它——审计姿态不受共同人格影响
+    （2026-08-18 用户裁定）。返回路径。"""
+    from misaka.config import CFG
+    path = os.path.join(os.path.expanduser(CFG["roles_root"]), "MISAKA.md")
+    if not os.path.exists(path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(SHARED_SOUL_TEMPLATE)
+    return path
+
+
 if __name__ == "__main__":
     import sys
     import tempfile
@@ -56,4 +80,14 @@ if __name__ == "__main__":
     assert len(got) == 1 and got[0].endswith("ponytail"), got   # 点开头的要跳过
     assert m.skills("/x/misaka/profiles/没有的") == []
     assert m.config_yaml(prof) == os.path.join(prof, "config.yaml")
-    print("profile_paths selfcheck ok — 角色名解析/技能扫描/点文件跳过 均正确（单一落位）")
+
+    from misaka.config import CFG
+    CFG["roles_root"] = tempfile.mkdtemp()
+    p = m.shared_soul()
+    assert os.path.isfile(p) and "共同魂" in open(p, encoding="utf-8").read(), \
+        "首跑落骨架"
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("# 我自己写的")
+    assert open(m.shared_soul(), encoding="utf-8").read() == "# 我自己写的", \
+        "绝不覆盖用户已写的共同魂"
+    print("profile_paths selfcheck ok — 角色名解析/技能扫描/点文件跳过/共同魂播种 均正确")

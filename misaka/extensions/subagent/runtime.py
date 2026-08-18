@@ -2230,7 +2230,9 @@ class SubagentManager:
             profile = self.role_context.profile_dir
             soul = Path(profile or "") / "SOUL.md"
             if soul.is_file():
-                system_prompt = soul.read_text(encoding="utf-8")
+                from misaka.config import profiles as _profiles
+                system_prompt = (Path(_profiles.shared_soul()).read_text(encoding="utf-8")
+                                 + "\n\n" + soul.read_text(encoding="utf-8"))  # 共同魂在前
         if task.definition.memory:
             system_prompt += "\n\n" + self._memory_prompt(task)
         prompt_path.write_text(system_prompt, encoding="utf-8")

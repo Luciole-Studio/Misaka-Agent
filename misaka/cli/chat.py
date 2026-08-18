@@ -98,7 +98,8 @@ def launch(who, model=None, cont=False, pick=False, session=None):
         model_default = "claude-opus-5"
         extra = []
     flags = ["--provider", CFG["provider"], "--model", model or model_default,
-             "--append-system-prompt", soul,
+             "--append-system-prompt", profiles.shared_soul(),   # 共同魂在前
+             "--append-system-prompt", soul,                     # 角色个性在后
              "--session-dir", os.path.expanduser(sess)] + extra
     if session:
         flags += ["--session", session]   # 切入指定会话（引擎支持路径或部分 UUID）
