@@ -25,6 +25,10 @@ CFG = {
     "judge_timeout": int(os.environ.get("MISAKA_JUDGE_TIMEOUT", "600")),
     "hooks_dir": os.path.join(REPO, "hooks"),
     "token_cap": int(os.environ.get("MISAKA_TOKEN_CAP", "0")),
+    # 上下文引擎：lcm＝无损压缩（原文全落 lcm.db，可回收）；native＝引擎原生一次性摘要。
+    # LCM 内部任何失败自动回落 native（fail-open），此开关是显式逃生舱。
+    "context_engine": os.environ.get("MISAKA_CONTEXT_ENGINE", "lcm"),
+    "lcm_db": os.environ.get("MISAKA_LCM_DB", "~/.misaka/lcm.db"),
 }
 
 

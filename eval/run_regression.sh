@@ -44,6 +44,7 @@ run "面板召唤树" .venv/bin/python -m pytest -q tests/unit/test_tree_summon.
 run "心虚点回流" .venv/bin/python -m pytest -q tests/contract/test_harvest_uncertain.py
 run "共同魂" .venv/bin/python -m pytest -q tests/contract/test_shared_soul.py
 run "MoA扇出" .venv/bin/python -m pytest -q tests/contract/test_moa_fanout.py
+run "LCM引擎接缝" .venv/bin/python -m pytest -q tests/contract/test_lcm_engine.py
 run "协力者工具执行面" .venv/bin/python -m pytest -q tests/contract/test_ally_tools.py
 run "Sister控制面" .venv/bin/python -m pytest -q tests/contract/test_sister_contract.py
 run "Sister持久生命周期" .venv/bin/python -m pytest -q tests/integration/test_sister_durable.py

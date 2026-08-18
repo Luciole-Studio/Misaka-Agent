@@ -25,6 +25,7 @@ from misaka.orchestration.lcm.store import MessageStore
 from misaka.orchestration.lcm.tokens import (
     count_message_tokens,
     count_messages_tokens,
+    count_tokens,
     normalize_content_value,
 )
 
@@ -223,16 +224,50 @@ class LCMCompactor:
             condensed += 1
         return condensed
 
-    # ── 装配 ────────────────────────────────────────────────────────────
+    # ── 宿主 compaction 形态（三期接缝：引擎定切点，LCM 消化被压段产摘要）──
 
-    def assemble(self, system_msg, session_id, tail_messages, *, anchor_source=None):
-        """[系统提示?] + [单条摘要消息] + [保护尾巴]。
-        首条非 system 必须 user（上游 400 坑）；预算超顶先裁摘要段。"""
-        result = [dict(system_msg)] if system_msg else []
-        parts = []
-        anchor = self._latest_user_anchor(anchor_source or [], tail_messages)
-        if anchor:
-            parts.append(anchor)
+    def compact_for_host(self, session_id, messages, *, previous_summary=None,
+                         focus_topic=None):
+        """被压段落库→多叶循环→凝聚→前沿渲染。返回 (summary_text, CompressResult)。
+        previous_summary＝切换 LCM 前引擎原生压缩的存量摘要，首见时收编为 D0 承接。"""
+        if previous_summary and not self.dag.get_session_nodes(session_id, limit=1):
+            self.dag.add_node(SummaryNode(
+                session_id=session_id, depth=0, summary=previous_summary,
+                token_count=count_tokens(previous_summary), source_ids=[],
+                source_type="messages", expand_hint="切换 LCM 前的原生压缩摘要"))
+        ids = self.store.append_batch(session_id, messages)
+        pos, leaves, level_max = 0, 0, 0
+        while pos < len(messages):
+            chunk, chunk_ids, used = [], [], 0
+            while pos < len(messages):
+                tokens = count_message_tokens(messages[pos])
+                if chunk and used + tokens > self.config.leaf_chunk_tokens:
+                    break
+                chunk.append(messages[pos])
+                chunk_ids.append(ids[pos])
+                used += tokens
+                pos += 1
+            summary, level = self._summarize(chunk, used, depth=0,
+                                             focus_topic=focus_topic)
+            earliest, latest = self.store.get_time_bounds(chunk_ids)
+            self.dag.add_node(SummaryNode(
+                session_id=session_id, depth=0, summary=summary,
+                token_count=count_tokens(summary), source_token_count=used,
+                source_ids=chunk_ids, source_type="messages",
+                earliest_at=earliest, latest_at=latest,
+                expand_hint=_extract_expand_hint(summary)))
+            leaves += 1
+            level_max = max(level_max, level)
+        condensed = self._maybe_condense(session_id, focus_topic)
+        text = self.render_frontier(session_id,
+                                    anchor=self._latest_user_anchor(messages, []))
+        return text, CompressResult([], "compacted", leaf_nodes=leaves,
+                                    condensed_nodes=condensed,
+                                    summary_level=level_max)
+
+    def render_frontier(self, session_id, *, anchor=None):
+        """摘要前沿 → 单块文本（宿主 summary 与 assemble 共用同一渲染）。"""
+        parts = [anchor] if anchor else []
         for node in self.dag.frontier_nodes(session_id):
             label = DEPTH_LABELS.get(node.depth, f"深度{node.depth}")
             part = (SUMMARY_HEADER.format(label=label, depth=node.depth,
@@ -241,6 +276,17 @@ class LCMCompactor:
             if node.expand_hint:
                 part += f"\n[{EXPAND_HINT_PREFIX}{node.expand_hint}]"
             parts.append(part)
+        return "\n\n---\n\n".join(parts)
+
+    # ── 装配 ────────────────────────────────────────────────────────────
+
+    def assemble(self, system_msg, session_id, tail_messages, *, anchor_source=None):
+        """[系统提示?] + [单条摘要消息] + [保护尾巴]。
+        首条非 system 必须 user（上游 400 坑）；预算超顶先裁摘要段。"""
+        result = [dict(system_msg)] if system_msg else []
+        anchor = self._latest_user_anchor(anchor_source or [], tail_messages)
+        rendered = self.render_frontier(session_id, anchor=anchor)
+        parts = rendered.split("\n\n---\n\n") if rendered else []
         if parts:
             summary_role = "user" if (not result or result[-1].get("role") == "system"
                                       ) else "assistant"

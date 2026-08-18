@@ -412,8 +412,10 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
             ]
             if task.get("id"):   # 合成任务（无卡号）没有微观代办
                 factories.append(inline("todo", todo.tools_for(task["id"])))
+            from misaka.extensions import lcm as lcm_ext
             from misaka.extensions import moa as moa_ext
             factories.append(inline("moa", moa_ext.commands_for(profile_dir)))
+            factories.append(inline("lcm", lcm_ext.register))
             # 禁 builtin，但仍可派分身与上报；SendMessage 在 SUBAGENT_TOOLS 白名单里
             flags += ["-t", ",".join(SUBAGENT_TOOLS)]
     else:
@@ -432,8 +434,10 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
         ]
         if task.get("id"):   # 合成任务（无卡号）没有微观代办
             factories.append(inline("todo", todo.tools_for(task["id"])))
+        from misaka.extensions import lcm as lcm_ext
         from misaka.extensions import moa as moa_ext
         factories.append(inline("moa", moa_ext.commands_for(profile_dir)))
+        factories.append(inline("lcm", lcm_ext.register))
         if can_delegate:
             factories.append(inline(
                 "subagent",
