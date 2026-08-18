@@ -29,7 +29,7 @@ for m in misaka/extensions/board/db.py misaka/extensions/board/validate.py \
          misaka/orchestration/lcm/fresh_tail.py misaka/orchestration/lcm/escalation.py \
          misaka/orchestration/lcm/compactor.py misaka/orchestration/lcm/maintenance.py \
          misaka/orchestration/skills_guard.py misaka/orchestration/skill_layers.py \
-         misaka/orchestration/skill_preprocessing.py \
+         misaka/orchestration/skill_preprocessing.py misaka/orchestration/learn_prompt.py \
          misaka/research/basemap.py misaka/research/indexer/index.py misaka/research/indexer/workspace.py; do
   run "$(basename "$m")" .venv/bin/python "$m"
 done

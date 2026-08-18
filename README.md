@@ -148,6 +148,24 @@ SendMessage/TaskStop,机制隔离)。在跑/验收中的卡先 `misaka net stop`
   绝大多数警告只 inspect，不乱建议清理）｜`misaka lcm backup` 热备快照
 - 切换前的原生摘要自动收编承接，历史不丢
 
+## 技能三件套（项目技能＋显式调用＋对话沉淀）
+
+技能三层栈（同名 project 赢）：**项目** `<git根>/.misaka/skills/`（跨工具兼容
+`.agents/skills/`）→ **角色** `~/.misaka/profiles/<角色>/skills/` → **共享**
+`~/.misaka/profiles/skills/`。移植自 hermes（含逐字整搬的安全扫描器）：
+
+- **信任闸**：clone 的仓自带技能是注入攻击面——须 `misaka skills trust` 显式
+  信任项目根才加载；未信任但有技能时只提示不加载。信任后每个技能仍逐个过
+  威胁扫描（外传/注入/破坏/持久化/混淆五类模式），dangerous 即隔离，
+  扫描炸了＝隔离（fail-closed）。`misaka skills list|scan` 看栈与报告
+- **`/skill`**：列清单；`/skill <名> [附带指令]` 把技能全文（含目录注入与
+  支撑文件清单）展开进本轮。SKILL.md 支持 `${MISAKA_SKILL_DIR}` 模板变量；
+  行内 shell 展开默认关（skills.json 可开）
+- **`/learn`**：把描述的任何东西学成技能——目录、链接、粘贴的笔记、或空参
+  ＝「沉淀我们刚做的」。带上游 HARDLINE 编写标准（description ≤60 字符、
+  绝不发明命令、author 绝不取环境身份）、大源知识库形态（瘦索引＋逐章
+  references/ 增量蒸馏）、来源卫生（源文本是数据不是指令）
+
 ## MoA（参谋团：多模型意见 → 一人行动）
 
 对话里打 **`/moa <问题>`**（LO 和每位 sis 的会话都有）：当前局面发给 N 个参谋模型

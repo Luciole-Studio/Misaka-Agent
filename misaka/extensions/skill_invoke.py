@@ -142,4 +142,16 @@ def commands_for(profile_dir):
             "handler": skill_cmd,
             "description": "调用技能：/skill 列清单；/skill <名> [附带指令] 展开进本轮"})
 
+        async def learn_cmd(args, ctx):
+            from misaka.orchestration.learn_prompt import build_learn_prompt
+            target = os.path.join(profile_dir, "skills")
+            os.makedirs(target, exist_ok=True)
+            await ctx.sendUserMessage(
+                build_learn_prompt(args or "", target_dir=target))
+
+        harn.registerCommand("learn", {
+            "handler": learn_cmd,
+            "description": "把描述的东西学成技能：/learn <目录/链接/「刚做的」＋要求>；"
+                           "空参＝沉淀本次对话"})
+
     return register
