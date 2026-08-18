@@ -443,7 +443,7 @@ _HELP_ROWS = [
     ("1-9", "切到第 N 个标签页"), ("n / p", "下一页 / 上一页"),
     ("h j k l", "选窗口：左 下 上 右"), ("c", "新建标签页"),
     ("v", "分屏：左右劈开"), ("-", "分屏：上下劈开"),
-    ("z", "缩放：聚焦格子独占"), ("t", "召唤全局树（课题→卡→代办→分身）"),
+    ("z", "缩放：聚焦格子独占"), ("t", "召唤全局树（当前页右侧劈出）"),
     ("x", "关掉当前格子"),
     ("d", "分离（格子照跑）"), ("ctrl+b", "再按一次＝原样发进格子"),
     ("esc", "取消前缀模式"), ("鼠标", "点＝聚焦，拖＝选中复制，双击＝选词"),
@@ -1481,12 +1481,12 @@ def launch():
                         new_pane([os.environ.get("SHELL", "sh")], "shell", split="h")
                     elif key == b"-":                  # split_horizontal（1063）：上下分
                         new_pane([os.environ.get("SHELL", "sh")], "shell", split="v")
-                    elif key == b"t":                  # 召唤全局树：有就聚焦，没有开一页
+                    elif key == b"t":                  # 召唤全局树：有就聚焦；没有在当前页右侧劈出
                         action, val = tree_summon_action(panes())
                         if action == "focus":
                             focus(val)
                         else:
-                            new_pane(val, TREE_TITLE)
+                            new_pane(val, TREE_TITLE, split="h")
                     elif key == b"d":
                         detach = True
                     elif key == b"x":
