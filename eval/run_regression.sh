@@ -27,7 +27,7 @@ for m in misaka/extensions/board/db.py misaka/extensions/board/validate.py \
          misaka/orchestration/lcm/tokens.py misaka/orchestration/lcm/search_query.py \
          misaka/orchestration/lcm/store.py misaka/orchestration/lcm/dag.py \
          misaka/orchestration/lcm/fresh_tail.py misaka/orchestration/lcm/escalation.py \
-         misaka/orchestration/lcm/compactor.py \
+         misaka/orchestration/lcm/compactor.py misaka/orchestration/lcm/maintenance.py \
          misaka/research/basemap.py misaka/research/indexer/index.py misaka/research/indexer/workspace.py; do
   run "$(basename "$m")" .venv/bin/python "$m"
 done
@@ -86,6 +86,7 @@ run "py_compile(全包)" sh -c '.venv/bin/python -c "import compileall,sys; sys.
 
 echo "── CLI 冒烟 ──"
 run "misaka board" .venv/bin/misaka board
+run "misaka lcm" env MISAKA_LCM_DB=/tmp/misaka-regression-lcm-smoke.db .venv/bin/misaka lcm doctor
 run "terminal_colors" .venv/bin/python misaka/tui/terminal_colors.py
 
 echo "── 端到端干跑（临时库，不碰真板）──"

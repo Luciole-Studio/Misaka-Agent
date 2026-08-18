@@ -120,6 +120,9 @@ def _parser():
     tr.add_argument("--project", help="只看某课题")
     tr.add_argument("--watch", action="store_true", help="每 2 秒重画（Ctrl+C 退出）")
 
+    lc = sub.add_parser("lcm", help="无损上下文运维：status 存量 / doctor 只读体检 / backup 热备快照")
+    lc.add_argument("op", nargs="?", default="status", choices=["status", "doctor", "backup"])
+
     au = sub.add_parser("selftest", help="免疫系统：安慰剂抽验判官（破坏产物看抓不抓得住）")
     au.add_argument("-k", type=int, default=1, help="抽几张已通过的卡")
     au.add_argument("--seed", type=int)
@@ -385,6 +388,26 @@ def main():
                     _time.sleep(2)
             except KeyboardInterrupt:
                 pass
+    elif args.cmd == "lcm":
+        import os as _os
+
+        from misaka.orchestration.lcm import maintenance as lcm_maint
+        lcm_db = _os.path.expanduser(CFG.get("lcm_db") or "~/.misaka/lcm.db")
+        if args.op == "status":
+            st = lcm_maint.status(lcm_db)
+            print(f"库 {st['db']}｜{st['size_bytes']:,} 字节｜"
+                  f"{st['sessions']} 会话｜{st['messages']} 条原文｜{st['nodes']} 个摘要节点")
+            for sid_, v in st["per_session"].items():
+                print(f"  {sid_}: 原文 {v['messages']} 摘要 {v['nodes']}")
+        elif args.op == "doctor":
+            for c in lcm_maint.doctor(lcm_db):
+                mark = {"pass": "✅", "warn": "⚠️", "fail": "❌"}[c["status"]]
+                suffix = f"  → {c['action']}" if c["status"] != "pass" else ""
+                print(f"{mark} {c['check']}: {c['detail']}{suffix}")
+            print("note: 只读体检，未改任何行")
+        else:
+            dest, err = lcm_maint.backup(lcm_db)
+            print(err if err else f"已备份：{dest}")
     elif args.cmd == "graph":
         rows, nedges = store.stats(con)
         print("边:", nedges)

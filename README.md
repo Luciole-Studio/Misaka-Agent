@@ -141,7 +141,12 @@ SendMessage/TaskStop,机制隔离)。在跑/验收中的卡先 `misaka net stop`
   确定性截断零花费收敛），熔断＋花费闸拉闸也绝不失控烧钱
 - **逃生舱**：`export MISAKA_CONTEXT_ENGINE=native` 回引擎原生压缩；
   LCM 内部任何故障也会自动回落原生（fail-open），一轮都不会卡死
-- 切换前的原生摘要自动收编承接，历史不丢；回收工具（按需钻回原文）四期到
+- **回收工具**（LO 与 sis 都有）：`lcm_grep` 检索已压历史 → `lcm_expand`
+  按号钻回逐字原文（节点可逐层下钻）→ `lcm_load_session` 顺序翻页 →
+  `lcm_status` 看存量。纪律：摘要是线索不是证据，引用原话必须回原文核对
+- **运维**：`misaka lcm status` 存量｜`misaka lcm doctor` 只读体检（分级：
+  绝大多数警告只 inspect，不乱建议清理）｜`misaka lcm backup` 热备快照
+- 切换前的原生摘要自动收编承接，历史不丢
 
 ## MoA（参谋团：多模型意见 → 一人行动）
 
