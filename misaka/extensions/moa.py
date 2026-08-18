@@ -12,6 +12,7 @@
 import asyncio
 import os
 
+from misaka.config import profiles
 from misaka.orchestration import moa as kernel
 from misaka.research.kernel import guard
 
@@ -120,3 +121,54 @@ async def moa_guidance(profile_dir, user_prompt, messages, *, roles_root,
         synthesize, preset, user_prompt, outputs,
         roles_root=roles_root, usage_kw=usage_kw or {})
     return guard.untrusted(f"moa:{preset['name']}", guidance), None
+
+
+def commands_for(profile_dir):
+    """`/moa <问题>` 命令工厂：profile_dir 烧进闭包——配置随角色走（R5），
+    LO 与每位 sis 各用各的 moa.json。打 /moa 即授权（R4，hermes 同款无确认闸）。"""
+
+    def register(harn):
+        async def moa_cmd(args, ctx):
+            from misaka.config import CFG
+            prompt = (args or "").strip()
+            if not prompt:
+                ctx.ui.notify("用法：/moa <问题>——当前局面发给参谋团求意见，"
+                              "综合后注入本轮再行动（配置在角色目录 moa.json）", "info")
+                return
+            kernel.ensure(profile_dir, CFG["provider"], CFG["default_model"])
+            preset, err = kernel.resolve(profile_dir)
+            if err:
+                ctx.ui.notify(err, "error")
+                return
+            messages = []
+            try:   # 会话现状＝参谋要判断的局面；读不到就只看这条问题
+                for entry in ctx.sessionManager.getEntries():
+                    if (entry.get("type") == "message"
+                            and isinstance(entry.get("message"), dict)):
+                        messages.append(entry["message"])
+            except Exception:  # noqa: BLE001 - 视图缺失不拦 /moa，参谋看单问题
+                messages = []
+            messages.append({"role": "user", "content": prompt})
+            role = profiles.role_of(profile_dir)
+            usage_kw = {"usage_db": CFG["db"], "usage_task_id": f"moa:{role}",
+                        "usage_generation": 0,
+                        "usage_token_cap": CFG.get("token_cap")}   # 宪法⑦：参谋花费入台账
+            ctx.ui.notify(
+                f"MoA：{len(preset['reference_models'])} 位参谋出动"
+                f"（{'、'.join(kernel.slot_label(s) for s in preset['reference_models'])}）"
+                "，收齐后综合注入…", "info")
+            guidance, err = await moa_guidance(
+                profile_dir, prompt, messages,
+                roles_root=CFG["roles_root"], usage_kw=usage_kw)
+            if err:
+                ctx.ui.notify(err, "error")
+                return
+            # hermes 一次性形态：用户原话＋参谋指导合成一条 user 轮进会话，
+            # 本人（聚合官＝行动模型）照常带工具行动
+            await ctx.sendUserMessage(prompt + "\n\n" + guidance)
+
+        harn.registerCommand("moa", {
+            "handler": moa_cmd,
+            "description": "MoA：把当前局面发给参谋团，意见综合后注入本轮再行动"})
+
+    return register
