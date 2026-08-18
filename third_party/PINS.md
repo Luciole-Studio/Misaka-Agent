@@ -4,6 +4,13 @@
 |---|---|---|---|
 | PageIndex | github.com/VectifyAI/PageIndex | d5c4e62c20172ce400aef84545dfba3a0580b9ae | 文档结构层（树导航），只调用不改 |
 
+## 代码移植（含拷贝，非 third_party 目录承载）
+
+- **hermes-lcm**（github.com/stephenschoettler/hermes-lcm，MIT）——`misaka/orchestration/lcm/`
+  是其数据层与压缩链的移植（2026-08-18 起，设计 docs/design/lcm.md）：
+  `search_query.py` 逐字整搬；store/dag/tokens 为骨架移植（schema 与算法忠实、
+  接口面按 misaka 削减）。上游 v0.21.0-rc2 时期。
+
 ## 设计移植（不含代码拷贝）
 
 - **herdr**（github.com/herdrdev/herdr，Apache-2.0）——`misaka/net/` 是其核心设计的
