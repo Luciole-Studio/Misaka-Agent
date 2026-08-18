@@ -148,6 +148,46 @@ class SummaryDAG:
             (node_id, limit)).fetchall()
         return [int(r[0]) for r in rows]
 
+    def search(self, query, session_id=None, limit=10):
+        """摘要节点检索（FTS＋CJK/LIKE 降级，与消息库同套查询构建）。"""
+        from misaka.orchestration.lcm.search_query import (
+            escape_like,
+            extract_search_terms,
+            requires_like_fallback,
+            sanitize_fts5_query,
+            sanitize_like_query,
+        )
+        safe = sanitize_fts5_query(query)
+        if not requires_like_fallback(query, safe):
+            where, args = ["nodes_fts MATCH ?"], [safe]
+            if session_id is not None:
+                where.append("n.session_id=?")
+                args.append(session_id)
+            args.append(limit)
+            try:
+                rows = self._conn.execute(
+                    f"""SELECT n.* FROM nodes_fts fts
+                        JOIN summary_nodes n ON n.node_id = fts.rowid
+                        WHERE {' AND '.join(where)} ORDER BY rank LIMIT ?""",
+                    args).fetchall()
+                return [self._row_to_node(r) for r in rows]
+            except sqlite3.Error:
+                pass
+        terms = extract_search_terms(sanitize_like_query(query))
+        if not terms:
+            return []
+        where, args = [], []
+        if session_id is not None:
+            where.append("session_id=?")
+            args.append(session_id)
+        where.append("(" + " OR ".join(["summary LIKE ? ESCAPE '\\'"] * len(terms)) + ")")
+        args.extend(f"%{escape_like(t)}%" for t in terms)
+        args.append(limit)
+        rows = self._conn.execute(
+            f"""SELECT * FROM summary_nodes WHERE {' AND '.join(where)}
+                ORDER BY node_id DESC LIMIT ?""", args).fetchall()
+        return [self._row_to_node(r) for r in rows]
+
     def describe_subtree(self, node_id):
         node = self.get_node(node_id)
         if not node:
