@@ -1,6 +1,8 @@
 """收割：把一张已验收卡的产物读成图节点（findings + gaps）。
 
 ponytail: 不给 Sister 加交卷字段（改合同代价大且会被忘），收割是调度侧一次 LLM 调用。
+例外是交卷早就有的 uncertain（心虚点）：她亲口标的没底处**机械回流**为缺口节点
+（provenance='uncertain'，零 LLM）——微观的相谈自动进前沿、可生复查卡。
 """
 import json
 import os
@@ -55,6 +57,7 @@ def harvest_task(con, store, task, cfg, worker, evidence=None, *,
         return [], [], "harvest 输出不是对象"
 
     fids, gids, unbacked = [], [], 0
+    proj = task["project"] if "project" in task.keys() else None   # 节点继承卡的课题
     for kind, key, bucket in (("finding", "findings", fids), ("gap", "gaps", gids)):
         for item in (obj.get(key) or [])[:8]:
             text = (item or {}).get("text") if isinstance(item, dict) else None
@@ -65,7 +68,6 @@ def harvest_task(con, store, task, cfg, worker, evidence=None, *,
             except (TypeError, ValueError):
                 w = 0.5
             prov = item.get("provenance") if item.get("provenance") in ("verified", "analogy", "invented") else None
-            proj = task["project"] if "project" in task.keys() else None   # 发现继承卡的课题
             nid = store.add_node(con, kind, text.strip(), weight=w, task_id=task["id"],
                                  provenance=prov, project=proj)
             store.add_edge(con, task["id"], nid, "from_task")
@@ -76,4 +78,11 @@ def harvest_task(con, store, task, cfg, worker, evidence=None, *,
                                                 item["source_file"], item.get("quote") or "")
                 if not ok:
                     unbacked += 1  # 引文核不上＝这条没有证据键，记账不静默
+    # 心虚点回流：她的原话就是缺口陈述，不经 LLM 转述；与正文节点同一 8 字质量门槛
+    for u in (report.get("uncertain") or [])[:8]:
+        if isinstance(u, str) and len(u.strip()) >= 8:
+            nid = store.add_node(con, "gap", u.strip()[:200], weight=0.6,
+                                 task_id=task["id"], provenance="uncertain", project=proj)
+            store.add_edge(con, task["id"], nid, "from_task")
+            gids.append(nid)
     return fids, gids, (f"{unbacked} 条发现的引文核不上（已收节点但无证据键）" if unbacked else None)

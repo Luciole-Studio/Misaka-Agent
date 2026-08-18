@@ -560,8 +560,8 @@ def register(harn):
     @_register(
         harn,
         name="misaka_tree", label="看树",
-        description="全局树快照：课题→卡（状态/负责人/来自哪个缺口）→分身（含嵌套）。"
-                    "实时版在面板格子里跑 `misaka tree --watch`。",
+        description="全局树快照：课题→方向（有派生边才有）→卡（状态/负责人/代办进度/卡壳）"
+                    "→分身（挂对应代办条目下，含嵌套）。实时版在面板格子里跑 `misaka tree --watch`。",
         snippet="查看 LO→卡→分身的全局树",
         parameters=TreeParams)
     async def misaka_tree(tool_call_id, params, signal, on_update, ctx):

@@ -627,7 +627,7 @@ class Daemon:
                             pane.exit_code if pane.exit_code is not None else -1,
                             pane.buf.decode("utf-8", errors="replace"),
                             assignee=pane.ally, task_id=pane.card)
-                    ok, report = worker.check_report(pane.cwd)
+                    ok, report = worker.check_report(pane.cwd, con=con, task_id=pane.card)
                     if db.reclaim_abandoned(
                         con, pane.card, generation=pane.generation,
                         claim_lock=row["claim_lock"], worker_pid=row["worker_pid"],
@@ -642,7 +642,7 @@ class Daemon:
                                      generation=pane.generation)
                     pane.claim_lock = None
                 elif not pane.submitted:
-                    ok, report = worker.check_report(pane.cwd)
+                    ok, report = worker.check_report(pane.cwd, con=con, task_id=pane.card)
                     if ok:
                         if db.mark_verifying(con, pane.card,
                                              generation=pane.generation,

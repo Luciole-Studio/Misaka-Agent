@@ -62,6 +62,18 @@ CREATE TABLE IF NOT EXISTS projects (
   archived  INTEGER NOT NULL DEFAULT 0,
   pinned_at REAL                -- NULL=不置顶；数值越大越靠前（后置顶的在上）
 );
+CREATE TABLE IF NOT EXISTS todos (
+  id         TEXT PRIMARY KEY,  -- td_xxxxxx
+  task_id    TEXT NOT NULL,     -- 归属卡（微观域；宏观代办＝卡本身，不进这张表）
+  parent_id  TEXT,              -- 树：父先于子存在，无重挂父＝环不可能
+  text       TEXT NOT NULL,
+  status     TEXT NOT NULL DEFAULT 'open',  -- open | doing | done | blocked
+  owner      TEXT,              -- 谁在干（sis 编号/分身任务名，自由文本）
+  note       TEXT,              -- blocked 的原因＝相谈内容
+  generation INTEGER NOT NULL,  -- 审计戳；打回重做沿用同一清单
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 """
 # ponytail: 无索引——五张卡的规模，SQLite 全表扫都嫌快；事件破万再加。
 RECLAIM_CAP = 2   # ponytail: 白死重跑上限写死；要可调时再提 CFG
@@ -322,8 +334,9 @@ def delete_task(con, task_id, *, allow_active=False):
         return False, f"卡 {task_id} 正在「{row['status']}」，先 stop 再删"
     con.execute("DELETE FROM budget_reservations WHERE task_id=?", (task_id,))
     con.execute("DELETE FROM events WHERE task_id=?", (task_id,))
+    con.execute("DELETE FROM todos WHERE task_id=?", (task_id,))
     con.execute("DELETE FROM tasks WHERE id=?", (task_id,))
-    return True, f"卡 {task_id} 已删（连同事件与预算记录）"
+    return True, f"卡 {task_id} 已删（连同事件、预算与微观代办）"
 
 
 @_serialized

@@ -138,7 +138,7 @@ def reconcile(con):
                 continue
         elif _pid_alive(t["worker_pid"]):
             continue
-        ok, result = worker.check_report(t["workspace"] or "")
+        ok, result = worker.check_report(t["workspace"] or "", con=con, task_id=t["id"])
         if not db.reclaim_abandoned(
             con,
             t["id"],
@@ -263,6 +263,7 @@ def run_task(con, t, cfg):
             usage_generation=generation,
             usage_claim_lock=lock,
             usage_token_cap=cfg.get("token_cap"),
+            con=con,
         )
     except BaseException:  # 跑挂了也要落终态：卡别悬在 running 等进程退出
         if db.back_to_ready(con, t["id"], generation=generation, claim_lock=lock):

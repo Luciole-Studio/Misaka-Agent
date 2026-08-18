@@ -485,7 +485,8 @@ class SisterRuntime:
                     # Never publish a replacement workspace owner while an old
                     # writer group remains observable.
                     continue
-            ok, report = worker.check_report(observed["workspace"] or "")
+            ok, report = worker.check_report(observed["workspace"] or "",
+                                             con=self.con, task_id=observed["id"])
             submitted = bool(ok)
             if not db.reclaim_abandoned(
                 self.con,
@@ -1173,7 +1174,8 @@ class SisterRuntime:
                     row = self._row_for_run(handle, token)
                     if row is None or not self._owns_running(handle, row):
                         return
-                    ok, result = worker.check_report(self._workspace(handle.board_id))
+                    ok, result = worker.check_report(self._workspace(handle.board_id),
+                                                     con=self.con, task_id=handle.board_id)
                     if not ok:
                         changed = self._owned_event(
                             handle,

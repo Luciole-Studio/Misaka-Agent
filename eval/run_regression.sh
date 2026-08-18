@@ -23,6 +23,7 @@ for m in misaka/extensions/board/db.py misaka/extensions/board/validate.py \
          misaka/research/kernel/precedent.py misaka/orchestration/budget.py \
          misaka/orchestration/skill_sandbox.py misaka/config/profiles.py \
          misaka/research/kernel/spike.py misaka/research/kernel/rounds.py \
+         misaka/extensions/board/todo.py \
          misaka/research/basemap.py misaka/research/indexer/index.py misaka/research/indexer/workspace.py; do
   run "$(basename "$m")" .venv/bin/python "$m"
 done
@@ -34,6 +35,9 @@ run "思辨红队" .venv/bin/python -m pytest -q tests/contract/test_critic.py
 run "深研工具" .venv/bin/python -m pytest -q tests/contract/test_research_tools.py
 run "深研驱动器" .venv/bin/python -m pytest -q tests/contract/test_research_loop.py
 run "可观测性" .venv/bin/python -m pytest -q tests/contract/test_observability.py
+run "微观代办工具" .venv/bin/python -m pytest -q tests/contract/test_todo_tools.py
+run "面板召唤树" .venv/bin/python -m pytest -q tests/unit/test_tree_summon.py
+run "心虚点回流" .venv/bin/python -m pytest -q tests/contract/test_harvest_uncertain.py
 run "协力者工具执行面" .venv/bin/python -m pytest -q tests/contract/test_ally_tools.py
 run "Sister控制面" .venv/bin/python -m pytest -q tests/contract/test_sister_contract.py
 run "Sister持久生命周期" .venv/bin/python -m pytest -q tests/integration/test_sister_durable.py

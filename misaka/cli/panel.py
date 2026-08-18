@@ -7,7 +7,7 @@
 
 操作：鼠标点标签/侧栏条目/格子＝聚焦；前缀键 ctrl+b：`1-9` 切标签页｜
 `n/p` 轮换页｜`hjkl` 选窗口｜`c` 新页｜`v`/`-` 左右/上下分屏｜`z` 缩放｜
-`x` 关格子｜`d` 分离｜`?` 键位面板｜再按一次 ctrl+b 原样发进格子。
+`t` 召唤全局树｜`x` 关格子｜`d` 分离｜`?` 键位面板｜再按一次 ctrl+b 原样发进格子。
 """
 import base64
 import fcntl
@@ -415,8 +415,8 @@ def format_prefix_bar(width, prefix_name="ctrl+b"):
     parts = [(f"{badge} PREFIX \x1b[0m", 8)]
     for name, desc in ((f"{prefix_name}", "原样发送"), ("1-9", "切页"),
                        ("hjkl", "选窗口"), ("c", "新页"), ("v/-", "分屏"),
-                       ("z", "缩放"), ("m", "鼠标"), ("x", "关格子"), ("d", "分离"),
-                       ("?", "键位"), ("esc", "取消")):
+                       ("z", "缩放"), ("t", "树"), ("m", "鼠标"), ("x", "关格子"),
+                       ("d", "分离"), ("?", "键位"), ("esc", "取消")):
         parts.append((f" {key}{name}\x1b[0m{dim} {desc}\x1b[0m",
                       1 + len(name) + 1 + _wcwidth(desc)))
     out, used = [], 0
@@ -428,11 +428,23 @@ def format_prefix_bar(width, prefix_name="ctrl+b"):
     return "".join(out) + " " * max(0, width - used)
 
 
+TREE_TITLE = "树"
+TREE_ARGV = [sys.executable, "-m", "misaka", "tree", "--watch"]
+
+
+def tree_summon_action(listing):
+    """prefix+t 的决策（纯函数可测）：活着的树格子→聚焦它；没有→新开一页。"""
+    existing = next((p["id"] for p in listing
+                     if p["alive"] and p["title"] == TREE_TITLE), None)
+    return ("focus", existing) if existing else ("create", TREE_ARGV)
+
+
 _HELP_ROWS = [
     ("1-9", "切到第 N 个标签页"), ("n / p", "下一页 / 上一页"),
     ("h j k l", "选窗口：左 下 上 右"), ("c", "新建标签页"),
     ("v", "分屏：左右劈开"), ("-", "分屏：上下劈开"),
-    ("z", "缩放：聚焦格子独占"), ("x", "关掉当前格子"),
+    ("z", "缩放：聚焦格子独占"), ("t", "召唤全局树（课题→卡→代办→分身）"),
+    ("x", "关掉当前格子"),
     ("d", "分离（格子照跑）"), ("ctrl+b", "再按一次＝原样发进格子"),
     ("esc", "取消前缀模式"), ("鼠标", "点＝聚焦，拖＝选中复制，双击＝选词"),
     ("", "任意键关闭本面板"),
@@ -1469,6 +1481,12 @@ def launch():
                         new_pane([os.environ.get("SHELL", "sh")], "shell", split="h")
                     elif key == b"-":                  # split_horizontal（1063）：上下分
                         new_pane([os.environ.get("SHELL", "sh")], "shell", split="v")
+                    elif key == b"t":                  # 召唤全局树：有就聚焦，没有开一页
+                        action, val = tree_summon_action(panes())
+                        if action == "focus":
+                            focus(val)
+                        else:
+                            new_pane(val, TREE_TITLE)
                     elif key == b"d":
                         detach = True
                     elif key == b"x":

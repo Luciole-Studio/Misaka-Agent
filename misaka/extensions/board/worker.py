@@ -198,8 +198,10 @@ def _load_profile(profile_dir):
     return (soul if os.path.exists(soul) else None), cfg, skills
 
 
-def check_report(workspace):
-    """keystone：报告+实物才算完成。返回 (ok, report_or_reason)。"""
+def check_report(workspace, con=None, task_id=None):
+    """keystone：报告+实物才算完成。返回 (ok, report_or_reason)。
+    给了 con+task_id 再加一道微观代办闸：doing 清零才许交卷（终态诚实，
+    末尾补不了历史）；没给就只验报告（golden/e2e 的纯 keystone 用法不受累）。"""
     try:
         root = Path(workspace).resolve(strict=True)
     except (OSError, RuntimeError):
@@ -273,6 +275,12 @@ def check_report(workspace):
         if not notes.strip():
             return False, "blocked report missing notes"
         return False, f"blocked: {notes[:500]}"  # ponytail: blocked 态 M1 加，先记 failed(blocked)
+    if con is not None and task_id:
+        from misaka.extensions.board import todo
+        doing = todo.stats(con, task_id)["doing"]
+        if doing:
+            return False, ("todo 未收口：还挂着 doing——" + "；".join(doing[:5])
+                           + "。做完的标 done；没做完的退 open 或标 blocked＋note，再交卷")
     return True, report
 
 
@@ -385,6 +393,7 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
             from functools import partial
 
             from misaka.extensions import inline, messages
+            from misaka.extensions.board import todo
             from misaka.extensions.subagent import extension as subagent
 
             factories = [
@@ -397,12 +406,15 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
                     route=subagent.route_to_children,
                 )),
             ]
+            if task.get("id"):   # 合成任务（无卡号）没有微观代办
+                factories.append(inline("todo", todo.tools_for(task["id"])))
             # 禁 builtin，但仍可派分身与上报；SendMessage 在 SUBAGENT_TOOLS 白名单里
             flags += ["-t", ",".join(SUBAGENT_TOOLS)]
     else:
         from functools import partial
 
         from misaka.extensions import docs, inline, mcp, messages
+        from misaka.extensions.board import todo
         from misaka.extensions.subagent import extension as subagent
 
         factories = [
@@ -412,6 +424,8 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
                 route=subagent.route_to_children if can_delegate else None,
             )),
         ]
+        if task.get("id"):   # 合成任务（无卡号）没有微观代办
+            factories.append(inline("todo", todo.tools_for(task["id"])))
         if can_delegate:
             factories.append(inline(
                 "subagent",
@@ -438,8 +452,10 @@ def run_card(
     usage_generation=None,
     usage_claim_lock=None,
     usage_token_cap=None,
+    con=None,
 ):
-    """同步跑一张卡。返回 verdict dict：{ok, report|reason, exit_code, timed_out}。"""
+    """同步跑一张卡。返回 verdict dict：{ok, report|reason, exit_code, timed_out}。
+    con 给了就在交卷时连微观代办闸一起验（dispatch 传板连接进来）。"""
     task_id = task.get("id") if isinstance(task, dict) else None
     flags, factories, prompt, ro_root, role = card_session_setup(
         task, workspace, profile_dir, provider, default_model
@@ -492,7 +508,7 @@ def run_card(
         )
 
     skill_sandbox.cleanup(ro_root)  # 副本用完即删，不占工作区也不进产物核验
-    ok, result = check_report(workspace)
+    ok, result = check_report(workspace, con=con, task_id=task_id)
     if ok:
         return {"ok": True, "report": result, "exit_code": 0, "timed_out": False}
     reason = result if not r["error"] else f"{result}（会话错误：{r['error']}）"

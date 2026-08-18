@@ -9,7 +9,7 @@
 import json
 import os
 
-from misaka.extensions.board import db
+from misaka.extensions.board import db, todo
 from misaka.extensions.board import project as project_mod
 from misaka.orchestration import budget
 from misaka.research.kernel import rounds, store
@@ -70,13 +70,21 @@ def _loose_children(session_dir, depth=0):
     return out
 
 
-def card_agents(workspace):
-    """一张卡现场里的全部分身树（新落位 session/ ＋旧落位 session/sister/）。"""
+def card_agents(workspace, self_agent_id=None):
+    """一张卡现场里的全部分身树（新落位 session/ ＋旧落位 session/sister/）。
+    self_agent_id＝这张卡 sister 本人的 agent 号：她不是自己的分身，折叠掉——
+    她派的分身直接挂卡下，两条执行路径（LO 会话内跑 / 格子里跑）长同一种树形。"""
     if not workspace:
         return []
     root = os.path.join(workspace, "session")
-    return (_agents_under(root) + _agents_under(os.path.join(root, "sister"))
-            + _loose_children(root))
+    agents = (_agents_under(root) + _agents_under(os.path.join(root, "sister"))
+              + _loose_children(root))
+    if not self_agent_id:
+        return agents
+    out = []
+    for a in agents:
+        out += a["children"] if a["id"] == self_agent_id else [a]
+    return out
 
 
 def _agent_lines(agents, indent):
@@ -89,27 +97,74 @@ def _agent_lines(agents, indent):
     return lines
 
 
+def _pref(a, b):
+    """截断兼容的前缀互认（desc 截 40、owner 截 60、text 截 200，谁短谁当前缀）。"""
+    a, b = (a or "").strip(), (b or "").strip()
+    return bool(a) and bool(b) and (a == b or a.startswith(b) or b.startswith(a))
+
+
+def _attach(agents, trows):
+    """2 期合同约定的机械挂接：条目 owner＝分身任务名，或分身描述以条目原文开头。
+    挂不上的落回卡下（毛边无害，只是视觉归位）。返回 ({todo_id: [分身]}, 散的)。"""
+    by_todo, loose = {}, []
+    for a in agents:
+        hit = next((t["id"] for t in trows
+                    if _pref(t["owner"], a["desc"]) or _pref(t["text"], a["desc"])), None)
+        (by_todo.setdefault(hit, []) if hit else loose).append(a)
+    return by_todo, loose
+
+
+def _card_lines(con, r, card_indent, tail_indent):
+    """一张卡：状态行（含代办徽标）＋⚠卡壳行＋带分身的条目锚行＋散分身。"""
+    trows = todo.items(con, r["id"])
+    doing = [t for t in trows if t["status"] == "doing"]
+    badge = ""
+    if trows:
+        done = sum(1 for t in trows if t["status"] == "done")
+        badge = (f"  代办{done}/{len(trows)}"
+                 + (f" ▶{doing[0]['text'][:20]}" if doing else ""))
+    glyph = GLYPH.get(r["status"], "·")
+    out = [f"{card_indent}{glyph} {r['id']} {r['title'][:44]}"
+           f"（{r['assignee']}·{r['status']}）{badge}"]
+    for t in trows:
+        if t["status"] == "blocked":
+            out.append(f"{tail_indent}⚠ {t['text'][:30]}：{(t['note'] or '')[:40]}")
+    by_todo, loose = _attach(card_agents(r["workspace"], r["agent_id"]), trows)
+    for t in trows:
+        if t["id"] in by_todo:
+            out.append(f"{tail_indent}{todo.GLYPH[t['status']]} {t['text'][:40]}")
+            out += _agent_lines(by_todo[t["id"]], tail_indent + "   ")
+    out += _agent_lines(loose, tail_indent)
+    return out
+
+
 def render(con, project=None):
-    """整棵树的文本快照。project=None＝全部课题（含未分类）。"""
+    """整棵树的文本快照：课题→（方向）→卡→代办/分身。project=None＝全部课题。
+    课题里有「缺口→卡」派生边才升出方向层；普通板保持平铺零噪音。"""
     rows = con.execute("SELECT * FROM tasks ORDER BY project IS NULL, project, created_at"
                        ).fetchall()
     if project is not None:
         rows = [r for r in rows if r["project"] == project]
     origins = {dst: src for src, dst in con.execute(
         "SELECT src, dst FROM edges WHERE kind='expanded_to'")}
-    lines, current = [], object()
+    by_proj = {}
     for r in rows:
-        if r["project"] != current:
-            current = r["project"]
-            lines.append(f"▌课题「{current or '(未分类)'}」" + _project_meter(con, current))
-        glyph = GLYPH.get(r["status"], "·")
-        origin = ""
-        if r["id"] in origins:
-            node = store.get(con, origins[r["id"]])
-            if node is not None:
-                origin = f"  ←{node['text'][:32]}"
-        lines.append(f"├ {glyph} {r['id']} {r['title'][:44]}（{r['assignee']}·{r['status']}）{origin}")
-        lines += _agent_lines(card_agents(r["workspace"]), "│    ")
+        by_proj.setdefault(r["project"], []).append(r)
+    lines = []
+    for proj, cards in by_proj.items():
+        lines.append(f"▌课题「{proj or '(未分类)'}」" + _project_meter(con, proj))
+        if not any(c["id"] in origins for c in cards):
+            for c in cards:
+                lines += _card_lines(con, c, "├ ", "│    ")
+            continue
+        groups = {}
+        for c in cards:
+            groups.setdefault(origins.get(c["id"]), []).append(c)
+        for origin_id, group in groups.items():
+            node = store.get(con, origin_id) if origin_id else None
+            lines.append(f"├ ◆ {node['text'][:44]}" if node is not None else "├ （直派）")
+            for c in group:
+                lines += _card_lines(con, c, "│ ├ ", "│ │    ")
     if not lines:
         return "(板上无卡)"
     if len(lines) > MAX_LINES:
@@ -129,7 +184,28 @@ def _project_meter(con, project):
         parts.insert(0, f"深研{done}轮")
     from misaka.config import CFG
     parts.append(budget.status(con, CFG.get("token_cap"))["mode"])
+    duty = _duty(project)
+    if duty:
+        parts.append("分工：" + duty)
     return "  ｜" + " ".join(parts)
+
+
+def _duty(project):
+    """PROJECT.md「## 分工」节的实义行（跳过模板的括号占位行）。"""
+    try:
+        with open(os.path.join(project_mod.path(project), "PROJECT.md"),
+                  encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return ""
+    got, inside = [], False
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("## "):
+            inside = s == "## 分工"
+        elif inside and s and not s.startswith("（"):
+            got.append(s)
+    return "；".join(got)[:40]
 
 
 def transcript_tail(session_file, limit=40):
