@@ -23,7 +23,7 @@ for m in misaka/extensions/board/db.py misaka/extensions/board/validate.py \
          misaka/research/kernel/precedent.py misaka/orchestration/budget.py \
          misaka/orchestration/skill_sandbox.py misaka/config/profiles.py \
          misaka/research/kernel/spike.py misaka/research/kernel/rounds.py \
-         misaka/extensions/board/todo.py \
+         misaka/extensions/board/todo.py misaka/orchestration/moa.py \
          misaka/research/basemap.py misaka/research/indexer/index.py misaka/research/indexer/workspace.py; do
   run "$(basename "$m")" .venv/bin/python "$m"
 done
