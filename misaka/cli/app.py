@@ -63,6 +63,9 @@ def _parser():
     dmp.add_argument("--from", dest="sender", help="发件角色（agent 互发署名；省略＝用户直发）")
     dmp.add_argument("--model", help="覆盖模型")
     dmp.add_argument("--timeout", type=int, default=600, help="等回复上限秒（超时不丢信）")
+    dmp.add_argument("--summary", help="一句话摘要（审计行用）")
+    dmp.add_argument("--task-id", dest="dm_task", help=argparse.SUPPRESS)      # 发件卡上下文
+    dmp.add_argument("--generation", dest="dm_gen", type=int, help=argparse.SUPPRESS)
 
     sub.add_parser("init", help="建库")
 
@@ -318,7 +321,9 @@ def main():
     elif args.cmd == "dm":
         from misaka.cli import dm as dm_cli
         sys.exit(dm_cli.deliver(args.to, args.message, sender=args.sender,
-                                model=args.model, timeout=args.timeout))
+                                model=args.model, timeout=args.timeout,
+                                task_id=args.dm_task, generation=args.dm_gen,
+                                summary=args.summary))
     elif args.cmd == "task":
         ok, msg = db.delete_task(con, args.task_id)
         print(msg)
