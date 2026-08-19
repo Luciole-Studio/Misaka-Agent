@@ -57,6 +57,13 @@ def _parser():
     tl.add_argument("--to", default="last-order", help="收件人（默认编排官）")
     tl.add_argument("--summary", help="一句话摘要")
 
+    dmp = sub.add_parser("dm", help="hermes 式互信：把消息直投某角色的联络会话并唤醒她跑一轮")
+    dmp.add_argument("to", help="收件角色：last-order 或妹妹编号")
+    dmp.add_argument("message", help="消息正文")
+    dmp.add_argument("--from", dest="sender", help="发件角色（agent 互发署名；省略＝用户直发）")
+    dmp.add_argument("--model", help="覆盖模型")
+    dmp.add_argument("--timeout", type=int, default=600, help="等回复上限秒（超时不丢信）")
+
     sub.add_parser("init", help="建库")
 
     nt = sub.add_parser("net", help="御坂网络守护进程：格子里跑卡（断线保活）")
@@ -308,6 +315,10 @@ def main():
         ok, msg = ally_tell.tell(args.message, to_addr=args.to, summary=args.summary)
         print(msg)
         sys.exit(0 if ok else 1)
+    elif args.cmd == "dm":
+        from misaka.cli import dm as dm_cli
+        sys.exit(dm_cli.deliver(args.to, args.message, sender=args.sender,
+                                model=args.model, timeout=args.timeout))
     elif args.cmd == "task":
         ok, msg = db.delete_task(con, args.task_id)
         print(msg)

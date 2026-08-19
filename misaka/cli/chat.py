@@ -77,34 +77,40 @@ def _migrate_sessions(new, old):
         return old   # ponytail: 跨盘/权限等罕见失败不硬迁，旧位置照用不断档
 
 
-def launch(who, model=None, cont=False, pick=False, session=None):
-    """装配并进入交互模式（阻塞到会话结束）。who=None 表示 Last Order。"""
-    if who:  # 找某位 Sister：带她的人格+技能+文献工具，有内置工具（她是干活的）
+def assembly(who, *, cwd=None):
+    """角色装配的公共部分（前台 chat 与 DM 无头轮共用）。
+    返回 (prof, soul, model_default, skill_flags)。who 不在册直接 sys.exit。"""
+    if who:  # Sister：人格+技能三层栈
         prof = os.path.join(CFG["profiles_root"], who)
         if not os.path.isdir(prof):
             sys.exit(f"没有这位 Sister：{who}（名册：{', '.join(sorted(sisters()))}）")
         soul = os.path.join(prof, "SOUL.md")
+        extra = []
+        from misaka.orchestration import skill_layers
+        for sk in skill_layers.skills_stack(prof, cwd=cwd or os.getcwd()):
+            extra += ["--skill", sk]      # 三层栈：项目（信任＋扫描）→ 角色 → 共享
+        return prof, soul, "claude-sonnet-5", extra
+    prof = os.path.join(CFG["roles_root"], "last_order")
+    return prof, os.path.join(prof, "SOUL-chat.md"), "claude-opus-5", []
+
+
+def launch(who, model=None, cont=False, pick=False, session=None):
+    """装配并进入交互模式（阻塞到会话结束）。who=None 表示 Last Order。"""
+    prof, soul, model_default, extra = assembly(who)
+    if who:  # 找某位 Sister：带她的人格+技能+文献工具，有内置工具（她是干活的）
         title = f"MISAKA · {who}"
         sess = _migrate_sessions(f"~/.misaka/sessions/{who}",
                                  f"~/.misaka/sister-sessions/{who}")
-        model_default = "claude-sonnet-5"
-        extra = []
         from misaka.orchestration import skill_layers
-        for sk in skill_layers.skills_stack(prof, cwd=os.getcwd()):
-            extra += ["--skill", sk]      # 三层栈：项目（信任＋扫描）→ 角色 → 共享
         hint = skill_layers.get_untrusted_project_skills_root(cwd=os.getcwd())
         if hint:
             print(f"（本仓有 {hint[1]} 个项目技能未加载——信任它：misaka skills trust）")
     else:  # 找 Last Order：pi 的内置工具照给，只是不给子代理——Sisters 就是她的子代理
         # （2026-08-07 用户勘误：此前 -nbt 把内置工具一并没收，是把"不给子代理"过度执行；
         #  不给子代理靠 _extension_factories 不注册 subagent 扩展，与内置工具无关。）
-        prof = os.path.join(CFG["roles_root"], "last_order")
-        soul = os.path.join(prof, "SOUL-chat.md")
         title = "MISAKA · Last Order"
         sess = _migrate_sessions("~/.misaka/sessions/last-order",
                                  "~/.misaka/last-order-sessions")
-        model_default = "claude-opus-5"
-        extra = []
     flags = ["--provider", CFG["provider"], "--model", model or model_default,
              "--append-system-prompt", profiles.shared_soul(),   # 共同魂在前
              "--append-system-prompt", soul,                     # 角色个性在后
