@@ -132,6 +132,11 @@ def deliver(to, message, sender=None, model=None, timeout=600,
     with _serial(to):
         r = run_coro(run_session(flags, text, home, timeout=timeout,
                                  extension_factories=factories, env=env))
+        spent = int(r.get("budget_usage") or 0)
+        if spent:   # 宪法⑦：唤醒烧的钱上账（记账不拦——链式唤醒在账上可见）
+            from misaka.orchestration import budget
+            budget.commit_agent_usage_path(
+                os.path.expanduser(CFG["db"]), None, f"dm:{to}", 0, spent)
         if not r["error"]:
             con = messages.connect()   # 审计行：已直投即已送达（收信循环绝不能再送）
             try:
@@ -164,6 +169,7 @@ if __name__ == "__main__":
     CFG["messages_db"] = os.path.join(tmp, "messages.db")
     CFG["profiles_root"] = os.path.join(tmp, "sisters")
     CFG["roles_root"] = tmp
+    CFG["db"] = os.path.join(tmp, "board.db")
     os.makedirs(os.path.join(tmp, "sisters", "10032"))
     os.makedirs(os.path.join(tmp, "last_order"))
 
@@ -176,7 +182,7 @@ if __name__ == "__main__":
                        extension_factories=None):
         calls.append({"flags": list(flags), "prompt": prompt, "cwd": cwd,
                       "env": dict(env or {})})
-        return {"text": "收到", "timed_out": False, "error": None, "budget_usage": None}
+        return {"text": "收到", "timed_out": False, "error": None, "budget_usage": 1234}
 
     real_run = sess_mod.run_session
     sess_mod.run_session = fake_run
@@ -209,6 +215,10 @@ if __name__ == "__main__":
             "SELECT sender, delivered_at FROM messages ORDER BY id").fetchall()
         assert len(rows) == 2 and all(r[1] for r in rows), "审计行即时 delivered"
         assert rows[0][0] == "last-order" and rows[1][0] == "user"
+        spent = sqlite3.connect(CFG["db"]).execute(
+            "SELECT task_id, payload FROM events WHERE kind='budget_usage'").fetchall()
+        assert len(spent) == 2 and all(r[0] == "dm:10032" for r in spent) \
+            and '"totalTokens":1234' in spent[0][1], "唤醒记账（宪法⑦）"
 
         for bad, why in ((("10099", "在吗"), "不在册"),
                          (("10032", "  "), "空消息")):
