@@ -14,7 +14,17 @@
   `misaka/orchestration/skills_guard.py` 是其 tools/skills_guard.py 的逐字整搬
   （仅改头注释＋加自检段）；`skill_layers.py` 是 agent/skill_utils.py
   项目技能层/信任闸/隔离段的严格移植；`extensions/moa.py`＋`orchestration/moa.py`
-  是其 MoA（agent/moa_loop.py 等）的忠实移植（2026-08-18，设计 docs/design/moa.md）。
+  是其 MoA（agent/moa_loop.py 等）的忠实移植（2026-08-18，设计 docs/design/moa.md）；
+  `misaka/cli/dm.py`＋messages.py 的直投分支是其 Bot Mode DM 模型
+  （apps/desktop hermes-bots 插件＋tools/bot_mode_probe.py）的落地移植
+  （2026-08-19，宪法修正案 A1）。
+- **dsh-trace-compare**（github.com/lamost423/dsh-trace-compare @7b8a28c，MIT）——
+  `misaka/orchestration/trace_verdict.py` 是其 src/client/verdict.js 的逐行 Python
+  翻译（阈值/文案逐字，tests/contract/test_trace_parity.py 用
+  tests/fixtures/dsh_verdict.mjs＝上游原文做 node 对拍钉一致）；`trace_lanes.py`
+  是其 buildLane/buildData/compressTimeline（maze-upload.html）＋live-data.ts
+  语义的合体移植（输入端换 misaka 引擎 v3 事件流，toolCallId 精确配对）。
+  TUI 渲染是本仓自写（2026-08-20 起，只做 CLI 终端——用户裁定）。
 
 ## 设计移植（不含代码拷贝）
 
