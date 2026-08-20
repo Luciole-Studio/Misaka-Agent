@@ -14,8 +14,11 @@ pi 形制落地的忠实性映射（与 hermes 的差异逐条记账）：
   provider 在各自内部按 cacheRetention 自动装饰，这里只透传，不重复实现。
 - hermes 的 peel/rebase（压缩闸重打标）不需要：pi 引擎每次调用把 context 全量
   交给 provider，guidance 附在**本次请求的副本**上，从不落进持久转录。
-- 参谋意见的实时上屏（hermes moa.reference 事件）一期不做：pi 事件流的每个
-  事件都会进正在拼装的 assistant 消息，伪造 thinking 块会污染回放；记档二期。
+- 参谋意见实时上屏（hermes moa.reference 块）：扇出期间以合成 thinking 块推
+  增量——engine 的 UI 读 partial 快照、**落库只取流的 result()**（agent_loop
+  在 done 时整个替换 partial），所以历史仍是聚合官的干净消息，回放无污染。
+  不变量：本流只发**一个** start（自己的）——聚合官的 start 被吞掉，否则
+  consumer 会第二次 append partial，那才真会污染历史。
 - privacy_filter 不移：依赖 hermes 中央脱敏器（agent.redact），misaka 没有对应物。
 
 配置：全局 ~/.misaka/moa.json（hermes config.yaml 的 moa 块同构；具名 presets＋
@@ -39,8 +42,13 @@ from misaka.ai.types import (
     Context,
     Model,
     SimpleStreamOptions,
+    StartEvent,
     StreamOptions,
     TextContent,
+    ThinkingContent,
+    ThinkingDeltaEvent,
+    ThinkingEndEvent,
+    ThinkingStartEvent,
     Usage,
     UsageCost,
     UserMessage,
@@ -387,15 +395,17 @@ def _message_text(message: AssistantMessage) -> str:
     return "\n".join(c.text for c in message.content if c.type == "text").strip()
 
 
-async def _run_reference(slot, view, *, preset, options) -> tuple[str, str, Usage | None]:
-    """调一个参谋：(label, text, usage)。永不 raise——失败＝[failed: …] 便签
-    （hermes _run_reference 契约：聚合官拿部分意见照样行动）。"""
+async def _run_reference(slot, view, *, preset, options) -> tuple[str, str, Usage | None, list | None]:
+    """调一个参谋：(label, text, usage, 实发消息)。永不 raise——失败＝[failed: …]
+    便签（hermes _run_reference 契约：聚合官拿部分意见照样行动）。第四位是该参谋
+    真实收到的完整消息序列（system＋修剪后视图），给 trace 用——展示预览不够审计
+    （hermes：display text is a truncated preview and is not enough to audit）。"""
     from misaka.ai.stream import complete_simple
 
     label = slot_label(slot)
     m = _resolve_slot_model(slot)
     if m is None:
-        return label, f"[failed: 槽位模型不在册 {label}]", None
+        return label, f"[failed: 槽位模型不在册 {label}]", None, None
     reserve = slot.get("max_tokens") or preset.get("reference_max_tokens")
     trimmed = trim_view_for_window(view, m.contextWindow, reserve=reserve)
     ctx = Context(systemPrompt=REFERENCE_SYSTEM_PROMPT, messages=_typed_view(trimmed))
@@ -412,13 +422,14 @@ async def _run_reference(slot, view, *, preset, options) -> tuple[str, str, Usag
         cacheRetention=getattr(options, "cacheRetention", None),
         apiKey=None,
     )
+    sent = [{"role": "system", "content": REFERENCE_SYSTEM_PROMPT}, *trimmed]
     try:
         msg = await complete_simple(m, ctx, opts)
     except Exception as exc:  # noqa: BLE001 - 单参谋失败不许炸整轮
-        return label, f"[failed: {exc}]", None
+        return label, f"[failed: {exc}]", None, sent
     if msg.stopReason == "error":
-        return label, f"[failed: {msg.errorMessage or '未知错误'}]", msg.usage
-    return label, _message_text(msg) or "(空响应)", msg.usage
+        return label, f"[failed: {msg.errorMessage or '未知错误'}]", msg.usage, sent
+    return label, _message_text(msg) or "(空响应)", msg.usage, sent
 
 
 def _is_failed(text: str) -> bool:
@@ -525,7 +536,11 @@ def _cadence_decision(state, preset, view) -> tuple[bool, str]:
 # ── trace 落盘（hermes moa_trace.py：opt-in，旁路文件，绝不进消息史） ────────
 
 
-def _save_trace(cfg, session_id, preset_name, outputs, agg_slot, guidance) -> None:
+def _save_trace(cfg, session_id, preset_name, advisor_traces, agg_slot,
+                agg_input_messages, agg_output) -> None:
+    """一轮＝一条 JSONL（hermes save_moa_turn：真·全量——每个参谋实收的消息与全文
+    输出、聚合官实收的消息（含注入的指导块）与行动输出）。扇出的缓存命中轮不记
+    （不是新的 MoA 轮）。best-effort，绝不弄断一轮。"""
     if not cfg.get("save_traces"):
         return
     try:
@@ -536,17 +551,43 @@ def _save_trace(cfg, session_id, preset_name, outputs, agg_slot, guidance) -> No
             "ts": time.time(),
             "session_id": session_id,
             "preset": preset_name,
-            "references": [
-                {"label": label, "output": text,
-                 "usage": usage.model_dump() if usage else None}
-                for label, text, usage in outputs
-            ],
-            "aggregator": {"label": slot_label(agg_slot), "guidance_attached": bool(guidance)},
+            "references": advisor_traces,
+            "aggregator": {
+                "label": slot_label(agg_slot),
+                "input_messages": agg_input_messages,
+                "output": agg_output,
+                # 聚合官输出为 None＝这轮在流式途中断掉/出错，正文去会话库找
+                "output_location": "inline" if agg_output is not None else "assistant_message_in_session_db",
+            },
         }
         with open(os.path.join(base, f"{sid}.jsonl"), "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
     except Exception as exc:  # noqa: BLE001 - trace 绝不许弄断一轮
         logger.debug("MoA trace write failed: %s", exc)
+
+
+def _serialize_messages(messages) -> list[dict[str, Any]]:
+    """typed 消息 → trace 可读形（离线审计用，够回答"模型看见了什么"）。"""
+    out = []
+    for m in messages:
+        role = getattr(m, "role", "?")
+        content = getattr(m, "content", None)
+        if isinstance(content, str):
+            out.append({"role": role, "content": content})
+        else:
+            parts = []
+            for c in content or []:
+                ctype = getattr(c, "type", "?")
+                if ctype == "text":
+                    parts.append({"type": "text", "text": c.text})
+                elif ctype == "thinking":
+                    parts.append({"type": "thinking", "chars": len(c.thinking)})
+                elif ctype == "toolCall":
+                    parts.append({"type": "toolCall", "name": c.name, "arguments": c.arguments})
+                else:
+                    parts.append({"type": ctype})
+            out.append({"role": role, "content": parts})
+    return out
 
 
 # ── 虚拟服务商流函数（引擎插口） ─────────────────────────────────────────
@@ -588,6 +629,24 @@ def stream_simple_moa(model: Model, context: Context, options: SimpleStreamOptio
     opts = options or SimpleStreamOptions()
 
     async def run() -> None:
+        # 本流恰好发**一个** start（自己的合成 partial）——聚合官的 start 会被吞：
+        # agent_loop 见到第二个 start 会再 append 一条 partial 进 context.messages，
+        # 那才是真的历史污染（落库消息本身始终取流的 result()，与 partial 无关）
+        now_ms = time.time_ns() // 1_000_000
+        shell = AssistantMessage(content=[ThinkingContent(thinking="")], api=model.api,
+                                 provider=model.provider, model=model.id,
+                                 usage=_zero_usage(), stopReason="stop", timestamp=now_ms)
+        outer.push(StartEvent(partial=shell))
+        thinking_text = ""
+
+        def push_thinking(delta: str) -> None:
+            nonlocal thinking_text, shell
+            if not thinking_text:
+                outer.push(ThinkingStartEvent(contentIndex=0, partial=shell))
+            thinking_text += delta
+            shell = shell.model_copy(update={"content": [ThinkingContent(thinking=thinking_text)]})
+            outer.push(ThinkingDeltaEvent(contentIndex=0, delta=delta, partial=shell))
+
         try:
             cfg = load_moa_config()
             preset_name, preset = resolve_moa_preset(model.id, config=cfg)
@@ -603,24 +662,41 @@ def stream_simple_moa(model: Model, context: Context, options: SimpleStreamOptio
 
             outputs: list[tuple[str, str, Usage | None]] = []
             advisor_models: list[Model | None] = []
+            advisor_traces: list[dict[str, Any]] = []
+            fresh_fanout = False
             if refs and reuse:
                 # 命中轮复用意见但**零入账**（hermes：cache HIT 不再折参谋花费，
-                # 否则参谋开销会按工具迭代数翻倍）
+                # 否则参谋开销会按工具迭代数翻倍）；也不重复上屏、不重复记 trace
                 outputs = [(label, text, None) for label, text, _u in state["outputs"]]
                 advisor_models = [None] * len(outputs)
             elif refs:
+                fresh_fanout = True
                 sem = asyncio.Semaphore(MAX_REFERENCE_CONCURRENCY)
 
-                async def guarded(slot):
+                async def guarded(idx, slot):
                     async with sem:
-                        return await _run_reference(slot, view, preset=preset, options=opts)
+                        return idx, await _run_reference(slot, view, preset=preset, options=opts)
 
-                outputs = list(await asyncio.gather(*(guarded(s) for s in refs)))
+                # as_completed：每收齐一个参谋，立刻以 thinking 增量上屏——
+                # hermes 的带署名参谋块（moa.reference），扇出期不再是安静等待
+                push_thinking(f"MoA·{preset_name}：{len(refs)} 位参谋出动…")
+                slot_results: dict[int, tuple[str, str, Usage | None]] = {}
+                done_n = 0
+                for fut in asyncio.as_completed([guarded(i, s) for i, s in enumerate(refs)]):
+                    idx, (label, text, usage, sent) = await fut
+                    done_n += 1
+                    slot_results[idx] = (label, text, usage)
+                    advisor_traces.append({
+                        "label": label, "input_messages": sent, "output": text,
+                        "usage": usage.model_dump() if usage else None})
+                    push_thinking(f"\n\n── 参谋 {done_n}/{len(refs)} 已回 — {label} ──\n{text}")
+                outputs = [slot_results[i] for i in range(len(refs))]   # 顺序与 preset 一致
                 advisor_models = [_resolve_slot_model(s) for s in refs]
                 state["sig"] = sig
                 state["outputs"] = list(outputs)
-                _save_trace(cfg, getattr(opts, "sessionId", None), preset_name,
-                            outputs, preset["aggregator"], True)
+                push_thinking("\n\n参谋收齐，聚合官上场。")
+            if thinking_text:
+                outer.push(ThinkingEndEvent(contentIndex=0, content=thinking_text, partial=shell))
 
             guidance = build_guidance(preset_name, preset, outputs) if outputs else None
 
@@ -646,16 +722,24 @@ def stream_simple_moa(model: Model, context: Context, options: SimpleStreamOptio
 
             inner = stream_simple(agg_model, agg_ctx, agg_opts)
             usages = [u for _l, _t, u in outputs]
+            final_text: str | None = None
             async for event in inner:
                 etype = getattr(event, "type", "")
+                if etype == "start":
+                    continue   # 唯一 start 是自己的合成 partial（见 run() 开头）
                 if etype == "done":
                     event = event.model_copy(update={"message": event.message.model_copy(
                         update={"usage": _fold_usage(event.message.usage, usages, advisor_models)})})
+                    final_text = _message_text(event.message)
                 elif etype == "error":
                     event = event.model_copy(update={"error": event.error.model_copy(
                         update={"usage": _fold_usage(event.error.usage, usages, advisor_models)})})
                 outer.push(event)
             outer.end()
+            if fresh_fanout:
+                _save_trace(cfg, getattr(opts, "sessionId", None), preset_name,
+                            advisor_traces, agg_slot,
+                            _serialize_messages(agg_messages), final_text)
         except Exception as exc:  # noqa: BLE001 - 虚拟服务商的失败以引擎错误消息形态上交
             from misaka.ai.types import ErrorEvent
             message = AssistantMessage(

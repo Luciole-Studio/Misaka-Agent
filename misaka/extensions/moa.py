@@ -18,6 +18,11 @@ def register(harn):
             ctx.ui.notify("用法：/moa <prompt>——用默认 MoA preset 跑这一条，跑完还原你的模型。"
                           "整会话切换用 /model 选 MoA·<preset>；配置 ~/.misaka/moa.json", "info")
             return
+        if not ctx.isIdle():
+            # hermes 给 /moa 标 busy_policy="reject"：正跑着的那一轮不许被
+            # setModel 中途换心脏
+            ctx.ui.notify("正在跑活——/moa 要临时切模型，等这轮收尾再来", "error")
+            return
         preset = load_moa_config()["default_preset"]
         moa_model = ctx.modelRegistry.find("moa", preset)
         if moa_model is None:
