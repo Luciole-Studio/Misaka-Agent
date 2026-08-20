@@ -2100,6 +2100,30 @@ class AgentSession:
             if isinstance(block, dict) and block.get("type") == "text"
         )
 
+    async def _normalize_tool_result_images(self, result: Any) -> None:
+        """就地归一化工具结果里的图片块（pi #7330）。autoResizeImages 关闭时跳过。"""
+        content = _event_field(result, "content")
+        if not isinstance(content, list) or not self.settingsManager.getImageAutoResize():
+            return
+        from misaka.ai.types import ImageContent
+        from misaka.utils.image_resize import resize_image
+        for index, block in enumerate(list(content)):
+            if _message_field(block, "type") != "image":
+                continue
+            img = block if isinstance(block, ImageContent) else ImageContent(
+                data=str(_message_field(block, "data") or ""),
+                mimeType=str(_message_field(block, "mimeType") or ""))
+            try:
+                resized = await resize_image(img)
+            except Exception:  # noqa: BLE001 - 后端不可用保原块（上游同语义）
+                continue
+            if resized is None or not resized.wasResized:
+                continue
+            replacement = dict(block) if isinstance(block, dict) else {"type": "image"}
+            replacement.update({"type": "image", "data": resized.data,
+                                "mimeType": resized.mimeType})
+            content[index] = replacement
+
     def _install_agent_tool_hooks(self) -> None:
         async def before_tool_call(payload: Any, _signal: Any | None = None) -> Any:
             runner = self._extensionRunner
@@ -2118,10 +2142,14 @@ class AgentSession:
 
         async def after_tool_call(payload: Any, _signal: Any | None = None) -> Any:
             runner = self._extensionRunner
+            result = _event_field(payload, "result")
+            # 工具自产图片（扩展/MCP/截图类）绕过了 read 的缩放，超大图会让 provider
+            # 拒掉整个对话——入史前归一化一次（pi #7330/b0e05b442）。失败保原块：
+            # 图片后端不可用时不静默删工具产出
+            await self._normalize_tool_result_images(result)
             if not runner.has_handlers("tool_result"):
                 return None
             tool_call = _event_field(payload, "toolCall")
-            result = _event_field(payload, "result")
             hook_result = await runner.emit_tool_result(  # type: ignore[attr-defined]
                 {
                     "type": "tool_result",
