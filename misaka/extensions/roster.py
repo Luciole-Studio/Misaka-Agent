@@ -3,7 +3,9 @@
 CLI 同名同功：`misaka create 10033`（缺的字段进向导问）、`misaka remove 10033`。
 
 名册＝目录：~/.misaka/profiles/sisters/<编号>/（Step-23 起人格住用户态）。
-建＝SOUL.md（向导可注入一句话人格）＋可选 config.json 钉模型＋空 skills/；
+建＝SOUL.md（人格骨架，她自己看）＋DESCRIBE.md（对外档案，LO 派活看）＋
+可选 config.json 钉模型＋空 skills/；向导问的「一句话专长」进 DESCRIBE.md 的
+frontmatter description——形制与 SKILL.md 同构，索引层同吃 60 字符截断规矩。
 删＝整目录移除——卡片、工作区、transcript 都跟板走，除名不动它们；
 有活卡（running/verifying/finalizing）时拒删，先 misaka_sister_stop。
 """
@@ -19,13 +21,24 @@ MODEL_CHOICES = ["默认（跟随全局）", "claude-opus-5", "claude-sonnet-5",
 
 SOUL_TEMPLATE = """# 御坂{sid}
 
-你是御坂网络的 Sister {sid}。{persona}
-
-## 专长
-- {specialty}
+你是御坂网络的 Sister {sid}。（在这里写她的人格与说话方式。）
 
 ## 边界
 - 只做卡片合同里的事；交卷走 report.json，产物必须是工作区内的真实文件。
+"""
+
+DESCRIBE_TEMPLATE = """---
+description: {specialty}
+---
+# 御坂{sid}·对外档案
+
+LO 派活看这份：她负责什么、擅长接什么卡。人格写 SOUL.md，别写这里。
+
+## 负责领域
+- {specialty_line}
+
+## 擅长接的卡 / 别派的卡
+- （补充：哪类卡优先派她、哪类别派）
 """
 
 
@@ -57,8 +70,8 @@ def card_counts(sid, db_path=None):
         con.close()
 
 
-def create_sister(sid, root=None, persona=None, model=None):
-    """返回 (成功?, 消息)。建目录＋SOUL（含向导注入的人格）＋空 skills/＋可选模型钉。"""
+def create_sister(sid, root=None, specialty=None, model=None):
+    """返回 (成功?, 消息)。建目录＋SOUL 人格骨架＋DESCRIBE 对外档案＋空 skills/＋可选模型钉。"""
     root = root or ROOT
     if not _valid(sid):
         return False, f"编号「{sid}」不合法（字母数字._-，且不是 last-order）"
@@ -66,21 +79,40 @@ def create_sister(sid, root=None, persona=None, model=None):
     if os.path.exists(prof):
         return False, f"御坂{sid} 已在册：{prof}"
     os.makedirs(os.path.join(prof, "skills"))
-    persona = (persona or "").strip()
+    specialty = (specialty or "").strip()
     with open(os.path.join(prof, "SOUL.md"), "w", encoding="utf-8") as f:
-        f.write(SOUL_TEMPLATE.format(
-            sid=sid,
-            persona=persona or "（在这里写她的人格、专长与说话方式。）",
-            specialty=persona or "-",
-        ))
+        f.write(SOUL_TEMPLATE.format(sid=sid))
+    with open(os.path.join(prof, "DESCRIBE.md"), "w", encoding="utf-8") as f:
+        f.write(DESCRIBE_TEMPLATE.format(
+            sid=sid, specialty=specialty, specialty_line=specialty or "（还没写）"))
     pinned = ""
     if model:
         with open(os.path.join(prof, "config.json"), "w", encoding="utf-8") as f:
             json.dump({"model": model}, f, ensure_ascii=False, indent=2)
         pinned = f"模型已钉 {model}；"
     return True, (f"御坂{sid} 已在册。{pinned}人格：{prof}/SOUL.md；"
+                  f"对外档案（LO 派活看）：{prof}/DESCRIBE.md；"
                   f"可选 config.yaml 写 mcp_servers、skills/ 放技能软链。"
                   f"/sister {sid} 即可切过去。")
+
+
+def describe(sid, root=None):
+    """读 DESCRIBE.md → (一句话描述, 正文全文)；没写或为空＝(None, None) 起步。"""
+    from misaka.utils.frontmatter import parse_frontmatter
+    try:
+        with open(os.path.join(root or ROOT, sid, "DESCRIBE.md"), encoding="utf-8") as f:
+            parsed = parse_frontmatter(f.read())
+    except OSError:
+        return None, None
+    desc = str(parsed.frontmatter.get("description") or "").strip()
+    return desc or None, parsed.body.strip() or None
+
+
+def describe_line(sid, root=None):
+    """名册索引用的一句话：与技能索引同一套 60 字符截断；没写＝None。"""
+    from misaka.core.skills import truncate_skill_description
+    desc, _ = describe(sid, root)
+    return truncate_skill_description(desc) if desc else None
 
 
 def remove_sister(sid, root=None, db_path=None):
@@ -88,7 +120,7 @@ def remove_sister(sid, root=None, db_path=None):
     root = root or ROOT
     prof = os.path.join(root, sid)
     if not _valid(sid) or not os.path.isdir(prof):
-        return False, f"没有御坂「{sid}」（名册看 /sisters）"
+        return False, f"没有御坂「{sid}」（名册看 /sister）"
     counts = card_counts(sid, db_path)
     live = {k: v for k, v in counts.items() if k in ACTIVE}
     if live:
@@ -114,10 +146,10 @@ def register(harn):
             ok, msg = create_sister(sid)      # 借它产出同一套报错文案
             ctx.ui.notify(msg, "error")
             return
-        persona = await ctx.ui.input(
-            f"御坂{sid} 的一句话人格/专长（回车＝先留骨架自己编辑）",
+        specialty = await ctx.ui.input(
+            f"御坂{sid} 的一句话专长（进名册，LO 派活看这个；回车＝先留骨架）",
             "如 专攻苏联档案的文献猎手")
-        if persona is None:
+        if specialty is None:
             ctx.ui.notify("取消了", "info")
             return
         model_pick = await ctx.ui.select(f"御坂{sid} 钉模型？", MODEL_CHOICES)
@@ -133,12 +165,12 @@ def register(harn):
             model = model.strip() or None
         elif not model_pick.startswith("默认"):
             model = model_pick
-        summary = (f"人格：{persona.strip() or '（骨架，稍后自己写）'}｜"
+        summary = (f"专长：{specialty.strip() or '（骨架，稍后自己写）'}｜"
                    f"模型：{model or '跟随全局'}")
         if not await ctx.ui.confirm(f"建御坂{sid}？", summary):
             ctx.ui.notify("取消了", "info")
             return
-        ok, msg = create_sister(sid, persona=persona, model=model)
+        ok, msg = create_sister(sid, specialty=specialty, model=model)
         ctx.ui.notify(msg, "info" if ok else "error")
 
     async def remove_cmd(args, ctx):
@@ -194,10 +226,10 @@ def cli_create(sid=None, desc=None, model=None, root=None):
             print("取消了")
             return 1
     if desc is None and interactive:
-        desc = input("一句话人格/专长（回车跳过）：").strip()
+        desc = input("一句话专长（进名册，LO 派活看这个；回车跳过）：").strip()
     if model is None and interactive:
         model = input("钉模型（回车＝跟随全局）：").strip()
-    ok, msg = create_sister(sid, root=root, persona=desc or None, model=model or None)
+    ok, msg = create_sister(sid, root=root, specialty=desc or None, model=model or None)
     print(msg)
     return 0 if ok else 1
 
@@ -223,19 +255,27 @@ if __name__ == "__main__":
     import tempfile
 
     root = tempfile.mkdtemp()
-    ok, msg = create_sister("10777", root=root, persona="专攻苏联档案", model="claude-opus-5")
+    ok, msg = create_sister("10777", root=root, specialty="专攻苏联档案", model="claude-opus-5")
     assert ok, msg
     soul = open(os.path.join(root, "10777", "SOUL.md"), encoding="utf-8").read()
-    assert "专攻苏联档案" in soul, "向导人格该进 SOUL"
+    assert "专攻苏联档案" not in soul, "专长归 DESCRIBE，SOUL 只留人格骨架"
+    desc, body = describe("10777", root=root)
+    assert desc == "专攻苏联档案" and "负责领域" in body, (desc, body)
+    assert describe_line("10777", root=root) == "专攻苏联档案"
+    assert describe_line("10777" + "x", root=root) == (None), "没这号人＝None 不炸"
+    ok_long, _ = create_sister("10800", root=root, specialty="档案" * 40)
+    assert ok_long and describe_line("10800", root=root).endswith("...") \
+        and len(describe_line("10800", root=root)) == 60, "索引层吃技能同款 60 字符截断"
     cfgj = json.load(open(os.path.join(root, "10777", "config.json"), encoding="utf-8"))
     assert cfgj == {"model": "claude-opus-5"}, cfgj
     assert os.path.isdir(os.path.join(root, "10777", "skills"))
-    ok2, _ = create_sister("10778", root=root)          # 无人格无模型＝纯骨架
+    ok2, _ = create_sister("10778", root=root)          # 无专长无模型＝纯骨架
     assert ok2 and not os.path.exists(os.path.join(root, "10778", "config.json"))
+    assert describe_line("10778", root=root) is None, "骨架档案的空 description 不进名册"
     assert not create_sister("10777", root=root)[0], "重号该拒"
     assert not create_sister("last-order", root=root)[0], "保留名该拒"
     assert not create_sister("a/b", root=root)[0], "路径穿越该拒"
-    assert roster_names(root) == ["10777", "10778"]
+    assert roster_names(root) == ["10777", "10778", "10800"]
 
     # 活卡守卫：running 拒删，终态可删
     from misaka.extensions.board import db as board_db

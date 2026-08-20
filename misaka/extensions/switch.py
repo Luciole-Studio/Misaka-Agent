@@ -1,4 +1,4 @@
-"""`/sisters` 看名册（列出全部并可挑）、`/sister <编号>` 直接切到指定御坂。
+"""`/sister <编号>` 直接切到指定御坂；不带编号＝名册（含一句话简介，选中即切）。
 
 为什么是换进程而不是换人格：harn 的 `appendSystemPrompt` 是**启动时**字段，
 运行时没有 setSystemPrompt/setSkills——同进程内换不了人格。
@@ -32,9 +32,15 @@ def register(harn):
         name = raw.rstrip("!").strip()
 
         if not name:  # 没给名字：列出名册让用户挑
-            picked = await ctx.ui.select(
-                f"当前是 {cur}，切到谁？",
-                [f"{n}{'（当前）' if n == cur else ''}" for n in roster])
+            from misaka.config import CFG
+            from misaka.extensions.roster import describe_line
+
+            def _label(n):
+                bits = (["当前"] if n == cur else []) + list(filter(None, [
+                    describe_line(n, root=CFG["profiles_root"]) if n != "last-order" else None]))
+                return n + (f"（{'｜'.join(bits)}）" if bits else "")
+
+            picked = await ctx.ui.select(f"当前是 {cur}，切到谁？", [_label(n) for n in roster])
             if not picked:
                 return
             name = picked.split("（")[0]
@@ -70,27 +76,10 @@ def register(harn):
         ctx.ui.notify(f"切到 {name}…", "info")
         os.execv(sys.executable, argv)   # 原地替换本进程：同窗口、同 PID
 
-    async def sisters_roster(args, ctx):
-        """/sisters：看名册，选中即切。"""
-        await misaka_switch("", ctx)
-
-    async def sister_switch(args, ctx):
-        """/sister <编号>：直接切到指定御坂；不给编号就报可用编号。"""
-        name = (args or "").strip()
-        if not name:
-            sisters = [n for n in _roster() if n != "last-order"]
-            ctx.ui.notify(f"用法：/sister <编号>，如 /sister {sisters[0] if sisters else '10032'}"
-                          f"（在册：{', '.join(sisters) or '无'}；看名册用 /sisters）", "info")
-            return
-        await misaka_switch(name, ctx)
-
-    harn.registerCommand("sisters", {
-        "description": "名册：列出 Last Order 与全部御坂，选中即切换",
-        "handler": sisters_roster,
-    })
     harn.registerCommand("sister", {
-        "description": "切到指定御坂，如 /sister 10032（切回编排官用 /sister last-order）",
-        "handler": sister_switch,
+        "description": "切御坂：/sister 10032 直切；不带编号＝名册选中即切"
+                       "（切回编排官用 /sister last-order）",
+        "handler": misaka_switch,
     })
 
 
@@ -120,5 +109,31 @@ if __name__ == "__main__":
 
     h = FakeHarn()
     register(h)
-    assert sorted(h.cmds) == ["sister", "sisters"], h.cmds
-    print(f"switch selfcheck ok — /sisters(名册)+/sister(直切) 已注册；名册 {'/'.join(r)}")
+    assert sorted(h.cmds) == ["sister"], h.cmds
+
+    # 名册选择器：带简介、当前标记，选中后能剥回纯编号
+    import asyncio
+
+    from misaka.extensions.roster import create_sister
+    create_sister("10033", root=CFG["profiles_root"], specialty="专攻苏联档案")
+
+    class FakeUI:
+        async def select(self, _q, options):
+            self.options = options
+            return options[-1]
+
+        def notify(self, *a):
+            pass
+
+        async def confirm(self, *a):
+            return False   # 到确认步就收手，不真 execv
+
+    class FakeCtx:
+        ui = FakeUI()
+
+    fctx = FakeCtx()
+    asyncio.run(h.cmds["sister"]["handler"]("", fctx))
+    opts = fctx.ui.options
+    assert opts[0] == "last-order（当前）" and "10033（专攻苏联档案）" in opts, opts
+    assert opts[-1].split("（")[0] == "10033", "选中项要能剥回纯编号"
+    print(f"switch selfcheck ok — /sister 单命令（直切+名册带简介）；名册 {'/'.join(_roster())}")

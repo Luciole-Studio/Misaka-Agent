@@ -97,7 +97,12 @@ def register(harn):
         b = budget.status(con, _cfg()["token_cap"])
         from misaka.extensions.board import project as _project
         projs = _project.listing()
-        return _text(f"Sister 名册：{', '.join(_sisters())}\n"
+        from misaka.extensions import roster as roster_mod
+        named = ", ".join(
+            f"{s}（{roster_mod.describe_line(s, root=_cfg()['profiles_root']) or '简介未写'}）"
+            for s in _sisters())
+        return _text(f"Sister 名册：{named or '（空）'}"
+                     f"{'（完整档案用 misaka_sister_view）' if named else ''}\n"
                      f"课题：{', '.join(projs) if projs else '(无——misaka project <名> 建)'}\n"
                      f"预算：已用 {b['used']:,} tokens（档位 {b['mode']}）\n\n"
                      + ("\n".join(lines) if lines else "(板上无卡)"))
@@ -593,6 +598,39 @@ def register(harn):
             return _text(err)
         return _text(guard.untrusted(f"peek:{params.task_id}", text)
                      + "（只是她的过程输出——判断完成与否仍以看板与红队验收为准。）")
+
+    class SisterViewParams(StrictParams):
+        sister: str = Field(description="御坂编号（名册见 misaka_board）")
+
+    @_register(
+        harn,
+        name="misaka_sister_view", label="查档案",
+        description="取一个 Sister 的完整对外档案（DESCRIBE.md 全文）＋模型钉＋名下卡片计数。"
+                    "对标 skill_view：名册一句话对上了，先取全文再派卡。",
+        snippet="查看某个 Sister 的对外档案",
+        guidelines=["拿不准卡该派给谁时，先 misaka_sister_view 看她们的档案，"
+                    "别凭编号猜专长。"],
+        parameters=SisterViewParams)
+    async def misaka_sister_view(tool_call_id, params, signal, on_update, ctx):
+        from misaka.extensions import roster as roster_mod
+        sid = params.sister.strip()
+        if sid not in set(_sisters()):
+            return _text(f"Sister {sid} 不在名册（{', '.join(_sisters())}）")
+        root = _cfg()["profiles_root"]
+        desc, body = roster_mod.describe(sid, root=root)
+        model = None
+        try:
+            with open(os.path.join(root, sid, "config.json"), encoding="utf-8") as f:
+                model = json.load(f).get("model")
+        except (OSError, ValueError):
+            pass
+        counts = {r[0]: r[1] for r in _con().execute(
+            "SELECT status, COUNT(*) FROM tasks WHERE assignee=? GROUP BY status", (sid,))}
+        cards = "、".join(f"{k}×{v}" for k, v in sorted(counts.items())) or "无"
+        head = (f"御坂{sid}\n简介：{desc or '未写'}\n模型：{model or '跟随全局'}\n"
+                f"名下卡片：{cards}\n")
+        return _text(head + ("\n" + body if body else
+                             f"\n（档案正文没写——请用户补 profiles/sisters/{sid}/DESCRIBE.md。）"))
 
     class ResearchStatusParams(StrictParams):
         project: Optional[str] = Field(None, description="课题名；不填＝当前在跑的深研课题")

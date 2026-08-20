@@ -149,9 +149,9 @@ def launch(who, model=None, cont=False, pick=False, session=None):
     profile_role = profiles.role_of(prof)
     session_role = who or "last-order"
     workspace = os.getcwd()
-    tagline = ("御坂网络编排官 Last Order 待命。她会追问、下注、拆卡；你点头后后台调用 Sisters，交卷验收后自动回报。（/sisters 名册 · /sister 10032 直切）"
+    tagline = ("御坂网络编排官 Last Order 待命。她会追问、下注、拆卡；你点头后后台调用 Sisters，交卷验收后自动回报。（/sister＝名册，/sister 10032＝直切）"
                if not who else
-               f"御坂{who} 在线。可以直接让她读文献、查资料、干活；她的子代理运行情况会实时显示。（/sisters 名册 · /sister 10032 直切）")
+               f"御坂{who} 在线。可以直接让她读文献、查资料、干活；她的子代理运行情况会实时显示。（/sister＝名册，/sister 10032＝直切）")
     os.environ.update({
         "MISAKA_APP_TITLE": title, "MISAKA_TAGLINE": tagline,
         "MISAKA_WHO": session_role,
