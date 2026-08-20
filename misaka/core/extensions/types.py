@@ -497,6 +497,16 @@ class SessionCompactEvent(TypedDict):
     fromExtension: bool
 
 
+class SessionCompactFailedEvent(TypedDict):
+    """压缩失败/中止的终态（pi #8175/a6b1dbceb）——与 session_before_compact 配对。"""
+    type: Literal["session_compact_failed"]
+    reason: str            # "manual" | "threshold" | "overflow"
+    errorMessage: str | None
+    aborted: bool
+    willRetry: bool
+    fromExtension: bool
+
+
 class SessionShutdownEvent(TypedDict):
     type: Literal["session_shutdown"]
     reason: Literal["quit", "reload", "new", "resume", "fork"]
@@ -1064,6 +1074,9 @@ class ExtensionAPI(Protocol):
 
     @overload
     def on(self, event: Literal["session_compact"], handler: ExtensionHandler[SessionCompactEvent, None]) -> None: ...
+
+    @overload
+    def on(self, event: Literal["session_compact_failed"], handler: ExtensionHandler[SessionCompactFailedEvent, None]) -> None: ...
 
     @overload
     def on(self, event: Literal["session_shutdown"], handler: ExtensionHandler[SessionShutdownEvent, None]) -> None: ...

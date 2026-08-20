@@ -457,6 +457,11 @@ class SettingsManager:
     def setFollowUpMode(self, mode: str) -> None:
         self._set_global_value("followUpMode", mode)
 
+    def getDefaultTools(self) -> list[str] | None:
+        """启动工具白名单设置（--tools 同格式；pi 4d9aa837c）。未配置返回 None。"""
+        tools = self.settings.get("defaultTools")
+        return list(tools) if isinstance(tools, list) else None
+
     def getTheme(self) -> str | None:
         return self.settings.get("theme")
 

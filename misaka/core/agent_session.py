@@ -952,7 +952,8 @@ class AgentSession:
         deliver_as = resolved_options.get("deliverAs")
         if deliver_as == "nextTurn":
             self._pendingNextTurnMessages.append(app_message)
-        elif self.isStreaming:
+        elif self.isStreaming and resolved_options.get("triggerTurn") is not False:
+            # triggerTurn:false＝只记录不介入正在跑的轮（pi #8022/47b5119d0）
             if deliver_as == "followUp":
                 self.agent.followUp(app_message)
             else:
@@ -996,7 +997,8 @@ class AgentSession:
         await self.prompt(
             text,
             {
-                "expandPromptTemplates": False,
+                # 扩展可显式要求走命令分发＋技能/模板展开（pi #7857/b987ead35）；缺省仍 False
+                "expandPromptTemplates": bool(resolved_options.get("expandPromptTemplates", False)),
                 "streamingBehavior": resolved_options.get("deliverAs"),
                 "images": images,
                 "source": "extension",
@@ -1190,9 +1192,31 @@ class AgentSession:
                     "errorMessage": None if aborted else f"Compaction failed: {message}",
                 }
             )
+            await self._emit_session_compact_failed(
+                reason="manual", aborted=aborted, will_retry=False,
+                error_message=None if aborted else f"Compaction failed: {message}")
             raise
         finally:
             self._compactionAbortController = None
+
+    async def _emit_session_compact_failed(self, *, reason: str, aborted: bool,
+                                           will_retry: bool,
+                                           error_message: str | None = None,
+                                           from_extension: bool = False) -> None:
+        """压缩失败/中止的终态事件（pi #8175/a6b1dbceb）：让遥测/LCM 这类扩展能把
+        session_before_compact 的尝试与终局配对——此前失败只进 UI 事件，扩展看不见。"""
+        if not self._extensionRunner.has_handlers("session_compact_failed"):
+            return
+        await self._extensionRunner.emit(
+            {
+                "type": "session_compact_failed",
+                "reason": reason,
+                "errorMessage": error_message,
+                "aborted": aborted,
+                "willRetry": will_retry,
+                "fromExtension": from_extension,
+            }
+        )
 
     def abortCompaction(self) -> None:
         if self._auto_compaction_abort_controller is not None:
@@ -2411,6 +2435,8 @@ class AgentSession:
                             "willRetry": False,
                         }
                     )
+                    await self._emit_session_compact_failed(
+                        reason=reason, aborted=True, will_retry=False)
                     return False
 
             provided = _result_flag(hook_result, "compaction")
@@ -2444,6 +2470,9 @@ class AgentSession:
                         "willRetry": False,
                     }
                 )
+                await self._emit_session_compact_failed(
+                    reason=reason, aborted=True, will_retry=False,
+                    from_extension=from_hook)
                 return False
 
             self.sessionManager.appendCompaction(
@@ -2493,6 +2522,11 @@ class AgentSession:
             return self.agent.hasQueuedMessages()
         except Exception as error:
             error_message = str(error) if str(error) else "compaction failed"
+            formatted_error = (
+                f"Context overflow recovery failed: {error_message}"
+                if reason == "overflow"
+                else f"Auto-compaction failed: {error_message}"
+            )
             self._emit(
                 {
                     "type": "compaction_end",
@@ -2500,13 +2534,12 @@ class AgentSession:
                     "result": None,
                     "aborted": False,
                     "willRetry": False,
-                    "errorMessage": (
-                        f"Context overflow recovery failed: {error_message}"
-                        if reason == "overflow"
-                        else f"Auto-compaction failed: {error_message}"
-                    ),
+                    "errorMessage": formatted_error,
                 }
             )
+            await self._emit_session_compact_failed(
+                reason=reason, aborted=False, will_retry=False,
+                error_message=formatted_error)
             return False
         finally:
             self._auto_compaction_abort_controller = None

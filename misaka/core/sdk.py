@@ -217,13 +217,20 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
     thinking_level = "off" if model is None else clamp_thinking_level(model, thinking_level)
 
     default_active_tool_names: list[ToolName] = ["read", "bash", "edit", "write"]
+    # defaultTools 设置＝未显式给 --tools/-nt 时的启动工具白名单（pi 4d9aa837c）
+    configured_default_tools = settings_manager.getDefaultTools()
     allowed_tool_names = resolved_options.get("tools")
-    if allowed_tool_names is None and resolved_options.get("noTools") == "all":
-        allowed_tool_names = []
+    if allowed_tool_names is None:
+        if resolved_options.get("noTools") == "all":
+            allowed_tool_names = []
+        elif resolved_options.get("noTools") is None:
+            allowed_tool_names = configured_default_tools
     initial_active_tool_names = (
         list(resolved_options["tools"])
         if resolved_options.get("tools") is not None
-        else ([] if resolved_options.get("noTools") else default_active_tool_names)
+        else ([] if resolved_options.get("noTools")
+              else (list(configured_default_tools) if configured_default_tools is not None
+                    else default_active_tool_names))
     )
 
     extension_runner_ref: dict[str, Any] = {}
