@@ -228,13 +228,20 @@ def tools_for(profile_dir):
 
         class ManageParams(BaseModel):
             model_config = ConfigDict(extra="forbid")
-            action: str = Field(description="create＝新建技能；write_file＝给技能加支撑文件")
+            action: str = Field(description="create＝新建｜patch＝定点替换（**小修首选**）｜"
+                                            "edit＝整篇重写（大改才用）｜delete＝删技能｜"
+                                            "write_file＝加支撑文件｜remove_file＝删支撑文件")
             name: str = Field(description="技能名（小写连字符，与目录名一致）")
-            content: str = Field("", description="create 用：完整 SKILL.md 文本"
+            content: str = Field("", description="create/edit 用：完整 SKILL.md 文本"
                                                  "（frontmatter＋正文）")
-            file_path: str = Field("", description="write_file 用：技能内相对路径"
-                                                   "（如 references/规范.md）")
+            file_path: str = Field("", description="write_file/remove_file 用（patch 可选）："
+                                                   "技能内相对路径（如 references/规范.md）")
             file_content: str = Field("", description="write_file 用：文件内容")
+            old_string: str = Field("", description="patch 用：要替换的原文（须逐字唯一命中）")
+            new_string: str = Field("", description="patch 用：替换成什么（删除就传空串）")
+            replace_all: bool = Field(False, description="patch 用：多处命中时全部替换")
+            absorbed_into: str = Field("", description="delete 用：内容已并入哪把伞技能"
+                                                       "（纯剪除传空；伞必须真实存在）")
 
         async def manage_execute(tool_call_id, raw, signal, on_update, ctx):
             from misaka.orchestration import skill_manage
@@ -242,7 +249,11 @@ def tools_for(profile_dir):
             result = skill_manage.manage(
                 args.action, args.name, profile_dir=profile_dir,
                 content=args.content or None, file_path=args.file_path or None,
-                file_content=args.file_content or None)
+                file_content=args.file_content if args.action == "write_file" else None,
+                old_string=args.old_string or None,
+                new_string=args.new_string if args.action == "patch" else None,
+                replace_all=args.replace_all,
+                absorbed_into=args.absorbed_into if args.action == "delete" else None)
             lines = [result.get("message") or result.get("error") or ""]
             for key in ("gist", "description_preview", "hint", "lint_hint"):
                 if result.get(key):
