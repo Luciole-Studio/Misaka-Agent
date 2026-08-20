@@ -127,7 +127,10 @@ from misaka.modes.interactive.components.scoped_models_selector import (
     ScopedModelsSelectorComponent,
 )
 from misaka.modes.interactive.components.session_selector import SessionSelectorComponent
-from misaka.modes.interactive.components.thinking_selector import ThinkingSelectorComponent
+from misaka.modes.interactive.components.thinking_selector import (
+    ADAPTIVE_LEVEL_DESCRIPTIONS,
+    ThinkingSelectorComponent,
+)
 from misaka.modes.interactive.components.settings_selector import (
     SettingsCallbacks,
     SettingsConfig,
@@ -5508,6 +5511,10 @@ class InteractiveMode:
         self.showStatus(f"Thinking level: {level}" + ("（已存为启动默认）" if persist else ""))
 
     def showThinkingSelector(self, *, persist: bool = False) -> None:
+        # adaptive 模型（claude-5 系）线上发 effort 关键字不发 budget——
+        # 换那张不写假 token 数的描述表
+        compat = getattr(self.session.model, "compat", None)
+        adaptive = getattr(compat, "forceAdaptiveThinking", None) is True
         self.showSelector(
             lambda done: {
                 "component": ThinkingSelectorComponent(
@@ -5515,6 +5522,7 @@ class InteractiveMode:
                     list(self.session.getAvailableThinkingLevels()),
                     lambda level: (done(), self._apply_thinking_level(level, persist=persist)),
                     lambda: (done(), self._request_render()),
+                    descriptions=ADAPTIVE_LEVEL_DESCRIPTIONS if adaptive else None,
                 ),
             }
         )
