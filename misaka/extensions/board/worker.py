@@ -327,8 +327,10 @@ def run_llm_json(profile_dir, prompt, provider, default_model,
             )),
         ]
     flags += ["-t", ",".join(dict.fromkeys(allowed))] if allowed else ["-nt"]
-    if soul and soul_path:
-        flags += ["--append-system-prompt", soul_path]
+    if soul:
+        from misaka.config import identity   # 身份槽＋职责段（hermes 同序）
+        for section in identity.prompt_sections(profile_dir, role):
+            flags += ["--append-system-prompt", section]
     env = {"MISAKA_PROFILE_DIR": profile_dir,
            "MISAKA_WHO": role,
            "MISAKA_MCP_ROLE": role,
@@ -457,8 +459,9 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
         for d in skill_sandbox.readonly_copies(skills, ro_root):
             flags += ["--skill", d]
     flags += ["--append-system-prompt", profiles.shared_soul()]   # 共同魂在前
-    if soul:
-        flags += ["--append-system-prompt", soul]                 # 角色个性在后
+    from misaka.config import identity            # 身份槽＋职责段（hermes 同序）
+    for section in identity.prompt_sections(profile_dir, role):
+        flags += ["--append-system-prompt", section]
     return flags, factories, prompt, ro_root, role
 
 

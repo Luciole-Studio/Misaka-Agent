@@ -95,29 +95,25 @@ def _migrate_lo_soul(prof):
 
 def assembly(who, *, cwd=None):
     """角色装配的公共部分（前台 chat 与 DM 无头轮共用）。
-    返回 (prof, soul, model_default, skill_flags)。who 不在册直接 sys.exit。"""
+    返回 (prof, model_default, skill_flags)。who 不在册直接 sys.exit。
+    人格不在这返回——身份槽＋职责段统一走 config.identity（hermes 同序）。"""
     if who:  # Sister：人格+技能三层栈
         prof = os.path.join(CFG["profiles_root"], who)
         if not os.path.isdir(prof):
             sys.exit(f"没有这位 Sister：{who}（名册：{', '.join(sorted(sisters()))}）")
-        soul = os.path.join(prof, "SOUL.md")
         extra = []
         from misaka.orchestration import skill_layers
         for sk in skill_layers.skills_stack(prof, cwd=cwd or os.getcwd()):
             extra += ["--skill", sk]      # 三层栈：项目（信任＋扫描）→ 角色 → 共享
-        return prof, soul, CFG["default_model"], extra   # 尊重 MISAKA_MODEL（与跑卡路径同轨）
+        return prof, CFG["default_model"], extra   # 尊重 MISAKA_MODEL（与跑卡路径同轨）
     prof = os.path.join(CFG["roles_root"], "last_order")
     _migrate_lo_soul(prof)
-    soul = os.path.join(prof, "SOUL.md")
-    if not os.path.isfile(soul):   # 迁移失败的兜底：沿用旧对话档名
-        legacy = os.path.join(prof, "SOUL-chat.md")
-        soul = legacy if os.path.isfile(legacy) else soul
-    return prof, soul, "claude-opus-5", []
+    return prof, "claude-opus-5", []
 
 
 def launch(who, model=None, cont=False, pick=False, session=None):
     """装配并进入交互模式（阻塞到会话结束）。who=None 表示 Last Order。"""
-    prof, soul, model_default, extra = assembly(who)
+    prof, model_default, extra = assembly(who)
     if who:  # 找某位 Sister：带她的人格+技能+文献工具，有内置工具（她是干活的）
         title = f"MISAKA · {who}"
         sess = _migrate_sessions(f"~/.misaka/sessions/{who}",
@@ -132,10 +128,14 @@ def launch(who, model=None, cont=False, pick=False, session=None):
         title = "MISAKA · Last Order"
         sess = _migrate_sessions("~/.misaka/sessions/last-order",
                                  "~/.misaka/last-order-sessions")
+    # hermes stable_parts 同序（identity.py）：身份槽（SOUL.md 有就用，空则代码兜底）
+    # ＋无条件职责段；共同魂在最前。SOUL.md 放空也不影响使用。
+    from misaka.config import identity
     flags = ["--provider", CFG["provider"], "--model", model or model_default,
-             "--append-system-prompt", profiles.shared_soul(),   # 共同魂在前
-             "--append-system-prompt", soul,                     # 角色个性在后
-             "--session-dir", os.path.expanduser(sess)] + extra
+             "--append-system-prompt", profiles.shared_soul()]
+    for section in identity.prompt_sections(prof, profiles.role_of(prof)):
+        flags += ["--append-system-prompt", section]
+    flags += ["--session-dir", os.path.expanduser(sess)] + extra
     if session:
         flags += ["--session", session]   # 切入指定会话（引擎支持路径或部分 UUID）
     elif pick:

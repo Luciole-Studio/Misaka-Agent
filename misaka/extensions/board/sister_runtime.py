@@ -265,9 +265,13 @@ class _SisterManager(SubagentManager):
     def resolve_definition(self, requested: str | None, _cwd: str) -> AgentDefinition:
         if requested not in (None, self.agent_type, "general", "general-purpose"):
             raise ValueError(f"Sister card cannot change identity to {requested!r}")
-        soul_path = Path(self.profile_dir) / "SOUL.md"
-        soul = (Path(profiles.shared_soul()).read_text(encoding="utf-8")
-                + "\n\n" + soul_path.read_text(encoding="utf-8"))   # 共同魂在前
+        # 共同魂在前，其后＝身份槽＋职责段（hermes 同序）。SOUL.md 缺失/放空都不影响
+        # ——此前直接 read_text，没有这个文件就当场抛异常
+        from misaka.config import identity
+        soul = "\n\n".join(
+            [Path(profiles.shared_soul()).read_text(encoding="utf-8")]
+            + identity.prompt_sections(self.profile_dir,
+                                       profiles.role_of(self.profile_dir)))
         copies = skill_sandbox.readonly_copies(
             profiles.skills(self.profile_dir), self.skill_root
         )

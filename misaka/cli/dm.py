@@ -107,17 +107,19 @@ def deliver(to, message, sender=None, model=None, timeout=600,
         sys.exit("消息不能为空")
     text = dm_prefix(sender) + body if sender else body   # 用户直发＝普通用户轮，无前缀
 
-    prof, soul, model_default, skill_flags = chat.assembly(
+    prof, model_default, skill_flags = chat.assembly(
         None if to == "last-order" else to)
     home = os.path.expanduser("~")
     sess_dir = dm_session_dir(to)
     os.makedirs(sess_dir, exist_ok=True)
-    flags = ["--provider", CFG["provider"], "--model", model or model_default,
-             "--append-system-prompt", profiles.shared_soul(),
-             "--append-system-prompt", soul,
-             "--append-system-prompt", protocol_file(),   # 协议节：仅 DM 会话携带
-             "--session-dir", sess_dir] + skill_flags
     role = profiles.role_of(prof)
+    from misaka.config import identity
+    flags = ["--provider", CFG["provider"], "--model", model or model_default,
+             "--append-system-prompt", profiles.shared_soul()]
+    for section in identity.prompt_sections(prof, role):   # 身份槽＋职责段（hermes 同序）
+        flags += ["--append-system-prompt", section]
+    flags += ["--append-system-prompt", protocol_file(),   # 协议节：仅 DM 会话携带
+              "--session-dir", sess_dir] + skill_flags
     env = {"MISAKA_APP_TITLE": DM_TITLE, "MISAKA_DM_SESSION": "1",
            "MISAKA_WHO": to, "MISAKA_MCP_ROLE": role,
            "MISAKA_PROFILE_DIR": prof, "MISAKA_WORKSPACE": home}
