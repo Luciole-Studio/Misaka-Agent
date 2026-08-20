@@ -425,6 +425,7 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
             factories.append(inline("moa", moa_ext.commands_for(profile_dir)))
             factories.append(inline("lcm", lcm_ext.register))
             factories.append(inline("skill-invoke", skill_ext.commands_for(profile_dir)))
+            factories.append(inline("skill-tools", skill_ext.tools_for(profile_dir)))
             # 禁 builtin，但仍可派分身与上报；SendMessage 在 SUBAGENT_TOOLS 白名单里
             flags += ["-t", ",".join(SUBAGENT_TOOLS)]
     else:
@@ -449,6 +450,7 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
         factories.append(inline("moa", moa_ext.commands_for(profile_dir)))
         factories.append(inline("lcm", lcm_ext.register))
         factories.append(inline("skill-invoke", skill_ext.commands_for(profile_dir)))
+        factories.append(inline("skill-tools", skill_ext.tools_for(profile_dir)))
         if can_delegate:
             factories.append(inline(
                 "subagent",

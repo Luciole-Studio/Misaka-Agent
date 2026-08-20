@@ -106,6 +106,154 @@ def build_skill_message(info, *, user_instruction="", session_id=None):
     return "\n".join(parts)
 
 
+_SUPPORT_DIRS = ("references", "templates", "assets", "scripts")
+
+
+def lookup_path_error(name):
+    """技能名的路径安全校验（hermes `_skill_lookup_path_error` 同款）。
+    agent 传进来的是原始字符串——绝对路径、`..`、Windows 盘符都不许进搜索根。
+    合法返回 None，否则返回人话原因。"""
+    from pathlib import PurePosixPath, PureWindowsPath
+    if not isinstance(name, str):
+        return "技能名必须是字符串"
+    value = name.strip()
+    if not value:
+        return "技能名不能为空"
+    if PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute() \
+            or PureWindowsPath(value).drive:
+        return f"技能名不能是绝对路径：{value}"
+    if ".." in PurePosixPath(value).parts or ".." in PureWindowsPath(value).parts:
+        return f"技能名不能含 `..`：{value}"
+    return None
+
+
+def collect_linked_files(skill_dir):
+    """支撑文件按类分组（hermes linked_files 同款）。软链不收（misaka 比上游本地
+    路径更严——上游只在 plugin 分支做这层校验）。空类不出现。"""
+    root = Path(skill_dir)
+    out = {}
+    for category in _SUPPORT_DIRS:
+        sub = root / category
+        if not sub.is_dir():
+            continue
+        files = [str(f.relative_to(root)) for f in sorted(sub.rglob("*"))
+                 if f.is_file() and not f.is_symlink()]
+        if files:
+            out[category] = files
+    return out
+
+
+def read_support_file(skill_dir, file_path):
+    """读技能内的支撑文件。返回 (内容, 错误)——路径必须留在技能目录内
+    （解析软链后再校验，hermes validate_within_dir 同款）。"""
+    err = lookup_path_error(file_path)
+    if err:
+        return None, err
+    root = Path(skill_dir).resolve()
+    target = (root / file_path).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return None, f"文件不在技能目录内：{file_path}"
+    if not target.is_file():
+        return None, f"技能里没有这个文件：{file_path}"
+    try:
+        data = target.read_bytes()
+    except OSError as e:
+        return None, str(e)
+    try:
+        return data.decode("utf-8-sig"), None
+    except UnicodeDecodeError:
+        return f"[二进制文件：{target.name}，{len(data)} 字节]", None
+
+
+def tools_for(profile_dir):
+    """`skills_list` / `skill_view` 两件工具（hermes tools/skills_tool.py 移植）。
+
+    此前 misaka 的技能只有两条路径：系统提示里的静态索引（agent 只能看）与
+    `/skill` 斜杠命令（只有人能用）——agent 想用技能只能裸 `read` SKILL.md，
+    拿到的是**未预处理**的原文（`${MISAKA_SKILL_DIR}` 还是字面量、没有支撑文件清单）。
+    hermes 的三层渐进披露（静态索引 → skills_list → skill_view）由这两件补齐；
+    与 `/skill` 复用同一份 scan/build，一份实现两个消费者（上游同构：斜杠命令走
+    `preprocess=False` 自己渲染，工具走 `preprocess=True`）。
+    """
+    from pydantic import BaseModel, ConfigDict, Field
+
+    from misaka.core.extensions.types import ToolDefinition
+
+    class ListParams(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+    class ViewParams(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        name: str = Field(description="技能名（用 skills_list 查）")
+        file_path: str = Field(
+            "", description="可选：技能内的支撑文件相对路径（如 references/规范.md）；"
+                            "留空＝取 SKILL.md 正文")
+
+    def register(harn):
+        async def list_execute(tool_call_id, raw, signal, on_update, ctx):
+            commands = scan_skill_commands(profile_dir, cwd=os.getcwd())
+            if not commands:
+                return {"content": [{"type": "text", "text": "当前没有可用技能。"}]}
+            lines = ["可用技能（要用哪个就 skill_view 取全文）："]
+            for info in sorted(commands.values(), key=lambda i: i["name"]):
+                lines.append(f"- {info['name']}：{info['description']}")
+            return {"content": [{"type": "text", "text": "\n".join(lines)}],
+                    "details": {"count": len(commands)}}
+
+        harn.registerTool(ToolDefinition(
+            name="skills_list", label="列技能",
+            description="列出可用技能（名字＋一句话描述）。要用某个技能时"
+                        "用 skill_view 取它的完整内容。",
+            parameters=ListParams.model_json_schema(), execute=list_execute,
+            promptSnippet="列出可用技能"))
+
+        async def view_execute(tool_call_id, raw, signal, on_update, ctx):
+            args = raw if isinstance(raw, ViewParams) else ViewParams(**(raw or {}))
+            err = lookup_path_error(args.name)
+            if err:
+                return {"content": [{"type": "text", "text": err}], "isError": True}
+            commands = scan_skill_commands(profile_dir, cwd=os.getcwd())
+            info = commands.get(_slug(args.name)) or next(
+                (i for i in commands.values() if i["name"] == args.name.strip()), None)
+            if info is None:
+                names = "、".join(sorted(i["name"] for i in commands.values())) or "（无）"
+                return {"content": [{"type": "text",
+                                     "text": f"没有技能「{args.name}」。可用：{names}"}],
+                        "isError": True}
+            if args.file_path:
+                content, err = read_support_file(info["skill_dir"], args.file_path)
+                if err:
+                    return {"content": [{"type": "text", "text": err}], "isError": True}
+                return {"content": [{"type": "text", "text": content}],
+                        "details": {"skill": info["name"], "file": args.file_path}}
+            try:
+                sid = str(ctx.sessionManager.getSessionId())
+            except Exception:  # noqa: BLE001 - 无会话号不拦调用
+                sid = None
+            # 与 /skill 同一份渲染：模板变量已替换、支撑文件清单已附
+            message = build_skill_message(info, session_id=sid)
+            linked = collect_linked_files(info["skill_dir"])
+            if linked:
+                message += ("\n\n[支撑文件：再调 skill_view(name=..., file_path=...) 取]\n"
+                            + "\n".join(f"- {c}: {', '.join(fs)}" for c, fs in linked.items()))
+            return {"content": [{"type": "text", "text": message}],
+                    "details": {"skill": info["name"], "linked_files": linked}}
+
+        harn.registerTool(ToolDefinition(
+            name="skill_view", label="读技能",
+            description="取一个技能的完整内容（模板变量已展开、支撑文件已列出）。"
+                        "首次调用返回 SKILL.md 正文与支撑文件清单；要读其中某个文件，"
+                        "再调一次并给 file_path。",
+            parameters=ViewParams.model_json_schema(), execute=view_execute,
+            promptSnippet="取某个技能的完整内容",
+            promptGuidelines=["任务与某个技能的描述对上时，先 skill_view 取它的全文再动手，"
+                              "别凭技能名猜它怎么用。"]))
+
+    return register
+
+
 def commands_for(profile_dir):
     """`/skill [名] [指令]` 命令工厂（角色目录烧进闭包）。"""
 

@@ -58,7 +58,8 @@ def _extension_factories(profile_dir, profile_role, workspace, session_role, *, 
         inline("roster", roster.register),
         inline("moa", moa.commands_for(profile_dir)),   # /moa：LO 与 sis 各用各的配置
         inline("lcm", lcm.register),                    # 无损压缩接管（fail-open 回原生）
-        inline("skill-invoke", skill_invoke.commands_for(profile_dir)),   # /skill 显式调用
+        inline("skill-invoke", skill_invoke.commands_for(profile_dir)),   # /skill 显式调用（人）
+        inline("skill-tools", skill_invoke.tools_for(profile_dir)),       # skills_list/skill_view（agent）
         inline("mcp", mcp.bind(profile_dir, session_role)),
     ]
 
