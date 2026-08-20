@@ -287,18 +287,21 @@ def check_report(workspace, con=None, task_id=None):
 def run_llm_json(profile_dir, prompt, provider, default_model,
                  cwd=None, tools=None, timeout=600, model=None,
                  usage_db=None, usage_task_id=None, usage_generation=None,
-                 usage_token_cap=None, on_event=None, raw=False, bare=False):
+                 usage_token_cap=None, on_event=None, raw=False, bare=False,
+                 soul=True):
     """一次性进程内调用，从最终回答捞 JSON。
 
     ``tools`` 只描述 builtin 白名单；除 Last Order 外，角色始终另有子代理四工具。
     ``raw=True``＝要纯文本不捞 JSON（没有 JSON 不算失败——MoA 参谋用）；
-    ``bare=True``＝裸调用：零内置工具零分身（hermes 参谋纪律：参谋不行动）。
+    ``bare=True``＝裸调用：零内置工具零分身（hermes 参谋纪律：参谋不行动）；
+    ``soul=False``＝跳过人格档（调用方自带完整合同时用——plan 拆卡，防止
+    对话档的工具清单混进无工具批处理轮变幻觉）。
 
     返回 (obj, raw_text, err)。err 为 None 即成功拿到可解析 JSON（raw 时＝拿到文本）。
     """
     from misaka.extensions.board import validate  # 延迟导入避免包初始化环
 
-    soul, cfg, _skills = _load_profile(profile_dir)
+    soul_path, cfg, _skills = _load_profile(profile_dir)
     model = os.environ.get("MISAKA_FORCE_MODEL") or model or cfg.get("model") or default_model  # 停摆时全线切换
     flags = ["--provider", provider, "--model", model, "--no-session", "--thinking", "low"]
     workdir = cwd or os.getcwd()
@@ -325,8 +328,8 @@ def run_llm_json(profile_dir, prompt, provider, default_model,
             )),
         ]
     flags += ["-t", ",".join(dict.fromkeys(allowed))] if allowed else ["-nt"]
-    if soul:
-        flags += ["--append-system-prompt", soul]
+    if soul and soul_path:
+        flags += ["--append-system-prompt", soul_path]
     env = {"MISAKA_PROFILE_DIR": profile_dir,
            "MISAKA_WHO": role,
            "MISAKA_MCP_ROLE": role,

@@ -77,6 +77,22 @@ def _migrate_sessions(new, old):
         return old   # ponytail: 跨盘/权限等罕见失败不硬迁，旧位置照用不断档
 
 
+def _migrate_lo_soul(prof):
+    """一次性归一（2026-08-20）：SOUL-chat.md → SOUL.md＝LO 唯一人格档。
+    旧 SOUL.md（拆卡合同）已逐字迁入 board/plan.py 的 PLAN_CONTRACT，
+    改名留档不删（用户手笔可能在里面）。幂等：SOUL-chat.md 不在＝已迁移。"""
+    chat_soul = os.path.join(prof, "SOUL-chat.md")
+    if not os.path.isfile(chat_soul):
+        return
+    try:
+        old = os.path.join(prof, "SOUL.md")
+        if os.path.isfile(old):
+            os.rename(old, os.path.join(prof, "SOUL-plan-retired.md"))
+        os.rename(chat_soul, old)
+    except OSError:
+        pass   # 迁不动不拦启动；assembly 有旧文件名兜底
+
+
 def assembly(who, *, cwd=None):
     """角色装配的公共部分（前台 chat 与 DM 无头轮共用）。
     返回 (prof, soul, model_default, skill_flags)。who 不在册直接 sys.exit。"""
@@ -91,7 +107,12 @@ def assembly(who, *, cwd=None):
             extra += ["--skill", sk]      # 三层栈：项目（信任＋扫描）→ 角色 → 共享
         return prof, soul, "claude-sonnet-5", extra
     prof = os.path.join(CFG["roles_root"], "last_order")
-    return prof, os.path.join(prof, "SOUL-chat.md"), "claude-opus-5", []
+    _migrate_lo_soul(prof)
+    soul = os.path.join(prof, "SOUL.md")
+    if not os.path.isfile(soul):   # 迁移失败的兜底：沿用旧对话档名
+        legacy = os.path.join(prof, "SOUL-chat.md")
+        soul = legacy if os.path.isfile(legacy) else soul
+    return prof, soul, "claude-opus-5", []
 
 
 def launch(who, model=None, cont=False, pick=False, session=None):
