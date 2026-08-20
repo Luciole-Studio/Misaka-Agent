@@ -126,7 +126,7 @@ def _parser():
 
     sub.add_parser("graph", help="看研究图")
 
-    tr = sub.add_parser("tree", help="全局树：课题→卡→分身（含嵌套）；--watch 实时刷新（面板格子用）")
+    tr = sub.add_parser("trace", help="全局迹：课题→卡→分身＋每卡过程脉搏（判定串/支路/耗时）；--watch 实时刷新（面板格子用）")
     tr.add_argument("--project", help="只看某课题")
     tr.add_argument("--watch", action="store_true", help="每 2 秒重画（Ctrl+C 退出）")
 
@@ -396,7 +396,7 @@ def main():
                 store.set_status(con, node["id"], "expanded")
                 store.add_edge(con, node["id"], tid, "expanded_to")
                 print(" ", tid)
-    elif args.cmd == "tree":
+    elif args.cmd == "trace":
         import time as _time
 
         from misaka.extensions.board import observe

@@ -19,6 +19,79 @@ GLYPH = {"running": "●", "verifying": "◆", "finalizing": "◆", "ready": "�
 MAX_DEPTH = 4          # ponytail: 分身递归展示到 4 层，再深不展
 MAX_LINES = 200        # 快照上限；实时格子每帧也够用
 
+# ── 卡的过程脉搏（trace 全局档，2026-08-20 平替旧纯结构树）────────────
+# 每张有现场的卡加一行「怎么走的」：判定串 sparkline＋支路盘点＋墙钟＋当前动作。
+# 判定来自 trace_lanes/trace_verdict（dsh-trace-compare 严格移植的内核）。
+V_GLYPH = {"ok": "✓", "answer": "●", "error": "✗", "deadend": "·", "retry": "↻"}
+V_COLOR = {"ok": "\x1b[32m", "answer": "\x1b[32m", "error": "\x1b[31m",
+           "deadend": "\x1b[90m", "retry": "\x1b[90m"}
+_RESET = "\x1b[0m"
+SPARK_W = 24           # sparkline 步数上限：超出折中段（头 16 尾 7）
+_lane_cache = {}       # session_file → ((mtime_ns, size), lane|None)
+
+
+def _card_lane(row):
+    """卡现场 → lane（mtime＋size 缓存：--watch 每 2s 重画，文件没动不重析）。"""
+    session_file = row["session_file"]
+    if not (session_file and os.path.isfile(session_file)):
+        from misaka.core.session_manager import find_most_recent_session
+        session_file = (find_most_recent_session(os.path.join(row["workspace"], "session"))
+                        if row["workspace"] else None)
+    if not session_file or not os.path.isfile(session_file):
+        return None
+    try:
+        st = os.stat(session_file)
+        key = (st.st_mtime_ns, st.st_size)
+        hit = _lane_cache.get(session_file)
+        if hit is not None and hit[0] == key:
+            return hit[1]
+        from misaka.orchestration.trace_lanes import build_lane
+        with open(session_file, encoding="utf-8", errors="replace") as f:
+            lane = build_lane(f.read(), "l1")
+    except ValueError:
+        lane = None            # 空现场/无 assistant：正常留白
+    except Exception:  # noqa: BLE001 - 现场读不出不拖累树
+        return None
+    _lane_cache[session_file] = (key, lane)
+    return lane
+
+
+def _spark(lane, width=SPARK_W):
+    """判定串 sparkline（执行序）：✓推进 ●回答 ✗失败 ·扑空 ↻重试，超宽折中段。"""
+    rows = sorted(lane["main"] + lane["detours"], key=lambda n: n["step"])
+    marks = [(V_GLYPH.get(n["v"], "·"), n["v"]) for n in rows]
+    if len(marks) > width:
+        marks = marks[: width - 8] + [("…", None)] + marks[-7:]
+    return "".join(f"{V_COLOR[v]}{ch}{_RESET}" if v in V_COLOR else ch
+                   for ch, v in marks)
+
+
+def _pulse_parts(lane, status):
+    """脉搏行的零件（纯函数可测）：sparkline／支路盘点／墙钟／当前动作。"""
+    from misaka.orchestration.trace_lanes import fmt_t
+    stats = lane["stats"]
+    parts = [_spark(lane)]
+    if stats["detours"]:
+        by = {}
+        for d in lane["detours"]:
+            by[d["v"]] = by.get(d["v"], 0) + 1
+        seg = "".join(f"{V_GLYPH[k]}{v}" for k, v in sorted(by.items()))
+        parts.append(f"支路{stats['detours']}({seg})")
+    parts.append(fmt_t(stats["T"]))
+    if status == "running":
+        live = [t for n in lane["main"] + lane["detours"]
+                for t in n["tools"] if t["e"] is None]
+        if live:
+            parts.append(f"▶{live[-1]['name']}")
+    return parts
+
+
+def _card_pulse(row, indent):
+    lane = _card_lane(row)
+    if lane is None:
+        return []
+    return [indent + " ".join(_pulse_parts(lane, row["status"]))]
+
 
 def _header_id(jsonl_path):
     """会话文件头一行的 id——嵌套分身目录就叫这个名。"""
@@ -126,6 +199,7 @@ def _card_lines(con, r, card_indent, tail_indent):
     glyph = GLYPH.get(r["status"], "·")
     out = [f"{card_indent}{glyph} {r['id']} {r['title'][:44]}"
            f"（{r['assignee']}·{r['status']}）{badge}"]
+    out += _card_pulse(r, tail_indent)
     for t in trows:
         if t["status"] == "blocked":
             out.append(f"{tail_indent}⚠ {t['text'][:30]}：{(t['note'] or '')[:40]}")
@@ -273,3 +347,30 @@ def peek(con, task_id, limit=40):
     if text is None:
         return None, f"卡 {task_id} 的现场读不出来"
     return text, None
+
+
+if __name__ == "__main__":
+    _lane = {"main": [{"step": 1, "v": "ok", "tools": [{"e": 1.0, "name": "bash"}]},
+                      {"step": 4, "v": "answer", "tools": []}],
+             "detours": [{"step": 2, "v": "error", "tools": []},
+                         {"step": 3, "v": "deadend", "tools": []}],
+             "stats": {"detours": 2, "T": 340}}
+    spark = _spark(_lane)
+    plain = spark.replace(_RESET, "")
+    for code in set(V_COLOR.values()):
+        plain = plain.replace(code, "")
+    assert plain == "✓✗·●", f"执行序 sparkline：{plain!r}"
+    parts = _pulse_parts(_lane, "done")
+    assert parts[1] == "支路2(·1✗1)" and parts[2] == "6m", parts
+    running = dict(_lane)
+    running["main"] = [{"step": 1, "v": "ok",
+                        "tools": [{"e": None, "name": "grep"}]}] + _lane["main"][1:]
+    assert _pulse_parts(running, "running")[-1] == "▶grep", "运行中显示当前动作"
+    assert _pulse_parts(running, "done")[-1] == "6m", "非 running 不显示动作"
+    wide = {"main": [{"step": i, "v": "ok", "tools": []} for i in range(40)],
+            "detours": [], "stats": {"detours": 0, "T": 5}}
+    w = _spark(wide)
+    for code in set(V_COLOR.values()) | {_RESET}:
+        w = w.replace(code, "")
+    assert len(w) == SPARK_W and "…" in w, f"超宽折中段：{len(w)}"
+    print("observe selfcheck ok — sparkline 执行序/折中段/盘点/动作行")

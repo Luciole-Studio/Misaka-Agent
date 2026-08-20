@@ -17,6 +17,7 @@ dsh-trace-compare 的 buildLane/buildData/compressTimeline（maze-upload.html@7b
 语义，处理中断现场）；步 e=max(本步消息落地, 最晚工具返回)。
 """
 import json
+import math
 from datetime import datetime
 
 from misaka.orchestration.trace_verdict import (
@@ -287,6 +288,24 @@ def wall_clock(t, time_map):
     return t
 
 
+def _js_round(v, nd=0):
+    """JS Math.round/toFixed 的远离零舍入（Python round 是银行家舍入，.5 会漂）。"""
+    q = 10 ** nd
+    return math.floor(v * q + 0.5) / q
+
+
+def fmt_t(t):
+    """秒 → 轴/统计标签（上游 fmtT 逐译，舍入按 JS 语义）：340→'6m'，42.5→'42.5s'。
+    （上游注释判例 49252→'13.7h' 与其代码不符——代码 ≥36000 走 toFixed(0)＝'14h'，
+    忠实以代码为准。）"""
+    if t >= 3600:
+        nd = 0 if t >= 36000 else 1
+        return f"{_js_round(t / 3600, nd):.{nd}f}h"
+    if t >= 120:
+        return f"{_js_round(t / 60):g}m"
+    return f"{_js_round(t, 1):g}s"
+
+
 if __name__ == "__main__":
     def ev(kind, at, **kw):
         base = {"type": kind, "timestamp":
@@ -353,4 +372,8 @@ if __name__ == "__main__":
     # 双泳道
     data2 = build_data(["\n".join(lines)] * 2)
     assert [l["key"] for l in data2["lanes"]] == ["l1", "l2"]
-    print("trace_lanes selfcheck ok — 分轮/配对/判定接线/分拣/attach/折叠/墙钟/截断/诚实缺席")
+    # fmt_t（判例按上游**代码**行为，其注释判例 49252→13.7h 与代码不符）
+    assert fmt_t(49252) == "14h" and fmt_t(340) == "6m" and fmt_t(42.5) == "42.5s"
+    assert fmt_t(42) == "42s" and fmt_t(0) == "0s" and fmt_t(36000) == "10h"
+    assert fmt_t(35000) == "9.7h" and fmt_t(150) == "3m" and fmt_t(119.96) == "120s"
+    print("trace_lanes selfcheck ok — 分轮/配对/判定接线/分拣/attach/折叠/墙钟/截断/诚实缺席/fmt_t")

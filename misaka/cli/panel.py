@@ -429,7 +429,7 @@ def format_prefix_bar(width, prefix_name="ctrl+b"):
 
 
 TREE_TITLE = "树"
-TREE_ARGV = [sys.executable, "-m", "misaka", "tree", "--watch"]
+TREE_ARGV = [sys.executable, "-m", "misaka", "trace", "--watch"]
 
 
 def tree_summon_action(listing):
