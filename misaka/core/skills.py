@@ -262,12 +262,17 @@ class _LoadSkillFromFileResult:
 
 def _load_skill_from_file(file_path: str, source: str) -> _LoadSkillFromFileResult:
     diagnostics: list[ResourceDiagnostic] = []
+    # 上游 #7805/8c2529dae：只有 SKILL.md 是「声明的技能」；技能目录里的 README.md
+    # 等普通根 .md 缺 frontmatter 不是坏技能——静默跳过，不出诊断
+    declared = os.path.basename(file_path) == "SKILL.md"
     try:
-        raw_content = Path(file_path).read_text(encoding="utf-8")
+        raw_content = Path(file_path).read_text(encoding="utf-8-sig")
         frontmatter = parse_frontmatter(raw_content).frontmatter
         skill_dir = os.path.dirname(file_path)
         parent_dir_name = os.path.basename(skill_dir)
         description = frontmatter.get("description")
+        if not declared and (not isinstance(description, str) or not description.strip()):
+            return _LoadSkillFromFileResult(skill=None, diagnostics=[])
         for error in _validate_description(description):
             diagnostics.append(ResourceDiagnostic(type="warning", message=error, path=file_path))
 
@@ -290,6 +295,8 @@ def _load_skill_from_file(file_path: str, source: str) -> _LoadSkillFromFileResu
             diagnostics=diagnostics,
         )
     except Exception as error:
+        if not declared:   # 普通 .md 解析不动也不算坏技能（#7805）
+            return _LoadSkillFromFileResult(skill=None, diagnostics=[])
         diagnostics.append(ResourceDiagnostic(type="warning", message=str(error), path=file_path))
         return _LoadSkillFromFileResult(skill=None, diagnostics=diagnostics)
 

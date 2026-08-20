@@ -1023,13 +1023,17 @@ def stream_anthropic(
                     if not isinstance(content_block, Mapping) or not isinstance(provider_index, int):
                         continue
                     block_type = content_block.get("type")
+                    # content_block_start 可自带首段 text/thinking——丢弃即丢内容
+                    #（pi #7358/59ad3dead，fork 时漏吃的 pin 内修复）
                     if block_type == "text":
-                        block = TextContent(text="")
+                        block = TextContent(text=str(content_block.get("text") or ""))
                         output.content.append(block)
                         provider_indexes[provider_index] = len(output.content) - 1
                         stream.push(TextStartEvent(contentIndex=len(output.content) - 1, partial=output))
                     elif block_type == "thinking":
-                        block = ThinkingContent(thinking="", thinkingSignature="")
+                        block = ThinkingContent(
+                            thinking=str(content_block.get("thinking") or ""),
+                            thinkingSignature=str(content_block.get("signature") or ""))
                         output.content.append(block)
                         provider_indexes[provider_index] = len(output.content) - 1
                         stream.push(ThinkingStartEvent(contentIndex=len(output.content) - 1, partial=output))

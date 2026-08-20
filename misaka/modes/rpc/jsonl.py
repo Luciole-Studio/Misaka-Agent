@@ -51,8 +51,21 @@ class JsonlLineBuffer:
         return [line]
 
 
+def to_json_event(value: Any) -> Any:
+    """线格式：message_update 只发 delta（pi #7290/a4475344f，fork 时漏吃）。
+    丢顶层累计 message 与 assistantMessageEvent.partial——否则每个 delta 携带
+    全量快照，线上输出随消息长度二次方膨胀；message_end 仍是权威全量。"""
+    data = to_jsonable(value)
+    if isinstance(data, dict) and data.get("type") == "message_update":
+        ame = data.get("assistantMessageEvent")
+        if isinstance(ame, dict):
+            ame = {k: v for k, v in ame.items() if k != "partial"}
+        return {"type": "message_update", "assistantMessageEvent": ame}
+    return data
+
+
 def serialize_json_line(value: Any) -> str:
-    return json.dumps(to_jsonable(value), ensure_ascii=False, separators=(",", ":")) + "\n"
+    return json.dumps(to_json_event(value), ensure_ascii=False, separators=(",", ":")) + "\n"
 
 
 def iter_jsonl_lines(stream: Any, chunk_size: int = 4096) -> Generator[str, None, None]:

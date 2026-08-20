@@ -145,7 +145,7 @@ class FileAuthStorageBackend(AuthStorageBackend):
         try:
             current = None
             if os.path.exists(self.authPath):
-                with open(self.authPath, encoding="utf-8") as handle:
+                with open(self.authPath, encoding="utf-8-sig") as handle:
                     current = handle.read()
             outcome = fn(current)
             if outcome.next is not None:
@@ -166,7 +166,7 @@ class FileAuthStorageBackend(AuthStorageBackend):
             self._assert_lock_uncompromised(expected_signature)
             current = None
             if os.path.exists(self.authPath):
-                with open(self.authPath, encoding="utf-8") as handle:
+                with open(self.authPath, encoding="utf-8-sig") as handle:
                     current = handle.read()
             outcome = await fn(current)
             self._assert_lock_uncompromised(expected_signature)
@@ -253,7 +253,7 @@ class AuthStorage:
     def _parse_storage_data(self, content: str | None) -> AuthStorageData:
         if not content:
             return {}
-        return json.loads(content)
+        return json.loads(content.removeprefix("\ufeff"))
 
     def reload(self) -> None:
         content: str | None = None

@@ -42,6 +42,16 @@ def _to_posix_path(value: str) -> str:
     return value.replace(os.sep, "/")
 
 
+def _relativize_find_result(path_value: str, search_path: str) -> str:
+    """结果路径 → 相对 search_path（pi #7569/523b5a491，pre-pin 漏移植）。
+    绝对路径走 relpath——前缀切片在根路径丢首段（"/" 下 /etc→tc）、把共享前缀
+    兄弟（/foo-bar vs /foo）误判为子路径；相对路径原样透传——custom glob 已产
+    相对结果，relpath 会错按 cwd 解析。"""
+    if os.path.isabs(path_value):
+        return _to_posix_path(os.path.relpath(path_value, search_path))
+    return _to_posix_path(path_value)
+
+
 _GLOB_FLAGS = glob.GLOBSTAR | glob.DOTMATCH
 
 
@@ -350,12 +360,8 @@ def create_find_tool_definition(
             if not results:
                 return AgentToolResult(content=[TextContent(text="No files found matching pattern")], details=None)
 
-            relativized = [
-                _to_posix_path(path_value[len(search_path) + 1 :])
-                if path_value.startswith(search_path)
-                else _to_posix_path(os.path.relpath(path_value, search_path))
-                for path_value in results
-            ]
+            relativized = [_relativize_find_result(path_value, search_path)
+                           for path_value in results]
             result_limit_reached = len(relativized) >= effective_limit
             raw_output = "\n".join(relativized)
             truncation = truncate_head(raw_output, TruncationOptions(maxLines=2**31 - 1))
@@ -417,11 +423,7 @@ def create_find_tool_definition(
             if not line:
                 continue
             had_trailing_slash = line.endswith("/") or line.endswith("\\")
-            if line.startswith(search_path):
-                relative_path = line[len(search_path) + 1 :]
-            else:
-                relative_path = os.path.relpath(line, search_path)
-            posix_value = _to_posix_path(relative_path)
+            posix_value = _relativize_find_result(line, search_path)
             if had_trailing_slash and not posix_value.endswith("/"):
                 posix_value += "/"
             relativized.append(posix_value)

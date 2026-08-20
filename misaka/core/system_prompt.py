@@ -42,7 +42,8 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
         if (selected_tools is None or "read" in selected_tools) and skills:
             prompt += format_skills_for_prompt(skills)
         prompt += f"\nCurrent date: {date}"
-        prompt += f"\nCurrent working directory: {prompt_cwd}"
+        # 尾换行：后续 append 的 prompt 内容必须另起一行（上游 #7887/3dd4623ee）
+        prompt += f"\nCurrent working directory: {prompt_cwd}\n"
         return prompt
 
     tools = selected_tools or ["read", "bash", "edit", "write"]

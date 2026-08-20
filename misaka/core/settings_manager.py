@@ -202,7 +202,7 @@ class SettingsManager:
         storage.withLock(scope, capture)
         if not content:
             return {}
-        return cls.migrateSettings(json.loads(content))
+        return cls.migrateSettings(json.loads(content.removeprefix("\ufeff")))
 
     @classmethod
     def tryLoadFromStorage(cls, storage: SettingsStorage, scope: SettingsScope) -> dict[str, Any]:
@@ -312,7 +312,7 @@ class SettingsManager:
     ) -> None:
         def persist(current: str | None) -> str:
             current_file_settings = (
-                self.migrateSettings(json.loads(current))
+                self.migrateSettings(json.loads(current.removeprefix("\ufeff")))
                 if current
                 else {}
             )

@@ -20,7 +20,7 @@ from misaka.ai.providers.register_builtins import reset_api_providers
 from misaka.ai.session_resources import cleanup_session_resources
 from misaka.ai.stream import stream_simple
 from misaka.ai.types import AssistantMessage, ImageContent, Model, TextContent, validate_message
-from misaka.ai.utils.overflow import is_context_overflow
+from misaka.ai.utils.overflow import is_context_overflow, is_recoverable_length
 
 from misaka.core.auth_guidance import (
     format_no_api_key_found_message,
@@ -382,11 +382,6 @@ class AgentSession:
         if self._unsubscribeAgent is not None:
             self._unsubscribeAgent()
             self._unsubscribeAgent = None
-
-    def _reconnect_to_agent(self) -> None:
-        if self._unsubscribeAgent is not None:
-            return
-        self._unsubscribeAgent = self.agent.subscribe(self._handle_agent_event)
 
     async def abort(self) -> None:
         self.abortRetry()
@@ -901,6 +896,9 @@ class AgentSession:
     async def reload(self) -> None:
         previous_flag_values = self._extensionRunner.get_flag_values()
         await emit_session_shutdown_event(self._extensionRunner, {"type": "session_shutdown", "reason": "reload"})
+        # 旧 runner 必须退订共享 event bus，否则 /reload 一次泄漏一层（pi #7656/6ca423447 的
+        # reload 半条；dispose 路径 fork 期已修，这半条没接线）
+        self._extensionRunner.invalidate(_STALE_CONTEXT_MESSAGE)
         await self.settingsManager.reload()
         reset_api_providers()
         await self._resourceLoader.reload()
@@ -1078,7 +1076,8 @@ class AgentSession:
             self._branchSummaryAbortController.abort()
 
     async def compact(self, customInstructions: str | None = None) -> SessionCompactionResult:
-        self._disconnect_from_agent()
+        # 保持 agent 订阅常连（pi #7370/e56893f4c，pre-pin 漏移植）：压缩期断订会把
+        # 被 abort 的半截消息的 message_end/agent_end 全部丢掉——不落盘、状态不更新
         await self.abort()
         self._compactionAbortController = AbortController()
         self._emit({"type": "compaction_start", "reason": "manual"})
@@ -1194,7 +1193,6 @@ class AgentSession:
             raise
         finally:
             self._compactionAbortController = None
-            self._reconnect_to_agent()
 
     def abortCompaction(self) -> None:
         if self._auto_compaction_abort_controller is not None:
@@ -1550,7 +1548,8 @@ class AgentSession:
             assistant_message = _as_assistant_message(message)
             if assistant_message is not None:
                 self._lastAssistantMessage = assistant_message
-                if assistant_message.stopReason != "error":
+                # length 也是恢复中的失败态：复位会让截断重试计数清零转无限循环（#7540）
+                if assistant_message.stopReason not in ("error", "length"):
                     self._overflow_recovery_attempted = False
                 if assistant_message.stopReason != "error" and self._retryAttempt > 0:
                     self._emit(
@@ -2270,7 +2269,16 @@ class AgentSession:
         ):
             return False
 
-        if same_model and is_context_overflow(assistant_message, context_window):
+        # 未达输出上限的 length 截断＝可恢复失败：同样走一次 compact-and-retry
+        #（pi #7540/32850ef7c，pre-pin 漏移植；stop 停止的超窗回答只压不重试——
+        # 回答已完成，agent.continue() 无法从 assistant 续）
+        recoverable_length = same_model and is_recoverable_length(
+            assistant_message, getattr(self.model, "maxTokens", 0) or 0)
+        if same_model and (is_context_overflow(assistant_message, context_window)
+                           or recoverable_length):
+            will_retry = assistant_message.stopReason != "stop"
+            if not will_retry:
+                return await self._run_auto_compaction("overflow", False)
             if self._overflow_recovery_attempted:
                 self._emit(
                     {
@@ -2279,9 +2287,16 @@ class AgentSession:
                         "result": None,
                         "aborted": False,
                         "willRetry": False,
+                        # 截断与溢出分开报（pi #8130/c7c763f5c）：误标成 overflow
+                        # 会把用户引向换大上下文模型，而真病因是输出截断
                         "errorMessage": (
-                            "Context overflow recovery failed after one compact-and-retry attempt. "
-                            "Try reducing context or switching to a larger-context model."
+                            "Truncated-response recovery failed after one compact-and-retry "
+                            "attempt. The provider repeatedly ended output early."
+                            if recoverable_length
+                            and not is_context_overflow(assistant_message, context_window)
+                            else "Context overflow recovery failed after one compact-and-retry "
+                                 "attempt. Try reducing context or switching to a "
+                                 "larger-context model."
                         ),
                     }
                 )
@@ -2294,22 +2309,27 @@ class AgentSession:
             return await self._run_auto_compaction("overflow", True)
 
         settings = CompactionSettings(**settings_data)
-        if assistant_message.stopReason == "error":
+        direct_context_tokens = calculate_compaction_context_tokens(assistant_message.usage)
+        # provider 不回 usage 时 direct=0，阈值压缩会永不触发——退到消息尺寸估算
+        #（pi #8328/4495469a5 双层：分流条件补零 usage；无 usage 数据不再直接放弃）
+        if assistant_message.stopReason == "error" or direct_context_tokens == 0:
             estimate = estimate_compaction_context_tokens(list(self.agent.state.messages))
-            if estimate.lastUsageIndex is None:
-                return False
-            usage_message = self.agent.state.messages[estimate.lastUsageIndex]
-            usage_timestamp = _event_timestamp_ms(_message_field(usage_message, "timestamp"))
-            if (
-                latest_compaction is not None
-                and _message_role(usage_message) == "assistant"
-                and usage_timestamp > 0
-                and usage_timestamp <= latest_compaction_timestamp
-            ):
-                return False
+            # 无 usage：estimate.tokens 即纯消息尺寸估算。仅 usage-backed 估算才做
+            # 「陈旧 pre-compaction usage」检查（保留的旧消息 usage 反映压缩前的大
+            # 上下文，会在刚压完时误触发再压）
+            if estimate.lastUsageIndex is not None:
+                usage_message = self.agent.state.messages[estimate.lastUsageIndex]
+                usage_timestamp = _event_timestamp_ms(_message_field(usage_message, "timestamp"))
+                if (
+                    latest_compaction is not None
+                    and _message_role(usage_message) == "assistant"
+                    and usage_timestamp > 0
+                    and usage_timestamp <= latest_compaction_timestamp
+                ):
+                    return False
             context_tokens = estimate.tokens
         else:
-            context_tokens = calculate_compaction_context_tokens(assistant_message.usage)
+            context_tokens = direct_context_tokens
 
         if should_compact(context_tokens, context_window, settings):
             return await self._run_auto_compaction("threshold", False)
@@ -2465,8 +2485,9 @@ class AgentSession:
             if will_retry:
                 messages = self.agent.state.messages
                 last_message = messages[-1] if messages else None
-                if _message_role(last_message) == "assistant" and _message_field(last_message, "stopReason") == "error":
-                    self.agent.state.messages = messages[:-1]
+                if (_message_role(last_message) == "assistant"
+                        and _message_field(last_message, "stopReason") in ("error", "length")):
+                    self.agent.state.messages = messages[:-1]   # 截断尾同样要清（#7540）
                 return True
 
             return self.agent.hasQueuedMessages()

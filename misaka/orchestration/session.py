@@ -94,8 +94,8 @@ async def dispose(runtime):
 
 def event_line(ev):
     """engine 事件 → JSON 行（与旧 --mode json 输出同一序列化器，线格式不变）。"""
-    from misaka.modes.rpc.jsonl import to_jsonable
-    return json.dumps(to_jsonable(ev), ensure_ascii=False, separators=(",", ":"))
+    from misaka.modes.rpc.jsonl import to_json_event
+    return json.dumps(to_json_event(ev), ensure_ascii=False, separators=(",", ":"))
 
 
 async def run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,

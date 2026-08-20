@@ -143,6 +143,11 @@ def prepare_edit_arguments(input_value: Any) -> Any:
     if not isinstance(input_value, dict):
         return input_value
 
+    def _single_edit(value: Any) -> bool:
+        # 单对象 edit（模型常这么给）：包成单元素数组（上游 #7835/ca21c1686）
+        return (isinstance(value, dict) and isinstance(value.get("oldText"), str)
+                and isinstance(value.get("newText"), str))
+
     args = input_value
     edits_value = args.get("edits")
     if isinstance(edits_value, str):
@@ -152,6 +157,10 @@ def prepare_edit_arguments(input_value: Any) -> Any:
             parsed = None
         if isinstance(parsed, list):
             args["edits"] = parsed
+        elif _single_edit(parsed):
+            args["edits"] = [parsed]
+    elif _single_edit(edits_value):
+        args["edits"] = [edits_value]
 
     legacy = args
     old_text = legacy.get("oldText")

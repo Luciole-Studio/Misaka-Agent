@@ -408,7 +408,7 @@ def _read_harn_manifest(package_root: str) -> HarnManifest | None:
 
 def _read_harn_package_json_manifest(package_json_path: str) -> HarnManifest | None:
     try:
-        payload = json.loads(Path(package_json_path).read_text(encoding="utf-8"))
+        payload = json.loads(Path(package_json_path).read_text(encoding="utf-8-sig"))
     except Exception:
         return None
     manifest = payload.get("harn")
@@ -1413,7 +1413,7 @@ class DefaultPackageManager:
         if not os.path.exists(package_json_path):
             return None
         try:
-            payload = json.loads(Path(package_json_path).read_text(encoding="utf-8"))
+            payload = json.loads(Path(package_json_path).read_text(encoding="utf-8-sig"))
         except Exception:  # noqa: BLE001
             return None
         version = payload.get("version")

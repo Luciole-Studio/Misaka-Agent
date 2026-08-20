@@ -236,7 +236,7 @@ def _load_raw_config(path: str) -> dict[str, Any] | None:
     if not os.path.exists(path):
         return None
     try:
-        with open(path, encoding="utf-8") as handle:
+        with open(path, encoding="utf-8-sig") as handle:
             parsed = json.load(handle)
     except (json.JSONDecodeError, OSError):
         return None

@@ -567,7 +567,7 @@ class ModelRegistry:
             return _empty_custom_models_result()
 
         try:
-            with open(modelsJsonPath, encoding="utf-8") as handle:
+            with open(modelsJsonPath, encoding="utf-8-sig") as handle:
                 parsed = json.loads(_strip_json_comments(handle.read()))
 
             errors = _validate_models_config(parsed)

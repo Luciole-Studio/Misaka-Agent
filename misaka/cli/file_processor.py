@@ -96,7 +96,7 @@ def _read_bytes(path: str) -> bytes:
 
 
 def _read_text(path: str) -> str:
-    with open(path, encoding="utf-8") as handle:
+    with open(path, encoding="utf-8-sig") as handle:
         return handle.read()
 
 

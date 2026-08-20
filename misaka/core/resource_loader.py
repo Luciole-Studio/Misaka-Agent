@@ -126,7 +126,7 @@ def resolve_prompt_input(input_value: str | None, description: str) -> str | Non
         return None
     if os.path.exists(input_value):
         try:
-            return Path(input_value).read_text(encoding="utf-8")
+            return Path(input_value).read_text(encoding="utf-8-sig")
         except OSError as error:
             _warn(f"Warning: Could not read {description} file {input_value}: {error}")
             return input_value
@@ -913,7 +913,7 @@ def _load_context_file_from_dir(dir_path: str) -> dict[str, str] | None:
         if not os.path.exists(file_path):
             continue
         try:
-            return {"path": file_path, "content": Path(file_path).read_text(encoding="utf-8")}
+            return {"path": file_path, "content": Path(file_path).read_text(encoding="utf-8-sig")}
         except OSError as error:
             _warn(f"Warning: Could not read {file_path}: {error}")
             continue

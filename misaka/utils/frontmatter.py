@@ -34,7 +34,8 @@ def _normalize_newlines(value: str) -> str:
 
 
 def _extract_frontmatter(content: str) -> tuple[str | None, str]:
-    normalized = _normalize_newlines(content)
+    # UTF-8 BOM 会让 startswith("---") 恒假，frontmatter 静默丢失（上游 #8337/1355cd36e）
+    normalized = _normalize_newlines(content.removeprefix("\ufeff"))
     if not normalized.startswith("---"):
         return None, normalized
 

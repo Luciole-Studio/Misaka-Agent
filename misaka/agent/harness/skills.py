@@ -360,7 +360,7 @@ def _validate_description(description: str | None) -> list[str]:
 
 def _parse_frontmatter(content: str) -> Result[tuple[_SkillFrontmatter, str], Exception]:
     try:
-        normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+        normalized = content.removeprefix("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
         if not normalized.startswith("---"):
             return ok((_SkillFrontmatter(), normalized))
         end_index = normalized.find("\n---", 3)

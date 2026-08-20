@@ -48,7 +48,8 @@ def _content_type(block: Any) -> str | None:
 
 
 def _serialize_json_line(value: Any) -> str:
-    return json.dumps(to_jsonable(value), ensure_ascii=False, separators=(",", ":")) + "\n"
+    from misaka.modes.rpc.jsonl import to_json_event
+    return json.dumps(to_json_event(value), ensure_ascii=False, separators=(",", ":")) + "\n"
 
 
 async def run_print_mode(runtime_host: Any, options: PrintModeOptions | dict[str, Any]) -> int:
