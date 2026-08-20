@@ -126,9 +126,11 @@ def _parser():
 
     sub.add_parser("graph", help="看研究图")
 
-    tr = sub.add_parser("trace", help="全局迹：课题→卡→分身＋每卡过程脉搏（判定串/支路/耗时）；--watch 实时刷新（面板格子用）")
-    tr.add_argument("--project", help="只看某课题")
-    tr.add_argument("--watch", action="store_true", help="每 2 秒重画（Ctrl+C 退出）")
+    tr = sub.add_parser("trace", help="执行迹：无参=全局树＋每卡脉搏；<卡号|角色|路径>=单会话迷宫（←→选步 f过滤 /搜索 +-缩放）")
+    tr.add_argument("targets", nargs="*", help="0 个=全局；1 个=单会话迷宫；2 个=同轴对比")
+    tr.add_argument("--project", help="全局档：只看某课题")
+    tr.add_argument("--watch", action="store_true", help="实时刷新（全局档每 2s；迷宫档盯现场文件生长）")
+    tr.add_argument("--plain", action="store_true", help="迷宫档：不进交互，打一帧就走（管道/嵌入用）")
 
     lc = sub.add_parser("lcm", help="无损上下文运维：status 存量 / doctor 只读体检 / backup 热备快照")
     lc.add_argument("op", nargs="?", default="status", choices=["status", "doctor", "backup"])
@@ -397,6 +399,19 @@ def main():
                 store.add_edge(con, node["id"], tid, "expanded_to")
                 print(" ", tid)
     elif args.cmd == "trace":
+        if len(args.targets) > 2:
+            sys.exit("最多两个目标（单会话或同轴对比）")
+        if args.targets:
+            from misaka.cli import trace_view
+            paths = []
+            for t in args.targets:
+                p, err = trace_view.locate_session(con, t)
+                if err:
+                    sys.exit(err)
+                paths.append(p)
+            if len(paths) == 2:
+                sys.exit("对比档在路上（阶段4）；先各自单开：misaka trace <目标>")
+            sys.exit(trace_view.run(paths[0], watch=args.watch, plain=args.plain))
         import time as _time
 
         from misaka.extensions.board import observe
