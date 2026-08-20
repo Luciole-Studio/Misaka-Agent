@@ -125,12 +125,15 @@ def register(harn, *, sender, route=None, receive=False):
         if addr in known and addr != sender:
             # 在册地址走 DM 直投（hermes Bot Mode）：后台唤醒对方联络会话跑一轮，
             # 即发即返绝不等回复（协议纪律）。分身起同名也遮蔽不了这条通道。
-            argv = [sys.executable, "-m", "misaka", "dm", addr, args.message,
+            # flags 前置＋"--" 分隔：message 是 "-急" 这类 `-` 开头单 token 时，
+            # 不加分隔 argparse 会当旗子解析当场死、信静默丢（审查 2026-08-20 实证）
+            argv = [sys.executable, "-m", "misaka", "dm",
                     "--from", sender, "--summary", args.summary]
             if card_task:
                 argv += ["--task-id", card_task]
             if card_gen is not None:
                 argv += ["--generation", str(card_gen)]
+            argv += ["--", addr, args.message]
             # 剥 MISAKA_USAGE_*：收件人那轮不许记到发件人卡的账上（DM 记账阶段3专列）
             child_env = {k: v for k, v in os.environ.items()
                          if not k.startswith("MISAKA_USAGE_")}
@@ -275,9 +278,11 @@ if __name__ == "__main__":
         "c1", {"to": "last-order", "message": "缺原始档案", "summary": "卡住"}, None, None, None))
     assert "已后台直投" in out["content"][0]["text"], out
     argv, kw = popened[-1]
-    assert argv[2:] == ["misaka", "dm", "last-order", "缺原始档案",
-                        "--from", "10032", "--summary", "卡住",
-                        "--task-id", "t_测试", "--generation", "2"], argv
+    assert argv[2:] == ["misaka", "dm", "--from", "10032", "--summary", "卡住",
+                        "--task-id", "t_测试", "--generation", "2",
+                        "--", "last-order", "缺原始档案"], argv
+    assert argv[argv.index("--") + 2] == "缺原始档案", \
+        "位置参数在 -- 之后：`-` 开头消息不再被当旗子（审查修）"
     assert not any(k.startswith("MISAKA_USAGE_") for k in kw["env"]), "预算环境必须剥离"
     assert kw["start_new_session"], "后台直投要脱离进程组"
     assert not pending(connect(), "last-order"), "直投不落 pending（审计行由 dm 层记）"

@@ -140,7 +140,7 @@ def register(harn):
         warn = f"\n⚠️ 过往教训（同类尝试栽过）：{hit[1]}" if hit else ""
         tag = f"［{proj}］" if proj else ""
         return _text(f"已上板 {tid}{tag}：{c['title']} → {c['assignee']}{warn}\n"
-                     "（还没开工。要跑的话让用户点头，再用 misaka_launch。）")
+                     "（还没开工。要跑的话让用户点头，再用 misaka_dispatch 或 misaka_sister。）")
 
 
     class DispatchParams(StrictParams):

@@ -45,7 +45,8 @@ def readonly_copies(skill_dirs, dest_root):
     for d in skill_dirs:
         dst = os.path.join(dest_root, os.path.basename(d.rstrip("/")))
         if os.path.exists(dst):
-            shutil.rmtree(dst, ignore_errors=True)
+            cleanup(dst)   # 上一轮的只读副本裸 rmtree 删不掉（只读子目录拒 unlink），
+            #              残骸会让 copytree 抛 FileExistsError——先加写权再删
         shutil.copytree(d, dst, symlinks=False, ignore=shutil.ignore_patterns(".git", "__pycache__"))
         _strip_write(dst)
         copies.append(dst)

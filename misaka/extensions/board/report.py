@@ -20,7 +20,7 @@ def card_body(rows, title):
         try:
             with open(os.path.join(r["workspace"], "report.json"), encoding="utf-8") as f:
                 rep = json.load(f)
-        except OSError:
+        except (OSError, ValueError):   # 续聊挪文件的读窗内可遇半写——容错别炸综合
             pass
         arts = "\n".join(f"  - {os.path.join(r['workspace'], a)}" for a in rep.get("artifacts", []))
         parts.append(f"### [{r['id']}] {r['title']}\n"

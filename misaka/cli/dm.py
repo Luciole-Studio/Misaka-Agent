@@ -117,11 +117,6 @@ def deliver(to, message, sender=None, model=None, timeout=600,
              "--append-system-prompt", soul,
              "--append-system-prompt", protocol_file(),   # 协议节：仅 DM 会话携带
              "--session-dir", sess_dir] + skill_flags
-    try:
-        if any(n.endswith(".jsonl") for n in os.listdir(sess_dir)):
-            flags.append("-c")   # canonical＝接续唯一现场；空目录＝首次开箱
-    except OSError:
-        pass
     role = profiles.role_of(prof)
     env = {"MISAKA_APP_TITLE": DM_TITLE, "MISAKA_DM_SESSION": "1",
            "MISAKA_WHO": to, "MISAKA_MCP_ROLE": role,
@@ -130,6 +125,13 @@ def deliver(to, message, sender=None, model=None, timeout=600,
     factories = chat._extension_factories(prof, role, home, to,
                                           sister=(to != "last-order"))
     with _serial(to):
+        # -c 探测必须在锁内：并发首发时锁外双方都见空目录、都开新会话，
+        # canonical 唯一性即破（审查 2026-08-20）
+        try:
+            if any(n.endswith(".jsonl") for n in os.listdir(sess_dir)):
+                flags.append("-c")   # canonical＝接续唯一现场；空目录＝首次开箱
+        except OSError:
+            pass
         r = run_coro(run_session(flags, text, home, timeout=timeout,
                                  extension_factories=factories, env=env))
         spent = int(r.get("budget_usage") or 0)

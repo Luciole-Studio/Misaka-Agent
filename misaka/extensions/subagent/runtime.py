@@ -2215,8 +2215,10 @@ class SubagentManager:
         system_prompt = task.definition.prompt
         if task.definition.source == "built-in" and task.definition.name in {"general", "general-purpose"}:
             profile = self.role_context.profile_dir
-            soul = Path(profile or "") / "SOUL.md"
-            if soul.is_file():
+            # profile 为空时 Path("")/"SOUL.md" 是 cwd 相对路径——工作目录里恰好有
+            # SOUL.md 会被静默注入（信任边界，审查 2026-08-20）；无 profile 即无人格
+            soul = Path(profile) / "SOUL.md" if profile else None
+            if soul is not None and soul.is_file():
                 from misaka.config import profiles as _profiles
                 system_prompt = (Path(_profiles.shared_soul()).read_text(encoding="utf-8")
                                  + "\n\n" + soul.read_text(encoding="utf-8"))  # 共同魂在前

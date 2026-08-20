@@ -128,11 +128,17 @@ class LCMCompactor:
             messages, fresh_tail_count=self.config.fresh_tail_count,
             fresh_tail_max_tokens=self.config.fresh_tail_max_tokens)
         tail_start = boundary.start
-        if tail_start <= leading_anchor:
+        # 上轮 assemble 注入的摘要条 id=None（已压区）：它是压缩产物，血统归 DAG
+        # 凝聚管，绝不再进叶压缩——否则「摘要的摘要」会顶着错误 source_ids 进 D0
+        #（审查 2026-08-20 实弹复现的血统错位，根因是旧版收尾清空 ids 破坏对齐）。
+        start = leading_anchor
+        while start < len(ids) and ids[start] is None:
+            start += 1
+        if tail_start <= start:
             return CompressResult(messages, "noop", "保护尾巴之外没有可压缩的原始积压")
 
-        candidate = messages[leading_anchor:tail_start]
-        candidate_ids = ids[leading_anchor:tail_start]
+        candidate = messages[start:tail_start]
+        candidate_ids = ids[start:tail_start]
 
         # 叶压缩：切最老 chunk（首条永远收，哪怕单条超预算——上游契约）
         chunk, chunk_ids, used = [], [], 0
@@ -159,13 +165,17 @@ class LCMCompactor:
 
         condensed = self._maybe_condense(session_id, focus_topic)
 
-        remaining = messages[leading_anchor + len(chunk):]
+        remaining = messages[start + len(chunk):]   # 旧摘要条不留——frontier 全量重渲染
         compressed = self.assemble(
             messages[0] if leading_anchor else None, session_id, remaining,
             anchor_source=chunk)   # 锚来自被压掉的段（仍在场的不需要锚）
         state = self._state(session_id)
         state["cursor"] = len(compressed)     # 上游纪律：收尾置 len(compressed)
-        state["ids"] = []                     # 活动列表已重排，映射失效（下轮重建）
+        # 对齐不变量（ingest 的契约）：ids 与活动列表逐位对齐。compressed=
+        # [system?][摘要条 0/1 条][remaining]——摘要条无源 id 记 None，其余保真。
+        n_summary = len(compressed) - len(remaining) - leading_anchor
+        state["ids"] = (ids[:leading_anchor] + [None] * n_summary
+                        + ids[start + len(chunk):])
         return CompressResult(compressed, "compacted",
                               leaf_nodes=1, condensed_nodes=condensed,
                               summary_level=level)
@@ -367,6 +377,20 @@ if __name__ == "__main__":
         active = active + [{"role": "user", "content": f"追问{i}" + "字" * 200},
                            {"role": "assistant", "content": f"答{i}" + "字" * 200}]
         active = c.compress(sid, active).messages
+    # 血统真值（审查 2026-08-20 实弹复现过错位）：第二轮起每个 D0 的 source_ids
+    # 反查 store 必须是真实被压的对话原文——绝不许是上轮的摘要条
+    for node in c.dag.get_session_nodes(sid, depth=0):
+        rows = c.store._conn.execute(
+            "SELECT content FROM messages WHERE store_id IN (%s)"
+            % ",".join("?" * len(node.source_ids)), node.source_ids).fetchall()
+        assert rows and all("近期摘要 (d" not in row[0] for row in rows), \
+            f"血统指向了摘要条而非原文：node {node.node_id}"
+    later = [n for n in c.dag.get_session_nodes(sid, depth=0)
+             if any("追问" in row[0] or "答" in row[0] for row in
+                    c.store._conn.execute(
+                        "SELECT content FROM messages WHERE store_id IN (%s)"
+                        % ",".join("?" * len(n.source_ids)), n.source_ids))]
+    assert later, "第二轮后的 D0 血统必须命中新消息原文"
     stats = c.dag.get_session_depth_stats(sid)
     assert 1 in stats, f"D0 满 fanin 后必须上卷 D1: {stats}"
     frontier_depths = [n.depth for n in c.dag.frontier_nodes(sid)]

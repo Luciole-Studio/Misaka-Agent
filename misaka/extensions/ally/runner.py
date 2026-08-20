@@ -71,9 +71,11 @@ def write_report(workspace, exit_code, output, *, assignee):
     if not tail:
         return False, f"协力者 {assignee} 没有任何输出"
     artifacts = []
-    try:                     # 它落在工作区的文件就是产物（report.json 自己除外）
+    try:                     # 它落在工作区的文件就是产物（report.json 自己除外；
+        # 目录不进清单——check_report 对每个 artifact 要求 S_ISREG，混入即整份拒收）
         artifacts = sorted(f for f in os.listdir(workspace)
-                           if not f.startswith(".") and f != "report.json")
+                           if not f.startswith(".") and f != "report.json"
+                           and os.path.isfile(os.path.join(workspace, f)))
     except OSError:
         pass
     report = {"schema_version": 1, "status": "done",

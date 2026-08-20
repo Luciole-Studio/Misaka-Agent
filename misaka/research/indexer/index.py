@@ -117,8 +117,8 @@ def extract_pages(p):
 
 def build_tree(p):
     """PageIndex flash 建树,返回 JSON 字符串或 None。装不上/失败即降级。"""
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    pi = os.path.join(root, "third_party", "PageIndex")
+    from misaka.config import REPO   # 仓根 third_party/（审查 2026-08-20：曾指错到
+    pi = os.path.join(REPO, "third_party", "PageIndex")   # misaka/research/ 下，树从未建成）
     py = os.path.join(pi, ".venv", "bin", "python")
     if not os.path.exists(py) or os.path.splitext(p)[1].lower() != ".pdf":
         return None
