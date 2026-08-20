@@ -370,13 +370,16 @@ async def handle_config_command(args: list[str]) -> bool | None:
         }
     )
     resolved_paths = await package_manager.resolve()
+    # select_config 按属性取值（TS 对象字面量的移植语义）——传 dict 必 AttributeError
+    #（审查 2026-08-20：config 子命令必崩的镜像翻译漏）
+    from types import SimpleNamespace
     await select_config(
-        {
-            "resolvedPaths": resolved_paths,
-            "settingsManager": settings_manager,
-            "cwd": cwd,
-            "agentDir": agent_dir,
-        }
+        SimpleNamespace(
+            resolvedPaths=resolved_paths,
+            settingsManager=settings_manager,
+            cwd=cwd,
+            agentDir=agent_dir,
+        )
     )
     return True
 
