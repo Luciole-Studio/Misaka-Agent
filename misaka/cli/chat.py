@@ -56,8 +56,7 @@ def _extension_factories(profile_dir, profile_role, workspace, session_role, *, 
         *role_extensions,
         inline("switch", switch.register),
         inline("roster", roster.register),
-        inline("moa", moa.commands_for(profile_dir)),   # /moa：LO 与 sis 各用各的配置
-        inline("moa-tool", moa.tools_for(profile_dir)),  # moa 工具：agent 自开参谋团
+        inline("moa", moa.register),   # /moa 一次性（MoA 本体是虚拟服务商，/model 可切）
         inline("views", views.register),                # /board /graph /trace 只读查看
         inline("lcm", lcm.register),                    # 无损压缩接管（fail-open 回原生）
         inline("skill-invoke", skill_invoke.commands_for(profile_dir)),   # /skill 显式调用（人）

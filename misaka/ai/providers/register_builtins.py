@@ -252,6 +252,17 @@ _stream_bedrock_lazy = _create_lazy_stream(_load_bedrock_provider_module)
 _stream_simple_bedrock_lazy = _create_lazy_simple_stream(_load_bedrock_provider_module)
 
 
+async def _load_moa_provider_module() -> LazyProviderModule:
+    """MoA 虚拟服务商（hermes 移植；misaka 自有，非 pi 上游件）。"""
+    return await _load_provider_module(
+        "moa", "misaka.ai.providers.moa", "streamMoa", "streamSimpleMoa",
+    )
+
+
+_stream_moa_lazy = _create_lazy_stream(_load_moa_provider_module)
+_stream_simple_moa_lazy = _create_lazy_simple_stream(_load_moa_provider_module)
+
+
 def register_built_in_api_providers() -> None:
     register_api_provider(ApiProvider(api="anthropic-messages", stream=stream_anthropic, streamSimple=stream_simple_anthropic))
     register_api_provider(
@@ -284,6 +295,7 @@ def register_built_in_api_providers() -> None:
     register_api_provider(
         ApiProvider(api="bedrock-converse-stream", stream=_stream_bedrock_lazy, streamSimple=_stream_simple_bedrock_lazy)
     )
+    register_api_provider(ApiProvider(api="moa", stream=_stream_moa_lazy, streamSimple=_stream_simple_moa_lazy))
 
 
 def reset_api_providers() -> None:

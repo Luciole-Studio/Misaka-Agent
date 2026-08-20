@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from collections.abc import Callable, Mapping
@@ -30,6 +31,8 @@ from misaka.ai.types import (
 from misaka.ai.utils.oauth.types import OAuthCredentials
 
 from misaka.config import get_agent_dir
+
+logger = logging.getLogger(__name__)
 from misaka.core.provider_display_names import BUILT_IN_PROVIDER_DISPLAY_NAMES
 from misaka.core.resolve_config_value import (
     clearConfigValueCache,
@@ -518,6 +521,26 @@ class ModelRegistry:
                 )
 
         self._models = combined
+        self._appendMoaModels()
+
+    def _appendMoaModels(self) -> None:
+        """MoA 虚拟服务商入册（hermes _moa_provider_row 同构，进的是 registry）。
+
+        槽位解析器注入进 ai 层（moa provider 不许反向 import core），preset 合成
+        模型行追加在真模型之后，并给 "moa" 记一把虚拟钥匙——它没有远端凭据，
+        hasConfiguredAuth 不开这个口子的话 preset 永远不进选择器（hermes 同款：
+        api_key="moa-virtual-provider"）。任何失败静默降级为"无 MoA 行"。
+        """
+        try:
+            from misaka.ai.providers import moa as moa_provider
+
+            moa_provider.set_model_resolver(self.find)
+            presets = moa_provider.preset_models()
+            if presets:
+                self._models = [m for m in self._models if m.provider != "moa"] + presets
+                self._storeProviderRequestConfig("moa", {"apiKey": "moa-virtual-provider"})
+        except Exception as exc:  # noqa: BLE001 - 虚拟行装载失败不许拦真模型
+            logger.warning("MoA preset models unavailable: %s", exc)
 
     def _loadBuiltInModels(
         self,

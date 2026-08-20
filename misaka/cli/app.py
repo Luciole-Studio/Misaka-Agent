@@ -147,6 +147,11 @@ def _parser():
     sk.add_argument("--dir", help="项目根（缺省＝当前目录向上找 .git）")
     sk.add_argument("--as", dest="role", default="sisters/10032", help="以哪个角色的视角看栈")
 
+    mo = sub.add_parser("moa", help="MoA 虚拟服务商：list 看 presets / delete 删 preset"
+                                    "（配置 ~/.misaka/moa.json；会话里 /model 选 MoA·<preset> 切换）")
+    mo.add_argument("op", nargs="?", default="list", choices=["list", "delete"])
+    mo.add_argument("name", nargs="?", help="delete：preset 名")
+
     ac = sub.add_parser("auth", help="凭据预检：auth check <provider> 看某家认证配没配好")
     ac.add_argument("op", nargs="?", default="check", choices=["check"])
     ac.add_argument("provider", nargs="?", help="供应商 id（省略＝列出全部已配置的）")
@@ -479,6 +484,45 @@ def main():
             if not (status.configured or status.source):
                 bad += 1
         sys.exit(1 if bad else 0)
+    elif args.cmd == "moa":
+        # hermes `hermes moa list/delete` 移植；config 向导不移——preset 就是一段
+        # json，直接编辑 ~/.misaka/moa.json（宽容读，坏值降级默认不炸）
+        import os as _os
+
+        from misaka.ai.providers.moa import MOA_CONFIG_PATH, load_moa_config, slot_label
+        path = _os.path.expanduser(MOA_CONFIG_PATH)
+        cfg = load_moa_config()
+        if args.op == "delete":
+            if not args.name:
+                sys.exit("用法：misaka moa delete <preset名>")
+            import json as _json
+            raw = {}
+            try:
+                with open(path, encoding="utf-8") as f:
+                    raw = _json.load(f)
+            except (OSError, ValueError):
+                pass
+            presets = raw.get("presets") if isinstance(raw.get("presets"), dict) else {}
+            if args.name not in presets:
+                sys.exit(f"没有 preset「{args.name}」（在册：{', '.join(cfg['presets']) or '无'}）")
+            if len(presets) <= 1:
+                sys.exit("不能删掉最后一个 preset")
+            del presets[args.name]
+            if raw.get("default_preset") == args.name:
+                raw["default_preset"] = next(iter(presets))
+            with open(path, "w", encoding="utf-8") as f:
+                _json.dump(raw, f, ensure_ascii=False, indent=2)
+            print(f"已删 preset「{args.name}」；默认：{raw.get('default_preset')}")
+        else:
+            print(f"MoA presets（{path}；会话里 /model 选 MoA·<名> 切换，/moa <prompt> 一次性）")
+            for name, preset in cfg["presets"].items():
+                mark = "*" if name == cfg["default_preset"] else " "
+                state = "" if preset["enabled"] else "（disabled：聚合官单干）"
+                print(f"\n{mark} {name}{state}  节奏 {preset['fanout']}")
+                for i, slot in enumerate(preset["reference_models"], 1):
+                    off = "" if slot.get("enabled", True) else "（停用）"
+                    print(f"    参谋{i}. {slot_label(slot)}{off}")
+                print(f"    聚合官: {slot_label(preset['aggregator'])}")
     elif args.cmd == "skills":
         import os as _os
 

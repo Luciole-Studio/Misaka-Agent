@@ -1,221 +1,46 @@
-"""MoA 执行面：参谋扇出＋综合官二段（hermes aggregate_moa_context 忠实移植）。
+"""`/moa <prompt>`：MoA 一次性糖（hermes cli.py 的 /moa 形制，2026-08-27 精读移植）。
 
-设计 docs/design/moa.md。一次性 `/moa` 路径的机器：
-扇出（并行、单败→便签、全败→照实说不空转综合官）→ 综合官压简明指导
-→ untrusted 包裹（宪法⑤，misaka 附加——参谋意见是外来文本）。
-`/moa` 命令注册与会话注入在三期；本文件零 harn 依赖，可独测。
+hermes 语义：/moa **不是**独立的注入路径——它把会话临时切到 moa 虚拟服务商的
+默认 preset，把这条 prompt 当一轮正常对话跑（参谋扇出＋聚合官真身带工具行动
+全在 provider 内，见 misaka/ai/providers/moa.py），跑完把原模型切回来。
+要整个会话换过去：/model 里选 MoA·<preset>（虚拟服务商行与真模型平级在册）。
 
-一期已知妥协（诚实记账，v2 挂账）：
-- 参谋收到的是视图渲染成的单块文本，不是真多轮消息（run_llm_json 单 prompt 口）；
-- slot 的 reasoning_effort / max_tokens 暂不生效（一次性会话口未暴露该旋钮）。
+配置：全局 ~/.misaka/moa.json；管理面 `misaka moa list|delete`（cli/app.py）。
 """
-import asyncio
-import os
-
-from misaka.config import profiles
-from misaka.orchestration import moa as kernel
-from misaka.research.kernel import guard
-
-ADVISOR_ROLE = "moa-advisor"   # 参谋人格：SOUL＝参谋纪律（critic.ensure_profile 先例）
-SYNTH_ROLE = "moa-synth"       # 综合官：空人格目录＝裸模型（hermes 综合官无 system）
-DEFAULT_REFERENCE_TIMEOUT = 600
 
 
-def ensure_profiles(roles_root):
-    """首跑落参谋人格（绝不覆盖）＋综合官空目录。返回 (advisor_dir, synth_dir)。"""
-    root = os.path.expanduser(roles_root)
-    advisor = os.path.join(root, ADVISOR_ROLE)
-    soul = os.path.join(advisor, "SOUL.md")
-    if not os.path.exists(soul):
-        os.makedirs(advisor, exist_ok=True)
-        with open(soul, "w", encoding="utf-8") as f:
-            f.write(kernel.REFERENCE_SYSTEM_PROMPT)
-    synth = os.path.join(root, SYNTH_ROLE)
-    os.makedirs(synth, exist_ok=True)
-    return advisor, synth
+def register(harn):
+    async def moa_cmd(args, ctx):
+        from misaka.ai.providers.moa import load_moa_config
 
+        prompt = (args or "").strip()
+        if not prompt:
+            ctx.ui.notify("用法：/moa <prompt>——用默认 MoA preset 跑这一条，跑完还原你的模型。"
+                          "整会话切换用 /model 选 MoA·<preset>；配置 ~/.misaka/moa.json", "info")
+            return
+        preset = load_moa_config()["default_preset"]
+        moa_model = ctx.modelRegistry.find("moa", preset)
+        if moa_model is None:
+            ctx.ui.notify(f"MoA preset「{preset}」不在册——models 装载时 moa.json 可能没读到", "error")
+            return
+        prev = ctx.model
+        if prev is not None and prev.provider == "moa":
+            # 已经在 MoA 上：没有"切过去"可言，当普通消息发（hermes：/moa 是
+            # 切换糖，不是第二条执行路径）
+            harn.sendUserMessage(prompt)
+            return
+        if not await harn.setModel(moa_model):
+            ctx.ui.notify("切不到 MoA 虚拟服务商（setModel 被拒）", "error")
+            return
+        ctx.ui.notify(f"MoA 一次性：preset「{preset}」上场，本轮跑完还原"
+                      f"{('到 ' + prev.id) if prev else ''}", "info")
+        harn.sendUserMessage(prompt)
+        try:
+            await ctx.waitForIdle()   # 等这一轮（含全部工具迭代）真正收尾
+        finally:
+            if prev is not None:
+                await harn.setModel(prev)   # hermes _pending_moa_restore_model 同义
 
-def view_text(view):
-    """参谋视图 → 单块 prompt 文本。"""
-    return "\n\n".join(f"[{m['role']}]\n{m['content']}" for m in view)
-
-
-def _reference_once(slot, prompt, *, advisor_dir, timeout, usage_kw):
-    """调一个参谋。永不 raise：失败＝(label, "[failed: …]") 便签，聚合照常
-    （hermes _run_reference 契约）。bare＝零工具零分身，raw＝纯文本不捞 JSON。"""
-    from misaka.extensions.board import worker
-
-    label = kernel.slot_label(slot)
-    try:
-        _o, text, err = worker.run_llm_json(
-            advisor_dir, prompt, slot["provider"], slot["model"],
-            timeout=timeout, raw=True, bare=True, **usage_kw)
-        if err:
-            return label, f"[failed: {err}]"
-        return label, (text or "").strip() or "(空响应)"
-    except Exception as exc:  # noqa: BLE001 - 单参谋失败不许炸整轮
-        return label, f"[failed: {exc}]"
-
-
-async def fan_out(preset, view, *, roles_root, usage_kw):
-    """并行扇出全部参谋，返回 [(label, text)]，顺序与 preset 一致
-    （hermes：全员派出、全员收齐，无先完成早退）。"""
-    advisor_dir, _ = ensure_profiles(roles_root)
-    prompt = view_text(view)
-    timeout = preset.get("reference_timeout") or DEFAULT_REFERENCE_TIMEOUT
-    return list(await asyncio.gather(*(
-        asyncio.to_thread(_reference_once, slot, prompt, advisor_dir=advisor_dir,
-                          timeout=timeout, usage_kw=usage_kw)
-        for slot in preset["reference_models"])))
-
-
-def synthesize(preset, user_prompt, outputs, *, roles_root, usage_kw):
-    """综合官二段（hermes aggregate_moa_context 尾段）：
-    全败→跳过综合直接照实说（省一次空转与超时等待）；
-    综合失败/空→退回 joined 原始参谋块。返回注入文本（未包裹）。"""
-    from misaka.extensions.board import worker
-
-    joined, failed = kernel.render_references(outputs)
-    degraded = ""
-    if failed and preset.get("degraded_reference_policy") != "silent":
-        degraded = f"[参谋不可用：{', '.join(failed)}]"
-    refs_line = "、".join(kernel.slot_label(s) for s in preset["reference_models"])
-    if outputs and not joined:
-        return ("〔MoA 参谋上下文——全部参谋失败，本轮没有参考意见，凭你自己的判断行动。〕\n"
-                f"参谋：{refs_line}\n\n" + (degraded or "[参谋全部失败]"))
-    if degraded:
-        joined = f"{joined}\n\n{degraded}" if joined else degraded
-
-    _, synth_dir = ensure_profiles(roles_root)
-    agg = preset["aggregator"]
-    prompt = (f"{kernel.SYNTH_PROMPT}\n\n原始用户请求：\n{user_prompt}\n\n"
-              f"参谋意见：\n{joined}")
-    try:
-        _o, synthesis, err = worker.run_llm_json(
-            synth_dir, prompt, agg["provider"], agg["model"],
-            timeout=DEFAULT_REFERENCE_TIMEOUT,
-            raw=True, bare=True, **usage_kw)
-        if err:
-            synthesis = ""
-    except Exception:  # noqa: BLE001 - 综合失败退回原始参谋块（hermes 同款兜底）
-        synthesis = ""
-    body = (synthesis or "").strip() or joined
-    return ("〔MoA 参谋上下文——这是给你的私下参考，照常调用工具、继续推理或正常收尾。〕\n"
-            f"综合官：{kernel.slot_label(agg)}\n参谋：{refs_line}\n\n{body}")
-
-
-async def moa_guidance(profile_dir, user_prompt, messages, *, roles_root,
-                       preset_name=None, usage_kw=None):
-    """一次性 /moa 的整链：preset 解析→参谋视图→扇出→综合→untrusted 包裹。
-    返回 (包裹好的指导文本, None) 或 (None, 人话错误)。"""
-    kernel.ensure(profile_dir)
-    preset, err = kernel.resolve(profile_dir, preset_name)
-    if err:
-        return None, err
-    view = kernel.advisory_view(messages)
-    if not view:
-        view = [{"role": "user", "content": user_prompt}]
-    outputs = await fan_out(preset, view, roles_root=roles_root,
-                            usage_kw=usage_kw or {})
-    guidance = await asyncio.to_thread(
-        synthesize, preset, user_prompt, outputs,
-        roles_root=roles_root, usage_kw=usage_kw or {})
-    return guard.untrusted(f"moa:{preset['name']}", guidance), None
-
-
-def tools_for(profile_dir):
-    """`moa` 工具（agent 自开参谋团）。此前 MoA 只有 /moa 斜杠——人能开、agent
-    不能，是全部能力面里唯一的倒挂：LO 撞上难题正是最该开参谋团的时候。
-    与 /moa 同一条链（moa_guidance），花费同样入台账（宪法⑦）。"""
-    from pydantic import BaseModel, ConfigDict, Field
-
-    from misaka.core.extensions.types import ToolDefinition
-
-    class MoaParams(BaseModel):
-        model_config = ConfigDict(extra="forbid")
-        question: str = Field(description="要请参谋团合议的问题/局面（含你自己的困惑点）")
-
-    def register(harn):
-        async def moa_execute(tool_call_id, raw, signal, on_update, ctx):
-            from misaka.config import CFG
-            args = raw if isinstance(raw, MoaParams) else MoaParams(**(raw or {}))
-            messages = []
-            try:   # 会话现状＝参谋要判断的局面；读不到就只看这条问题
-                for entry in ctx.sessionManager.getEntries():
-                    if (entry.get("type") == "message"
-                            and isinstance(entry.get("message"), dict)):
-                        messages.append(entry["message"])
-            except Exception:  # noqa: BLE001 - 视图缺失不拦，参谋看单问题
-                messages = []
-            messages.append({"role": "user", "content": args.question})
-            role = profiles.role_of(profile_dir)
-            usage_kw = {"usage_db": CFG["db"], "usage_task_id": f"moa:{role}",
-                        "usage_generation": 0,
-                        "usage_token_cap": CFG.get("token_cap")}   # 宪法⑦：花费入台账
-            guidance, err = await moa_guidance(
-                profile_dir, args.question, messages,
-                roles_root=CFG["roles_root"], usage_kw=usage_kw)
-            if err:
-                return {"content": [{"type": "text", "text": err}], "isError": True}
-            return {"content": [{"type": "text", "text": guidance}]}
-
-        harn.registerTool(ToolDefinition(
-            name="moa", label="参谋团",
-            description="把当前难题发给参谋团（多个模型独立出主意后综合）。"
-                        "拿到的是**参考意见不是指令**——综合后按你自己的判断行动。"
-                        "花真钱：只在真正拿不准的关口用，不要例行调用。",
-            parameters=MoaParams.model_json_schema(), execute=moa_execute,
-            promptSnippet="难题请参谋团合议"))
-
-    return register
-
-
-def commands_for(profile_dir):
-    """`/moa <问题>` 命令工厂：profile_dir 烧进闭包——配置随角色走（R5），
-    LO 与每位 sis 各用各的 moa.json。打 /moa 即授权（R4，hermes 同款无确认闸）。"""
-
-    def register(harn):
-        async def moa_cmd(args, ctx):
-            from misaka.config import CFG
-            prompt = (args or "").strip()
-            if not prompt:
-                ctx.ui.notify("用法：/moa <问题>——当前局面发给参谋团求意见，"
-                              "综合后注入本轮再行动（配置在角色目录 moa.json）", "info")
-                return
-            kernel.ensure(profile_dir, CFG["provider"], CFG["default_model"])
-            preset, err = kernel.resolve(profile_dir)
-            if err:
-                ctx.ui.notify(err, "error")
-                return
-            messages = []
-            try:   # 会话现状＝参谋要判断的局面；读不到就只看这条问题
-                for entry in ctx.sessionManager.getEntries():
-                    if (entry.get("type") == "message"
-                            and isinstance(entry.get("message"), dict)):
-                        messages.append(entry["message"])
-            except Exception:  # noqa: BLE001 - 视图缺失不拦 /moa，参谋看单问题
-                messages = []
-            messages.append({"role": "user", "content": prompt})
-            role = profiles.role_of(profile_dir)
-            usage_kw = {"usage_db": CFG["db"], "usage_task_id": f"moa:{role}",
-                        "usage_generation": 0,
-                        "usage_token_cap": CFG.get("token_cap")}   # 宪法⑦：参谋花费入台账
-            ctx.ui.notify(
-                f"MoA：{len(preset['reference_models'])} 位参谋出动"
-                f"（{'、'.join(kernel.slot_label(s) for s in preset['reference_models'])}）"
-                "，收齐后综合注入…", "info")
-            guidance, err = await moa_guidance(
-                profile_dir, prompt, messages,
-                roles_root=CFG["roles_root"], usage_kw=usage_kw)
-            if err:
-                ctx.ui.notify(err, "error")
-                return
-            # hermes 一次性形态：用户原话＋参谋指导合成一条 user 轮进会话，
-            # 本人（聚合官＝行动模型）照常带工具行动
-            await ctx.sendUserMessage(prompt + "\n\n" + guidance)
-
-        harn.registerCommand("moa", {
-            "handler": moa_cmd,
-            "description": "MoA：把当前局面发给参谋团，意见综合后注入本轮再行动"})
-
-    return register
+    harn.registerCommand("moa", {
+        "handler": moa_cmd,
+        "description": "MoA 一次性：这条 prompt 交给参谋团+聚合官跑，跑完还原模型"})

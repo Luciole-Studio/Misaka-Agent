@@ -420,10 +420,7 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
             if task.get("id"):   # 合成任务（无卡号）没有微观代办
                 factories.append(inline("todo", todo.tools_for(task["id"])))
             from misaka.extensions import lcm as lcm_ext
-            from misaka.extensions import moa as moa_ext
             from misaka.extensions import skill_invoke as skill_ext
-            factories.append(inline("moa", moa_ext.commands_for(profile_dir)))
-            factories.append(inline("moa-tool", moa_ext.tools_for(profile_dir)))
             factories.append(inline("lcm", lcm_ext.register))
             factories.append(inline("skill-invoke", skill_ext.commands_for(profile_dir)))
             factories.append(inline("skill-tools", skill_ext.tools_for(profile_dir)))
@@ -446,10 +443,7 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
         if task.get("id"):   # 合成任务（无卡号）没有微观代办
             factories.append(inline("todo", todo.tools_for(task["id"])))
         from misaka.extensions import lcm as lcm_ext
-        from misaka.extensions import moa as moa_ext
         from misaka.extensions import skill_invoke as skill_ext
-        factories.append(inline("moa", moa_ext.commands_for(profile_dir)))
-        factories.append(inline("moa-tool", moa_ext.tools_for(profile_dir)))
         factories.append(inline("lcm", lcm_ext.register))
         factories.append(inline("skill-invoke", skill_ext.commands_for(profile_dir)))
         factories.append(inline("skill-tools", skill_ext.tools_for(profile_dir)))
