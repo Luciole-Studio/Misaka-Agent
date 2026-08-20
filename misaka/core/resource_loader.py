@@ -194,6 +194,7 @@ class DefaultResourceLoader:
     )
     skills: list[Skill] = field(default_factory=list)
     skillDiagnostics: list[ResourceDiagnostic] = field(default_factory=list)
+    _skillsGeneration: int | None = None   # 技能索引代次（getSkills 据此决定重扫）
     prompts: list[PromptTemplate] = field(default_factory=list)
     promptDiagnostics: list[ResourceDiagnostic] = field(default_factory=list)
     themes: list[Theme] = field(default_factory=list)
@@ -238,6 +239,7 @@ class DefaultResourceLoader:
         self.extensionsResult = LoadExtensionsResult(extensions=[], errors=[], runtime=create_extension_runtime())
         self.skills = []
         self.skillDiagnostics = []
+        self._skillsGeneration = None
         self.prompts = []
         self.promptDiagnostics = []
         self.themes = []
@@ -256,6 +258,13 @@ class DefaultResourceLoader:
         return self.extensionsResult
 
     def getSkills(self) -> SkillsResult:
+        # 盘上技能变过就重扫（沉淀/批准/禁用之后，当前会话的索引不能还是启动快照）
+        from misaka.core.skills import skills_cache_generation
+        generation = skills_cache_generation()
+        if generation != self._skillsGeneration:
+            self._skillsGeneration = generation
+            if getattr(self, "lastSkillPaths", None) is not None:
+                self._update_skills_from_paths(self.lastSkillPaths)
         return {"skills": self.skills, "diagnostics": self.skillDiagnostics}
 
     def getPrompts(self) -> PromptsResult:

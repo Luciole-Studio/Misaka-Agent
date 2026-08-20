@@ -12,6 +12,9 @@ import os
 import re
 from pathlib import Path
 
+# 路径校验住在 orchestration（skill_manage 也用它）——这里转出口
+from misaka.orchestration.skill_manage import lookup_path_error
+
 logger = logging.getLogger(__name__)
 
 _SKILL_INVALID_CHARS = re.compile(r"[^a-z0-9-]")
@@ -107,24 +110,6 @@ def build_skill_message(info, *, user_instruction="", session_id=None):
 
 
 _SUPPORT_DIRS = ("references", "templates", "assets", "scripts")
-
-
-def lookup_path_error(name):
-    """技能名的路径安全校验（hermes `_skill_lookup_path_error` 同款）。
-    agent 传进来的是原始字符串——绝对路径、`..`、Windows 盘符都不许进搜索根。
-    合法返回 None，否则返回人话原因。"""
-    from pathlib import PurePosixPath, PureWindowsPath
-    if not isinstance(name, str):
-        return "技能名必须是字符串"
-    value = name.strip()
-    if not value:
-        return "技能名不能为空"
-    if PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute() \
-            or PureWindowsPath(value).drive:
-        return f"技能名不能是绝对路径：{value}"
-    if ".." in PurePosixPath(value).parts or ".." in PureWindowsPath(value).parts:
-        return f"技能名不能含 `..`：{value}"
-    return None
 
 
 def collect_linked_files(skill_dir):
@@ -241,6 +226,46 @@ def tools_for(profile_dir):
             return {"content": [{"type": "text", "text": message}],
                     "details": {"skill": info["name"], "linked_files": linked}}
 
+        class ManageParams(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+            action: str = Field(description="create＝新建技能；write_file＝给技能加支撑文件")
+            name: str = Field(description="技能名（小写连字符，与目录名一致）")
+            content: str = Field("", description="create 用：完整 SKILL.md 文本"
+                                                 "（frontmatter＋正文）")
+            file_path: str = Field("", description="write_file 用：技能内相对路径"
+                                                   "（如 references/规范.md）")
+            file_content: str = Field("", description="write_file 用：文件内容")
+
+        async def manage_execute(tool_call_id, raw, signal, on_update, ctx):
+            from misaka.orchestration import skill_manage
+            args = raw if isinstance(raw, ManageParams) else ManageParams(**(raw or {}))
+            result = skill_manage.manage(
+                args.action, args.name, profile_dir=profile_dir,
+                content=args.content or None, file_path=args.file_path or None,
+                file_content=args.file_content or None)
+            lines = [result.get("message") or result.get("error") or ""]
+            for key in ("gist", "description_preview", "hint", "lint_hint"):
+                if result.get(key):
+                    lines.append(str(result[key]))
+            for warning in result.get("lint_warnings") or []:
+                lines.append(f"  ⚠ [{warning['rule']}] {warning['message']}")
+            return {"content": [{"type": "text", "text": "\n".join(x for x in lines if x)}],
+                    "isError": not result.get("success"),
+                    "details": {k: v for k, v in result.items() if k != "message"}}
+
+        harn.registerTool(ToolDefinition(
+            name="skill_manage", label="沉淀技能",
+            description="把可复用的做法沉淀成技能——技能是你的程序性记忆。"
+                        "action='create' 给完整 SKILL.md；action='write_file' 加参考资料/模板/脚本。"
+                        "**写技能只能用这个工具**，不要用通用 write 直接写技能目录"
+                        "（写权闸、校验、安全扫描、变更总账都在这条路上）。",
+            parameters=ManageParams.model_json_schema(), execute=manage_execute,
+            promptSnippet="沉淀/修改技能",
+            promptGuidelines=[
+                "技能的 description 必须一句话且不超过 60 字符——索引会截断更长的，"
+                "路由信号就丢了；细节写进正文。",
+                "写技能一律用 skill_manage 工具，不要用 write/edit 直接动技能目录。"]))
+
         harn.registerTool(ToolDefinition(
             name="skill_view", label="读技能",
             description="取一个技能的完整内容（模板变量已展开、支撑文件已列出）。"
@@ -294,18 +319,18 @@ def commands_for(profile_dir):
             target = os.path.join(profile_dir, "skills")
             os.makedirs(target, exist_ok=True)
             prompt = build_learn_prompt(args or "", target_dir=target)
-            # 宪法 D2：写权闸。forbid/ask 档下技能不直落盘，改为写进暂存区待人审
+            # 沉淀走 skill_manage 工具（宪法 D2 的闸、校验、扫描、总账都在那条路上）
             decision, note = skill_write.evaluate_gate()
+            prompt += (
+                "\n\n---\n[沉淀入口] **用 `skill_manage` 工具写技能，不要用 write/edit "
+                "直接写技能目录**——写权闸、frontmatter 硬校验、安全扫描、变更总账都在"
+                "那条路上。`skill_manage(action='create', name=..., content=<完整 SKILL.md>)`；"
+                "参考资料/模板/脚本用 `action='write_file'` 追加。\n"
+                "description 必须一句话且 ≤60 字符（索引会截断更长的），细节写进正文。")
             if decision == "stage":
-                staging = os.path.join(
-                    os.path.expanduser("~/.misaka"), "pending", "skills", "workspace")
-                os.makedirs(staging, exist_ok=True)
-                prompt = prompt.replace(target, staging) + (
-                    f"\n\n---\n[写权闸] {note}\n"
-                    f"技能先写进暂存区 `{staging}/<技能名>/`，**不要**写进 "
-                    f"`{target}`——那是活的技能树，须经人审才能落位。"
-                    "写完把技能名与一行摘要报给用户，让他用 "
-                    "`misaka skills pending` 查看、`misaka skills approve <名>` 批准。")
+                prompt += (f"\n{note}\n工具会把写入暂存起来并返回 pending_id——"
+                           "把技能名与一行摘要报给用户，让他用 `misaka skills pending` "
+                           "查看、`misaka skills approve <名>` 批准。")
             await ctx.sendUserMessage(prompt)
 
         harn.registerCommand("learn", {

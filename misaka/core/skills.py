@@ -168,6 +168,21 @@ def load_skills(options: LoadSkillsOptions) -> LoadSkillsResult:
     return LoadSkillsResult(skills=list(skill_map.values()), diagnostics=[*diagnostics, *collision_diagnostics])
 
 
+_INDEX_GENERATION = 0
+
+
+def invalidate_skills_cache() -> None:
+    """技能盘上变了——让各会话的技能索引在下次取用时重扫（hermes
+    clear_skills_system_prompt_cache 同位）。此前 misaka 的索引是会话启动时的
+    快照：沉淀完当前会话看不见新技能，而 skills_list 工具能看见，两个来源不一致。"""
+    global _INDEX_GENERATION
+    _INDEX_GENERATION += 1
+
+
+def skills_cache_generation() -> int:
+    return _INDEX_GENERATION
+
+
 # 系统提示技能索引里的 description 上限（hermes SKILL_PROMPT_DESC_LIMIT 同值）。
 # 索引每会话常驻，超出部分截断——learn_prompt 的 HARDLINE「≤60 字符」正是据此，
 # 此前 misaka 抄了纪律没抄机制，那条要求一直悬空（2026-08-20 用户裁定补齐）。

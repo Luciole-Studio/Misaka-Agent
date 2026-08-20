@@ -495,48 +495,68 @@ def main():
                               if _os.path.isdir(_os.path.join(staging, d)))
 
             if args.op == "pending":
-                names = _staged()
                 print(f"写权档：{skill_write.write_mode()}（宪法 D2 缺省 forbid）")
-                if not names:
-                    print("暂存区没有待审技能")
-                from misaka.orchestration.skill_linter import format_findings, lint_skill
-                for n in names:
-                    md = _os.path.join(staging, n, "SKILL.md")
-                    desc = ""
-                    if _os.path.isfile(md):
-                        from misaka.utils.frontmatter import parse_frontmatter
-                        desc = str((parse_frontmatter(
-                            open(md, encoding="utf-8-sig").read()).frontmatter or {}
-                        ).get("description") or "")
-                    print(f"  {n}  {desc}")
-                    # 人审要看见检查结果（顾问层，不阻断批准）
-                    print(format_findings(lint_skill(_os.path.join(staging, n))))
-                    print(f"    批准：misaka skills approve {n} --as {args.role}")
+                records = skill_write.list_pending()
+                legacy = _staged()
+                if not records and not legacy:
+                    print("没有待审技能")
+                from misaka.orchestration.skill_linter import format_findings, lint_content
+                for r in records:
+                    payload = r.get("payload") or {}
+                    print(f"  [{r['id']}] {r['summary']}  （{r['origin']} 提交）")
+                    if payload.get("content"):
+                        # 人审要看见检查结果（顾问层，不阻断批准）
+                        print(format_findings(lint_content(payload["content"])))
+                    print(f"    批准：misaka skills approve {r['id']}")
+                for n in legacy:      # 兼容目录形态的旧暂存
+                    print(f"  [目录] {n}    批准：misaka skills approve {n} --as {args.role}")
             elif args.op == "approve":
                 if not args.name:
-                    sys.exit("要批准哪个：misaka skills approve <技能名>")
-                src = _os.path.join(staging, args.name)
-                if not _os.path.isdir(src):
-                    sys.exit(f"暂存区没有「{args.name}」")
-                dst = _os.path.join(live, args.name)
-                before = skill_write.snapshot(dst)
-                _os.makedirs(live, exist_ok=True)
-                if _os.path.isdir(dst):
-                    _shutil.rmtree(dst)
-                _shutil.copytree(src, dst)
-                _shutil.rmtree(src)
-                eid = skill_write.record("approve", args.name, before=before, after_root=dst,
-                                         evidence={"from": "pending", "role": args.role})
-                print(f"已批准并落位：{dst}（总账 {eid}）")
+                    sys.exit("要批准哪个：misaka skills approve <pending_id 或技能名>")
+                from misaka.orchestration import skill_manage
+                record = skill_write.get_pending(args.name) or next(
+                    (r for r in skill_write.list_pending()
+                     if (r.get("payload") or {}).get("name") == args.name), None)
+                if record is not None:
+                    # 重放已批准的写入：绕过闸，但校验/扫描/记账一个不少（hermes 同款）
+                    result = skill_manage.apply_pending(record["payload"])
+                    if not result.get("success"):
+                        sys.exit(f"重放失败：{result.get('error')}")
+                    skill_write.discard_pending(record["id"])
+                    print(f"已批准并落位：{result.get('path') or result.get('message')}")
+                else:
+                    src = _os.path.join(staging, args.name)
+                    if not _os.path.isdir(src):
+                        sys.exit(f"没有待审的「{args.name}」")
+                    dst = _os.path.join(live, args.name)   # 目录形态旧暂存
+                    before = skill_write.snapshot(dst)
+                    _os.makedirs(live, exist_ok=True)
+                    if _os.path.isdir(dst):
+                        _shutil.rmtree(dst)
+                    _shutil.copytree(src, dst)
+                    _shutil.rmtree(src)
+                    eid = skill_write.record("approve", args.name, before=before,
+                                             after_root=dst,
+                                             evidence={"from": "pending", "role": args.role})
+                    print(f"已批准并落位：{dst}（总账 {eid}）")
             elif args.op == "reject":
                 if not args.name:
-                    sys.exit("要弃审哪个：misaka skills reject <技能名>")
-                src = _os.path.join(staging, args.name)
-                if not _os.path.isdir(src):
-                    sys.exit(f"暂存区没有「{args.name}」")
-                _shutil.rmtree(src)
-                skill_write.record("reject", args.name, evidence={"role": args.role})
-                print(f"已弃审并删除暂存：{args.name}")
+                    sys.exit("要弃审哪个：misaka skills reject <pending_id 或技能名>")
+                record = skill_write.get_pending(args.name) or next(
+                    (r for r in skill_write.list_pending()
+                     if (r.get("payload") or {}).get("name") == args.name), None)
+                if record is not None:
+                    skill_write.discard_pending(record["id"])
+                    skill_write.record("reject", (record.get("payload") or {}).get("name", ""),
+                                       evidence={"pending_id": record["id"]})
+                    print(f"已弃审：{record['summary']}")
+                else:
+                    src = _os.path.join(staging, args.name)
+                    if not _os.path.isdir(src):
+                        sys.exit(f"没有待审的「{args.name}」")
+                    _shutil.rmtree(src)
+                    skill_write.record("reject", args.name, evidence={"role": args.role})
+                    print(f"已弃审并删除暂存：{args.name}")
             elif args.op == "ledger":
                 rows = skill_write.entries(limit=30)
                 if not rows:
