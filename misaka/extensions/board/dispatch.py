@@ -124,10 +124,19 @@ def _pid_alive(pid):
 
 
 def reconcile(con):
+    import time as _time
+
+    from misaka.extensions.board.sister_runtime import _claimer_alive
     from misaka.extensions.subagent.child import PROCESS_GROUP_IDENTITY
     from misaka.orchestration import processes as process_tree
 
+    now = int(_time.time())
     for t in db.by_status(con, "running"):
+        expires = t["claim_expires"]
+        if expires is not None and int(expires) >= now and _claimer_alive(t["claim_lock"]):
+            # sister_runtime 同款守卫（审查 2026-08-20 补齐）：租约有效且认领者
+            # 活着＝回合边界常态窗口，抢收会白丢一轮产出还误记崩溃
+            continue
         stored = str(t["worker_identity"] or "")
         if stored.startswith(PROCESS_GROUP_IDENTITY):
             # 与 sister_runtime 同款纪律：带组身份的孤儿要先证明组空才许回收

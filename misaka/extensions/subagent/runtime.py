@@ -2061,6 +2061,11 @@ class SubagentManager:
             failure = task.error or error_message or f"request {stop_reason}"
             if task.background:
                 task.result = None
+            else:
+                # 镜像行为（D18）：前台分身按 completed 收——但失败详情不许蒸发
+                #（审查 2026-08-20：此前 error 置 None 彻底静默）
+                logger.warning("前台分身 %s 的回合以错误收场（按镜像语义记 completed）：%s",
+                               task.id, failure)
             await self._finish(
                 task,
                 "failed" if task.background else "completed",
@@ -2282,18 +2287,21 @@ class SubagentManager:
                 for tool in source
                 if (base := tool.split("(", 1)[0].strip())
             ]
-            if task.definition.memory:
-                denied = {
-                    spec.split("(", 1)[0].strip().casefold()
-                    for spec in (task.definition.disallowed_tools or [])
-                }
-                if "*" not in denied:
-                    normalized.extend(
-                        tool
-                        for tool in ("read", "edit", "write")
-                        if tool not in denied
-                    )
-            tools = list(dict.fromkeys([*normalized, *MANAGEMENT_TOOLS]))
+            denied = {
+                spec.split("(", 1)[0].strip().casefold()
+                for spec in (task.definition.disallowed_tools or [])
+            }
+            if task.definition.memory and "*" not in denied:
+                normalized.extend(
+                    tool
+                    for tool in ("read", "edit", "write")
+                    if tool not in denied
+                )
+            # frontmatter 显式 disallowedTools 是硬 deny，管理四工具不豁免
+            #（审查 2026-08-20：曾无条件追加，explorer 可递归生出带 write 的分身）
+            tools = list(dict.fromkeys(
+                [*normalized,
+                 *(t for t in MANAGEMENT_TOOLS if t.casefold() not in denied)]))
             flags.extend(["-t", ",".join(tools)])
         for skill in self._skill_paths(task.definition):
             flags.extend(["--skill", skill])

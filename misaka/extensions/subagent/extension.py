@@ -430,7 +430,9 @@ async def route_to_children(to: str, message: str, _summary: str, ctx: Any):
             managers.discard(manager)
             continue
         try:
-            if manager._find_task(to, ctx) is None:  # noqa: SLF001
+            # 不传 ctx：route 只找活任务（内存/已绑定盘面）。带 ctx 会让空白
+            # manager 被绑定成调用方会话，毒化同进程并发会话（审查 2026-08-20）
+            if manager._find_task(to) is None:  # noqa: SLF001
                 continue
         except RuntimeError:  # 别的会话的管理器：归属校验抛错＝不是它的，跳过而不是炸整个工具
             continue

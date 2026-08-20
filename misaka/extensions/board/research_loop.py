@@ -119,7 +119,7 @@ def settle_done_cards(con, cfg, worker, *, project):
             con, store, t, cfg, worker, evidence=evidence,
             usage_db=cfg.get("db"), usage_generation=gen,
             usage_token_cap=cfg.get("token_cap"))
-        canon.dedup(con, store, fids + gids)
+        canon.dedup(con, store, fids + gids, project=t["project"])
         spike_ids, dropped, cerr = critic.critique_task(
             con, t, cfg, worker, extra_nodes=design,
             usage_db=cfg.get("db"), usage_generation=gen,

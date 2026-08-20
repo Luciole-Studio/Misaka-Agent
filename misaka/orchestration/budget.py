@@ -6,6 +6,7 @@
 import json
 import os
 import secrets
+import sqlite3
 import time
 
 DEFAULT_CAP = int(os.environ.get("MISAKA_TOKEN_CAP", "0"))  # 0 = 不设顶
@@ -97,16 +98,18 @@ def reserved(con):
             con.execute("RELEASE SAVEPOINT misaka_budget_expiry")
         else:
             con.commit()
-    except Exception:  # caller-owned legacy/in-memory ledgers may lack the table
+    except sqlite3.OperationalError as e:
         try:
             if nested:
                 con.execute("ROLLBACK TO SAVEPOINT misaka_budget_expiry")
                 con.execute("RELEASE SAVEPOINT misaka_budget_expiry")
             else:
                 con.rollback()
-        except Exception:
+        except Exception:  # noqa: BLE001 - 回滚失败不掩盖原错
             pass
-        return 0
+        if "no such table" in str(e):
+            return 0   # caller-owned legacy/in-memory ledgers may lack the table
+        raise   # 锁竞争/IO 错吞成 0 会让账本最忙时对预留量失明（审查 2026-08-20）
     return int(row[0] or 0)
 
 

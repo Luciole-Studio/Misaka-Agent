@@ -427,9 +427,11 @@ async def amain() -> int:
         os.environ.get("MISAKA_SUBAGENT_DISALLOWED_TOOLS")
     )
     if disallowed_tools:
+        denied = {t.casefold() for t in disallowed_tools}
         session.setDisallowedToolsByName(
             disallowed_tools,
-            alwaysAllowed=list(MANAGEMENT_TOOLS),
+            # 显式 deny 优先：frontmatter 禁掉的管理工具不再被 always-allow 复活
+            alwaysAllowed=[t for t in MANAGEMENT_TOOLS if t.casefold() not in denied],
         )
 
     if os.environ.get("MISAKA_SUBAGENT_INHERIT_ALL_TOOLS") == "1":

@@ -381,7 +381,7 @@ def main():
             if err and not fids and not gids:
                 print(f"{r['id']}  收割失败: {err}")
                 continue
-            merged = canon.dedup(con, store, fids + gids)
+            merged = canon.dedup(con, store, fids + gids, project=r["project"])
             print(f"{r['id']}  发现 {len(fids)} 缺口 {len(gids)}" +
                   (f"  判重合流 {len(merged)}" if merged else "") + (f"  ⚠️ {err}" if err else ""))
             for dup, keep, sim in merged:

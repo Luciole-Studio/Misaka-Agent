@@ -36,8 +36,10 @@ def cosine(a, b):
     return dot / (na * nb) if na and nb else 0.0
 
 
-def dedup(con, store, new_ids):
-    """给新节点算嵌入，与同类既有节点比对；超阈值即合流。返回 [(dup, canon, sim)]。"""
+def dedup(con, store, new_ids, project=None):
+    """给新节点算嵌入，与同类既有节点比对；超阈值即合流。返回 [(dup, canon, sim)]。
+    project 给了就只在本课题内判重——跨课题合流会把 A 课题的缺口挪进 B 的 canon，
+    改变另一课题的前沿与饱和读数（审查 2026-08-20，与 project 维度根治对齐）。"""
     merged = []
     for nid in new_ids:
         n = store.get(con, nid)
@@ -51,7 +53,7 @@ def dedup(con, store, new_ids):
             vec = got[0]
             con.execute("UPDATE nodes SET embedding=? WHERE id=?", (json.dumps(vec), nid))
         best, best_sim = None, 0.0
-        for other in store.nodes(con, kind=n["kind"], status="open"):
+        for other in store.nodes(con, kind=n["kind"], status="open", project=project):
             if other["id"] == nid or not other["embedding"]:
                 continue
             sim = cosine(vec, json.loads(other["embedding"]))
