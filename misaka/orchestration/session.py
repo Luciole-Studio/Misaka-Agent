@@ -88,7 +88,7 @@ async def dispose(runtime):
         return
     try:
         await asyncio.wait_for(runtime.dispose(), 30)
-    except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         pass
 
 
@@ -102,6 +102,7 @@ async def run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
                       extension_factories=None):
     """一轮会话：装配 → prompt → 收尾。返回 {text, timed_out, error}。"""
     old_env = {}
+    # ponytail: 改进程级环境（一进程一会话的现状安全）；进程内并行会话前必须改注入式
     for k, v in (env or {}).items():  # 工具注册函数在装配时读 MISAKA_* 环境变量
         old_env[k] = os.environ.get(k)
         os.environ[k] = v
@@ -151,7 +152,7 @@ async def run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
             timed_out = True
             try:
                 await asyncio.wait_for(session.abort(), 10)
-            except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 pass
         text, err = None, None
         msgs = session.state.messages or []

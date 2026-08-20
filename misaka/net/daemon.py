@@ -475,6 +475,9 @@ class Daemon:
                 continue
             try:
                 writer.write(line)
+                # 挂死的订阅者（面板僵住不读）：缓冲无界堆积前摘除（常驻进程内存面）
+                if writer.transport.get_write_buffer_size() > 4 * 1024 * 1024:
+                    self._attached.pop(writer, None)
             except Exception:  # noqa: BLE001 - 订阅者死了就摘掉
                 self._attached.pop(writer, None)
 
@@ -847,7 +850,6 @@ class Daemon:
                 raise ValueError(f"没有这个格子：{params['id']}")
             text = pane.buf.decode("utf-8", errors="replace")
             if params.get("strip"):
-                import re
                 text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|[\r\x00]", "", text)
             lines = params.get("lines")
             if lines:

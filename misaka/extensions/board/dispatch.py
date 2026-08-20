@@ -401,25 +401,23 @@ def judge_task(con, t, cfg, verify_token=None, generation=None):
     ):
         return
     ws = t["workspace"]
-    verified_artifacts = None
-    checker = getattr(worker, "check_report", None)
-    if callable(checker):
-        valid, report_or_reason = checker(ws or "")
-        if not valid:
-            if db.back_to_ready(
-                con, t["id"], verify_token, generation=generation
-            ):
-                # verify_reclaimed ≠ reclaimed：验收侧打回不算崩溃，不进白死计数
-                db.add_event(
-                    con,
-                    t["id"],
-                    "verify_reclaimed",
-                    {"reason": f"verifying report invalid: {report_or_reason}"[:500]},
-                    generation=generation,
-                )
-            return
-        verified_artifacts = list(report_or_reason.get("artifacts", []))
-    report_limit = int(getattr(worker, "MAX_REPORT_BYTES", 256 * 1024))
+    # 红队闸前 keystone：直调，缺了就该炸（曾 getattr 防御＝静默跳闸，审查 2026-08-20）
+    valid, report_or_reason = worker.check_report(ws or "")
+    if not valid:
+        if db.back_to_ready(
+            con, t["id"], verify_token, generation=generation
+        ):
+            # verify_reclaimed ≠ reclaimed：验收侧打回不算崩溃，不进白死计数
+            db.add_event(
+                con,
+                t["id"],
+                "verify_reclaimed",
+                {"reason": f"verifying report invalid: {report_or_reason}"[:500]},
+                generation=generation,
+            )
+        return
+    verified_artifacts = list(report_or_reason.get("artifacts", []))
+    report_limit = worker.MAX_REPORT_BYTES
     try:
         with open(os.path.join(ws, "report.json"), "rb") as f:
             report_bytes = f.read(report_limit + 1)

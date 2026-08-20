@@ -142,6 +142,7 @@ def build_tree(p):
 # ── 文件树存储 ────────────────────────────────────────────────────
 
 def _page_path(ddir, page):
+    # ponytail: 4 位补零＝万页顶；超了字典序会乱，真有再升位
     return os.path.join(ddir, "pages", f"p{page:04d}.txt")
 
 

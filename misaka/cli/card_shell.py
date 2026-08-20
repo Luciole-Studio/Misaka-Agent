@@ -32,7 +32,7 @@ def continue_flags(session_file, session_dir):
 
 
 def launch(task_id, resume_only=False):
-    con = db.connect(os.path.expanduser(CFG["db"]))
+    con = db.connect(CFG["db"])   # connect 自会 expanduser
     row = db.get(con, task_id)
     if row is None:
         sys.exit(f"没有这张卡：{task_id}")

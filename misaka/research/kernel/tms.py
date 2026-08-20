@@ -1,6 +1,7 @@
 """真值维护：证据塌了，连坐的结论自动找出来重查——只重查最小脏集，不全局重跑。
 
-节点靠 from_task 边挂在卡上（正当化），靠 supports/contradicts 相互依赖。
+节点靠 from_task 边挂在卡上（正当化），靠 supports 边相互依赖
+（contradicts 不传播——反驳者塌了不该连坐被反驳者）。
 撤回一张卡 → 它的节点 stale → 沿 supports 边传播 → 生成复核卡。
 """
 

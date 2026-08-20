@@ -18,12 +18,6 @@ class FreshTailBoundary:
     tool_group_extended: bool = False
 
 
-def _tool_call_id(tc):
-    if isinstance(tc, dict):
-        return tc.get("id") or (tc.get("function") or {}).get("id")
-    return None
-
-
 def _assistant_group_start(messages, start):
     """边界在 tool 结果上→向前找发起的 assistant；跨 user/system 立即放弃。"""
     if start <= 0 or start >= len(messages):

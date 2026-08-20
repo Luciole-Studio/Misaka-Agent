@@ -120,7 +120,7 @@ def register(harn, *, sender, route=None, receive=False):
 
     async def execute(tool_call_id, raw, signal, on_update, ctx):
         args = raw if isinstance(raw, SendMessageParams) else SendMessageParams(**(raw or {}))
-        addr = args.to.strip()
+        addr = args.to.strip().replace("_", "-")   # 地址拼写单轨（route 仍用原文找分身）
         known = {"last-order"} | sisters()
         if addr in known and addr != sender:
             # 在册地址走 DM 直投（hermes Bot Mode）：后台唤醒对方联络会话跑一轮，

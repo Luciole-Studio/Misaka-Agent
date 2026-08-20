@@ -86,8 +86,7 @@ def doctor(db_path):
         orphan = con.execute(
             """SELECT COUNT(*) FROM summary_nodes n, json_each(n.source_ids) j
                WHERE n.source_type='messages'
-               AND CAST(j.value AS INTEGER) NOT IN (SELECT store_id FROM messages)
-               LIMIT 4096""").fetchone()[0]
+               AND CAST(j.value AS INTEGER) NOT IN (SELECT store_id FROM messages)""").fetchone()[0]
         if orphan:
             add("node_lineage", "warn",
                 f"{orphan} 条血统指向不存在的消息（展开会缺行，摘要仍可用）",

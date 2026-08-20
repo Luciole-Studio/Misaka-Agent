@@ -466,10 +466,6 @@ def bind(profile_dir: str, role: str):
     return bound
 
 
-def register(harn):
-    """Legacy factory: capture process-global role values once."""
-
-    _register_bound(harn, McpRoleContext.capture())
 
 
 
@@ -564,7 +560,7 @@ if __name__ == "__main__":
     os.environ["MISAKA_MCP_CONFIG"] = p
     os.environ["MISAKA_WHO"] = "10032"
     h = FakeHarn()
-    assert register(h) is None, "工厂不许返回协程——harn 会 await 它，慢 server 卡死启动"
+    assert _register_bound(h, McpRoleContext.capture()) is None, "工厂不许返回协程——harn 会 await 它，慢 server 卡死启动"
     assert "mcp" in h.cmds, h.cmds
     class _P:  returncode = None
     class _C:
@@ -584,7 +580,7 @@ if __name__ == "__main__":
     assert "session_start" in h.handlers and "session_shutdown" in h.handlers, h.handlers
     os.environ["MISAKA_MCP_CONFIG"] = "/不存在/mcp.json"
     h2 = FakeHarn()
-    assert register(h2) is None and not h2.cmds, "无配置时应整个不启用"
+    assert _register_bound(h2, McpRoleContext.capture()) is None and not h2.cmds, "无配置时应整个不启用"
     del os.environ["MISAKA_WHO"]
 
     # ⑤ 缓存：指纹一致命中、变了失效

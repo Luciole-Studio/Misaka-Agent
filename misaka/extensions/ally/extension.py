@@ -200,9 +200,12 @@ def register(harn):
         snippet="看协力者格子的输出",
         parameters=PeerOutParams)
     async def misaka_ally_output(tool_call_id, params, signal, on_update, ctx):
+        from misaka.research.kernel import guard
         out = await asyncio.to_thread(_net().request, "pane.read", {
             "id": params.pane_id, "lines": params.lines, "strip": True})
-        return _text(out.get("text") or "(没有输出)")
+        # 宪法 A1 点名：协力者输出全额适用第 5 条——包裹，不裸回
+        return _text(guard.untrusted(f"ally-pane:{params.pane_id}",
+                                     out.get("text") or "(没有输出)"))
 
     class PeerStopParams(BaseModel):
         model_config = {"extra": "forbid"}

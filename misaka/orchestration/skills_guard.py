@@ -1203,7 +1203,7 @@ if __name__ == "__main__":
 
     cached, prov = scan_skill_cached(ok, source="project-local",
                                      cache_dir=root / "cache")
-    assert cached.verdict == "safe" and prov.get("cache") in ("miss", "hit", None) or True
+    assert cached.verdict == "safe" and prov.get("cache") in ("miss", "hit", None)
     again, prov2 = scan_skill_cached(ok, source="project-local",
                                      cache_dir=root / "cache")
     assert again.verdict == "safe", "内容哈希缓存复扫一致"

@@ -28,7 +28,8 @@ def skills(profile_dir):
     d = os.path.join(profile_dir, "skills")
     if not os.path.isdir(d):
         return []
-    return [os.path.join(d, x) for x in sorted(os.listdir(d)) if not x.startswith(".")]
+    return [os.path.join(d, x) for x in sorted(os.listdir(d))
+            if not x.startswith(".") and os.path.isdir(os.path.join(d, x))]   # 杂文件会炸下游 copytree
 
 
 def config_yaml(profile_dir):

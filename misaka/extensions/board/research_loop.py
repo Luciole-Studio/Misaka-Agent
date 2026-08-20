@@ -242,6 +242,11 @@ async def _synthesize(con, cfg, runner, *, project, assignee, context,
             return {"task_id": tid, "status": row["status"]}
         if stop_event and stop_event.is_set():
             return {"task_id": tid, "status": row["status"], "note": "手动停止，未等综合完成"}
+        if cfg.get("token_cap"):
+            from misaka.orchestration import budget
+            if budget.status(con, cfg["token_cap"])["mode"] == "stop":
+                # 综合运行中预算触顶：launch 的异常被 gather 吞掉，不设出口就 2s 死转
+                return {"task_id": tid, "status": row["status"], "note": "预算触顶，综合未完成"}
         await runner.launch_ready(context=context, tool_call_id=tool_call_id,
                                   task_ids=[tid])
         await asyncio.sleep(poll_seconds)

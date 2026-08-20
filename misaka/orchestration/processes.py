@@ -193,6 +193,14 @@ def terminate(pid: int, captured: list[ProcessToken] | None = None) -> None:
             process.terminate()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
+    for process in processes:
+        # 冻结态进程不响应 SIGTERM（POSIX：停住的进程只认 KILL/CONT）——不补
+        # SIGCONT 则优雅终止段永远走不到，每次必空等满 2s 再 KILL（审查 2026-08-20）。
+        # TERM 已挂起，CONT 一到即先递送，逃逸窗口不复开。
+        try:
+            process.resume()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
     _, alive = psutil.wait_procs(processes, timeout=2)
     for process in alive:
         try:

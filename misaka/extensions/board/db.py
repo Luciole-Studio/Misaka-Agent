@@ -371,9 +371,9 @@ def set_runtime(con, task_id, agent_id, session_file, generation=None, claim_loc
     if generation is not None:
         clauses.append("generation=?")
         values.append(generation)
-    if claim_lock is not None:
-        clauses.extend(["status='running'", "claim_lock=?"])
-        values.append(claim_lock)
+    if claim_lock is not None:   # 栅栏纪律与 set_workspace/set_pid 同款（含租约有效期）
+        clauses.extend(["status='running'", "claim_lock=?", "claim_expires>=?"])
+        values.extend([claim_lock, int(time.time())])
     cur = con.execute(
         f"UPDATE tasks SET agent_id=?, session_file=? WHERE {' AND '.join(clauses)}",
         tuple(values),

@@ -43,7 +43,7 @@ from misaka.extensions.subagent.runtime import (
 
 TERMINAL_BOARD_STATUSES = frozenset({"done", "failed", "stopped"})
 ACTIVE_BOARD_STATUSES = frozenset({"running", "verifying", "finalizing"})
-PROCESS_GROUP_IDENTITY = "process-group|"
+from misaka.extensions.subagent.child import PROCESS_GROUP_IDENTITY  # wire 常量单源
 STATUS_MAP = {
     "ready": "pending",
     "running": "running",

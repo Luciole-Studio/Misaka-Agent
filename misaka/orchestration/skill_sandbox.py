@@ -47,7 +47,12 @@ def readonly_copies(skill_dirs, dest_root):
         if os.path.exists(dst):
             cleanup(dst)   # 上一轮的只读副本裸 rmtree 删不掉（只读子目录拒 unlink），
             #              残骸会让 copytree 抛 FileExistsError——先加写权再删
-        shutil.copytree(d, dst, symlinks=False, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+        def _ignore(src, names, _pat=shutil.ignore_patterns(".git", "__pycache__")):
+            # 软链不收：SIZE_CAP 用 os.walk 计量（不跟链），copytree 跟链复制会绕过
+            # 上限（链到大目录/链环炸盘，审查 2026-08-20）；技能内链出去的本就不该带
+            return set(_pat(src, names)) | {
+                n for n in names if os.path.islink(os.path.join(src, n))}
+        shutil.copytree(d, dst, symlinks=False, ignore=_ignore)
         _strip_write(dst)
         copies.append(dst)
     return copies

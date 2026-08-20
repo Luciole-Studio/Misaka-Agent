@@ -2,8 +2,8 @@
 
 视觉语言对应上游：主干=判定色时长条（宽∝耗时，条间 ─ 连接），支路=上下泳道行
 （↳出程＋条＋标注＋↩折返），┊=换轮分隔，⏸=空闲折叠缝，底行=墙钟刻度。
-上游的悬停/点击在终端换成键盘：←→ 选步（详情区常驻显示选中步），f 只看失败/
-重试，/ 搜索命令与返回，+/- 以选中步为中心缩放，h/l 平移，0 复位，q 退出。
+上游的悬停/点击在终端换成键盘：←→（或 h/l）选步（详情区常驻显示选中步），
+f 只看失败/重试，/ 搜索命令与返回，+/- 以选中步为中心缩放，0 复位，q 退出。
 --watch＝现场文件变了自动重析重画（正在跑的卡实时生长）。
 
 帧渲染是纯函数（render_frame），交互循环只管键与重画——selfcheck 直接断言帧。
@@ -223,9 +223,14 @@ def render_inventory(data, sel_idx, width):
                        ("deadend", by["deadend"])) if v)
         return f"{g['n']} 步·{fmt_t(g['T'])}" + (f" {seg}" if seg else "")
 
+    from misaka.cli.herdr_ui import display_width
+
+    def pad(s, w):   # CJK 感知补白（f-string 按字符数补会让含全宽字的列错位）
+        return s + " " * max(1, w - display_width(s))
+
     w1, w2 = 10, 26
     out = ["支路盘点（按轮次）——↑↓选轮 Enter缩放到该轮 i返回", ""]
-    out.append(f"{'轮次':<{w1}}{'第 1 会话':<{w2}}{'第 2 会话':<{w2}}差额")
+    out.append(pad("轮次", w1) + pad("第 1 会话", w2) + pad("第 2 会话", w2) + "差额")
     ta = {"n": 0, "T": 0.0}
     tb = {"n": 0, "T": 0.0}
     for i, turn in enumerate(turns):
@@ -237,15 +242,15 @@ def render_inventory(data, sel_idx, width):
             tb["n"] += b["n"]
             tb["T"] += b["T"]
         diff = fmt_det_diff((b["T"] if b else 0) - (a["T"] if a else 0), bool(a or b))
-        line = f"{'第 %d 轮' % turn:<{w1}}{cell(a):<{w2}}{cell(b):<{w2}}{diff}"
+        line = pad(f"第 {turn} 轮", w1) + pad(cell(a), w2) + pad(cell(b), w2) + diff
         out.append(f"{INV}{line}{RESET}" if i == sel_idx else line)
     total_diff = (fmt_det_diff(tb["T"] - ta["T"], True)
                   if ta["n"] + tb["n"] > 0 else "两边都无支路")
-    out.append(f"{'合计':<{w1}}{'%d 步·%s' % (ta['n'], fmt_t(ta['T'])):<{w2}}"
-               f"{'%d 步·%s' % (tb['n'], fmt_t(tb['T'])):<{w2}}{total_diff}")
+    out.append(pad("合计", w1) + pad(f"{ta['n']} 步·{fmt_t(ta['T'])}", w2)
+               + pad(f"{tb['n']} 步·{fmt_t(tb['T'])}", w2) + total_diff)
     out.append("")
     out.append(DIM + "支路耗时为墙钟；✗失败 ↻无效重试 ·扑空；只一边有的轮显 —（缺席本身是信号）" + RESET)
-    return out[: max(4, 100)], turns
+    return out, turns
 
 
 def detail_lines(n, time_map, width, is_main):
@@ -504,6 +509,8 @@ def _interactive(paths, data, watch):
                 view = None
                 if not playing:
                     t_cursor = None
+    except KeyboardInterrupt:   # Ctrl-C（cbreak 保留 ISIG）＝干净退出，不甩栈
+        return 0
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         sys.stdout.write("\n")

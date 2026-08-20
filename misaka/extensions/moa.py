@@ -49,7 +49,7 @@ def _reference_once(slot, prompt, *, advisor_dir, timeout, usage_kw):
     try:
         _o, text, err = worker.run_llm_json(
             advisor_dir, prompt, slot["provider"], slot["model"],
-            model=slot["model"], timeout=timeout, raw=True, bare=True, **usage_kw)
+            timeout=timeout, raw=True, bare=True, **usage_kw)
         if err:
             return label, f"[failed: {err}]"
         return label, (text or "").strip() or "(空响应)"
@@ -93,7 +93,7 @@ def synthesize(preset, user_prompt, outputs, *, roles_root, usage_kw):
     try:
         _o, synthesis, err = worker.run_llm_json(
             synth_dir, prompt, agg["provider"], agg["model"],
-            model=agg["model"], timeout=DEFAULT_REFERENCE_TIMEOUT,
+            timeout=DEFAULT_REFERENCE_TIMEOUT,
             raw=True, bare=True, **usage_kw)
         if err:
             synthesis = ""

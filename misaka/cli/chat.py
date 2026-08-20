@@ -105,7 +105,7 @@ def assembly(who, *, cwd=None):
         from misaka.orchestration import skill_layers
         for sk in skill_layers.skills_stack(prof, cwd=cwd or os.getcwd()):
             extra += ["--skill", sk]      # 三层栈：项目（信任＋扫描）→ 角色 → 共享
-        return prof, soul, "claude-sonnet-5", extra
+        return prof, soul, CFG["default_model"], extra   # 尊重 MISAKA_MODEL（与跑卡路径同轨）
     prof = os.path.join(CFG["roles_root"], "last_order")
     _migrate_lo_soul(prof)
     soul = os.path.join(prof, "SOUL.md")

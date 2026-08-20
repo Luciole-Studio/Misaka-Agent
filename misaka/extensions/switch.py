@@ -14,10 +14,8 @@ import sys
 
 
 def _roster():
-    root = os.path.expanduser("~/.misaka/profiles/sisters")
-    sisters = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))) \
-        if os.path.isdir(root) else []
-    return ["last-order"] + sisters
+    from misaka.config import sisters
+    return ["last-order"] + sorted(sisters())
 
 
 def _current():
@@ -99,9 +97,14 @@ def register(harn):
 
 
 if __name__ == "__main__":
+    import tempfile
+
+    from misaka.config import CFG
+    _tmp = tempfile.mkdtemp()   # 沙箱名册：不读真实用户目录（换机自检也绿）
+    CFG["profiles_root"] = os.path.join(_tmp, "sisters")
+    os.makedirs(os.path.join(_tmp, "sisters", "10032"))
     r = _roster()
-    assert r[0] == "last-order" and len(r) >= 2, r
-    assert "10032" in r, r
+    assert r == ["last-order", "10032"], r
     assert _current() == "last-order"
     os.environ["MISAKA_WHO"] = "10032"
     assert _current() == "10032"
