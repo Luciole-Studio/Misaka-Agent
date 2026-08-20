@@ -44,6 +44,16 @@ def load_skills_config():
         return {}
 
 
+def disabled_skill_names():
+    """`~/.misaka/skills.json` 的 `disabled` 清单（按技能目录名）。
+    此前 misaka 完全没有「暂时别用这个技能」的开关——技能会随 /learn 持续变多，
+    /skill 清单只会膨胀（hermes skills.disabled 同款，平台维度不适用故不移植）。"""
+    raw = load_skills_config().get("disabled")
+    if isinstance(raw, str):        # 裸标量当单元素（hermes _normalize_skill_names 同款）
+        raw = [raw]
+    return {str(x).strip() for x in raw or [] if str(x).strip()}
+
+
 def _write_skills_config(cfg):
     path = config_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -265,8 +275,12 @@ def skills_stack(profile_dir, cwd=None):
             seen.add(key)
             out.append(str(skill_dir))
 
+    disabled = disabled_skill_names()
+
     def _add_user_skill(skill_dir):
         """角色层/共享层：扫描后照常加载（只告警不拦，见 warn_if_risky_user_skill）。"""
+        if Path(skill_dir).name in disabled:
+            return
         warn_if_risky_user_skill(skill_dir)
         _add(skill_dir)
 

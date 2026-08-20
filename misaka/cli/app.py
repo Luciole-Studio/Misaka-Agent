@@ -499,6 +499,7 @@ def main():
                 print(f"写权档：{skill_write.write_mode()}（宪法 D2 缺省 forbid）")
                 if not names:
                     print("暂存区没有待审技能")
+                from misaka.orchestration.skill_linter import format_findings, lint_skill
                 for n in names:
                     md = _os.path.join(staging, n, "SKILL.md")
                     desc = ""
@@ -508,6 +509,8 @@ def main():
                             open(md, encoding="utf-8-sig").read()).frontmatter or {}
                         ).get("description") or "")
                     print(f"  {n}  {desc}")
+                    # 人审要看见检查结果（顾问层，不阻断批准）
+                    print(format_findings(lint_skill(_os.path.join(staging, n))))
                     print(f"    批准：misaka skills approve {n} --as {args.role}")
             elif args.op == "approve":
                 if not args.name:
