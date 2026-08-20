@@ -155,6 +155,38 @@ def is_quarantined_project_skill(skill_md):
     return quarantined
 
 
+_USER_SCAN_CACHE = {}
+_USER_SCAN_SOURCE = "user-local"
+
+
+def warn_if_risky_user_skill(skill_dir):
+    """角色层/共享层技能的加载期扫描（2026-08-20 补：此前只有项目层过扫描，
+    `/learn` 自产与手工拷入的技能 100% 绕过 skills_guard）。
+
+    处置与项目层**有意不同**，对齐 hermes 的分层信任：项目层来自克隆的仓，
+    dangerous 即隔离（fail-closed）；用户自己目录里的技能只告警不拦——静默吞掉
+    用户手写的技能比放行更糟，而告警足以让人发现「我拷进来的这个东西有问题」。
+    返回 True＝扫出风险（已告警）。扫描失败在这里 fail-open（不是仓的内容）。"""
+    key = str(skill_dir)
+    cached = _USER_SCAN_CACHE.get(key)
+    if cached is not None:
+        return cached
+    risky = False
+    try:
+        from misaka.orchestration.skills_guard import scan_skill_cached
+        result, _prov = scan_skill_cached(
+            Path(skill_dir), source=_USER_SCAN_SOURCE,
+            cache_dir=Path(os.path.expanduser("~/.misaka/cache/user_skill_scans")))
+        risky = result.verdict == "dangerous"
+        if risky:
+            logger.warning("技能扫出风险（仍会加载——你自己目录里的东西不替你拦）："
+                           "%s — %s", skill_dir, result.summary)
+    except Exception:  # noqa: BLE001 - 用户自有内容 fail-open：扫不动不拦加载
+        logger.debug("用户技能扫描失败（放行）：%s", skill_dir, exc_info=True)
+    _USER_SCAN_CACHE[key] = risky
+    return risky
+
+
 # 扫描剪枝（hermes agent/skill_utils.py:28-51 逐字）：依赖树/虚拟环境/VCS/缓存目录
 # 里的 SKILL.md 不是技能。缺这层剪枝时，克隆仓的 node_modules 里藏一个 SKILL.md
 # 就会被当真技能装载，且按字典序可能排在真技能之前压过它（2026-08-20 实测复现）。
@@ -233,17 +265,22 @@ def skills_stack(profile_dir, cwd=None):
             seen.add(key)
             out.append(str(skill_dir))
 
+    def _add_user_skill(skill_dir):
+        """角色层/共享层：扫描后照常加载（只告警不拦，见 warn_if_risky_user_skill）。"""
+        warn_if_risky_user_skill(skill_dir)
+        _add(skill_dir)
+
     for proj_dir in get_project_skills_dirs(cwd):
         for skill_md in iter_project_skill_files(proj_dir):
             _add(skill_md.parent)
     for d in profiles.skills(profile_dir):
-        _add(d)
+        _add_user_skill(d)
     shared = shared_skills_dir()
     if os.path.isdir(shared):
         for name in sorted(os.listdir(shared)):
             cand = os.path.join(shared, name)
             if os.path.isdir(cand) and not name.startswith("."):
-                _add(cand)
+                _add_user_skill(cand)
     return out
 
 

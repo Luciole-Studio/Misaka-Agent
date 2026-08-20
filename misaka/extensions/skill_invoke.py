@@ -142,10 +142,23 @@ def commands_for(profile_dir):
 
         async def learn_cmd(args, ctx):
             from misaka.orchestration.learn_prompt import build_learn_prompt
+            from misaka.orchestration import skill_write
             target = os.path.join(profile_dir, "skills")
             os.makedirs(target, exist_ok=True)
-            await ctx.sendUserMessage(
-                build_learn_prompt(args or "", target_dir=target))
+            prompt = build_learn_prompt(args or "", target_dir=target)
+            # 宪法 D2：写权闸。forbid/ask 档下技能不直落盘，改为写进暂存区待人审
+            decision, note = skill_write.evaluate_gate()
+            if decision == "stage":
+                staging = os.path.join(
+                    os.path.expanduser("~/.misaka"), "pending", "skills", "workspace")
+                os.makedirs(staging, exist_ok=True)
+                prompt = prompt.replace(target, staging) + (
+                    f"\n\n---\n[写权闸] {note}\n"
+                    f"技能先写进暂存区 `{staging}/<技能名>/`，**不要**写进 "
+                    f"`{target}`——那是活的技能树，须经人审才能落位。"
+                    "写完把技能名与一行摘要报给用户，让他用 "
+                    "`misaka skills pending` 查看、`misaka skills approve <名>` 批准。")
+            await ctx.sendUserMessage(prompt)
 
         harn.registerCommand("learn", {
             "handler": learn_cmd,

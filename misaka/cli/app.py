@@ -135,8 +135,13 @@ def _parser():
     lc = sub.add_parser("lcm", help="无损上下文运维：status 存量 / doctor 只读体检 / backup 热备快照")
     lc.add_argument("op", nargs="?", default="status", choices=["status", "doctor", "backup"])
 
-    sk = sub.add_parser("skills", help="技能三层栈：trust 信任当前仓 / list 看装配栈 / scan 扫描项目技能")
-    sk.add_argument("op", nargs="?", default="list", choices=["trust", "list", "scan"])
+    sk = sub.add_parser("skills", help="技能：trust 信任仓 / list 装配栈 / scan 扫描 / "
+                                       "pending 待审 / approve 批准 / reject 弃审 / "
+                                       "ledger 变更账 / rollback 回滚（宪法 D2）")
+    sk.add_argument("op", nargs="?", default="list",
+                    choices=["trust", "list", "scan", "pending", "approve", "reject",
+                             "ledger", "rollback"])
+    sk.add_argument("name", nargs="?", help="approve/reject：技能名；rollback：总账条目 id")
     sk.add_argument("--dir", help="项目根（缺省＝当前目录向上找 .git）")
     sk.add_argument("--as", dest="role", default="sisters/10032", help="以哪个角色的视角看栈")
 
@@ -476,7 +481,77 @@ def main():
         import os as _os
 
         from misaka.orchestration import skill_layers
-        if args.op == "trust":
+        if args.op in ("pending", "approve", "reject", "ledger", "rollback"):
+            import shutil as _shutil
+
+            from misaka.orchestration import skill_write
+            staging = _os.path.expanduser("~/.misaka/pending/skills/workspace")
+            live = _os.path.join(CFG["roles_root"], args.role, "skills")
+
+            def _staged():
+                if not _os.path.isdir(staging):
+                    return []
+                return sorted(d for d in _os.listdir(staging)
+                              if _os.path.isdir(_os.path.join(staging, d)))
+
+            if args.op == "pending":
+                names = _staged()
+                print(f"写权档：{skill_write.write_mode()}（宪法 D2 缺省 forbid）")
+                if not names:
+                    print("暂存区没有待审技能")
+                for n in names:
+                    md = _os.path.join(staging, n, "SKILL.md")
+                    desc = ""
+                    if _os.path.isfile(md):
+                        from misaka.utils.frontmatter import parse_frontmatter
+                        desc = str((parse_frontmatter(
+                            open(md, encoding="utf-8-sig").read()).frontmatter or {}
+                        ).get("description") or "")
+                    print(f"  {n}  {desc}")
+                    print(f"    批准：misaka skills approve {n} --as {args.role}")
+            elif args.op == "approve":
+                if not args.name:
+                    sys.exit("要批准哪个：misaka skills approve <技能名>")
+                src = _os.path.join(staging, args.name)
+                if not _os.path.isdir(src):
+                    sys.exit(f"暂存区没有「{args.name}」")
+                dst = _os.path.join(live, args.name)
+                before = skill_write.snapshot(dst)
+                _os.makedirs(live, exist_ok=True)
+                if _os.path.isdir(dst):
+                    _shutil.rmtree(dst)
+                _shutil.copytree(src, dst)
+                _shutil.rmtree(src)
+                eid = skill_write.record("approve", args.name, before=before, after_root=dst,
+                                         evidence={"from": "pending", "role": args.role})
+                print(f"已批准并落位：{dst}（总账 {eid}）")
+            elif args.op == "reject":
+                if not args.name:
+                    sys.exit("要弃审哪个：misaka skills reject <技能名>")
+                src = _os.path.join(staging, args.name)
+                if not _os.path.isdir(src):
+                    sys.exit(f"暂存区没有「{args.name}」")
+                _shutil.rmtree(src)
+                skill_write.record("reject", args.name, evidence={"role": args.role})
+                print(f"已弃审并删除暂存：{args.name}")
+            elif args.op == "ledger":
+                rows = skill_write.entries(limit=30)
+                if not rows:
+                    print("总账还是空的")
+                for e in rows:
+                    print(f"{e['ts']}  {e['id']}  {e['actor']:<12} {e['action']:<12} "
+                          f"{e['skill']}  (前{len(e['before'])}/后{len(e['after'])})")
+            else:   # rollback
+                if not args.name:
+                    sys.exit("要回滚哪条：misaka skills rollback <总账id>（先看 ledger）")
+                target = next((e for e in skill_write.entries() if e["id"] == args.name), None)
+                if target is None:
+                    sys.exit(f"总账里没有这条：{args.name}")
+                ok, why = skill_write.rollback(
+                    args.name, _os.path.join(live, target["skill"]))
+                print(why)
+                sys.exit(0 if ok else 1)
+        elif args.op == "trust":
             target = args.dir or skill_layers.find_project_root()
             if not target:
                 print("当前目录不在 git 仓里；用 --dir 指定项目根")
