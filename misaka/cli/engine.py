@@ -412,6 +412,8 @@ def create_runtime_factory(
             }
         )
         settings_manager = services.settingsManager
+        if parsed.useTheme is not None:   # 只覆盖本次运行，不写回设置（pi #7722）
+            settings_manager.applyOverrides({"theme": parsed.useTheme})
         model_registry = services.modelRegistry
         resource_loader = services.resourceLoader
 

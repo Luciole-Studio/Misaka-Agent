@@ -140,6 +140,11 @@ def _parser():
     sk.add_argument("--dir", help="项目根（缺省＝当前目录向上找 .git）")
     sk.add_argument("--as", dest="role", default="sisters/10032", help="以哪个角色的视角看栈")
 
+    ac = sub.add_parser("auth", help="凭据预检：auth check <provider> 看某家认证配没配好")
+    ac.add_argument("op", nargs="?", default="check", choices=["check"])
+    ac.add_argument("provider", nargs="?", help="供应商 id（省略＝列出全部已配置的）")
+    ac.add_argument("--show", action="store_true", help="连解析到的凭据一起打（小心屏幕共享）")
+
     au = sub.add_parser("selftest", help="免疫系统：安慰剂抽验判官（破坏产物看抓不抓得住）")
     au.add_argument("-k", type=int, default=1, help="抽几张已通过的卡")
     au.add_argument("--seed", type=int)
@@ -442,6 +447,31 @@ def main():
         else:
             dest, err = lcm_maint.backup(lcm_db)
             print(err if err else f"已备份：{dest}")
+    elif args.cmd == "auth":
+        # 凭据预检（pi #7152/a261366b）：跑卡前先确认认证配好了，别烧到一半才发现
+        import asyncio as _asyncio
+
+        from misaka.core.auth_storage import AuthStorage
+        storage = AuthStorage.create()
+        targets = [args.provider] if args.provider else sorted(storage.getAll())
+        if not targets:
+            print("没有任何已存凭据（misaka 用的是 provider 配置：见 ~/.misaka/auth.json）")
+            sys.exit(1)
+        bad = 0
+        for provider in targets:
+            status = storage.getAuthStatus(provider)
+            mark = "✓" if status.configured or status.source else "✗"
+            detail = status.source or "未配置"
+            if status.label:
+                detail += f"（{status.label}）"
+            line = f"{mark} {provider}  {detail}"
+            if args.show and (status.configured or status.source):
+                key = _asyncio.run(storage.getApiKey(provider))
+                line += f"  {key}" if key else "  （解析不出凭据）"
+            print(line)
+            if not (status.configured or status.source):
+                bad += 1
+        sys.exit(1 if bad else 0)
     elif args.cmd == "skills":
         import os as _os
 

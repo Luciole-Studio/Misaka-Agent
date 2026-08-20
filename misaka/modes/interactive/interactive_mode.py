@@ -127,6 +127,7 @@ from misaka.modes.interactive.components.scoped_models_selector import (
     ScopedModelsSelectorComponent,
 )
 from misaka.modes.interactive.components.session_selector import SessionSelectorComponent
+from misaka.modes.interactive.components.thinking_selector import ThinkingSelectorComponent
 from misaka.modes.interactive.components.settings_selector import (
     SettingsCallbacks,
     SettingsConfig,
@@ -196,6 +197,31 @@ class ExpandableText(Text):
         """重新求值文本。构造时只取过一次，异步加载的内容（如 MCP 连接结果）
         没有这个就永远停在初始快照上。"""
         self.setText(self._getExpandedText() if self.expanded else self._getCollapsedText())
+
+
+@dataclass(slots=True)
+class DefaultFlagArgs:
+    """`/thinking --default high` 这类参数的解析结果（pi 496185f6 parseDefaultFlagArgs）。"""
+    persist: bool = False
+    searchTerm: str | None = None
+    error: str | None = None
+
+
+def parse_default_flag_args(commandName: str, args: str | None) -> DefaultFlagArgs:
+    """只认 `--default` 一个选项；其余 `--x` 报错（纯函数，可测）。"""
+    tokens = (args or "").strip().split()
+    persist = False
+    rest: list[str] = []
+    for index, token in enumerate(tokens):
+        if token.startswith("--") and not rest:
+            if token == "--default":
+                persist = True
+                continue
+            return DefaultFlagArgs(
+                error=f'Unknown /{commandName} option "{token}". Supported option: --default.')
+        rest = tokens[index:]
+        break
+    return DefaultFlagArgs(persist=persist, searchTerm=" ".join(rest) or None)
 
 
 def is_anthropic_subscription_auth_key(api_key: str | None) -> bool:
@@ -3352,6 +3378,11 @@ class InteractiveMode:
             self._set_editor_text("")
             await self.handleModelCommand(search_term or None)
             return
+        if text == "/thinking" or text.startswith("/thinking "):
+            argument = text[10:].strip() if text.startswith("/thinking ") else ""
+            self._set_editor_text("")
+            self.handleThinkingCommand(argument)
+            return
         if text == "/scoped-models":
             self._set_editor_text("")
             await self.showModelsSelector()
@@ -5450,6 +5481,43 @@ class InteractiveMode:
     async def _handle_session_select(self, sessionPath: str, done: Callable[[], None]) -> None:
         done()
         await self.handleResumeSession(sessionPath)
+
+    def handleThinkingCommand(self, argument: str = "") -> None:
+        """`/thinking [--default] [档]`（pi 496185f6）：无参开选择器，带档直接切；
+        --default 同时存为启动默认。"""
+        parsed = parse_default_flag_args("thinking", argument)
+        if parsed.error:
+            self.showError(parsed.error)
+            return
+        level = (parsed.searchTerm or "").strip()
+        if not level:
+            self.showThinkingSelector(persist=parsed.persist)
+            return
+        available = list(self.session.getAvailableThinkingLevels())
+        if level not in available:
+            self.showError(f"Unknown thinking level \"{level}\". Available: {', '.join(available)}")
+            return
+        self._apply_thinking_level(level, persist=parsed.persist)
+
+    def _apply_thinking_level(self, level: str, *, persist: bool = False) -> None:
+        self.session.setThinkingLevel(level)
+        self.footer.invalidate()
+        self.updateEditorBorderColor()
+        if persist:
+            self.settingsManager.setDefaultThinkingLevel(level)
+        self.showStatus(f"Thinking level: {level}" + ("（已存为启动默认）" if persist else ""))
+
+    def showThinkingSelector(self, *, persist: bool = False) -> None:
+        self.showSelector(
+            lambda done: {
+                "component": ThinkingSelectorComponent(
+                    self._get_session_thinking_level(),
+                    list(self.session.getAvailableThinkingLevels()),
+                    lambda level: (done(), self._apply_thinking_level(level, persist=persist)),
+                    lambda: (done(), self._request_render()),
+                ),
+            }
+        )
 
     async def handleModelCommand(self, searchTerm: str | None = None) -> None:
         if not searchTerm:

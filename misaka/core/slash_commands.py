@@ -27,6 +27,8 @@ class BuiltinSlashCommand:
 BUILTIN_SLASH_COMMANDS: tuple[BuiltinSlashCommand, ...] = (
     BuiltinSlashCommand("settings", "Open settings menu"),
     BuiltinSlashCommand("model", "Select model (opens selector UI)"),
+    # pi 496185f6：运行时切推理档；--default 同时存为启动默认
+    BuiltinSlashCommand("thinking", "Select thinking level (--default persists it)"),
     BuiltinSlashCommand("scoped-models", "Enable/disable models for Ctrl+P cycling"),
     # 删掉了 "models" 与 "theme"：两者只在此声明、交互模式里**无任何处理分支**，
     # 输入后不匹配任何命令，会被当成普通消息发给 LLM（用户看到 "Working..."）。

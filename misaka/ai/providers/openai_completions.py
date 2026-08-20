@@ -554,6 +554,19 @@ def build_params(
     if _option(options, "temperature") is not None:
         params["temperature"] = _option(options, "temperature")
 
+    # 采样参数透传（pi #7568）：模型级作底、请求级覆盖；已显式设过的键不动
+    #（temperature/max_tokens 等由上面的专用分支说了算）
+    sampling: dict[str, Any] = {}
+    model_sampling = getattr(context.model, "samplingParams", None)
+    if isinstance(model_sampling, dict):
+        sampling.update(model_sampling)
+    request_sampling = _option(options, "samplingParams")
+    if isinstance(request_sampling, dict):
+        sampling.update(request_sampling)
+    for key, value in sampling.items():
+        if value is not None and key not in params:
+            params[key] = value
+
     if context.tools:
         params["tools"] = convert_tools(context.tools, compat)
         if compat.get("zaiToolStream"):
