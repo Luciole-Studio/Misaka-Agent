@@ -140,8 +140,10 @@ def _parser():
                                        "ledger 变更账 / rollback 回滚（宪法 D2）")
     sk.add_argument("op", nargs="?", default="list",
                     choices=["trust", "list", "scan", "pending", "approve", "reject",
-                             "ledger", "rollback"])
-    sk.add_argument("name", nargs="?", help="approve/reject：技能名；rollback：总账条目 id")
+                             "ledger", "rollback", "mode"])
+    sk.add_argument("name", nargs="?",
+                    help="approve/reject：技能名；rollback：总账 id；"
+                         "mode：off(关死)/forbid(暂存人审)/allow(直写)，空参=看当前")
     sk.add_argument("--dir", help="项目根（缺省＝当前目录向上找 .git）")
     sk.add_argument("--as", dest="role", default="sisters/10032", help="以哪个角色的视角看栈")
 
@@ -481,7 +483,25 @@ def main():
         import os as _os
 
         from misaka.orchestration import skill_layers
-        if args.op in ("pending", "approve", "reject", "ledger", "rollback"):
+        if args.op == "mode":
+            # agent 写技能能力的全局开关（off＝硬关，agent 连暂存都不行；
+            # 人经 approve 重放不受影响——关的是 agent 不是你）
+            from misaka.orchestration import skill_write
+            if not args.name:
+                mode = skill_write.write_mode()
+                desc = {"off": "关死（agent 不能建/改技能）",
+                        "forbid": "暂存人审（宪法 D2 缺省）",
+                        "ask": "暂存人审（同 forbid）",
+                        "allow": "直写（agent 写完即生效）"}[mode]
+                print(f"skill_write_mode = {mode} —— {desc}")
+            elif args.name not in skill_write.WRITE_MODES:
+                sys.exit(f"没有这一档：{args.name}。可用：{'/'.join(skill_write.WRITE_MODES)}")
+            else:
+                cfg = skill_layers.load_skills_config()
+                cfg["skill_write_mode"] = args.name
+                skill_layers._write_skills_config(cfg)
+                print(f"已切到 {args.name}（立即生效，含正在跑的会话——每次写入现读配置）")
+        elif args.op in ("pending", "approve", "reject", "ledger", "rollback"):
             import shutil as _shutil
 
             from misaka.orchestration import skill_write

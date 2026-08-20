@@ -332,6 +332,10 @@ def commands_for(profile_dir):
             prompt = build_learn_prompt(args or "", target_dir=target)
             # 沉淀走 skill_manage 工具（宪法 D2 的闸、校验、扫描、总账都在那条路上）
             decision, note = skill_write.evaluate_gate()
+            if decision == "off":   # 硬关时直接告诉人，不烧一轮让 agent 去撞墙
+                ctx.ui.notify("技能写入已全局关闭（skill_write_mode=off）——"
+                              "要用 /learn 先 `misaka skills mode forbid` 或 `allow`", "error")
+                return
             prompt += (
                 "\n\n---\n[沉淀入口] **用 `skill_manage` 工具写技能，不要用 write/edit "
                 "直接写技能目录**——写权闸、frontmatter 硬校验、安全扫描、变更总账都在"

@@ -27,7 +27,11 @@ import time
 import uuid
 from pathlib import Path
 
-WRITE_MODES = ("forbid", "ask", "allow")
+# off＝彻底关闭（agent 连暂存都不行，硬拒）｜forbid（缺省）＝暂存待人审｜
+# ask＝同 forbid｜allow＝直写。off 是 misaka 自加的一档（hermes 的闸有意只延迟
+# 不拒绝）——用户主权开关：关的是 **agent** 的写入能力；人经 CLI approve 重放
+# 走 bypass，不受 off 影响
+WRITE_MODES = ("off", "forbid", "ask", "allow")
 DEFAULT_WRITE_MODE = "forbid"          # 宪法 D2：默认 forbid
 
 _ORIGIN = contextvars.ContextVar("misaka_skill_write_origin", default="user")
@@ -181,11 +185,15 @@ def _pending_dir():
 
 def evaluate_gate():
     """本次技能写入该怎么办。返回 (decision, 给 agent 看的话)。
-    decision ∈ {allow, stage}。**没有 blocked**——闸只延迟写入、从不静默拒绝
-    （hermes 同款语义）。skills 永远 stage 而非内联审：SKILL.md 太大。"""
+    decision ∈ {allow, stage, off}。forbid/ask 只延迟不拒绝（hermes 同款）；
+    off 是用户主权硬关——agent 连暂存都不行。skills 永远 stage 而非内联审。"""
     mode = write_mode()
     if mode == "allow":
         return "allow", ""
+    if mode == "off":
+        return "off", ("技能写入已被用户全局关闭（skill_write_mode=off）。"
+                       "不要再试、也不要用别的工具绕——要开回来是用户的决定："
+                       "`misaka skills mode forbid`（暂存待审）或 `allow`（直写）。")
     return "stage", (
         f"技能写入已暂存待人审（skill_write_mode={mode}，宪法 D2）。"
         "**尚未落盘**——用 `misaka skills pending` 看待审、`misaka skills approve <id>` 批准。")

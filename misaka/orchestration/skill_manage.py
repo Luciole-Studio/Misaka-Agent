@@ -411,6 +411,8 @@ def manage(action, name, *, profile_dir, content=None, file_path=None,
 
     if not _bypass.get():
         decision, note = skill_write.evaluate_gate()
+        if decision == "off":   # 用户主权硬关：agent 不许写，连暂存都不留
+            return {"success": False, "error": note}
         if decision == "stage":
             payload = {"action": action, "name": name, "profile_dir": profile_dir,
                        "content": content, "file_path": file_path,
