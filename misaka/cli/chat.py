@@ -15,7 +15,7 @@ def _extension_factories(profile_dir, profile_role, workspace, session_role, *, 
 
     from functools import partial
 
-    from misaka.extensions import docs, inline, mcp, messages, roster, switch
+    from misaka.extensions import docs, inline, mcp, messages, roster, switch, views
     from misaka.extensions.board import extension as board
     from misaka.extensions.ally import extension as ally
     from misaka.extensions.subagent import extension as subagent
@@ -57,6 +57,8 @@ def _extension_factories(profile_dir, profile_role, workspace, session_role, *, 
         inline("switch", switch.register),
         inline("roster", roster.register),
         inline("moa", moa.commands_for(profile_dir)),   # /moa：LO 与 sis 各用各的配置
+        inline("moa-tool", moa.tools_for(profile_dir)),  # moa 工具：agent 自开参谋团
+        inline("views", views.register),                # /board /graph /trace 只读查看
         inline("lcm", lcm.register),                    # 无损压缩接管（fail-open 回原生）
         inline("skill-invoke", skill_invoke.commands_for(profile_dir)),   # /skill 显式调用（人）
         inline("skill-tools", skill_invoke.tools_for(profile_dir)),       # skills_list/skill_view（agent）

@@ -58,18 +58,19 @@ def follow(con, since=None, poll=0.5, once=False):
         time.sleep(poll)
 
 
-def board_view(con):
+def board_text(con):
+    """看板文本（/board 斜杠命令与 CLI 共用；返回串不直接打印）。"""
     rows = con.execute(
         "SELECT id,status,assignee,priority,title,project FROM tasks "
         "ORDER BY project IS NULL, project, created_at").fetchall()   # 按课题分组，未分类垫底
     if not rows:
-        print("(板上无卡)")
-        return
+        return "(板上无卡)"
+    out = []
     cur_proj = object()   # 哨兵：与任何 project 值都不同,保证首行必打表头
     for r in rows:
         if r["project"] != cur_proj:
             cur_proj = r["project"]
-            print(f"\n▌{cur_proj or '(未分类)'}")
+            out.append(f"\n▌{cur_proj or '(未分类)'}")
         status = r["status"]
         if status == "failed":  # blocked（等输入）如实显示，不冒充 failed
             hit = con.execute(
@@ -78,4 +79,9 @@ def board_view(con):
                 "LIMIT 1", (r["id"], r["id"])).fetchone()
             if hit:
                 status = "blocked"
-        print(f"{r['id']}  {_c(status, status):<18}  {r['assignee']:<16} p{r['priority']}  {r['title']}")
+        out.append(f"{r['id']}  {_c(status, status):<18}  {r['assignee']:<16} p{r['priority']}  {r['title']}")
+    return "\n".join(out)
+
+
+def board_view(con):
+    print(board_text(con))
