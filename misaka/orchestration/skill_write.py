@@ -191,9 +191,11 @@ def evaluate_gate():
     if mode == "allow":
         return "allow", ""
     if mode == "off":
-        return "off", ("技能写入已被用户全局关闭（skill_write_mode=off）。"
-                       "不要再试、也不要用别的工具绕——要开回来是用户的决定："
-                       "`misaka skills mode forbid`（暂存待审）或 `allow`（直写）。")
+        # 不教命令：这条文案是给 agent 看的，agent 有 bash——写出切换命令等于教它绕。
+        # 用户自己知道开关在哪（/skill-mode、misaka skills mode）。
+        return "off", ("技能写入已被用户全局关闭。不要再试，也不要用 bash/write 绕过"
+                       "（改配置或直写技能目录都算绕）——开不开回来是用户的决定，"
+                       "需要时把这个情况告诉用户即可。")
     return "stage", (
         f"技能写入已暂存待人审（skill_write_mode={mode}，宪法 D2）。"
         "**尚未落盘**——用 `misaka skills pending` 看待审、`misaka skills approve <id>` 批准。")

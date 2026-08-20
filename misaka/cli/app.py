@@ -496,6 +496,11 @@ def main():
                 print(f"skill_write_mode = {mode} —— {desc}")
             elif args.name not in skill_write.WRITE_MODES:
                 sys.exit(f"没有这一档：{args.name}。可用：{'/'.join(skill_write.WRITE_MODES)}")
+            elif _os.environ.get("MISAKA_WHO") or _os.environ.get("MISAKA_USAGE_TASK_ID"):
+                # 切换权只归用户：agent 会话里的 bash 继承这些环境变量——
+                # 从会话内（含跑卡）发起的切档一律拒绝；看当前档不受限
+                sys.exit("写权档只有用户能切（检测到 agent 会话环境）。"
+                         "请在你自己的终端里跑，或在聊天框用 /skill-mode。")
             else:
                 cfg = skill_layers.load_skills_config()
                 cfg["skill_write_mode"] = args.name

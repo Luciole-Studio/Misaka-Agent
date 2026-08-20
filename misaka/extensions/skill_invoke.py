@@ -275,7 +275,9 @@ def tools_for(profile_dir):
             promptGuidelines=[
                 "技能的 description 必须一句话且不超过 60 字符——索引会截断更长的，"
                 "路由信号就丢了；细节写进正文。",
-                "写技能一律用 skill_manage 工具，不要用 write/edit 直接动技能目录。"]))
+                "写技能一律用 skill_manage 工具，不要用 write/edit 直接动技能目录。",
+                "skill_write_mode 写权档是用户的开关（~/.misaka/skills.json）——"
+                "不许改它，也不许在被闸拒后换路子绕：被拒就把情况报告用户。"]))
 
         harn.registerTool(ToolDefinition(
             name="skill_view", label="读技能",
@@ -347,6 +349,34 @@ def commands_for(profile_dir):
                            "把技能名与一行摘要报给用户，让他用 `misaka skills pending` "
                            "查看、`misaka skills approve <名>` 批准。")
             await ctx.sendUserMessage(prompt)
+
+        async def skill_mode_cmd(args, ctx):
+            # 斜杠命令只有用户打字能触发（agent 输出不经命令分发——引擎结构保证），
+            # 所以这里就是「切换权只归用户」的聊天框入口，不需要再验身份
+            from misaka.orchestration import skill_layers, skill_write
+            value = (args or "").strip().lower()
+            labels = {"off": "关死（agent 不能建/改技能）",
+                      "forbid": "暂存人审（宪法 D2 缺省）",
+                      "ask": "暂存人审（同 forbid）",
+                      "allow": "直写（agent 写完即生效）"}
+            if not value:
+                mode = skill_write.write_mode()
+                ctx.ui.notify(f"skill_write_mode = {mode} —— {labels[mode]}\n"
+                              f"切换：/skill-mode off|forbid|allow", "info")
+                return
+            if value not in skill_write.WRITE_MODES:
+                ctx.ui.notify(f"没有这一档：{value}。可用：{'/'.join(skill_write.WRITE_MODES)}",
+                              "error")
+                return
+            cfg = skill_layers.load_skills_config()
+            cfg["skill_write_mode"] = value
+            skill_layers._write_skills_config(cfg)
+            ctx.ui.notify(f"已切到 {value} —— {labels[value]}（立即生效）", "info")
+
+        harn.registerCommand("skill-mode", {
+            "handler": skill_mode_cmd,
+            "description": "agent 写技能的全局开关（仅用户）：off 关死 / forbid 暂存人审 / "
+                           "allow 直写；空参＝看当前"})
 
         harn.registerCommand("learn", {
             "handler": learn_cmd,
