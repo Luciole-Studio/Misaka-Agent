@@ -168,6 +168,25 @@ def load_skills(options: LoadSkillsOptions) -> LoadSkillsResult:
     return LoadSkillsResult(skills=list(skill_map.values()), diagnostics=[*diagnostics, *collision_diagnostics])
 
 
+# 系统提示技能索引里的 description 上限（hermes SKILL_PROMPT_DESC_LIMIT 同值）。
+# 索引每会话常驻，超出部分截断——learn_prompt 的 HARDLINE「≤60 字符」正是据此，
+# 此前 misaka 抄了纪律没抄机制，那条要求一直悬空（2026-08-20 用户裁定补齐）。
+SKILL_PROMPT_DESC_LIMIT = 60
+
+
+def truncate_skill_description(description: str) -> str:
+    """索引用 description：超限截断加省略号（hermes extract_skill_description 同款）。"""
+    desc = str(description or "").strip().strip("'\"")
+    if len(desc) > SKILL_PROMPT_DESC_LIMIT:
+        return desc[: SKILL_PROMPT_DESC_LIMIT - 3] + "..."
+    return desc
+
+
+def is_skill_description_truncated(description: str) -> bool:
+    """这条 description 会不会在系统提示索引里被截断（给 linter/`/learn` 用）。"""
+    return len(str(description or "").strip().strip("'\"")) > SKILL_PROMPT_DESC_LIMIT
+
+
 def format_skills_for_prompt(skills: list[Skill]) -> str:
     visible_skills = [skill for skill in skills if not skill.disableModelInvocation]
     if not visible_skills:
@@ -187,7 +206,8 @@ def format_skills_for_prompt(skills: list[Skill]) -> str:
     for skill in visible_skills:
         lines.append("  <skill>")
         lines.append(f"    <name>{_escape_xml(skill.name)}</name>")
-        lines.append(f"    <description>{_escape_xml(skill.description)}</description>")
+        lines.append(
+            f"    <description>{_escape_xml(truncate_skill_description(skill.description))}</description>")
         lines.append(f"    <location>{_escape_xml(skill.filePath)}</location>")
         lines.append("  </skill>")
     lines.append("</available_skills>")

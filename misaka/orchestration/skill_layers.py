@@ -155,9 +155,42 @@ def is_quarantined_project_skill(skill_md):
     return quarantined
 
 
+# 扫描剪枝（hermes agent/skill_utils.py:28-51 逐字）：依赖树/虚拟环境/VCS/缓存目录
+# 里的 SKILL.md 不是技能。缺这层剪枝时，克隆仓的 node_modules 里藏一个 SKILL.md
+# 就会被当真技能装载，且按字典序可能排在真技能之前压过它（2026-08-20 实测复现）。
+EXCLUDED_SKILL_DIRS = frozenset((
+    ".git", ".github", ".hub", ".archive", ".venv", "venv", "node_modules",
+    "site-packages", "__pycache__", ".tox", ".nox", ".pytest_cache",
+    ".mypy_cache", ".ruff_cache",
+))
+# 渐进披露的支撑目录：住在技能包内部，只能经 file_path 显式加载，不是独立技能。
+SKILL_SUPPORT_DIRS = frozenset(("references", "templates", "assets", "scripts"))
+
+
+def is_skill_support_path(path):
+    """path 是否位于某个**真技能**（同级有 SKILL.md）的支撑目录下。
+    `skills/scripts/foo` 这类把 scripts 当分类名的合法布局不受影响——它的
+    scripts 段并不直接位于含 SKILL.md 的目录之下（hermes 同款细则）。"""
+    parts = Path(path).parts
+    for idx, part in enumerate(parts[:-1]):
+        if part not in SKILL_SUPPORT_DIRS or idx == 0:
+            continue
+        if (Path(*parts[:idx]) / "SKILL.md").exists():
+            return True
+    return False
+
+
+def is_excluded_skill_path(path):
+    """扫描器是否该跳过这个 SKILL.md（排除目录 或 支撑目录）。"""
+    return any(part in EXCLUDED_SKILL_DIRS for part in Path(path).parts) \
+        or is_skill_support_path(path)
+
+
 def iter_project_skill_files(project_dir):
-    """信任目录下未隔离的 SKILL.md（唯一遍历汇聚点——新调用方绕不开隔离）。"""
+    """信任目录下未隔离的 SKILL.md（唯一遍历汇聚点——新调用方绕不开剪枝与隔离）。"""
     for skill_md in sorted(Path(project_dir).rglob("SKILL.md")):
+        if is_excluded_skill_path(skill_md):
+            continue
         if not is_quarantined_project_skill(skill_md):
             yield skill_md
 
@@ -185,15 +218,19 @@ def shared_skills_dir():
 
 
 def skills_stack(profile_dir, cwd=None):
-    """装配用技能目录栈：项目（信任+非隔离逐技能）→ 角色 → 共享；
-    首见名去重（project 赢——上游：仓自带的技能在仓内优先）。"""
+    """装配用技能目录栈：项目（信任+非隔离逐技能）→ 角色 → 共享。
+
+    只做**路径**去重，不按名字去重（2026-08-20 用户裁定「身份口径与 hermes 完全一致」）：
+    hermes 的发现层同样只排序目录，身份去重发生在加载层且按 frontmatter name
+    ——目录名只是位置，name 才是身份。此前这里按目录名提前去重，口径错且会先斩后奏。
+    栈序即优先级（project > 角色 > 共享），加载层首见名胜出。"""
     from misaka.config import profiles
     out, seen = [], set()
 
     def _add(skill_dir):
-        name = Path(skill_dir).name
-        if name not in seen:
-            seen.add(name)
+        key = os.path.realpath(str(skill_dir))   # 软链指向同一处也算同一个
+        if key not in seen:
+            seen.add(key)
             out.append(str(skill_dir))
 
     for proj_dir in get_project_skills_dirs(cwd):
@@ -245,8 +282,13 @@ if __name__ == "__main__":
     stack = skills_stack(prof, cwd=repo)
     names = [Path(s).name for s in stack]
     assert names[0] == "repo-skill" and ".misaka" in stack[0], \
-        f"信任后项目技能进栈且同名压过角色层: {stack}"
-    assert names.count("repo-skill") == 1, "首见名去重"
+        f"信任后项目技能排在最前（栈序即优先级）: {stack}"
+    # 2026-08-20 裁定「身份口径与 hermes 完全一致」：发现层只做路径去重，
+    # 同名的角色层目录照常进栈——按 frontmatter name 的身份去重发生在加载层
+    #（引擎 load_skills 与 skill_invoke.scan_skill_commands 都是首见名胜出）
+    assert names.count("repo-skill") == 2, f"同名两层都在栈里，靠栈序定胜负: {names}"
+    # 加载层按 frontmatter name 去重（project 胜出）的断言在
+    # tests/contract/test_skill_pruning.py——那是跨层验证，不能写在 orchestration 里
     assert "role-skill" in names and "shared-skill" in names, "三层齐"
     assert get_untrusted_project_skills_root(cwd=repo) is None, "已信任不再提示"
 

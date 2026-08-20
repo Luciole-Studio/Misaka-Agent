@@ -33,38 +33,36 @@ def _slug(name):
 
 def scan_skill_commands(profile_dir, cwd=None):
     """三层栈 → {slug: {name, description, skill_md_path, skill_dir}}。
-    去重 first-wins（栈序即优先级：project > 角色 > 共享，上游同语义）。"""
+
+    2026-08-20 合并（用户裁定「两套技能系统合并、对齐 hermes」）：加载层复用引擎的
+    `core.skills.load_skills_from_dir`，不再自己重扫一遍——于是 `/skill` 与系统提示里的
+    `<available_skills>` 索引**看到同一批技能、用同一套规则**（SKILL.md 门、BOM 剥离、
+    description 缺失回落 body 首行、name 取 frontmatter）。身份口径统一为 frontmatter
+    name（hermes 同款：name 是身份、目录名只是位置）。
+    栈序即优先级（project > 角色 > 共享），首见名胜出。
+    """
+    from misaka.core.skills import load_skills_from_dir
     from misaka.orchestration.skill_layers import skills_stack
-    from misaka.utils.frontmatter import parse_frontmatter
 
     commands = {}
+    seen_names = set()
     for skill_dir in skills_stack(profile_dir, cwd=cwd):
-        skill_md = Path(skill_dir) / "SKILL.md"
-        if not skill_md.is_file():
-            continue
         try:
-            content = skill_md.read_text(encoding="utf-8")
-            parsed = parse_frontmatter(content)
-            frontmatter = parsed.frontmatter or {}
-            body = parsed.body or ""
+            result = load_skills_from_dir({"dir": str(skill_dir), "source": "misaka"})
         except Exception:  # noqa: BLE001 - 单个坏技能不毁扫描（上游同款）
-            logger.warning("技能解析失败，跳过：%s", skill_md, exc_info=True)
+            logger.warning("技能加载失败，跳过：%s", skill_dir, exc_info=True)
             continue
-        name = str(frontmatter.get("name") or Path(skill_dir).name)
-        slug = _slug(name)
-        if not slug or slug in commands:
-            continue
-        description = str(frontmatter.get("description") or "")
-        if not description:
-            for line in body.strip().splitlines():
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    description = line[:80]
-                    break
-        commands[slug] = {"name": name,
-                          "description": description or f"调用 {name} 技能",
-                          "skill_md_path": str(skill_md),
-                          "skill_dir": str(skill_dir)}
+        for skill in result.skills:
+            if skill.name in seen_names:   # 身份＝frontmatter name
+                continue
+            slug = _slug(skill.name)
+            if not slug or slug in commands:
+                continue
+            seen_names.add(skill.name)
+            commands[slug] = {"name": skill.name,
+                              "description": skill.description or f"调用 {skill.name} 技能",
+                              "skill_md_path": skill.filePath,
+                              "skill_dir": skill.baseDir}
     return commands
 
 
