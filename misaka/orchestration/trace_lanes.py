@@ -288,6 +288,45 @@ def wall_clock(t, time_map):
     return t
 
 
+def turn_detour_stats(lane, time_map):
+    """每轮支路聚合（上游 turnDetourStats）：{turn: {n, T, by:{error,retry,deadend}}}。
+    T 为墙钟秒。turn 缺失的旧数据统一记第 1 轮。"""
+    out = {}
+    for d in lane["detours"]:
+        t = d.get("turn") or 1
+        g = out.setdefault(t, {"n": 0, "T": 0.0, "by": {"error": 0, "retry": 0, "deadend": 0}})
+        g["n"] += 1
+        g["T"] += max(0.0, wall_clock(d["e"], time_map) - wall_clock(d["s"], time_map))
+        g["by"][d["v"]] = g["by"].get(d["v"], 0) + 1
+    return out
+
+
+def turn_end_nodes(lane):
+    """每轮的收尾主干节点（该轮最后一个主干节点＝回答）：{turn: node}。"""
+    out = {}
+    for n in lane["main"]:
+        out[n.get("turn") or 1] = n
+    return out
+
+
+def union_turns(lanes):
+    """各泳道出现过的轮次并集，升序。"""
+    turns = set()
+    for lane in lanes:
+        for n in lane["main"] + lane["detours"]:
+            turns.add(n.get("turn") or 1)
+    return sorted(turns)
+
+
+def fmt_det_diff(d_t, any_side):
+    """差额文案（上游 fmtDetDiff）：正=第 2 会话多耗，负=第 1 会话多耗；1 秒内持平。"""
+    if not any_side:
+        return ""
+    if abs(d_t) < 1:
+        return "≈持平"
+    return f"第 {2 if d_t > 0 else 1} 会话多耗 {fmt_t(abs(d_t))}"
+
+
 def _js_round(v, nd=0):
     """JS Math.round/toFixed 的远离零舍入（Python round 是银行家舍入，.5 会漂）。"""
     q = 10 ** nd
@@ -372,6 +411,16 @@ if __name__ == "__main__":
     # 双泳道
     data2 = build_data(["\n".join(lines)] * 2)
     assert [l["key"] for l in data2["lanes"]] == ["l1", "l2"]
+    # 轮次聚合（对比档的对齐与盘点共用）
+    tds = turn_detour_stats(lane, data["timeMap"])
+    assert tds == {1: {"n": 2, "T": tds[1]["T"], "by": {"error": 1, "retry": 0, "deadend": 1}}}
+    assert abs(tds[1]["T"] - 13.0) < 0.3, tds[1]["T"]   # 步1(0→9)＋步2(9→13)（墙钟）
+    ends = turn_end_nodes(lane)
+    assert set(ends) == {1, 2} and ends[2]["v"] == "answer"
+    assert union_turns([lane]) == [1, 2]
+    assert fmt_det_diff(48.4, True) == "第 2 会话多耗 48.4s"
+    assert fmt_det_diff(-130, True) == "第 1 会话多耗 2m"
+    assert fmt_det_diff(0.5, True) == "≈持平" and fmt_det_diff(9, False) == ""
     # fmt_t（判例按上游**代码**行为，其注释判例 49252→13.7h 与代码不符）
     assert fmt_t(49252) == "14h" and fmt_t(340) == "6m" and fmt_t(42.5) == "42.5s"
     assert fmt_t(42) == "42s" and fmt_t(0) == "0s" and fmt_t(36000) == "10h"

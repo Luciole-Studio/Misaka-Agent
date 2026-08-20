@@ -11,7 +11,9 @@
 import os
 import sys
 
-from misaka.orchestration.trace_lanes import fmt_t, wall_clock
+from misaka.orchestration.trace_lanes import (
+    fmt_det_diff, fmt_t, turn_detour_stats, turn_end_nodes, union_turns,
+    wall_clock)
 
 V_COLOR = {"ok": "\x1b[32m", "answer": "\x1b[32m", "error": "\x1b[31m",
            "deadend": "\x1b[90m", "retry": "\x1b[90m"}
@@ -78,20 +80,25 @@ def _pack(items):
     return out
 
 
-def render_frame(lane, time_map, tmax, width, *, view=None, sel_step=None,
-                 filt_fail=False, query=""):
-    """一条泳道的迷宫帧。view=[t0,t1]（压缩坐标）或 None=整图。返回 Frame。"""
+def _make_x(view, tmax, width):
     t0 = view[0] if view else 0.0
-    span = (view[1] - view[0]) if view else tmax
-    span = max(span, MIN_SPAN)
+    span = max((view[1] - view[0]) if view else tmax, MIN_SPAN)
     usable = width - X0 - 1
+    return (lambda t: X0 + int((t - t0) / span * usable)), t0, span, usable
 
-    def x(t):
-        return X0 + int((t - t0) / span * usable)
+
+def render_frame(lane, time_map, tmax, width, *, view=None, sel_step=None,
+                 filt_fail=False, query="", with_ticks=True, t_cursor=None,
+                 title=None):
+    """一条泳道的迷宫帧。view=[t0,t1]（压缩坐标）或 None=整图。
+    t_cursor＝播放光标（压缩坐标）：未到的节点变暗。返回 Frame。"""
+    x, t0, span, usable = _make_x(view, tmax, width)
 
     active = filt_fail or bool(query)
 
     def shade(n, base_color):
+        if t_cursor is not None and n["s"] > t_cursor:
+            return DIM
         if sel_step is not None and n["step"] == sel_step:
             return INV + base_color
         if active and not _visible(n, filt_fail, query):
@@ -105,7 +112,7 @@ def render_frame(lane, time_map, tmax, width, *, view=None, sel_step=None,
     turns = len({n["turn"] for n in lane["main"] + lane["detours"]})
     head = f.line()
     f.put(head, 0,
-          f"{lane['model'] or '未知模型'} · "
+          f"{title + ' · ' if title else ''}{lane['model'] or '未知模型'} · "
           f"{'%d 轮 · ' % turns if turns > 1 else ''}{st['steps']} 步"
           f"（主干 {st['main']} / 支路 {st['detours']}）· {st['tools']} 工具 · "
           f"{tok} · 总 {fmt_t(st['T'])}")
@@ -162,16 +169,83 @@ def render_frame(lane, time_map, tmax, width, *, view=None, sel_step=None,
     n_down = max((r for r, _, _ in down_rows), default=-1) + 1
     draw_detour_rows(down_rows, n_down)
 
-    tick = f.line()
-    n_ticks = max(2, usable // 14)
-    for i in range(n_ticks + 1):
-        t = t0 + span * i / n_ticks
-        label = fmt_t(wall_clock(t, time_map))
-        col = x(t)
-        f.put(tick, min(col, width - len(label) - 1), label, DIM)
-    for c, skipped in seams:
-        f.put(tick, c, f"⏸{fmt_t(skipped)}", "\x1b[33m")
+    if with_ticks:
+        tick = f.line()
+        n_ticks = max(2, usable // 14)
+        for i in range(n_ticks + 1):
+            t = t0 + span * i / n_ticks
+            label = fmt_t(wall_clock(t, time_map))
+            col = x(t)
+            f.put(tick, min(col, width - len(label) - 1), label, DIM)
+        for c, skipped in seams:
+            f.put(tick, c, f"⏸{fmt_t(skipped)}", "\x1b[33m")
     return f
+
+
+def render_align(lane_a, lane_b, time_map, tmax, width, view=None):
+    """双泳道间的轮次对齐行（上游对齐线的一行化）：只连两边都有的轮，
+    ⚑N Δ时差 支路a↔b 落在两边回答节点的中点列。"""
+    x, _, _, _ = _make_x(view, tmax, width)
+    ends_a, ends_b = turn_end_nodes(lane_a), turn_end_nodes(lane_b)
+    det_a = turn_detour_stats(lane_a, time_map)
+    det_b = turn_detour_stats(lane_b, time_map)
+    f = Frame(width)
+    row = f.line()
+    for turn in union_turns([lane_a, lane_b]):
+        na, nb = ends_a.get(turn), ends_b.get(turn)
+        if na is None or nb is None:
+            continue
+        wa = wall_clock(na["e"], time_map)
+        wb = wall_clock(nb["e"], time_map)
+        da = det_a.get(turn, {}).get("n", 0)
+        db = det_b.get(turn, {}).get("n", 0)
+        label = f"⚑{turn} Δ{fmt_t(abs(wb - wa))}" + (f" 支路{da}↔{db}" if da + db else "")
+        col = x((na["e"] + nb["e"]) / 2) - len(label) // 2
+        f.put(row, max(0, min(col, width - len(label))), label, "\x1b[36m")
+    return f
+
+
+def render_inventory(data, sel_idx, width):
+    """支路盘点表（上游 renderInventory 的终端化）：行=轮，列=两泳道＋差额。
+    返回 (行列表, 轮次列表)。sel_idx 高亮行（Enter 缩放到该轮）。"""
+    lanes = data["lanes"]
+    tm = data["timeMap"]
+    det_a = turn_detour_stats(lanes[0], tm)
+    det_b = turn_detour_stats(lanes[1], tm)
+    turns = union_turns(lanes)
+
+    def cell(g):
+        if not g:
+            return "—"
+        by = g["by"]
+        seg = "".join(f"{V_GLYPH[k]}{v}" for k, v in
+                      (("error", by["error"]), ("retry", by["retry"]),
+                       ("deadend", by["deadend"])) if v)
+        return f"{g['n']} 步·{fmt_t(g['T'])}" + (f" {seg}" if seg else "")
+
+    w1, w2 = 10, 26
+    out = ["支路盘点（按轮次）——↑↓选轮 Enter缩放到该轮 i返回", ""]
+    out.append(f"{'轮次':<{w1}}{'第 1 会话':<{w2}}{'第 2 会话':<{w2}}差额")
+    ta = {"n": 0, "T": 0.0}
+    tb = {"n": 0, "T": 0.0}
+    for i, turn in enumerate(turns):
+        a, b = det_a.get(turn), det_b.get(turn)
+        if a:
+            ta["n"] += a["n"]
+            ta["T"] += a["T"]
+        if b:
+            tb["n"] += b["n"]
+            tb["T"] += b["T"]
+        diff = fmt_det_diff((b["T"] if b else 0) - (a["T"] if a else 0), bool(a or b))
+        line = f"{'第 %d 轮' % turn:<{w1}}{cell(a):<{w2}}{cell(b):<{w2}}{diff}"
+        out.append(f"{INV}{line}{RESET}" if i == sel_idx else line)
+    total_diff = (fmt_det_diff(tb["T"] - ta["T"], True)
+                  if ta["n"] + tb["n"] > 0 else "两边都无支路")
+    out.append(f"{'合计':<{w1}}{'%d 步·%s' % (ta['n'], fmt_t(ta['T'])):<{w2}}"
+               f"{'%d 步·%s' % (tb['n'], fmt_t(tb['T'])):<{w2}}{total_diff}")
+    out.append("")
+    out.append(DIM + "支路耗时为墙钟；✗失败 ↻无效重试 ·扑空；只一边有的轮显 —（缺席本身是信号）" + RESET)
+    return out[: max(4, 100)], turns
 
 
 def detail_lines(n, time_map, width, is_main):
@@ -226,44 +300,81 @@ def locate_session(con, target):
     return None, f"不认识的目标：{target}（可给卡号／角色名／会话文件路径）"
 
 
-def _load(path):
+def _load(paths):
     from misaka.orchestration.trace_lanes import build_data
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        return build_data([fh.read()])
+    texts = []
+    for p in paths:
+        with open(p, encoding="utf-8", errors="replace") as fh:
+            texts.append(fh.read())
+    return build_data(texts)
 
 
 def _nodes_in_order(lane):
     return sorted(lane["main"] + lane["detours"], key=lambda n: n["step"])
 
 
-def run(path, *, watch=False, plain=False):
-    """单会话迷宫入口。plain（或非 TTY）＝打一帧退出；否则进交互循环。"""
-    data = _load(path)
-    lane = data["lanes"][0]
+def _lane_title(data, i):
+    return None if len(data["lanes"]) == 1 else f"第 {i + 1} 会话"
+
+
+def run(paths, *, watch=False, plain=False):
+    """迷宫入口：paths 1 个=单会话，2 个=同轴对比。plain（或非 TTY）＝打一帧退出。"""
+    data = _load(paths)
     cols = os.get_terminal_size().columns if sys.stdout.isatty() else 120
     if plain or not sys.stdin.isatty() or not sys.stdout.isatty():
-        frame = render_frame(lane, data["timeMap"], data["Tmax"], cols)
-        print(frame.text())
+        parts = []
+        for i, lane in enumerate(data["lanes"]):
+            parts.append(render_frame(
+                lane, data["timeMap"], data["Tmax"], cols,
+                with_ticks=(i == len(data["lanes"]) - 1),
+                title=_lane_title(data, i)).text())
+            if len(data["lanes"]) == 2 and i == 0:
+                parts.append(render_align(*data["lanes"], data["timeMap"],
+                                          data["Tmax"], cols).text())
+        print("\n".join(parts))
+        lane = data["lanes"][0]
         nodes = _nodes_in_order(lane)
-        if nodes:
+        if len(data["lanes"]) == 1 and nodes:
             print("\n" + "\n".join(detail_lines(
                 nodes[-1], data["timeMap"], cols, nodes[-1]["v"] in ("ok", "answer"))))
         return 0
-    return _interactive(path, data, watch)
+    return _interactive(paths, data, watch)
 
 
-def _interactive(path, data, watch):
+SPEEDS = (5, 25, 100, 300)
+
+
+def _interactive(paths, data, watch):
     import select
     import termios
     import tty
 
-    lane = data["lanes"][0]
-    nodes = _nodes_in_order(lane)
-    sel = len(nodes) - 1
+    lanes = data["lanes"]
+    per_lane = [_nodes_in_order(l) for l in lanes]
+    two = len(lanes) == 2
+    cur = 0
+    sels = [len(ns) - 1 for ns in per_lane]
     view = None
     filt_fail = False
     query = ""
-    mtime = os.stat(path).st_mtime_ns
+    mode = "maze"          # maze | inv（盘点表，仅对比档）
+    inv_sel = 0
+    playing = False
+    speed_i = 1            # SPEEDS[1]=25×
+    t_cursor = None
+    mtimes = [os.stat(p).st_mtime_ns for p in paths]
+
+    def turn_extent(turn):
+        s, e = float("inf"), float("-inf")
+        for lane in lanes:
+            for n in lane["main"] + lane["detours"]:
+                if (n.get("turn") or 1) != turn:
+                    continue
+                s, e = min(s, n["s"]), max(e, n["e"])
+        if s >= e:
+            return None
+        pad = max((e - s) * 0.06, 2)
+        return [s - pad, e + pad]
 
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
@@ -271,43 +382,89 @@ def _interactive(path, data, watch):
     try:
         while True:
             size = os.get_terminal_size()
-            node = nodes[sel] if nodes else None
-            frame = render_frame(
-                lane, data["timeMap"], data["Tmax"], size.columns, view=view,
-                sel_step=node["step"] if node else None,
-                filt_fail=filt_fail, query=query)
-            out = [frame.text(), ""]
-            if node is not None:
-                is_main = any(n is node for n in lane["main"])
-                out += detail_lines(node, data["timeMap"], size.columns, is_main)
-            hits = ""
-            if filt_fail or query:
-                vis = sum(1 for n in nodes if _visible(n, filt_fail, query))
-                hits = f" · 命中 {vis}/{len(nodes)}"
-            status = (f"←→选步 f失败{'●' if filt_fail else '○'} /搜索"
-                      f"{('「' + query + '」') if query else ''} +-缩放 h l平移 0整图 q退出"
-                      f"{hits}{' · watch' if watch else ''}")
-            body = "\n".join(out[: size.lines - 2])
-            sys.stdout.write("\x1b[2J\x1b[H" + body + "\n" + DIM + status + RESET)
+            nodes = per_lane[cur]
+            node = nodes[sels[cur]] if nodes else None
+            if mode == "inv":
+                inv_lines, inv_turns = render_inventory(data, inv_sel, size.columns)
+                body = "\n".join(inv_lines[: size.lines - 2])
+                status = "↑↓选轮 Enter缩放该轮 i返回 q退出"
+            else:
+                parts = []
+                for i, lane in enumerate(lanes):
+                    parts.append(render_frame(
+                        lane, data["timeMap"], data["Tmax"], size.columns,
+                        view=view, with_ticks=(i == len(lanes) - 1),
+                        sel_step=(node["step"] if node is not None and i == cur else None),
+                        filt_fail=filt_fail, query=query, t_cursor=t_cursor,
+                        title=_lane_title(data, i)).text())
+                    if two and i == 0:
+                        parts.append(render_align(
+                            *lanes, data["timeMap"], data["Tmax"],
+                            size.columns, view=view).text())
+                out = ["\n".join(parts), ""]
+                if node is not None and t_cursor is None:
+                    is_main = any(n is node for n in lanes[cur]["main"])
+                    out += detail_lines(node, data["timeMap"], size.columns, is_main)
+                hits = ""
+                if filt_fail or query:
+                    vis = sum(1 for ns in per_lane for n in ns
+                              if _visible(n, filt_fail, query))
+                    total = sum(len(ns) for ns in per_lane)
+                    hits = f" · 命中 {vis}/{total}"
+                play = (f" ▶{fmt_t(wall_clock(t_cursor, data['timeMap']))}"
+                        f" {SPEEDS[speed_i]}×" if t_cursor is not None else "")
+                status = (f"←→选步{'（泳道' + str(cur + 1) + '，↑↓切）' if two else ''}"
+                          f" f失败{'●' if filt_fail else '○'} /搜索"
+                          f"{('「' + query + '」') if query else ''}"
+                          f" +-缩放 0整图 p播放{play} []调速"
+                          f"{' i盘点' if two else ''} q退出"
+                          f"{hits}{' · watch' if watch else ''}")
+                body = "\n".join(out)
+            lines = body.splitlines()[: size.lines - 2]
+            sys.stdout.write("\x1b[H" + "\n".join(l + "\x1b[K" for l in lines)
+                             + "\n" + DIM + status + RESET + "\x1b[K\x1b[J")
             sys.stdout.flush()
 
-            ready, _, _ = select.select([sys.stdin], [], [], 2 if watch else None)
+            timeout = 0.04 if playing else (2 if watch else None)
+            ready, _, _ = select.select([sys.stdin], [], [], timeout)
             if not ready:
-                st = os.stat(path)
-                if st.st_mtime_ns != mtime:
-                    mtime = st.st_mtime_ns
-                    data = _load(path)
-                    lane = data["lanes"][0]
-                    nodes = _nodes_in_order(lane)
-                    sel = min(sel, len(nodes) - 1) if nodes else 0
+                if playing and t_cursor is not None:
+                    t_cursor += 0.04 * SPEEDS[speed_i]
+                    if t_cursor >= data["Tmax"]:
+                        t_cursor = data["Tmax"]
+                        playing = False
+                if watch and not playing:
+                    fresh = [os.stat(p).st_mtime_ns for p in paths]
+                    if fresh != mtimes:
+                        mtimes = fresh
+                        data = _load(paths)
+                        lanes = data["lanes"]
+                        per_lane = [_nodes_in_order(l) for l in lanes]
+                        sels = [min(s, len(ns) - 1) if ns else 0
+                                for s, ns in zip(sels, per_lane)]
                 continue
             key = os.read(fd, 8).decode("utf-8", errors="replace")
             if key in ("q", "\x03"):
                 return 0
-            if key in ("\x1b[C", "l") and sel < len(nodes) - 1:
-                sel += 1
-            elif key in ("\x1b[D", "h") and sel > 0:
-                sel -= 1
+            if mode == "inv":
+                if key == "\x1b[A" and inv_sel > 0:
+                    inv_sel -= 1
+                elif key == "\x1b[B" and inv_sel < len(inv_turns) - 1:
+                    inv_sel += 1
+                elif key in ("\r", "\n"):
+                    ext = turn_extent(inv_turns[inv_sel])
+                    if ext:
+                        view = ext
+                    mode = "maze"
+                elif key == "i":
+                    mode = "maze"
+                continue
+            if key in ("\x1b[C", "l") and sels[cur] < len(nodes) - 1:
+                sels[cur] += 1
+            elif key in ("\x1b[D", "h") and sels[cur] > 0:
+                sels[cur] -= 1
+            elif two and key in ("\x1b[A", "\x1b[B", "\t"):
+                cur = 1 - cur
             elif key == "f":
                 filt_fail = not filt_fail
             elif key == "/":
@@ -318,6 +475,20 @@ def _interactive(path, data, watch):
                     query = input().strip()
                 finally:
                     tty.setcbreak(fd)
+            elif key == "i" and two:
+                mode, inv_sel = "inv", 0
+            elif key == "p":
+                if t_cursor is not None and t_cursor >= data["Tmax"]:
+                    t_cursor = 0.0
+                if t_cursor is None:
+                    t_cursor = 0.0
+                playing = not playing
+                if not playing and t_cursor >= data["Tmax"]:
+                    t_cursor = None
+            elif key == "]":
+                speed_i = min(speed_i + 1, len(SPEEDS) - 1)
+            elif key == "[":
+                speed_i = max(speed_i - 1, 0)
             elif key in ("+", "="):
                 if node is not None:
                     center = (node["s"] + node["e"]) / 2
@@ -327,12 +498,12 @@ def _interactive(path, data, watch):
                 if view is not None:
                     center = (view[0] + view[1]) / 2
                     span = (view[1] - view[0]) * 2
-                    if span >= data["Tmax"]:
-                        view = None
-                    else:
-                        view = [center - span / 2, center + span / 2]
+                    view = None if span >= data["Tmax"] else \
+                        [center - span / 2, center + span / 2]
             elif key == "0":
                 view = None
+                if not playing:
+                    t_cursor = None
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         sys.stdout.write("\n")
@@ -396,4 +567,24 @@ if __name__ == "__main__":
     # pack：重叠支路分两行
     packed = _pack([(0, 20, "a"), (5, 25, "b"), (30, 40, "c")])
     assert [r for r, _, _ in packed] == [0, 1, 0]
-    print("trace_view selfcheck ok — 帧/泳道/换轮/缝/选中/过滤/搜索/缩放裁剪/详情/装箱")
+    # 播放光标：未到的节点变暗（t_cursor=5 时步3 s=40 未到）
+    frp = render_frame(lane, None, 41, 80, t_cursor=5.0)
+    assert DIM + "●" in frp.text() or f"{DIM}●" in frp.text(), "未到 answer 该暗"
+    # 对齐行：两泳道同数据 → 每共有轮 ⚑N Δ0s＋支路计数
+    al = render_align(lane, lane, None, 41, 100).text()
+    plain_al = al
+    for code in (INV, DIM, RESET, "\x1b[36m", "\x1b[33m", *V_COLOR.values()):
+        plain_al = plain_al.replace(code, "")
+    assert "⚑1 Δ0s 支路1↔1" in plain_al and "⚑2 Δ0s" in plain_al, plain_al
+    # 盘点表：同数据两边对称=持平；title 行＋合计行
+    inv, turns = render_inventory({"lanes": [lane, lane], "timeMap": None}, 0, 100)
+    plain_inv = "\n".join(inv)
+    for code in (INV, DIM, RESET):
+        plain_inv = plain_inv.replace(code, "")
+    assert turns == [1, 2] and "第 1 轮" in plain_inv and "≈持平" in plain_inv
+    assert "1 步·18s ✗1" in plain_inv and "合计" in plain_inv, plain_inv
+    # 只一边有轮：另一边显 —
+    lane_b = dict(lane, detours=[])
+    inv2, _ = render_inventory({"lanes": [lane, lane_b], "timeMap": None}, 0, 100)
+    assert "—" in "\n".join(inv2) and "第 1 会话多耗" in "\n".join(inv2)
+    print("trace_view selfcheck ok — 帧/泳道/换轮/缝/选中/过滤/搜索/缩放裁剪/详情/装箱/播放/对齐/盘点")

@@ -409,9 +409,7 @@ def main():
                 if err:
                     sys.exit(err)
                 paths.append(p)
-            if len(paths) == 2:
-                sys.exit("对比档在路上（阶段4）；先各自单开：misaka trace <目标>")
-            sys.exit(trace_view.run(paths[0], watch=args.watch, plain=args.plain))
+            sys.exit(trace_view.run(paths, watch=args.watch, plain=args.plain))
         import time as _time
 
         from misaka.extensions.board import observe
