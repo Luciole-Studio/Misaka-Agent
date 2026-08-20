@@ -187,15 +187,14 @@ def card_prompt(task):
 
 
 def _load_profile(profile_dir):
+    """(soul_path|None, config dict)。技能不在这算——两个调用方各有自己的技能栈来源。"""
     soul = os.path.join(profile_dir, "SOUL.md")
     cfg_path = os.path.join(profile_dir, "config.json")
     cfg = {}
     if os.path.exists(cfg_path):
         with open(cfg_path, encoding="utf-8") as f:
             cfg = json.load(f)
-    # 技能＝角色目录下的 skills/（人格与技能同居 ~/.misaka/profiles/<角色>/，照 pi）
-    skills = profiles.skills(profile_dir)
-    return (soul if os.path.exists(soul) else None), cfg, skills
+    return (soul if os.path.exists(soul) else None), cfg
 
 
 def check_report(workspace, con=None, task_id=None):
@@ -301,7 +300,7 @@ def run_llm_json(profile_dir, prompt, provider, default_model,
     """
     from misaka.extensions.board import validate  # 延迟导入避免包初始化环
 
-    soul_path, cfg, _skills = _load_profile(profile_dir)
+    soul_path, cfg = _load_profile(profile_dir)
     model = os.environ.get("MISAKA_FORCE_MODEL") or model or cfg.get("model") or default_model  # 停摆时全线切换
     flags = ["--provider", provider, "--model", model, "--no-session", "--thinking", "low"]
     workdir = cwd or os.getcwd()
@@ -380,7 +379,7 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
     返回 (flags, factories, prompt, ro_root, role)：引擎旗标、扩展工厂、
     开场合同（含验收反馈与交卷规矩）、技能只读副本根、角色名。
     """
-    soul, cfg, _profile_skills = _load_profile(profile_dir)
+    soul, cfg = _load_profile(profile_dir)
     model = os.environ.get("MISAKA_FORCE_MODEL") or task["model"] or cfg.get("model") or default_model
     os.makedirs(workspace, exist_ok=True)
     # 技能三层栈：项目（信任＋扫描）→ 角色 → 共享；project 同名压过角色层

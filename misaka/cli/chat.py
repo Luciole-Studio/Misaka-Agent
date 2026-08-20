@@ -7,7 +7,7 @@ import os
 import sys
 
 from misaka.config import profiles
-from misaka.config import CFG, REPO, sisters
+from misaka.config import CFG, sisters
 
 
 def _extension_factories(profile_dir, profile_role, workspace, session_role, *, sister):

@@ -453,7 +453,6 @@ if __name__ == "__main__":
         return _orig_open(fp, *a, **k)
     builtins.open = _spy_open
     try:
-        multi = ingest(os.path.join(tmp, "multi.md")) if False else None  # 用已有多页 doc
         read_pages(doc_id, 1, 1)          # 只该 open p0001.txt
     finally:
         builtins.open = _orig_open

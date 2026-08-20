@@ -11,8 +11,6 @@
 import os
 import sys
 
-_REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, _REPO)
 
 
 def _roster():

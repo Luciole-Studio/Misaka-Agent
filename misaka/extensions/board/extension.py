@@ -133,10 +133,7 @@ def register(harn):
             raise ValueError("；".join(errs))
         c = cards[0]
         from misaka.extensions.board import project as _project
-        try:
-            proj = _project.require(params.project)   # 拼错/未注册当场挡
-        except ValueError as e:
-            raise ValueError(str(e))
+        proj = _project.require(params.project)   # 拼错/未注册当场挡
         tid = db.create_task(con, c["title"], body=c["body"], assignee=c["assignee"],
                              priority=c["priority"], timeout_seconds=c["timeout"], project=proj)
         hit = cdcl.check(con, f"{c['title']} {c['body'][:300]}", canon)

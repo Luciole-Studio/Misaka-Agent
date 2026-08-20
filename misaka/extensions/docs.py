@@ -4,15 +4,11 @@
 挂载：worker/子代理把 register 直接传进会话（extension_factories）。
 """
 import os
-import sys
 
 from misaka.core.extensions.types import ToolDefinition
 from pydantic import BaseModel, Field
 
-_REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, _REPO)
-
-from misaka.research.indexer import index as corpus  # noqa: E402
+from misaka.research.indexer import index as corpus
 
 def _text(s):
     return {"content": [{"type": "text", "text": s}], "details": {}}

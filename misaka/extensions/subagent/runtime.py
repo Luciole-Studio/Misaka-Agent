@@ -1427,19 +1427,6 @@ class SubagentManager:
         except asyncio.CancelledError:
             raise
 
-    async def _release_budget(self, task: AgentTask) -> None:
-        token = task._budget_reservation
-        task._budget_reservation = None
-        if not token or not self.role_context.usage_db:
-            return
-        from misaka.orchestration import budget
-
-        await asyncio.to_thread(
-            budget.release_agent_path,
-            self.role_context.usage_db,
-            token,
-        )
-
     @staticmethod
     def _async_hook_request_path(
         task: AgentTask, event: Mapping[str, Any]

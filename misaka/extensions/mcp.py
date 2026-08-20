@@ -28,7 +28,6 @@ from misaka.core.extensions.types import ToolDefinition
 from pydantic import BaseModel
 
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, _REPO)
 
 def _config_path():
     """调用时读——import 时读会让测试/子进程拿到陈旧值（subagent 深度同款教训）。"""

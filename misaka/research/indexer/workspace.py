@@ -9,10 +9,8 @@
 """
 import json
 import os
-import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from misaka.research.indexer import index as corpus  # noqa: E402
+from misaka.research.indexer import index as corpus
 
 
 def ingest_artifacts(bcon, task, artifacts=None):

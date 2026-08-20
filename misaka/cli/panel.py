@@ -85,8 +85,7 @@ def busy_dot(busy, level, dim=None, bright=None):
     return f"{hui.sgr_fg(color)}●"
 
 
-def _wcwidth(text):
-    return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in text)
+_wcwidth = hui.display_width   # 同一算法就用镜像件那份（审查 2026-08-20：曾逐字重复）
 
 
 
@@ -415,7 +414,7 @@ def format_prefix_bar(width, prefix_name="ctrl+b"):
     parts = [(f"{badge} PREFIX \x1b[0m", 8)]
     for name, desc in ((f"{prefix_name}", "原样发送"), ("1-9", "切页"),
                        ("hjkl", "选窗口"), ("c", "新页"), ("v/-", "分屏"),
-                       ("z", "缩放"), ("t", "树"), ("m", "鼠标"), ("x", "关格子"),
+                       ("z", "缩放"), ("t", "树"), ("x", "关格子"),
                        ("d", "分离"), ("?", "键位"), ("esc", "取消")):
         parts.append((f" {key}{name}\x1b[0m{dim} {desc}\x1b[0m",
                       1 + len(name) + 1 + _wcwidth(desc)))
@@ -802,7 +801,7 @@ def launch():
         paint("".join(out).encode())
     ui_map = {"bar": None, "targets": []}   # 鼠标热区：标签条几何＋侧栏目标表
 
-    def draw_sidebar(note=None, force=False):
+    def draw_sidebar():
         nonlocal tab_scroll
         sync_tabs()
         names = [tab_label(tab) for tab in tabs]
@@ -831,14 +830,12 @@ def launch():
         cached = chrome_cache["rows"]
         out = ["\x1b[?25l\x1b[?2026h"]
         for index, chunk in enumerate(wanted):
-            if force or index >= len(cached) or cached[index] != chunk:
+            if index >= len(cached) or cached[index] != chunk:
                 out.append(chunk)
         chrome_cache["rows"] = wanted
         out.append("\x1b[?2026l")
         if len(out) > 2:
             paint("".join(out).encode())
-        if note:                 # 提示只走主区底行，不占侧栏
-            bottom_note(note)
 
     def draw_prefix_bar():
         # herdr：进前缀模式=底行弹出模式栏（menus.rs render_prefix_overlay）；
