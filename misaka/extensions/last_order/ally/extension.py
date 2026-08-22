@@ -6,6 +6,7 @@ about any vendor's CLI: Last Order supplies the full command line every time (re
 """
 import asyncio
 import json
+import os
 
 from pydantic import BaseModel, Field
 
@@ -103,7 +104,8 @@ def register(harn):
         name = runner.label_for(params.argv, params.label)
         out = await asyncio.to_thread(_net().request, "pane.create", {
             "argv": params.argv, "cwd": params.cwd, "title": f"{name}·ally",
-            "env": {"MISAKA_ALLY": name}})
+            "env": {"MISAKA_ALLY": name},
+            "parent": os.environ.get("MISAKA_NET_PANE")})   # the panel groups the ally under this Last Order
         return _text(f"Ally {name} is running in pane {out['pane_id']} (interactive session; the user can take over). "
                      f"To give it a job, create a card with misaka_ally_card.")
 
@@ -162,7 +164,8 @@ def register(harn):
         if not params.confirmed:
             raise ValueError("Dispatching spends the ally's own quota; get explicit user confirmation first.")
         out = await asyncio.to_thread(_net().request, "pane.run_card",
-                                      {"task_id": params.task_id})
+                                      {"task_id": params.task_id,
+                                       "parent": os.environ.get("MISAKA_NET_PANE")})
         return _text(f"Card {params.task_id} is running in pane {out['pane_id']}. It will submit on its own "
                      f"(moving to verifying for red-team review); go do something else meanwhile.")
 

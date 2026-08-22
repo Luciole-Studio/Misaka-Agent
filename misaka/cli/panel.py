@@ -210,10 +210,68 @@ def pane_state(pane):
     return "idle", True
 
 
+LO_TITLE = "Last Order"      # the panel opens Last Order panes with this title; they are space roots
+
+
 def space_key(pane):
-    """A pane's space: the real path of its folder (herdr's workspace identity cwd,
-    workspace.rs:1161-1173). ponytail: folder = space until sister panes carry a parent link."""
+    """A pane's folder as a real path (herdr's workspace identity cwd, workspace.rs:1161-1173)."""
     return os.path.realpath(pane.get("cwd") or os.getcwd())
+
+
+def _space_label(folder):
+    home = os.path.expanduser("~")
+    return "~" if folder == home else (os.path.basename(folder.rstrip(os.sep)) or folder)
+
+
+def group_spaces(listing):
+    """One space per Last Order session: her pane is the root and every pane whose ``parent``
+    chain reaches her is a member (herdr workspace = root pane plus everything opened from it).
+    Panes with no Last Order above them (opened from the CLI, restored from a snapshot, or
+    orphaned when she closed) join the first Last Order space in their folder, else a space of
+    their own keyed by the folder. Returns ``(spaces, member_of)``: ordered space dicts
+    (key, root, folder, label, state, seen, alive) and {pane id: space key}. Pure, so testable."""
+    by_id = {pane["id"]: pane for pane in listing}
+
+    def root_of(pane):
+        seen = set()
+        while pane.get("parent") in by_id and pane["id"] not in seen:
+            seen.add(pane["id"])
+            pane = by_id[pane["parent"]]
+        return pane
+
+    spaces, by_key, member_of, orphans = [], {}, {}, []
+    for pane in listing:
+        root = root_of(pane)
+        if root["title"] != LO_TITLE:
+            orphans.append(pane)
+            continue
+        if root["id"] not in by_key:
+            folder = space_key(root)
+            by_key[root["id"]] = {"key": root["id"], "root": root["id"], "folder": folder,
+                                  "label": _space_label(folder), "state": "unknown",
+                                  "seen": True, "alive": False}
+            spaces.append(by_key[root["id"]])
+        member_of[pane["id"]] = root["id"]
+    for pane in orphans:
+        folder = space_key(pane)
+        host = next((space for space in spaces
+                     if space["root"] is not None and space["folder"] == folder), None)
+        if host is None:
+            host = by_key.get(folder)
+            if host is None:
+                host = by_key[folder] = {"key": folder, "root": None, "folder": folder,
+                                         "label": _space_label(folder), "state": "unknown",
+                                         "seen": True, "alive": False}
+                spaces.append(host)
+        member_of[pane["id"]] = host["key"]
+    for pane in listing:                                  # aggregate.rs:86-99 aggregate_state
+        space = by_key[member_of[pane["id"]]]
+        state, seen = pane_state(pane)
+        space["alive"] = space["alive"] or bool(pane["alive"])
+        if (hui.attention_priority(state, seen)
+                > hui.attention_priority(space["state"], space["seen"])):
+            space["state"], space["seen"] = state, seen
+    return spaces, member_of
 
 
 def tabs_by_space(tabs, space_of_pane):
@@ -241,28 +299,18 @@ def sidebar_model(listing, focused_id, active_space=None, tab_of=None, tab_count
     a bare shell (aggregate.rs:29-69 lists only panes with an agent); its tab number shows only
     when its space has several tabs (sidebar.rs:166-171). Pure, so testable."""
     tab_of, tab_counts = tab_of or {}, tab_counts or {}
-    home = os.path.expanduser("~")
-    spaces, by_key = [], {}
-    for pane in listing:
-        key = space_key(pane)
-        if key not in by_key:
-            label = "~" if key == home else (os.path.basename(key.rstrip(os.sep)) or key)
-            by_key[key] = {"key": key, "label": label, "active": key == active_space,
-                           "state": "unknown", "seen": True}
-            spaces.append(by_key[key])
-        space = by_key[key]
-        state, seen = pane_state(pane)
-        if active_space is None and pane["id"] == focused_id:
-            space["active"] = True
-        if (hui.attention_priority(state, seen)
-                > hui.attention_priority(space["state"], space["seen"])):
-            space["state"], space["seen"] = state, seen
+    spaces, member_of = group_spaces(listing)
+    by_key = {space["key"]: space for space in spaces}
+    if active_space is None:
+        active_space = member_of.get(focused_id)
+    for space in spaces:
+        space["active"] = space["key"] == active_space
     agents = []
     for pane in listing:
         if pane["title"] == "shell":          # ponytail: MISAKA's own shell panes carry this title
             continue
         state, seen = pane_state(pane)
-        key = space_key(pane)
+        key = member_of[pane["id"]]
         tab = tab_of.get(pane["id"])
         agents.append({"pane": pane["id"], "space": by_key[key]["label"],
                        "tab": (str(tab + 1) if (tab is not None and tab_counts.get(key, 1) > 1)
@@ -781,8 +829,10 @@ def launch():
                 tabs.append(tree)
 
     def space_of(pane_id):
-        pane = next((p for p in listing if p["id"] == pane_id), None)
-        return space_key(pane) if pane else None
+        return group_spaces(listing)[1].get(pane_id)
+
+    def space_info(key):
+        return next((space for space in group_spaces(listing)[0] if space["key"] == key), None)
 
     def visible_tabs():
         """herdr: the tab bar and the main area show only the active workspace's tabs."""
@@ -801,7 +851,7 @@ def launch():
 
     rows, cols = _term_size()
     # Sidebar state (herdr AppState: sidebar_width / sidebar_collapsed / agent_panel_sort / active).
-    side = {"w": SIDEBAR_W, "collapsed": False, "sort": "grouped", "ws": workspace}
+    side = {"w": SIDEBAR_W, "collapsed": False, "sort": "grouped", "ws": lo["id"]}
     last_focus = {}        # space -> the pane focused last time we were there (herdr: per-workspace focus)
     side_order = []        # space keys in sidebar order at the last draw (neighbour lookup when one closes)
 
@@ -831,10 +881,7 @@ def launch():
         if vis:
             focus(hui.pane_ids(vis[min(page_idx, len(vis) - 1)])[0], force_layout=True)
             return
-        spaces = []
-        for pane in listing:
-            if pane["alive"] and space_key(pane) not in spaces:
-                spaces.append(space_key(pane))
+        spaces = [space["key"] for space in group_spaces(listing)[0] if space["alive"]]
         if spaces:
             index = side_order.index(side["ws"]) if side["ws"] in side_order else 0
             switch_space(spaces[min(index, len(spaces) - 1)])
@@ -1224,15 +1271,19 @@ def launch():
             draw_sidebar()
 
     _FOCUSED = object()          # Default target: split the currently focused pane.
+    _ACTIVE = object()           # Default parent: the active space's Last Order.
 
-    def new_pane(argv, title, *, split=None, target=_FOCUSED):
+    def new_pane(argv, title, *, split=None, target=_FOCUSED, parent=_ACTIVE):
         """split=None opens a new tab; split="h"/"v" splits ``target`` in the current tab.
         target=_FOCUSED splits the focused pane (herdr split_focused); target=None wraps the
-        whole tree (a new column, used by MISAKA's tiling rule)."""
+        whole tree (a new column). The pane lands in the active space's folder and, unless
+        ``parent`` says otherwise, under its Last Order; parent=None makes it a space root."""
         nonlocal listing
-        out = control.request("pane.create",
-                              {"argv": argv, "cwd": side["ws"], "title": title,   # lands in the active space
-                               "env": {"MISAKA_THEME": hui.theme_variant()}})
+        space = space_info(side["ws"])
+        out = control.request("pane.create", {
+            "argv": argv, "cwd": space["folder"] if space else os.getcwd(), "title": title,
+            "parent": (space["root"] if space else None) if parent is _ACTIVE else parent,
+            "env": {"MISAKA_THEME": hui.theme_variant()}})
         listing = panes()
         new_id = out["pane_id"]
         if split is not None:
@@ -1329,8 +1380,8 @@ def launch():
                 focus(hit[1])
             elif hit[0] == "space":                   # herdr: click a space = switch workspace.
                 switch_space(hit[1])
-            elif hit[0] == "new":                     # herdr: new workspace = a shell in the startup folder; here a shell tab.
-                new_pane([os.environ.get("SHELL", "sh")], "shell")
+            elif hit[0] == "new":                     # herdr: new workspace in the same folder; here a new Last Order session.
+                new_pane([sys.executable, "-m", "misaka", "chat"], LO_TITLE, parent=None)
             elif hit[0] == "menu":                    # herdr: the global menu; the key help is the nearest thing here.
                 help_open = True
                 draw_help_overlay()

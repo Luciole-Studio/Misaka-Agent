@@ -34,7 +34,7 @@ from misaka.config import CFG
 # Wire protocol version (strict equality, as in herdr). Bump it whenever *server
 # behaviour* changes, not only method/event shapes: an unbumped behaviour change
 # once let a stale daemon slip through the version gate.
-PROTOCOL = 18   # 18: projects.list groups cards by folder; project.set/project.delete removed
+PROTOCOL = 19   # 19: panes carry `parent` (the pane that opened them); pane.create / pane.run_card accept it
 RING_CAP = 256 * 1024          # output tail kept per pane
 FRAME_SECONDS = 0.008          # coalescing window for dirty-row broadcasts (~120 fps)
 SCROLLBACK_LINES = 2000        # scrollback history per pane
@@ -350,10 +350,12 @@ class Pane:
     __slots__ = ("id", "title", "argv", "cwd", "card", "claim_lock", "generation",
                  "deadline", "proc", "fd", "buf", "started_at", "exit_code", "submitted",
                  "seen_status", "screen", "stream", "carry", "alt_screen",
-                 "last_output", "last_heartbeat", "theme", "ally", "flush", "sent_cursor")
+                 "last_output", "last_heartbeat", "theme", "ally", "flush", "sent_cursor",
+                 "parent")
 
-    def __init__(self, pane_id, title, argv, cwd, card=None):
+    def __init__(self, pane_id, title, argv, cwd, card=None, parent=None):
         self.id, self.title, self.argv, self.cwd, self.card = pane_id, title, argv, cwd, card
+        self.parent = parent          # the pane that opened this one (Last Order dispatching a Sister); panel groups by it
         self.claim_lock = self.generation = self.deadline = None
         self.proc = self.fd = self.exit_code = None
         self.buf = bytearray()
@@ -504,10 +506,11 @@ class Daemon:
             except Exception:  # noqa: BLE001 - remove dead subscribers
                 self._attached.pop(writer, None)
 
-    def create(self, argv, cwd, *, title="", card=None, env=None) -> Pane:
+    def create(self, argv, cwd, *, title="", card=None, env=None, parent=None) -> Pane:
         self._seq += 1
         pane = Pane(f"p{self._seq}", title or (argv[0] if argv else ""), list(argv),
-                    cwd or os.getcwd(), card=card)
+                    cwd or os.getcwd(), card=card,
+                    parent=parent if parent in self.panes else None)
         if env and env.get("MISAKA_THEME") in ("dark", "light"):
             pane.theme = self._theme = env["MISAKA_THEME"]   # remember the session variant
         if env and env.get("MISAKA_ALLY"):
@@ -565,7 +568,7 @@ class Daemon:
             self._con = db.connect(_expand(CFG["db"]))
         return self._con
 
-    def run_card(self, task_id) -> Pane:
+    def run_card(self, task_id, parent=None) -> Pane:
         from misaka.platform import tasks as db
         from misaka.platform import admission, processes as process_tree
 
@@ -620,7 +623,7 @@ class Daemon:
                 env["MISAKA_ALLY"] = row["assignee"]
             pane = self.create(argv, workspace,
                                title=f"{row['assignee']}·{task_id}", card=task_id,
-                               env=env)
+                               env=env, parent=parent)
         except BaseException:
             db.back_to_ready(con, task_id, generation=generation, claim_lock=lock)
             raise
@@ -793,6 +796,7 @@ class Daemon:
                     mail = {}
             return {"panes": [
                 {"id": p.id, "title": p.title, "card": p.card, "cwd": p.cwd,
+                 "parent": p.parent,
                  "alive": p.alive(), "exit_code": p.exit_code,
                  "status": status.get(p.card),
                  "busy": _pane_busy(p),
@@ -875,10 +879,11 @@ class Daemon:
         if method == "pane.create":
             pane = self.create(params["argv"], params.get("cwd"),
                                title=params.get("title", ""),
-                               env=params.get("env"))     # the panel passes through theme etc.
+                               env=params.get("env"),      # the panel passes through theme etc.
+                               parent=params.get("parent"))
             return {"pane_id": pane.id, "pid": pane.proc.pid}
         if method == "pane.run_card":
-            pane = self.run_card(params["task_id"])
+            pane = self.run_card(params["task_id"], parent=params.get("parent"))
             return {"pane_id": pane.id, "pid": pane.proc.pid, "card": pane.card}
         if method == "pane.read":
             pane = self.panes.get(params["id"])

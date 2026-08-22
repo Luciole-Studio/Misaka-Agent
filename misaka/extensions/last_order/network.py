@@ -264,7 +264,8 @@ def register(harn):
                     continue
                 try:
                     out = await asyncio.to_thread(
-                        net.request, "pane.run_card", {"task_id": row["id"]})
+                        net.request, "pane.run_card",
+                        {"task_id": row["id"], "parent": os.environ["MISAKA_NET_PANE"]})
                     started += 1
                     lines.append(f"""  {row['id']} → {row['assignee']}  pane {out['pane_id']}""")
                 except Exception as error:  # noqa: BLE001 - report individual launch failures
@@ -320,7 +321,8 @@ def register(harn):
         if os.environ.get("MISAKA_NET_PANE") and row is not None and row["status"] == "ready":
             from misaka.net import client as net
             out = await asyncio.to_thread(
-                net.request, "pane.run_card", {"task_id": params.task_id})
+                net.request, "pane.run_card",
+                {"task_id": params.task_id, "parent": os.environ["MISAKA_NET_PANE"]})
             return _text(f"Card {params.task_id} started in pane {out['pane_id']}.")
         result = await runtime.launch(
             params.task_id,

@@ -47,7 +47,8 @@ def register(harn):
             if name != "last-order":
                 argv += ["--as", name]
             out = net.request("pane.create",
-                              {"argv": argv, "cwd": os.getcwd(), "title": title})
+                              {"argv": argv, "cwd": os.getcwd(), "title": title,
+                               "parent": os.environ["MISAKA_NET_PANE"]})
             ctx.ui.notify(
                 f"{name} is now open in pane {out['pane_id']}. "
                 "Select it from the sidebar or press Ctrl+B and its number.",
