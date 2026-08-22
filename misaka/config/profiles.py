@@ -48,7 +48,7 @@ def shared_soul():
     """Return the path of the shared soul, ~/.misaka/profiles/MISAKA.md, seeding it on first use.
 
     Last Order, the Sisters, and their sub-agents all load it before their own
-    SOUL.md. An existing file is never overwritten. One-shot roles (harvester,
+    SOUL.md. An existing file is never overwritten. One-shot roles (planner,
     red team, judge) do not read it, so their audit stance is unaffected by the
     shared personality.
     """
