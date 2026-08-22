@@ -1,27 +1,24 @@
-"""misaka — 御坂网络 CLI。薄入口：解析参数、调各包、打印结果；业务逻辑住在各自的包里。
-
-入口经 pyproject [project.scripts] 生成 `misaka` 命令（照 engine/harn 同款做法，仓根无入口脚本）。
-"""
+"""MISAKA command-line entry point."""
 import argparse
 import os
 import signal
 import sys
 
-from misaka.extensions.board import db
-from misaka.research import basemap
-from misaka.orchestration import budget
-from misaka.research.indexer import index as corpus
-from misaka.research.indexer import workspace as ws_index
-from misaka.research.kernel import audit, calibration, canon, cdcl, evidence, frontier, harvest, precedent, saturation, store, synthesize, tms, verdict
+from misaka.platform import tasks as db
+from misaka.research import basemap, runs as research_runs
+from misaka.platform import budget
+from misaka.documents import index as corpus
+from misaka.documents import workspace as artifact_store
+from misaka import workspace as ws_index
 from misaka.config import CFG, sisters
-from misaka.extensions.board import tail
+from misaka.observability import board as tail
 
 
 def _parser():
     p = argparse.ArgumentParser(prog="misaka")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    a = sub.add_parser("add", help="建卡")
+    a = sub.add_parser("add", help="Create a task card")
     a.add_argument("title")
     a.add_argument("--body", default="")
     a.add_argument("--body-file")
@@ -29,211 +26,163 @@ def _parser():
     a.add_argument("--model")
     a.add_argument("--priority", type=int, default=0)
     a.add_argument("--timeout", type=int, default=900)
-    a.add_argument("--project", help="归属课题(须先 misaka project 建目录);不填=未分类")
+    a.add_argument("--project", help="Project name or ID (default: the current workspace's project)")
 
-    pr = sub.add_parser("project", help="课题:建/列/归档/置顶/删除")
-    pr.add_argument("name", nargs="?", help="课题名(=目录名);省略则列出全部")
+    pr = sub.add_parser("project", help="Create, list, archive, pin, or delete projects")
+    pr.add_argument("name", nargs="?", help="Project name to create; omit to list projects")
     pr_act = pr.add_mutually_exclusive_group()
-    pr_act.add_argument("--archive", action="store_true", help="归档（列表沉底标灰）")
-    pr_act.add_argument("--unarchive", action="store_true", help="恢复进行中")
-    pr_act.add_argument("--pin", action="store_true", help="置顶")
-    pr_act.add_argument("--unpin", action="store_true", help="取消置顶")
+    pr_act.add_argument("--archive", action="store_true", help="Archive the project")
+    pr_act.add_argument("--unarchive", action="store_true", help="Unarchive the project")
+    pr_act.add_argument("--pin", action="store_true", help="Pin the project")
+    pr_act.add_argument("--unpin", action="store_true", help="Unpin the project")
     pr_act.add_argument("--delete", action="store_true",
-                        help="删课题（有卡挂着会拒；目录软删进 .trash-*）")
+                        help="Delete the project (needs --with-cards if it still has cards)")
     pr.add_argument("--with-cards", action="store_true",
-                    help="随 --delete：连课题下的卡一起删（卡是硬删）")
+                    help="Also delete the project's cards permanently")
 
-    tk = sub.add_parser("task", help="卡：删除（破坏性，连事件与预算一并抹）")
+    tk = sub.add_parser("task", help="Manage task cards")
     tk.add_argument("task_id")
     tk.add_argument("--delete", action="store_true", required=True,
-                    help="硬删这张卡（在跑的先 misaka net stop）")
+                    help="Delete the card and its event history")
 
-    sub.add_parser("board", help="看板")
-    t = sub.add_parser("tail", help="跟事件流")
+    sub.add_parser("board", help="Show the task board")
+    t = sub.add_parser("tail", help="Follow task events")
     t.add_argument("--since", type=int)
     t.add_argument("--no-follow", action="store_true")
-    tl = sub.add_parser("tell", help="协力者给编排官/御坂送信（在卡的工作区里跑）")
-    tl.add_argument("message", help="要说的话")
-    tl.add_argument("--to", default="last-order", help="收件人（默认编排官）")
-    tl.add_argument("--summary", help="一句话摘要")
+    tl = sub.add_parser("tell", help="Send a message from inside a running card")
+    tl.add_argument("message", help="Message body")
+    tl.add_argument("--to", default="last-order", help="Recipient; defaults to Last Order")
+    tl.add_argument("--summary", help="Short audit-log summary")
 
-    dmp = sub.add_parser("dm", help="hermes 式互信：把消息直投某角色的联络会话并唤醒她跑一轮")
-    dmp.add_argument("to", help="收件角色：last-order 或妹妹编号")
-    dmp.add_argument("message", help="消息正文")
-    dmp.add_argument("--from", dest="sender", help="发件角色（agent 互发署名；省略＝用户直发）")
-    dmp.add_argument("--model", help="覆盖模型")
-    dmp.add_argument("--timeout", type=int, default=600, help="等回复上限秒（超时不丢信）")
-    dmp.add_argument("--summary", help="一句话摘要（审计行用）")
-    dmp.add_argument("--task-id", dest="dm_task", help=argparse.SUPPRESS)      # 发件卡上下文
+    dmp = sub.add_parser("dm", help="Deliver a message to an agent's contact session and run one turn")
+    dmp.add_argument("to", help="Recipient: last-order or a Sister ID")
+    dmp.add_argument("message", help="Message body")
+    dmp.add_argument("--from", dest="sender", help="Sender role (default: the user)")
+    dmp.add_argument("--model", help="Override the recipient's model")
+    dmp.add_argument("--timeout", type=int, default=600, help="Seconds to wait for a reply")
+    dmp.add_argument("--summary", help="Short audit-log summary")
+    dmp.add_argument("--task-id", dest="dm_task", help=argparse.SUPPRESS)
     dmp.add_argument("--generation", dest="dm_gen", type=int, help=argparse.SUPPRESS)
 
-    sub.add_parser("init", help="建库")
+    sub.add_parser("init", help="Initialize the local database")
 
-    nt = sub.add_parser("net", help="御坂网络守护进程：格子里跑卡（断线保活）")
+    nt = sub.add_parser("net", help="Control the Misaka Network daemon and its panes")
     nt_sub = nt.add_subparsers(dest="net_cmd", required=True)
-    nt_sub.add_parser("status", help="守护进程与格子概况（不在会拉起）")
-    nt_sub.add_parser("panes", help="列出所有格子")
-    nr = nt_sub.add_parser("run-card", help="把一张 ready 卡放进格子里跑")
+    nt_sub.add_parser("status", help="Show daemon and pane status")
+    nt_sub.add_parser("panes", help="List all panes")
+    nr = nt_sub.add_parser("run-card", help="Run a ready card in a pane")
     nr.add_argument("task_id")
-    nd = nt_sub.add_parser("read", help="看某格子的输出尾巴")
+    nd = nt_sub.add_parser("read", help="Print the last lines of a pane's screen")
     nd.add_argument("pane_id")
     nd.add_argument("--lines", type=int, default=40)
-    ns = nt_sub.add_parser("send", help="往格子里打字（默认带回车）")
+    ns = nt_sub.add_parser("send", help="Type text into a pane (followed by Enter unless --no-enter)")
     ns.add_argument("pane_id")
     ns.add_argument("text")
     ns.add_argument("--no-enter", action="store_true")
-    nc = nt_sub.add_parser("close", help="关一个格子（终止其进程组）")
+    nc = nt_sub.add_parser("close", help="Close a pane and kill its process group")
     nc.add_argument("pane_id")
-    nx = nt_sub.add_parser("explain", help="为什么这个格子判成在跑/闲着")
+    nx = nt_sub.add_parser("explain", help="Explain why a pane is busy or idle")
     nx.add_argument("pane_id", nargs="?")
-    nt_sub.add_parser("stop", help="停守护进程（所有格子一并关闭）")
-    sub.add_parser("net-daemon", help=argparse.SUPPRESS)     # 内部：守护进程本体
-    cs = sub.add_parser("card-shell", help=argparse.SUPPRESS)  # 内部：格子内跑卡会话
+    nt_sub.add_parser("stop", help="Stop the daemon and close every pane")
+    sub.add_parser("net-daemon", help="Internal: the Misaka Network daemon")
+    cs = sub.add_parser("card-shell", help="Internal: run a card session inside a pane")
     cs.add_argument("task_id")
     cs.add_argument("--resume", action="store_true",
-                    help="只接续会话现场看/手聊，不重发合同（面板点卡用）")
+                    help="Resume the card's existing session")
 
-    sub.add_parser("panel", help="★ 多格子面板（光敲 misaka 就是它）：编排官+妹妹格子+状态灯")
-    ch = sub.add_parser("chat", help="直连对话（不经守护进程的逃生舱）；--as <sister> 直接找某位妹妹")
-    ch.add_argument("--model", help="覆盖模型")
+    sub.add_parser("panel", help="Open the Misaka Network panel (default in a terminal)")
+    ch = sub.add_parser("chat", help="Chat with Last Order, or with a Sister via --as")
+    ch.add_argument("--model", help="Override the model")
     ch.add_argument("--as", dest="as_agent", metavar="SISTER",
-                    help="改为与某个 Sister 对话（名册见 misaka board）")
+                    help="Chat with this Sister instead of Last Order")
     ch.add_argument("-c", "--continue", dest="cont", action="store_true",
-                    help="接续上次会话（默认开新会话，与 claude 一致）")
-    ch.add_argument("--pick", action="store_true", help="从历史会话里挑一个恢复")
-    ch.add_argument("--session", help="切入指定会话（文件路径或部分 UUID，在该角色的会话目录里找）")
+                    help="Continue the most recent session instead of starting a new one")
+    ch.add_argument("--pick", action="store_true", help="Pick a past session to resume")
+    ch.add_argument("--session", help="Resume a session by path or UUID prefix")
 
-    pl = sub.add_parser("plan", help="Last Order：目标 → 卡片上板")
+    pl = sub.add_parser("plan", help="Ask Last Order to turn a goal into task cards")
     pl.add_argument("goal")
-    pl.add_argument("--dry", action="store_true", help="只打印卡片不上板")
+    pl.add_argument("--dry", action="store_true", help="Print the cards without creating them")
 
-    rs = sub.add_parser("research", help="深研模式（无头）：立论→找刺→束宽展开多轮循环（花模型额度）")
-    rs.add_argument("goal", help="研究目标（首跑建立论卡；课题已有立论卡则只续跑）")
-    rs.add_argument("--project", required=True, help="归属课题（不存在会自动建）")
-    rs.add_argument("--assignee", default="10032", help="立论与展开卡的 Sister")
-    rs.add_argument("--rounds", type=int, help="授权轮数；缺省=不限（只剩自然闸）")
-    rs.add_argument("--beam", type=int, default=4, help="束宽：每轮最多展开几个刺/缺口")
-    rs.add_argument("--cap", type=int, help="本次预算顶（对全局账本比对）；缺省=沿用全局")
-    rs.add_argument("--no-synth", action="store_true", help="终止后不建综合卡")
+    rs = sub.add_parser("research", help="Run the Research Workflow on a question")
+    rs.add_argument("goal", nargs="?", help="Research question for a new run")
+    rs.add_argument("--resume", metavar="RUN_ID", help="Resume an existing research run")
+    rs.add_argument("--depth", type=int, default=3, help="Maximum branch depth")
 
-    hv = sub.add_parser("harvest", help="收割：已验收卡的产物 → 图节点")
-    hv.add_argument("ids", nargs="*", help="卡 id；缺省=全部未收割的 done 卡")
+    tr = sub.add_parser("trace", help="Show the global trace, one session's trace, or compare two")
+    tr.add_argument("targets", nargs="*", help="None: global view; one: a session; two: side-by-side comparison")
+    tr.add_argument("--project", help="Limit the global view to one project")
+    tr.add_argument("--watch", action="store_true", help="Keep refreshing as the trace grows")
+    tr.add_argument("--plain", action="store_true", help="Print a single frame and exit")
 
-    ex = sub.add_parser("expand", help="前沿：挑 top-k 缺口生成新卡上板")
-    ex.add_argument("-k", type=int, default=2)
-    ex.add_argument("--assignee", default="10032")
-    ex.add_argument("--dry", action="store_true")
+    lc = sub.add_parser("lcm", help="Inspect, back up, repair, or rebuild the LCM context database")
+    lc.add_argument("op", nargs="?", default="status",
+                    choices=["status", "doctor", "backup", "repair", "rebuild"])
+    lc.add_argument("target", nargs="?", help="Session JSONL path for rebuild")
 
-    sub.add_parser("graph", help="看研究图")
-
-    tr = sub.add_parser("trace", help="执行迹：无参=全局树＋每卡脉搏；<卡号|角色|路径>=单会话迷宫（←→选步 f过滤 /搜索 +-缩放）")
-    tr.add_argument("targets", nargs="*", help="0 个=全局；1 个=单会话迷宫；2 个=同轴对比")
-    tr.add_argument("--project", help="全局档：只看某课题")
-    tr.add_argument("--watch", action="store_true", help="实时刷新（全局档每 2s；迷宫档盯现场文件生长）")
-    tr.add_argument("--plain", action="store_true", help="迷宫档：不进交互，打一帧就走（管道/嵌入用）")
-
-    lc = sub.add_parser("lcm", help="无损上下文运维：status 存量 / doctor 只读体检 / backup 热备快照")
-    lc.add_argument("op", nargs="?", default="status", choices=["status", "doctor", "backup"])
-
-    sk = sub.add_parser("skills", help="技能：trust 信任仓 / list 装配栈 / scan 扫描 / "
-                                       "pending 待审 / approve 批准 / reject 弃审 / "
-                                       "ledger 变更账 / rollback 回滚（宪法 D2）")
+    sk = sub.add_parser("skills", help="Discover, review, approve, and manage skills")
     sk.add_argument("op", nargs="?", default="list",
                     choices=["trust", "list", "scan", "pending", "approve", "reject",
                              "ledger", "rollback", "mode"])
     sk.add_argument("name", nargs="?",
-                    help="approve/reject：技能名；rollback：总账 id；"
-                         "mode：off(关死)/forbid(暂存人审)/allow(直写)，空参=看当前")
-    sk.add_argument("--dir", help="项目根（缺省＝当前目录向上找 .git）")
-    sk.add_argument("--as", dest="role", default="sisters/10032", help="以哪个角色的视角看栈")
+                    help="Skill name or pending ID; ledger ID for rollback; mode name for mode")
+    sk.add_argument("--dir", help="Project root (default: the enclosing Git repository)")
+    sk.add_argument("--as", dest="role", default="sisters/10032",
+                    help="Role whose skill stack to show")
 
-    mo = sub.add_parser("moa", help="MoA 虚拟服务商：list 看 presets / delete 删 preset"
-                                    "（配置 ~/.misaka/moa.json；会话里 /model 选 MoA·<preset> 切换）")
+    mo = sub.add_parser("moa", help="List or delete Mixture-of-Agents presets")
     mo.add_argument("op", nargs="?", default="list", choices=["list", "delete"])
-    mo.add_argument("name", nargs="?", help="delete：preset 名")
+    mo.add_argument("name", nargs="?", help="Preset name (for delete)")
 
-    ac = sub.add_parser("auth", help="凭据预检：auth check <provider> 看某家认证配没配好")
+    ac = sub.add_parser("auth", help="Check provider credentials")
     ac.add_argument("op", nargs="?", default="check", choices=["check"])
-    ac.add_argument("provider", nargs="?", help="供应商 id（省略＝列出全部已配置的）")
-    ac.add_argument("--show", action="store_true", help="连解析到的凭据一起打（小心屏幕共享）")
+    ac.add_argument("provider", nargs="?", help="Provider ID (default: every configured provider)")
+    ac.add_argument("--show", action="store_true", help="Print the resolved credential")
 
-    au = sub.add_parser("selftest", help="免疫系统：安慰剂抽验判官（破坏产物看抓不抓得住）")
-    au.add_argument("-k", type=int, default=1, help="抽几张已通过的卡")
-    au.add_argument("--seed", type=int)
+    sub.add_parser("immune", help="Show token budget and artifact-validation hooks")
 
-    sub.add_parser("immune", help="免疫状态：预算/禁令/判例一览")
+    bm = sub.add_parser("basemap", help="Load or inspect the research coverage taxonomies")
+    bm.add_argument("--load", action="store_true", help="Load the built-in taxonomy seeds")
+    bm.add_argument("--scheme", nargs="*", help="Only show these taxonomy schemes")
 
-    bm = sub.add_parser("basemap", help="底图：看格 / 灌种子")
-    bm.add_argument("--load", action="store_true", help="灌入首期三套分类法种子")
-    bm.add_argument("--scheme", nargs="*", help="只看某几套（OCM CAP JEL）")
-
-    wsp = sub.add_parser("ws", help="工作区导航树：卡片/材料/产物同树（PageIndex 形状）")
+    wsp = sub.add_parser("ws", help="Inspect or rebuild the artifact workspace index")
     wsp.add_argument("action", choices=["outline", "read", "reindex"])
-    wsp.add_argument("arg", nargs="?", help="read:node_id  outline:限定卡 id")
+    wsp.add_argument("arg", nargs="?", help="Node ID (read) or card ID (outline)")
 
-    dc = sub.add_parser("doc", help="文献层：入库/检索/复核引文（FTS5 页级正典＋PageIndex 树＋语义）")
+    dc = sub.add_parser("doc", help="Index documents, search them, show their structure, and verify quotes")
     dc.add_argument("action", choices=["add", "list", "find", "verify", "tree"])
-    dc.add_argument("arg", nargs="?", help="add:文件路径 find:查询词 verify:引文 tree:doc_id")
-    dc.add_argument("--doc", help="限定某份文献（doc_id）")
-    dc.add_argument("--semantic", action="store_true", help="find 用语义检索")
-    dc.add_argument("--no-tree", action="store_true", help="add 时跳过 PageIndex 建树（默认 ≥20 页的 PDF 自动建）")
-    dc.add_argument("--project", help="doc add: 归属课题（落到该课题目录的 corpus/）")
+    dc.add_argument("arg", nargs="?", help="File path (add), query (find), quote (verify), or document ID (tree)")
+    dc.add_argument("--doc", help="Restrict to one document ID")
+    dc.add_argument("--no-tree", action="store_true", help="Skip PageIndex structure extraction")
+    dc.add_argument("--project", help="Project to file the document under")
 
-    sv = sub.add_parser("survey", help="网格扫描：逐格问「这格与命题通不通」→ 生成触达判定卡")
-    sv.add_argument("proposition", help="研究命题")
-    sv.add_argument("--scheme", nargs="*", default=["OCM"], help="用哪几套底图（默认 OCM）")
+    sv = sub.add_parser("survey", help="Create a coverage-survey card for a proposition")
+    sv.add_argument("proposition", help="Proposition to examine")
+    sv.add_argument("--scheme", nargs="*", default=["OCM"], help="Taxonomy schemes (default: OCM)")
     sv.add_argument("--assignee", default="10032")
     sv.add_argument("--dry", action="store_true")
 
-    cl = sub.add_parser("claims", help="证据台账：覆盖率与全量复核（宪法⑧）")
-    cl.add_argument("--audit", action="store_true", help="逐条复核 blob 与引文")
-    sub.add_parser("saturation", help="饱和仪表：挖够了没有")
+    sy = sub.add_parser("synth", help="Create a synthesis card from completed cards")
+    sy.add_argument("ids", nargs="*", help="Card IDs (default: every completed card)")
+    sy.add_argument("--title", default="Synthesis report")
 
-    ca = sub.add_parser("calibration", help="校准账：harvester 预估 vs 实际回报（分桶+收缩修正）")
-    ca.add_argument("--project", help="只看某课题")
-    ca.add_argument("--drift", action="store_true", help="把系统性高/低估立成判例喂回 harvester")
-
-    hy = sub.add_parser("hypothesize", help="假说综合：同课题高权重发现→溯因假说→检验卡（花模型额度）")
-    hy.add_argument("--project", help="综合哪个课题（不填=未分类池）")
-    hy.add_argument("--assignee", default="10032")
-
-    fa = sub.add_parser("falsify", help="裁定假说被检验证伪：标 dropped + 立禁令")
-    fa.add_argument("node_id", help="hypothesis 节点号")
-    fa.add_argument("--reason", default="", help="证伪依据（写进禁令）")
-
-    vd = sub.add_parser("verdict", help="裁决：矛盾预筛+送审+标注谁站得住")
-    vd.add_argument("--limit", type=int, default=8, help="本轮最多送审几对")
-    vd.add_argument("--dry", action="store_true", help="只列候选不送审")
-
-    rt = sub.add_parser("retract", help="撤回一张卡的证据基础（连坐+复核卡）")
-    rt.add_argument("task_id")
-    rt.add_argument("--reason", default="")
-    rt.add_argument("--assignee", default="10032")
-    rt.add_argument("--no-card", action="store_true")
-
-    sy = sub.add_parser("synth", help="建综合卡（把已 done 的卡汇成 REPORT.md）")
-    sy.add_argument("ids", nargs="*", help="卡 id；缺省=全部 done")
-    sy.add_argument("--title", default="综合报告")
-
-    cr = sub.add_parser("create", help="新建御坂（配置向导；--desc/--model 直接给值免问）")
-    cr.add_argument("sid", nargs="?", help="编号，如 10033")
-    cr.add_argument("--desc", help="一句话人格/专长（写进 SOUL）")
-    cr.add_argument("--model", help="钉模型，如 claude-opus-5")
-    rm = sub.add_parser("remove", help="御坂除名（历史卡与工作区保留；活卡在跑拒绝）")
-    rm.add_argument("sid", help="编号")
-    rm.add_argument("--yes", action="store_true", help="跳过确认（非交互环境必须）")
+    cr = sub.add_parser("create", help="Create a new Sister")
+    cr.add_argument("sid", nargs="?", help="Sister ID, such as 10033")
+    cr.add_argument("--desc", help="Personality or specialty, written to SOUL.md")
+    cr.add_argument("--model", help="Pinned model, such as claude-opus-5")
+    rm = sub.add_parser("remove", help="Remove a Sister along with her sessions and workspace")
+    rm.add_argument("sid", help="Sister ID")
+    rm.add_argument("--yes", action="store_true", help="Skip confirmation")
     return p
 
-
 def main():
-    signal.signal(signal.SIGPIPE, signal.SIG_DFL)  # tail | head 不炸
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     argv = sys.argv[1:]
     if not argv:
-        # 光敲 misaka ＝ 多格子面板（有终端才行；管道/脚本里退回直连对话）
+        # No arguments: open the panel in a terminal, plain chat when piped.
         argv = ["panel"] if sys.stdin.isatty() and sys.stdout.isatty() else ["chat"]
     args = _parser().parse_args(argv)
     con = db.connect(CFG["db"])
-    store.init_all(con)
 
     if args.cmd == "chat":
         from misaka.cli import chat
@@ -253,21 +202,21 @@ def main():
         if args.net_cmd == "stop":
             try:
                 net.request("server.stop")
-                print("已通知守护进程停机")
+                print("Daemon shutdown requested.")
             except (ConnectionError, FileNotFoundError, OSError):
-                print("守护进程本来就不在")
+                print("Daemon is not running.")
             sys.exit(0)
         info = net.ensure()
         if args.net_cmd == "status":
-            print(f"守护进程 pid={info['pid']}，格子 {info['panes']} 个")
+            print(f"Daemon pid={info['pid']}, panes={info['panes']}")
         elif args.net_cmd == "panes":
             for p in net.request("panes.list")["panes"]:
-                state = "跑" if p["alive"] else f"退({p['exit_code']})"
-                card = f" 卡:{p['card']}" if p["card"] else ""
+                state = "running" if p["alive"] else f"exited:{p['exit_code']}"
+                card = f" card:{p['card']}" if p["card"] else ""
                 print(f"{p['id']}  [{state}]{card}  {p['title']}  {p['cwd']}")
         elif args.net_cmd == "run-card":
             out = net.request("pane.run_card", {"task_id": args.task_id})
-            print(f"卡 {args.task_id} 已进格子 {out['pane_id']}（pid {out['pid']}）")
+            print(f"Card {args.task_id} started in pane {out['pane_id']} (pid {out['pid']}).")
         elif args.net_cmd == "read":
             out = net.request("pane.read",
                               {"id": args.pane_id, "lines": args.lines, "strip": True})
@@ -282,56 +231,55 @@ def main():
                    else [p["id"] for p in net.request("panes.list")["panes"]])
             for pane_id in ids:
                 out = net.request("pane.explain", {"id": pane_id})
-                mark = "●在跑" if out["busy"] else "○闲着"
+                mark = "● busy" if out["busy"] else "○ idle"
                 print(f"{out['id']}  {mark}  {out['title']}\n    {out['why']}")
     elif args.cmd == "init":
         print("board:", os.path.expanduser(CFG["db"]))
     elif args.cmd == "create":
-        from misaka.extensions import roster
+        from misaka.network import roster
         sys.exit(roster.cli_create(args.sid, desc=args.desc, model=args.model))
     elif args.cmd == "remove":
-        from misaka.extensions import roster
+        from misaka.network import roster
         sys.exit(roster.cli_remove(args.sid, yes=args.yes))
     elif args.cmd == "add":
-        from misaka.extensions.board import project
+        from misaka.platform import projects as project
         body = args.body
         if args.body_file:
             with open(args.body_file, encoding="utf-8") as f:
                 body = f.read()
-        proj = project.require(args.project)   # 拼错/未注册当场报错
+        proj = project.require(con, args.project, workspace=os.getcwd())
         tid = db.create_task(con, args.title, body=body, assignee=args.assignee,
                              model=args.model, priority=args.priority, timeout_seconds=args.timeout,
-                             project=proj)
+                             project=proj, workspace=os.getcwd())
         print(tid)
     elif args.cmd == "project":
-        from misaka.extensions.board import project
+        from misaka.platform import projects as project
         if not args.name:
-            state = project.states(con)
-            names = project.listing()
-            if not names:
-                print("(还没有课题)")
-            for n in sorted(names, key=lambda x: (
-                    state.get(x, {}).get("archived", False),
-                    -(state.get(x, {}).get("pinned_at") or 0), x)):
-                meta = state.get(n, {})
-                marks = ("★" if meta.get("pinned_at") else "") + \
-                        ("（已归档）" if meta.get("archived") else "")
-                print(f"{n} {marks}".rstrip())
+            rows = project.listing(con, workspace=os.getcwd())
+            if not rows:
+                print("No projects in this workspace.")
+            for row in sorted(rows, key=lambda x: (
+                    bool(x["archived"]), -(x["pinned_at"] or 0), x["name"])):
+                marks = ("★" if row["pinned_at"] else "") + \
+                        (" (archived)" if row["archived"] else "")
+                print(f"{row['id']}  {row['name']} {marks}".rstrip())
         elif args.delete:
-            ok, msg = project.delete(con, args.name, with_cards=args.with_cards)
+            ok, msg = project.delete(
+                con, args.name, with_cards=args.with_cards, workspace=os.getcwd()
+            )
             print(msg)
             sys.exit(0 if ok else 1)
         elif args.archive or args.unarchive or args.pin or args.unpin:
             ok, msg = project.set_state(
                 con, args.name,
                 archived=True if args.archive else False if args.unarchive else None,
-                pinned=True if args.pin else False if args.unpin else None)
+                pinned=True if args.pin else False if args.unpin else None,
+                workspace=os.getcwd())
             print(msg)
             sys.exit(0 if ok else 1)
         else:
-            ok, msg = project.create(args.name)
-            print(msg)
-            sys.exit(0 if ok else 1)
+            row = project.create(con, os.getcwd(), args.name)
+            print(f"{row['id']}  {row['name']}:{row['path']}")
     elif args.cmd == "tell":
         from misaka.extensions.ally import tell as ally_tell
         ok, msg = ally_tell.tell(args.message, to_addr=args.to, summary=args.summary)
@@ -352,72 +300,64 @@ def main():
     elif args.cmd == "tail":
         tail.follow(con, since=args.since, once=args.no_follow)
     elif args.cmd == "plan":
-        from misaka.extensions.board import plan
+        from misaka.network import plan
         bet, cards, errors, raw = plan.make(CFG, args.goal, sisters())
         if errors:
-            sys.exit("计划书不过:\n" + "\n".join(f"  {e}" for e in errors) + f"\n---原文---\n{(raw or '')[-1000:]}")
-        print(f"赌注：{bet}\n")
+            sys.exit("Invalid plan:\n" + "\n".join(f"  {e}" for e in errors) +
+                     f"\n--- model output ---\n{raw}")
+        print(f"Plan: {bet}\n")
         for c in cards:
             print(("[dry] " if args.dry else "") + c["title"], "→", c["assignee"])
         if not args.dry:
-            for tid in plan.submit(con, bet, cards):
+            for tid in plan.submit(con, bet, cards, workspace=os.getcwd()):
                 print(" ", tid)
     elif args.cmd == "research":
         import asyncio as _asyncio
 
-        from misaka.extensions.board import project as project_mod
-        from misaka.extensions.board import research_loop
-        from misaka.extensions.board import worker as worker_mod
-        if not project_mod.exists(args.project):
-            print(project_mod.create(args.project)[1])
-        boot = research_loop.bootstrap(con, goal=args.goal, project=args.project,
-                                       assignee=args.assignee)
-        if boot["argument_task"]:
-            print(f"立论卡 {boot['argument_task']} 已上板")
+        from misaka.network import worker as worker_mod
+        from misaka.research import planner, runs, workflow
+        runs.init(con)
+        if args.resume:
+            run = runs.get(con, args.resume)
+            if not run:
+                sys.exit(f"Research run not found: {args.resume}")
+            if run["status"] in {"failed", "stopped", "waiting_input"}:
+                phase = ("planning" if run["phase"] == "waiting_input" else
+                         "branch_planning" if run["phase"] == "branch_waiting_input" else
+                         run["phase"])
+                runs.set_state(con, run["id"], phase=phase, status="active", error="")
+            if run["status"] == "stopped":
+                runs.resume_stopped(con, run["id"])
+        else:
+            if not args.goal:
+                sys.exit("A new research run requires a question; use --resume RUN_ID to continue one.")
+            project = planner.create_project_for_question(
+                con, dict(CFG), worker_mod, args.goal, os.getcwd())
+            run = runs.create(con, project_id=project["id"], question=args.goal,
+                              limits={"max_depth": args.depth},
+                              token_start=budget.spent(con))
+            print(
+                f"Last Order created project '{project['name']}' ({project['id']}). "
+                f"Research run {run['id']}: {runs.run_dir(run)}"
+            )
         cfg = dict(CFG)
-        if args.cap:
-            cfg["token_cap"] = args.cap
-        out = _asyncio.run(research_loop.run_loop(
-            con, cfg, research_loop.DispatchRunner(con, cfg), worker_mod,
-            project=args.project, assignee=args.assignee, beam=args.beam,
-            max_rounds=args.rounds, poll_seconds=1.0, synthesize=not args.no_synth))
-        print(f"深研收场：{out['reason']}｜共 {out['rounds']} 轮"
-              + (f"｜综合 {out['synthesis']}" if out.get("synthesis") else ""))
-        for e in out["errors"]:
-            print(f"  ⚠️ {e}")
-    elif args.cmd == "harvest":
-        from misaka.extensions.board import worker
-        rows = [db.get(con, i) for i in args.ids] if args.ids else db.by_status(con, "done")
-        harvested = {r["task_id"] for r in con.execute(
-            "SELECT DISTINCT src AS task_id FROM edges WHERE kind='from_task'")}
-        rows = [r for r in rows if r and r["status"] == "done" and (args.ids or r["id"] not in harvested)]
-        if not rows:
-            print("没有待收割的卡")
-        for r in rows:
-            fids, gids, err = harvest.harvest_task(con, store, r, CFG, worker, evidence=evidence)
-            if err and not fids and not gids:
-                print(f"{r['id']}  收割失败: {err}")
-                continue
-            merged = canon.dedup(con, store, fids + gids, project=r["project"])
-            print(f"{r['id']}  发现 {len(fids)} 缺口 {len(gids)}" +
-                  (f"  判重合流 {len(merged)}" if merged else "") + (f"  ⚠️ {err}" if err else ""))
-            for dup, keep, sim in merged:
-                print(f"    {dup} → {keep} (相似 {sim})")
-    elif args.cmd == "expand":
-        picks = frontier.pick(con, store, k=args.k)
-        if not picks:
-            print("前沿无可挖缺口（跑 harvest 先收割）")
-        for node, sc in picks:
-            c = frontier.card_for(node, args.assignee)
-            print(f"[{sc:.2f}] {c['title']}")
-            if not args.dry:
-                tid = db.create_task(con, c["title"], body=c["body"], assignee=c["assignee"])
-                store.set_status(con, node["id"], "expanded")
-                store.add_edge(con, node["id"], tid, "expanded_to")
-                print(" ", tid)
+
+        class HeadlessRunner:
+            async def launch_ready(self, *, task_ids=None, **_kwargs):
+                from misaka.network import dispatch
+                await _asyncio.to_thread(dispatch.dispatch_once, con, cfg, task_ids=task_ids)
+                return []
+
+        out = _asyncio.run(workflow.run(
+            con, cfg, HeadlessRunner(), worker_mod,
+            run_id=run["id"], poll_seconds=1.0))
+        print(f"Research run {run['id']}: {out['reason']}")
+        final = out.get("final") or {}
+        if final.get("path"):
+            print(final["path"])
     elif args.cmd == "trace":
         if len(args.targets) > 2:
-            sys.exit("最多两个目标（单会话或同轴对比）")
+            sys.exit("Trace accepts at most two targets.")
         if args.targets:
             from misaka.cli import trace_view
             paths = []
@@ -429,7 +369,7 @@ def main():
             sys.exit(trace_view.run(paths, watch=args.watch, plain=args.plain))
         import time as _time
 
-        from misaka.extensions.board import observe
+        from misaka.observability import overview as observe
         if not args.watch:
             print(observe.render(con, args.project))
         else:
@@ -442,60 +382,79 @@ def main():
     elif args.cmd == "lcm":
         import os as _os
 
-        from misaka.orchestration.lcm import maintenance as lcm_maint
+        from misaka.extensions.lcm import maintenance as lcm_maint
         lcm_db = _os.path.expanduser(CFG.get("lcm_db") or "~/.misaka/lcm.db")
         if args.op == "status":
             st = lcm_maint.status(lcm_db)
-            print(f"库 {st['db']}｜{st['size_bytes']:,} 字节｜"
-                  f"{st['sessions']} 会话｜{st['messages']} 条原文｜{st['nodes']} 个摘要节点")
+            print(
+                f"Database {st['db']} | {st['size_bytes']:,} bytes | "
+                f"{st['sessions']} sessions | {st['messages']} source messages | "
+                f"{st['nodes']} summary nodes"
+            )
             for sid_, v in st["per_session"].items():
-                print(f"  {sid_}: 原文 {v['messages']} 摘要 {v['nodes']}")
+                print(f"  {sid_}: {v['messages']} source messages, {v['nodes']} summaries")
         elif args.op == "doctor":
             for c in lcm_maint.doctor(lcm_db):
                 mark = {"pass": "✅", "warn": "⚠️", "fail": "❌"}[c["status"]]
                 suffix = f"  → {c['action']}" if c["status"] != "pass" else ""
                 print(f"{mark} {c['check']}: {c['detail']}{suffix}")
-            print("note: 只读体检，未改任何行")
-        else:
+            print("Read-only check; nothing was modified.")
+        elif args.op == "backup":
             dest, err = lcm_maint.backup(lcm_db)
-            print(err if err else f"已备份：{dest}")
+            print(err if err else f"Backup created: {dest}")
+        elif args.op == "repair":
+            result = lcm_maint.repair(lcm_db)
+            print(
+                f"Backup {result['backup'] or '-'} | messages FTS {result['messages_fts']} | "
+                f"nodes FTS {result['nodes_fts']} | removed orphaned pending attempts "
+                f"{result['orphan_pending_deleted']}"
+            )
+        else:
+            if not args.target:
+                print("Usage: misaka lcm rebuild SESSION.jsonl")
+                sys.exit(2)
+            result = lcm_maint.rebuild_from_session_file(lcm_db, args.target)
+            print(
+                f"Rebuild complete | session {result['session_id']} | "
+                f"source messages {result['messages']} | summaries {result['nodes']} | "
+                f"backup {result['backup'] or '-'}"
+            )
     elif args.cmd == "auth":
-        # 凭据预检（pi #7152/a261366b）：跑卡前先确认认证配好了，别烧到一半才发现
+        # Verify credentials up front so a run does not fail halfway through.
         import asyncio as _asyncio
 
         from misaka.core.auth_storage import AuthStorage
         storage = AuthStorage.create()
         targets = [args.provider] if args.provider else sorted(storage.getAll())
         if not targets:
-            print("没有任何已存凭据（misaka 用的是 provider 配置：见 ~/.misaka/auth.json）")
+            print("No provider credentials are configured. See ~/.misaka/auth.json.")
             sys.exit(1)
         bad = 0
         for provider in targets:
             status = storage.getAuthStatus(provider)
             mark = "✓" if status.configured or status.source else "✗"
-            detail = status.source or "未配置"
+            detail = status.source or "not configured"
             if status.label:
-                detail += f"（{status.label}）"
+                detail += f" ({status.label})"
             line = f"{mark} {provider}  {detail}"
             if args.show and (status.configured or status.source):
                 key = _asyncio.run(storage.getApiKey(provider))
-                line += f"  {key}" if key else "  （解析不出凭据）"
+                line += f"  {key}" if key else " (credential could not be resolved)"
             print(line)
             if not (status.configured or status.source):
                 bad += 1
         sys.exit(1 if bad else 0)
     elif args.cmd == "moa":
-        # hermes `hermes moa list/delete` 移植；config 向导不移——preset 就是一段
-        # json，直接编辑 ~/.misaka/moa.json（宽容读，坏值降级默认不炸）
+        import json as _json
         import os as _os
 
-        from misaka.ai.providers.moa import MOA_CONFIG_PATH, load_moa_config, slot_label
+        from misaka.extensions.moa.provider import MOA_CONFIG_PATH, load_moa_config, slot_label
+
         path = _os.path.expanduser(MOA_CONFIG_PATH)
         cfg = load_moa_config()
         if args.op == "delete":
             if not args.name:
-                sys.exit("用法：misaka moa delete <preset名>")
-            import json as _json
+                sys.exit("Usage: misaka moa delete <preset>")
             raw = {}
             try:
                 with open(path, encoding="utf-8") as f:
@@ -504,56 +463,59 @@ def main():
                 pass
             presets = raw.get("presets") if isinstance(raw.get("presets"), dict) else {}
             if args.name not in presets:
-                sys.exit(f"没有 preset「{args.name}」（在册：{', '.join(cfg['presets']) or '无'}）")
+                known = ", ".join(cfg["presets"]) or "none"
+                sys.exit(f'Unknown preset "{args.name}". Available presets: {known}.')
             if len(presets) <= 1:
-                sys.exit("不能删掉最后一个 preset")
+                sys.exit("Cannot delete the last remaining MoA preset.")
             del presets[args.name]
             if raw.get("default_preset") == args.name:
                 raw["default_preset"] = next(iter(presets))
             with open(path, "w", encoding="utf-8") as f:
                 _json.dump(raw, f, ensure_ascii=False, indent=2)
-            print(f"已删 preset「{args.name}」；默认：{raw.get('default_preset')}")
+            print(f"Deleted preset '{args.name}'; default: {raw.get('default_preset')}")
         else:
-            print(f"MoA presets（{path}；会话里 /model 选 MoA·<名> 切换，/moa <prompt> 一次性）")
+            print(f"MoA presets in {path}")
+            print("Use /model to select MoA·<preset>, or /moa <prompt> for a one-off request.")
             for name, preset in cfg["presets"].items():
                 mark = "*" if name == cfg["default_preset"] else " "
-                state = "" if preset["enabled"] else "（disabled：聚合官单干）"
-                print(f"\n{mark} {name}{state}  节奏 {preset['fanout']}")
+                state = "" if preset["enabled"] else " (disabled)"
+                print(f"\n{mark} {name}{state}  fanout={preset['fanout']}")
                 for i, slot in enumerate(preset["reference_models"], 1):
-                    off = "" if slot.get("enabled", True) else "（停用）"
-                    print(f"    参谋{i}. {slot_label(slot)}{off}")
-                print(f"    聚合官: {slot_label(preset['aggregator'])}")
+                    off = "" if slot.get("enabled", True) else " (disabled)"
+                    print(f"    advisor{i}: {slot_label(slot)}{off}")
+                print(f"    aggregator: {slot_label(preset['aggregator'])}")
     elif args.cmd == "skills":
         import os as _os
 
-        from misaka.orchestration import skill_layers
+        from misaka.skills import layers as skill_layers
         if args.op == "mode":
-            # agent 写技能能力的全局开关（off＝硬关，agent 连暂存都不行；
-            # 人经 approve 重放不受影响——关的是 agent 不是你）
-            from misaka.orchestration import skill_write
+            from misaka.skills import write as skill_write
             if not args.name:
                 mode = skill_write.write_mode()
-                desc = {"off": "关死（agent 不能建/改技能）",
-                        "forbid": "暂存人审（宪法 D2 缺省）",
-                        "ask": "暂存人审（同 forbid）",
-                        "allow": "直写（agent 写完即生效）"}[mode]
-                print(f"skill_write_mode = {mode} —— {desc}")
+                desc = {
+                    "off": "agents cannot create or update skills",
+                    "forbid": "agent writes are rejected",
+                    "ask": "agent writes require user approval",
+                    "allow": "agent writes are applied immediately",
+                }[mode]
+                print(f"skill_write_mode = {mode} — {desc}")
             elif args.name not in skill_write.WRITE_MODES:
-                sys.exit(f"没有这一档：{args.name}。可用：{'/'.join(skill_write.WRITE_MODES)}")
+                sys.exit(
+                    f"Unknown skill write mode: {args.name}. "
+                    f"Available modes: {', '.join(skill_write.WRITE_MODES)}"
+                )
             elif _os.environ.get("MISAKA_WHO") or _os.environ.get("MISAKA_USAGE_TASK_ID"):
-                # 切换权只归用户：agent 会话里的 bash 继承这些环境变量——
-                # 从会话内（含跑卡）发起的切档一律拒绝；看当前档不受限
-                sys.exit("写权档只有用户能切（检测到 agent 会话环境）。"
-                         "请在你自己的终端里跑，或在聊天框用 /skill-mode。")
+                # These variables are set in every agent shell; only a human may change this.
+                sys.exit("Skill write mode can only be changed by the user, not from an agent session.")
             else:
                 cfg = skill_layers.load_skills_config()
                 cfg["skill_write_mode"] = args.name
                 skill_layers._write_skills_config(cfg)
-                print(f"已切到 {args.name}（立即生效，含正在跑的会话——每次写入现读配置）")
+                print(f"Skill write mode set to {args.name} (effective immediately).")
         elif args.op in ("pending", "approve", "reject", "ledger", "rollback"):
             import shutil as _shutil
 
-            from misaka.orchestration import skill_write
+            from misaka.skills import write as skill_write
             staging = _os.path.expanduser("~/.misaka/pending/skills/workspace")
             live = _os.path.join(CFG["roles_root"], args.role, "skills")
 
@@ -564,40 +526,40 @@ def main():
                               if _os.path.isdir(_os.path.join(staging, d)))
 
             if args.op == "pending":
-                print(f"写权档：{skill_write.write_mode()}（宪法 D2 缺省 forbid）")
+                print(f"Skill write mode: {skill_write.write_mode()}")
                 records = skill_write.list_pending()
                 legacy = _staged()
                 if not records and not legacy:
-                    print("没有待审技能")
-                from misaka.orchestration.skill_linter import format_findings, lint_content
+                    print("No skills are awaiting review.")
+                from misaka.skills.linter import format_findings, lint_content
                 for r in records:
                     payload = r.get("payload") or {}
-                    print(f"  [{r['id']}] {r['summary']}  （{r['origin']} 提交）")
+                    print(f"  [{r['id']}] {r['summary']} (submitted by {r['origin']})")
                     if payload.get("content"):
-                        # 人审要看见检查结果（顾问层，不阻断批准）
+                        # Advisory lint findings, shown before approval.
                         print(format_findings(lint_content(payload["content"])))
-                    print(f"    批准：misaka skills approve {r['id']}")
-                for n in legacy:      # 兼容目录形态的旧暂存
-                    print(f"  [目录] {n}    批准：misaka skills approve {n} --as {args.role}")
+                    print(f"    Approve: misaka skills approve {r['id']}")
+                for n in legacy:
+                    print(f"  [directory] {n}  approve: misaka skills approve {n} --as {args.role}")
             elif args.op == "approve":
                 if not args.name:
-                    sys.exit("要批准哪个：misaka skills approve <pending_id 或技能名>")
-                from misaka.orchestration import skill_manage
+                    sys.exit("Usage: misaka skills approve <pending-id-or-skill-name>")
+                from misaka.skills import manage as skill_manage
                 record = skill_write.get_pending(args.name) or next(
                     (r for r in skill_write.list_pending()
                      if (r.get("payload") or {}).get("name") == args.name), None)
                 if record is not None:
-                    # 重放已批准的写入：绕过闸，但校验/扫描/记账一个不少（hermes 同款）
+                    # Re-run the reviewed request through the normal validation path.
                     result = skill_manage.apply_pending(record["payload"])
                     if not result.get("success"):
-                        sys.exit(f"重放失败：{result.get('error')}")
+                        sys.exit(f"Approval failed: {result.get('error')}")
                     skill_write.discard_pending(record["id"])
-                    print(f"已批准并落位：{result.get('path') or result.get('message')}")
+                    print("Approved and applied.")
                 else:
                     src = _os.path.join(staging, args.name)
                     if not _os.path.isdir(src):
-                        sys.exit(f"没有待审的「{args.name}」")
-                    dst = _os.path.join(live, args.name)   # 目录形态旧暂存
+                        sys.exit(f"No pending skill named '{args.name}'.")
+                    dst = _os.path.join(live, args.name)
                     before = skill_write.snapshot(dst)
                     _os.makedirs(live, exist_ok=True)
                     if _os.path.isdir(dst):
@@ -607,10 +569,10 @@ def main():
                     eid = skill_write.record("approve", args.name, before=before,
                                              after_root=dst,
                                              evidence={"from": "pending", "role": args.role})
-                    print(f"已批准并落位：{dst}（总账 {eid}）")
+                    print(f"Approved and installed: {dst} (ledger entry {eid})")
             elif args.op == "reject":
                 if not args.name:
-                    sys.exit("要弃审哪个：misaka skills reject <pending_id 或技能名>")
+                    sys.exit("Usage: misaka skills reject <pending-id-or-skill-name>")
                 record = skill_write.get_pending(args.name) or next(
                     (r for r in skill_write.list_pending()
                      if (r.get("payload") or {}).get("name") == args.name), None)
@@ -618,27 +580,29 @@ def main():
                     skill_write.discard_pending(record["id"])
                     skill_write.record("reject", (record.get("payload") or {}).get("name", ""),
                                        evidence={"pending_id": record["id"]})
-                    print(f"已弃审：{record['summary']}")
+                    print(f"Rejected: {record['summary']}")
                 else:
                     src = _os.path.join(staging, args.name)
                     if not _os.path.isdir(src):
-                        sys.exit(f"没有待审的「{args.name}」")
+                        sys.exit(f"No pending skill named '{args.name}'.")
                     _shutil.rmtree(src)
                     skill_write.record("reject", args.name, evidence={"role": args.role})
-                    print(f"已弃审并删除暂存：{args.name}")
+                    print(f"Rejected and removed pending skill: {args.name}")
             elif args.op == "ledger":
                 rows = skill_write.entries(limit=30)
                 if not rows:
-                    print("总账还是空的")
+                    print("The skill ledger is empty.")
                 for e in rows:
-                    print(f"{e['ts']}  {e['id']}  {e['actor']:<12} {e['action']:<12} "
-                          f"{e['skill']}  (前{len(e['before'])}/后{len(e['after'])})")
+                    print(
+                        f"{e['ts']}  {e['id']}  {e['actor']:<12} {e['action']:<12} "
+                        f"{e['skill']}  (before {len(e['before'])}/after {len(e['after'])})"
+                    )
             else:   # rollback
                 if not args.name:
-                    sys.exit("要回滚哪条：misaka skills rollback <总账id>（先看 ledger）")
+                    sys.exit("Usage: misaka skills rollback <ledger-id>")
                 target = next((e for e in skill_write.entries() if e["id"] == args.name), None)
                 if target is None:
-                    sys.exit(f"总账里没有这条：{args.name}")
+                    sys.exit(f"Skill ledger entry not found: {args.name}")
                 ok, why = skill_write.rollback(
                     args.name, _os.path.join(live, target["skill"]))
                 print(why)
@@ -646,210 +610,107 @@ def main():
         elif args.op == "trust":
             target = args.dir or skill_layers.find_project_root()
             if not target:
-                print("当前目录不在 git 仓里；用 --dir 指定项目根")
+                print("No Git repository found above the current directory; pass --dir.")
             else:
                 print(skill_layers.trust_project_root(target)[1])
         elif args.op == "scan":
             rt = args.dir or skill_layers.find_project_root()
             if not rt:
-                print("当前目录不在 git 仓里")
+                print("No Git repository found above the current directory.")
             else:
-                from misaka.orchestration.skills_guard import format_scan_report, scan_skill
+                from misaka.skills.guard import format_scan_report, scan_skill
                 found = False
                 for d in skill_layers._candidate_project_skills_dirs(rt):
                     for md in __import__("pathlib").Path(d).rglob("SKILL.md"):
                         found = True
                         print(format_scan_report(scan_skill(md.parent, source="project-local")))
                 if not found:
-                    print("该仓没有项目技能（.misaka/skills 或 .agents/skills）")
+                    print("No project skills found in .misaka/skills or .agents/skills.")
         else:
             prof = _os.path.join(_os.path.expanduser(CFG["roles_root"]), args.role)
             for d in skill_layers.skills_stack(prof, cwd=_os.getcwd()):
                 print(d)
             hint = skill_layers.get_untrusted_project_skills_root(cwd=_os.getcwd())
             if hint:
-                print(f"（{hint[0]} 有 {hint[1]} 个技能未信任——misaka skills trust 解锁）")
-    elif args.cmd == "graph":
-        rows, nedges = store.stats(con)
-        print("边:", nedges)
-        for r in rows:
-            print(f"  {r['kind']:<9} {r['status']:<9} {r['n']}")
-        for n in store.nodes(con, status="open")[:15]:
-            print(f"  {n['id']}  {n['kind']:<8} w={n['weight']:.2f}  {n['text'][:70]}")
-    elif args.cmd == "selftest":
-        import random as _r
-        from misaka.extensions.board import validate
-        from misaka.extensions.board import worker
-        done = [t for t in db.by_status(con, "done") if t["workspace"]]
-        picks = audit.reservoir(done, args.k, _r.Random(args.seed))
-        if not picks:
-            sys.exit("没有可抽验的已通过卡")
-        for t in picks:
-            r = audit.run_placebo(con, db, t, CFG, worker)
-            mark = {"caught": "✅ 判官抓住了", "leaked": "🚨 判官放水（已记 placebo_failed）"}.get(r, "⏭ " + r)
-            print(f"{t['id']}  {mark}")
-            if r == "leaked":
-                precedent.add(con, f"卡「{t['title']}」的产物被删掉一行验收要求的内容",
-                              "缺任一硬性判据即判不通过，不许因整体看着不错就放行",
-                              "placebo_leak", t["id"], canon)
-                print("   → 已立判例，未来判官会带着它掌握尺度")
+                print(f"  ({hint[1]} project skill(s) not loaded: project is untrusted. Run `misaka skills trust` to enable them.)")
     elif args.cmd == "basemap":
         bcon = basemap.connect()
         if args.load:
-            print("灌入", basemap.load_seeds(bcon), "格")
+            print(f"Loaded {basemap.load_seeds(bcon)} taxonomy cells.")
         st = basemap.stats(bcon)
         if not st:
-            sys.exit("底图为空——先跑 misaka basemap --load")
+            sys.exit("The basemap is empty; run `misaka basemap --load` first.")
         print("  ".join(f"{r['scheme']}={r['n']}" for r in st))
         for c in basemap.cells(bcon, args.scheme)[:80]:
             print(f"  {c['id']:<8} {c['label']}")
     elif args.cmd == "ws":
         if args.action == "outline":
-            print(ws_index.render(ws_index.outline(con, task_id=args.arg)))
+            print(ws_index.render(ws_index.outline(
+                con, task_id=args.arg, research_store=research_runs)))
         elif args.action == "read":
-            txt = ws_index.read(con, args.arg or "")
-            print(txt if txt else "无此节点（用 misaka ws outline 看 node_id）")
+            txt = ws_index.read(con, args.arg or "", research_store=research_runs)
+            print(txt if txt else "Node not found; use `misaka ws outline` to list node IDs.")
         elif args.action == "reindex":
             n = 0
             for t in db.by_status(con, "done"):
-                n += len(ws_index.ingest_artifacts(con, t))
-            print(f"补索引 {n} 件产物入正典")
+                n += len(artifact_store.ingest_artifacts(con, t))
+            print(f"Indexed {n} additional artifact(s).")
     elif args.cmd == "doc":
         if args.action == "add":
-            proj = args.project if getattr(args, "project", None) else None
-            did, n = corpus.ingest(args.arg, with_tree=not args.no_tree, project=proj)
+            from misaka.platform import projects as project_store
+            project = (project_store.resolve(con, args.project, workspace=os.getcwd())
+                       if getattr(args, "project", None) else None)
+            did, n = corpus.ingest(
+                args.arg, with_tree=not args.no_tree,
+                project=project["id"] if project else None,
+                project_path=project["path"] if project else None)
             has = corpus.doc_dir(did) and os.path.exists(os.path.join(corpus.doc_dir(did), "tree.json"))
-            print(f"{did}  {n} 页入正典  {'＋PageIndex 结构树' if has else '（无结构树，按页导航）'}  {os.path.basename(args.arg)}")
+            structure = "with PageIndex structure" if has else "page navigation only"
+            print(f"Added {os.path.basename(args.arg)} as {did}: {n} pages, {structure}.")
         elif args.action == "list":
             for d_ in corpus.docs():
-                print(f"  {d_['doc_id']}  {d_['pages']:>4} 页  {d_['title']}")
+                print(f"  {d_['doc_id']}  {d_['pages']:>4} pages  {d_['title']}")
         elif args.action == "find":
-            if args.semantic:
-                hits = corpus.search_semantic(args.arg, canon, doc_id=args.doc)
-                if hits is None:
-                    sys.exit("嵌入服务不可用——改用词面检索（去掉 --semantic）")
-            else:
-                hits = corpus.search_literal(args.arg, doc_id=args.doc)
+            hits = corpus.search_literal(args.arg, doc_id=args.doc)
             for h in hits:
-                sc = f" {h['score']}" if "score" in h else ""
-                print(f"  {h['doc_id']} p{h['page']}{sc}  {h['s'][:90]}")
-            print(f"({len(hits)} 命中；进引用前请用 doc verify 逐字复核)")
+                print(f"  {h['doc_id']} p{h['page']}  {h['s'][:90]}")
+            print(f"{len(hits)} match(es). Use `misaka doc verify` before citing a quotation.")
         elif args.action == "verify":
             if not args.doc:
-                sys.exit("需 --doc <doc_id>")
+                sys.exit("verify requires --doc <doc-id>.")
             v = corpus.verify_quote(args.doc, args.arg)
             if not v:
-                sys.exit("❌ 这句话不在该文献里（引用非法）")
-            print(f"✅ p{v['page']} 第 {v['offset']} 字\n   claim_hash {v['claim_hash']}")
+                sys.exit("❌ Quote not found in that document.")
+            print(f"✅ p{v['page']} offset {v['offset']}\n   claim_hash {v['claim_hash']}")
         elif args.action == "tree":
             st = corpus.structure(args.arg or args.doc)
             if not st:
-                sys.exit("无此文献")
-            print(f"{st['title']}（{st['mode']}）")
+                sys.exit("Document not found.")
+            print(f"{st['title']} ({st['mode']})")
             for pg in (st.get("pages") or [])[:40]:
                 print(f"  p{pg['page']:<4} {pg['head']}")
     elif args.cmd == "survey":
         bcon = basemap.connect()
         cells = basemap.cells(bcon, args.scheme)
         if not cells:
-            sys.exit("底图为空——先跑 misaka basemap --load")
+                sys.exit("The basemap is empty; run `misaka basemap --load` first.")
         body = basemap.survey_body(cells, args.proposition)
-        print(f"网格 {len(cells)} 格（{'/'.join(args.scheme)}）→ 触达判定卡")
+        print(f"Loaded {len(cells)} cells ({', '.join(args.scheme)}) for a coverage survey.")
         if not args.dry:
-            tid = db.create_task(con, f"网格扫描：{args.proposition[:30]}", body=body,
-                                 assignee=args.assignee, timeout_seconds=1800)
+            tid = db.create_task(con, f"Coverage survey: {args.proposition[:30]}", body=body,
+                                 assignee=args.assignee, timeout_seconds=1800,
+                                 workspace=os.getcwd())
             print(" ", tid)
     elif args.cmd == "immune":
         b = budget.status(con, CFG["token_cap"])
-        print(f"预算：{b['used']:,} tokens" + (f" / 上限 {b['cap']:,}（{b['ratio']:.0%}，档位 {b['mode']}）"
-                                              if b["cap"] else "（未设上限，档位 normal）"))
-        cs = cdcl.clauses(con)
-        print(f"禁令：{len(cs)} 条" + ("" if not cs else "  最常命中："))
-        for cid, text, scope, hits in cs[:5]:
-            print(f"  #{cid} [{scope or '全部'}] 命中 {hits} 次  {text[:60]}")
-        n = con.execute("SELECT COUNT(*) FROM precedents").fetchone()[0]
-        print(f"判例：{n} 条")
-        for s_, r_ in con.execute("SELECT situation, ruling FROM precedents ORDER BY id DESC LIMIT 3"):
-            print(f"  情形 {s_[:50]} → {r_[:50]}")
+        print(f"Budget: {b['used']:,} tokens" +
+              (f" / {b['ratio']:.0%} of limit" if b["cap"] else " (no limit)"))
         hooks = [h for h in sorted(os.listdir(CFG["hooks_dir"]))
                  if os.access(os.path.join(CFG["hooks_dir"], h), os.X_OK)] if os.path.isdir(CFG["hooks_dir"]) else []
-        print(f"钩子闸：{len(hooks)} 个  {' '.join(hooks)}")
-    elif args.cmd == "claims":
-        cov = evidence.coverage(con, store)
-        print(f"证据键覆盖：{cov['backed']}/{cov['findings']} 条发现有引文撑着（{cov['ratio']:.0%}）")
-        n = con.execute("SELECT COUNT(*) FROM claims").fetchone()[0]
-        print(f"台账条目：{n}    证据库：{evidence.root()}")
-        if args.audit:
-            bad = evidence.audit(con)
-            print(f"复核：{n - len(bad)}/{n} 通过" + ("" if not bad else f"，{len(bad)} 条有问题："))
-            for cid, nid, why, extra in bad[:20]:
-                print(f"  claim#{cid} {nid} {why} {extra}")
-        for r in con.execute("SELECT node_id, source_file, quote FROM claims ORDER BY id DESC LIMIT 3"):
-            print(f"  例 {r[0]} ← {r[1]}: 「{r[2][:50]}…」")
-    elif args.cmd == "saturation":
-        for kind in ("finding", "gap"):
-            r = saturation.reading(con, kind)
-            print(f"{kind}: 互异 {r['distinct']}  观测 {r['observations']}  只见过一次 {r['singletons']}"
-                  f"  → 下一铲出新 ≈ {r['p_new']:.0%}")
-            print("   ", saturation.verdict(r))
-    elif args.cmd == "calibration":
-        if args.drift:
-            made = calibration.drift_precedents(con, canon)
-            print(f"立漂移判例 {len(made)} 条" if made else "无新漂移（或桶样本 <8）")
-        print(calibration.view(con, project=args.project))
-    elif args.cmd == "hypothesize":
-        from misaka.extensions.board import project as project_mod
-        from misaka.extensions.board import worker
-        proj = project_mod.require(args.project)
-        hid, card, err = synthesize.synthesize_project(con, store, CFG, worker, proj,
-                                                       assignee=args.assignee)
-        if err:
-            sys.exit(err)
-        tid = db.create_task(con, card["title"], body=card["body"], assignee=card["assignee"],
-                             project=card["project"])
-        store.add_edge(con, hid, tid, "tested_by")
-        print(f"假说 {hid} 落图（explains 见 misaka graph）；检验卡 {tid} 上板"
-              "——要跑进 misaka 对话说开工")
-    elif args.cmd == "falsify":
-        cid, msg = synthesize.mark_outcome(con, store, canon, args.node_id, True,
-                                           reason=args.reason)
-        print(msg)
-        sys.exit(0 if cid else 1)
-    elif args.cmd == "verdict":
-        from misaka.extensions.board import worker
-        pairs = verdict.candidates(con, store, canon)
-        print(f"矛盾候选 {len(pairs)} 对（相似度落在 {verdict.BAND[0]}–{verdict.BAND[1]} 带内）")
-        for a_, b_, sim in pairs[:args.limit]:
-            print(f"  [{sim}] {a_['text'][:34]}… ⟷ {b_['text'][:34]}…")
-        if not args.dry and pairs:
-            n_conf, n_judged = verdict.judge_pairs(con, store, pairs, CFG, worker, limit=args.limit)
-            print(f"送审 {n_judged} 对，判定冲突 {n_conf} 对")
-        lab = verdict.label(con, store)
-        tally = {}
-        for v in lab.values():
-            tally[v] = tally.get(v, 0) + 1
-        print("标注:", "  ".join(f"{k}={v}" for k, v in sorted(tally.items())))
-        for nid, v in lab.items():
-            if v != "in":
-                print(f"  {v:<10} {store.get(con, nid)['text'][:70]}")
-    elif args.cmd == "retract":
-        t = db.get(con, args.task_id)
-        if not t:
-            sys.exit("无此卡")
-        direct, down = tms.retract(con, store, args.task_id, args.reason)
-        print(f"撤回 {len(direct)} 个直接节点，连坐 {len(down)} 个下游节点")
-        if direct and not args.no_card:
-            stale = [store.get(con, x) for x in direct + list(down)]
-            c = tms.recheck_card(stale, t["title"], args.reason, args.assignee)
-            tid = db.create_task(con, c["title"], body=c["body"], assignee=c["assignee"])
-            print("复核卡:", tid)
+        print(f"Artifact hooks: {len(hooks)}  {' '.join(hooks)}")
     elif args.cmd == "synth":
-        from misaka.extensions.board import report
+        from misaka.research import report
         rows = report.gather(con, args.ids)
         if not rows:
-            sys.exit("没有可综合的 done 卡")
-        print(report.create(con, rows, args.title), "已上板（跑 dispatch 执行）")
-
-
-if __name__ == "__main__":
-    main()
+            sys.exit("No completed cards are available for synthesis.")
+        print(report.create(con, rows, args.title), "created; run dispatch to execute it")

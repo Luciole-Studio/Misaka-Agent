@@ -35,7 +35,6 @@ from misaka.core.resource_loader import DefaultResourceLoader, ResourceLoader
 from misaka.core.session_manager import SessionManager, get_default_session_dir
 from misaka.core.settings_manager import SettingsManager
 from misaka.core.skills import Skill
-from misaka.core.telemetry import is_install_telemetry_enabled
 from misaka.core.timings import time
 from misaka.core.tools import (
     Tool,
@@ -119,32 +118,6 @@ def _get_default_agent_dir() -> str:
     return get_agent_dir()
 
 
-def _get_attribution_headers(
-    model: Model[Any],
-    settings_manager: SettingsManager,
-) -> dict[str, str] | None:
-    if not is_install_telemetry_enabled(settings_manager):
-        return None
-
-    if model.provider == "openrouter" or "openrouter.ai" in model.baseUrl:
-        return {
-            "HTTP-Referer": "https://harn.dev",
-            "X-OpenRouter-Title": "harn",
-            "X-OpenRouter-Categories": "cli-agent",
-        }
-
-    if (
-        model.provider in {"cloudflare-workers-ai", "cloudflare-ai-gateway"}
-        or "api.cloudflare.com" in model.baseUrl
-        or "gateway.ai.cloudflare.com" in model.baseUrl
-    ):
-        return {
-            "User-Agent": "harn",
-        }
-
-    return None
-
-
 async def create_agent_session(options: CreateAgentSessionOptions | None = None) -> CreateAgentSessionResult:
     resolved_options = dict(options or {})
     explicit_session_manager = resolved_options.get("sessionManager")
@@ -217,7 +190,7 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
     thinking_level = "off" if model is None else clamp_thinking_level(model, thinking_level)
 
     default_active_tool_names: list[ToolName] = ["read", "bash", "edit", "write"]
-    # defaultTools 设置＝未显式给 --tools/-nt 时的启动工具白名单（pi 4d9aa837c）
+    # defaultTools setting = startup tool allowlist when --tools/-nt is not given explicitly (pi 4d9aa837c)
     configured_default_tools = settings_manager.getDefaultTools()
     allowed_tool_names = resolved_options.get("tools")
     if allowed_tool_names is None:
@@ -277,9 +250,8 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
             raise Exception(auth["error"])
 
         provider_retry_settings = settings_manager.getProviderRetrySettings()
-        attribution_headers = _get_attribution_headers(model_value, settings_manager)
         resolved_stream_options = _to_dict(stream_options)
-        headers = _merge_headers(attribution_headers, auth.get("headers"), resolved_stream_options.get("headers"))
+        headers = _merge_headers(auth.get("headers"), resolved_stream_options.get("headers"))
         final_options = dict(resolved_stream_options)
         final_options["apiKey"] = auth.get("apiKey")
         if final_options.get("timeoutMs") is None:

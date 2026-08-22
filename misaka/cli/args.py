@@ -171,7 +171,7 @@ def parse_args(args: list[str]) -> Args:
             result.themes = result.themes or []
             result.themes.append(args[index + 1])
             index += 1
-        elif arg == "--use-theme":   # 本次运行的主题，不写回设置（pi #7722/9795d602）
+        elif arg == "--use-theme":  # Theme for this run only; not written back to settings (pi #7722/9795d602).
             theme_name = args[index + 1] if has_next else None
             if theme_name is None or theme_name.startswith("-"):
                 result.diagnostics.append(
@@ -373,7 +373,6 @@ Environment Variables:
   {ENV_SESSION_DIR.ljust(32)} - Session storage directory (overridden by --session-dir)
   MISAKA_PACKAGE_DIR              - Override package directory (for Nix/Guix store paths)
   MISAKA_OFFLINE                  - Disable startup network operations when set to 1/true/yes
-  MISAKA_TELEMETRY                - Override install telemetry when set to 1/true/yes or 0/false/no
   MISAKA_SHARE_VIEWER_URL         - Base URL for /share command (default: https://harn.dev/session/)
 
 Built-in Tool Names:

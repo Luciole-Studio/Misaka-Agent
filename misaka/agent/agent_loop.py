@@ -614,7 +614,7 @@ async def prepare_tool_call(
                 )
             if before_result and before_result.block:
                 result = create_error_tool_result(before_result.reason or "Tool execution was blocked")
-                if before_result.terminate is True:  # pi 1eb988c:被拦的调用也能参与整批早停
+                if before_result.terminate is True:  # pi 1eb988c: blocked calls can still end the batch early
                     result.terminate = True
                 return ImmediateToolCallOutcome(
                     kind="immediate",

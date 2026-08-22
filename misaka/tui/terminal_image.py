@@ -74,7 +74,7 @@ def setCellDimensions(dims: CellDimensions | dict[str, int]) -> None:
 
 
 def _probe_tmux_hyperlinks() -> bool:
-    """tmux 只在 client_termfeatures 含 hyperlinks 时转发 OSC 8，否则剥掉。出错按 False。"""
+    """tmux forwards OSC 8 only when client_termfeatures includes hyperlinks; otherwise it strips them. Errors count as False."""
     try:
         out = subprocess.run(
             ["tmux", "display-message", "-p", "#{client_termfeatures}"],
@@ -96,7 +96,7 @@ def detectCapabilities(tmux_forwards_hyperlink=None) -> TerminalCapabilities:
         probe = tmux_forwards_hyperlink or _probe_tmux_hyperlinks
         return TerminalCapabilities(images=None, trueColor=has_truecolor_hint, hyperlinks=probe())
 
-    if term.startswith("screen"):  # screen 不转发 OSC 8
+    if term.startswith("screen"):  # screen does not forward OSC 8
         return TerminalCapabilities(images=None, trueColor=has_truecolor_hint, hyperlinks=False)
 
     if os.environ.get("KITTY_WINDOW_ID") or term_program == "kitty":

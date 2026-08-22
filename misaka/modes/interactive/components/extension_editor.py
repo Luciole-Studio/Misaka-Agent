@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 import sys
 import tempfile
 import time
@@ -17,6 +18,42 @@ from misaka.modes.interactive.theme.theme import get_editor_theme, theme
 
 from .dynamic_border import DynamicBorder
 from .keybinding_hints import key_hint
+
+
+async def edit_text_external(tui, text: str) -> str | None:
+    """Edit text with $VISUAL/$EDITOR while safely handing the terminal over."""
+    editor_cmd = os.environ.get("VISUAL") or os.environ.get("EDITOR")
+    if not editor_cmd:
+        return None
+
+    temp_file = Path(tempfile.gettempdir()) / f"misaka-extension-editor-{int(time.time() * 1000)}.md"
+    temp_file.write_text(text, encoding="utf-8")
+    stop = getattr(tui, "stop", None)
+    if callable(stop):
+        stop()
+
+    try:
+        args = shlex.split(editor_cmd)
+        if not args:
+            return None
+        sys.stdout.write(f"Launching external editor: {editor_cmd}\nMISAKA will resume when the editor exits.\n")
+        process = await asyncio.create_subprocess_exec(*args, str(temp_file))
+        if await process.wait() != 0:
+            return None
+        return temp_file.read_text(encoding="utf-8").removesuffix("\n")
+    except OSError:
+        return None
+    finally:
+        try:
+            temp_file.unlink()
+        except OSError:
+            pass
+        start = getattr(tui, "start", None)
+        if callable(start):
+            start()
+        request_render = getattr(tui, "requestRender", None)
+        if callable(request_render):
+            request_render(True)
 
 
 class ExtensionEditorComponent(Container):
@@ -89,57 +126,9 @@ class ExtensionEditorComponent(Container):
         loop.create_task(self.openExternalEditor())
 
     async def openExternalEditor(self) -> None:
-        editor_cmd = os.environ.get("VISUAL") or os.environ.get("EDITOR")
-        if not editor_cmd:
-            return
-
-        current_text = self.editor.getText()
-        temp_file = Path(tempfile.gettempdir()) / f"harn-extension-editor-{int(time.time() * 1000)}.md"
-        temp_file.write_text(current_text, encoding="utf-8")
-
-        stop = getattr(self.tui, "stop", None)
-        if callable(stop):
-            stop()
-
-        try:
-            args = editor_cmd.split(" ")
-            if not args or not args[0]:
-                return
-            editor, *editor_args = args
-            sys.stdout.write(
-                f"Launching external editor: {editor_cmd}\nHarn will resume when the editor exits.\n"
-            )
-
-            status: int | None
-            if sys.platform == "win32":
-                command = " ".join([editor, *editor_args, str(temp_file)])
-                try:
-                    process = await asyncio.create_subprocess_shell(command)
-                except OSError:
-                    status = None
-                else:
-                    status = await process.wait()
-            else:
-                try:
-                    process = await asyncio.create_subprocess_exec(editor, *editor_args, str(temp_file))
-                except OSError:
-                    status = None
-                else:
-                    status = await process.wait()
-            if status == 0:
-                new_content = temp_file.read_text(encoding="utf-8").removesuffix("\n")
-                self.editor.setText(new_content)
-        finally:
-            try:
-                temp_file.unlink()
-            except OSError:
-                pass
-            start = getattr(self.tui, "start", None)
-            if callable(start):
-                start()
-            request_render = getattr(self.tui, "requestRender", None)
-            if callable(request_render):
-                request_render(True)
+        new_content = await edit_text_external(self.tui, self.editor.getText())
+        if new_content is not None:
+            self.editor.setText(new_content)
 
 
-__all__ = ["ExtensionEditorComponent"]
+__all__ = ["ExtensionEditorComponent", "edit_text_external"]

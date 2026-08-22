@@ -193,7 +193,7 @@ def stream_google_vertex(
                 if next_params is not None:
                     params = next_params
 
-            google_stream = await client.aio.models.generate_content_stream(  # google-genai async 流工厂须先 await
+            google_stream = await client.aio.models.generate_content_stream(
                 **_prepare_sdk_params(params))
             stream.push(StartEvent(partial=output))
 

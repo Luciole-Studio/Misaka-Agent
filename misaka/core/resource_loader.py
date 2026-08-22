@@ -194,7 +194,7 @@ class DefaultResourceLoader:
     )
     skills: list[Skill] = field(default_factory=list)
     skillDiagnostics: list[ResourceDiagnostic] = field(default_factory=list)
-    _skillsGeneration: int | None = None   # 技能索引代次（getSkills 据此决定重扫）
+    _skillsGeneration: int | None = None   # skill index generation; getSkills rescans when it changes
     prompts: list[PromptTemplate] = field(default_factory=list)
     promptDiagnostics: list[ResourceDiagnostic] = field(default_factory=list)
     themes: list[Theme] = field(default_factory=list)
@@ -258,7 +258,8 @@ class DefaultResourceLoader:
         return self.extensionsResult
 
     def getSkills(self) -> SkillsResult:
-        # 盘上技能变过就重扫（沉淀/批准/禁用之后，当前会话的索引不能还是启动快照）
+        # Rescan when skills on disk changed (after save/approve/disable the session
+        # index must not stay a startup snapshot)
         from misaka.core.skills import skills_cache_generation
         generation = skills_cache_generation()
         if generation != self._skillsGeneration:
@@ -800,8 +801,9 @@ class DefaultResourceLoader:
         extensions: list[Extension] = []
         errors: list[dict[str, str]] = []
         for index, input_ in enumerate(self.extensionFactories, start=1):
-            # pi 真源移植（resource-loader.ts loadExtensionFactories）：InlineExtension
-            # ＝裸工厂或 {name, factory, hidden}；命名件显示 <inline:name>，hidden 不上启动屏。
+            # Port of pi resource-loader.ts loadExtensionFactories: an InlineExtension is a bare
+            # factory or {name, factory, hidden}; named ones show as <inline:name>, hidden ones
+            # stay off the startup screen.
             is_named = not callable(input_)
             factory = input_.get("factory") if is_named else input_
             extension_path = f"<inline:{input_.get('name') if is_named else index}>"

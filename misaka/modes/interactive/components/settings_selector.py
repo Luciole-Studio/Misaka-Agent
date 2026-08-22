@@ -66,7 +66,6 @@ class SettingsConfig:
     availableThemes: list[str]
     hideThinkingBlock: bool
     collapseChangelog: bool
-    enableInstallTelemetry: bool
     doubleEscapeAction: DoubleEscapeAction
     treeFilterMode: TreeFilterMode
     showHardwareCursor: bool
@@ -95,7 +94,6 @@ class SettingsCallbacks:
     onThemePreview: Callable[[str], None] | None
     onHideThinkingBlockChange: Callable[[bool], None]
     onCollapseChangelogChange: Callable[[bool], None]
-    onEnableInstallTelemetryChange: Callable[[bool], None]
     onDoubleEscapeActionChange: Callable[[DoubleEscapeAction], None]
     onTreeFilterModeChange: Callable[[TreeFilterMode], None]
     onShowHardwareCursorChange: Callable[[bool], None]
@@ -251,13 +249,6 @@ class SettingsSelectorComponent(Container):
                 label="Quiet startup",
                 description="Disable verbose printing at startup",
                 currentValue="true" if config.quietStartup else "false",
-                values=["true", "false"],
-            ),
-            SettingItem(
-                id="install-telemetry",
-                label="Install telemetry",
-                description="Send an anonymous version/update ping after changelog-detected updates",
-                currentValue="true" if config.enableInstallTelemetry else "false",
                 values=["true", "false"],
             ),
             SettingItem(
@@ -481,8 +472,6 @@ class SettingsSelectorComponent(Container):
                 callbacks.onCollapseChangelogChange(new_value == "true")
             case "quiet-startup":
                 callbacks.onQuietStartupChange(new_value == "true")
-            case "install-telemetry":
-                callbacks.onEnableInstallTelemetryChange(new_value == "true")
             case "double-escape-action":
                 callbacks.onDoubleEscapeActionChange(new_value)
             case "tree-filter-mode":
@@ -502,8 +491,8 @@ class SettingsSelectorComponent(Container):
         return self.settingsList
 
     def handleInput(self, data: str) -> None:
-        # 少了这个方法，/settings 打开后所有按键都掉地上，整个界面失聪（连 Esc 都退不出）。
-        # 同目录其他选择器（ModelSelector/SessionSelector/内层 SettingsList）都实现了它。
+        # Without this, keystrokes are dropped once /settings opens (even Esc).
+        # Forward to the active submenu if one is open, else the settings list.
         submenu = getattr(self, "activeSubmenu", None)
         target = submenu if submenu is not None else self.settingsList
         handler = getattr(target, "handleInput", None)

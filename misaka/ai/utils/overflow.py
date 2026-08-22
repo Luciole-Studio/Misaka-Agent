@@ -58,9 +58,13 @@ def is_context_overflow(message: AssistantMessage, context_window: int | None = 
 
 
 def is_recoverable_length(message: AssistantMessage, desired_max_output: int) -> bool:
-    """length 停止且输出低于模型原始输出上限＝可恢复截断（上下文压力/供应商侧截断），
-    调用方可做一次有界的 compact-and-retry。desired_max_output 必须是钳制前的原始上限。
-    （pi overflow.ts isRecoverableLength，pre-pin 漏移植；#7540/32850ef7c）"""
+    """True when a ``length`` stop is a recoverable truncation.
+
+    Output below the model's raw output cap means context pressure or a
+    provider-side cut, so the caller may do one bounded compact-and-retry.
+    ``desired_max_output`` must be the original, unclamped cap
+    (pi overflow.ts isRecoverableLength, #7540/32850ef7c).
+    """
     return (message.stopReason == "length" and desired_max_output > 0
             and message.usage.output < desired_max_output)
 

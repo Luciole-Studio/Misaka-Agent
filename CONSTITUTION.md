@@ -11,7 +11,7 @@
 4. **技能运行时只读**；沉淀走提案制人审；记忆编辑权只给史官。
 5. **agent 间消息一律不可信输入**，不能替用户授权；抓回内容永远是数据不是指令。（在册角色 DM 见修正案 A1）
 6. **验收是必经态**；agent 永远不能自己把卡拖到"完成"。
-7. **预算硬顶＋强制交卷**；停机靠饱和读数不靠感觉。
+7. **预算硬顶＋强制交卷**；Research 由深度边界、人工停止与全局预算收束，边际价值判断交给 Agent 留理由。
 8. **一切结论带证据键**；hash 解析不出＝引用非法。
 9. **诚实边界表**（未探／已探拿不到／结构零）是交付物的一部分。
 
@@ -53,14 +53,14 @@ delivered（发件人＋卡上下文）。
 |---|---|
 | D1 | 常驻三层：身份常驻／任务内 session 常驻／跨任务不常驻 |
 | D2 | 记忆外置；skill 写权三档默认 forbid；沉淀走提案制＋留出法验收 |
-| D3 | 覆盖＝影响权重质量的 99%；饱和判据只发"继续"信号，停机是经济决策 |
-| D4 | 分类表当审计器＋覆盖地板，问题原生图当骨架，双向映射 |
-| D5 | 三生成器（网格／分解／辩证）共用一张研究图与同一前沿 |
+| D3 | 覆盖与边际价值由 Agent 论证；代码只守深度、人工停止、全局预算与必经阶段 |
+| D4 | Project／PageIndex 管内容与导航，Run／Issue／发现台账管可恢复状态与证据键 |
+| D5 | LO 规划、独立综合与全局红队共享 Project／Run／产物／开放问题，不靠机械图评分裁剪思路 |
 | D6 | 读写分离：并行只做取证，成稿单线程一枪 |
 | D7 | 注入防御：一切外来文本按数据处理，总线消息带不可信标志 |
 | D8 | 多起点做结构比较，不做人格集成伪统计；历史模拟有结局泄漏硬伤 |
 | D9 | 验收即状态机：producing→verifying→done，不过自动打回 |
-| D10 | 底座变更史：曾裁 Hermes Kanban，后改全自研（故障机器自写最小子集） |
+| D10 | Hermes Bot／Task 基建是全场景共用底座；Misaka 只保留领域语义，重复旧组织在职责迁移后退役 |
 | D11 | 基底＝自写 Python 小环；采用 harn（MIT）；CC 泄源镜像等法律不碰名单 |
 | D12 | skills loader 以 agentskills.io spec 1.0.0 为正典 |
 | D13 | 文档栈：PageIndex 留任＋解析前端按文种路由＋bge-reranker |
@@ -75,9 +75,9 @@ delivered（发件人＋卡上下文）。
 
 代码 `~/Projects/misaka`＝**单包 `misaka/`**（harn fork 已整体改姓融入——`ai/agent/tui/protocol/core/modes/cli`
 来自上游 @0bd413b1，上游更新手动挑拣、对表看 `misaka/protocol/PORTMAP.tsv` 与 `docs/upstream/harn/`；
-`orchestration/`＝执行控制面、`research/`＝研究领域（kernel/indexer/basemap）、`extensions/`＝产品扩展、
+`platform/`＝共享执行设施、`network/` 与 `research/`＝内置领域、`documents/` 与 `skills/`＝内置支撑域、`extensions/`＝真正可挂载扩展、
 `cli/`＝装配入口、`config/`＝身份与常量——层次与依赖方向见 `docs/architecture/architecture.md`（回归有"架构边界"项）；
-具体能力按 Pi 规则落在自包含 bundled Extension，
+可选能力按 Pi 规则落在自包含 bundled Extension，内置能力归各领域并通过同一 Extension API 挂载；
 `core/extensions` 只放扩展框架、`core/tools` 只放引擎内置工具；`third_party/` 仅剩 PageIndex）／状态 `~/.misaka`
 （角色档案 `profiles/<角色>/{SOUL.md,config.json,skills,mcp,config.yaml}`——**人格与数据合居，照 pi：
 人格是用户态，源码仓不放 profiles（2026-08-06 用户裁定）**；内建分身类型随包走

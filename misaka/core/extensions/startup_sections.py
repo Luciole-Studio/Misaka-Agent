@@ -1,8 +1,10 @@
-"""扩展注册的启动屏资源区——与内置的 [Skills]/[Extensions] 同一渲染路径。
+"""Startup-screen resource sections registered by extensions.
 
-扩展调用 register("MCPs", collapsed_fn, expanded_fn)，文本可以是字符串或**可调用对象**；
-可调用的会在每次渲染时求值，所以异步加载的资源（如 MCP server）能先显示"连接中"，
-连上后再自动变成真实列表。
+Rendered through the same path as the built-in [Skills]/[Extensions] sections.
+Extensions call register("MCPs", collapsed_fn, expanded_fn); each text may be a
+string or a callable. Callables are evaluated on every render, so resources that
+load asynchronously (e.g. MCP servers) can show "connecting" first and switch to
+the real list once connected.
 """
 
 SECTIONS: list[dict] = []
@@ -24,6 +26,6 @@ def resolve(value) -> str:
     if callable(value):
         try:
             return str(value() or "")
-        except Exception:  # noqa: BLE001  区块坏了不该毁掉启动屏
+        except Exception:  # noqa: BLE001 - a broken section must not break the startup screen
             return ""
     return str(value or "")

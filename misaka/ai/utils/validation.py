@@ -167,8 +167,8 @@ def _apply_schema_array_coercion(value: list[Any], schema: JsonSchemaObject) -> 
 
 
 def _coerce_with_union_schema(value: Any, schemas: Sequence[JsonSchemaObject]) -> Any:
-    # 值已命中某个 arm 就原样保留——否则 nullable 联合会把 null 强转成 0/""
-    #（pi #7328/2e95584da，fork 时漏吃的 pin 内修复）
+    # Keep the value as-is if it already matches an arm; otherwise a nullable
+    # union would coerce null into 0/"" (pi #7328/2e95584da).
     for schema in schemas:
         if _schema_validates(value, schema):
             return value

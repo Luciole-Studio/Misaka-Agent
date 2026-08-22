@@ -111,7 +111,8 @@ class StreamOptions(RuntimeModel):
     maxRetries: int | None = None
     maxRetryDelayMs: int | None = None
     metadata: dict[str, Any] | None = None
-    # 任意 OpenAI-compatible 采样参数透传（pi #7568）：Model.samplingParams 作底，本字段按键覆盖
+    # Arbitrary OpenAI-compatible sampling params (pi #7568): Model.samplingParams
+    # provides defaults, this field overrides per key.
     samplingParams: dict[str, Any] | None = None
 
 
@@ -397,7 +398,7 @@ class Model(SchemaModel):
     maxTokens: int
     headers: dict[str, str] | None = None
     compat: ModelCompat | None = None
-    samplingParams: dict[str, Any] | None = None   # models.json 可配的采样参数（pi #7568）
+    samplingParams: dict[str, Any] | None = None   # sampling params configurable in models.json (pi #7568)
 
 
 class ImagesModel(SchemaModel):

@@ -1,10 +1,12 @@
 """Buffered stdin sequence splitting for terminal input streams.
 
-PORT-NOTE (审计修复): 上游拿到的是 Node setEncoding("utf8") 后的**字符串**（StringDecoder
-跨 chunk 缓存半个多字节序列）。Python 侧进来的是裸 bytes——必须用增量解码器，
-否则 >4KB 中文粘贴被 os.read 边界切开就出 U+FFFD（实测必现）。
-10ms 刷帧定时器经 loop.call_soon_threadsafe 回事件循环执行（Node 单线程语义），
-消灭定时器线程与主线程并发读写 buffer 的竞态。
+PORT-NOTE: upstream receives strings from Node after setEncoding("utf8"), where
+StringDecoder buffers partial multi-byte sequences across chunks. Here the input is raw
+bytes, so an incremental decoder is required; otherwise a >4KB CJK paste split at an
+os.read boundary yields U+FFFD (reliably reproducible).
+The 10ms flush timer runs on the event loop via loop.call_soon_threadsafe (Node's
+single-threaded semantics), which removes the race between the timer thread and the
+main thread over the buffer.
 """
 
 from __future__ import annotations
@@ -169,7 +171,7 @@ class StdinBuffer:
             self.timeout = None
 
         if isinstance(data, (bytes, bytearray)):
-            raw = self._decoder.decode(bytes(data))  # 半个多字节序列留在解码器里等下一 chunk
+            raw = self._decoder.decode(bytes(data))  # a partial multi-byte sequence stays in the decoder until the next chunk
         else:
             raw = data
 

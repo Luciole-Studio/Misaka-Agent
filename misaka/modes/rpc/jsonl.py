@@ -52,9 +52,12 @@ class JsonlLineBuffer:
 
 
 def to_json_event(value: Any) -> Any:
-    """线格式：message_update 只发 delta（pi #7290/a4475344f，fork 时漏吃）。
-    丢顶层累计 message 与 assistantMessageEvent.partial——否则每个 delta 携带
-    全量快照，线上输出随消息长度二次方膨胀；message_end 仍是权威全量。"""
+    """Convert an event to its wire form.
+
+    ``message_update`` events carry only the delta: the accumulated ``partial``
+    snapshot is stripped so output does not grow quadratically with message
+    length. ``message_end`` remains the authoritative full message.
+    """
     data = to_jsonable(value)
     if isinstance(data, dict) and data.get("type") == "message_update":
         ame = data.get("assistantMessageEvent")

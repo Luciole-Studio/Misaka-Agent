@@ -61,10 +61,11 @@ def _is_regional_indicator(codepoint: int) -> bool:
 def _is_extend_char(char: str) -> bool:
     codepoint = ord(char)
     if codepoint == 0x200D:
-        return False  # ZWJ 由 _iter_graphemes 的 join 分支接手——放进 extend 会把家庭 emoji 拆成三簇
+        return False  # ZWJ is handled by the join branch in _iter_graphemes; treating it as extend would split family emoji into three clusters
     return (
         unicodedata.combining(char) != 0
-        # Mc（间距组合，如天城文 ि）与 Hangul V/T jamo 附着前簇——近似 Intl.Segmenter 的 UAX#29
+        # Mc (spacing combining marks, e.g. Devanagari vowel signs) and Hangul V/T jamo attach to the
+        # preceding cluster; approximates Intl.Segmenter's UAX#29
         or unicodedata.category(char) in {"Cf", "Mn", "Me", "Mc"}
         or 0x1160 <= codepoint <= 0x11FF
         or _is_variation_selector(codepoint)
@@ -414,12 +415,15 @@ def _update_tracker_from_text(text: str, tracker: AnsiCodeTracker) -> None:
         index += 1
 
 
-# CJK 可断行字（近似 TS 的 Script_Extensions Han/Hiragana/Katakana/Hangul/Bopomofo——
-# Python re 无 \p{Script}，按主区段列举；覆盖全部常用面）
+# Characters that may break lines anywhere (approximates the TS Script_Extensions check for
+# Han/Hiragana/Katakana/Hangul/Bopomofo; Python re has no \p{Script}, so the main blocks are
+# listed explicitly, covering all common planes)
 _CJK_BREAK_RE = re.compile(
-    "[\u2E80-\u2EFF\u3005\u3007\u3041-\u30FF\u3100-\u312F\u31A0-\u31BF"
-    "\u31F0-\u31FF\u3130-\u318F\u3400-\u4DBF\u4E00-\u9FFF\uA960-\uA97F"
-    "\uAC00-\uD7FF\uF900-\uFAFF\uFF66-\uFF9D\U00020000-\U0002FFFF]")
+    r"[\u2e80-\u2eff\u3005\u3007\u3041-\u30ff\u3100-\u312f"
+    r"\u31a0-\u31bf\u31f0-\u31ff\u3130-\u318f\u3400-\u4dbf"
+    r"\u4e00-\u9fff\ua960-\ua97f\uac00-\ud7ff\uf900-\ufaff"
+    r"\uff66-\uff9d\U00020000-\U0002ffff]"
+)
 
 
 def _split_into_tokens_with_ansi(text: str) -> list[str]:
@@ -448,7 +452,7 @@ def _split_into_tokens_with_ansi(text: str) -> list[str]:
         for segment in _iter_graphemes(text[index:text_end]):
             segment_is_space = segment == " "
             if not segment_is_space and _CJK_BREAK_RE.search(segment):
-                flush_current()  # CJK 逐字成 token：任意字间皆可断行
+                flush_current()  # each CJK character is its own token: a line may break between any two
                 tokens.append(pending_ansi + segment)
                 pending_ansi = ""
                 continue
@@ -641,8 +645,8 @@ def _truncate_fragment_to_width(text: str, max_width: int) -> tuple[str, int]:
 
 
 def _get_active_osc8_close(prefix: str) -> str:
-    """截断保留段若停在未闭合的 OSC 8 链接里,给出闭合序列(保留其 BEL/ST 终结符)。(pi b780d20 #7657)"""
-    if "\x1b]8;" not in prefix:  # 纯文本前缀不逐字扫(pi 229afb8 #7665)
+    """If the kept prefix ends inside an unclosed OSC 8 link, return the closing sequence (preserving its BEL/ST terminator). (pi b780d20 #7657)"""
+    if "\x1b]8;" not in prefix:  # skip the per-character scan for plain-text prefixes (pi 229afb8 #7665)
         return ""
     active: ActiveHyperlink | None = None
     i = 0

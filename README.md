@@ -14,11 +14,11 @@ alias misaka='~/Projects/misaka/.venv/bin/misaka'
 misaka
 ```
 
-光敲 `misaka` 进**多格子面板**（herdr 形态）：自动拉起守护进程、开一个编排官格子。
+光敲 `misaka` 进**多格子面板**（herdr 形态）：当前 shell 目录就是 Workspace；自动拉起守护进程、开一个属于该 Workspace 的编排官格子。
 顶行是**标签栏**（agent 名标签，点标签切页）；左侧边栏分三区（每区超高出滚动条，
 滚轮可滚）：**Sisters 名册**——在跑的标 ●、点击即聚焦，没在跑的标 ○、**点开即在
 当前页平铺启动她**（每列两格，列满往右）；**Windows 窗口列表**——活格子＋呼吸圆点
-（真在跑才亮）；最下面 **Projects 课题**——全部课题（置顶★在前、已归档沉底标灰），
+（真在跑才亮）；最下面 **Projects 课题**——当前 Workspace 的课题（置顶★在前、已归档沉底标灰），
 **点击展开/收回**附属卡列表：在跑的卡点击即聚焦，**跑过的卡点击展开她的会话现场**
 （`card-shell --resume`，只接续不重发合同，看/手聊不动看板；在跑/验收中的卡
 拒绝展开——现场有人在写），没跑过的提示无现场；
@@ -44,12 +44,11 @@ tmux 用户同理（tmux 会吃掉 ctrl+b，按 `ctrl+b b` 转发）。
 **你说开工她才跑**（花钱的动作永远等你点头）→ 跑完她告诉你下一步能干嘛。
 
 她手里除了 pi 的内置工具（读文件／grep／跑命令等），还有一套御坂网络控制工具：看板／建卡／后台开工／
-查询 Sister／传话续聊／停止／看研究图与饱和读数／从缺口自动生卡／网格覆盖审计。每张卡都有稳定 task ID；
-Sister 通过红队后会自动把交卷摘要回注当前对话。Last Order 会话关闭后，原 agent ID、
-工作区与 transcript 仍跟着卡保存；下次开工会续接原会话，不会冒充一个新 Sister。
+查询 Sister／传话续聊／停止／看 Project、任务、Research Run 与开放问题。每张卡都有稳定 task ID；
+Sister 通过红队后会自动把交卷摘要回注当前对话。Last Order 会话关闭后，原 agent ID、Workspace 与 transcript 仍跟着卡保存；下次开工会续接原会话，不会冒充一个新 Sister。
 **一张卡一份现场**：格子里跑过的卡 LO 后台续办会收养同一份对话，面板点开
 LO 跑过的卡也是同一份——两条路互通，不各写各的。
-Sister 干活途中若发现卡片前提被推翻、或没有外部输入就走不下去，会 **`SendMessage` 给 last-order 中途上报**（CC 同款三参数工具，全系统只此一套）：编排官在场立刻看到，不在场则信落盘、她下次开会话补送（完成通知同理）。上报只是送信——不改卡状态，验收照旧只能由红队给。消息层是单文件 `extensions/messages.py`（自带 `~/.misaka/messages.db`，地址=角色名）：发给自己生的分身＝唤醒续聊（进程内短路），发给在册角色＝投信；收到的信一律按不可信数据包裹。Last Order 也持有 `SendMessage`——这是她唯一解禁的子代理类工具，派活仍只能走建卡＋验收。
+Sister 干活途中若发现卡片前提被推翻、或没有外部输入就走不下去，会 **`SendMessage` 给 last-order 中途上报**（CC 同款三参数工具，全系统只此一套）：编排官在场立刻看到，不在场则信落盘、她下次开会话补送（完成通知同理）。上报只是送信——不改卡状态，验收照旧只能由红队给。消息层是单文件 `network/messages.py`（自带 `~/.misaka/messages.db`，地址=角色名）：发给自己生的分身＝唤醒续聊（进程内短路），发给在册角色＝投信；收到的信一律按不可信数据包裹。Last Order 也持有 `SendMessage`——这是她唯一解禁的子代理类工具，派活仍只能走建卡＋验收。
 **她不持有派活类子代理工具**（`Agent / TaskOutput / TaskStop`）——因为 Sisters
 就是她的子代理：要把活分出去只能走建卡＋验收这条道，不能私开一个没人验收的分身。
 
@@ -65,11 +64,12 @@ Sister 干活途中若发现卡片前提被推翻、或没有外部输入就走�
 协力者也能**中途主动上报**——`misaka tell "卡住了"`,这就是它的 SendMessage 等价物。
 **它那边零安装零配置**:协力者跑在 shell 里而 misaka 本身就是命令行,合同里告诉它这句话
 就会用。对号靠三重定位:环境变量(`MISAKA_ALLY`/卡号,守护进程起格子时塞好)→工作目录
-反查(cwd 落在 `workspaces/<卡号>/` 里就查板拿 assignee,防真实 agent 的沙箱清环境变量)
+反查(cwd 落在卡上记录的 workspace/output_dir 里就查板拿 assignee；多卡共享同一路径时拒绝猜测，防冒名)
 →都认不出就**拒发**(宁可不发也不冒名顶替,宪法②)。格子还会继承守护进程的库路径,
 免得各写各的库、信送进另一个 `messages.db`。
 
-工具与代码**两条线分家**(`extensions/ally/` 自成一块,一行不进 `board/`):
+工具与代码**两条线分家**：第三方适配与会话工具留在 `extensions/ally/`，
+通用任务状态归 `platform/tasks.py`，只有派发边界进入 `network/`：
 `misaka_ally_card` 建卡 / `misaka_ally_dispatch` 派活 / `misaka_ally_message` 传话
 (打进它终端,它不认信箱) / `misaka_ally_output` 看输出 / `misaka_ally_stop` 停卡 /
 `misaka_ally_list` 看所有格子跑着什么 / `misaka_ally_start`·`misaka_ally_close`
@@ -87,10 +87,13 @@ LO 自己起的协力者不受此限。外部额度不在 misaka 记账内,
 所以建卡外的每个动作(派活/起停)都带确认闸。
 除她之外的角色（包括分身）都可用那几个工具继续拆分工作。
 
-课题(project):一个研究目标就是一个课题。先 `misaka project <名>` 建课题目录(里面 `PROJECT.md` 写目标/赌注,原始材料也放这)——建卡时 `--project <名>` 归属它,看板按课题分组,饱和/前沿按课题分别算(不同课题的"挖够没"不混算)。不给 project=未分类。
-课题状态:`misaka project` 列出全部(置顶★在前、已归档标注);`--pin/--unpin` 置顶、
+课题(Project)是 Workspace 内的持久容器。`misaka project <名>` 在当前目录创建
+`.misaka/projects/<project_id>/{PROJECT.md,pageindex/,runs/}`；显示名可重复，稳定 ID 才是身份。
+`/research` 由 Last Order 根据下一条问题自动命名并新建 Project，不要求人先填。建卡时
+`--project <ID>` 归属它（唯一显示名也可）；不给就是当前 Workspace 内未分类。
+课题状态:`misaka project` 只列当前 Workspace(置顶★在前、已归档标注);`--pin/--unpin` 置顶、
 `--archive/--unarchive` 归档(目录是课题的"真相",库里只存状态位)、`--delete` 删除
-(有卡挂着拒删,加 `--with-cards` 连卡一起删;目录软删进 `.trash-*` 可反悔)。
+(有卡挂着拒删,加 `--with-cards` 连卡一起删;目录软删进 `<workspace>/.misaka/trash/projects/` 可反悔)。
 
 删除:课题软删(目录进 `.trash` 可反悔),卡**硬删**(连事件与预算记录一并抹——
 board 保持干净)。命令 `misaka task <卡号> --delete`、`misaka project <名> --delete`;
@@ -109,23 +112,21 @@ SendMessage/TaskStop,机制隔离)。在跑/验收中的卡先 `misaka net stop`
 面板里按 `ctrl+b t` 召唤**全局树**（已有就聚焦；等价命令 `misaka tree --watch`，2 秒实时重画）：
 
 ```
-▌课题「苏联档案」 ｜深研3轮 前沿2 normal 分工：10032＝档案与文献
-├ ◆ 核对入藏簿原件确认年份            ← 方向层（深研的派生边才有，普通板平铺）
-│ ├ ● t_a3f2 补缺：核对入藏簿（10032·running）  代办1/3 ▶联系档案馆
-│ │    ⚠ 交叉核对搬迁清单：馆方没回信   ← 卡壳浮出来（相谈）
-│ │    [~] 联系档案馆                  ← 有分身干的条目成锚行
-│ │       ⇢ ● dd44 分身·联系馆方（running）
-├ （直派）
-│ ├ ✓ t_9c01 立论：搬迁性质（10032·done）  代办5/5
+▌课题「苏联档案」 ｜Research r_ab12 wave 2 active 开放问题2 分工：10032＝档案与文献
+├ ● t_a3f2 核对入藏簿（10032·running）  代办1/3 ▶联系档案馆
+│    ⚠ 交叉核对搬迁清单：馆方没回信   ← 卡壳浮出来（相谈）
+│    [~] 联系档案馆                  ← 有分身干的条目成锚行
+│       ⇢ ● dd44 分身·联系馆方（running）
+└ ✓ t_9c01 分析搬迁性质（10032·done）  代办5/5
 ```
 
-五层：**课题 →（方向）→ 卡＝宏观代办 → 微观代办 → 分身**。宏观代办就是板上的卡
+四层：**课题 → 卡＝宏观代办 → 微观代办 → 分身**。宏观代办就是板上的卡
 （状态机归 Last Order）；微观代办是每张卡里 Sister 自己的子任务树——她拿到的
 `misaka_todo` 工具**卡号烧死在闭包里**，只能写自己这张卡。约定：开工先拆（琐碎卡
 可不拆）、推进随手标 doing/done、卡壳标 blocked＋一句原因（⚠ 直接浮上树）。
 光干活不记账会被系统提醒（唠叨不拦活）；**硬闸只有一道**：交卷时 doing 必须清零，
-否则打回。交卷必填的心虚点（uncertain）在收割时**机械回流**成研究图缺口，
-自动进前沿、够分量就生复查卡——她亲口说的没底处不会被扔掉。
+否则打回。交卷里的心虚点（`uncertain`）原样进入产物与材料图，供综合官和全局红队审查；
+足以影响结论的缺口由红队写成持久 `research_issues`，再由分支 LO 决定是否派复查卡，不做机械打分或自动扩卡。
 编排官侧同款视角：`misaka_tree` 看树快照、`misaka_sister_peek` 窥视某卡现场尾巴
 （内容按不可信数据包裹，完成与否仍以看板与红队验收为准）。
 
@@ -141,11 +142,18 @@ SendMessage/TaskStop,机制隔离)。在跑/验收中的卡先 `misaka net stop`
   确定性截断零花费收敛），熔断＋花费闸拉闸也绝不失控烧钱
 - **逃生舱**：`export MISAKA_CONTEXT_ENGINE=native` 回引擎原生压缩；
   LCM 内部任何故障也会自动回落原生（fail-open），一轮都不会卡死
-- **回收工具**（LO 与 sis 都有）：`lcm_grep` 检索已压历史 → `lcm_expand`
-  按号钻回逐字原文（节点可逐层下钻）→ `lcm_load_session` 顺序翻页 →
-  `lcm_status` 看存量。纪律：摘要是线索不是证据，引用原话必须回原文核对
+- **完整摄取**：每个已提交回合按 Pi `entry_id` 幂等同步；短会话也能回收。
+  压缩摘要先 pending，只有宿主 `session_compact` 落盘后才提交 DAG；失败、中断、
+  重启都与 transcript 对账
+- **回收工具**（LO 与 sis 都有）：`lcm_grep` 检索完整历史 → `lcm_expand`
+  按字符/来源游标有界展开 → `lcm_load_session` 顺序翻页 → `lcm_recent` 按时间回看 →
+  `lcm_status` 看存量与摘要用量。摘要是线索，引用原话必须回原文核对
 - **运维**：`misaka lcm status` 存量｜`misaka lcm doctor` 只读体检（分级：
-  绝大多数警告只 inspect，不乱建议清理）｜`misaka lcm backup` 热备快照
+  绝大多数警告只 inspect）｜`misaka lcm backup` 热备｜`misaka lcm repair`
+  迁移并重建 FTS｜`misaka lcm rebuild SESSION.jsonl` 从事实源重建会话
+- **可选混合召回**：默认纯 FTS、零额外常驻资源；`uv sync --extra lcm-semantic`
+  后设置 `MISAKA_LCM_RETRIEVAL_MODE=hybrid` 与 `MISAKA_LCM_EMBEDDING_MODEL=<model>`，
+  首次检索才惰性建立摘要向量，原文 chunk 不建向量
 - 切换前的原生摘要自动收编承接，历史不丢
 
 ## 技能三件套（项目技能＋显式调用＋对话沉淀）
@@ -173,13 +181,12 @@ SendMessage/TaskStop,机制隔离)。在跑/验收中的卡先 `misaka net stop`
 移植自 hermes（`docs/design/moa.md`），关键纪律原样保留：
 
 - **参谋不行动**：零工具零分身，系统提示明令「绝不声称执行过任何操作」；
-  意见按不可信数据包裹（宪法⑤）后才进上下文
+  意见标成专用 MoA 参谋上下文，只附在本次请求副本，不写回持久会话
 - **降级不炸**：单参谋失败成 `[failed: …]` 便签照常综合；全部失败则跳过综合官，
   照实说「参谋全灭，凭自己判断」
-- **配置随角色走**：`~/.misaka/profiles/<角色>/moa.json`——LO 与每位 sis
-  各配各的参谋团与综合官；首次 `/moa` 自动落骨架（参谋＝本机模型，开箱即跑），
-  编辑 `reference_models` / `aggregator` 换成你要的组合，改文件即生效
-- 参谋花费全部入预算台账（宪法⑦），台账里记作 `moa:<角色>`
+- **全局 preset**：`~/.misaka/moa.json` 由所有会话共用；首次使用自动落骨架，
+  编辑 `reference_models` / `aggregator` 换组合，改文件即生效
+- 参谋花费折进聚合官最终 usage，随当前会话或任务进入同一预算账，不另开旁账
 
 ## 三分钟上手（命令行直接操作）
 
@@ -209,50 +216,53 @@ misaka tail
 只通知一次。**产物必须是工作区内真实的相对路径普通文件**；绝对路径、`../`、越界软链、
 目录以及交卷时报了却不存在的文件一律不算完成。
 
-## 研究闭环（系统自己找活干）
+## 普通任务编排
 
 ```bash
 # 一句话目标 → Last Order 拆成卡（会先下一个"赌注"，再拆）
 misaka plan "你的研究目标"
 
-# 开工：进 misaka 对话说"跑吧"，Last Order 后台调度（跑卡只此一条路，见上）
+# 开工：进 misaka 对话说"跑吧"，Last Order 使用公共 Task/Bot 基建调度
 misaka
-
-misaka harvest           # 收割：把产物读成研究图（发现/缺口 + 证据键）
-misaka graph             # 看图
-misaka saturation        # 挖够了没有（下一铲出新的概率）
-misaka expand -k 2       # 前沿：挑最值得挖的缺口，自动生成新卡
-#                          再进 misaka 说"跑吧" …… 如此循环
 misaka synth --title "报告名"   # 综合成 REPORT.md（再进对话开工执行）
 ```
 
-## 深研模式（/research：上面的闭环交给蜂群自动摇）
+## 深研模式（/research）
 
-对话里让 Last Order 调 `misaka_research_start`（要明确授权才动，轮数/预算顶可给可不给）；
-或命令行无头跑：
+只有人在 Last Order 输入框中键入 `/research`，或在终端运行 `misaka research`，才会启动；
+Agent 工具表只有只读查看，没有 start/stop/expand 入口。
 
-```bash
-misaka research "你的研究目标" --project 课题名   # 课题不存在会自动建
-#   --rounds 8     授权轮数（缺省不限，只剩自然闸）
-#   --beam 4       束宽：每轮最多展开几个刺/缺口
-#   --cap 200000   本次预算顶（触顶即停并跳过综合——宪法⑦）
-#   --assignee 10032  立论与展开卡给谁
-
-misaka tree --watch      # 实时树：课题→卡→分身（含嵌套），另开一格围观
-# 对话里随时：misaka_research_status 看仪表；misaka_research_stop 收手（跑完当轮即停）
-# LO 还可 misaka_sister_peek 窥视某卡现场尾巴（内容按不可信数据看待）
+```text
+/research [深度]
+# 下一条普通消息输入研究问题；LO 自动命名并创建 Project
+/research status [RUN_ID|课题名]
+/research stop [RUN_ID]
+/research resume [RUN_ID] [补充说明]
 ```
 
-循环长这样：立论 Sister 落笔 → 思辨红队找刺（臆想/偏见/出处弱/过度概括/矛盾/覆盖缺口）
-→ 每根刺**逐字引文核验**，核不上整条丢（金标 g9）→ 核上的成缺口节点，按权重挑 top-k
-生新卡并行开挖 → 收割入图 → 再找刺……直到前沿挖空/轮数到/预算顶到。
+CLI 聊天窗口退出（双击 `Ctrl-C` 或 `Ctrl-D`）会持久停止本窗口启动的 Research Run，
+并终止其运行中、排队中和依赖等待中的任务，不留到后台继续执行。
 
-要点：
-- **零结论纪律**：模式内 Last Order 只做设计（要素/方向/耦合以结构化节点入图），
-  结论全部出自立论 Sister 的笔＋红队验收；模式不开则一切如常，零引导零设置。
-- **驱动器无状态**：轮数记在课题 `PROJECT.md` 的「## 深研日志」（一行＝一轮），
-  断了重启接着跑，不重复建卡。
-- 收场自动送综合报告通知，纪律随之解除。
+收到下一条消息后，LO 先命名并编写 Project，再创建持久 Research Run。根 LO 只产出研究设计，不把原问题答案送入聊天；
+独立方法红队审查后，各 Sister 按能力档案被选择，并各自先做 preflight，再使用原有 Agent Loop 执行。
+每波结束后至少两位 Sister 独立综合，全局红队检查事实、逻辑、因果、范围、方法、偏见和未决分歧。
+实质且可补证的断裂点会各开一个新 LO 分支 Session，读取祖先 Session/产物导航后重新规划。
+
+调度是按深度停止的分波并行 best-first，而不是机械 BFS。入口唯一研究边界是深度：
+
+```bash
+misaka research "你的研究问题" --depth 3
+misaka research --resume RUN_ID
+```
+
+- `深度` / `--depth`：最大扩展分支深度；不填默认 3。
+- 任务、方法、兵法、Sister 和综合视角由 LO 根据问题决定，不要求人类预填。
+- 系统级全局 token 预算、并发容量和单次调用故障超时仍正常工作，但不裁剪研究规划。
+
+所有计划、preflight、任务产物、证据台账、红队报告、分歧矩阵、分支上下文、综合和最终审计都落在
+`<workspace>/.misaka/projects/<project_id>/runs/<run_id>/`。SQLite 保存状态和谱系，进程退出后可恢复。证据可靠性由 Agent 写出
+来源独立性、距离、方法匹配、反证、范围和裁决理由；程序只核引文确实存在，不用机械分数代替判断。
+能补证的分歧继续研究，不能补证的解释/规范分歧在最终报告保留，不做模型投票。
 
 ```bash
 misaka net status              # 守护进程概况（不在会自动拉起）
@@ -266,14 +276,11 @@ misaka net stop                # 停守护进程（所有格子一并关闭）
 （花钱等你点头）。快照在 `~/.misaka/net.json`，套接字 `~/.misaka/net.sock`。
 （第②期将把 `misaka` 默认入口换成多格子面板；设计移植自 herdr，Apache-2.0。）
 
-## 检查与免疫
+## 检查与评测
 
 ```bash
-misaka verdict           # 找互相矛盾的发现，标出谁站得住/哪里是对峙点
-misaka claims --audit    # 证据台账：引文还对得上原文吗
-misaka selftest -k 1     # 抽验红队：破坏产物看它抓不抓得住（会花模型额度）
-misaka immune            # 预算/禁令/判例/钩子闸一览
-misaka retract <卡id> --reason "出处存疑"   # 撤回证据，连坐下游+自动生复核卡
+misaka immune                     # 预算与机器钩子闸一览
+python eval/placebo.py            # 显式判官突变评测；不进入产品工作流
 
 ./eval/run_regression.sh            # 全量回归。改任何代码前后都跑
 ```
@@ -290,23 +297,23 @@ misaka survey "你的命题" --scheme OCM     # 逐格判"这格与命题通不�
 | 件 | 检查 | 挂了会怎样 |
 |---|---|---|
 | sub2api（Claude 池） | `curl -s -o /dev/null -w "%{http_code}" -X POST http://127.0.0.1:8964/v1/messages` 有响应即可 | 所有 LLM 步骤报 503。改用 Gemini：`export MISAKA_PROVIDER=google MISAKA_MODEL=gemini-3.5-flash MISAKA_FORCE_MODEL=gemini-3.5-flash` |
-| 嵌入服务（bge-m3, 8080） | `curl -s http://127.0.0.1:8080/health` | 判重/禁令/判例**自动降级为不启用**，不阻塞流程 |
 | 项目 venv | `.venv/bin/misaka board` 能出结果 | 一切都跑不了。重建：`uv venv .venv --python 3.13 && uv pip install --python .venv -e .` |
+| PageIndex PDF 树（可选） | `uv sync --extra pageindex` | 未装时文献仍会入库，只降级为按页导航 |
 
 ## 东西放在哪
 
 - 代码 `~/Projects/misaka`——**只有一个包 `misaka/`**（harn fork 已整体改姓融入：
-  `ai/ agent/ tui/ protocol/ core/ modes/ utils/ compat/` 来自上游；`orchestration/`=执行控制面、
-  `research/`=研究领域（kernel/indexer/basemap）、`extensions/`=产品扩展、`cli/`=装配入口、`config/`=身份与常量；
+  `ai/ agent/ tui/ protocol/ core/ modes/ utils/ compat/` 来自上游；`platform/`=共享执行设施，`network/`=御坂网络与任务执行，
+  `research/`=研究 Workflow、证据台账与 basemap，`documents/`=文献正典，`skills/`=技能域，
+  `observability/`=只读投影，`extensions/`=真正可挂载扩展，`app/composition.py`=唯一装配根，`cli/`=入口；
   层次与依赖方向见 `docs/architecture/architecture.md`；上游文档在 `docs/upstream/harn/`，符号对表在 `misaka/protocol/PORTMAP.tsv`）
-- bundled Extension 按 Pi 的目录规则自包含：`extensions/board/` 负责看板与 Sister 控制面，
-  `extensions/subagent/` 负责递归 Agent，`extensions/messages.py` 是统一消息层（`SendMessage`＋落盘信箱），
-  `extensions/docs.py`、`mcp.py`、`switch.py` 是单文件扩展；
+- 内置领域与 Extension 分开：`network/` 负责看板与 Sister 控制面，
+  `extensions/subagent/` 负责递归 Agent，`network/messages.py` 是统一消息层（`SendMessage`＋落盘信箱），
+  `documents/tools.py` 与 `network/switch.py` 是内置能力，`extensions/mcp.py` 是扩展；
   `core/extensions/` 只保留加载器、Runner 和协议，`core/tools/` 只保留引擎内置工具
-- 板与图 `~/.misaka/board.db`｜信箱 `~/.misaka/messages.db`｜底图 `~/.misaka/basemap.db`｜协力者手敲识别名单 `~/.misaka/allies.json`｜自由对话会话 `~/.misaka/sessions/<角色>/`（首启自动从旧的 last-order-sessions/sister-sessions 搬家；卡的现场不在这，随卡在工作区 `session/`）｜角色档案（人格 SOUL.md＋config.json＋技能＋MCP，照 pi 全在用户态）`~/.misaka/profiles/<角色>/`｜**共同魂** `~/.misaka/profiles/MISAKA.md`（LO 与 Sisters——含分身——共用的开场人格，装配在各自 SOUL.md 之前，首跑落骨架；收割官/思辨红队/判官不读它，审计姿态不受共同人格影响）
+- 公共任务状态与 Research Run 谱系 `~/.misaka/board.db`｜Project、PageIndex 与 Research 产物在 `<workspace>/.misaka/projects/<project_id>/`｜Task 会话、`report.json`、附件与日志在 `~/.misaka/tasks/<task_id>/`｜信箱 `~/.misaka/messages.db`｜底图 `~/.misaka/basemap.db`｜协力者手敲识别名单 `~/.misaka/allies.json`｜自由对话会话 `~/.misaka/sessions/<角色>/`｜角色档案 `~/.misaka/profiles/<角色>/`｜**共同魂** `~/.misaka/profiles/MISAKA.md`
 - engine 运行时资产（models.json/auth/主题/设置）`~/.misaka/agent/`（已与 ~/.harn 脱钩，真文件）
-- 每张卡的工作区与产物 `~/Documents/Misaka/workspaces/<卡id>/`（含 `report.json` 和会话现场）
-- 证据库（按内容哈希）`~/Documents/Misaka/evidence/`
+- 普通 Task 的 Workspace 与产物就是建卡时冻结的 shell 当前目录；Research Task 的产物进入所属 Run 的 `tasks/<task_id>/work/`
 - 规矩看 `CONSTITUTION.md`；施工日志在 `~/Documents/momoi/misaka-build/build-log.md`
 
 ## 常用旋钮（环境变量，都可不设）
@@ -315,4 +322,4 @@ misaka survey "你的命题" --scheme OCM     # 逐格判"这格与命题通不�
 `MISAKA_TOKEN_CAP`（token 上限，超 85% 进 Beast Mode 强制交卷，超 100% 停派新卡）｜
 `MISAKA_MAX_CONCURRENT_SISTERS`（Sister 并发，默认 4）｜
 `MISAKA_MAX_CONCURRENT_JUDGES`（独立红队进程并发，默认 2）｜
-`MISAKA_JUDGE_TIMEOUT`（红队超时，默认 600 秒）｜`MISAKA_WS`（工作区位置）
+`MISAKA_JUDGE_TIMEOUT`（红队超时，默认 600 秒）

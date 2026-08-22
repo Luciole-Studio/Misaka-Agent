@@ -31,15 +31,19 @@ from misaka.tui.utils import (
 _BASE_SEGMENTER = getSegmenter()
 
 def _is_word_nav_punct(segment: str) -> bool:
-    """词导航的标点面：ASCII 标点 + Unicode P* 类（。、《》等）。
-    PORT-NOTE: 上游用 Intl.Segmenter 词粒度（带 CJK 词典）。Python 无词典分词——
-    近似为「CJK 逐字为一词 + Unicode 标点为界」：跳转粒度略细于 ICU 词，
-    但根治了整句中文被 alt+backspace 一口吞掉的降级。"""
+    """Punctuation for word navigation: ASCII punctuation plus Unicode P* classes.
+
+    PORT-NOTE: upstream uses Intl.Segmenter word granularity (with a CJK dictionary).
+    Python has no dictionary segmentation, so approximate with "each CJK character is a
+    word, Unicode punctuation is a boundary": slightly finer jumps than ICU words, but it
+    fixes alt+backspace swallowing a whole Chinese sentence.
+    """
     if not segment:
         return False
     if isPunctuationChar(segment):
         return True
-    # P*=标点（。、《》）；S*=符号（emoji/￥/±）——上游 ASCII 表里 +-=$#@~ 本就是 S 类，等价类取 P∪S
+    # P* = punctuation; S* = symbols (emoji, currency, ±). Upstream's ASCII table already puts
+    # +-=$#@~ in S, so the equivalent class is P ∪ S
     return unicodedata.category(segment[0])[0] in ("P", "S")
 
 
@@ -234,7 +238,7 @@ def word_wrap_line(
             wrap_opp_index = next_segment.index
             wrap_opp_width = current_width
         elif not is_whitespace and next_segment is not None and not isWhitespaceChar(next_segment.segment):
-            # CJK 任意相邻字间都是断行机会（TS cjkBreakRegex 分支）
+            # any two adjacent CJK characters are a break opportunity (TS cjkBreakRegex branch)
             is_cjk = not is_paste_marker(grapheme) and _CJK_BREAK_RE.search(grapheme)
             next_is_cjk = (not is_paste_marker(next_segment.segment)
                            and _CJK_BREAK_RE.search(next_segment.segment))
@@ -275,7 +279,7 @@ class Editor:
         self.history: list[str] = []
         self.historyIndex = -1
         self.historyDraft: EditorState | None = None
-        # MISAKA: 输入历史跨会话持久化（Claude Code 同款）。设 MISAKA_INPUT_HISTORY 才启用。
+        # MISAKA: input history persists across sessions (as in Claude Code). Enabled only when MISAKA_INPUT_HISTORY is set.
         self.historyFile = os.environ.get("MISAKA_INPUT_HISTORY") or None
         if self.historyFile:
             try:
@@ -347,7 +351,7 @@ class Editor:
         if len(self.history) > 100:
             self.history.pop()
         if self.historyFile:
-            try:  # 原子写；历史写不进盘不该打断提交
+            try:  # atomic write; a failed history save must not block the submit
                 os.makedirs(os.path.dirname(self.historyFile), exist_ok=True)
                 tmp = self.historyFile + ".tmp"
                 with open(tmp, "w", encoding="utf-8") as f:
@@ -379,7 +383,7 @@ class Editor:
         if self.historyIndex == -1 and new_index >= 0:
             self.pushUndoSnapshot()
             from copy import deepcopy as _dc
-            self.historyDraft = _dc(self.state)  # 进历史前存草稿——Down 回来要原样还给用户
+            self.historyDraft = _dc(self.state)  # save the draft before entering history so Down returns it intact
 
         self.historyIndex = new_index
         if self.historyIndex == -1:
@@ -394,7 +398,8 @@ class Editor:
             else:
                 self.setTextInternal("")
         else:
-            # 上翻(-1)光标放行首：多行历史条目再按 Up 直接翻上一条，不用爬完整条
+            # Going up (-1) puts the cursor at the start: on a multi-line entry, Up again moves
+            # straight to the previous entry instead of climbing through the whole text
             self.setTextInternal(self.history[self.historyIndex],
                                  "start" if direction == -1 else "end")
 
@@ -455,7 +460,7 @@ class Editor:
         else:
             result.append(horizontal * width)
 
-        emit_cursor_marker = self.focused  # 补全菜单开着也要发——IME 候选窗靠它定位
+        emit_cursor_marker = self.focused  # emit even with the completion menu open: the IME candidate window is positioned by it
         for layout_line in visible_lines:
             display_text = layout_line.text
             line_visible_width = visibleWidth(layout_line.text)
@@ -485,7 +490,7 @@ class Editor:
 
         lines_below = len(layout_lines) - (self.scrollOffset + len(visible_lines))
         left = f"─── ↓ {lines_below} more " if lines_below > 0 else ""
-        # MISAKA: 翻历史时底边框右侧显示位置指示（Claude Code 同款 History N/M）
+        # MISAKA: while browsing history, show a position indicator on the right of the bottom border (Claude Code style "History N/M")
         label = (f" History {self.historyIndex + 1}/{len(self.history)} "
                  if self.historyIndex > -1 and self.history else "")
         if left and visibleWidth(left) > width:
@@ -962,7 +967,7 @@ class Editor:
             last_grapheme = graphemes[-1] if graphemes else None
             grapheme_length = len(last_grapheme.segment) if last_grapheme is not None else 1
             marker = PASTE_MARKER_SINGLE.match(last_grapheme.segment) if last_grapheme else None
-            if marker:  # 删的是 [paste #N …] 整块：注册表同步删 + 高位 id 全体降一号
+            if marker:  # deleting a whole [paste #N …] block: drop it from the registry and renumber higher ids down by one
                 target_id = int(marker.group(1))
                 self.pastes.pop(target_id, None)
                 self.pasteCounter -= 1
@@ -1311,7 +1316,7 @@ class Editor:
                     self.setCursorCol(len(self.state.lines[self.state.cursorLine]))
 
         if self.autocompleteState:
-            self.updateAutocomplete()  # 光标动了：重查/自动关掉过期菜单（Tab 拼上过期候选是真事故）
+            self.updateAutocomplete()  # cursor moved: re-query, or close a stale menu (Tab completing a stale candidate is a real hazard)
 
     def pageScroll(self, direction: int) -> None:
         self.lastAction = None
@@ -1350,7 +1355,7 @@ class Editor:
                 ):
                     new_col -= len(graphemes.pop().segment)
             elif _CJK_BREAK_RE.search(last_grapheme):
-                new_col -= len(graphemes.pop().segment)   # CJK 一字一词
+                new_col -= len(graphemes.pop().segment)   # each CJK character is a word
             else:
                 while (
                     graphemes
@@ -1517,7 +1522,7 @@ class Editor:
                     new_col += len(next_segment.segment)
                     next_segment = next(segments, None)
             elif _CJK_BREAK_RE.search(first_grapheme):
-                new_col += len(first_grapheme)             # CJK 一字一词
+                new_col += len(first_grapheme)             # each CJK character is a word
             else:
                 while (
                     next_segment is not None

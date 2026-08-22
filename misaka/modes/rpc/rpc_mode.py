@@ -690,9 +690,8 @@ async def _run_rpc_mode(runtime_host: Any, *, input_stream: Any | None = None) -
     reader = JsonlLineBuffer()
     try:
         while True:
-            # RPC 是 JSONL 协议，必须按行读：read(4096) 会阻塞到读满 4096 字节或 EOF，
-            # 使得任何保持连接的客户端（命令通常几十字节）永远收不到响应。
-            # readline() 读到 \n 即返回，EOF 时返回 b'' —— 下面的 break 语义不变。
+            # Read line by line: a fixed-size read() blocks until the buffer fills or EOF,
+            # so clients that keep the connection open would never get a response.
             chunk = await asyncio.to_thread(source.readline)
             if not chunk:
                 break

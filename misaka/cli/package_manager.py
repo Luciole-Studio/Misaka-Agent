@@ -14,7 +14,6 @@ from misaka.cli.config_selector import select_config
 from misaka.config import (
     APP_NAME,
     PACKAGE_NAME,
-    VERSION,
     SelfUpdateCommand,
     get_agent_dir,
     get_package_dir,
@@ -24,7 +23,6 @@ from misaka.config import (
 from misaka.core.package_manager import DefaultPackageManager
 from misaka.core.settings_manager import SettingsManager
 from misaka.utils.child_process import spawn_process
-from misaka.utils.version_check import get_latest_harn_release, is_newer_package_version
 from misaka.utils.windows_self_update import (
     cleanup_windows_self_update_quarantine,
     quarantine_windows_native_dependencies,
@@ -53,13 +51,6 @@ class PackageCommandOptions:
     invalidArgument: str | None = None
     missingOptionValue: str | None = None
     conflictingOptions: str | None = None
-
-
-@dataclass(slots=True)
-class _SelfUpdatePlan:
-    packageName: str
-    shouldRun: bool
-    note: str | None = None
 
 
 _command_exit_code = 0
@@ -128,40 +119,6 @@ def _print_self_update_unavailable(
 
 def _print_self_update_fallback(command: SelfUpdateCommand) -> None:
     print(f"If this keeps failing, run this command yourself: {command.display}", file=sys.stderr)
-
-
-def _print_self_update_note(note: str) -> None:
-    trimmed = note.strip()
-    if not trimmed:
-        return
-    print()
-    print("Update note")
-    print(trimmed)
-    print()
-
-
-async def _get_self_update_plan(force: bool) -> _SelfUpdatePlan:
-    if force:
-        return _SelfUpdatePlan(packageName=PACKAGE_NAME, shouldRun=True)
-
-    try:
-        latest_release = await get_latest_harn_release(VERSION)
-        package_name = latest_release.packageName if latest_release and latest_release.packageName else PACKAGE_NAME
-        if (
-            latest_release is None
-            or package_name != PACKAGE_NAME
-            or is_newer_package_version(latest_release.version, VERSION)
-        ):
-            return _SelfUpdatePlan(
-                packageName=package_name,
-                shouldRun=True,
-                note=latest_release.note if latest_release else None,
-            )
-    except Exception:  # noqa: BLE001
-        return _SelfUpdatePlan(packageName=PACKAGE_NAME, shouldRun=True)
-
-    print(f"{APP_NAME} is already up to date (v{VERSION})")
-    return _SelfUpdatePlan(packageName=PACKAGE_NAME, shouldRun=False)
 
 
 async def _run_self_update(command: SelfUpdateCommand) -> None:
@@ -370,8 +327,6 @@ async def handle_config_command(args: list[str]) -> bool | None:
         }
     )
     resolved_paths = await package_manager.resolve()
-    # select_config 按属性取值（TS 对象字面量的移植语义）——传 dict 必 AttributeError
-    #（审查 2026-08-20：config 子命令必崩的镜像翻译漏）
     from types import SimpleNamespace
     await select_config(
         SimpleNamespace(
@@ -499,20 +454,15 @@ async def handle_package_command(args: list[str]) -> bool | None:
                 else:
                     print("Updated packages")
             if _update_target_includes_self(target):
-                self_update_plan = await _get_self_update_plan(parsed.force)
-                if not self_update_plan.shouldRun:
-                    return True
                 self_update_command = get_self_update_command(
                     PACKAGE_NAME,
                     self_update_python_command,
-                    self_update_plan.packageName,
+                    PACKAGE_NAME,
                 )
                 if self_update_command is None:
-                    _print_self_update_unavailable(self_update_python_command, self_update_plan.packageName)
+                    _print_self_update_unavailable(self_update_python_command, PACKAGE_NAME)
                     _set_command_exit_code(1)
                     return True
-                if self_update_plan.note:
-                    _print_self_update_note(self_update_plan.note)
                 try:
                     _prepare_windows_self_update()
                     await _run_self_update(self_update_command)

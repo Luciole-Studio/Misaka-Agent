@@ -4,6 +4,9 @@ from misaka.modes.interactive.components.armin import ArminComponent
 from misaka.modes.interactive.components.assistant_message import (
     AssistantMessageComponent,
 )
+from misaka.modes.interactive.components.ask_user_question import (
+    AskUserQuestionComponent,
+)
 from misaka.modes.interactive.components.bash_execution import (
     BashExecutionComponent,
 )
@@ -94,6 +97,7 @@ from misaka.modes.interactive.components.visual_truncate import (
 __all__ = [
     "ArminComponent",
     "AssistantMessageComponent",
+    "AskUserQuestionComponent",
     "BashExecutionComponent",
     "BorderedLoader",
     "BranchSummaryMessageComponent",

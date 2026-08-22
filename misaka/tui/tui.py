@@ -382,7 +382,7 @@ class TUI(Container):
             self.terminal.write("\x1b[?2031h" if enabled else "\x1b[?2031l")
 
     async def queryTerminalBackgroundColor(self, timeoutMs: int = 1000) -> RgbColor | None:
-        """OSC-11 问终端真实背景色（pi tui.ts:1199）。超时/解析失败 → None。"""
+        """Ask the terminal for its real background color via OSC 11 (pi tui.ts:1199). None on timeout or parse failure."""
         loop = __import__("asyncio").get_running_loop()
         fut = loop.create_future()
         query = {"settled": False, "future": fut, "timer": None}
@@ -401,7 +401,7 @@ class TUI(Container):
         return await fut
 
     async def queryTerminalColorScheme(self, timeoutMs: int = 1000) -> TerminalColorScheme | None:
-        """CSI ?996n 问明暗方案（pi tui.ts:1227）；支持的终端回 ?997;1/2 n。"""
+        """Ask for the light/dark color scheme via CSI ?996n (pi tui.ts:1227); supporting terminals reply ?997;1/2 n."""
         loop = __import__("asyncio").get_running_loop()
         fut = loop.create_future()
 
@@ -477,7 +477,7 @@ class TUI(Container):
         timer.start()
 
     def _request_immediate_render(self) -> None:
-        """绕开 16ms 节流 timer 的渲染路（pi 29d9f08：键盘输入是延迟敏感的）。"""
+        """Render path that bypasses the 16ms throttle timer (pi 29d9f08: keyboard input is latency-sensitive)."""
         self._cancel_render_timer()
         self.renderRequested = True
         if self.immediateRenderScheduled:

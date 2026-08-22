@@ -726,7 +726,7 @@ def _accept_edits_bash(command: str, workspace: str) -> bool:
             return False
         if not argv or argv[0] not in ACCEPT_EDITS_COMMANDS:
             return False
-        # The reference performs path constraints before its acceptEdits fast
+        # Apply path constraints before the acceptEdits fast path.
         # path.  Bare operands resolve inside cwd; explicit escaping operands
         # must remain inside this worker's workspace.
         executable = argv[0]

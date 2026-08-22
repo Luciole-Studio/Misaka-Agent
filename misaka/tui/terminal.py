@@ -1,15 +1,20 @@
 """Terminal lifecycle and ANSI control helpers for the TUI package.
 
-PORT-NOTE (审计修复批, 对照 pi terminal.ts@686f193e 逐段回对):
-- kitty 键盘协议协商照上游状态机整段重写: 先推 flags 再查询、DA 哨兵兜底
-  (无 150ms 猜测定时器)、分片应答重组+150ms 碎片冲刷、flags==0 转 modifyOtherKeys、
-  kitty 激活时关 modifyOtherKeys、stop/drainInput 双向清理。
-- Apple Terminal Shift+Enter 归一化 (native-modifiers .node 插件 → ctypes CoreGraphics)。
-- raw mode 按 libuv UV_TTY_MODE_RAW 语义 (保 OPOST/ONLCR, TCSADRAIN 进 / TCSAFLUSH 出——
-  出口冲掉未读输入, 等价上游 stdin.pause() 防 Ctrl+D 泄给父 shell)。
-- SIGWINCH / 定时器回调一律经 call_soon_threadsafe 回事件循环线程 (Node 单线程语义)。
-- stdin EOF 时注销 reader (Node 流 'end' 后不再发 data), 防 100% CPU 空转。
-- COLUMNS/LINES 回退按 JS 语义: 非数字与 0 都落 80/24。
+PORT-NOTE (audit fixes, checked section by section against pi terminal.ts@686f193e):
+- Kitty keyboard protocol negotiation rewritten to match the upstream state machine:
+  push flags, then query, then a trailing DA sentinel (no 150ms guess timer);
+  fragmented replies are reassembled with a 150ms flush; flags==0 falls back to
+  modifyOtherKeys; modifyOtherKeys is disabled while kitty is active; stop/drainInput
+  both clean up.
+- Apple Terminal Shift+Enter normalization (native-modifiers .node addon -> ctypes CoreGraphics).
+- Raw mode follows libuv UV_TTY_MODE_RAW semantics (keeps OPOST/ONLCR; TCSADRAIN on entry,
+  TCSAFLUSH on exit so unread input is discarded, equivalent to upstream stdin.pause()
+  preventing a stray Ctrl+D from leaking to the parent shell).
+- SIGWINCH and timer callbacks always go through call_soon_threadsafe back to the event
+  loop thread (Node single-thread semantics).
+- The reader is removed on stdin EOF (Node streams emit no data after 'end'), avoiding a
+  100% CPU spin.
+- COLUMNS/LINES fallback follows JS semantics: non-numeric and 0 both become 80/24.
 """
 
 from __future__ import annotations
@@ -49,7 +54,7 @@ _NEGOTIATION_PREFIX_RE = re.compile(r"^\x1b\[\?[\d;]*$")
 
 
 def parse_keyboard_protocol_negotiation_sequence(sequence: str):
-    """→ {"type": "kitty-flags", "flags": n} | {"type": "device-attributes"} | None"""
+    """Returns {"type": "kitty-flags", "flags": n} | {"type": "device-attributes"} | None."""
     m = _KITTY_FLAGS_RE.match(sequence)
     if m:
         return {"type": "kitty-flags", "flags": int(m.group(1))}
@@ -72,8 +77,9 @@ def normalize_apple_terminal_input(data: str, is_apple_terminal: bool, is_shift_
     return data
 
 
-# PORT-NOTE: 上游用 darwin-modifiers.node 原生插件读修饰键实时状态; Python 等价物是
-# ctypes 调 CoreGraphics CGEventSourceFlagsState (0 = kCGEventSourceStateCombinedSessionState)。
+# PORT-NOTE: upstream reads live modifier state via the darwin-modifiers.node addon; the Python
+# equivalent is calling CoreGraphics CGEventSourceFlagsState through ctypes
+# (0 = kCGEventSourceStateCombinedSessionState).
 _MODIFIER_MASKS = {"shift": 0x20000, "control": 0x40000, "option": 0x80000, "command": 0x100000}
 _cg_lib: Any = None
 _cg_failed = False
@@ -93,7 +99,7 @@ def is_native_modifier_pressed(key: str) -> bool:
             _cg_lib.CGEventSourceFlagsState.restype = ctypes.c_uint64
             _cg_lib.CGEventSourceFlagsState.argtypes = [ctypes.c_int]
         return bool(_cg_lib.CGEventSourceFlagsState(0) & mask)
-    except Exception:  # noqa: BLE001  原生层不可用 → 与上游加载失败同款: 恒 False
+    except Exception:  # noqa: BLE001 - native layer unavailable: always False, as upstream on addon load failure
         _cg_failed = True
         return False
 
@@ -154,7 +160,7 @@ class ProcessTerminal:
         self.inputHandler = onInput
         self.resizeHandler = onResize
         self._lastStdinActivityMs = self._now_ms()
-        self._event_loop()  # 捕获事件循环, 供定时器/信号回调路由回主线程
+        self._event_loop()  # capture the event loop so timer/signal callbacks can be routed back to the main thread
 
         self.wasRaw = bool(getattr(self.stdin, "isRaw", False))
         if hasattr(self.stdin, "setRawMode"):
@@ -176,8 +182,9 @@ class ProcessTerminal:
         self.queryAndEnableKittyProtocol()
 
     def queryAndEnableKittyProtocol(self) -> None:
-        """上游语义: 先推 flags、再查询、尾随 DA 哨兵——不认识 kitty 协议的终端
-        会先应答 DA, 我们即转 modifyOtherKeys, 无须启动定时器猜测。"""
+        """Upstream semantics: push flags, query, then a trailing DA sentinel. A terminal that
+        does not know the kitty protocol answers the DA first, and we switch to
+        modifyOtherKeys without any guessing timer."""
         self.setupStdinBuffer()
         self._install_reader()
         self.keyboardProtocolPushed = True
@@ -191,7 +198,7 @@ class ProcessTerminal:
             negotiation = self.read_keyboard_protocol_negotiation_sequence(sequence)
             if negotiation == "pending":
                 self.schedule_keyboard_protocol_negotiation_buffer_flush()
-                return  # 等一小会儿, 让被拆包的 kitty 应答拼完整
+                return  # wait briefly so a fragmented kitty reply can be reassembled
             if self.handle_keyboard_protocol_negotiation_sequence(negotiation):
                 return
             self.forward_input_sequence(sequence)
@@ -204,7 +211,7 @@ class ProcessTerminal:
         self.stdinBuffer.on("paste", on_paste)
         self.stdinDataHandler = lambda data: self.stdinBuffer.process(data)
 
-    # ── kitty 协商状态机 (terminal.ts:228-306 逐一对应) ──────────────────────
+    # ── kitty negotiation state machine (mirrors terminal.ts:228-306 one to one) ──────────────────
 
     def handle_keyboard_protocol_negotiation_sequence(self, negotiation) -> bool:
         if not negotiation:
@@ -219,7 +226,7 @@ class ProcessTerminal:
             else:
                 self.enable_modify_other_keys()
             return True
-        if not self._kittyProtocolActive:  # device-attributes 先到 = 终端不识 kitty
+        if not self._kittyProtocolActive:  # device-attributes arrived first: terminal does not support kitty
             self.enable_modify_other_keys()
         return True
 
@@ -321,7 +328,7 @@ class ProcessTerminal:
         should_disable_kitty = self.keyboardProtocolPushed or self._kittyProtocolActive
         self.clear_keyboard_protocol_negotiation_buffer()
         if should_disable_kitty:
-            # 先弹掉 kitty flags, 迟到的 release 事件才不会再生成 kitty 转义序列
+            # pop the kitty flags first so late release events no longer produce kitty escape sequences
             self.write("\x1b[<u")
             self.keyboardProtocolPushed = False
             self._kittyProtocolActive = False
@@ -330,7 +337,7 @@ class ProcessTerminal:
 
         previous_handler = self.inputHandler
         self.inputHandler = None
-        self._lastStdinActivityMs = self._now_ms()  # 上游在入口重置计时: 至少排水 idleMs
+        self._lastStdinActivityMs = self._now_ms()  # upstream resets the clock on entry: drain for at least idleMs
         end_time = self._now_ms() + maxMs
 
         try:
@@ -353,7 +360,7 @@ class ProcessTerminal:
 
         should_disable_kitty = self.keyboardProtocolPushed or self._kittyProtocolActive
         self.clear_keyboard_protocol_negotiation_buffer()
-        if should_disable_kitty:  # drainInput 没跑过时兜底弹栈
+        if should_disable_kitty:  # fallback pop in case drainInput never ran
             self.write("\x1b[<u")
             self.keyboardProtocolPushed = False
             self._kittyProtocolActive = False
@@ -390,9 +397,9 @@ class ProcessTerminal:
             except OSError:
                 pass
 
-    # PORT-NOTE: pi 的 process.stdout.columns/rows 是 Node 维护的活 tty 尺寸;
-    # Python 等价物是对 stdout fd 做 ioctl 查询。env 回退按 JS 语义:
-    # Number("abc")=NaN 与 0 都是 falsy → 落 80/24。
+    # PORT-NOTE: pi's process.stdout.columns/rows are the live tty size maintained by Node; the
+    # Python equivalent is an ioctl on the stdout fd. The env fallback follows JS semantics:
+    # Number("abc") is NaN, and both NaN and 0 are falsy, so they become 80/24.
     def _tty_size(self):
         try:
             return os.get_terminal_size(self.stdout.fileno())
@@ -410,7 +417,8 @@ class ProcessTerminal:
     @property
     def columns(self) -> int:
         size = self._tty_size()
-        # 0 列也回退（JS || 语义；pty 未设 winsize 时 ioctl 返回 0×0，实测踩过：整屏逐字竖排）
+        # 0 columns falls back too (JS || semantics): when a pty has no winsize set, ioctl returns
+        # 0x0, which in practice rendered the whole screen one character per line
         return size.columns if size and size.columns > 0 else self._env_dim("COLUMNS", 80)
 
     @property
@@ -472,8 +480,8 @@ class ProcessTerminal:
             self.write(TERMINAL_PROGRESS_ACTIVE_SEQUENCE)
             self._schedule_progress_keepalive()
 
-        # 保活写回事件循环线程执行——Node 的 setInterval 本就单线程, 定时器线程
-        # 直接 write 会与渲染字节交错 (审计 C8)。
+        # The keepalive write runs on the event loop thread: Node's setInterval is single-threaded,
+        # and writing from the timer thread would interleave with render bytes (audit C8).
         self.progressTimer = threading.Timer(
             TERMINAL_PROGRESS_KEEPALIVE_MS / 1000.0, lambda: self._on_loop(tick))
         self.progressTimer.daemon = True
@@ -501,8 +509,9 @@ class ProcessTerminal:
         self._previousSigwinchHandler = signal.getsignal(signal.SIGWINCH)
 
         def handler(_signum: int, _frame: Any) -> None:
-            # 信号处理器可在任意字节码间打断主线程——重渲染若就地执行会与
-            # 进行中的 write 交错花屏 (审计 C7)。挪回事件循环排队执行。
+            # A signal handler can interrupt the main thread between any two bytecodes; re-rendering
+            # in place would interleave with an in-progress write and garble the screen (audit C7).
+            # Queue it on the event loop instead.
             self._on_loop(lambda: self.resizeHandler() if self.resizeHandler else None)
 
         signal.signal(signal.SIGWINCH, handler)
@@ -558,7 +567,7 @@ class ProcessTerminal:
             except OSError:
                 data = b""
             if data == b"":
-                # EOF: Node 流 'end' 后不再发 data。不注销 reader 会 100% CPU 空转 (审计 C4)。
+                # EOF: Node streams emit no data after 'end'. Without removing the reader we spin at 100% CPU (audit C4).
                 self._remove_reader()
                 return
         else:
@@ -585,8 +594,9 @@ class ProcessTerminal:
         if fd is None or (callable(is_tty) and not is_tty()):
             return
         self._previousTermiosSettings = termios.tcgetattr(fd)
-        # PORT-NOTE: 不用 tty.setraw——它清掉 OPOST (裸 \n 输出阶梯错位) 且 TCSAFLUSH
-        # 丢启动瞬间的预输入。Node/libuv 的 UV_TTY_MODE_RAW 保留输出后处理, 这里照搬。
+        # PORT-NOTE: not tty.setraw: it clears OPOST (bare \n output staircases) and TCSAFLUSH
+        # discards input typed during startup. Node/libuv UV_TTY_MODE_RAW keeps output
+        # post-processing, so mirror that here.
         mode = termios.tcgetattr(fd)
         mode[0] &= ~(termios.BRKINT | termios.ICRNL | termios.INPCK
                      | termios.ISTRIP | termios.IXON)          # iflag
@@ -602,10 +612,11 @@ class ProcessTerminal:
         fd = self._stdin_fileno()
         if fd is None:
             return
-        # MISAKA: 原 TCSAFLUSH 在 macOS pty 上会永久挂死（drain 唤醒边沿丢失，
-        # 输出已被对端读走仍不醒——双击 Ctrl+C/Ctrl+D 退出实测卡死在本行）。
-        # 改 TCSANOW（永不阻塞）＋显式 tcflush 丢未读输入，保住审计 C9 的意图：
-        # 残留 Ctrl+D 不泄给父 shell。
+        # MISAKA: TCSAFLUSH could hang forever on a macOS pty (the drain wake-up edge is lost and
+        # the call never returns even after the peer read the output; double Ctrl+C/Ctrl+D exit
+        # reproducibly stuck on this line). Use TCSANOW (never blocks) plus an explicit tcflush of
+        # unread input, which keeps the intent of audit C9: a leftover Ctrl+D must not leak to the
+        # parent shell.
         termios.tcsetattr(fd, termios.TCSANOW, self._previousTermiosSettings)
         try:
             termios.tcflush(fd, termios.TCIFLUSH)
@@ -614,7 +625,7 @@ class ProcessTerminal:
         self._previousTermiosSettings = None
 
     def _on_loop(self, cb) -> None:
-        """把回调路由回事件循环线程 (Node 单线程语义); 无循环时就地执行。"""
+        """Route a callback back to the event loop thread (Node single-thread semantics); run it inline when there is no loop."""
         loop = self.loop
         if loop is not None and not loop.is_closed():
             try:

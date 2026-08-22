@@ -144,7 +144,7 @@ def prepare_edit_arguments(input_value: Any) -> Any:
         return input_value
 
     def _single_edit(value: Any) -> bool:
-        # 单对象 edit（模型常这么给）：包成单元素数组（上游 #7835/ca21c1686）
+        # A single edit object (models often send this): wrap it in a one-element list (upstream #7835/ca21c1686)
         return (isinstance(value, dict) and isinstance(value.get("oldText"), str)
                 and isinstance(value.get("newText"), str))
 

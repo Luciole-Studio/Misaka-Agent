@@ -1,7 +1,8 @@
-"""engine（原 harn/pi）侧配置：路径/元数据/身份机关。
+"""Engine-side (formerly harn/pi) configuration: paths, package metadata, identity.
 
-身份已改姓：dist 元数据查 misaka、配置目录 ~/.misaka/、agent 资产 ~/.misaka/agent/。
-产品侧 CFG 在 misaka/config/product.py。
+The identity is now MISAKA's: dist metadata is looked up under ``misaka``, the
+config directory is ``~/.misaka/``, and agent assets live in ``~/.misaka/agent/``.
+Product-side CFG lives in misaka/config/product.py.
 """
 
 from __future__ import annotations
@@ -340,11 +341,10 @@ def _get_package_source_dir() -> Path:
 
 
 def _get_package_module_dir() -> Path:
-    """Return the misaka package directory using __file__.
+    """Return the ``misaka`` package directory via ``__file__``.
 
-    This works reliably whether running from source or from an installed wheel,
-    because __file__ always points to the actual location of this module on disk.
-    本文件住在 misaka/config/ 下一层，所以要上跳到包根 misaka/。
+    Works from both a source checkout and an installed wheel. This module lives
+    one level down in misaka/config/, hence ``parents[1]``.
     """
     return Path(__file__).resolve().parents[1]
 
@@ -354,7 +354,7 @@ def get_themes_dir() -> str:
         return str(Path(get_package_dir()) / "theme")
     # Use __file__-relative resolution so that theme files are found correctly
     # both when running from source (uv run harn) and when installed as a
-    # wheel/package (uv tool install harn / pip install harn).
+    # package (uv tool install harn / pip install harn).
     return str(_get_package_module_dir() / "modes" / "interactive" / "theme")
 
 
@@ -376,7 +376,7 @@ def get_readme_path() -> str:
         return str((Path(get_package_dir()) / "README.md").resolve())
     # Use __file__-relative resolution so that bundled assets are found correctly
     # both when running from source (uv run harn) and when installed as a
-    # wheel/package (uv tool install harn / pip install harn).
+    # package (uv tool install harn / pip install harn).
     return str((_get_package_module_dir() / "README.md").resolve())
 
 

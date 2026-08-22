@@ -49,7 +49,8 @@ class _RuntimeState:
 
 @dataclass(slots=True)
 class _TrackedEventBus:
-    """扩展侧的 event bus 面：订阅登记到 runtime，invalidate 时统一退订（pi #7656 泄漏修复）。"""
+    """Extension-facing event bus: subscriptions are recorded on the runtime and
+    unsubscribed together on invalidate (pi #7656 leak fix)."""
     runtime: ExtensionRuntime
     bus: Any
 
@@ -222,7 +223,7 @@ def create_extension_runtime() -> ExtensionRuntime:
                 "For reload, do not use the old ctx after await ctx.reload()."
             )
         )
-        for unsubscribe in list(state.eventBusUnsubscribers):  # 退订本 runtime 的全部 bus 订阅（pi #7656）
+        for unsubscribe in list(state.eventBusUnsubscribers):  # drop every bus subscription this runtime made (pi #7656)
             unsubscribe()
         state.eventBusUnsubscribers.clear()
 

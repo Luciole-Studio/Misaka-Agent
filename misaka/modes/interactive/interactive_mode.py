@@ -24,8 +24,6 @@ from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from urllib.parse import quote
-from urllib.request import Request, urlopen
 from uuid import uuid4
 
 from misaka.ai.types import ImageContent
@@ -45,8 +43,6 @@ from misaka.tui import (
     Spacer,
     Text,
     TruncatedText,
-    getCapabilities,
-    hyperlink,
     matchesKey,
     setKeybindings,
     visibleWidth,
@@ -81,7 +77,6 @@ from misaka.core.provider_display_names import BUILT_IN_PROVIDER_DISPLAY_NAMES
 from misaka.core.session_cwd import MissingSessionCwdError, format_missing_session_cwd_prompt
 from misaka.core.session_manager import SessionManager
 from misaka.core.slash_commands import BUILTIN_SLASH_COMMANDS, _LOCAL_ALIAS_SLASH_COMMANDS
-from misaka.core.telemetry import is_install_telemetry_enabled
 from misaka.core.tools.truncate import TruncationResult
 from misaka.modes.interactive.components.assistant_message import AssistantMessageComponent
 from misaka.modes.interactive.components.armin import ArminComponent
@@ -154,7 +149,6 @@ from misaka.utils.clipboard_image import (
 )
 from misaka.utils.shell import kill_tracked_detached_children
 from misaka.utils.tools_manager import ensureTool
-from misaka.utils.version_check import LatestHarnRelease, check_for_new_harn_version
 
 interactive_theme = import_module("misaka.modes.interactive.theme.theme")
 
@@ -197,21 +191,22 @@ class ExpandableText(Text):
         self.refreshText()
 
     def refreshText(self) -> None:
-        """重新求值文本。构造时只取过一次，异步加载的内容（如 MCP 连接结果）
-        没有这个就永远停在初始快照上。"""
+        """Re-evaluate the text. The constructor samples it once, so content that loads
+        asynchronously (such as MCP connection results) would otherwise stay frozen at
+        the initial snapshot."""
         self.setText(self._getExpandedText() if self.expanded else self._getCollapsedText())
 
 
 @dataclass(slots=True)
 class DefaultFlagArgs:
-    """`/thinking --default high` 这类参数的解析结果（pi 496185f6 parseDefaultFlagArgs）。"""
+    """Parsed arguments of commands like ``/thinking --default high`` (pi 496185f6 parseDefaultFlagArgs)."""
     persist: bool = False
     searchTerm: str | None = None
     error: str | None = None
 
 
 def parse_default_flag_args(commandName: str, args: str | None) -> DefaultFlagArgs:
-    """只认 `--default` 一个选项；其余 `--x` 报错（纯函数，可测）。"""
+    """Accept only ``--default``; any other ``--x`` option is an error. Pure, so testable."""
     tokens = (args or "").strip().split()
     persist = False
     rest: list[str] = []
@@ -416,11 +411,12 @@ class _ExtensionUIContext:
         return self._mode.addExtensionTerminalInputListener(handler)
 
     def refresh(self) -> None:
-        """请求重绘。扩展异步加载完资源后调它，启动屏里惰性求值的区块才会更新
-        （ExtensionUI 此前只有 select/confirm/input/notify，扩展无法触发重绘）。"""
+        """Request a redraw. Extensions call this after loading resources asynchronously so
+        lazily evaluated startup-screen sections update (ExtensionUI previously offered only
+        select/confirm/input/notify, with no way to trigger a redraw)."""
         refresh_blocks = getattr(self._mode, "_refresh_expandables", None)
         if callable(refresh_blocks):
-            refresh_blocks()          # 先重新求值，再重绘——否则画的还是旧快照
+            refresh_blocks()          # Re-evaluate first, then redraw; otherwise the old snapshot is painted.
         request = getattr(self._mode, "_request_render", None)
         if callable(request):
             request(True)
@@ -618,7 +614,6 @@ class InteractiveMode:
                 getLastChangelogVersion=lambda: None,
                 getCodeBlockIndent=lambda: "  ",
                 getHideThinkingBlock=lambda: False,
-                getEnableInstallTelemetry=lambda: False,
                 getEditorPaddingX=lambda: 0,
                 getAutocompleteMaxVisible=lambda: 5,
                 getClearOnShrink=lambda: False,
@@ -799,11 +794,6 @@ class InteractiveMode:
 
     def _refresh_expandables(self) -> None:
         import os as _os
-        if _os.environ.get("MISAKA_MCP_DEBUG"):
-            kids = list(getattr(self.chatContainer, "children", []) or [])
-            open("/tmp/mcpdbg.log", "a").write(
-                f"refresh_expandables: {len(kids)} children, "
-                f"{sum(1 for k in kids if hasattr(k, 'refreshText'))} 可刷新\n")
         containers = (getattr(self.chatContainer, "children", None) or [],
                       getattr(getattr(self, "headerContainer", None), "children", None) or [])
         for child in [c for kids in containers for c in kids]:
@@ -811,7 +801,7 @@ class InteractiveMode:
             if callable(refresh):
                 try:
                     refresh()
-                except Exception:  # noqa: BLE001  单个区块坏了不该拦住重绘
+                except Exception:  # noqa: BLE001 - one broken block must not block the redraw
                     pass
 
     def _request_render(self, force: bool | None = None) -> None:
@@ -972,50 +962,6 @@ class InteractiveMode:
 
     def showWarning(self, message: str) -> None:
         self._append_notice(message, "warning", "Warning")
-
-    def showNewVersionNotification(self, release: LatestHarnRelease) -> None:
-        action = interactive_theme.theme.fg("accent", f"{APP_NAME} update")
-        update_instruction = (
-            interactive_theme.theme.fg("muted", f"New version {release.version} is available. Run ") + action
-        )
-        changelog_url = "https://harn.dev/changelog"
-        changelog_link = (
-            hyperlink(interactive_theme.theme.fg("accent", "open changelog"), changelog_url)
-            if getattr(getCapabilities(), "hyperlinks", False)
-            else interactive_theme.theme.fg("accent", changelog_url)
-        )
-        changelog_line = interactive_theme.theme.fg("muted", "Changelog: ") + changelog_link
-        note = (release.note or "").strip()
-
-        self.chatContainer.addChild(Spacer(1))
-        self.chatContainer.addChild(DynamicBorder(lambda text: interactive_theme.theme.fg("warning", text)))
-        self.chatContainer.addChild(
-            Text(
-                "\n".join(
-                    [
-                        interactive_theme.theme.bold(interactive_theme.theme.fg("warning", "Update Available")),
-                        update_instruction,
-                    ]
-                ),
-                1,
-                0,
-            )
-        )
-        if note:
-            self.chatContainer.addChild(Spacer(1))
-            self.chatContainer.addChild(
-                Markdown(
-                    note,
-                    1,
-                    0,
-                    self.getMarkdownThemeWithSettings(),
-                    DefaultTextStyle(color=lambda text: interactive_theme.theme.fg("muted", text)),
-                )
-            )
-            self.chatContainer.addChild(Spacer(1))
-        self.chatContainer.addChild(Text(changelog_line, 1, 0))
-        self.chatContainer.addChild(DynamicBorder(lambda text: interactive_theme.theme.fg("warning", text)))
-        self._request_render()
 
     def showPackageUpdateNotification(self, packages: list[str]) -> None:
         package_lines = "\n".join(f"- {package_name}" for package_name in packages)
@@ -1978,7 +1924,6 @@ class InteractiveMode:
         )
         extensions = _value(options, "extensions")
         if extensions is None:
-            # pi 真源：hidden 的内联扩展不上启动屏（interactive-mode.ts 的 !extension.hidden 过滤）
             extensions = [
                 {"path": _value(extension, "path"), "sourceInfo": _value(extension, "sourceInfo")}
                 for extension in _value(extensions_result, "extensions", []) or []
@@ -2003,10 +1948,10 @@ class InteractiveMode:
 
         def add_loaded_section(name: str, collapsed_body, expanded_body=None) -> None:
             body = expanded_body or collapsed_body
-            _r = startup_sections.resolve   # 支持 str 或 可调用（后者每次渲染求值）
+            _r = startup_sections.resolve   # Accepts a str or a callable (evaluated on every render).
 
             def _title() -> str:
-                # MISAKA: 启动屏小标题用专属 sectionTitle 槽（纯白）；主题没这键时回退 accent
+                # Startup-screen section titles use the dedicated sectionTitle slot; fall back to accent if the theme lacks it.
                 try:
                     return interactive_theme.theme.fg("sectionTitle", f"[{name}]")
                 except KeyError:
@@ -2130,8 +2075,9 @@ class InteractiveMode:
                     ),
                 )
 
-            # 扩展注册的启动屏资源区（与 [Skills]/[Extensions] 同一渲染路径）。
-            # 文本可为可调用对象 → 每次渲染求值，异步加载的资源能从"连接中"自动变为真实列表。
+            # Startup-screen sections registered by extensions, rendered the same way as [Skills]/[Extensions].
+            # Text may be a callable, evaluated on every render, so an async resource moves from
+            # "connecting" to the real list on its own.
             for _sec in list(startup_sections.SECTIONS):
                 _name = str(_sec.get("name") or "")
                 if not _name:
@@ -2191,47 +2137,15 @@ class InteractiveMode:
         if not last_seen_version:
             if set_last_changelog_version is not None:
                 set_last_changelog_version(VERSION)
-            self.reportInstallTelemetry(VERSION)
             return None
 
         new_entries = get_new_entries(entries, last_seen_version)
         if new_entries:
             if set_last_changelog_version is not None:
                 set_last_changelog_version(VERSION)
-            self.reportInstallTelemetry(VERSION)
             return "\n\n".join(entry.content for entry in new_entries)
 
         return None
-
-    def reportInstallTelemetry(self, version: str) -> None:
-        if os.environ.get("MISAKA_OFFLINE"):
-            return
-
-        get_install_telemetry = _callable_attr(self.settingsManager, "getEnableInstallTelemetry")
-        if get_install_telemetry is None:
-            return
-
-        try:
-            if not is_install_telemetry_enabled(self.settingsManager):
-                return
-        except Exception:
-            return
-
-        async def _report() -> None:
-            def _send() -> None:
-                try:
-                    request = Request(
-                        f"https://harn.dev/api/report-install?version={quote(version)}",
-                        headers={"User-Agent": f"harn/{version}"},
-                    )
-                    with urlopen(request, timeout=5):
-                        return
-                except Exception:
-                    return
-
-            await asyncio.to_thread(_send)
-
-        self._schedule_task(_report())
 
     async def checkForPackageUpdates(self) -> list[str]:
         if os.environ.get("MISAKA_OFFLINE"):
@@ -3255,9 +3169,10 @@ class InteractiveMode:
             return False
 
     async def handleTrueClearCommand(self) -> None:
-        """MISAKA: /clear＝就地清空当前会话——走 /new 的全套重置拿干净状态，
-        然后收养旧 id 与旧文件（截断成只剩头行），新分配的空会话文件删除。
-        与 /new 的差别只在身份：id/文件不变，续聊仍写进这份被清空的会话。"""
+        """/clear: wipe the current session in place. Runs the full /new reset for a clean state,
+        then adopts the old id and file (truncated to its header line) and deletes the freshly
+        allocated empty session file. The only difference from /new is identity: id and file
+        stay the same, and the conversation keeps writing into this cleared session."""
         sm = self.sessionManager
         old_id = str(_safe_call_str(sm, "getSessionId", "") or "") if sm is not None else ""
         get_file = _callable_attr(sm, "getSessionFile")
@@ -3476,14 +3391,16 @@ class InteractiveMode:
             await self.shutdown()
             return
 
-        # 兜底：认不出的斜杠命令**明确报错**，不要当成普通消息发给模型。
-        # 原行为是静默落到下面当文本发出去（用户只看到 "Working..."，以为命令生效了），
-        # 而 slash_commands 里恰好还有声明了却没实现的条目——两下相加就是纯坑。
+        # Unknown slash commands fail loudly instead of being sent to the model as text.
+        # Silently falling through showed only "Working..." and made it look as if the
+        # command had taken effect, and slash_commands still lists some unimplemented entries.
         if text.startswith("/") and not text.startswith("//") and not self.isExtensionCommand(text):
             name = text[1:].split(" ", 1)[0]
             if name and not name[0].isdigit():
                 self._set_editor_text("")
-                self.showError(f"未知命令 /{name}。按 / 看可用命令；要把它当普通文本发送请用 //{name}。")
+                self.showError(
+                    f"Unknown command /{name}. Type / to list commands, or //{name} to send it as plain text."
+                )
                 return
 
         if text.startswith("!"):
@@ -4777,8 +4694,8 @@ class InteractiveMode:
             self._schedule_task(self.shutdown())
             return
         self.lastSigintTime = now
-        # MISAKA: 忙时 Ctrl+C＝打断（Claude Code 手感）——与 Esc 同一条 abort 路。
-        # pi 原版 Ctrl+C 只清行；双击退出、闲时清行保持原样。
+        # Ctrl+C while busy interrupts (Claude Code feel), via the same abort path as Esc.
+        # Upstream pi only cleared the line; double-press to exit and idle clearing are unchanged.
         if bool(getattr(self.session, "isStreaming", False)):
             restore_queued = _callable_attr(self, "restoreQueuedMessagesToEditor")
             if restore_queued is not None:
@@ -4994,11 +4911,11 @@ class InteractiveMode:
             _title_text = os.environ.get("MISAKA_APP_TITLE") or APP_NAME
 
             def _logo() -> str:
-                # 显示名可被 MISAKA_APP_TITLE 覆盖（只改标题，不动 APP_NAME——
-                # 后者决定配置目录名与环境变量前缀，改了会搬家）。
-                # MISAKA: 品牌段保持 accent；agent 名段按终端背景自适应——
-                # 亮背景用 appTitleOnLight（黑），暗/未知用 appTitle（白）。背景来自
-                # OSC-11 查询与 mode-2031 明暗通知（pi 同款机制），变了会重画。
+                # MISAKA_APP_TITLE overrides only the displayed title; APP_NAME stays, since it
+                # names the config directory and env prefix. The brand part keeps the accent
+                # color; the agent part adapts to the terminal background (appTitleOnLight on
+                # light, appTitle on dark/unknown), detected via OSC-11 and mode-2031
+                # notifications as in pi, with a redraw when it changes.
                 agent_slot = "appTitleOnLight" if getattr(self, "_terminalBgIsLight", False) else "appTitle"
                 if " · " in _title_text:
                     brand, agent = _title_text.split(" · ", 1)
@@ -5012,7 +4929,7 @@ class InteractiveMode:
                 return interactive_theme.theme.bold(colored) + interactive_theme.theme.fg(
                     "dim", f" v{self.version}")
 
-            logo = _logo  # 下方 header lambda 里以 logo() 求值
+            logo = _logo  # Evaluated as logo() inside the header lambda below.
             expanded_instructions = [
                 key_hint("app.interrupt", "to interrupt"),
                 key_hint("app.clear", "to clear"),
@@ -5051,7 +4968,7 @@ class InteractiveMode:
             onboarding = interactive_theme.theme.fg(
                 "dim",
                 os.environ.get("MISAKA_TAGLINE")
-                or "MISAKA 研究系统就绪。",
+                or "MISAKA research system ready.",
             )
             self.builtInHeader = ExpandableText(
                 lambda: (
@@ -5094,8 +5011,8 @@ class InteractiveMode:
         self.setupKeyHandlers()
         self.setupEditorSubmitHandler()
 
-        # MISAKA: 背景自适应（pi 同款 OSC-11 + mode-2031）——启动即订阅明暗通知，
-        # 随后后台问一次真实背景色；答案/通知到达即重画头部（agent 名黑白随背景）。
+        # Background adaptation (pi's OSC-11 + mode-2031): subscribe to light/dark notifications
+        # at startup, then query the real background once; the header redraws when either arrives.
         set_notify = _callable_attr(self.ui, "setTerminalColorSchemeNotifications")
         if set_notify is not None:
             set_notify(True)
@@ -5121,7 +5038,7 @@ class InteractiveMode:
                 return
             try:
                 rgb = await query(timeoutMs=1000)
-            except Exception:  # noqa: BLE001  探测失败保持默认（当暗底）
+            except Exception:  # noqa: BLE001 - detection failed; keep the dark default
                 return
             if rgb is None:
                 return
@@ -5146,11 +5063,6 @@ class InteractiveMode:
         if on_branch_change is not None:
             on_branch_change(lambda: self._request_render())
         await _maybe_await(self.updateAvailableProviderCount())
-
-    async def _check_for_new_version(self) -> None:
-        release = await check_for_new_harn_version(self.version)
-        if release is not None:
-            self.showNewVersionNotification(release)
 
     async def _check_for_package_updates(self) -> None:
         updates = await self.checkForPackageUpdates()
@@ -5186,7 +5098,6 @@ class InteractiveMode:
             return await self._shutdownFuture
 
         self.isShuttingDown = False
-        self._schedule_task(self._check_for_new_version())
         self._schedule_task(self._check_for_package_updates())
         self._schedule_task(self._check_tmux_keyboard_setup())
 
@@ -5486,8 +5397,8 @@ class InteractiveMode:
         await self.handleResumeSession(sessionPath)
 
     def handleThinkingCommand(self, argument: str = "") -> None:
-        """`/thinking [--default] [档]`（pi 496185f6）：无参开选择器，带档直接切；
-        --default 同时存为启动默认。"""
+        """``/thinking [--default] [level]`` (pi 496185f6): no argument opens the selector, a level
+        switches directly; ``--default`` also saves it as the startup default."""
         parsed = parse_default_flag_args("thinking", argument)
         if parsed.error:
             self.showError(parsed.error)
@@ -5508,11 +5419,11 @@ class InteractiveMode:
         self.updateEditorBorderColor()
         if persist:
             self.settingsManager.setDefaultThinkingLevel(level)
-        self.showStatus(f"Thinking level: {level}" + ("（已存为启动默认）" if persist else ""))
+        self.showStatus(f"Thinking level: {level}" + (" (saved as default)" if persist else ""))
 
     def showThinkingSelector(self, *, persist: bool = False) -> None:
-        # adaptive 模型（claude-5 系）线上发 effort 关键字不发 budget——
-        # 换那张不写假 token 数的描述表
+        # Adaptive models send an effort keyword rather than a budget, so use the
+        # description table without token counts.
         compat = getattr(self.session.model, "compat", None)
         adaptive = getattr(compat, "forceAdaptiveThinking", None) is True
         self.showSelector(
@@ -5678,11 +5589,6 @@ class InteractiveMode:
                         availableThemes=available_themes,
                         hideThinkingBlock=self.hideThinkingBlock,
                         collapseChangelog=_safe_call_bool(self.settingsManager, "getCollapseChangelog", True),
-                        enableInstallTelemetry=_safe_call_bool(
-                            self.settingsManager,
-                            "getEnableInstallTelemetry",
-                            True,
-                        ),
                         doubleEscapeAction=_safe_call_str(self.settingsManager, "getDoubleEscapeAction", "tree")
                         or "tree",
                         treeFilterMode=_safe_call_str(self.settingsManager, "getTreeFilterMode", "default")
@@ -5735,10 +5641,6 @@ class InteractiveMode:
                         onCollapseChangelogChange=lambda collapsed: (
                             _callable_attr(self.settingsManager, "setCollapseChangelog")
                             and self.settingsManager.setCollapseChangelog(collapsed)
-                        ),
-                        onEnableInstallTelemetryChange=lambda enabled: (
-                            _callable_attr(self.settingsManager, "setEnableInstallTelemetry")
-                            and self.settingsManager.setEnableInstallTelemetry(enabled)
                         ),
                         onDoubleEscapeActionChange=lambda action: (
                             _callable_attr(self.settingsManager, "setDoubleEscapeAction")

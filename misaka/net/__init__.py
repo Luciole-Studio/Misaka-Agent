@@ -1,10 +1,14 @@
-"""御坂网络守护进程：格子（伪终端）托管层，herdr 核心设计的 Python 移植。
+"""Misaka Network daemon: the pane (pseudo-terminal) host, a Python port of herdr's core design.
 
-三条照搬的设计（出处 herdr，Apache-2.0）：
-- 守护进程独占所有伪终端：客户端断开只是摘掉观察者，格子里的进程照跑。
-- 单例靠套接字：绑得上才当守护进程；连不通的陈尸套接字删掉重建。
-- 结构快照只记形状（格子/命令/工作目录），不记进程：恢复＝重建，
-  跑卡的格子绝不自动复跑（花钱等人点头，宪法⑦）。
+Three ideas taken directly from herdr (Apache-2.0):
+- The daemon owns every PTY: a client disconnect only removes an observer; the
+  process in the pane keeps running.
+- Singleton by socket: whoever binds is the daemon; a stale socket nobody
+  answers on is removed and recreated.
+- The snapshot records shape only (panes, argv, cwd), never processes:
+  restore = recreate, and card panes are never rerun automatically (they cost
+  money; wait for a human -- Constitution 7).
 
-分层：net 只认识 config 与 board 的数据层（卡片状态机），不认识 cli/tui。
+Layering: ``net`` knows only config and the board data layer (the card state
+machine), never cli/tui.
 """

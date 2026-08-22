@@ -37,9 +37,10 @@ def is_thinking_part(part: dict[str, Any] | Any) -> bool:
 
 
 def coerce_thought_signature(value: object) -> str | None:
-    """google-genai 有时把 thought_signature 作为原始 bytes 返回；ToolCall 声明为 str。
+    """Coerce a thought_signature to str.
 
-    以 base64 保真转字符串（signature 只需原样回传，不需可读）。
+    google-genai sometimes returns it as raw bytes while ToolCall declares str;
+    base64 preserves it losslessly (it is only ever echoed back, never read).
     """
     if isinstance(value, (bytes, bytearray)):
         return base64.b64encode(bytes(value)).decode("ascii")

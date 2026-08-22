@@ -283,8 +283,8 @@ def _attach_durable_sister_owner() -> tuple[bool, str | None]:
     if os.name == "posix" and os.getpgrp() != os.getpid():
         return False, "Durable Sister root has no isolated process group"
 
-    from misaka.orchestration import processes as process_tree
-    from misaka.extensions.board import db
+    from misaka.platform import processes as process_tree
+    from misaka.platform import tasks as db
 
     process_identity = process_tree.identity(os.getpid())
     if not process_identity:
@@ -313,11 +313,8 @@ async def amain() -> int:
         await asyncio.gather(parent_watch, return_exceptions=True)
         return 2
 
-    from functools import partial
-
-    from misaka.orchestration import session as engine_session
+    from misaka.platform import session as engine_session
     from misaka.agent.request_budget import install_turn_budget
-    from misaka.extensions import docs, inline, mcp, messages
     from misaka.extensions.subagent import extension as subagent
     from misaka.extensions.subagent import hooks as subagent_hooks
     from misaka.extensions.subagent import policy as subagent_policy
@@ -396,23 +393,18 @@ async def amain() -> int:
     role = os.environ.get("MISAKA_WHO") or ""
     workspace = os.environ.get("MISAKA_WORKSPACE") or os.getcwd()
     mcp_role = os.environ.get("MISAKA_MCP_ROLE") or role
+    from misaka.app.composition import SessionSpec, build_extensions
     runtime, session, error = await engine_session.open_session(
         flags,
         workspace,
-        [
-            inline("doc-tools", docs.register),
-            inline(
-                "subagent",
-                subagent.bind(profile_dir, role, workspace, mcp_role=mcp_role),
-            ),
-            # 统一消息层：可上报 last-order，也可续聊自己生的分身
-            inline("messages", partial(
-                messages.register,
-                sender=role.rsplit("/", 1)[-1],
-                route=subagent.route_to_children,
-            )),
-            inline("mcp", mcp.bind(profile_dir, mcp_role)),
-        ],
+        build_extensions(SessionSpec(
+            profile_dir=profile_dir,
+            role=role,
+            workspace=workspace,
+            kind="child",
+            sender=role.rsplit("/", 1)[-1],
+            mcp_role=mcp_role,
+        )),
     )
     if error:
         _emit({"type": "child_error", "error": error})
@@ -430,7 +422,7 @@ async def amain() -> int:
         denied = {t.casefold() for t in disallowed_tools}
         session.setDisallowedToolsByName(
             disallowed_tools,
-            # 显式 deny 优先：frontmatter 禁掉的管理工具不再被 always-allow 复活
+            # Explicit deny wins: a management tool disabled in frontmatter is not revived by always-allow.
             alwaysAllowed=[t for t in MANAGEMENT_TOOLS if t.casefold() not in denied],
         )
 

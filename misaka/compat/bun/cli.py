@@ -48,8 +48,6 @@ def main(argv: list[str] | None = None) -> int:
     return _load_cli_main()(argv)
 
 
-if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(main())
 
 
 __all__: list[str] = []

@@ -415,8 +415,8 @@ def detect_terminal_background(
 
 
 def get_default_theme() -> str:
-    # 显式指定优先（面板把检测结果透传给格子，old daemon 也能对上）；
-    # 否则按终端背景自适应。misaka 就是暗/亮两变体，别的名字放行给下游解析。
+    # An explicit MISAKA_THEME (set by the panel for its panes) wins; otherwise
+    # pick the variant that matches the terminal background.
     pinned = os.environ.get("MISAKA_THEME")
     if pinned in ("dark", "light"):
         return pinned
@@ -533,8 +533,8 @@ def _parse_theme_json_content(label: str, content: str) -> ThemeJson:
 
 
 def load_theme_json(name: str) -> ThemeJson:
-    # misaka＝唯一主题：dark/light 只是它的黑白终端两个面孔。
-    # 老设置里存的 "misaka" 按终端背景自适应到对应变体。
+    # MISAKA ships one theme with dark and light variants. Older settings may
+    # still name "misaka"; resolve that to the variant matching the terminal.
     if name in ("misaka", "misaka-light"):
         name = "light" if name == "misaka-light" else get_default_theme()
     builtin_themes = get_builtin_themes()
@@ -651,10 +651,9 @@ def load_theme_from_path(theme_path: str, mode: str | None = None) -> Theme:
 
 def set_global_theme(theme_instance: Theme) -> None:
     global theme
-    # 23 个组件用 `from ...theme import theme` 抓着**对象引用**（如 dynamic_border），
-    # 只重新绑定模块级名字的话，它们手里仍是启动时那个主题 —— 换主题后
-    # 边框/选择器等元素会留在旧配色。所以把新主题的状态**就地搬进现有对象**，
-    # 已持有的引用继续有效；名字也一并更新，两条路都对。
+    # Many components hold a direct reference to the `theme` object, so rebinding
+    # the module name alone would leave them on the old palette. Copy the new
+    # state into the existing object and rebind the name as well.
     prior = globals().get("theme")
     if isinstance(prior, Theme) and prior is not theme_instance:
         prior.__dict__.update(theme_instance.__dict__)

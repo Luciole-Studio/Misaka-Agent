@@ -1,4 +1,4 @@
-"""瘦客户端：连守护进程，不在就拉起（herdr 的自动探测同款）。"""
+"""Thin client: connect to the daemon, starting it if it is not running (herdr-style auto-detect)."""
 import json
 import os
 import socket
@@ -14,7 +14,7 @@ def _sock_path():
 
 
 def request(method, params=None, *, timeout=10):
-    """发一条请求收一条响应。守护进程不在会抛 ConnectionError。"""
+    """Send one request and return its result. Raises ConnectionError if the daemon is not running."""
     con = socket.socket(socket.AF_UNIX)
     con.settimeout(timeout)
     con.connect(_sock_path())
@@ -49,12 +49,16 @@ def _spawn_and_wait(timeout):
             return request("ping", timeout=2)
         except (ConnectionError, FileNotFoundError, OSError):
             time.sleep(0.05)
-    raise RuntimeError("守护进程没能在时限内就绪（misaka net-daemon 手动跑一次看报错）")
+    raise RuntimeError("The daemon did not become ready in time (run `misaka net-daemon` by hand to see the error).")
 
 
 def ensure(timeout=8.0):
-    """守护进程在就直连；不在就拉起。版本不合（升级后旧进程还活着）：
-    没有活卡就原地换新，有活卡在跑就拒绝并说清楚——绝不带病服务。"""
+    """Connect to the daemon, starting it if needed.
+
+    On a protocol mismatch (an old daemon survived an upgrade): replace it in
+    place when no cards are running; refuse with an explanation when cards are
+    running. Never serve from a stale daemon.
+    """
     from misaka.net import daemon as _d
 
     try:
@@ -69,8 +73,9 @@ def ensure(timeout=8.0):
         panes = []
     if any(p.get("card") and p.get("alive") for p in panes):
         raise RuntimeError(
-            "守护进程是旧版本，且有卡正在格子里跑——等它们跑完，"
-            "或确认可弃后 `misaka net stop` 再进面板")
+            "The daemon is an older version and still has a running task card in a pane. Wait for it to finish, "
+            "or run `misaka net stop` once you are sure it can be discarded, then reopen the panel."
+        )
     try:
         request("server.stop")
     except (RuntimeError, ConnectionError, OSError):
@@ -80,5 +85,5 @@ def ensure(timeout=8.0):
         time.sleep(0.05)
     info = _spawn_and_wait(timeout)
     if info.get("proto") != _d.PROTOCOL:
-        raise RuntimeError("重启后的守护进程版本仍不匹配（PATH 里可能有旧 misaka）")
+        raise RuntimeError("The restarted daemon still has a protocol mismatch (an older MISAKA may be on PATH).")
     return info

@@ -498,7 +498,7 @@ class SessionCompactEvent(TypedDict):
 
 
 class SessionCompactFailedEvent(TypedDict):
-    """压缩失败/中止的终态（pi #8175/a6b1dbceb）——与 session_before_compact 配对。"""
+    """Terminal state of a failed or aborted compaction (pi #8175/a6b1dbceb); pairs with session_before_compact."""
     type: Literal["session_compact_failed"]
     reason: str            # "manual" | "threshold" | "overflow"
     errorMessage: str | None
@@ -544,6 +544,7 @@ type SessionEvent = (
     | SessionBeforeForkEvent
     | SessionBeforeCompactEvent
     | SessionCompactEvent
+    | SessionCompactFailedEvent
     | SessionShutdownEvent
     | SessionBeforeTreeEvent
     | SessionTreeEvent
@@ -1212,8 +1213,8 @@ class ExtensionAPI(Protocol):
 
 type ExtensionFactory = Callable[[ExtensionAPI], Awaitable[None] | None]
 
-# pi 真源（types.ts InlineExtension）：裸工厂，或 {"name": ..., "factory": ..., "hidden": ...}——
-# name 在启动屏显示为 <inline:name>；hidden 为真则不上启动屏列表。
+# Mirrors pi types.ts InlineExtension: a bare factory, or {"name": ..., "factory": ..., "hidden": ...}.
+# name shows on the startup screen as <inline:name>; hidden=True keeps it off the list.
 type InlineExtension = ExtensionFactory | dict[str, Any]
 
 

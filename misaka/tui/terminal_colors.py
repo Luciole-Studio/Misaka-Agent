@@ -1,5 +1,5 @@
 # Ported from: pi packages/tui/src/terminal-colors.ts @686f193e
-# 终端背景色（OSC-11 应答）与明暗方案报告（CSI ?997;n n）的解析。
+# Parses terminal background color (OSC 11 response) and color scheme reports (CSI ?997;n n).
 from __future__ import annotations
 
 import re
@@ -40,7 +40,7 @@ def parse_osc_hex_channel(channel: str) -> int | None:
     max_value = 16 ** len(channel) - 1
     if max_value <= 0:
         return None
-    # JS Math.round＝half-up；Python round 是银行家舍入，须显式 half-up
+    # JS Math.round is half-up; Python round() is banker's rounding, so do half-up explicitly
     return int((int(channel, 16) / max_value) * 255 + 0.5)
 
 
@@ -100,20 +100,3 @@ __all__ = [
     "parseTerminalColorSchemeReport",
     "parse_terminal_color_scheme_report",
 ]
-
-
-if __name__ == "__main__":
-    # 端值照 TS 语义：rgb:ffff/ffff/ffff → 255；#rrggbb 直取；997;2=light
-    assert parse_osc11_background_color("\x1b]11;rgb:ffff/ffff/ffff\x07") == RgbColor(255, 255, 255)
-    assert parse_osc11_background_color("\x1b]11;rgb:0000/0000/0000\x1b\\") == RgbColor(0, 0, 0)
-    assert parse_osc11_background_color("\x1b]11;#1e1e2e\x07") == RgbColor(0x1E, 0x1E, 0x2E)
-    assert parse_osc11_background_color("\x1b]11;#ffff00000000\x07") == RgbColor(255, 0, 0)
-    assert parse_osc11_background_color("\x1b]11;rgba:ffff/8000/0000\x07") == RgbColor(255, 128, 0)
-    assert parse_osc11_background_color("\x1b]11;垃圾\x07") is None
-    assert is_osc11_background_color_response("\x1b]11;#ffffff\x07")
-    assert not is_osc11_background_color_response("\x1b]10;#ffffff\x07")
-    assert parse_terminal_color_scheme_report("\x1b[?997;2n") == "light"
-    assert parse_terminal_color_scheme_report("\x1b[?997;1n") == "dark"
-    assert parse_terminal_color_scheme_report("\x1b[?997;3n") is None
-    assert parse_osc_hex_channel("8000") == 128    # half-up 舍入（JS Math.round 语义）
-    print("terminal_colors selfcheck ok — OSC11 五格式/997 报告/half-up 舍入")

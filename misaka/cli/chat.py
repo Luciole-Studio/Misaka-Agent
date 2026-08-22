@@ -1,6 +1,7 @@
-"""前台会话装配：misaka chat ——和 Last Order（或某位 Sister）对话。
+"""Foreground chat: ``misaka chat`` talks to Last Order or to one Sister.
 
-进程内起 engine 的交互模式；工具以注册函数直接进工具表，无 -e 文件挂载。
+Runs the engine's interactive mode in-process; extensions are registered as
+factories rather than mounted from ``-e`` files.
 """
 import asyncio
 import os
@@ -10,64 +11,11 @@ from misaka.config import profiles
 from misaka.config import CFG, sisters
 
 
-def _extension_factories(profile_dir, profile_role, workspace, session_role, *, sister):
-    """Assemble the named bundled extensions for one foreground role."""
-
-    from functools import partial
-
-    from misaka.extensions import docs, inline, mcp, messages, roster, switch, views
-    from misaka.extensions.board import extension as board
-    from misaka.extensions.ally import extension as ally
-    from misaka.extensions.subagent import extension as subagent
-
-    role_extensions = (
-        [
-            inline("doc-tools", docs.register),
-            inline(
-                "subagent",
-                subagent.bind(
-                    profile_dir,
-                    profile_role,
-                    workspace,
-                    mcp_role=session_role,
-                ),
-            ),
-            # 统一消息层：妹妹发信＋收信；自己生的分身由 route 短路唤醒
-            inline("messages", partial(
-                messages.register,
-                sender=session_role,
-                route=subagent.route_to_children,
-                receive=True,
-            )),
-        ]
-        if sister
-        else [
-            inline("board-tools", board.register),
-            # 协力者：跑在格子里的第三方 agent（codex/claude/…）——只给 LO
-            inline("ally-tools", ally.register),
-            # LO 解禁的唯一子代理类工具：SendMessage（派活仍只能建卡＋验收）
-            inline("messages", partial(
-                messages.register, sender="last-order", receive=True,
-            )),
-        ]
-    )
-    from misaka.extensions import lcm, moa, skill_invoke
-    return [
-        *role_extensions,
-        inline("switch", switch.register),
-        inline("roster", roster.register),
-        inline("moa", moa.register),   # /moa 一次性（MoA 本体是虚拟服务商，/model 可切）
-        inline("views", views.register),                # /board /graph /trace 只读查看
-        inline("lcm", lcm.register),                    # 无损压缩接管（fail-open 回原生）
-        inline("skill-invoke", skill_invoke.commands_for(profile_dir)),   # /skill 显式调用（人）
-        inline("skill-tools", skill_invoke.tools_for(profile_dir)),       # skills_list/skill_view（agent）
-        inline("mcp", mcp.bind(profile_dir, session_role)),
-    ]
-
-
 def _migrate_sessions(new, old):
-    """一次性搬家（自由聊目录合并为 ~/.misaka/sessions/<角色>/）：
-    旧目录在、新目录不在就整体改名过去；搬不动静默沿用旧目录。返回实际用的目录。"""
+    """One-time move of a legacy session directory; returns the directory actually in use.
+
+    Renames ``old`` to ``new`` when only the old one exists; if the rename fails
+    (cross-device, permissions) the old directory is kept."""
     new, old = os.path.expanduser(new), os.path.expanduser(old)
     if os.path.isdir(new) or not os.path.isdir(old):
         return new
@@ -76,13 +24,14 @@ def _migrate_sessions(new, old):
         os.rename(old, new)
         return new
     except OSError:
-        return old   # ponytail: 跨盘/权限等罕见失败不硬迁，旧位置照用不断档
+        return old
 
 
 def _migrate_lo_soul(prof):
-    """一次性归一（2026-08-20）：SOUL-chat.md → SOUL.md＝LO 唯一人格档。
-    旧 SOUL.md（拆卡合同）已逐字迁入 board/plan.py 的 PLAN_CONTRACT，
-    改名留档不删（用户手笔可能在里面）。幂等：SOUL-chat.md 不在＝已迁移。"""
+    """One-time rename: SOUL-chat.md becomes SOUL.md, Last Order's only persona file.
+
+    The previous SOUL.md (the planning contract) is kept as SOUL-plan-retired.md in
+    case it holds user edits. Idempotent: no SOUL-chat.md means already migrated."""
     chat_soul = os.path.join(prof, "SOUL-chat.md")
     if not os.path.isfile(chat_soul):
         return
@@ -92,46 +41,46 @@ def _migrate_lo_soul(prof):
             os.rename(old, os.path.join(prof, "SOUL-plan-retired.md"))
         os.rename(chat_soul, old)
     except OSError:
-        pass   # 迁不动不拦启动；assembly 有旧文件名兜底
+        pass
 
 
 def assembly(who, *, cwd=None):
-    """角色装配的公共部分（前台 chat 与 DM 无头轮共用）。
-    返回 (prof, model_default, skill_flags)。who 不在册直接 sys.exit。
-    人格不在这返回——身份槽＋职责段统一走 config.identity（hermes 同序）。"""
-    if who:  # Sister：人格+技能三层栈
+    """Shared role setup for foreground chat and the DM loop.
+
+    Returns ``(profile_dir, default_model, skill_flags)``; exits if ``who`` is not
+    a known Sister. Persona text is not resolved here; see ``config.identity``."""
+    if who:
         prof = os.path.join(CFG["profiles_root"], who)
         if not os.path.isdir(prof):
-            sys.exit(f"没有这位 Sister：{who}（名册：{', '.join(sorted(sisters()))}）")
+            sys.exit(f"Unknown Sister {who!r}. Roster: {', '.join(sorted(sisters()))}")
         extra = []
-        from misaka.orchestration import skill_layers
+        from misaka.skills import layers as skill_layers
         for sk in skill_layers.skills_stack(prof, cwd=cwd or os.getcwd()):
-            extra += ["--skill", sk]      # 三层栈：项目（信任＋扫描）→ 角色 → 共享
-        return prof, CFG["default_model"], extra   # 尊重 MISAKA_MODEL（与跑卡路径同轨）
+            extra += ["--skill", sk]
+        return prof, CFG["default_model"], extra
     prof = os.path.join(CFG["roles_root"], "last_order")
     _migrate_lo_soul(prof)
     return prof, "claude-opus-5", []
 
 
 def launch(who, model=None, cont=False, pick=False, session=None):
-    """装配并进入交互模式（阻塞到会话结束）。who=None 表示 Last Order。"""
+    """Assemble the session and run interactive mode until it exits. ``who=None`` means Last Order."""
     prof, model_default, extra = assembly(who)
-    if who:  # 找某位 Sister：带她的人格+技能+文献工具，有内置工具（她是干活的）
+    if who:
         title = f"MISAKA · {who}"
         sess = _migrate_sessions(f"~/.misaka/sessions/{who}",
                                  f"~/.misaka/sister-sessions/{who}")
-        from misaka.orchestration import skill_layers
+        from misaka.skills import layers as skill_layers
         hint = skill_layers.get_untrusted_project_skills_root(cwd=os.getcwd())
         if hint:
-            print(f"（本仓有 {hint[1]} 个项目技能未加载——信任它：misaka skills trust）")
-    else:  # 找 Last Order：pi 的内置工具照给，只是不给子代理——Sisters 就是她的子代理
-        # （2026-08-07 用户勘误：此前 -nbt 把内置工具一并没收，是把"不给子代理"过度执行；
-        #  不给子代理靠 _extension_factories 不注册 subagent 扩展，与内置工具无关。）
+            print(
+                f"{hint[1]} project skill(s) were not loaded because the project is "
+                "untrusted. Run `misaka skills trust` to enable them."
+            )
+    else:
         title = "MISAKA · Last Order"
         sess = _migrate_sessions("~/.misaka/sessions/last-order",
                                  "~/.misaka/last-order-sessions")
-    # hermes stable_parts 同序（identity.py）：身份槽（SOUL.md 有就用，空则代码兜底）
-    # ＋无条件职责段；共同魂在最前。SOUL.md 放空也不影响使用。
     from misaka.config import identity
     flags = ["--provider", CFG["provider"], "--model", model or model_default,
              "--append-system-prompt", profiles.shared_soul()]
@@ -139,39 +88,41 @@ def launch(who, model=None, cont=False, pick=False, session=None):
         flags += ["--append-system-prompt", section]
     flags += ["--session-dir", os.path.expanduser(sess)] + extra
     if session:
-        flags += ["--session", session]   # 切入指定会话（引擎支持路径或部分 UUID）
+        flags += ["--session", session]
     elif pick:
-        flags.append("-r")        # 挑一个历史会话恢复
+        flags.append("-r")
     elif cont:
-        flags.append("-c")        # 显式要求才接续；默认开新会话（对齐 claude 的默认）
+        flags.append("-c")
 
     profile_role = profiles.role_of(prof)
     session_role = who or "last-order"
     workspace = os.getcwd()
     if who:
-        from misaka.extensions.roster import describe_line
-        blurb = (describe_line(who, root=CFG["profiles_root"])   # 60 字符截断，与名册同规矩
-                 or "可以直接让她读文献、查资料、干活")
-    tagline = ("御坂网络编排官 Last Order 待命。她会追问、下注、拆卡；你点头后后台调用 Sisters，交卷验收后自动回报。（/sister＝名册，/sister 10032＝直切）"
+        from misaka.network.roster import describe_line
+        blurb = (describe_line(who, root=CFG["profiles_root"])
+                 or "Ask her to read papers, look things up, or get work done.")
+    tagline = ("Last Order, Misaka Network coordinator, standing by. She asks questions, splits work into cards, and calls Sisters once you approve. /sister shows the roster; /sister 10032 opens a direct chat."
                if not who else
-               f"御坂{who} 在线：{blurb}（/sister＝名册，/sister 10032＝直切）")
+               f"Sister {who} online: {blurb} (/sister shows the roster; /sister <id> opens a direct chat)")
     os.environ.update({
         "MISAKA_APP_TITLE": title, "MISAKA_TAGLINE": tagline,
         "MISAKA_WHO": session_role,
         "MISAKA_MCP_ROLE": session_role,
-        # MCP 按角色找数据目录 ~/.misaka/profiles/<角色>/config.yaml
         "MISAKA_PROFILE_DIR": prof,
         "MISAKA_WORKSPACE": workspace,
         "MISAKA_INPUT_HISTORY": os.path.expanduser(f"~/.misaka/input-history/{who or 'last-order'}.json"),
         "MISAKA_CODING_AGENT": "true"})
 
-    factories = _extension_factories(
-        prof,
-        profile_role,
-        workspace,
-        session_role,
-        sister=bool(who),
-    )
+    from misaka.app.composition import SessionSpec, build_extensions
+    factories = build_extensions(SessionSpec(
+        profile_dir=prof,
+        role=profile_role,
+        workspace=workspace,
+        kind="foreground",
+        sender=session_role,
+        mcp_role=session_role,
+        receive_messages=True,
+    ))
 
     from misaka.cli.engine import main as engine_main
     sys.exit(asyncio.run(engine_main(flags, {"extensionFactories": factories})))

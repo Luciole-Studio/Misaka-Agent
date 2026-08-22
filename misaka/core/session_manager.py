@@ -876,9 +876,10 @@ class SessionManager:
             "parentSession": resolved_source_path,
         }
         copied_entries = [entry for entry in source_entries if entry.get("type") != "session"]
-        # 原子发布（pi #7707/f4bbbdb）：直写正式文件名时，写到一半被打断（Ctrl-C／
-        # 崩溃／磁盘满）会留下半截 JSONL 且已占着正式名字，下次当成有效会话加载。
-        # 先写同目录临时文件再 os.replace——同一文件系统上是原子的。
+        # Atomic publish (pi #7707/f4bbbdb): writing the final name directly and getting
+        # interrupted halfway (Ctrl-C, crash, disk full) leaves a truncated JSONL under the
+        # real name that loads as a valid session next time. Write a temp file in the same
+        # directory, then os.replace, which is atomic on one filesystem.
         temp_file = f"{new_session_file}.{os.getpid()}.tmp"
         try:
             Path(temp_file).write_text(_dump_jsonl([header, *copied_entries]), encoding="utf-8")

@@ -38,7 +38,8 @@ type TransportSetting = Transport
 
 def deep_merge_settings(base: Settings, overrides: Settings) -> Settings:
     """Deep merge settings: overrides take precedence, nested objects merge recursively.
-    (pi 97f0ccd #7572——此前第二层起整个被覆盖,丢 base 里的兄弟键。)"""
+    (pi 97f0ccd #7572: previously everything below the first level was replaced wholesale,
+    dropping sibling keys from base.)"""
     result = dict(base)
     for key, override_value in overrides.items():
         base_value = base.get(key)
@@ -458,7 +459,7 @@ class SettingsManager:
         self._set_global_value("followUpMode", mode)
 
     def getDefaultTools(self) -> list[str] | None:
-        """启动工具白名单设置（--tools 同格式；pi 4d9aa837c）。未配置返回 None。"""
+        """Startup tool allowlist setting (same format as --tools; pi 4d9aa837c). None when unset."""
         tools = self.settings.get("defaultTools")
         return list(tools) if isinstance(tools, list) else None
 
@@ -588,12 +589,6 @@ class SettingsManager:
 
     def setCollapseChangelog(self, collapse: bool) -> None:
         self._set_global_value("collapseChangelog", collapse)
-
-    def getEnableInstallTelemetry(self) -> bool:
-        return self._nullish(self.settings.get("enableInstallTelemetry"), True)
-
-    def setEnableInstallTelemetry(self, enabled: bool) -> None:
-        self._set_global_value("enableInstallTelemetry", enabled)
 
     def getPackages(self) -> list[PackageSource]:
         return list(self.settings.get("packages") or [])

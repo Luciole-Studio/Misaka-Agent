@@ -350,7 +350,7 @@ class Agent:
         await self.waitForIdle()
 
     def reset(self) -> None:
-        if self._active_run is not None:  # pi 1532c99 #7717:跑动中 reset 会清掉运行态
+        if self._active_run is not None:  # pi 1532c99 #7717: resetting mid-run would wipe the active run state
             raise RuntimeError("Agent is already processing. Wait for completion before resetting.")
         self._state.messages = []
         self._state.isStreaming = False

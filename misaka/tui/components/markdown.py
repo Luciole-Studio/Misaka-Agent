@@ -28,7 +28,7 @@ _AUTOLINK_RE = re.compile(f"(?P<url>{_BARE_URL_RE})|(?P<email>{_EMAIL_RE})")
 
 
 def _trim_bare_url(url: str) -> str:
-    """GFM 式收尾：剥尾部标点；右括号只在失衡时剥（wiki 链接 (x) 保留）。"""
+    """GFM-style trailing trim: strip trailing punctuation; strip a closing paren only when unbalanced (so wiki links ending in (x) survive)."""
     while url:
         ch = url[-1]
         if ch in ".,!?:;\"'*_~]":
@@ -39,14 +39,14 @@ def _trim_bare_url(url: str) -> str:
             break
     return url
 
-try:  # LaTeX 数学识别（pi 05e89b4 对齐;识别层用 markdown-it 官方插件而非手写 tokenizer）
+try:  # LaTeX math detection (parity with pi 05e89b4; uses the official markdown-it plugin instead of a hand-written tokenizer)
     from mdit_py_plugins.dollarmath import dollarmath_plugin
 
     _MARKDOWN_PARSER = (
         MarkdownIt("commonmark").enable("table").enable("strikethrough")
         .use(dollarmath_plugin, allow_space=False, double_inline=True)
     )
-except ImportError:  # 插件缺失=数学按原文显示,别拖垮 markdown
+except ImportError:  # plugin missing: show math as source text rather than breaking markdown
     _MARKDOWN_PARSER = MarkdownIt("commonmark").enable("table").enable("strikethrough")
 
 _FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
@@ -54,8 +54,9 @@ _PARTIAL_FENCE_RE = re.compile(r"^ {0,3}(`{1,2}|~{1,2})\s*$")
 
 
 def _trim_partial_closing_fence(text: str) -> str:
-    """流式输出防闪烁（pi issue #5825）：末行是打了一半的收尾围栏（1-2 个反引号）
-    且当前在未闭合代码块内时，先裁掉——否则它会被当代码内容渲染、下一帧又消失。"""
+    """Anti-flicker for streamed output (pi issue #5825): if the last line is a half-typed
+    closing fence (1-2 backticks) inside an unclosed code block, cut it off first; otherwise
+    it renders as code content and vanishes on the next frame."""
     if not text.endswith(("`", "~")):
         return text
     lines = text.split("\n")
@@ -160,7 +161,7 @@ class Markdown(Component):
         root = SyntaxTreeNode(_MARKDOWN_PARSER.parse(normalized_text))
 
         rendered_lines: list[str] = []
-        # markdown-it 吞掉首部空行（上游 space token 会渲染成空行）——补回
+        # markdown-it swallows a leading blank line (upstream renders the space token as an empty line); put it back
         if re.match(r"[ \t]*\r?\n", normalized_text):
             rendered_lines.append("")
         for index, node in enumerate(root.children or []):
@@ -444,7 +445,7 @@ class Markdown(Component):
 
     def renderAutolinkText(self, text: str, styleContext: InlineStyleContext) -> str:
         if getattr(self, "_inLink", False):
-            return styleContext.applyText(text)  # 链接标签内不二次 autolink（OSC8 嵌套会提前断外层）
+            return styleContext.applyText(text)  # no autolinking inside a link label: nested OSC 8 would close the outer link early
         if "\n" in text:
             return "\n".join(self.renderAutolinkText(part, styleContext) for part in text.split("\n"))
 
@@ -483,7 +484,7 @@ class Markdown(Component):
 
         href_for_comparison = href[7:] if href.startswith("mailto:") else href
         candidates = {href, href_for_comparison}
-        try:  # markdown-it 会对 href 做百分号编码，与明文标签比对须解码
+        try:  # markdown-it percent-encodes href, so decode before comparing with the plain-text label
             from urllib.parse import unquote
             candidates |= {unquote(href), unquote(href_for_comparison)}
         except Exception:  # noqa: BLE001
@@ -518,7 +519,7 @@ class Markdown(Component):
         indent = "    " * depth
         start_number = int(node.attrs.get("start", 1)) if node.type == "ordered_list" else 1
         items = node.children or []
-        # loose 列表（项间有空行）：markdown-it 的信号是 paragraph 未被 hidden
+        # loose list (blank lines between items): markdown-it signals it by leaving the paragraph un-hidden
         loose = any(child.type == "paragraph" and not child.hidden
                     for item in items for child in item.children or [])
 
@@ -552,7 +553,7 @@ class Markdown(Component):
         return lines
 
     def _takeTaskMarker(self, item: SyntaxTreeNode) -> str:
-        """GFM 任务列表：吃掉列表项首个文本节点开头的 [ ]/[x]，并入 bullet（commonmark 预设无 tasklists）。"""
+        """GFM task lists: consume a leading [ ]/[x] from the item's first text node and fold it into the bullet (the commonmark preset has no tasklists)."""
         for child in item.children or []:
             if child.type != "paragraph":
                 continue

@@ -172,9 +172,12 @@ _INDEX_GENERATION = 0
 
 
 def invalidate_skills_cache() -> None:
-    """技能盘上变了——让各会话的技能索引在下次取用时重扫（hermes
-    clear_skills_system_prompt_cache 同位）。此前 misaka 的索引是会话启动时的
-    快照：沉淀完当前会话看不见新技能，而 skills_list 工具能看见，两个来源不一致。"""
+    """Mark the on-disk skill set as changed so each session's skill index rescans on
+    next access (counterpart of hermes clear_skills_system_prompt_cache).
+
+    The index used to be a startup snapshot: a freshly saved skill was invisible to the
+    current session while the skills_list tool could see it.
+    """
     global _INDEX_GENERATION
     _INDEX_GENERATION += 1
 
@@ -183,14 +186,14 @@ def skills_cache_generation() -> int:
     return _INDEX_GENERATION
 
 
-# 系统提示技能索引里的 description 上限（hermes SKILL_PROMPT_DESC_LIMIT 同值）。
-# 索引每会话常驻，超出部分截断——learn_prompt 的 HARDLINE「≤60 字符」正是据此，
-# 此前 misaka 抄了纪律没抄机制，那条要求一直悬空（2026-08-20 用户裁定补齐）。
+# Cap on description length in the system-prompt skill index (same value as hermes
+# SKILL_PROMPT_DESC_LIMIT). The index lives in every session, so longer descriptions are
+# truncated; learn_prompt's hard "<= 60 characters" rule comes from this limit.
 SKILL_PROMPT_DESC_LIMIT = 60
 
 
 def truncate_skill_description(description: str) -> str:
-    """索引用 description：超限截断加省略号（hermes extract_skill_description 同款）。"""
+    """Description for the index: truncate with an ellipsis past the limit (as hermes extract_skill_description)."""
     desc = str(description or "").strip().strip("'\"")
     if len(desc) > SKILL_PROMPT_DESC_LIMIT:
         return desc[: SKILL_PROMPT_DESC_LIMIT - 3] + "..."
@@ -198,7 +201,7 @@ def truncate_skill_description(description: str) -> str:
 
 
 def is_skill_description_truncated(description: str) -> bool:
-    """这条 description 会不会在系统提示索引里被截断（给 linter/`/learn` 用）。"""
+    """Whether this description would be truncated in the system-prompt index (used by the linter and /learn)."""
     return len(str(description or "").strip().strip("'\"")) > SKILL_PROMPT_DESC_LIMIT
 
 
@@ -297,8 +300,9 @@ class _LoadSkillFromFileResult:
 
 def _load_skill_from_file(file_path: str, source: str) -> _LoadSkillFromFileResult:
     diagnostics: list[ResourceDiagnostic] = []
-    # 上游 #7805/8c2529dae：只有 SKILL.md 是「声明的技能」；技能目录里的 README.md
-    # 等普通根 .md 缺 frontmatter 不是坏技能——静默跳过，不出诊断
+    # Upstream #7805/8c2529dae: only SKILL.md is a declared skill. A plain root .md in a
+    # skill directory (README.md etc.) without frontmatter is not a broken skill; skip it
+    # silently, no diagnostic.
     declared = os.path.basename(file_path) == "SKILL.md"
     try:
         raw_content = Path(file_path).read_text(encoding="utf-8-sig")
@@ -330,7 +334,7 @@ def _load_skill_from_file(file_path: str, source: str) -> _LoadSkillFromFileResu
             diagnostics=diagnostics,
         )
     except Exception as error:
-        if not declared:   # 普通 .md 解析不动也不算坏技能（#7805）
+        if not declared:   # an unparseable plain .md is not a broken skill either (#7805)
             return _LoadSkillFromFileResult(skill=None, diagnostics=[])
         diagnostics.append(ResourceDiagnostic(type="warning", message=str(error), path=file_path))
         return _LoadSkillFromFileResult(skill=None, diagnostics=diagnostics)

@@ -2,14 +2,20 @@
 
 | 仓 | 上游 | commit | 用途 |
 |---|---|---|---|
-| PageIndex | github.com/VectifyAI/PageIndex | d5c4e62c20172ce400aef84545dfba3a0580b9ae | 文档结构层（树导航），只调用不改 |
+| PageIndex | github.com/VectifyAI/PageIndex | d5c4e62c20172ce400aef84545dfba3a0580b9ae | 文档结构层的钉版参考；运行时不依赖此目录 |
 
 ## 代码移植（含拷贝，非 third_party 目录承载）
 
-- **hermes-lcm**（github.com/stephenschoettler/hermes-lcm，MIT）——`misaka/orchestration/lcm/`
-  是其数据层与压缩链的移植（2026-08-18 起，设计 docs/design/lcm.md）：
-  `search_query.py` 逐字整搬；store/dag/tokens 为骨架移植（schema 与算法忠实、
-  接口面按 misaka 削减）。上游 v0.21.0-rc2 时期。
+- **PageIndex Flash**（github.com/VectifyAI/PageIndex，MIT，
+  `d5c4e62c20172ce400aef84545dfba3a0580b9ae`）——确定性 PDF 结构解析源码与词表并入
+  `misaka/documents/pageindex/`；MISAKA 只保留树导航所需切片，删除上游 CLI、LLM
+  摘要/优化、examples 和 results，运行时不读取 `third_party/PageIndex`。
+
+- **hermes-lcm**（github.com/stephenschoettler/hermes-lcm，MIT，
+  `10cbb78347ec86f3004153b24767324ded9e37b4`）——`misaka/extensions/lcm/`
+  是其数据/压缩/检索算法的 Pi-native feature-slice 移植（设计 docs/design/lcm.md）：
+  `search_query.py` 为严格移植；store/dag/tokens/semantic 为按 MISAKA transcript、
+  entry id 与 session hooks 重写的骨架，不复制 Hermes ContextEngine 宿主层。
 - **hermes-agent**（github.com/NousResearch/hermes-agent，MIT）——
   `misaka/orchestration/skills_guard.py` 是其 tools/skills_guard.py 的逐字整搬
   （仅改头注释＋加自检段）；`skill_layers.py` 是 agent/skill_utils.py
@@ -27,6 +33,11 @@
   TUI 渲染是本仓自写（2026-08-20 起，只做 CLI 终端——用户裁定）。
 
 ## 设计移植（不含代码拷贝）
+
+- **claude-code-best/claude-code**（`d010f7727474824c54809d08b69c65cd6133872f`）——
+  `extensions/ask_user/` 与 `modes/interactive/components/ask_user_question.py`
+  按其 AskUserQuestion 工具、问题状态机、普通/预览/提交视图的交互语义重新实现；
+  渲染、主题、按键、工具结果和会话挂载均使用 MISAKA/Pi 原生接口，不复制 React/Ink 源码。
 
 - **herdr**（github.com/herdrdev/herdr，Apache-2.0）——`misaka/net/` 是其核心设计的
   Python 重写（守护进程独占伪终端／瘦客户端／结构快照恢复／套接字单例）；

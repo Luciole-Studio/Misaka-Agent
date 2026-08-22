@@ -42,7 +42,7 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
         if (selected_tools is None or "read" in selected_tools) and skills:
             prompt += format_skills_for_prompt(skills)
         prompt += f"\nCurrent date: {date}"
-        # 尾换行：后续 append 的 prompt 内容必须另起一行（上游 #7887/3dd4623ee）
+        # Trailing newline: anything appended to the prompt later must start on its own line (upstream #7887/3dd4623ee)
         prompt += f"\nCurrent working directory: {prompt_cwd}\n"
         return prompt
 
@@ -79,9 +79,10 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
     add_guideline("Show file paths clearly when working with files")
 
     guidelines_text = "\n".join(f"- {guideline}" for guideline in guidelines)
-    # MISAKA: fork 定制——原 harn 版自称 coding assistant 并附 harn 文档区
-    # （其 examples/ 路径在本仓不存在）。角色的真实人格由 appended 的 SOUL 定义。
-    prompt = f"""You are an agent of MISAKA (御坂网络), a multi-agent research system for the humanities and social sciences. Your specific role and working discipline are defined in the role instructions appended below — follow them over any generic assumptions.
+    # MISAKA fork: the harn original called itself a coding assistant and appended a harn
+    # docs section (its examples/ path does not exist here). The real persona comes from
+    # the appended SOUL.
+    prompt = f"""You are an agent of MISAKA, a multi-agent research system for the humanities and social sciences. Your specific role and working discipline are defined in the role instructions appended below — follow them over any generic assumptions.
 
 Available tools:
 {tools_list}

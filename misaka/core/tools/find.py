@@ -43,10 +43,14 @@ def _to_posix_path(value: str) -> str:
 
 
 def _relativize_find_result(path_value: str, search_path: str) -> str:
-    """结果路径 → 相对 search_path（pi #7569/523b5a491，pre-pin 漏移植）。
-    绝对路径走 relpath——前缀切片在根路径丢首段（"/" 下 /etc→tc）、把共享前缀
-    兄弟（/foo-bar vs /foo）误判为子路径；相对路径原样透传——custom glob 已产
-    相对结果，relpath 会错按 cwd 解析。"""
+    """Make a result path relative to search_path (pi #7569/523b5a491).
+
+    Absolute paths go through relpath: prefix slicing loses the first segment at the
+    root ("/etc" under "/" becomes "tc") and mistakes shared-prefix siblings
+    (/foo-bar vs /foo) for children. Relative paths pass through unchanged: the custom
+    glob already yields relative results, and relpath would wrongly resolve them
+    against cwd.
+    """
     if os.path.isabs(path_value):
         return _to_posix_path(os.path.relpath(path_value, search_path))
     return _to_posix_path(path_value)

@@ -1,1 +1,1 @@
-"""兼容层（bun 等）——只为镜像上游行为而存在。"""
+"""Compatibility shims (bun, etc.) that exist only to mirror upstream behavior."""

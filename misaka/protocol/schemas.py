@@ -1,6 +1,6 @@
 # Ported from: third_party/pi-mono/packages/protocol/src/schemas.ts
 # Upstream commit: 686f193e51ccdc56fdf3366ce5d092530c1007ac
-# Ported: 2026-08-04 (D16 逐命名对齐; wire JSON keys keep upstream camelCase verbatim)
+# Ported: 2026-08-04 (D16 name-by-name alignment; wire JSON keys keep upstream camelCase verbatim)
 #
 # PORT-NOTE: typebox runtime validators (*Schema consts) are NOT ported — stdlib
 # has no JSON-Schema engine. Each XSchema symbol folds into its static type here
@@ -523,31 +523,3 @@ __all__ = [
     "EventEnvelope",
     "ServerMessage",
 ]
-
-
-if __name__ == "__main__":
-    import json
-
-    hello: ClientHello = {"type": "hello", "version": PROTOCOL_VERSION}
-    req: RequestEnvelope = {
-        "type": "request",
-        "id": "r1",
-        "request": {"command": "prompt", "sessionId": "s1", "text": "привет"},
-    }
-    item: CompleteAssistantTranscriptItem = {
-        "id": "a1",
-        "role": "assistant",
-        "content": [{"type": "text", "text": "done"}],
-        "model": {"provider": "anthropic", "id": "claude-fable-5"},
-        "timestamp": 0,
-        "status": "complete",
-        "stopReason": "toolUse",
-    }
-    for obj in (hello, req, item):
-        assert json.loads(json.dumps(obj, ensure_ascii=False)) == obj
-    assert req["request"]["command"] in RESULT_FOR_COMMAND
-    assert item["status"] == "complete" and item["stopReason"] == "toolUse"
-    g = globals()
-    missing = [n for n in __all__ if n not in g]
-    assert not missing, f"__all__ 悬空: {missing}"
-    print(f"selfcheck ok — {len(__all__)} exported symbols, wire keys camelCase preserved")

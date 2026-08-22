@@ -22,7 +22,8 @@ def to_display_path(value: str) -> str:
 
 
 def escape_regex(value: str) -> str:
-    # PORT-NOTE: 照上游只逃逸这一组——re.escape 会逃逸空格等，旧版 fd 的 regex 解析直接报错
+    # PORT-NOTE: escape only this set, as upstream does; re.escape also escapes spaces etc.,
+    # which older fd versions reject when parsing the regex
     return re.sub(r"[.*+?^${}()|\[\]\\]", lambda m: "\\" + m.group(0), value)
 
 

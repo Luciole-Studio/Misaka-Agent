@@ -1,17 +1,17 @@
-"""Claude Code compatible sub-agent tools.
+"""Claude Code-compatible subagent tools.
 
 The public contract intentionally mirrors the reference implementation:
-
 ``Agent`` creates one fresh agent, ``TaskOutput`` reads or waits for a
-background task, and ``TaskStop`` terminates a running task.  Parallelism
+background task, and ``TaskStop`` terminates a running task. Parallelism
 comes from multiple ``Agent`` tool calls in the same model message; there is
 no private batch or chain mini-language.
 
-``SendMessage`` 本体在统一消息层（extensions/messages.py）；本模块只出
-``route_to_children``——命中自己生的分身就唤醒续聊，装配方把它注入消息层。
+``SendMessage`` itself lives in the unified messaging layer; this module only
+exports ``route_to_children``, which resumes a child this session spawned, and
+the assembly code plugs it into that layer.
 
-Last Order is excluded at registration time.  Every other MISAKA role gets
-the same tools, including named child agents.
+Last Order is excluded at registration time. Every other MISAKA role gets the
+same tools, including named child agents.
 """
 
 from __future__ import annotations
@@ -422,19 +422,20 @@ def has_background_tasks() -> bool:
 
 
 async def route_to_children(to: str, message: str, _summary: str, ctx: Any):
-    """统一 SendMessage 的进程内分支：是自己生的分身就唤醒续聊，不是返回 None 走信箱。"""
+    """In-process branch of SendMessage: resume the child if this session spawned it, else return None so the mailbox handles it."""
 
     managers = _ACTIVE_MANAGERS.get(asyncio.get_running_loop(), set())
     for manager in tuple(managers):
-        if manager._closed:  # noqa: SLF001 - 异常关闭的残留，顺手清出名册
+        if manager._closed:  # noqa: SLF001 - left over from an abnormal shutdown; drop it from the roster
             managers.discard(manager)
             continue
         try:
-            # 不传 ctx：route 只找活任务（内存/已绑定盘面）。带 ctx 会让空白
-            # manager 被绑定成调用方会话，毒化同进程并发会话（审查 2026-08-20）
+            # No ctx here on purpose: route only looks for live tasks (in memory or already bound).
+            # Passing ctx would bind a blank manager to the caller's session and poison
+            # concurrent sessions in the same process (review 2026-08-20).
             if manager._find_task(to) is None:  # noqa: SLF001
                 continue
-        except RuntimeError:  # 别的会话的管理器：归属校验抛错＝不是它的，跳过而不是炸整个工具
+        except RuntimeError:  # Another session's manager: the ownership check raised, so skip it rather than fail the tool.
             continue
         return await manager.send_message(to, message, context=ctx)
     return None

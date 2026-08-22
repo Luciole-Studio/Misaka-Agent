@@ -284,7 +284,7 @@ class Input:
                 while graphemes and _nav_punct(graphemes[-1].segment):
                     self.cursor -= len(graphemes.pop().segment)
             elif _CJK_BREAK_RE.search(last_grapheme):
-                self.cursor -= len(graphemes.pop().segment)   # CJK 一字一词
+                self.cursor -= len(graphemes.pop().segment)   # each CJK character is a word
             else:
                 while (
                     graphemes
@@ -312,7 +312,7 @@ class Input:
                     self.cursor += len(next_segment.segment)
                     next_segment = next(segments, None)
             elif _CJK_BREAK_RE.search(first_grapheme):
-                self.cursor += len(first_grapheme)             # CJK 一字一词
+                self.cursor += len(first_grapheme)             # each CJK character is a word
             else:
                 while (
                     next_segment is not None

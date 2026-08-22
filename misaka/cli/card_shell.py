@@ -1,12 +1,9 @@
-"""卡片格子里的交互会话：合同当开场白，工作区当现场。
+"""Interactive card session run inside a Misaka Network pane.
 
-由网络守护进程在格子（伪终端）里拉起——认领、超时、交卷转态都归守护进程盯，
-这里只负责把跑卡装配（worker.card_session_setup 同款）接到交互引擎上。
-上一轮验收反馈照 dispatch 口径并入合同。接续现场：卡上记的精确路径优先
-（LO 后台跑的也接得上），退回目录里最近的（打回重做沿用原对话，不冒充新 Sister）。
-
-# ponytail: 预约制预算在格子路径未接（v1 已知缺口）——靠 MISAKA_USAGE_* 的
-# 事后记账与 token_cap 兜底；要预约再把 _reserve_usage 接进来。
+The daemon launches this in a pane and owns claiming, timeouts and status
+transitions; this module only wires the card setup (same as the background
+worker) into the interactive engine, folding in any red-team feedback from
+the previous round and resuming the card's existing session when there is one.
 """
 import asyncio
 import json
@@ -14,14 +11,17 @@ import os
 import sys
 
 from misaka.config import CFG
-from misaka.extensions.board import db, worker
+from misaka.platform import tasks as db
+from misaka.network import worker
 
-ACTIVE_STATUSES = ("running", "verifying", "finalizing")
+ACTIVE_STATUSES = ("running", "review", "verifying", "finalizing")
 
 
 def continue_flags(session_file, session_dir):
-    """现场定位：卡上记的精确路径优先（跨落位有效），退回目录里最近的（-c）。
-    返回要追加的引擎旗标；None＝没有现场。"""
+    """Return engine flags that resume the card's session, or None if there is none.
+
+    The exact path recorded on the card wins; otherwise fall back to the most
+    recent session in ``session_dir`` (``-c``)."""
     if session_file and os.path.isfile(session_file):
         return ["--session", session_file]
     try:
@@ -32,47 +32,51 @@ def continue_flags(session_file, session_dir):
 
 
 def launch(task_id, resume_only=False):
-    con = db.connect(CFG["db"])   # connect 自会 expanduser
+    con = db.connect(CFG["db"])
     row = db.get(con, task_id)
     if row is None:
-        sys.exit(f"没有这张卡：{task_id}")
+        sys.exit(f"Card not found: {task_id}")
     task = dict(row)
     if resume_only and task["status"] in ACTIVE_STATUSES:
-        # 只看不动看板；但在跑/验收中的卡现场有人在写——两个进程同写一份会写花
-        sys.exit(f"卡 {task_id} 正在「{task['status']}」——现场有人在写，等她跑完再展开")
+        # The live session is being written by another process; do not open it twice.
+        sys.exit(f"Card {task_id} is still running in another pane ({task['status']}); open that pane instead.")
     feedback = db.latest_payload(con, task_id, "verify_fail", generation=task["generation"])
     if feedback:
         fixes = json.loads(feedback).get("must_fix", [])
         if fixes:
-            task["feedback"] = ("⚠️ 上一轮验收未过，必须先修复以下问题（产物按最新要求重写）：\n"
+            task["feedback"] = ("⚠️ The previous review failed. Fix the following before resubmitting (rewrite deliverables to the latest requirements):\n"
                                 + "\n".join(f"- {x}" for x in fixes))
-    workspace = task["workspace"] or os.path.join(CFG["workspaces_root"], task_id)
+    workspace = db.workspace_for(task, CFG.get("workspaces_root"))
+    os.makedirs(workspace, exist_ok=True)
+    task["_attachments"] = db.stage_attachments(con, task_id, workspace)
     profile_dir = os.path.join(os.path.expanduser(CFG["profiles_root"]), task["assignee"])
     if not os.path.isdir(profile_dir):
-        sys.exit(f"Sister {task['assignee']} 不在可启动名册")
+        sys.exit(f"Sister {task['assignee']} is not in the roster.")
 
     flags, factories, prompt, _ro_root, role = worker.card_session_setup(
         task, workspace, profile_dir, CFG["provider"], CFG["default_model"]
     )
-    session_dir = os.path.join(workspace, "session")
+    session_dir = os.path.join(db.task_state_dir(task_id), "session")
     cont = continue_flags(task["session_file"], session_dir)
     if resume_only:
-        # 只展开现场看/手聊，**不重发合同**——否则点开即重跑＝暗中花钱（宪法③）
+        # Open the existing session only; never resend the contract, which would rerun the card.
         if not cont:
-            sys.exit(f"卡 {task_id} 还没有会话现场，没法展开")
+            sys.exit(f"Card {task_id} has no session to resume.")
         flags += cont
     else:
         if cont:
-            flags += cont             # 打回重做/复跑：接续原现场（LO 后台跑的也接得上）
-        flags.append(prompt)          # 位置参数＝开场消息（引擎原生机制）
+            flags += cont
+        flags.append(prompt)
 
     os.environ.update({
         "MISAKA_PROFILE_DIR": profile_dir,
         "MISAKA_WHO": role,
         "MISAKA_MCP_ROLE": role,
         "MISAKA_WORKSPACE": workspace,
+        "MISAKA_TASK_DIR": db.task_state_dir(task_id),
+        "MISAKA_TASK_OUTPUT_DIR": str(task.get("output_dir") or workspace),
         "MISAKA_APP_TITLE": f"MISAKA · {task['assignee']} · {task_id}",
-        "MISAKA_TAGLINE": f"卡 {task_id}：{task['title']}",
+        "MISAKA_TAGLINE": f"Card {task_id}: {task['title']}",
     })
     os.chdir(workspace)
 

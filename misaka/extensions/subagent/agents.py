@@ -474,22 +474,12 @@ def filter_agents_by_mcp_requirements(
 def roster_text(agents: Mapping[str, AgentDefinition]) -> str:
     """Human/model-facing roster, with general aliases shown only once."""
     if not agents:
-        return "（无专门类型，只能用 general-purpose/general）"
+        return "(no specialized types; use general-purpose/general)"
     seen: set[int] = set()
     lines: list[str] = []
     for agent in agents.values():
         if id(agent) in seen:
             continue
         seen.add(id(agent))
-        lines.append(f"- {agent.name}：{agent.description}")
+        lines.append(f"- {agent.name}: {agent.description}")
     return "\n".join(lines)
-
-
-if __name__ == "__main__":
-    definitions = discover()
-    assert definitions["general"] is definitions["general-purpose"]
-    assert "explorer" in definitions
-    assert resolve_tools({"tools": ["a", "b"], "disallowedTools": ["b"]}) == ["a"]
-    assert resolve_tools({"tools": ["inherit"]}) is None
-    assert resolve_tools({"disallowedTools": ["x"]}, ["x", "y"]) == ["y"]
-    print(f"agents selfcheck ok — {len({id(a) for a in definitions.values()})} definitions")

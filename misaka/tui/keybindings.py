@@ -40,7 +40,7 @@ TUI_KEYBINDINGS: dict[str, KeybindingDefinition] = {
     "tui.editor.jumpBackward": KeybindingDefinition("ctrl+alt+]", "Jump backward to character"),
     "tui.editor.pageUp": KeybindingDefinition(["pageUp", "ctrl+pageUp"], "Page up"),
     "tui.editor.pageDown": KeybindingDefinition(["pageDown", "ctrl+pageDown"], "Page down"),
-    # 专用历史 action:默认不绑键,用户在 keybindings.json 里绑(如 ctrl+p/ctrl+n)。(pi 16ad96a)
+    # Dedicated history actions: unbound by default; users bind them in keybindings.json (e.g. ctrl+p/ctrl+n). (pi 16ad96a)
     "tui.editor.historyPrevious": KeybindingDefinition([], "Select the previous prompt history entry"),
     "tui.editor.historyNext": KeybindingDefinition([], "Select the next prompt history entry"),
     "tui.editor.deleteCharBackward": KeybindingDefinition("backspace", "Delete character backward"),

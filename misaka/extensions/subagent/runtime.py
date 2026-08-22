@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from xml.sax.saxutils import escape
 
-from misaka.orchestration import processes as process_tree
+from misaka.platform import processes as process_tree
 from misaka.extensions.subagent import agents as agent_roster
 
 
@@ -326,7 +326,7 @@ def _write_usage_sink(context: RoleContext, task: "AgentTask") -> bool:
         or context.usage_generation is None
     ):
         return False
-    from misaka.orchestration import budget
+    from misaka.platform import budget
 
     message_total = sum(
         int(message.get("usage", {}).get("totalTokens") or 0)
@@ -1366,7 +1366,7 @@ class SubagentManager:
             or context.usage_generation is None
         ):
             return
-        from misaka.orchestration import budget
+        from misaka.platform import budget
 
         pending = asyncio.create_task(
             asyncio.to_thread(
@@ -1403,7 +1403,7 @@ class SubagentManager:
             )
 
     async def _budget_heartbeat_loop(self, task: AgentTask) -> None:
-        from misaka.orchestration import budget
+        from misaka.platform import budget
 
         try:
             while task._budget_reservation and self.role_context.usage_db:
@@ -1891,8 +1891,9 @@ class SubagentManager:
         try:
             ready = False
             accepted = False
-            # 子进程 child_ready 前零输出，而它内部要等接入服务就绪
-            # （MISAKA_MCP_REQUIRED_WAIT 可配大于 30）——握手窗口要随配置放大
+            # The child prints nothing before child_ready, and it may first wait for required
+            # MCP servers (MISAKA_MCP_REQUIRED_WAIT can exceed 30s), so the handshake window
+            # must grow with that setting.
             handshake = max(
                 30.0,
                 float(os.environ.get("MISAKA_MCP_REQUIRED_WAIT") or 30) + 15,
@@ -1904,7 +1905,7 @@ class SubagentManager:
                     try:
                         line = await asyncio.wait_for(process.stdout.readline(), handshake)
                     except asyncio.TimeoutError:
-                        raise RuntimeError(   # 空异常串会让 task.error 一片空白，说清楚
+                        raise RuntimeError(   # An empty message would leave task.error blank; be explicit.
                             f"sub-agent child produced no output within {int(handshake)}s handshake window"
                         ) from None
                 if not line:
@@ -2034,7 +2035,7 @@ class SubagentManager:
                 for waiter in task.steer_waiters.values():
                     if not waiter.done():
                         waiter.set_exception(RuntimeError("Agent turn completed before steering"))
-                        waiter.exception()  # 发信方已撤时预取，免得孤儿 waiter 刷"never retrieved"
+                        waiter.exception()  # Retrieve now in case the sender is gone, so an orphaned waiter does not log "never retrieved".
                 task.steer_waiters.clear()
 
         if not turn_done:
@@ -2062,9 +2063,9 @@ class SubagentManager:
             if task.background:
                 task.result = None
             else:
-                # 镜像行为（D18）：前台分身按 completed 收——但失败详情不许蒸发
-                #（审查 2026-08-20：此前 error 置 None 彻底静默）
-                logger.warning("前台分身 %s 的回合以错误收场（按镜像语义记 completed）：%s",
+                # Mirror semantics (D18): a foreground subagent is recorded as completed, but the
+                # failure details must not vanish (review 2026-08-20: error was previously set to None).
+                logger.warning('Foreground subagent %s ended its turn with an error (recorded as completed): %s',
                                task.id, failure)
             await self._finish(
                 task,
@@ -2091,7 +2092,7 @@ class SubagentManager:
             )
             if inspect.isawaitable(value):
                 job = asyncio.create_task(value)
-                self._progress_jobs.add(job)   # 持引用防半路被回收，完了自清
+                self._progress_jobs.add(job)   # Hold a reference so the job is not garbage-collected mid-flight; it removes itself when done.
                 job.add_done_callback(self._progress_jobs.discard)
         except Exception:  # noqa: BLE001 - display callbacks never fail a task
             pass
@@ -2220,11 +2221,12 @@ class SubagentManager:
         system_prompt = task.definition.prompt
         if task.definition.source == "built-in" and task.definition.name in {"general", "general-purpose"}:
             profile = self.role_context.profile_dir
-            # profile 为空＝无人格（不能拿 cwd 下的 SOUL.md 顶替——信任边界，审查 2026-08-20）
+            # An empty profile means no persona. Never substitute a SOUL.md found under cwd:
+            # that is a trust boundary (review 2026-08-20).
             if profile:
                 from misaka.config import identity
                 from misaka.config import profiles as _profiles
-                # 共同魂在前，其后＝身份槽＋职责段（hermes 同序）；SOUL.md 可空
+                # Shared soul first, then the identity slot and duty sections (same order as Hermes); SOUL.md may be empty.
                 system_prompt = "\n\n".join(
                     [Path(_profiles.shared_soul()).read_text(encoding="utf-8")]
                     + identity.prompt_sections(profile, _profiles.role_of(profile)))
@@ -2298,8 +2300,6 @@ class SubagentManager:
                     for tool in ("read", "edit", "write")
                     if tool not in denied
                 )
-            # frontmatter 显式 disallowedTools 是硬 deny，管理四工具不豁免
-            #（审查 2026-08-20：曾无条件追加，explorer 可递归生出带 write 的分身）
             tools = list(dict.fromkeys(
                 [*normalized,
                  *(t for t in MANAGEMENT_TOOLS if t.casefold() not in denied)]))
@@ -2477,7 +2477,7 @@ class SubagentManager:
                         waiter.set_exception(
                             RuntimeError(error or "Agent turn ended before consuming steering")
                         )
-                        waiter.exception()  # 同上：防孤儿 waiter 噪音
+                        waiter.exception()  # As above: avoid orphaned-waiter noise.
                 task.steer_waiters.clear()
             # Waiters observe an in-memory terminal state even if persistence
             # fails.  ``_settled`` separately guards continuation until cleanup
@@ -2497,7 +2497,7 @@ class SubagentManager:
                 ):
                     return
                 delay = 0.05
-                for _attempt in range(8):   # 账本持续故障时封顶放行：宁可少记一笔，不可挂死终结
+                for _attempt in range(8):   # Bounded retries if the ledger keeps failing: better to miss one entry than to hang completion.
                     try:
                         committed = await asyncio.to_thread(
                             _write_usage_sink, self.role_context, task
@@ -2725,8 +2725,8 @@ class SubagentManager:
                     else:
                         self.run_background(task, message, notify=False)
                 except BaseException:
-                    # 唤醒失败（如管理器正在关闭）：回滚终态并落定，
-                    # 别让任务永远卡在 pending、等它的人永远挂着
+                    # Resume failed (e.g. the manager is closing): roll back to the previous terminal
+                    # state and settle, so the task is not stuck in pending with waiters hung forever.
                     task.status, task.error, task.result = previous
                     task._done.set()
                     task._settled.set()
@@ -2917,8 +2917,8 @@ class SubagentManager:
             elif task.process is not None:
                 await task.stop()
             else:
-                # 覆盖"runner 已结束但状态没落终态"的竞争残局（唤醒×关闭），
-                # 不然等它的人永远挂着
+                # Covers the race (resume vs. close) where the runner has finished but the task
+                # never reached a terminal state; otherwise its waiters hang forever.
                 await self._finish(task, "killed", "Sub-agent manager closed", False)
         # A runner may already have published its terminal status while still
         # committing usage, cleaning its worktree, or notifying its parent.

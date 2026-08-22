@@ -27,12 +27,12 @@ class BuiltinSlashCommand:
 BUILTIN_SLASH_COMMANDS: tuple[BuiltinSlashCommand, ...] = (
     BuiltinSlashCommand("settings", "Open settings menu"),
     BuiltinSlashCommand("model", "Select model (opens selector UI)"),
-    # pi 496185f6：运行时切推理档；--default 同时存为启动默认
+    # pi 496185f6: switch thinking level at runtime; --default also saves it as the startup default
     BuiltinSlashCommand("thinking", "Select thinking level (--default persists it)"),
     BuiltinSlashCommand("scoped-models", "Enable/disable models for Ctrl+P cycling"),
-    # 删掉了 "models" 与 "theme"：两者只在此声明、交互模式里**无任何处理分支**，
-    # 输入后不匹配任何命令，会被当成普通消息发给 LLM（用户看到 "Working..."）。
-    # 功能上 models 与 scoped-models 重叠、theme 已并入 /settings。
+    # "models" and "theme" were removed: they were only declared here with no handler in
+    # interactive mode, so the input matched nothing and went to the LLM as a plain message
+    # (the user saw "Working..."). models overlaps scoped-models; theme lives in /settings.
     BuiltinSlashCommand("export", "Export session (HTML default, or specify path: .html/.jsonl)"),
     BuiltinSlashCommand("import", "Import and resume a session from a JSONL file"),
     BuiltinSlashCommand("share", "Share session as a secret GitHub gist"),
@@ -54,7 +54,7 @@ BUILTIN_SLASH_COMMANDS: tuple[BuiltinSlashCommand, ...] = (
 )
 
 _LOCAL_ALIAS_SLASH_COMMANDS: tuple[BuiltinSlashCommand, ...] = (
-    # MISAKA: /clear＝就地清空当前会话（同 id 同文件，历史抹掉接着聊）；/new 才是开新会话
+    # MISAKA: /clear wipes the current session in place (same id, same file, history erased); /new starts a new session
     BuiltinSlashCommand("clear", "Wipe current session in place (same id, history erased)"),
 )
 

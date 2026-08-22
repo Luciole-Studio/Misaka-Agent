@@ -896,8 +896,8 @@ class AgentSession:
     async def reload(self) -> None:
         previous_flag_values = self._extensionRunner.get_flag_values()
         await emit_session_shutdown_event(self._extensionRunner, {"type": "session_shutdown", "reason": "reload"})
-        # 旧 runner 必须退订共享 event bus，否则 /reload 一次泄漏一层（pi #7656/6ca423447 的
-        # reload 半条；dispose 路径 fork 期已修，这半条没接线）
+        # The old runner must unsubscribe from the shared event bus, or every
+        # /reload leaks one more layer of handlers (pi #7656/6ca423447).
         self._extensionRunner.invalidate(_STALE_CONTEXT_MESSAGE)
         await self.settingsManager.reload()
         reset_api_providers()
@@ -953,7 +953,7 @@ class AgentSession:
         if deliver_as == "nextTurn":
             self._pendingNextTurnMessages.append(app_message)
         elif self.isStreaming and resolved_options.get("triggerTurn") is not False:
-            # triggerTurn:false＝只记录不介入正在跑的轮（pi #8022/47b5119d0）
+            # triggerTurn=False: record the message without interrupting the running turn (pi #8022/47b5119d0)
             if deliver_as == "followUp":
                 self.agent.followUp(app_message)
             else:
@@ -997,7 +997,7 @@ class AgentSession:
         await self.prompt(
             text,
             {
-                # 扩展可显式要求走命令分发＋技能/模板展开（pi #7857/b987ead35）；缺省仍 False
+                # Extensions may opt in to command dispatch and skill/template expansion (pi #7857/b987ead35); default stays False
                 "expandPromptTemplates": bool(resolved_options.get("expandPromptTemplates", False)),
                 "streamingBehavior": resolved_options.get("deliverAs"),
                 "images": images,
@@ -1078,8 +1078,9 @@ class AgentSession:
             self._branchSummaryAbortController.abort()
 
     async def compact(self, customInstructions: str | None = None) -> SessionCompactionResult:
-        # 保持 agent 订阅常连（pi #7370/e56893f4c，pre-pin 漏移植）：压缩期断订会把
-        # 被 abort 的半截消息的 message_end/agent_end 全部丢掉——不落盘、状态不更新
+        # Keep the agent subscription live across compaction (pi #7370/e56893f4c):
+        # unsubscribing here would drop the aborted partial message's
+        # message_end/agent_end, so it would never be persisted or applied to state.
         await self.abort()
         self._compactionAbortController = AbortController()
         self._emit({"type": "compaction_start", "reason": "manual"})
@@ -1161,7 +1162,7 @@ class AgentSession:
                     {
                         "type": "session_compact",
                         "compactionEntry": saved_entry,
-                        "fromHook": from_hook,
+                        "fromExtension": from_hook,
                     }
                 )
 
@@ -1203,8 +1204,11 @@ class AgentSession:
                                            will_retry: bool,
                                            error_message: str | None = None,
                                            from_extension: bool = False) -> None:
-        """压缩失败/中止的终态事件（pi #8175/a6b1dbceb）：让遥测/LCM 这类扩展能把
-        session_before_compact 的尝试与终局配对——此前失败只进 UI 事件，扩展看不见。"""
+        """Emit the terminal event for a failed or aborted compaction (pi #8175/a6b1dbceb).
+
+        Lets extensions such as telemetry or LCM pair a session_before_compact
+        attempt with its outcome; previously failures only reached the UI.
+        """
         if not self._extensionRunner.has_handlers("session_compact_failed"):
             return
         await self._extensionRunner.emit(
@@ -1407,8 +1411,8 @@ class AgentSession:
             content = _message_content(message)
             if isinstance(content, list):
                 tool_calls += sum(1 for block in content if _content_type(block) == "toolCall")
-            # usage 可能是 dict，也可能是 Usage 对象（provider 回来的就是对象），
-            # 直接 .get() 会在"会话已有用量"时炸 /session：'Usage' object has no attribute 'get'
+            # usage may be a dict or a Usage object (providers return objects);
+            # a bare .get() would crash /session once the session has usage.
             def _u(field, src=usage, default=0):
                 if isinstance(src, dict):
                     return src.get(field, default)
@@ -1572,7 +1576,8 @@ class AgentSession:
             assistant_message = _as_assistant_message(message)
             if assistant_message is not None:
                 self._lastAssistantMessage = assistant_message
-                # length 也是恢复中的失败态：复位会让截断重试计数清零转无限循环（#7540）
+                # "length" is also a mid-recovery failure state: resetting here would
+                # zero the truncation retry counter and loop forever (#7540)
                 if assistant_message.stopReason not in ("error", "length"):
                     self._overflow_recovery_attempted = False
                 if assistant_message.stopReason != "error" and self._retryAttempt > 0:
@@ -2101,7 +2106,7 @@ class AgentSession:
         )
 
     async def _normalize_tool_result_images(self, result: Any) -> None:
-        """就地归一化工具结果里的图片块（pi #7330）。autoResizeImages 关闭时跳过。"""
+        """Normalize image blocks in a tool result in place (pi #7330). No-op when autoResizeImages is off."""
         content = _event_field(result, "content")
         if not isinstance(content, list) or not self.settingsManager.getImageAutoResize():
             return
@@ -2115,7 +2120,7 @@ class AgentSession:
                 mimeType=str(_message_field(block, "mimeType") or ""))
             try:
                 resized = await resize_image(img)
-            except Exception:  # noqa: BLE001 - 后端不可用保原块（上游同语义）
+            except Exception:  # noqa: BLE001 - keep the original block if the image backend is unavailable (matches upstream)
                 continue
             if resized is None or not resized.wasResized:
                 continue
@@ -2143,9 +2148,10 @@ class AgentSession:
         async def after_tool_call(payload: Any, _signal: Any | None = None) -> Any:
             runner = self._extensionRunner
             result = _event_field(payload, "result")
-            # 工具自产图片（扩展/MCP/截图类）绕过了 read 的缩放，超大图会让 provider
-            # 拒掉整个对话——入史前归一化一次（pi #7330/b0e05b442）。失败保原块：
-            # 图片后端不可用时不静默删工具产出
+            # Images produced by tools (extensions/MCP/screenshots) bypass read's resizing,
+            # and an oversized image makes the provider reject the whole conversation, so
+            # normalize once before they enter history (pi #7330/b0e05b442). On failure keep
+            # the original block: an unavailable image backend must not silently drop output.
             await self._normalize_tool_result_images(result)
             if not runner.has_handlers("tool_result"):
                 return None
@@ -2321,9 +2327,10 @@ class AgentSession:
         ):
             return False
 
-        # 未达输出上限的 length 截断＝可恢复失败：同样走一次 compact-and-retry
-        #（pi #7540/32850ef7c，pre-pin 漏移植；stop 停止的超窗回答只压不重试——
-        # 回答已完成，agent.continue() 无法从 assistant 续）
+        # A length stop below the output cap is a recoverable failure: run the same
+        # compact-and-retry once (pi #7540/32850ef7c). A "stop" answer that overflowed the
+        # window is only compacted, not retried: it is complete, and agent.continue()
+        # cannot resume from an assistant message.
         recoverable_length = same_model and is_recoverable_length(
             assistant_message, getattr(self.model, "maxTokens", 0) or 0)
         if same_model and (is_context_overflow(assistant_message, context_window)
@@ -2339,8 +2346,9 @@ class AgentSession:
                         "result": None,
                         "aborted": False,
                         "willRetry": False,
-                        # 截断与溢出分开报（pi #8130/c7c763f5c）：误标成 overflow
-                        # 会把用户引向换大上下文模型，而真病因是输出截断
+                        # Report truncation and overflow separately (pi #8130/c7c763f5c): labeling
+                        # truncation as overflow would steer the user toward a larger-context
+                        # model when the real cause is early-ended output.
                         "errorMessage": (
                             "Truncated-response recovery failed after one compact-and-retry "
                             "attempt. The provider repeatedly ended output early."
@@ -2362,13 +2370,14 @@ class AgentSession:
 
         settings = CompactionSettings(**settings_data)
         direct_context_tokens = calculate_compaction_context_tokens(assistant_message.usage)
-        # provider 不回 usage 时 direct=0，阈值压缩会永不触发——退到消息尺寸估算
-        #（pi #8328/4495469a5 双层：分流条件补零 usage；无 usage 数据不再直接放弃）
+        # Without provider usage direct=0 and threshold compaction would never fire,
+        # so fall back to a message-size estimate (pi #8328/4495469a5).
         if assistant_message.stopReason == "error" or direct_context_tokens == 0:
             estimate = estimate_compaction_context_tokens(list(self.agent.state.messages))
-            # 无 usage：estimate.tokens 即纯消息尺寸估算。仅 usage-backed 估算才做
-            # 「陈旧 pre-compaction usage」检查（保留的旧消息 usage 反映压缩前的大
-            # 上下文，会在刚压完时误触发再压）
+            # With no usage at all, estimate.tokens is a pure message-size estimate. Only a
+            # usage-backed estimate needs the stale pre-compaction check: a kept old message's
+            # usage reflects the large pre-compaction context and would re-trigger compaction
+            # right after one finished.
             if estimate.lastUsageIndex is not None:
                 usage_message = self.agent.state.messages[estimate.lastUsageIndex]
                 usage_timestamp = _event_timestamp_ms(_message_field(usage_message, "timestamp"))
@@ -2525,7 +2534,7 @@ class AgentSession:
                     {
                         "type": "session_compact",
                         "compactionEntry": saved_entry,
-                        "fromHook": from_hook,
+                        "fromExtension": from_hook,
                     }
                 )
 
@@ -2544,7 +2553,7 @@ class AgentSession:
                 last_message = messages[-1] if messages else None
                 if (_message_role(last_message) == "assistant"
                         and _message_field(last_message, "stopReason") in ("error", "length")):
-                    self.agent.state.messages = messages[:-1]   # 截断尾同样要清（#7540）
+                    self.agent.state.messages = messages[:-1]   # drop the truncated tail too (#7540)
                 return True
 
             return self.agent.hasQueuedMessages()
