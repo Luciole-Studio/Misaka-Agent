@@ -229,11 +229,25 @@ def sidebar_new_button_rect(ws_area):
     return Rect(footer.x, footer.y, min(5, max(footer.width, 1)), footer.height)
 
 
-def global_launcher_rect(ws_area, badge=False):
-    """src/app/input/sidebar.rs:183-197: "menu" right-aligned, six columns (eight with a badge)."""
+def global_launcher_rect(ws_area, label="menu"):
+    """src/app/input/sidebar.rs:183-197: the launcher label right-aligned on the footer, two
+    columns wider than its text ("menu" = 6, "● menu" = 8)."""
     footer = sidebar_footer_rect(ws_area)
-    width = min(8 if badge else 6, max(footer.width, 1))
+    width = min(display_width(label) + 2, max(footer.width, 1))
     return Rect(footer.x + max(0, footer.width - width), footer.y, width, footer.height)
+
+
+def menu_popup_rect(screen, launcher, labels):
+    """src/app/input/sidebar.rs:210-232 global_menu_rect: width = longest label + 4 (padding and
+    border), left edge on the launcher's left edge (clamped to the screen), bottom edge on the
+    row above it. MISAKA addition: the height is capped at the rows above the launcher, so a
+    long list scrolls instead of spilling over the footer."""
+    content = max([display_width(label) for label in labels] or [8]) + 2
+    menu_w = min(content + 2, max(screen.width, 1))
+    menu_h = min(len(labels) + 2, max(screen.height, 1), max(launcher.y - screen.y, 2))
+    max_x = screen.x + max(0, screen.width - menu_w)
+    x = min(launcher.x + max(0, launcher.width - menu_w), max_x)
+    return Rect(x, max(0, launcher.y - menu_h), menu_w, menu_h)
 
 
 def agent_panel_header_label_rect(area, label):

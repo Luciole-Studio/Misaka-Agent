@@ -211,6 +211,7 @@ def pane_state(pane):
 
 
 LO_TITLE = "Last Order"      # the panel opens Last Order panes with this title; they are space roots
+SISTERS_LABEL = "sisters"    # the footer launcher (herdr: "menu"); it opens the Sister roster
 
 
 def space_key(pane):
@@ -393,10 +394,10 @@ def _render_spaces(canvas, spaces, area, scroll, hits):
         canvas.put(new_rect.x, new_rect.y, " new", fg=hui.OVERLAY0,
                    clip=new_rect.x + new_rect.width)
         hits.append((new_rect, ("new",)))
-        menu_rect = hui.global_launcher_rect(area)
-        canvas.put(menu_rect.x + max(0, menu_rect.width - 4), menu_rect.y, "menu",
-                   fg=hui.OVERLAY0, clip=menu_rect.x + menu_rect.width)
-        hits.append((menu_rect, ("menu",)))
+        menu_rect = hui.global_launcher_rect(area, SISTERS_LABEL)
+        canvas.put(menu_rect.x + max(0, menu_rect.width - _wcwidth(SISTERS_LABEL)), menu_rect.y,
+                   SISTERS_LABEL, fg=hui.OVERLAY0, clip=menu_rect.x + menu_rect.width)
+        hits.append((menu_rect, ("sisters",)))
     return {"rect": area, "scroll": scroll, "max_scroll": metrics["max_offset_from_bottom"]}
 
 
@@ -489,6 +490,48 @@ def _render_collapsed(canvas, spaces, agents, area, hits):
     toggle = hui.collapsed_sidebar_toggle_rect(area)
     canvas.put(toggle.x, toggle.y, "»", fg=hui.OVERLAY0)
     hits.append((toggle, ("toggle",)))
+
+
+def menu_scroll_for(highlighted, scroll, visible):
+    """Keep the highlighted item inside the popup's window of ``visible`` rows (herdr clips its
+    menu; scrolling is MISAKA's addition for long rosters). Pure, so testable."""
+    if visible <= 0:
+        return 0
+    if highlighted < scroll:
+        return highlighted
+    if highlighted >= scroll + visible:
+        return highlighted - visible + 1
+    return scroll
+
+
+def format_menu_popup(labels, highlighted, scroll, rect):
+    """herdr menus.rs:214-258 render_global_launcher_menu on widgets.rs:11-30 render_panel_shell:
+    a plain accent border on panel_bg, one " label " per row in text color, the highlighted
+    label on accent in the contrast color, bold. Rows from ``scroll`` fill the inner height.
+    Returns ``(rows, hits)``: rows = [(y, x, ansi)] in screen cells, hits = [(Rect, index)].
+    Pure, so testable."""
+    if rect.width < 2 or rect.height < 2:
+        return [], []
+    width, height = rect.width, rect.height
+    canvas = _Canvas(width, height)
+    for y in range(height):
+        canvas.fill_bg(0, width, y, hui.PANEL_BG)
+    canvas.put(0, 0, "┌" + "─" * (width - 2) + "┐", fg=hui.ACCENT)
+    for y in range(1, height - 1):
+        canvas.put(0, y, "│", fg=hui.ACCENT)
+        canvas.put(width - 1, y, "│", fg=hui.ACCENT)
+    canvas.put(0, height - 1, "└" + "─" * (width - 2) + "┘", fg=hui.ACCENT)
+    inner_w = width - 2
+    hits = []
+    for row, index in enumerate(range(scroll, min(len(labels), scroll + height - 2))):
+        y = 1 + row
+        if index == highlighted:
+            canvas.put(1, y, f" {labels[index]} ", fg=hui.panel_contrast_fg(), bg=hui.ACCENT,
+                       bold=True, clip=1 + inner_w)
+        else:
+            canvas.put(1, y, f" {labels[index]} ", fg=hui.TEXT, clip=1 + inner_w)
+        hits.append((hui.Rect(rect.x + 1, rect.y + y, inner_w, 1), index))
+    return [(rect.y + y, rect.x, canvas.row(y)) for y in range(height)], hits
 
 
 def format_sidebar(spaces, agents, width, rows, *, collapsed=False, scrolls=None,
@@ -886,6 +929,65 @@ def launch():
             index = side_order.index(side["ws"]) if side["ws"] in side_order else 0
             switch_space(spaces[min(index, len(spaces) - 1)])
 
+    # The Sister roster popup (herdr's global menu, Mode::GlobalMenu): a modal that eats
+    # keys and clicks until it closes.
+    menu = {"open": False, "items": [], "hl": 0, "scroll": 0, "rect": None, "hits": []}
+
+    def draw_menu():
+        ws_area, _detail = hui.expanded_sidebar_sections(
+            hui.Rect(0, 0, side["w"], rows), SIDEBAR_SECTION_SPLIT)
+        launcher = hui.global_launcher_rect(ws_area, SISTERS_LABEL)
+        rect = hui.menu_popup_rect(hui.Rect(0, 0, cols, rows), launcher, menu["items"])
+        menu["scroll"] = menu_scroll_for(menu["hl"], menu["scroll"], rect.height - 2)
+        lines, menu["hits"] = format_menu_popup(menu["items"], menu["hl"], menu["scroll"], rect)
+        menu["rect"] = rect
+        paint(("\x1b[?25l\x1b[?2026h"
+               + "".join(f"\x1b[{y + 1};{x + 1}H{line}" for y, x, line in lines)
+               + "\x1b[?2026l").encode())
+
+    def open_menu():
+        from misaka.config import sisters
+        menu.update(items=sorted(sisters()) or ["no sisters"], hl=0, scroll=0, open=True)
+        draw_menu()
+
+    def close_menu():
+        menu["open"] = False
+        relayout()                 # The popup may have covered the main area too; repaint everything under it.
+
+    def menu_move(delta):
+        menu["hl"] = max(0, min(menu["hl"] + delta, len(menu["items"]) - 1))   # herdr move_prev/move_next: no wrap
+        draw_menu()
+
+    def menu_choose(index):
+        name = menu["items"][index]
+        close_menu()
+        if name != "no sisters":   # Open her in the active space, as a new tab under its Last Order.
+            new_pane([sys.executable, "-m", "misaka", "chat", "--as", name], name)
+
+    def menu_keys(chunk):
+        """herdr modal.rs:147-160 handle_global_menu_key: esc closes, k/up and j/down move, enter picks."""
+        index = 0
+        while index < len(chunk) and menu["open"]:
+            if chunk.startswith(b"\x1b[", index):          # CSI: arrows arrive as ESC [ A / ESC [ B
+                end = index + 2
+                while end < len(chunk) and not 0x40 <= chunk[end] <= 0x7e:
+                    end += 1
+                seq, index = chunk[index:end + 1], end + 1
+                if seq == b"\x1b[A":
+                    menu_move(-1)
+                elif seq == b"\x1b[B":
+                    menu_move(1)
+                continue
+            key, index = chunk[index:index + 1], index + 1
+            if key == b"\x1b":
+                close_menu()
+            elif key == b"k":
+                menu_move(-1)
+            elif key == b"j":
+                menu_move(1)
+            elif key == b"\r":
+                menu_choose(menu["hl"])
+
     def main_col():
         """First (1-based) column of the main area: flush against the sidebar separator."""
         return side["w"] + 1
@@ -993,6 +1095,8 @@ def launch():
         out.append("\x1b[?2026l")
         if len(out) > 2:
             paint("".join(out).encode())
+        if menu["open"]:           # A sidebar refresh under the popup must not erase it.
+            draw_menu()
 
     def draw_prefix_bar():
         # herdr: entering prefix mode pops a mode bar on the bottom row (menus.rs
@@ -1323,7 +1427,14 @@ def launch():
         return False
 
     def on_wheel(x, y, delta):
-        """Mouse wheel: scroll the sidebar section or the pane under the pointer."""
+        """Mouse wheel: scroll the roster popup, a sidebar section, or the pane under the pointer."""
+        rect = menu["rect"] if menu["open"] else None
+        if rect and rect.x <= x - 1 < rect.x + rect.width and rect.y <= y - 1 < rect.y + rect.height:
+            cap = max(0, len(menu["items"]) - (rect.height - 2))
+            menu["scroll"] = max(0, min(menu["scroll"] + (1 if delta > 0 else -1), cap))
+            menu["hl"] = max(menu["scroll"], min(menu["hl"], menu["scroll"] + rect.height - 3))
+            draw_menu()
+            return
         if x <= side["w"]:
             for key, section in ui_map["sections"].items():   # One entry per notch, clamped like herdr.
                 rect = section["rect"]
@@ -1352,6 +1463,14 @@ def launch():
 
     def on_click(x, y):
         nonlocal tab_scroll, tab_follow, help_open
+        if menu["open"]:                              # herdr mouse.rs:164-172: an item picks, anywhere else closes.
+            hit = next((index for rect, index in menu["hits"]
+                        if rect.x <= x - 1 < rect.x + rect.width and rect.y == y - 1), None)
+            if hit is None:
+                close_menu()
+            else:
+                menu_choose(hit)
+            return
         bar = ui_map.get("bar")
         if y == 1 and bar is not None:                # Tab row: route by herdr's hit areas.
             cx = x - 1                                # Rects are 0-based.
@@ -1382,9 +1501,8 @@ def launch():
                 switch_space(hit[1])
             elif hit[0] == "new":                     # herdr: new workspace in the same folder; here a new Last Order session.
                 new_pane([sys.executable, "-m", "misaka", "chat"], LO_TITLE, parent=None)
-            elif hit[0] == "menu":                    # herdr: the global menu; the key help is the nearest thing here.
-                help_open = True
-                draw_help_overlay()
+            elif hit[0] == "sisters":                 # herdr's global menu slot: here it lists the Sisters.
+                open_menu()
             elif hit[0] == "toggle":                  # herdr toggle_sidebar: 26 columns <-> 4.
                 side["collapsed"] = not side["collapsed"]
                 side["w"] = SIDEBAR_COLLAPSED_W if side["collapsed"] else SIDEBAR_W
@@ -1427,6 +1545,7 @@ def launch():
                 rows, cols = _term_size()
                 paint(b"\x1b[0m\x1b[2J")
                 chrome_cache["rows"] = []
+                menu["open"] = False           # Geometry changed under the popup; it is simply gone.
                 relayout()
             readable, _, _ = select.select([0, stream.sock], [], [], 0.05)
             now = time.monotonic()
@@ -1488,6 +1607,9 @@ def launch():
                         copy_selection()    # herdr copy_on_select: releasing copies to the clipboard.
                 chunk = _MOUSE.sub(b"", chunk)
                 chunk = _MOUSE_X10.sub(b"", chunk)     # Legacy reports are only stripped, so they never reach a pane as input.
+                if menu["open"]:                       # The roster popup is modal: it takes every key.
+                    menu_keys(chunk)
+                    chunk = b""
                 plain = bytearray()
                 detach = False
                 for offset in range(len(chunk)):       # Byte by byte: prefix and command may arrive in one read.
