@@ -39,10 +39,6 @@ def config_yaml(profile_dir):
 
 SHARED_SOUL_TEMPLATE = """# MISAKA Network · Shared identity
 
-The opening agreement shared by Last Order and every Sister, including their sub-agents:
-tone, values, discipline. Each role's own `SOUL.md` loads after this one; personality and
-expertise belong there. Editing this file takes effect across the whole network.
-
 - Files are the truth: conclusions go to disk as artifacts, not into the conversation.
 - When something cannot be found, write "could not be verified". Never invent a source.
 """

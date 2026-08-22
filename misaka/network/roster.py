@@ -18,10 +18,6 @@ MODEL_CHOICES = [
 SOUL_TEMPLATE = """# Misaka {sid}
 
 You are Sister {sid} of the MISAKA Network. Describe her personality and voice here.
-
-## Boundaries
-- Follow the task-card contract.
-- Submit `report.json`; deliver real artifacts in the task workspace.
 """
 
 DESCRIBE_TEMPLATE = """---

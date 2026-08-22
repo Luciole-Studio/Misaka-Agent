@@ -353,6 +353,7 @@ def register(harn):
         name="misaka_sister_output", label="Get Sister result",
         description="Inspect a Sister task or wait for its accepted, failed, or stopped result.",
         snippet="Inspect or wait for a Sister task",
+        guidelines=["Progress arrives as a <sister-notification>; do not poll. Read a result with misaka_sister_output after the notification or when the user asks; misaka_sister_peek is for diagnosing a stuck task, not for progress checks."],
         parameters=SisterOutputParams)
     async def misaka_sister_output(tool_call_id, params, signal, on_update, ctx):
         result = await runtime.output(
@@ -566,7 +567,7 @@ def register(harn):
         name="misaka_card_delete", label='Delete card',
         description="Permanently delete a stopped or inactive task card after explicit user confirmation.",
         snippet="Permanently delete a task card",
-        guidelines=["Deletion is irreversible. Never call this tool without an explicit user request to delete the card."],
+        guidelines=["Deletion is irreversible. Never call misaka_card_delete without an explicit user request to delete the card."],
         parameters=CardDeleteParams)
     async def misaka_card_delete(tool_call_id, params, signal, on_update, ctx):
         if not params.confirmed:
@@ -588,7 +589,7 @@ def register(harn):
         name="misaka_project_delete", label="Delete project",
         description="Permanently delete a project after explicit user confirmation; active task cards prevent deletion.",
         snippet="Permanently delete a project",
-        guidelines=["Deletion is irreversible. Never call this tool without an explicit user request."],
+        guidelines=["Deletion is irreversible. Never call misaka_project_delete without an explicit user request."],
         parameters=ProjectDeleteParams)
     async def misaka_project_delete(tool_call_id, params, signal, on_update, ctx):
         if not params.confirmed:

@@ -31,6 +31,7 @@ def register(harn):
         harn, name="doc_list", label="List documents",
         description="List documents already indexed in the workspace and return their document IDs.",
         snippet="List indexed documents and document IDs",
+        guidelines=["Check doc_list before fetching or re-reading material: indexed sources and other cards' artifacts are already there."],
         parameters=ListParams)
     async def doc_list(tool_call_id, params, signal, on_update, ctx):
         rows = corpus.docs()

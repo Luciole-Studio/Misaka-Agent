@@ -277,6 +277,8 @@ def _register(harn: Any, context: RoleContext, permitted: bool) -> None:
                 "Give fresh agents all relevant context; they do not see the parent conversation.",
                 "Use multiple Agent tool calls in one message for independent parallel work.",
                 "Use background only when useful work remains for you to do in parallel.",
+                "Completion arrives as a <task-notification>; never sleep or poll. TaskOutput reads a result, SendMessage continues the same agent, TaskStop stops one that is still running.",
+                "Findings a delegate brings back need the same source verification as your own before you cite them.",
             ],
         )
     )

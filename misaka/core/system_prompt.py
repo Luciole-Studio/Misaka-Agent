@@ -75,14 +75,18 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
         if normalized:
             add_guideline(normalized)
 
+    add_guideline("Batch independent tool calls into one turn; serialize only when a call depends on an earlier result")
     add_guideline("Be concise in your responses")
     add_guideline("Show file paths clearly when working with files")
 
     guidelines_text = "\n".join(f"- {guideline}" for guideline in guidelines)
     # MISAKA fork: the harn original called itself a coding assistant and appended a harn
-    # docs section (its examples/ path does not exist here). The real persona comes from
-    # the appended SOUL.
-    prompt = f"""You are an agent of MISAKA, a multi-agent research system for the humanities and social sciences. Your specific role and working discipline are defined in the role instructions appended below — follow them over any generic assumptions.
+    # docs section. Here the role stack (shared soul, identity, charter) comes first, via
+    # the append slot, so the model reads who it is before what it can do.
+    prompt = "You are an agent of MISAKA, a multi-agent research system for the humanities and social sciences."
+    if append_section:
+        prompt += append_section
+    prompt += f"""
 
 Available tools:
 {tools_list}
@@ -91,9 +95,6 @@ In addition to the tools above, you may have access to other custom tools depend
 
 Guidelines:
 {guidelines_text}"""
-
-    if append_section:
-        prompt += append_section
     if context_files:
         prompt += _format_project_context(context_files)
     if has_read and skills:
