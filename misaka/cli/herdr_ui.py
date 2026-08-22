@@ -51,7 +51,9 @@ def _load_palette(variant=None):
         "surface0": rgb("selectedBg", "#3d2029"),  # inactive tab / sidebar selection background
         "surface1": rgb("userMsgBg", "#33212a"),
         "text": rgb("text", "#e2d6da"),
-        "subtext0": rgb("gray", "#9b8288"),
+        "subtext0": rgb("gray", "#9b8288"),       # inactive sidebar names
+        "surface_dim": rgb("userMsgBg", "#33212a"),   # active sidebar row background
+        "teal": rgb("roseLite", "#e8698c"),       # herdr teal: finished, nobody looked yet
         "panel_bg": rgb("toolPendingBg", "#2a1e23"),
         "green": rgb("green", "#7fa87f"),
         "yellow": rgb("yellow", "#e8c15a"),
@@ -172,6 +174,230 @@ def sidebar_section_divider_rect(area, split_ratio):
         return RECT_DEFAULT
     ws_h, _ = sidebar_section_heights(content.height, split_ratio)
     return Rect(content.x, content.y + ws_h, content.width, 1)
+
+
+WORKSPACE_SECTION_HEADER_ROWS = 2     # src/ui/sidebar.rs:20
+AGENT_PANEL_HEADER_ROWS = 3           # src/ui/sidebar.rs:21
+
+
+def collapsed_sidebar_sections(area):
+    """src/ui/sidebar.rs:765-787: numbered spaces on top, a divider row, compact agents below;
+    under 7 rows the whole content is the space list. Returns (ws_area, divider_y | None, detail_area)."""
+    content = Rect(area.x, area.y, max(0, area.width - 1), area.height)
+    if content.width == 0 or content.height == 0:
+        return RECT_DEFAULT, None, RECT_DEFAULT
+    if content.height < 7:
+        return content, None, RECT_DEFAULT
+    ws_h = -(-content.height // 2)
+    detail_h = max(0, content.height - (ws_h + 1))
+    if ws_h == 0 or detail_h == 0:
+        return content, None, RECT_DEFAULT
+    divider_y = content.y + ws_h
+    return (Rect(content.x, content.y, content.width, ws_h), divider_y,
+            Rect(content.x, divider_y + 1, content.width, detail_h))
+
+
+def workspace_list_body_rect(area, has_scrollbar):
+    """src/ui/sidebar.rs:430-441: the header rows come off the top, the footer row off the bottom."""
+    if area.width == 0 or area.height <= WORKSPACE_SECTION_HEADER_ROWS:
+        return RECT_DEFAULT
+    body_y = area.y + WORKSPACE_SECTION_HEADER_ROWS
+    footer_y = area.y + max(0, area.height - 1)
+    return Rect(area.x, body_y, max(0, area.width - int(has_scrollbar)),
+                max(0, footer_y - body_y))
+
+
+def agent_panel_body_rect(area, has_scrollbar):
+    """src/ui/sidebar.rs:543-553."""
+    if area.width == 0 or area.height <= AGENT_PANEL_HEADER_ROWS:
+        return RECT_DEFAULT
+    body_y = area.y + AGENT_PANEL_HEADER_ROWS
+    return Rect(area.x, body_y, max(0, area.width - int(has_scrollbar)),
+                max(0, area.y + area.height - body_y))
+
+
+def sidebar_footer_rect(ws_area):
+    """src/app/input/sidebar.rs:168-175: the last row of the spaces section."""
+    if ws_area == RECT_DEFAULT:
+        return RECT_DEFAULT
+    return Rect(ws_area.x, ws_area.y + max(0, ws_area.height - 1), ws_area.width, 1)
+
+
+def sidebar_new_button_rect(ws_area):
+    """src/app/input/sidebar.rs:177-181: " new", five columns at the left of the footer."""
+    footer = sidebar_footer_rect(ws_area)
+    return Rect(footer.x, footer.y, min(5, max(footer.width, 1)), footer.height)
+
+
+def global_launcher_rect(ws_area, badge=False):
+    """src/app/input/sidebar.rs:183-197: "menu" right-aligned, six columns (eight with a badge)."""
+    footer = sidebar_footer_rect(ws_area)
+    width = min(8 if badge else 6, max(footer.width, 1))
+    return Rect(footer.x + max(0, footer.width - width), footer.y, width, footer.height)
+
+
+def agent_panel_header_label_rect(area, label):
+    """src/ui/sidebar.rs:99-111: the sort toggle, right-aligned on the second header row."""
+    if area.width == 0 or area.height < 2:
+        return RECT_DEFAULT
+    width = min(display_width(label), area.width)
+    return Rect(area.x + max(0, area.width - width), area.y + 1, width, 1)
+
+
+def expanded_sidebar_toggle_rect(area):
+    """src/ui/sidebar.rs:1520-1529: "«" one column left of the separator, on the bottom row."""
+    if area.width <= 1 or area.height == 0:
+        return RECT_DEFAULT
+    return Rect(area.x + area.width - 2, area.y + area.height - 1, 1, 1)
+
+
+def collapsed_sidebar_toggle_rect(area):
+    """src/ui/sidebar.rs:1510-1518: "»" in the middle of the collapsed content, bottom row."""
+    content_w = max(0, area.width - 1)
+    if content_w == 0 or area.height == 0:
+        return RECT_DEFAULT
+    return Rect(area.x + content_w // 2, area.y + area.height - 1, 1, 1)
+
+
+def list_bottom_start(heights, body_h):
+    """src/ui/sidebar.rs:468-487 / 590-606: the first entry from which everything below still
+    fits the body (row_gap is 0, the default)."""
+    used, start = 0, len(heights)
+    for idx in range(len(heights) - 1, -1, -1):
+        needed = min(heights[idx], body_h)
+        if used + needed > body_h:
+            break
+        used += needed
+        start = idx
+    return min(start, max(0, len(heights) - 1))
+
+
+def list_visible_count(heights, body_h, scroll):
+    """src/ui/sidebar.rs:443-466 / 565-588: entries that fit from ``scroll`` downward."""
+    used, visible = 0, 0
+    for height in heights[scroll:]:
+        height = min(height, body_h)
+        if used + height > body_h:
+            break
+        used += height
+        visible += 1
+    return visible
+
+
+def list_scroll_metrics(heights, body_h, scroll):
+    """src/ui/sidebar.rs:489-501 / 608-620: scrollbar metrics for an entry list."""
+    max_scroll = list_bottom_start(heights, body_h) if heights else 0
+    scroll = min(scroll, max_scroll)
+    return {"offset_from_bottom": max_scroll - scroll,
+            "max_offset_from_bottom": max_scroll,
+            "viewport_rows": list_visible_count(heights, body_h, scroll)}
+
+
+def fit_tokens(tokens, max_width):
+    """src/ui/sidebar.rs:818-936 resolved_token_spans, the width fitting: every text token keeps
+    at least one column; if even that overflows, text tokens are dropped from the left and
+    re-admitted from the right while they fit; leftover width then grows them round-robin.
+    ``tokens`` = [(kind, text)] with kind "icon" (fixed width) or "text". Separator: one space
+    after an icon, " · " otherwise (sidebar/tokens.rs:158-166). Returns [(index, separator, shown)]."""
+    widths = [display_width(text) for _kind, text in tokens]
+    fixed = [w if kind == "icon" else 0 for (kind, _t), w in zip(tokens, widths)]
+    flex = [0 if kind == "icon" else w for (kind, _t), w in zip(tokens, widths)]
+
+    def sep(prev, _cur):
+        return " " if tokens[prev][0] == "icon" else " · "
+
+    def minimum(active):
+        idx = [i for i, on in enumerate(active) if on]
+        return (sum(fixed[i] + (1 if flex[i] > 0 else 0) for i in idx)
+                + sum(display_width(sep(a, b)) for a, b in zip(idx, idx[1:])))
+
+    active = [True] * len(tokens)
+    if minimum(active) > max_width:
+        for i, width in enumerate(flex):
+            if width > 0:
+                active[i] = False
+        for i in range(len(tokens) - 1, -1, -1):
+            if flex[i] == 0:
+                continue
+            active[i] = True
+            if minimum(active) > max_width:
+                active[i] = False
+    idx = [i for i, on in enumerate(active) if on]
+    sep_w = sum(display_width(sep(a, b)) for a, b in zip(idx, idx[1:]))
+    fixed_w = sum(fixed[i] for i in idx)
+    budgets = [1 if (active[i] and flex[i] > 0) else 0 for i in range(len(tokens))]
+    remaining = max(0, max(0, max_width - (sep_w + fixed_w)) - sum(budgets))
+    while remaining > 0:
+        grew = False
+        for i in range(len(tokens)):
+            if 0 < budgets[i] < flex[i]:
+                budgets[i] += 1
+                remaining -= 1
+                grew = True
+                if remaining == 0:
+                    break
+        if not grew:
+            break
+    out = []
+    for pos, i in enumerate(idx):
+        kind, text = tokens[i]
+        out.append((i, sep(idx[pos - 1], i) if pos else "",
+                    text if kind == "icon" else truncate_end(text, budgets[i])))
+    return out
+
+
+# ── src/ui/text.rs ────────────────────────────────────────────────────
+
+def truncate_end(text, max_width):
+    """src/ui/text.rs:12-25: cut to a display width, ending in an ellipsis."""
+    if display_width(text) <= max_width:
+        return text
+    if max_width == 0:
+        return ""
+    if max_width == 1:
+        return "…"
+    out, used = "", 0
+    for ch in text:
+        width = display_width(ch)
+        if used + width > max_width - 1:
+            break
+        out += ch
+        used += width
+    return out + "…"
+
+
+# ── src/ui/status.rs ──────────────────────────────────────────────────
+
+def state_dot(state, seen):
+    """src/ui/status.rs:196-204 (colors double as state_label_color, 216-224):
+    ``state`` is herdr's AgentState name, ``seen`` its pane.seen flag."""
+    if state == "blocked":
+        return "●", PALETTE["red"]
+    if state == "working":
+        return "●", PALETTE["yellow"]
+    if state == "idle" and not seen:
+        return "●", PALETTE["teal"]
+    if state == "idle":
+        return "○", PALETTE["green"]
+    return "·", OVERLAY0
+
+
+def state_label(state, seen):
+    """src/ui/status.rs:206-214."""
+    if state in ("blocked", "working"):
+        return state
+    return "done" if (state == "idle" and not seen) else "idle"
+
+
+def attention_priority(state, seen):
+    """src/workspace/aggregate.rs:75-83: Blocked > done (idle, unseen) > Working > Idle > Unknown."""
+    if state == "blocked":
+        return 4
+    if state == "working":
+        return 2
+    if state == "idle":
+        return 1 if seen else 3
+    return 0
 
 
 # ── src/ui/tabs.rs ────────────────────────────────────────────────────

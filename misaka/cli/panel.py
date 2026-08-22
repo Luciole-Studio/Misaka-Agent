@@ -1,8 +1,8 @@
 """Multi-pane panel: MISAKA's default entry point (herdr-style; geometry from herdr_ui).
 
 Rendering: the daemon keeps a terminal emulator per pane; the panel subscribes
-to dirty rows from every pane and lays them out itself: a sidebar on the left
-(Sister roster plus the Windows/Projects sections), a tab row at the top of the
+to dirty rows from every pane and lays them out itself: herdr's sidebar on the left
+(spaces = folders on top, agents = panes below), a tab row at the top of the
 main area, and a per-tab BSP split tree (splitting only the focused pane; each
 pane gets a border and joints are merged). Colors come from the engine's
 built-in dark/light theme, adapted to the terminal background; only herdr's
@@ -16,7 +16,6 @@ x close pane | d detach | ? key help | ctrl+b again sends a literal ctrl+b.
 import base64
 import fcntl
 import json
-import math
 import os
 import re
 import select
@@ -29,7 +28,6 @@ import time
 import unicodedata
 
 from misaka.cli import herdr_ui as hui
-from misaka.config import sisters as _sisters_roster
 from misaka.net import client as net
 
 def _prefix_key():
@@ -43,53 +41,13 @@ def _prefix_key():
 
 PREFIX = _prefix_key()
 POLL_SECONDS = 2.0
-SIDEBAR_W = 24            # Sidebar width in columns; the divider sits at SIDEBAR_W+1 and the main area starts one column later.
+SIDEBAR_W = 26            # herdr ui.sidebar_width default (config/model.rs:1010); the separator column is the last one.
+SIDEBAR_COLLAPSED_W = 4   # herdr ui.rs:229: the collapsed sidebar.
+SIDEBAR_SECTION_SPLIT = 0.5   # herdr app/state.rs:1848 sidebar_section_split.
 _MOUSE = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
 _MOUSE_X10 = re.compile(rb"\x1b\[M[\x20-\xff]{3}")   # Legacy X10 mouse reports (some terminals lack SGR mode).
 # Word-break characters for double-click selection (herdr's embedded set) plus whitespace.
 _WORD_BREAK = set(" \t" + "!\"#$%&'()*+,-./:;<=>?@[\\]^`{|}~")
-
-_P = hui.PALETTE
-# Windows section: a pulsing dot on the left while a card is actually running,
-# a status word on the right.
-BREATH_SECONDS = 1.6             # One full pulse (Claude Code-style fade).
-BREATH_FPS = 0.12                # Redraw interval for the fade.
-# Only terminal and waiting states get a word; "running" is the pulsing dot alone.
-_STATUS_WORD = {
-    "review": ("review", hui.sgr_fg(_P["plum"])),
-    "verifying": ("verify", hui.sgr_fg(_P["plum"])),
-    "finalizing": ("verify", hui.sgr_fg(_P["plum"])),
-    "ready": ("ready", hui.sgr_fg(hui.OVERLAY0)),
-    "failed": ("failed", hui.sgr_fg(_P["red"])),
-    "stopped": ("stopped", hui.sgr_fg(_P["plum"])),
-    "done": ("done", hui.sgr_fg(hui.OVERLAY0)),
-}
-_UNSEEN_WORD = {                 # Finished but not yet viewed: bright (herdr's "done, nobody looked").
-    "done": ("done", hui.sgr_fg(_P["green"])),
-    "failed": ("failed", hui.sgr_fg(_P["red"])),
-    "stopped": ("stopped", hui.sgr_fg(_P["plum"])),
-}
-
-
-def breath_level(now, period=BREATH_SECONDS):
-    """Breathing phase in 0..1 (sine, so it fades rather than blinks). Pure, so testable."""
-    return (math.sin(2 * math.pi * (now % period) / period) + 1) / 2
-
-
-# Pulse range for the running indicator: dark and bright versions of the theme green.
-DOT_DIM = tuple(round(c * 0.42) for c in _P["green"])
-DOT_BRIGHT = tuple(min(255, round(c * 1.28)) for c in _P["green"])
-
-
-def busy_dot(busy, level, dim=None, bright=None):
-    """Running indicator: a green dot fading between dim and bright while busy, a space otherwise.
-    ``level`` comes from breath_level(). The result carries no reset sequence on purpose;
-    one would wipe the selection background."""
-    if not busy:
-        return " "
-    color = hui.blend(dim or DOT_DIM, bright or DOT_BRIGHT, level)
-    return f"{hui.sgr_fg(color)}●"
-
 
 _wcwidth = hui.display_width
 
@@ -103,22 +61,6 @@ NESTED_MESSAGES = [
     "Recursive panels make terrible roommates.",
     "One panel is enough for this pane.",
 ]
-
-
-def next_tile_placement(tree):
-    """MISAKA's default tiling rule (not from herdr): at most two panes per column,
-    stacking first, then opening a new column on the right once a column is full.
-    Returns ``(pane_to_split, direction)``; ``None`` means wrap the whole tree (new column). Pure, so testable.
-
-        1 [A]   2 [A]   3 [A][C]   4 [A][C]   5 [A][C][E]
-                  [B]     [B]        [B][D]     [B][D]
-    """
-    ids = hui.pane_ids(tree)
-    if len(ids) % 2 == 0:                      # Every column holds two: open a new column on the right.
-        return None, "h"
-    placed = hui.collect_panes(tree, hui.Rect(0, 0, 1000, 1000), ids[0])
-    rightmost = max(placed, key=lambda item: (item[1].x, -item[1].y))
-    return rightmost[0], "v"                   # Stack inside the rightmost column.
 
 
 def render_tab_bar(tab_names, active_index, view, area, tab_scroll=0):
@@ -194,187 +136,318 @@ def render_tab_bar(tab_names, active_index, view, area, tab_scroll=0):
     return "".join(out)
 
 
-_CARD_GLYPH = {          # Status glyphs for card rows under an expanded project: done in theme rose, muted for unfinished.
-    "running": ("●", "green"), "review": ("◇", "plum"),
-    "verifying": ("◆", "plum"), "finalizing": ("◆", "plum"),
-    "ready": ("○", "overlay"), "done": ("✓", "accent"),
-    "failed": ("✗", "red"), "stopped": ("■", "plum"),
-}
+# ── Sidebar: src/ui/sidebar.rs render_sidebar / render_sidebar_collapsed on a cell canvas ──
+
+class _Canvas:
+    """A cell grid standing in for ratatui's Buffer: every cell keeps its own symbol and
+    style, later writes patch earlier ones (a bg fill survives the text drawn over it, like
+    ratatui's Cell::set_style), and each row serializes to one ANSI string."""
+
+    def __init__(self, width, height):
+        self.width, self.height = width, height
+        self.cells = [[[" ", None, None, False, False] for _ in range(width)]
+                      for _ in range(height)]
+
+    def put(self, x, y, text, fg=None, bg=None, bold=False, dim=False, clip=None):
+        """Write ``text`` at (x, y); ``clip`` is the widget rect's exclusive right edge."""
+        if not 0 <= y < self.height:
+            return
+        limit = self.width if clip is None else min(clip, self.width)
+        for ch in text:
+            w = _wcwidth(ch)
+            if x + w > limit:
+                break
+            if x >= 0:
+                self._patch(x, y, ch, fg, bg, bold, dim)
+                if w == 2:                       # A wide character also owns the next cell.
+                    self._patch(x + 1, y, "", fg, bg, bold, dim)
+            x += w
+
+    def _patch(self, x, y, symbol, fg, bg, bold, dim):
+        cell = self.cells[y][x]
+        cell[0] = symbol
+        if fg is not None:
+            cell[1] = fg
+        if bg is not None:
+            cell[2] = bg
+        cell[3] = cell[3] or bold
+        cell[4] = cell[4] or dim
+
+    def fill_bg(self, x0, x1, y, bg):
+        """Buffer-wide background fill of one row span (sidebar.rs:1082-1091 highlighted rows)."""
+        if 0 <= y < self.height:
+            for x in range(max(0, x0), min(x1, self.width)):
+                self.cells[y][x][2] = bg
+
+    def row(self, y):
+        out, last = [], None
+        for symbol, fg, bg, bold, dim in self.cells[y]:
+            if symbol == "":
+                continue
+            style = (fg, bg, bold, dim)
+            if style != last:
+                out.append("\x1b[0m" + (hui.sgr_fg(fg) if fg else "")
+                           + (hui.sgr_bg(bg) if bg else "")
+                           + ("\x1b[1m" if bold else "") + ("\x1b[2m" if dim else ""))
+                last = style
+            out.append(symbol)
+        out.append("\x1b[0m")
+        return "".join(out)
 
 
-def _row(body, body_w, selected):
-    """Finish one sidebar row: one blank column on each side; a selected row is covered
-    in surface0 (herdr sidebar.rs:791), re-applied after every reset so the block is not broken."""
-    body += " " * max(0, (SIDEBAR_W - 2) - body_w)
-    if selected:
-        bg = hui.sgr_bg(hui.SURFACE0)
-        body = bg + body.replace("\x1b[0m", "\x1b[0m" + bg) + "\x1b[0m"
-    else:
-        body += "\x1b[0m"
-    return " " + body + " "
+def pane_state(pane):
+    """The one bridge from MISAKA pane fields to herdr's (AgentState, pane.seen) pair:
+    busy = working, a card waiting for review = blocked, a finished card nobody looked at =
+    done (idle + unseen), otherwise idle; a dead pane = unknown. Pure, so testable."""
+    if not pane["alive"]:
+        return "unknown", True
+    if pane.get("busy"):
+        return "working", True
+    if pane.get("status") == "review":
+        return "blocked", True
+    if pane.get("unseen"):
+        return "idle", False
+    return "idle", True
 
 
-def _alloc_sections(rows, wants):
-    """Split the sidebar height across the three sections (one divider row between each):
-    the smallest requests are satisfied first, then leftovers go to the rest in order.
-    Not from herdr (it has only two sections, sidebar.rs:42). Pure, so testable."""
-    avail = max(0, rows - (len(wants) - 1))
-    alloc = [0] * len(wants)
-    left = avail
-    order = sorted(range(len(wants)), key=lambda i: wants[i])
-    for pos, i in enumerate(order):
-        share = left // (len(order) - pos)
-        alloc[i] = min(wants[i], share)
-        left -= alloc[i]
-    for i in range(len(wants)):
-        if left <= 0:
+def sidebar_model(listing, focused_id, tab_count=1, tab_of=None):
+    """Shape the pane listing into herdr's two lists. A space is a workspace = the folder its
+    panes run in (workspace.rs identity cwd), labelled by the last path component and marked
+    with its most attention-worthy pane (aggregate.rs:86-99); an agent entry is one pane that
+    runs something other than a bare shell (aggregate.rs:29-69 lists only panes with an
+    agent). Pure, so testable."""
+    tab_of = tab_of or {}
+    home = os.path.expanduser("~")
+    spaces, by_key = [], {}
+    for pane in listing:
+        key = os.path.realpath(pane.get("cwd") or os.getcwd())
+        if key not in by_key:
+            label = "~" if key == home else (os.path.basename(key.rstrip(os.sep)) or key)
+            by_key[key] = {"key": key, "label": label, "first": None, "active": False,
+                           "state": "unknown", "seen": True}
+            spaces.append(by_key[key])
+        space = by_key[key]
+        state, seen = pane_state(pane)
+        if space["first"] is None or (pane["alive"] and not space["first_alive"]):
+            space["first"], space["first_alive"] = pane["id"], pane["alive"]
+        if pane["id"] == focused_id:
+            space["active"] = True
+        if (hui.attention_priority(state, seen)
+                > hui.attention_priority(space["state"], space["seen"])):
+            space["state"], space["seen"] = state, seen
+    agents = []
+    for pane in listing:
+        if pane["title"] == "shell":          # ponytail: MISAKA's own shell panes carry this title
+            continue
+        state, seen = pane_state(pane)
+        key = os.path.realpath(pane.get("cwd") or os.getcwd())
+        tab = tab_of.get(pane["id"])
+        agents.append({"pane": pane["id"], "space": by_key[key]["label"],
+                       # workspace.rs:488-495 tab_display_name: auto-named tabs show their number.
+                       "tab": str(tab + 1) if (tab_count > 1 and tab is not None) else None,
+                       "agent": pane["title"] or pane["id"], "state": state, "seen": seen,
+                       "active": pane["id"] == focused_id})
+    return spaces, agents
+
+
+def _sorted_agents(agents, sort):
+    """app/state.rs AgentPanelSort: "grouped" keeps space order; "priority" puts the entries
+    that need attention first (stable, so ties keep the grouped order)."""
+    if sort != "priority":
+        return list(agents)
+    return sorted(agents, key=lambda a: -hui.attention_priority(a["state"], a["seen"]))
+
+
+def _put_tokens(canvas, x, y, tokens, max_width, clip):
+    """sidebar.rs:818-936 resolved_token_spans, the drawing half: separators in overlay0 dim,
+    each token in its own style, widths from herdr_ui.fit_tokens.
+    ``tokens`` = [(kind, text, style kwargs)]."""
+    for index, sep, shown in hui.fit_tokens([(k, t) for k, t, _s in tokens], max_width):
+        if sep:
+            canvas.put(x, y, sep, fg=hui.OVERLAY0, dim=True, clip=clip)
+            x += _wcwidth(sep)
+        canvas.put(x, y, shown, clip=clip, **tokens[index][2])
+        x += _wcwidth(shown)
+
+
+def _put_scrollbar(canvas, metrics, track):
+    """scrollbar.rs:135-162 render_scrollbar as the sidebar calls it (sidebar.rs:1192, 1315):
+    track and thumb are both "▕", surface_dim under overlay0."""
+    thumb = hui.scrollbar_thumb(metrics, track)
+    if thumb is None:
+        return
+    for y in range(track.y, track.y + track.height):
+        canvas.put(track.x, y, "▕", fg=hui.PALETTE["surface_dim"])
+    top, length = thumb
+    for y in range(top, min(top + length, track.y + track.height)):
+        canvas.put(track.x, y, "▕", fg=hui.OVERLAY0)
+
+
+def _render_spaces(canvas, spaces, area, scroll, hits):
+    """sidebar.rs:1040-1183 render_workspace_list with the default rows (state icon + name;
+    the branch row needs git data MISAKA does not collect, so every entry is one row tall).
+    Returns the section's scroll state for the wheel."""
+    P = hui.PALETTE
+    list_bottom = area.y + max(0, area.height - 1)
+    if area.height > 0:
+        canvas.put(area.x, area.y, " spaces", fg=hui.OVERLAY0, bold=True,
+                   clip=area.x + area.width)
+    heights = [1] * len(spaces)
+    body = hui.workspace_list_body_rect(area, False)
+    metrics = hui.list_scroll_metrics(heights, body.height, scroll)
+    scroll = min(scroll, metrics["max_offset_from_bottom"])
+    has_bar = hui.should_show_scrollbar(metrics) and body.width > 0 and body.height > 0
+    body = hui.workspace_list_body_rect(area, has_bar)
+    row_y, body_bottom = body.y, body.y + body.height
+    for space in spaces[scroll:]:
+        height = min(1, body.height)
+        if height == 0 or row_y + height > body_bottom:
             break
-        extra = min(left, wants[i] - alloc[i])
-        alloc[i] += extra
-        left -= extra
-    return alloc
+        card = hui.Rect(body.x, row_y, body.width, height)
+        if space["active"] and row_y < list_bottom:     # 1082-1091: the active space sits on surface_dim
+            canvas.fill_bg(card.x, card.x + card.width, row_y, P["surface_dim"])
+        name = ({"fg": hui.TEXT, "bold": True} if space["active"]
+                else {"fg": P["subtext0"]})                # 1094-1098
+        glyph, color = hui.state_dot(space["state"], space["seen"])
+        canvas.put(card.x, row_y, " ", clip=card.x + card.width)   # 1137-1139: one-column prefix
+        _put_tokens(canvas, card.x + 1, row_y,
+                    [("icon", glyph, {"fg": color}), ("text", space["label"], name)],
+                    max(0, card.width - 1), card.x + card.width)
+        hits.append((card, ("pane", space["first"])))
+        row_y += height
+    if has_bar:
+        _put_scrollbar(canvas, metrics,
+                       hui.Rect(area.x + area.width - 1, body.y, 1, body.height))
+    if list_bottom > area.y:                              # 1196-1218 footer (mouse_capture is always on here)
+        new_rect = hui.sidebar_new_button_rect(area)
+        canvas.put(new_rect.x, new_rect.y, " new", fg=hui.OVERLAY0,
+                   clip=new_rect.x + new_rect.width)
+        hits.append((new_rect, ("new",)))
+        menu_rect = hui.global_launcher_rect(area)
+        canvas.put(menu_rect.x + max(0, menu_rect.width - 4), menu_rect.y, "menu",
+                   fg=hui.OVERLAY0, clip=menu_rect.x + menu_rect.width)
+        hits.append((menu_rect, ("menu",)))
+    return {"rect": area, "scroll": scroll, "max_scroll": metrics["max_offset_from_bottom"]}
 
 
-def format_sidebar(panes, focused_id, rows, roster=(), projects=(),
-                   expanded=(), scrolls=None, level=1.0, selected=None):
-    """The three sidebar sections: Sisters roster | Projects (a project is a folder; click to
-    expand its cards) | Windows (pane list).
-    A section taller than its slot gets a thin scrollbar in its last column.
-    Returns ``(lines, targets, spans)``; ``targets`` parallels ``lines``:
-    None | ("roster", name) | ("pane", id) | ("proj", project_id) | ("card", card_id). Pure, so testable."""
+def _render_agents(canvas, agents, area, scroll, sort, hits):
+    """sidebar.rs:1189-1318 render_agent_detail with the default rows: state icon + space
+    (+ tab number when there are several tabs), then the agent name on a second line."""
+    P = hui.PALETTE
+    state = {"rect": area, "scroll": 0, "max_scroll": 0}
+    if area.height < 3:
+        return state
+    clip = area.x + area.width
+    canvas.put(area.x, area.y, "─" * area.width, fg=P["surface_dim"], clip=clip)
+    canvas.put(area.x, area.y + 1, " agents", fg=hui.OVERLAY0, bold=True, clip=clip)
+    label = "priority" if sort == "priority" else "grouped"     # 86-91 agent_panel_sort_label
+    toggle = hui.agent_panel_header_label_rect(area, label)
+    if toggle != hui.RECT_DEFAULT:
+        canvas.put(toggle.x, toggle.y, label, fg=hui.OVERLAY0, bold=True,
+                   clip=toggle.x + toggle.width)
+        hits.append((toggle, ("sort",)))
+    heights = [2] * len(agents)
+    body = hui.agent_panel_body_rect(area, False)
+    metrics = hui.list_scroll_metrics(heights, body.height, scroll)
+    scroll = min(scroll, metrics["max_offset_from_bottom"])
+    has_bar = hui.should_show_scrollbar(metrics) and body.width > 0 and body.height > 0
+    body = hui.agent_panel_body_rect(area, has_bar)
+    state.update(scroll=scroll, max_scroll=metrics["max_offset_from_bottom"])
+    if body == hui.RECT_DEFAULT:
+        return state
+    row_y, body_bottom = body.y, body.y + body.height
+    agent_style = {"fg": hui.OVERLAY0, "dim": True}
+    for entry in agents[scroll:]:
+        height = min(2, body.height)
+        if row_y + height > body_bottom:
+            break
+        glyph, color = hui.state_dot(entry["state"], entry["seen"])
+        if entry["active"]:                                   # Paragraph.style(row_style): the whole row
+            for y in range(row_y, row_y + height):
+                canvas.fill_bg(body.x, body.x + body.width, y, P["surface_dim"])
+        name = ({"fg": hui.TEXT, "bold": True} if entry["active"]
+                else {"fg": P["subtext0"], "bold": True})
+        first = [("icon", glyph, {"fg": color}), ("text", entry["space"], name)]
+        if entry["tab"]:
+            first.append(("text", entry["tab"], agent_style))
+        lines = [(" ", first), ("   ", [("text", entry["agent"], agent_style)])]
+        for offset, (prefix, tokens) in enumerate(lines[:height]):
+            canvas.put(body.x, row_y + offset, prefix, clip=body.x + body.width)
+            _put_tokens(canvas, body.x + len(prefix), row_y + offset, tokens,
+                        max(0, body.width - len(prefix)), body.x + body.width)
+        hits.append((hui.Rect(body.x, row_y, body.width, height), ("pane", entry["pane"])))
+        row_y += height
+    if has_bar:
+        _put_scrollbar(canvas, metrics,
+                       hui.Rect(area.x + area.width - 1, body.y, 1, body.height))
+    return state
+
+
+def _render_collapsed(canvas, spaces, agents, area, hits):
+    """sidebar.rs:790-904 render_sidebar_collapsed: a numbered space glance on top, the
+    divider, then position-numbered agent marks; "»" expands again."""
+    P = hui.PALETTE
+    ws_area, divider_y, detail_area = hui.collapsed_sidebar_sections(area)
+    if ws_area != hui.RECT_DEFAULT:
+        clip = ws_area.x + ws_area.width
+        for index, space in enumerate(spaces):
+            y = ws_area.y + index
+            if y >= ws_area.y + ws_area.height:
+                break
+            glyph, color = hui.state_dot(space["state"], space["seen"])
+            if space["active"]:
+                canvas.fill_bg(ws_area.x, clip, y, P["surface_dim"])
+            number = str(index + 1)
+            canvas.put(ws_area.x, y, number,
+                       fg=hui.TEXT if space["active"] else hui.OVERLAY0, clip=clip)
+            canvas.put(ws_area.x + len(number) + 1, y, glyph, fg=color, clip=clip)
+            hits.append((hui.Rect(ws_area.x, y, ws_area.width, 1), ("pane", space["first"])))
+        if divider_y is not None:
+            canvas.put(ws_area.x, divider_y, "─" * ws_area.width, fg=P["surface_dim"], clip=clip)
+        content = hui.Rect(detail_area.x, detail_area.y, detail_area.width,
+                           max(0, detail_area.height - 1))
+        if content != hui.RECT_DEFAULT:
+            for index, entry in enumerate(agents):
+                y = content.y + index
+                if y >= content.y + content.height:
+                    break
+                glyph, color = hui.state_dot(entry["state"], entry["seen"])
+                canvas.put(content.x, y, f"{index + 1:<2}", fg=hui.OVERLAY0,
+                           clip=content.x + content.width)
+                canvas.put(content.x + 2, y, glyph, fg=color, clip=content.x + content.width)
+                hits.append((hui.Rect(content.x, y, content.width, 1), ("pane", entry["pane"])))
+    toggle = hui.collapsed_sidebar_toggle_rect(area)
+    canvas.put(toggle.x, toggle.y, "»", fg=hui.OVERLAY0)
+    hits.append((toggle, ("toggle",)))
+
+
+def format_sidebar(spaces, agents, width, rows, *, collapsed=False, scrolls=None,
+                   sort="grouped"):
+    """src/ui/sidebar.rs render_sidebar (1011-1035) / render_sidebar_collapsed (790-904) on a
+    canvas covering the whole sidebar rect, separator column included.
+    Returns ``(lines, hits, sections)``: one ANSI string per screen row; ``hits`` =
+    [(Rect, action)] in draw order (search it backwards, the last drawn wins); ``sections``
+    = per-section scroll state for the wheel. Pure, so testable."""
     scrolls = scrolls or {}
-    heading = f"{hui.sgr_fg(hui.OVERLAY1)}\x1b[1m"
-
-    def pad(text, visible):
-        return text + " " * max(0, SIDEBAR_W - visible)
-
-    def live_pane_for(name):
-        title = "Last Order" if name == "last-order" else name
-        for pane in panes:
-            if pane["alive"] and (pane["title"] == title
-                                  or pane["title"].startswith(title + "·")):
-                return pane["id"]
-        return None
-
-    sisters = []
-    for name in roster:
-        live = live_pane_for(name)
-        dot = (f"{hui.sgr_fg(_P['plum'])}●" if live
-               else f"{hui.sgr_fg(hui.OVERLAY0)}○")
-        shown, shown_w = _cut("Last Order" if name == "last-order" else name,
-                              SIDEBAR_W - 5)
-        sisters.append((pad(f" {dot}\x1b[0m {shown}", 3 + shown_w),
-                        ("pane", live) if live else ("roster", name)))
-    # Allies: third-party agents running inside MISAKA. Marked with a star and listed
-    # only while the process is alive; they are never written to the roster file.
-    for pane in panes:
-        if not pane["alive"] or not pane.get("ally"):
-            continue
-        star = (f"{hui.sgr_fg(hui.ACCENT)}★" if pane.get("busy")
-                else f"{hui.sgr_fg(_P['plum'])}☆")
-        shown, shown_w = _cut(pane["ally"], SIDEBAR_W - 5)
-        sisters.append((pad(f" {star}\x1b[0m {shown}", 3 + shown_w),
-                        ("pane", pane["id"])))
-
-    projs = []
-    for proj in projects:
-        project_id = proj.get("id")
-        name = proj["name"]
-        shown = name if name is not None else '(unclassified)'
-        arrow = "▾" if (project_id in expanded) else "▸"
-        live_n = sum(1 for c in proj["cards"]
-                     if c["status"] in ("ready", "running", "review", "verifying", "finalizing"))
-        label = str(live_n) if live_n else ""
-        inner = SIDEBAR_W - 2
-        shown, shown_w = _cut(shown, max(4, inner - 5 - _wcwidth(label)))
-        left = f"{arrow} {shown}"
-        left_w = 2 + shown_w
-        gap = max(1, inner - left_w - _wcwidth(label))
-        projs.append((_row(f"{left}{' ' * gap}{hui.sgr_fg(hui.OVERLAY0)}{label}\x1b[0m",
-                           left_w + gap + _wcwidth(label),
-                           selected == ("proj", project_id)),
-                      ("proj", project_id)))
-        if project_id in expanded:
-            for card in proj["cards"]:
-                glyph, tone_key = _CARD_GLYPH.get(card["status"], ("?", "overlay"))
-                color = (hui.sgr_fg(hui.OVERLAY0) if tone_key == "overlay"
-                         else hui.sgr_fg(_P[tone_key]))
-                title, title_w = _cut(card["title"], SIDEBAR_W - 7)
-                projs.append((_row(f"  {color}{glyph}\x1b[0m {title}", 4 + title_w,
-                                   selected == ("card", card["id"])),
-                              ("card", card["id"])))
-
-    windows = []
-    for index, pane in enumerate(panes, 1):
-        status = pane.get("status") or ""
-        busy = pane.get("busy", False)
-        if not pane["alive"]:
-            glyph, (label, color) = " ", ("exited", hui.sgr_fg(_P["red"]))
-        else:
-            glyph = busy_dot(busy, level)     # The left column only says "running right now".
-            label, color = "", ""
-            if pane["card"]:
-                if pane.get("unseen"):
-                    label, color = _UNSEEN_WORD.get(status, ("", ""))
-                elif status != "running":
-                    label, color = _STATUS_WORD.get(status, ("", ""))
-        mail = (f"{hui.sgr_fg(_P['red'])}✉{pane['mail']}\x1b[0m"
-                if pane.get("mail") else "")
-        mail_w = (1 + len(str(pane["mail"]))) if pane.get("mail") else 0
-        inner_w = SIDEBAR_W - 2               # One blank column on each side.
-        name, name_w = _cut(pane["title"] or pane["id"], inner_w - 9 - mail_w)
-        left = f"{index}. {glyph} {name}{mail}"
-        left_w = len(f"{index}. ") + 1 + 1 + name_w + mail_w
-        gap = max(1, inner_w - left_w - len(label))
-        windows.append((_row(left + " " * gap + f"{color}{label}",
-                             left_w + gap + len(label),
-                             pane["id"] == focused_id),
-                        ("pane", pane["id"])))
-
-    sections = [("sisters", "Sisters", sisters),
-                ("windows", "Windows", windows),
-                ("projects", "Projects", projs)]
-    alloc = _alloc_sections(rows, [1 + len(body) for _k, _t, body in sections])
-    lines, targets, spans = [], [], []
-    for idx, (key, title, body) in enumerate(sections):
-        if idx:
-            lines.append(hui.sgr_fg(hui.OVERLAY0) + "─" * SIDEBAR_W + "\x1b[0m")
-            targets.append(None)
-        height = alloc[idx]
-        if height <= 0:
-            spans.append({"key": key, "y0": len(lines) + 1, "height": 0,
-                          "scroll": 0, "total": len(body)})
-            continue
-        lines.append(pad(f" {heading}{title}\x1b[0m", 1 + len(title)))
-        targets.append(None)
-        vis = height - 1
-        total = len(body)
-        scroll = max(0, min(scrolls.get(key, 0), max(0, total - vis)))
-        spans.append({"key": key, "y0": len(lines) + 1, "height": vis,
-                      "scroll": scroll, "total": total})
-        window = body[scroll: scroll + vis]
-        for line, target in window:
-            lines.append(line)
-            targets.append(target)
-        for _ in range(vis - len(window)):
-            lines.append(" " * SIDEBAR_W)
-            targets.append(None)
-        if total > vis and vis > 0:          # Overflow: thin track plus thumb in the last column.
-            metrics = {"offset_from_bottom": total - vis - scroll,
-                       "max_offset_from_bottom": total - vis, "viewport_rows": vis}
-            thumb = hui.scrollbar_thumb(metrics, hui.Rect(0, 0, 1, vis))
-            base = len(lines) - vis
-            for j in range(vis):
-                on_thumb = thumb and thumb[0] <= j < thumb[0] + thumb[1]
-                glyph = (hui.sgr_fg(hui.OVERLAY1) if on_thumb
-                         else hui.sgr_fg(hui.PALETTE["surface1"])) + "▕\x1b[0m"
-                lines[base + j] = lines[base + j][:-1] + glyph
-    while len(lines) < rows:
-        lines.append(" " * SIDEBAR_W)
-        targets.append(None)
-    # Final clamp: no row may be wider than the sidebar, even if something upstream skipped _cut.
-    lines = [_clamp_row(line, SIDEBAR_W) for line in lines]
-    return lines[:rows], targets[:rows], spans
+    hits, sections = [], {}
+    if width == 0 or rows == 0:
+        return [], hits, sections
+    canvas = _Canvas(width, rows)
+    area = hui.Rect(0, 0, width, rows)
+    for y in range(rows):                 # 1023-1027: the separator, surface_dim outside navigate mode
+        canvas.put(width - 1, y, "│", fg=hui.PALETTE["surface_dim"])
+    if collapsed:
+        _render_collapsed(canvas, spaces, _sorted_agents(agents, sort), area, hits)
+    else:
+        ws_area, detail_area = hui.expanded_sidebar_sections(area, SIDEBAR_SECTION_SPLIT)
+        sections["spaces"] = _render_spaces(canvas, spaces, ws_area,
+                                            scrolls.get("spaces", 0), hits)
+        sections["agents"] = _render_agents(canvas, _sorted_agents(agents, sort), detail_area,
+                                            scrolls.get("agents", 0), sort, hits)
+        toggle = hui.expanded_sidebar_toggle_rect(area)       # 1531-1553: "«" collapses
+        canvas.put(toggle.x, toggle.y, "«", fg=hui.OVERLAY0)
+        hits.append((toggle, ("toggle",)))
+    return [canvas.row(y) for y in range(rows)], hits, sections
 
 
 def draw_scrollbar(metrics, track, focused):
@@ -516,19 +589,6 @@ def _clamp_row(line, width):
         used += w
         i += 1
     return "".join(out) + "\x1b[0m" + " " * (width - used)
-
-
-def format_card_menu(card_id, width=46):
-    """Card context menu: delete only (destructive). Same layout as the key help. Pure, so testable."""
-    rows = [("d", "Delete card + history (cannot undo)"), ("", "Any other key closes")]
-    inner = width - 2
-    title, tw = _cut(f"─ Card: {card_id} ", inner)
-    lines = ["┌" + title + "─" * (inner - tw) + "┐"]
-    for key, desc in rows:
-        body, bw = _cut(f"  {key}" + " " * max(1, 4 - len(key)) + desc, inner)
-        lines.append("│" + body + " " * (inner - bw) + "│")
-    lines.append("└" + "─" * inner + "┘")
-    return lines
 
 
 def format_help_lines(width=46):
@@ -710,7 +770,12 @@ def launch():
 
 
     rows, cols = _term_size()
-    main_col = SIDEBAR_W + 2      # First column of the main area (herdr: flush against the sidebar border).
+    # Sidebar state (herdr AppState: sidebar_width / sidebar_collapsed / agent_panel_sort).
+    side = {"w": SIDEBAR_W, "collapsed": False, "sort": "grouped"}
+
+    def main_col():
+        """First (1-based) column of the main area: flush against the sidebar separator."""
+        return side["w"] + 1
     tab_scroll, tab_follow = 0, True   # herdr tab_scroll / tab_scroll_follow_active
     resized = {"hit": True}
     signal.signal(signal.SIGWINCH, lambda *_a: resized.update(hit=True))
@@ -752,20 +817,7 @@ def launch():
 
     chrome_cache = {"rows": []}       # Only changed rows are written (herdr's row-level diffing).
     chrome_state = {"chromed": [], "area": None, "tracks": []}   # Border and scrollbar geometry.
-    # Roster and projects hit the filesystem and database, while the fade repaints every
-    # 0.12 s; cache them and refresh only with the status poll.
-    roster_cache = {"names": ["last-order", *sorted(_sisters_roster())]}
-    projects_cache = {"items": []}
-    expanded_projects = set()      # Projects whose card list is expanded.
-    side_scrolls = {}              # Scroll offset per section (sisters/projects/windows).
-    side_selected = [None]         # Last clicked row in Projects: ("proj", id) or ("card", id).
-
-    def refresh_projects():
-        try:
-            projects_cache["items"] = control.request(
-                "projects.list", {"workspace": workspace})["projects"]
-        except (RuntimeError, ConnectionError):
-            pass
+    side_scrolls = {}              # Scroll offset (in entries) per sidebar section: spaces / agents.
     scroll_state = {}    # pane id -> {"metrics": ..., "alt": bool} (scroll readings from the daemon)
 
     def draw_borders():
@@ -789,13 +841,16 @@ def launch():
                     out.append(f"\x1b[{y + 1};{gutter.x + 1}H ")
         out.append("\x1b[?2026l")
         paint("".join(out).encode())
-    ui_map = {"bar": None, "targets": []}   # Mouse hit areas: tab bar geometry plus sidebar target table.
+    ui_map = {"bar": None, "hits": [], "sections": {}}   # Mouse hit areas: tab bar geometry plus sidebar hit rects.
+
+    def tab_index_of():
+        return {pid: idx for idx, tree in enumerate(tabs) for pid in hui.pane_ids(tree)}
 
     def draw_sidebar():
         nonlocal tab_scroll
         sync_tabs()
         names = [tab_label(tab) for tab in tabs]
-        view = hui.compute_view(hui.Rect(0, 0, cols, rows), SIDEBAR_W + 1, len(tabs))
+        view = hui.compute_view(hui.Rect(0, 0, cols, rows), side["w"], len(tabs))
         # mouse_chrome=True: herdr's "+" new-tab button and overflow scroll buttons.
         bar = hui.compute_tab_bar_view(names, active_tab(), view["tab_bar_rect"],
                                        tab_scroll, tab_follow, True)
@@ -803,15 +858,15 @@ def launch():
         ui_map["bar"] = bar
         tab_line = render_tab_bar(names, active_tab(), bar, view["tab_bar_rect"],
                                   tab_scroll)
-        side_lines, ui_map["targets"], ui_map["spans"] = format_sidebar(
-            listing, focused, rows, roster=roster_cache["names"],
-            projects=projects_cache["items"], expanded=expanded_projects,
-            scrolls=side_scrolls, level=breath_level(time.monotonic()),
-            selected=side_selected[0])
+        spaces, agents = sidebar_model(listing, focused, len(tabs), tab_index_of())
+        side_lines, ui_map["hits"], ui_map["sections"] = format_sidebar(
+            spaces, agents, side["w"], rows, collapsed=side["collapsed"],
+            scrolls=side_scrolls, sort=side["sort"])
+        for key, section in ui_map["sections"].items():   # herdr ui.rs:247-252: compute_view clamps the scroll.
+            side_scrolls[key] = section["scroll"]
         wanted = []
         for row, line in enumerate(side_lines, 1):
-            cell = (f"\x1b[{row};1H{line}\x1b[0m\x1b[{row};{SIDEBAR_W + 1}H"
-                    f"{hui.sgr_fg(hui.OVERLAY0)}│\x1b[0m")
+            cell = f"\x1b[{row};1H{line}"
             if row == 1:
                 cell += (f"\x1b[1;{view['tab_bar_rect'].x + 1}H\x1b[K"
                          f"\x1b[1;{view['tab_bar_rect'].x + 1}H{tab_line}")
@@ -830,22 +885,22 @@ def launch():
         # herdr: entering prefix mode pops a mode bar on the bottom row (menus.rs
         # render_prefix_overlay). It spans only the main area; the sidebar is permanent
         # navigation and must not be covered.
-        width = max(10, cols - SIDEBAR_W - 1)
-        paint(f"\x1b[?2026h\x1b[{rows};{main_col}H\x1b[K"
+        width = max(10, cols - side["w"])
+        paint(f"\x1b[?2026h\x1b[{rows};{main_col()}H\x1b[K"
                    f"{format_prefix_bar(width)}\x1b[?2026l".encode())
 
     def bottom_note(text):
         """One-line hint on the bottom row, main area only (never spills into the sidebar)."""
-        width = max(10, cols - SIDEBAR_W - 2)
+        width = max(10, cols - side["w"] - 1)
         plain = re.sub(r"\x1b\[[0-9;]*m", "", text)
         while _wcwidth(plain) > width and plain:
             text, plain = text[:-1], plain[:-1]
-        paint(f"\x1b[{rows};{main_col}H\x1b[K{text}\x1b[0m".encode())
+        paint(f"\x1b[{rows};{main_col()}H\x1b[K{text}\x1b[0m".encode())
 
     def restore_bottom():
         """Remove the mode bar: clear the main area's bottom row, then restore that row for any
         pane that reaches it (the sidebar was never covered, so it needs nothing)."""
-        paint(f"\x1b[?25l\x1b[?2026h\x1b[{rows};{main_col}H\x1b[K".encode())
+        paint(f"\x1b[?25l\x1b[?2026h\x1b[{rows};{main_col()}H\x1b[K".encode())
         for pane_id, rect in slices:
             if rect.y + rect.height < rows:      # This pane does not reach the bottom row.
                 continue
@@ -860,11 +915,11 @@ def launch():
     def draw_help_overlay():
         # herdr: "?" shows the full key help (keybind_help), centered in the main area,
         # closed by any key. Width is clamped to the main area so narrow screens do not overflow.
-        avail = cols - main_col + 1
+        avail = cols - main_col() + 1
         width = max(24, min(46, avail))
         lines = format_help_lines(width=width)
         top = max(2, (rows - len(lines)) // 2)
-        left = main_col + max(0, (avail - width) // 2)
+        left = main_col() + max(0, (avail - width) // 2)
         out = ["\x1b[?25l\x1b[?2026h"]
         for index, line in enumerate(lines):
             out.append(f"\x1b[{top + index};{left}H\x1b[0m{line}")
@@ -1006,7 +1061,7 @@ def launch():
     def relayout():
         nonlocal slices
         sync_tabs()
-        view = hui.compute_view(hui.Rect(0, 0, cols, rows), SIDEBAR_W + 1, len(tabs))
+        view = hui.compute_view(hui.Rect(0, 0, cols, rows), side["w"], len(tabs))
         term = view["terminal_area"]
         # herdr: only the active tab is drawn; its layout is the BSP tree cut into rectangles (layout.rs collect_panes).
         tree = tabs[active_tab()] if tabs else None
@@ -1152,13 +1207,13 @@ def launch():
 
     def on_wheel(x, y, delta):
         """Mouse wheel: scroll the sidebar section or the pane under the pointer."""
-        if x <= SIDEBAR_W + 1:
-            for span in ui_map.get("spans", []):
-                if span["height"] and span["y0"] <= y < span["y0"] + span["height"]:
-                    cap = max(0, span["total"] - span["height"])
+        if x <= side["w"]:
+            for key, section in ui_map["sections"].items():   # One entry per notch, clamped like herdr.
+                rect = section["rect"]
+                if rect.height and rect.y <= y - 1 < rect.y + rect.height:
                     step = 1 if delta > 0 else -1
-                    side_scrolls[span["key"]] = max(
-                        0, min(span["scroll"] + step, cap))
+                    side_scrolls[key] = max(
+                        0, min(section["scroll"] + step, section["max_scroll"]))
                     draw_sidebar()
                     return
             return
@@ -1178,30 +1233,8 @@ def launch():
             draw_borders()
             return
 
-    def _popup(lines):
-        avail = cols - main_col + 1     # Clamp to the main area so narrow screens do not overflow on the right.
-        top = max(2, (rows - len(lines)) // 2)
-        left_col = main_col + max(0, (avail - _wcwidth(lines[0])) // 2)
-        out = ["\x1b[?25l\x1b[?2026h"]
-        for index, line in enumerate(lines):
-            out.append(f"\x1b[{top + index};{left_col}H\x1b[0m{line}")
-        out.append("\x1b[?2026l")
-        paint("".join(out).encode())
-
-    def on_rclick(x, y):
-        """Right-click in the sidebar: open the context menu for the card under the pointer."""
-        nonlocal menu_card
-        if x > SIDEBAR_W:
-            return
-        target = (ui_map["targets"][y - 1]
-                  if 0 <= y - 1 < len(ui_map["targets"]) else None)
-        width = max(24, min(46, cols - main_col + 1))
-        if target and target[0] == "card":
-            menu_card = target[1]
-            _popup(format_card_menu(menu_card, width=width))
-
     def on_click(x, y):
-        nonlocal tab_scroll, tab_follow
+        nonlocal tab_scroll, tab_follow, help_open
         bar = ui_map.get("bar")
         if y == 1 and bar is not None:                # Tab row: route by herdr's hit areas.
             cx = x - 1                                # Rects are 0-based.
@@ -1220,63 +1253,28 @@ def launch():
             if rect.width and rect.x <= cx < rect.x + rect.width:
                 new_pane([os.environ.get("SHELL", "sh")], "shell")
             return
-        if x <= SIDEBAR_W:                            # Sidebar: route by the target table.
-            target = (ui_map["targets"][y - 1]
-                      if 0 <= y - 1 < len(ui_map["targets"]) else None)
-            if target is None:
+        if x <= side["w"]:                            # Sidebar: hit rects, last drawn wins (the toggle sits over the list).
+            hit = next((action for rect, action in reversed(ui_map["hits"])
+                        if rect.x <= x - 1 < rect.x + rect.width
+                        and rect.y <= y - 1 < rect.y + rect.height), None)
+            if hit is None:
                 return
-            kind, value = target
-            if kind == "pane":
-                focus(value)
-                return
-            if kind == "proj":                        # Click a project: expand/collapse and select.
-                expanded_projects.symmetric_difference_update({value})
-                side_selected[0] = ("proj", value)
-                draw_sidebar()          # Row diffing writes only changed rows; the column does not flash.
-                return
-            if kind == "card":
-                # Running card: focus its pane. Finished card: open its session (--resume only
-                # views and chats; it does not resend the contract or touch board state).
-                # A card that never ran has no session to open.
-                side_selected[0] = ("card", value)
-                pane = next((p for p in listing
-                             if p["card"] == value and p["alive"]), None)
-                if pane:
-                    focus(pane["id"])       # Already on screen: just move the highlight.
-                    return
-                viewer = next((p for p in listing     # A viewer pane is already open: focus it instead of opening another.
-                               if p["alive"] and p["title"].endswith(f"·{value}")),
-                              None)
-                if viewer:
-                    focus(viewer["id"])
-                    return
-                card = next((c for p in projects_cache["items"]
-                             for c in p["cards"] if c["id"] == value), None)
-                if not card or not card.get("has_session"):
-                    draw_sidebar()
-                    bottom_note(f"{hui.sgr_fg(hui.OVERLAY1)}Card {value} has no session yet\x1b[0m")
-                    return
-                argv = [sys.executable, "-m", "misaka", "card-shell",
-                        value, "--resume"]
-                title = f"{card.get('assignee', '?')}·{value}"
-                index = active_tab()
-                if index < len(tabs):
-                    tile_target, direction = next_tile_placement(tabs[index])
-                    new_pane(argv, title, split=direction, target=tile_target)
-                else:
-                    new_pane(argv, title)
-                return
-            argv = [sys.executable, "-m", "misaka", "chat"]   # Roster: clicking a name starts her.
-            title = "Last Order" if value == "last-order" else value
-            if value != "last-order":
-                argv += ["--as", value]
-            # Open her pane in the current tab using the tiling rule (two per column, then a new column).
-            index = active_tab()
-            if index < len(tabs):
-                target, direction = next_tile_placement(tabs[index])
-                new_pane(argv, title, split=direction, target=target)
-            else:
-                new_pane(argv, title)
+            if hit[0] == "pane":                      # A space row carries its folder's first pane (herdr: switch workspace).
+                focus(hit[1])
+            elif hit[0] == "new":                     # herdr: new workspace = a shell in the startup folder; here a shell tab.
+                new_pane([os.environ.get("SHELL", "sh")], "shell")
+            elif hit[0] == "menu":                    # herdr: the global menu; the key help is the nearest thing here.
+                help_open = True
+                draw_help_overlay()
+            elif hit[0] == "toggle":                  # herdr toggle_sidebar: 26 columns <-> 4.
+                side["collapsed"] = not side["collapsed"]
+                side["w"] = SIDEBAR_COLLAPSED_W if side["collapsed"] else SIDEBAR_W
+                paint(b"\x1b[0m\x1b[2J")
+                chrome_cache["rows"] = []
+                relayout()
+            elif hit[0] == "sort":                    # herdr: click the header label to flip grouped / priority.
+                side["sort"] = "priority" if side["sort"] == "grouped" else "grouped"
+                draw_sidebar()
             return
         for pane_id, rect in slices:                  # Click a pane: focus it (rectangle hit test).
             if (rect.x < x <= rect.x + rect.width
@@ -1297,15 +1295,13 @@ def launch():
     prefix_pending = 0
     exit_reason = ["detached"]     # detached: user left; closed_all: the last pane was closed.
     help_open = False
-    menu_card = None
     try:
         paint(b"\x1b[0m\x1b[2J")
         chrome_cache["rows"] = []          # The row cache must be invalidated after a clear, or the sidebar draws nothing.
         stream.send("pane.attach", {"id": "*"})
         load_layout()          # Pick up the previous split layout (stored in the daemon).
-        refresh_projects()
         focus(focused, force_layout=True)
-        last_poll = last_blink = 0.0
+        last_poll = 0.0
         repaint_after_typing = 0.0   # After typing pauses, repaint the focused pane once to erase IME leftovers.
         while True:
             if resized.pop("hit", None):
@@ -1369,7 +1365,6 @@ def launch():
                             on_click(mx, my)
                     elif press and button == 2:             # Right button.
                         clear_selection()
-                        on_rclick(mx, my)
                     elif not press and button == 0 and sel["b"]:
                         copy_selection()    # herdr copy_on_select: releasing copies to the clipboard.
                 chunk = _MOUSE.sub(b"", chunk)
@@ -1380,19 +1375,6 @@ def launch():
                     key = chunk[offset:offset + 1]
                     if help_open:                      # Key help is open: any key closes it and redraws.
                         help_open = False
-                        relayout()
-                        continue
-                    if menu_card is not None:          # Card menu: d deletes, any other key closes.
-                        card_id, menu_card = menu_card, None
-                        if key in (b"d", b"D"):
-                            try:
-                                control.request("card.delete", {"task_id": card_id})
-                            except RuntimeError as error:
-                                refresh_projects()
-                                relayout()
-                                bottom_note(f"\x1b[33m{error}\x1b[0m")
-                                continue
-                            refresh_projects()
                         relayout()
                         continue
                     if not prefix_pending:
@@ -1490,8 +1472,6 @@ def launch():
 
             if now - last_poll > POLL_SECONDS:
                 last_poll = now
-                roster_cache["names"] = ["last-order", *sorted(_sisters_roster())]
-                refresh_projects()
                 try:
                     listing = panes()
                 except (RuntimeError, ConnectionError):
@@ -1513,11 +1493,6 @@ def launch():
                     else:
                         relayout()
                 draw_sidebar()
-            elif now - last_blink > BREATH_FPS:
-                # Only the sidebar needs redrawing for the pulse animation.
-                last_blink = now
-                if any(p.get("busy") for p in listing):
-                    draw_sidebar()
     except (RuntimeError, ConnectionError, json.JSONDecodeError) as error:
         sys.exit(f"Panel disconnected: {error}")
     except Exception as error:   # noqa: BLE001
