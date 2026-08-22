@@ -11,22 +11,6 @@ from misaka.config import profiles
 from misaka.config import CFG, sisters
 
 
-def _migrate_sessions(new, old):
-    """One-time move of a legacy session directory; returns the directory actually in use.
-
-    Renames ``old`` to ``new`` when only the old one exists; if the rename fails
-    (cross-device, permissions) the old directory is kept."""
-    new, old = os.path.expanduser(new), os.path.expanduser(old)
-    if os.path.isdir(new) or not os.path.isdir(old):
-        return new
-    try:
-        os.makedirs(os.path.dirname(new), exist_ok=True)
-        os.rename(old, new)
-        return new
-    except OSError:
-        return old
-
-
 def _migrate_lo_soul(prof):
     """One-time rename: SOUL-chat.md becomes SOUL.md, Last Order's only persona file.
 
@@ -66,10 +50,12 @@ def assembly(who, *, cwd=None):
 def launch(who, model=None, cont=False, pick=False, session=None):
     """Assemble the session and run interactive mode until it exits. ``who=None`` means Last Order."""
     prof, model_default, extra = assembly(who)
+    from misaka.core.session_manager import encode_cwd
+    # Sessions are bucketed per role and per folder, like pi's per-cwd sessions:
+    # `-c` resumes this role's conversation about *this* project.
+    sess = f"~/.misaka/sessions/{who or 'last-order'}/{encode_cwd(os.getcwd())}"
     if who:
         title = f"MISAKA · {who}"
-        sess = _migrate_sessions(f"~/.misaka/sessions/{who}",
-                                 f"~/.misaka/sister-sessions/{who}")
         from misaka.skills import layers as skill_layers
         hint = skill_layers.get_untrusted_project_skills_root(cwd=os.getcwd())
         if hint:
@@ -79,8 +65,6 @@ def launch(who, model=None, cont=False, pick=False, session=None):
             )
     else:
         title = "MISAKA · Last Order"
-        sess = _migrate_sessions("~/.misaka/sessions/last-order",
-                                 "~/.misaka/last-order-sessions")
     from misaka.config import identity
     flags = ["--provider", CFG["provider"], "--model", model or model_default,
              "--append-system-prompt", profiles.shared_soul()]

@@ -311,12 +311,15 @@ def build_session_context(
     return SessionContext(messages=messages, thinkingLevel=thinking_level, model=model)
 
 
+def encode_cwd(cwd: str) -> str:
+    """Encode a working directory as one path-safe segment (``--Users-me-proj--``)."""
+    normalized_cwd = _SAFE_PATH_LEADING_SEPARATORS.sub("", resolve_path(cwd))
+    return f"--{_SAFE_PATH_SEPARATORS.sub('-', normalized_cwd)}--"
+
+
 def get_default_session_dir(cwd: str, agent_dir: str | None = None) -> str:
-    resolved_cwd = resolve_path(cwd)
     resolved_agent_dir = resolve_path(get_agent_dir() if agent_dir is None else agent_dir)
-    normalized_cwd = _SAFE_PATH_LEADING_SEPARATORS.sub("", resolved_cwd)
-    safe_path = f"--{_SAFE_PATH_SEPARATORS.sub('-', normalized_cwd)}--"
-    session_dir = os.path.join(resolved_agent_dir, "sessions", safe_path)
+    session_dir = os.path.join(resolved_agent_dir, "sessions", encode_cwd(cwd))
     os.makedirs(session_dir, exist_ok=True)
     return session_dir
 

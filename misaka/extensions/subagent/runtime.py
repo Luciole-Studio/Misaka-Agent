@@ -2430,16 +2430,21 @@ class SubagentManager:
         return str(path)
 
     def _memory_prompt(self, task: AgentTask) -> str:
+        from misaka.core.session_manager import encode_cwd
+
         name = _safe_component(task.agent_type.replace(":", "-"))
         workspace = Path(self.role_context.workspace or task.cwd).expanduser()
+        # Memory lives in home; project-scoped memory is bucketed by folder so the
+        # project folder itself stays free of MISAKA state.
+        home = Path(os.environ.get("MISAKA_AGENT_MEMORY_HOME") or Path.home() / ".misaka" / "agent-memory")
         if task.definition.memory == "user":
-            directory = Path.home() / ".misaka" / "agent-memory" / name
+            directory = home / name
             scope_note = "Keep these memories general because they apply across projects."
         elif task.definition.memory == "project":
-            directory = workspace / ".misaka" / "agent-memory" / name
+            directory = home / encode_cwd(str(workspace)) / name
             scope_note = "Tailor these shared memories to this project."
         else:
-            directory = workspace / ".misaka" / "agent-memory-local" / name
+            directory = home / encode_cwd(str(workspace)) / f"{name}-local"
             scope_note = "Tailor these local memories to this project and machine."
         directory.mkdir(parents=True, exist_ok=True)
         memory_file = directory / "MEMORY.md"
