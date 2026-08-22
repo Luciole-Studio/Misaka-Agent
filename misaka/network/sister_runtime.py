@@ -33,8 +33,8 @@ from misaka.core.session_manager import find_most_recent_session
 from misaka.network import worker
 from misaka.platform import tasks as db
 from misaka.network import judge_process
-from misaka.extensions.subagent.agents import AgentDefinition
-from misaka.extensions.subagent.runtime import (
+from misaka.extensions.sisters.subagent.agents import AgentDefinition
+from misaka.extensions.sisters.subagent.runtime import (
     AgentTask,
     RoleContext,
     SubagentManager,
@@ -43,7 +43,7 @@ from misaka.extensions.subagent.runtime import (
 
 TERMINAL_BOARD_STATUSES = frozenset({"done", "failed", "stopped", "blocked", "triage"})
 ACTIVE_BOARD_STATUSES = frozenset({"running", "review", "verifying", "finalizing"})
-from misaka.extensions.subagent.child import PROCESS_GROUP_IDENTITY  # single source of truth for the wire constant
+from misaka.extensions.sisters.subagent.child import PROCESS_GROUP_IDENTITY  # single source of truth for the wire constant
 STATUS_MAP = {
     "ready": "pending",
     "todo": "pending",

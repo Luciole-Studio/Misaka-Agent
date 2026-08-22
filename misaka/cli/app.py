@@ -237,7 +237,7 @@ def main():
                              workspace=os.getcwd())
         print(tid)
     elif args.cmd == "tell":
-        from misaka.extensions.ally import tell as ally_tell
+        from misaka.extensions.last_order.ally import tell as ally_tell
         ok, msg = ally_tell.tell(args.message, to_addr=args.to, summary=args.summary)
         print(msg)
         sys.exit(0 if ok else 1)

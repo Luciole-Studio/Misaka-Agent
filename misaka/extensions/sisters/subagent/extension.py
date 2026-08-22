@@ -24,8 +24,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from misaka.core.extensions.types import ToolDefinition
-from misaka.extensions.subagent import agents as agent_roster
-from misaka.extensions.subagent.runtime import (
+from misaka.extensions.sisters.subagent import agents as agent_roster
+from misaka.extensions.sisters.subagent.runtime import (
     AgentCancelled,
     RoleContext,
     SubagentManager,
@@ -192,7 +192,7 @@ def _register(harn: Any, context: RoleContext, permitted: bool) -> None:
     # In a child process these values come from the selected agent definition.
     # Register before the management tools so scoped argument rules and hooks
     # govern the complete child tool pool.
-    from misaka.extensions.subagent import policy as subagent_policy
+    from misaka.extensions.sisters.subagent import policy as subagent_policy
 
     subagent_policy.register(harn, context)
     if not permitted:

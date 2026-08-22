@@ -335,3 +335,14 @@ def commands_for(profile_dir):
             "description": "Create or improve a reusable skill from files, links, notes, or the workflow just completed."})
 
     return register
+
+SESSION_KINDS = {"foreground", "dm", "card"}
+
+
+def activate(spec):
+    commands, tools = commands_for(spec.profile_dir), tools_for(spec.profile_dir)
+
+    def register(harn):
+        commands(harn)
+        tools(harn)
+    return register

@@ -112,7 +112,7 @@ async def run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
             # One-shot worker sessions cannot outlive their event loop.  Keep
             # them open long enough for detached agents, their completion
             # notification, and the model's follow-up turn to settle.
-            from misaka.extensions.subagent import extension as subagent
+            from misaka.extensions.sisters.subagent import extension as subagent
 
             if not (
                 subagent.has_background_task_records()

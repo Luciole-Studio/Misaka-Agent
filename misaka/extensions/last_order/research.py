@@ -424,3 +424,11 @@ User clarification: {spec['clarification']}""", run["id"]))
             await close()
 
     harn.on("session_shutdown", cleanup)
+
+SESSION_KINDS = {"foreground", "dm"}
+
+
+def activate(spec):
+    from misaka.network import worker
+    from misaka.network.sister_runtime import SisterRuntime
+    return bind(lambda harn, con_factory, cfg_factory: SisterRuntime(harn, con_factory, cfg_factory), worker)

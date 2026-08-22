@@ -90,3 +90,9 @@ def register(harn):
 
 
 __all__ = ["register"]
+
+SESSION_KINDS = {"foreground", "dm"}
+
+
+def activate(spec):
+    return register

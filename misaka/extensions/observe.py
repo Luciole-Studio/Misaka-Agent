@@ -26,3 +26,9 @@ def register(harn):
     harn.registerCommand("trace", {
         "handler": trace_cmd,
         "description": "Show the read-only task card → to-do → agent execution tree of this project folder."})
+
+SESSION_KINDS = {"foreground", "dm"}
+
+
+def activate(spec):
+    return register

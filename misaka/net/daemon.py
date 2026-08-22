@@ -613,7 +613,7 @@ class Daemon:
             if executor is None:
                 argv = [*CARD_SHELL, task_id]
             else:  # ally: the card contract is the prompt, run one non-interactive turn
-                from misaka.extensions.ally import runner as ally_runner
+                from misaka.extensions.last_order.ally import runner as ally_runner
                 task = dict(row)
                 task["_attachments"] = db.stage_attachments(con, task_id, workspace)
                 argv = ally_runner.build_argv(executor, ally_runner.card_prompt(task))
@@ -655,7 +655,7 @@ class Daemon:
                         # An ally neither submits nor reports; do both on its behalf at
                         # exit so the artifact reconciliation below is identical for
                         # both kinds of executor (the board is the single bus).
-                        from misaka.extensions.ally import runner as ally_runner
+                        from misaka.extensions.last_order.ally import runner as ally_runner
                         ally_runner.finish(
                             pane.cwd,
                             pane.exit_code if pane.exit_code is not None else -1,

@@ -470,3 +470,9 @@ def bind(profile_dir: str, role: str):
         _register_bound(harn, context)
 
     return bound
+
+SESSION_KINDS = {"foreground", "dm", "card", "child"}
+
+
+def activate(spec):
+    return bind(spec.profile_dir, spec.mcp_role or spec.role)

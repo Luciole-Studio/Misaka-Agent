@@ -71,3 +71,14 @@ def register(harn):
         "description": "List roles or switch between Last Order and a Sister; use `/sister last-order` to return.",
         "handler": misaka_switch,
     })
+
+SESSION_KINDS = {"foreground", "dm"}
+
+
+def activate(spec):
+    from misaka.network import roster
+
+    def both(harn):
+        register(harn)
+        roster.register(harn)
+    return both

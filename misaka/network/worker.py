@@ -300,12 +300,11 @@ def run_llm_json(profile_dir, prompt, provider, default_model,
     workdir = cwd or os.getcwd()
     role = profiles.role_of(profile_dir)
     from misaka.app.composition import SessionSpec, build_extensions
-    from misaka.config import capabilities
 
     kind = "bare" if bare else "one-shot"
-    granted = capabilities.resolve(profile_dir, kind)
+    delegates = not bare and not profiles.is_last_order(profile_dir)
     allowed = list(tools or ())
-    if capabilities.DELEGATE in granted:
+    if delegates:
         allowed.extend(SUBAGENT_TOOLS)
     factories = build_extensions(SessionSpec(
         profile_dir=profile_dir,
@@ -313,7 +312,7 @@ def run_llm_json(profile_dir, prompt, provider, default_model,
         workspace=workdir,
         kind=kind,
         sender=role.rsplit("/", 1)[-1],
-        tool_ceiling=tuple(allowed) if capabilities.DELEGATE in granted else None,
+        tool_ceiling=tuple(allowed) if delegates else None,
     )) or None
     flags += ["-t", ",".join(dict.fromkeys(allowed))] if allowed else ["-nt"]
     if soul:
@@ -382,10 +381,9 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
     ro_root = os.path.join(state_dir, ".skills-ro")
     sender = role.rsplit("/", 1)[-1]
     from misaka.app.composition import SessionSpec, build_extensions
-    from misaka.config import capabilities
 
     kind = "beast" if beast else "card"
-    granted = capabilities.resolve(profile_dir, kind)
+    delegates = not profiles.is_last_order(profile_dir)
     factories = build_extensions(SessionSpec(
         profile_dir=profile_dir,
         role=role,
@@ -393,12 +391,12 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
         kind=kind,
         sender=sender,
         task_id=task.get("id"),
-        tool_ceiling=SUBAGENT_TOOLS if beast and capabilities.DELEGATE in granted else None,
+        tool_ceiling=SUBAGENT_TOOLS if beast and delegates else None,
     )) or None
     if beast:
         # Beast mode gets no builtin tools: with DELEGATE it keeps only the subagent
         # tools, otherwise none (Last Order has no DELEGATE, so it runs tool-less).
-        if capabilities.DELEGATE in granted:
+        if delegates:
             flags += ["-t", ",".join(SUBAGENT_TOOLS)]
         else:
             flags += ["-nt"]

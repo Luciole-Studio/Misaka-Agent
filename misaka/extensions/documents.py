@@ -159,3 +159,9 @@ def register(harn):
             f"claim_hash {v['claim_hash']}\n"
             f"Cite as: [{params.doc_id} p{v['page']}]"
         )
+
+SESSION_KINDS = {"foreground", "dm", "card", "child"}
+
+
+def activate(spec):
+    return register

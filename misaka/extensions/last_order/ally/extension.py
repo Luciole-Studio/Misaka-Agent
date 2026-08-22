@@ -99,7 +99,7 @@ def register(harn):
     async def misaka_ally_start(tool_call_id, params, signal, on_update, ctx):
         if not params.confirmed:
             raise ValueError("Starting an ally spends its own quota; get explicit user confirmation first.")
-        from misaka.extensions.ally import runner
+        from misaka.extensions.last_order.ally import runner
         name = runner.label_for(params.argv, params.label)
         out = await asyncio.to_thread(_net().request, "pane.create", {
             "argv": params.argv, "cwd": params.cwd, "title": f"{name}·ally",

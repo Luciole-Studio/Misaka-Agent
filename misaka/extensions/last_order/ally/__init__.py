@@ -9,3 +9,10 @@ then reads ally replies from the same mailbox it uses for Sisters.
 No vendor knowledge lives here: Last Order supplies the full command line each time
 and reads any session ID it needs out of the reply; MISAKA only executes.
 """
+
+SESSION_KINDS = {"foreground", "dm"}
+
+
+def activate(spec):
+    from .extension import register
+    return register

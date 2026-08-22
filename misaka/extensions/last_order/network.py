@@ -664,3 +664,9 @@ def register(harn):
         asyncio.ensure_future(collect_pending())
 
     harn.on("session_start", _kickoff)
+
+SESSION_KINDS = {"foreground", "dm"}
+
+
+def activate(spec):
+    return register

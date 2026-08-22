@@ -120,7 +120,7 @@ def reconcile(con, cfg):
     import time as _time
 
     from misaka.network.sister_runtime import _claimer_alive
-    from misaka.extensions.subagent.child import PROCESS_GROUP_IDENTITY
+    from misaka.extensions.sisters.subagent.child import PROCESS_GROUP_IDENTITY
     from misaka.platform import processes as process_tree
 
     now = int(_time.time())

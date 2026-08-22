@@ -1081,7 +1081,7 @@ class AgentPolicy:
     async def _execute_hook_with_outcome(
         self, hook: Mapping[str, Any], payload: Mapping[str, Any]
     ) -> tuple[dict[str, Any], bool]:
-        from misaka.extensions.subagent import hooks as subagent_hooks
+        from misaka.extensions.sisters.subagent import hooks as subagent_hooks
 
         async def execute() -> tuple[dict[str, Any], bool]:
             kind = str(hook.get("type") or "command").casefold()
