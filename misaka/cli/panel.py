@@ -212,6 +212,33 @@ def pane_state(pane):
 
 LO_TITLE = "Last Order"      # the panel opens Last Order panes with this title; they are space roots
 SISTERS_LABEL = "sisters"    # the footer launcher (herdr: "menu"); it opens the Sister roster
+TAB_PANE_CAP = 6             # ponytail: three columns of two on a ~180-column screen; past that, a new tab
+
+
+def next_tile_placement(tree):
+    """MISAKA's seating rule for summoned Sisters (not from herdr): at most two panes per column,
+    stacking below first, then a new column on the right once the column is full.
+    Returns ``(pane_to_split, direction)``; ``None`` means wrap the whole tree (new column).
+
+        1 [A]   2 [A]   3 [A][C]   4 [A][C]   5 [A][C][E]
+                  [B]     [B]        [B][D]     [B][D]
+    """
+    ids = hui.pane_ids(tree)
+    if len(ids) % 2 == 0:                      # Every column holds two: open a new column on the right.
+        return None, "h"
+    placed = hui.collect_panes(tree, hui.Rect(0, 0, 1000, 1000), ids[0])
+    rightmost = max(placed, key=lambda item: (item[1].x, -item[1].y))
+    return rightmost[0], "v"                   # Stack inside the rightmost column.
+
+
+def tile_into(tree, pane_id):
+    """Seat ``pane_id`` in ``tree`` by the rule above; a new column takes an equal share of the
+    width (existing columns keep cols/(cols+1)). Pure, so testable."""
+    target, direction = next_tile_placement(tree)
+    if target is None:
+        columns = (len(hui.pane_ids(tree)) + 1) // 2
+        return hui.split_root(tree, direction, pane_id, columns / (columns + 1))
+    return hui.split_at(tree, target, direction, pane_id, 0.5)
 
 
 def space_key(pane):
@@ -828,7 +855,11 @@ def launch():
     tabs = []            # One tree per tab; by default every pane gets its own tab.
 
     def sync_tabs():
+        """Drop dead panes from the tabs and seat new ones: a pane whose parent sits in some tab
+        joins that tab by the tiling rule (until TAB_PANE_CAP), anything else gets its own tab.
+        Returns True when the tabs changed."""
         alive = [p["id"] for p in listing if p["alive"]]
+        parent_of = {p["id"]: p.get("parent") for p in listing}
         known = {pid for tree in tabs for pid in hui.pane_ids(tree)}
         before = list(tabs)
         for index, tree in enumerate(tabs):
@@ -840,10 +871,17 @@ def launch():
             tabs[index] = tree
         tabs[:] = [tree for tree in tabs if tree is not None]
         for pid in alive:
-            if pid not in known:
+            if pid in known:
+                continue
+            home = next((index for index, tree in enumerate(tabs)
+                         if parent_of.get(pid) in hui.pane_ids(tree)), None)
+            if home is not None and len(hui.pane_ids(tabs[home])) < TAB_PANE_CAP:
+                tabs[home] = tile_into(tabs[home], pid)      # Summoned: next to whoever summoned her.
+            else:
                 tabs.append(("pane", pid))
         if tabs != before:
             save_layout()          # The daemon stores the layout, so splits survive a panel restart.
+        return tabs != before
 
     def save_layout():
         try:
@@ -978,8 +1016,8 @@ def launch():
     def menu_choose(index):
         name = menu["items"][index]
         close_menu()
-        if name != "no sisters":   # Open her in the active space, as a new tab under its Last Order.
-            new_pane([sys.executable, "-m", "misaka", "chat", "--as", name], name)
+        if name != "no sisters":   # Open her next to the active space's Last Order (tiling rule).
+            new_pane([sys.executable, "-m", "misaka", "chat", "--as", name], name, tile=True)
 
     def menu_keys(chunk):
         """herdr modal.rs:147-160 handle_global_menu_key: esc closes, k/up and j/down move, enter picks."""
@@ -1394,8 +1432,9 @@ def launch():
     _FOCUSED = object()          # Default target: split the currently focused pane.
     _ACTIVE = object()           # Default parent: the active space's Last Order.
 
-    def new_pane(argv, title, *, split=None, target=_FOCUSED, parent=_ACTIVE):
-        """split=None opens a new tab; split="h"/"v" splits ``target`` in the current tab.
+    def new_pane(argv, title, *, split=None, target=_FOCUSED, parent=_ACTIVE, tile=False):
+        """split=None opens a new tab; split="h"/"v" splits ``target`` in the current tab;
+        tile=True seats the pane next to its parent by the tiling rule (sync_tabs does it).
         target=_FOCUSED splits the focused pane (herdr split_focused); target=None wraps the
         whole tree (a new column). The pane lands in the active space's folder and, unless
         ``parent`` says otherwise, under its Last Order; parent=None makes it a space root."""
@@ -1407,7 +1446,9 @@ def launch():
             "env": {"MISAKA_THEME": hui.theme_variant()}})
         listing = panes()
         new_id = out["pane_id"]
-        if split is not None:
+        if tile:
+            sync_tabs()
+        elif split is not None:
             index = active_tab()
             if index < len(tabs):
                 if target is None:
@@ -1755,7 +1796,10 @@ def launch():
                         refocus(page_idx=page)
                     else:
                         relayout()
-                draw_sidebar()
+                if sync_tabs():        # A summoned Sister was seated in a tab: lay the panes out again.
+                    relayout()
+                else:
+                    draw_sidebar()
     except (RuntimeError, ConnectionError, json.JSONDecodeError) as error:
         sys.exit(f"Panel disconnected: {error}")
     except Exception as error:   # noqa: BLE001
