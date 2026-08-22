@@ -34,7 +34,7 @@ from misaka.config import CFG
 # Wire protocol version (strict equality, as in herdr). Bump it whenever *server
 # behaviour* changes, not only method/event shapes: an unbumped behaviour change
 # once let a stale daemon slip through the version gate.
-PROTOCOL = 20   # 20: no background -- the daemon stops when its panel disconnects; closing a pane closes its children
+PROTOCOL = 21   # 21: pane.report_state -- a session in a pane says working/idle/blocked itself; panes.list carries `reported`
 RING_CAP = 256 * 1024          # output tail kept per pane
 FRAME_SECONDS = 0.008          # coalescing window for dirty-row broadcasts (~120 fps)
 SCROLLBACK_LINES = 2000        # scrollback history per pane
@@ -351,11 +351,12 @@ class Pane:
                  "deadline", "proc", "fd", "buf", "started_at", "exit_code", "submitted",
                  "seen_status", "screen", "stream", "carry", "alt_screen",
                  "last_output", "last_heartbeat", "theme", "ally", "flush", "sent_cursor",
-                 "parent")
+                 "parent", "reported")
 
     def __init__(self, pane_id, title, argv, cwd, card=None, parent=None):
         self.id, self.title, self.argv, self.cwd, self.card = pane_id, title, argv, cwd, card
         self.parent = parent          # the pane that opened this one (Last Order dispatching a Sister); panel groups by it
+        self.reported = None          # the session's own word: {"state", "message", "seq"} (herdr hook authority); None = guess from the screen
         self.claim_lock = self.generation = self.deadline = None
         self.proc = self.fd = self.exit_code = None
         self.buf = bytearray()
@@ -432,6 +433,7 @@ class Daemon:
             os.close(pane.fd)
             pane.fd = None
             pane.exit_code = pane.proc.poll() if pane.proc else None
+            pane.reported = None      # herdr: process exit is a generation fence; a dead session has no say
             self._broadcast(pane.id, {"event": "exited", "id": pane.id,
                                       "exit_code": pane.exit_code})
             return
@@ -800,7 +802,7 @@ class Daemon:
                     mail = {}
             return {"panes": [
                 {"id": p.id, "title": p.title, "card": p.card, "cwd": p.cwd,
-                 "parent": p.parent,
+                 "parent": p.parent, "reported": p.reported,
                  "alive": p.alive(), "exit_code": p.exit_code,
                  "status": status.get(p.card),
                  "busy": _pane_busy(p),
@@ -850,6 +852,22 @@ class Daemon:
             if not ok:
                 raise ValueError(msg)
             return {"message": msg}
+        if method == "pane.report_state":
+            # The session's own word (herdr pane.report_agent): working / idle / blocked plus a
+            # short message. Per-pane monotonic seq, so a report that arrives late cannot undo
+            # a newer one. The panel trusts this over the screen heuristic.
+            pane = self.panes.get(params["id"])
+            if pane is None:
+                raise ValueError(f"Pane not found: {params['id']}")
+            state = params.get("state")
+            if state not in ("working", "idle", "blocked"):
+                raise ValueError(f"Unknown state: {state!r} (working, idle, or blocked)")
+            seq = int(params.get("seq") or 0)
+            if pane.reported and seq < pane.reported["seq"]:
+                return {"ok": False, "stale": True}
+            pane.reported = {"state": state, "message": str(params.get("message") or "")[:240],
+                             "seq": seq}
+            return {"ok": True}
         if method == "pane.explain":     # like herdr's `agent explain`: why the pane is busy/idle
             pane = self.panes.get(params["id"])
             if pane is None:

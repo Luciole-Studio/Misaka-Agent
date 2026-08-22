@@ -197,15 +197,19 @@ class _Canvas:
 
 
 def pane_state(pane):
-    """The one bridge from MISAKA pane fields to herdr's (AgentState, pane.seen) pair:
-    busy = working, a card waiting for review = blocked, a finished card nobody looked at =
-    done (idle + unseen), otherwise idle; a dead pane = unknown. Pure, so testable."""
+    """The one bridge from MISAKA pane fields to herdr's (AgentState, pane.seen) pair.
+    The session's own report wins (``reported``, herdr's hook authority: the agent_state
+    extension says working / idle / blocked); the screen heuristic (``busy``) only speaks for
+    panes that never report (shells, allies). The board adds the cases where a person must
+    decide: a blocked, triaged, or failed card is "blocked" too. A finished card nobody looked
+    at is done (idle + unseen); a dead pane is unknown. Pure, so testable."""
     if not pane["alive"]:
         return "unknown", True
-    if pane.get("busy"):
-        return "working", True
-    if pane.get("status") == "review":
+    reported = (pane.get("reported") or {}).get("state")
+    if reported == "blocked" or pane.get("status") in ("blocked", "triage", "failed"):
         return "blocked", True
+    if reported == "working" or (reported is None and pane.get("busy")):
+        return "working", True
     if pane.get("unseen"):
         return "idle", False
     return "idle", True
