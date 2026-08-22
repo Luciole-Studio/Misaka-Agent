@@ -10,7 +10,7 @@ from misaka.platform import budget
 from misaka.documents import index as corpus
 from misaka.documents import workspace as artifact_store
 from misaka import workspace as ws_index
-from misaka.config import CFG, sisters
+from misaka.config import CFG
 from misaka.observability import board as tail
 
 
@@ -86,10 +86,6 @@ def _parser():
                     help="Continue the most recent session instead of starting a new one")
     ch.add_argument("--pick", action="store_true", help="Pick a past session to resume")
     ch.add_argument("--session", help="Resume a session by path or UUID prefix")
-
-    pl = sub.add_parser("plan", help="Ask Last Order to turn a goal into task cards")
-    pl.add_argument("goal")
-    pl.add_argument("--dry", action="store_true", help="Print the cards without creating them")
 
     rs = sub.add_parser("research", help="Run the Research Workflow on a question")
     rs.add_argument("goal", nargs="?", help="Research question for a new run")
@@ -255,18 +251,6 @@ def main():
         tail.board_view(con, db.canonical_workspace())
     elif args.cmd == "tail":
         tail.follow(con, since=args.since, once=args.no_follow)
-    elif args.cmd == "plan":
-        from misaka.network import plan
-        bet, cards, errors, raw = plan.make(CFG, args.goal, sisters())
-        if errors:
-            sys.exit("Invalid plan:\n" + "\n".join(f"  {e}" for e in errors) +
-                     f"\n--- model output ---\n{raw}")
-        print(f"Plan: {bet}\n")
-        for c in cards:
-            print(("[dry] " if args.dry else "") + c["title"], "→", c["assignee"])
-        if not args.dry:
-            for tid in plan.submit(con, bet, cards, workspace=os.getcwd()):
-                print(" ", tid)
     elif args.cmd == "research":
         import asyncio as _asyncio
 

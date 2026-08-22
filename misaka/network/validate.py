@@ -1,4 +1,4 @@
-"""Small schema validators for plans, task cards, and reports."""
+"""Small schema validators for task cards and reports."""
 import json
 
 
@@ -13,19 +13,6 @@ def extract_json(text):
             except ValueError:
                 continue
     return None
-
-
-def validate_plan(obj, sisters):
-    """Validate a plan object; return ``(bet, cards, errors)``."""
-    if isinstance(obj, dict):
-        bet = obj.get("bet")
-        cards, errors = validate_cards(obj.get("cards"), sisters)
-        if not (isinstance(bet, str) and len(bet.strip()) >= 10):
-            errors.append("Missing `bet`: provide a falsifiable working hypothesis of at least 10 characters.")
-            bet = None
-        return (bet.strip() if bet else None), cards, errors
-    cards, errors = validate_cards(obj, sisters)
-    return None, cards, errors + ["Plan is missing the `bet` field."]
 
 
 def validate_cards(obj, sisters):
