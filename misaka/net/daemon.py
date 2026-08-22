@@ -34,7 +34,7 @@ from misaka.config import CFG
 # Wire protocol version (strict equality, as in herdr). Bump it whenever *server
 # behaviour* changes, not only method/event shapes: an unbumped behaviour change
 # once let a stale daemon slip through the version gate.
-PROTOCOL = 19   # 19: panes carry `parent` (the pane that opened them); pane.create / pane.run_card accept it
+PROTOCOL = 20   # 20: no background -- the daemon stops when its panel disconnects; closing a pane closes its children
 RING_CAP = 256 * 1024          # output tail kept per pane
 FRAME_SECONDS = 0.008          # coalescing window for dirty-row broadcasts (~120 fps)
 SCROLLBACK_LINES = 2000        # scrollback history per pane
@@ -389,6 +389,7 @@ class Daemon:
         self.layout = []            # tab layout (one split tree per tab); owned by the daemon
         self._con = None            # board connection, opened on the first card run
         self._attached: dict[asyncio.StreamWriter, str] = {}   # subscribers: connection -> pane id
+        self._panels: set[asyncio.StreamWriter] = set()        # panels (attach "*"): when the last one leaves, so do we
         self._clients: set[asyncio.StreamWriter] = set()
         self._stopping = asyncio.Event()
 
@@ -557,6 +558,9 @@ class Daemon:
             except OSError:
                 pass
             pane.fd = None
+        # No orphans: whoever this pane opened (Last Order's Sisters, a Sister's helpers) goes with it.
+        for child in [p.id for p in self.panes.values() if p.parent == pane_id]:
+            self.close(child)
         self._save_snapshot()
         return pane
 
@@ -970,6 +974,8 @@ class Daemon:
                         if wanted != "*" and wanted not in self.panes:
                             raise ValueError("Pane not found.")
                         self._attached[writer] = wanted
+                        if wanted == "*":
+                            self._panels.add(writer)
                         result = {"attached": wanted}
                     else:
                         result = self._api(method, req.get("params") or {})
@@ -984,6 +990,14 @@ class Daemon:
         finally:
             self._clients.discard(writer)
             self._attached.pop(writer, None)
+            if writer in self._panels:
+                # The panel left (detach key, closed terminal window, crash, kill): nothing keeps
+                # running behind the user's back. Last Order and the Sisters shut down with it;
+                # run() closes every pane on the way out. A daemon that never had a panel (pure
+                # `misaka net ...` use) is unaffected and still ends with `misaka net stop`.
+                self._panels.discard(writer)
+                if not self._panels:
+                    self._stopping.set()
             writer.close()
 
     async def run(self):

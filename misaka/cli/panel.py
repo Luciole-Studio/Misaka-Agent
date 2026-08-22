@@ -11,7 +11,8 @@ color roles are borrowed.
 Controls: click a tab, sidebar entry or pane to focus it. Prefix key ctrl+b,
 then: 1-9 switch tab | n/p cycle tabs | hjkl move focus | c new tab |
 v / - split side by side / stacked | z zoom | t summon the global tree |
-x close pane | d detach | ? key help | ctrl+b again sends a literal ctrl+b.
+x close pane | d quit (Last Order and the Sisters shut down with the panel) | ? key help |
+ctrl+b again sends a literal ctrl+b.
 """
 import base64
 import fcntl
@@ -635,7 +636,7 @@ def format_prefix_bar(width, prefix_name="ctrl+b"):
     for name, desc in ((f"{prefix_name}", "Send literally"), ("1-9", "Tab"),
                        ("hjkl", "Focus"), ("c", "New tab"), ("v/-", "Split"),
                        ("z", "Zoom"), ("t", "Tree"), ("x", "Close pane"),
-                       ("d", "Detach"), ("?", "Help"), ("esc", "Cancel")):
+                       ("d", "Quit"), ("?", "Help"), ("esc", "Cancel")):
         parts.append((f" {key}{name}\x1b[0m{dim} {desc}\x1b[0m",
                       1 + len(name) + 1 + _wcwidth(desc)))
     out, used = [], 0
@@ -664,7 +665,7 @@ _HELP_ROWS = [
     ("v", "Split side by side"), ("-", "Split top and bottom"),
     ("z", "Zoom: focused pane fills the tab"), ("t", "Summon the global tree"),
     ("x", "Close the focused pane"),
-    ("d", "Detach (panes keep running)"), ("ctrl+b", "Send a literal ctrl+b"),
+    ("d", "Quit (everything shuts down)"), ("ctrl+b", "Send a literal ctrl+b"),
     ("esc", "Leave prefix mode"), ("Mouse", "Click focus, drag copy, 2× word"),
     ("", "Any key closes this help"),
 ]
@@ -1814,4 +1815,4 @@ def launch():
         if exit_reason[0] == "closed_all":
             print("All panes closed. Run `misaka` to open the panel again.")
         else:
-            print("Detached. The daemon and panes keep running; `misaka net stop` shuts them down.")
+            print("Panel closed. Last Order and the Sisters shut down with it; nothing keeps running in the background.")
