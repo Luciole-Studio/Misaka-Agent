@@ -56,13 +56,6 @@ def launch(who, model=None, cont=False, pick=False, session=None):
     sess = f"~/.misaka/sessions/{who or 'last-order'}/{encode_cwd(os.getcwd())}"
     if who:
         title = f"MISAKA · {who}"
-        from misaka.skills import layers as skill_layers
-        hint = skill_layers.get_untrusted_project_skills_root(cwd=os.getcwd())
-        if hint:
-            print(
-                f"{hint[1]} project skill(s) were not loaded because the project is "
-                "untrusted. Run `misaka skills trust` to enable them."
-            )
     else:
         title = "MISAKA · Last Order"
     from misaka.config import identity

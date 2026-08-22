@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, TypedDict
 
-from misaka.config import CONFIG_DIR_NAME
 from misaka.core.diagnostics import ResourceCollision, ResourceDiagnostic
 from misaka.core.event_bus import createEventBus
 from misaka.core.extensions.loader import (
@@ -671,20 +670,11 @@ class DefaultResourceLoader:
             os.path.join(self.agentDir, "themes"),
             os.path.join(self.agentDir, "extensions"),
         ]
-        project_roots = [
-            os.path.join(self.cwd, CONFIG_DIR_NAME, "skills"),
-            os.path.join(self.cwd, CONFIG_DIR_NAME, "prompts"),
-            os.path.join(self.cwd, CONFIG_DIR_NAME, "themes"),
-            os.path.join(self.cwd, CONFIG_DIR_NAME, "extensions"),
-        ]
-
+        # MISAKA fork: no project-level resource roots. The project folder carries only
+        # PROJECT.md and skills/ (loaded through misaka.skills.layers), never executable config.
         for root in agent_roots:
             if self._is_under_path(normalized_path, root):
                 return SourceInfo(path=file_path, source="local", scope="user", origin="top-level", baseDir=root)
-
-        for root in project_roots:
-            if self._is_under_path(normalized_path, root):
-                return SourceInfo(path=file_path, source="local", scope="project", origin="top-level", baseDir=root)
 
         stats = os.stat(normalized_path)
         base_dir = (
@@ -720,11 +710,7 @@ class DefaultResourceLoader:
         diagnostics: list[ResourceDiagnostic] = []
 
         if include_defaults:
-            for dir_path in (
-                os.path.join(self.agentDir, "themes"),
-                os.path.join(self.cwd, CONFIG_DIR_NAME, "themes"),
-            ):
-                self._load_themes_from_dir(dir_path, themes, diagnostics)
+            self._load_themes_from_dir(os.path.join(self.agentDir, "themes"), themes, diagnostics)
 
         for path in paths:
             resolved = self._resolve_resource_path(path)
@@ -869,18 +855,12 @@ class DefaultResourceLoader:
         return {"themes": list(seen.values()), "diagnostics": diagnostics}
 
     def _discover_system_prompt_file(self) -> str | None:
-        project_path = os.path.join(self.cwd, CONFIG_DIR_NAME, "SYSTEM.md")
-        if os.path.exists(project_path):
-            return project_path
         global_path = os.path.join(self.agentDir, "SYSTEM.md")
         if os.path.exists(global_path):
             return global_path
         return None
 
     def _discover_append_system_prompt_file(self) -> str | None:
-        project_path = os.path.join(self.cwd, CONFIG_DIR_NAME, "APPEND_SYSTEM.md")
-        if os.path.exists(project_path):
-            return project_path
         global_path = os.path.join(self.agentDir, "APPEND_SYSTEM.md")
         if os.path.exists(global_path):
             return global_path

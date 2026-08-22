@@ -108,11 +108,11 @@ def _parser():
 
     sk = sub.add_parser("skills", help="Discover, review, approve, and manage skills")
     sk.add_argument("op", nargs="?", default="list",
-                    choices=["trust", "list", "scan", "pending", "approve", "reject",
+                    choices=["list", "scan", "pending", "approve", "reject",
                              "ledger", "rollback", "mode"])
     sk.add_argument("name", nargs="?",
                     help="Skill name or pending ID; ledger ID for rollback; mode name for mode")
-    sk.add_argument("--dir", help="Project root (default: the enclosing Git repository)")
+    sk.add_argument("--dir", help="Project folder to scan (default: the current directory)")
     sk.add_argument("--as", dest="role", default="sisters/10032",
                     help="Role whose skill stack to show")
 
@@ -560,32 +560,19 @@ def main():
                     args.name, _os.path.join(live, target["skill"]))
                 print(why)
                 sys.exit(0 if ok else 1)
-        elif args.op == "trust":
-            target = args.dir or skill_layers.find_project_root()
-            if not target:
-                print("No Git repository found above the current directory; pass --dir.")
-            else:
-                print(skill_layers.trust_project_root(target)[1])
         elif args.op == "scan":
-            rt = args.dir or skill_layers.find_project_root()
-            if not rt:
-                print("No Git repository found above the current directory.")
-            else:
-                from misaka.skills.guard import format_scan_report, scan_skill
-                found = False
-                for d in skill_layers._candidate_project_skills_dirs(rt):
-                    for md in __import__("pathlib").Path(d).rglob("SKILL.md"):
-                        found = True
-                        print(format_scan_report(scan_skill(md.parent, source="project-local")))
-                if not found:
-                    print("No project skills found in .misaka/skills or .agents/skills.")
+            from misaka.skills.guard import format_scan_report, scan_skill
+            found = False
+            for d in skill_layers.get_project_skills_dirs(args.dir or _os.getcwd()):
+                for md in skill_layers.iter_project_skill_files(d):
+                    found = True
+                    print(format_scan_report(scan_skill(md.parent, source="project")))
+            if not found:
+                print("No project skills found under skills/.")
         else:
             prof = _os.path.join(_os.path.expanduser(CFG["roles_root"]), args.role)
             for d in skill_layers.skills_stack(prof, cwd=_os.getcwd()):
                 print(d)
-            hint = skill_layers.get_untrusted_project_skills_root(cwd=_os.getcwd())
-            if hint:
-                print(f"  ({hint[1]} project skill(s) not loaded: project is untrusted. Run `misaka skills trust` to enable them.)")
     elif args.cmd == "basemap":
         bcon = basemap.connect()
         if args.load:

@@ -1,4 +1,4 @@
-"""Layered skill discovery with project trust and security scanning."""
+"""Layered skill discovery: project (<folder>/skills), role, shared."""
 import json
 import logging
 import os
@@ -8,11 +8,6 @@ from misaka.config import CFG
 
 logger = logging.getLogger(__name__)
 
-PROJECT_SKILLS_SUBDIRS = (os.path.join(".misaka", "skills"),
-                          os.path.join(".agents", "skills"))
-_PROJECT_ROOT_MAX_DEPTH = 64
-_PROJECT_SCAN_SOURCE = "project-local"
-_QUARANTINE_CACHE = {}
 
 
 def config_path():
@@ -42,111 +37,6 @@ def _write_skills_config(cfg):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
-
-
-def find_project_root(start=None):
-    """Return the nearest Git root, excluding the user's home directory."""
-    try:
-        cur = Path(start if start is not None else Path.cwd()).resolve()
-    except OSError:
-        return None
-    home = Path.home().resolve()
-    for _ in range(_PROJECT_ROOT_MAX_DEPTH):
-        try:
-            if (cur / ".git").exists():
-                return None if cur == home else cur
-        except OSError:
-            return None
-        if cur.parent == cur:
-            return None
-        cur = cur.parent
-    return None
-
-
-def trusted_project_dirs():
-    raw = load_skills_config().get("trusted_project_dirs")
-    if isinstance(raw, str):
-        raw = [raw]
-    if not isinstance(raw, list):
-        return set()
-    out = set()
-    for entry in raw:
-        entry = str(entry).strip()
-        if entry:
-            try:
-                out.add(Path(os.path.expanduser(os.path.expandvars(entry))).resolve())
-            except OSError:
-                continue
-    return out
-
-
-def is_project_root_trusted(root):
-    try:
-        return Path(root).resolve() in trusted_project_dirs()
-    except OSError:
-        return False
-
-
-def trust_project_root(root):
-    """Add a project root to the trusted skill-source list."""
-    resolved = Path(root).resolve()
-    if not resolved.is_dir():
-        return False, f"Directory does not exist: {resolved}"
-    cfg = load_skills_config()
-    dirs = cfg.get("trusted_project_dirs")
-    dirs = [dirs] if isinstance(dirs, str) else (dirs if isinstance(dirs, list) else [])
-    if str(resolved) in {str(Path(os.path.expanduser(d)).resolve())
-                         for d in dirs if str(d).strip()}:
-        return True, f"Already trusted: {resolved}"
-    dirs.append(str(resolved))
-    cfg["trusted_project_dirs"] = dirs
-    _write_skills_config(cfg)
-    return True, (
-        f"Trusted: {resolved}. Skills under .misaka/skills and .agents/skills "
-        "will now be discovered."
-    )
-
-
-def _candidate_project_skills_dirs(root):
-    """Return project skill directories that do not overlap role storage."""
-    roles_root = Path(os.path.expanduser(CFG["roles_root"])).resolve()
-    dirs = []
-    for sub in PROJECT_SKILLS_SUBDIRS:
-        cand = Path(root) / sub
-        try:
-            resolved = cand.resolve()
-            if cand.is_dir() and roles_root not in (resolved, *resolved.parents):
-                dirs.append(resolved)
-        except OSError:
-            continue
-    return dirs
-
-
-def is_quarantined_project_skill(skill_md):
-    """Quarantine dangerous project skills and fail closed when scanning fails."""
-    skill_dir = Path(skill_md).parent
-    try:
-        key = str(skill_dir.resolve())
-    except OSError:
-        key = str(skill_dir)
-    cached = _QUARANTINE_CACHE.get(key)
-    if cached is not None:
-        return cached
-    try:
-        from misaka.skills.guard import scan_skill_cached
-        result, _prov = scan_skill_cached(
-            skill_dir, source=_PROJECT_SCAN_SOURCE,
-            cache_dir=Path(os.path.expanduser("~/.misaka/cache/project_skill_scans")))
-        quarantined = result.verdict == "dangerous"
-        if quarantined:
-            logger.warning('Quarantined dangerous project skill: %s — %s',
-                           skill_dir, result.summary)
-    except Exception:  # noqa: BLE001 - unscanned project content must not load
-        logger.warning('Project skill scan failed; quarantining: %s',
-                       skill_dir, exc_info=True)
-        quarantined = True
-    _QUARANTINE_CACHE[key] = quarantined
-    return quarantined
 
 
 _USER_SCAN_CACHE = {}
@@ -202,30 +92,27 @@ def is_excluded_skill_path(path):
 
 
 def iter_project_skill_files(project_dir):
-    """Yield safe SKILL.md files under a trusted project directory."""
+    """Yield SKILL.md files under a project skills directory."""
     for skill_md in sorted(Path(project_dir).rglob("SKILL.md")):
-        if is_excluded_skill_path(skill_md):
-            continue
-        if not is_quarantined_project_skill(skill_md):
+        if not is_excluded_skill_path(skill_md):
             yield skill_md
 
 
 def get_project_skills_dirs(cwd=None):
-    """Return trusted project skill roots available from the current directory."""
-    root = find_project_root(cwd)
-    if root is None or not is_project_root_trusted(root):
-        return []
-    return _candidate_project_skills_dirs(root)
+    """Return the project skills root: ``<folder>/skills`` when it exists.
 
-
-def get_untrusted_project_skills_root(cwd=None):
-    """Return an untrusted project root and its skill count, when present."""
-    root = find_project_root(cwd)
-    if root is None or is_project_root_trusted(root):
-        return None
-    count = sum(1 for d in _candidate_project_skills_dirs(root)
-                for _ in Path(d).rglob("SKILL.md"))
-    return (root, count) if count else None
+    The folder MISAKA runs in is the project; its skills are the user's own, so they
+    get the same treatment as role skills (risk warning, ``disabled`` list) and no trust gate.
+    """
+    root = Path(cwd or os.getcwd()).expanduser()
+    try:
+        cand = (root / "skills").resolve()
+        roles_root = Path(os.path.expanduser(CFG["roles_root"])).resolve()
+        if cand.is_dir() and roles_root not in (cand, *cand.parents):
+            return [cand]
+    except OSError:
+        pass
+    return []
 
 
 def shared_skills_dir():
@@ -254,8 +141,8 @@ def skills_stack(profile_dir, cwd=None):
 
     for proj_dir in get_project_skills_dirs(cwd):
         for skill_md in iter_project_skill_files(proj_dir):
-            _add(skill_md.parent)
-    for d in profiles.skills(profile_dir):
+            _add_user_skill(skill_md.parent)
+    for d in (profiles.skills(profile_dir) if profile_dir else []):
         _add_user_skill(d)
     shared = shared_skills_dir()
     if os.path.isdir(shared):

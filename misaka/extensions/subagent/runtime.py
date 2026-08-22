@@ -2368,21 +2368,11 @@ class SubagentManager:
         return []
 
     def _skill_paths(self, definition: agent_roster.AgentDefinition) -> list[str]:
-        candidates: list[str] = []
-        profile = self.role_context.profile_dir
-        if profile:
-            try:
-                from misaka.config import profiles
+        from misaka.skills import layers as skill_layers
 
-                candidates.extend(profiles.skills(profile))
-            except Exception:  # noqa: BLE001
-                pass
-        workspace = Path(self.role_context.workspace).expanduser().resolve()
-        for directory in (workspace, *workspace.parents):
-            candidates.extend(str(path) for path in (directory / ".misaka" / "skills").glob("*"))
-            if (directory / ".git").exists():
-                break
-        candidates.extend(str(path) for path in (Path.home() / ".misaka" / "agent" / "skills").glob("*"))
+        # Children see the same project/role/shared stack as their parent.
+        candidates = skill_layers.skills_stack(
+            self.role_context.profile_dir or None, cwd=self.role_context.workspace or None)
         by_name = {Path(path).name: path for path in candidates}
         resolved: list[str] = []
         for value in definition.skills:

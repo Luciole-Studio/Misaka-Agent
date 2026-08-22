@@ -10,7 +10,6 @@ from typing import Any, TypedDict
 
 from pathspec import GitIgnoreSpec
 
-from misaka.config import CONFIG_DIR_NAME as _CONFIG_DIR_NAME
 from misaka.config import get_agent_dir
 from misaka.core.diagnostics import ResourceCollision, ResourceDiagnostic
 from misaka.core.source_info import SourceInfo, create_synthetic_source_info
@@ -116,12 +115,8 @@ def load_skills(options: LoadSkillsOptions) -> LoadSkillsResult:
             skill_map[skill.name] = skill
             real_path_set.add(real_path)
 
-    user_skills_dir = os.path.join(resolved_agent_dir, "skills")
-    project_skills_dir = os.path.join(resolved_cwd, _CONFIG_DIR_NAME, "skills")
-
-    if include_defaults:
-        add_skills(_load_skills_from_dir_internal(user_skills_dir, "user", True))
-        add_skills(_load_skills_from_dir_internal(project_skills_dir, "project", True))
+    # MISAKA fork: no implicit skill roots. Every session receives its project/role/shared
+    # stack explicitly through --skill (misaka.skills.layers.skills_stack).
 
     def is_under_path(target: str, root: str) -> bool:
         normalized_root = os.path.abspath(root)
@@ -132,11 +127,6 @@ def load_skills(options: LoadSkillsOptions) -> LoadSkillsResult:
         return normalized_target.startswith(prefix)
 
     def get_source(resolved_path: str) -> str:
-        if not include_defaults:
-            if is_under_path(resolved_path, user_skills_dir):
-                return "user"
-            if is_under_path(resolved_path, project_skills_dir):
-                return "project"
         return "path"
 
     for raw_path in skill_paths:
