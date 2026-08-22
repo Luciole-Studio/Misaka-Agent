@@ -34,7 +34,7 @@ from misaka.config import CFG
 # Wire protocol version (strict equality, as in herdr). Bump it whenever *server
 # behaviour* changes, not only method/event shapes: an unbumped behaviour change
 # once let a stale daemon slip through the version gate.
-PROTOCOL = 21   # 21: pane.report_state -- a session in a pane says working/idle/blocked itself; panes.list carries `reported`
+PROTOCOL = 22   # 22: one panel at a time -- a second attach "*" is refused; ping reports `panels`
 RING_CAP = 256 * 1024          # output tail kept per pane
 FRAME_SECONDS = 0.008          # coalescing window for dirty-row broadcasts (~120 fps)
 SCROLLBACK_LINES = 2000        # scrollback history per pane
@@ -780,7 +780,7 @@ class Daemon:
     def _api(self, method, params):
         if method == "ping":
             return {"pong": True, "pid": os.getpid(), "panes": len(self.panes),
-                    "proto": PROTOCOL}
+                    "panels": len(self._panels), "proto": PROTOCOL}
         if method == "panes.list":
             status, mail = {}, {}
             cards = [p.card for p in self.panes.values() if p.card]
@@ -991,6 +991,8 @@ class Daemon:
                         wanted = (req.get("params") or {}).get("id", "")
                         if wanted != "*" and wanted not in self.panes:
                             raise ValueError("Pane not found.")
+                        if wanted == "*" and self._panels:
+                            raise ValueError("A panel is already attached; one panel at a time.")
                         self._attached[writer] = wanted
                         if wanted == "*":
                             self._panels.add(writer)

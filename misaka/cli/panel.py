@@ -200,13 +200,14 @@ def pane_state(pane):
     """The one bridge from MISAKA pane fields to herdr's (AgentState, pane.seen) pair.
     The session's own report wins (``reported``, herdr's hook authority: the agent_state
     extension says working / idle / blocked); the screen heuristic (``busy``) only speaks for
-    panes that never report (shells, allies). The board adds the cases where a person must
-    decide: a blocked, triaged, or failed card is "blocked" too. A finished card nobody looked
-    at is done (idle + unseen); a dead pane is unknown. Pure, so testable."""
+    panes that never report (shells, allies). The board adds the cases where someone must act
+    before anything moves: a blocked, triaged, or failed card, or one parked at the peer-review
+    gate, is "blocked" too. A finished card nobody looked at is done (idle + unseen); a dead
+    pane is unknown. Pure, so testable."""
     if not pane["alive"]:
         return "unknown", True
     reported = (pane.get("reported") or {}).get("state")
-    if reported == "blocked" or pane.get("status") in ("blocked", "triage", "failed"):
+    if reported == "blocked" or pane.get("status") in ("blocked", "triage", "failed", "review"):
         return "blocked", True
     if reported == "working" or (reported is None and pane.get("busy")):
         return "working", True
@@ -340,7 +341,9 @@ def sidebar_model(listing, focused_id, active_space=None, tab_of=None, tab_count
         space["active"] = space["key"] == active_space
     agents = []
     for pane in listing:
-        if pane["title"] == "shell":          # ponytail: MISAKA's own shell panes carry this title
+        # ponytail: MISAKA's own shell panes carry this title; one running an ally (the daemon
+        # recognised codex/claude in its foreground) counts as that agent, like herdr's detection.
+        if pane["title"] == "shell" and not pane.get("ally"):
             continue
         state, seen = pane_state(pane)
         key = member_of[pane["id"]]
@@ -348,7 +351,8 @@ def sidebar_model(listing, focused_id, active_space=None, tab_of=None, tab_count
         agents.append({"pane": pane["id"], "space": by_key[key]["label"],
                        "tab": (str(tab + 1) if (tab is not None and tab_counts.get(key, 1) > 1)
                                else None),
-                       "agent": pane["title"] or pane["id"], "state": state, "seen": seen,
+                       "agent": pane.get("ally") or pane["title"] or pane["id"],
+                       "state": state, "seen": seen,
                        "active": pane["id"] == focused_id})
     return spaces, agents
 
@@ -828,9 +832,32 @@ def launch():
     net.ensure()
     sock_path = os.path.expanduser(net.CFG["net_sock"])
     control, stream = _Sock(sock_path), _Sock(sock_path)
+    if control.request("ping").get("panels"):
+        # One panel at a time: two would fight over the layout (herdr shares one view across
+        # clients; the cheap answer here is to refuse the second).
+        sys.exit("Another MISAKA panel is already open. Use that one, or close it first.")
+
+    # herdr's seen/done rule (api_helpers.rs:99-110): a turn that finished while its pane was
+    # out of sight is "done" (teal) until you look at it. Tracked here from the reported state.
+    turns = {}              # pane id -> last reported state
+    unseen_turn = set()     # panes whose last turn ended out of sight
+
+    def _in_view():
+        tab = next((tree for tree in tabs if focused in hui.pane_ids(tree)), None)
+        return set(hui.pane_ids(tab)) if tab else {focused}
+
+    def note_turns(raw):
+        for pane in raw:
+            state = (pane.get("reported") or {}).get("state")
+            previous, turns[pane["id"]] = turns.get(pane["id"]), state
+            if previous in ("working", "blocked") and state == "idle" and pane["id"] not in _in_view():
+                unseen_turn.add(pane["id"])
+            if pane["id"] in unseen_turn:
+                pane["unseen"] = True
+        return raw
 
     def panes():
-        return control.request("panes.list")["panes"]
+        return note_turns(control.request("panes.list")["panes"])
 
     listing = panes()
     for pane in listing:      # Clean up dead Last Order panes first.
@@ -1410,6 +1437,10 @@ def launch():
         last_focus[side["ws"]] = pane_id
         changed = focused != pane_id
         focused = pane_id
+        unseen_turn.difference_update(_in_view())   # herdr switch_tab: everything now on screen counts as seen
+        for pane in listing:
+            if pane["id"] not in unseen_turn and not pane.get("card"):
+                pane.pop("unseen", None)
         try:
             control.request("pane.focused", {"id": pane_id})   # Focusing marks the pane as seen.
         except RuntimeError:
