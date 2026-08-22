@@ -948,11 +948,28 @@ def launch():
     def open_menu():
         from misaka.config import sisters
         menu.update(items=sorted(sisters()) or ["no sisters"], hl=0, scroll=0, open=True)
+        _write_all(b"\x1b[?1003h")     # herdr highlights on hover: report every mouse move while the popup is up.
         draw_menu()
 
     def close_menu():
         menu["open"] = False
-        relayout()                 # The popup may have covered the main area too; repaint everything under it.
+        _write_all(b"\x1b[?1003l\x1b[?1002h")    # Back to motion-only-while-pressed (drag selection).
+        # The popup sat on rows the sidebar cache believes are unchanged: drop the cache so every
+        # row is rewritten, or a ghost popup stays on screen (looked like a freeze).
+        chrome_cache["rows"] = []
+        rect = menu["rect"]
+        if rect and rect.x + rect.width > side["w"]:
+            relayout()             # It spilled into the main area: repaint the panes under it too.
+        else:
+            draw_sidebar()
+
+    def menu_hover(x, y):
+        """herdr mouse.rs:146-153: the pointer moves the highlight."""
+        hit = next((index for rect, index in menu["hits"]
+                    if rect.x <= x - 1 < rect.x + rect.width and rect.y == y - 1), None)
+        if hit is not None and hit != menu["hl"]:
+            menu["hl"] = hit
+            draw_menu()
 
     def menu_move(delta):
         menu["hl"] = max(0, min(menu["hl"] + delta, len(menu["items"]) - 1))   # herdr move_prev/move_next: no wrap
@@ -1576,6 +1593,9 @@ def launch():
                     button, mx, my = (int(m.group(1)), int(m.group(2)),
                                       int(m.group(3)))
                     press = m.group(4) == b"M"
+                    if menu["open"] and press and button in (32, 35):   # Pointer motion over the open popup.
+                        menu_hover(mx, my)
+                        continue
                     if button in (64, 65):
                         on_wheel(mx, my, -3 if button == 64 else 3)
                     elif button == 32 and press:            # Drag with the left button held.
@@ -1746,7 +1766,7 @@ def launch():
     finally:
         termios.tcsetattr(0, termios.TCSANOW, old_attrs)
         # Turn off mouse tracking, leave the alternate screen, and show the cursor again.
-        _write_all(b"\x1b[?1000;1002;1006l\x1b[?7h\x1b[0m\x1b[2J\x1b[?1049l\x1b[?25h")
+        _write_all(b"\x1b[?1000;1002;1003;1006l\x1b[?7h\x1b[0m\x1b[2J\x1b[?1049l\x1b[?25h")
         if exit_reason[0] == "closed_all":
             print("All panes closed. Run `misaka` to open the panel again.")
         else:
