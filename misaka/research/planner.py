@@ -12,18 +12,16 @@ from pathlib import Path
 
 from misaka.config import CFG
 from misaka.core.session_manager import find_most_recent_session
-from misaka.platform import projects
 from misaka.skills import layers as skill_layers
 from misaka.research import runs
 
 
-PROJECT_INTAKE_CONTRACT = """You are Last Order in Research mode. Set up the project for the user's research question.
+PROJECT_INTAKE_CONTRACT = """You are Last Order in Research mode. Draft the project brief (PROJECT.md) for the user's research question.
 Do not answer the original question, and do not break it into research tasks yet.
 Return exactly one JSON object:
-{"name": "short project display name", "project_markdown": "the complete PROJECT.md"}
+{"project_markdown": "the complete PROJECT.md"}
 
 Requirements:
-- Derive a concise display name from the question. It is a label, not a directory name.
 - project_markdown must cover the original question, the research goal, the assumptions to test, and the boundaries.
 - Phrase assumptions as things to investigate, never as conclusions.
 - Output JSON only.
@@ -176,9 +174,12 @@ def _call(worker, cfg, prompt, *, cwd, session_dir, continue_session=False,
     )
 
 
-def create_project_for_question(con, cfg, worker, question, workspace):
-    """Let Last Order author the project; Python only checks the filesystem boundary."""
+def ensure_project_brief(cfg, worker, question, workspace):
+    """Return ``<workspace>/PROJECT.md``, letting Last Order draft it when the folder has none."""
     workspace = str(Path(workspace).expanduser().resolve())
+    path = os.path.join(workspace, "PROJECT.md")
+    if os.path.isfile(path):
+        return path
     obj, _raw, err = _call(
         worker, cfg, PROJECT_INTAKE_CONTRACT + f"""
 # The user's research question
@@ -188,16 +189,14 @@ def create_project_for_question(con, cfg, worker, question, workspace):
         timeout=120, thinking="low", model=cfg["default_model"],
     )
     if err:
-        raise RuntimeError(f"Last Order failed to create the project: {err}")
+        raise RuntimeError(f"Last Order failed to draft the project brief: {err}")
     if not isinstance(obj, dict):
-        raise ValueError("Last Order's project output is not an object.")
-    name = str(obj.get("name") or "").strip()[:64]
+        raise ValueError("Last Order's project brief output is not an object.")
     markdown = str(obj.get("project_markdown") or "").strip()
-    if not name:
-        raise ValueError("Last Order did not generate a project name.")
     if len(markdown) < 40:
         raise ValueError("Last Order did not generate a complete PROJECT.md.")
-    return projects.create(con, workspace, name, markdown=markdown)
+    Path(path).write_text(markdown + "\n", encoding="utf-8")
+    return path
 
 
 def _validate_task(raw, roster, index):
@@ -286,7 +285,7 @@ def validate_plan(obj, roster):
 
 def plan_root(con, run, cfg, worker, *, revision=None):
     root = runs.run_dir(run)
-    session_dir = os.path.join(root, "sessions", "root-lo")
+    session_dir = runs.session_dir(run, "root-lo")
     roster = sister_catalog(cfg.get("profiles_root"))
     if not roster:
         raise RuntimeError("The Sister roster is empty; research tasks cannot be assigned.")
@@ -296,9 +295,6 @@ def plan_root(con, run, cfg, worker, *, revision=None):
         + f"""
 # Original question
 {run['question']}
-
-# Project
-{run['project_name']} ({run['project_id']})
 """
         + f"""
 # Project / PageIndex workspace index (read before planning)
@@ -332,7 +328,7 @@ def plan_root(con, run, cfg, worker, *, revision=None):
 def plan_branch(con, run, cfg, worker, branch, context_path, *, revision=None):
     """Open or continue a dedicated Last Order session for one material issue confirmed by the critic."""
     root = runs.run_dir(run)
-    session_dir = os.path.join(root, "sessions", "branches", branch["id"])
+    session_dir = runs.session_dir(run, "branches", branch["id"])
     roster = sister_catalog(cfg.get("profiles_root"))
     methods = method_catalog(os.path.join(cfg["roles_root"], "last_order"), root)
     prompt = (
@@ -373,7 +369,7 @@ def plan_branch(con, run, cfg, worker, branch, context_path, *, revision=None):
 
 def review_methods(run, cfg, worker, plan):
     root = runs.run_dir(run)
-    session_dir = os.path.join(root, "sessions", "method-review")
+    session_dir = runs.session_dir(run, "method-review")
     prompt = (METHOD_REVIEW_CONTRACT + f"""
 # Original question
 {run['question']}
@@ -400,7 +396,7 @@ def preflight(run, cfg, worker, task, *, branch_id=None):
     if not os.path.isdir(profile):
         raise ValueError(f"Sister profile not found: {sid}")
     label = branch_id or "root"
-    session_dir = os.path.join(root, "sessions", "preflight", label, task["local_id"])
+    session_dir = runs.session_dir(run, "preflight", label, task["local_id"])
     prompt = (PREFLIGHT_CONTRACT + '\n# Original question\n' + run["question"]
               + '\n# Your research assignment\n' + _catalog_text(task)
               + f"""

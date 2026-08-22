@@ -18,9 +18,6 @@ def ingest_artifacts(con, task, artifacts=None):
                 artifacts = json.load(handle).get("artifacts", [])
         except (OSError, ValueError):
             return []
-    project = task["project"] if "project" in task.keys() else None
-    project_row = (con.execute("SELECT path FROM projects WHERE id=?", (project,)).fetchone()
-                   if project else None)
     root = os.path.realpath(workspace) if workspace else ""
     collected = []
     for relative in artifacts:
@@ -34,13 +31,8 @@ def ingest_artifacts(con, task, artifacts=None):
         ):
             continue
         try:
-            doc_id, _pages = corpus.ingest(
-                path,
-                title=f"[{task['id']}] {relative}",
-                project=project,
-                project_path=project_row["path"] if project_row else None,
-                task_id=task["id"],
-            )
+            doc_id, _pages = corpus.ingest(path, title=f"[{task['id']}] {relative}",
+                                           task_id=task["id"])
         except ValueError:
             continue
         collected.append((doc_id, relative))

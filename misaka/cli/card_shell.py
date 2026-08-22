@@ -46,7 +46,7 @@ def launch(task_id, resume_only=False):
         if fixes:
             task["feedback"] = ("⚠️ The previous review failed. Fix the following before resubmitting (rewrite deliverables to the latest requirements):\n"
                                 + "\n".join(f"- {x}" for x in fixes))
-    workspace = db.workspace_for(task, CFG.get("workspaces_root"))
+    workspace = db.workspace_for(task)
     os.makedirs(workspace, exist_ok=True)
     task["_attachments"] = db.stage_attachments(con, task_id, workspace)
     profile_dir = os.path.join(os.path.expanduser(CFG["profiles_root"]), task["assignee"])

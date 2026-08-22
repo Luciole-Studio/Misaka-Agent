@@ -10,6 +10,11 @@ def _text(s):
     return {"content": [{"type": "text", "text": s}], "details": {}}
 
 
+def _workspace(ctx):
+    """The project is the folder MISAKA runs in."""
+    return os.path.realpath(getattr(ctx, "cwd", None) or os.getcwd())
+
+
 def _register(harn, name, label, description, parameters, snippet=None, guidelines=None):
     def deco(fn):
         async def execute(tool_call_id, raw, signal, on_update, ctx):
@@ -34,12 +39,12 @@ def register(harn):
         guidelines=["Check doc_list before fetching or re-reading material: indexed sources and other cards' artifacts are already there."],
         parameters=ListParams)
     async def doc_list(tool_call_id, params, signal, on_update, ctx):
-        rows = corpus.docs()
+        rows = corpus.docs(workspace=_workspace(ctx))
         if params.query:
             rows = [r for r in rows if params.query.lower() in (r["title"] or "").lower()]
         if not rows:
             return _text("No documents are indexed in this workspace.")
-        return _text("\n".join(f"  {r['pages']:>4} pages  {r['title']}" for r in rows))
+        return _text("\n".join(f"  {r['doc_id']}  {r['pages']:>4} pages  {r['title']}" for r in rows))
 
     class OutlineParams(BaseModel):
         doc_id: str = Field(description="Document ID from `doc_list`.")
@@ -100,10 +105,38 @@ def register(harn):
         snippet="Locate exact text in indexed documents",
         parameters=FindParams)
     async def doc_find(tool_call_id, params, signal, on_update, ctx):
-        hits = corpus.search_literal(params.query, doc_id=params.doc_id or None)
+        hits = corpus.search_literal(params.query, doc_id=params.doc_id or None,
+                                     workspace=_workspace(ctx))
         if not hits:
             return _text("No matches.")
         return _text("\n".join(f"{h['doc_id']} p{h['page']}  {h['s'][:100]}" for h in hits))
+
+    class AddParams(BaseModel):
+        path: str = Field(description="File or folder to index (PDF, Markdown, text), relative to the workspace or absolute; must stay inside the workspace.")
+
+    @_register(
+        harn, name="doc_add", label="Index materials",
+        description="Index a file or a folder of materials into the document store so the doc_* tools can navigate, search, and cite them.",
+        snippet="Index a file or folder of materials for doc_* tools",
+        guidelines=["Use doc_add for new material you fetched or wrote; doc_list shows what is already indexed."],
+        parameters=AddParams)
+    async def doc_add(tool_call_id, params, signal, on_update, ctx):
+        ws = _workspace(ctx)
+        path = os.path.realpath(os.path.join(ws, os.path.expanduser(params.path)))
+        if path != ws and not path.startswith(ws + os.sep):
+            return _text(f"Refused: {params.path} resolves outside the workspace {ws}.")
+        if os.path.isdir(path):
+            added, skipped = corpus.scan(path)
+        elif os.path.isfile(path):
+            try:
+                added, skipped = [(corpus.ingest(path)[0], path)], []
+            except ValueError as e:
+                added, skipped = [], [(path, str(e))]
+        else:
+            return _text(f"Not found: {params.path}")
+        lines = [f"  {did}  {os.path.relpath(p, ws)}" for did, p in added]
+        lines += [f"  skipped  {os.path.relpath(p, ws)}: {why}" for p, why in skipped]
+        return _text("\n".join(lines) or "Nothing to index: no PDF, Markdown, or text files found.")
 
     class VerifyParams(BaseModel):
         doc_id: str = Field(description="Document ID.")

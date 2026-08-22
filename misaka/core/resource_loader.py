@@ -919,7 +919,7 @@ class DefaultResourceLoader:
 
 
 def _load_context_file_from_dir(dir_path: str) -> dict[str, str] | None:
-    for filename in ("AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"):  # pi 8ecf8a9
+    for filename in ("PROJECT.md", "AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"):  # pi 8ecf8a9 + the project brief
         file_path = os.path.join(dir_path, filename)
         if not os.path.exists(file_path):
             continue

@@ -2,7 +2,7 @@
 
 Rendering: the daemon keeps a terminal emulator per pane; the panel subscribes
 to dirty rows from every pane and lays them out itself: a sidebar on the left
-(Sister roster plus the Windows/projects section), a tab row at the top of the
+(Sister roster plus the Windows/Projects sections), a tab row at the top of the
 main area, and a per-tab BSP split tree (splitting only the focused pane; each
 pane gets a border and joints are merged). Colors come from the engine's
 built-in dark/light theme, adapted to the terminal background; only herdr's
@@ -237,8 +237,8 @@ def _alloc_sections(rows, wants):
 
 def format_sidebar(panes, focused_id, rows, roster=(), projects=(),
                    expanded=(), scrolls=None, level=1.0, selected=None):
-    """The three sidebar sections: Sisters roster | Projects (click to expand a project's
-    cards; pinned first, archived sink to the bottom in gray) | Windows (pane list).
+    """The three sidebar sections: Sisters roster | Projects (a project is a folder; click to
+    expand its cards) | Windows (pane list).
     A section taller than its slot gets a thin scrollbar in its last column.
     Returns ``(lines, targets, spans)``; ``targets`` parallels ``lines``:
     None | ("roster", name) | ("pane", id) | ("proj", project_id) | ("card", card_id). Pure, so testable."""
@@ -282,16 +282,13 @@ def format_sidebar(panes, focused_id, rows, roster=(), projects=(),
         name = proj["name"]
         shown = name if name is not None else '(unclassified)'
         arrow = "▾" if (project_id in expanded) else "▸"
-        star = "★" if proj.get("pinned_at") else ""
         live_n = sum(1 for c in proj["cards"]
                      if c["status"] in ("ready", "running", "review", "verifying", "finalizing"))
-        label = "archived" if proj["archived"] else (str(live_n) if live_n else "")
-        tone = hui.sgr_fg(hui.OVERLAY0) if proj["archived"] else ""
+        label = str(live_n) if live_n else ""
         inner = SIDEBAR_W - 2
-        shown, shown_w = _cut(shown,
-                              max(4, inner - 5 - _wcwidth(star) - _wcwidth(label)))
-        left = f"{tone}{arrow} {star}{shown}"
-        left_w = 2 + _wcwidth(star) + shown_w
+        shown, shown_w = _cut(shown, max(4, inner - 5 - _wcwidth(label)))
+        left = f"{arrow} {shown}"
+        left_w = 2 + shown_w
         gap = max(1, inner - left_w - _wcwidth(label))
         projs.append((_row(f"{left}{' ' * gap}{hui.sgr_fg(hui.OVERLAY0)}{label}\x1b[0m",
                            left_w + gap + _wcwidth(label),
@@ -522,27 +519,10 @@ def _clamp_row(line, width):
 
 
 def format_card_menu(card_id, width=46):
-    """Card context menu: delete only (destructive). Same layout as the project menu. Pure, so testable."""
+    """Card context menu: delete only (destructive). Same layout as the key help. Pure, so testable."""
     rows = [("d", "Delete card + history (cannot undo)"), ("", "Any other key closes")]
     inner = width - 2
     title, tw = _cut(f"─ Card: {card_id} ", inner)
-    lines = ["┌" + title + "─" * (inner - tw) + "┐"]
-    for key, desc in rows:
-        body, bw = _cut(f"  {key}" + " " * max(1, 4 - len(key)) + desc, inner)
-        lines.append("│" + body + " " * (inner - bw) + "│")
-    lines.append("└" + "─" * inner + "┘")
-    return lines
-
-
-def format_project_menu(name, pinned, archived, width=46):
-    """Project context menu (same layout as the key help): verbs depend on the current state.
-    Rows are exactly ``width`` wide; long names and narrow screens are truncated, never overflow. Pure, so testable."""
-    rows = [("1", "Unpin" if pinned else "Pin"),
-            ("2", "Unarchive" if archived else "Archive"),
-            ("3", "Delete (refused while cards remain)"),
-            ("", "Any other key closes")]
-    inner = width - 2
-    title, tw = _cut(f"─ Project: {name} ", inner)
     lines = ["┌" + title + "─" * (inner - tw) + "┐"]
     for key, desc in rows:
         body, bw = _cut(f"  {key}" + " " * max(1, 4 - len(key)) + desc, inner)
@@ -1209,8 +1189,8 @@ def launch():
         paint("".join(out).encode())
 
     def on_rclick(x, y):
-        """Right-click in the sidebar: open the context menu for the project or card under the pointer."""
-        nonlocal menu_proj, menu_card
+        """Right-click in the sidebar: open the context menu for the card under the pointer."""
+        nonlocal menu_card
         if x > SIDEBAR_W:
             return
         target = (ui_map["targets"][y - 1]
@@ -1219,14 +1199,6 @@ def launch():
         if target and target[0] == "card":
             menu_card = target[1]
             _popup(format_card_menu(menu_card, width=width))
-            return
-        if not target or target[0] != "proj" or target[1] is None:
-            return
-        menu_proj = target[1]
-        meta = next((p for p in projects_cache["items"]
-                     if p.get("id") == menu_proj), {})
-        _popup(format_project_menu(meta.get("name") or menu_proj, bool(meta.get("pinned_at")),
-                                   bool(meta.get("archived")), width=width))
 
     def on_click(x, y):
         nonlocal tab_scroll, tab_follow
@@ -1325,7 +1297,6 @@ def launch():
     prefix_pending = 0
     exit_reason = ["detached"]     # detached: user left; closed_all: the last pane was closed.
     help_open = False
-    menu_proj = None
     menu_card = None
     try:
         paint(b"\x1b[0m\x1b[2J")
@@ -1409,29 +1380,6 @@ def launch():
                     key = chunk[offset:offset + 1]
                     if help_open:                      # Key help is open: any key closes it and redraws.
                         help_open = False
-                        relayout()
-                        continue
-                    if menu_proj is not None:          # Project menu: 1 pin, 2 archive, 3 delete.
-                        project_id, menu_proj = menu_proj, None
-                        meta = next((p for p in projects_cache["items"]
-                                     if p.get("id") == project_id), {})
-                        try:
-                            if key == b"1":
-                                control.request("project.set", {
-                                    "id": project_id,
-                                    "pinned": not meta.get("pinned_at")})
-                            elif key == b"2":
-                                control.request("project.set", {
-                                    "id": project_id,
-                                    "archived": not meta.get("archived")})
-                            elif key == b"3":
-                                control.request("project.delete", {"id": project_id})
-                        except RuntimeError as error:
-                            refresh_projects()
-                            relayout()
-                            bottom_note(f"\x1b[33m{error}\x1b[0m")
-                            continue
-                        refresh_projects()
                         relayout()
                         continue
                     if menu_card is not None:          # Card menu: d deletes, any other key closes.

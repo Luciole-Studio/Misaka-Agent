@@ -16,7 +16,7 @@ run() { # run <name> <command...>
 }
 
 echo "── Module self-checks ──"
-for m in misaka/platform/tasks.py misaka/platform/projects.py \
+for m in misaka/platform/tasks.py \
          misaka/platform/prompt_guard.py \
          misaka/network/validate.py \
          misaka/platform/budget.py \
@@ -59,8 +59,7 @@ run "subagent permission policy" .venv/bin/python -m pytest -q tests/contract/te
 run "subagent hooks + process group" .venv/bin/python -m pytest -q tests/integration/test_subagent_hooks.py
 run "subagent runtime edge cases" .venv/bin/python -m pytest -q tests/integration/test_subagent_runtime_edges.py
 run "Sister owner fence" .venv/bin/python -m pytest -q tests/integration/test_sister_owner_fence.py
-run "project dimension" .venv/bin/python -m pytest -q tests/integration/test_project_dimension.py
-run "projects self-check" .venv/bin/python misaka/platform/projects.py
+run "research runs (folder = project)" .venv/bin/python -m pytest -q tests/contract/test_research_runs.py
 run "token budget" .venv/bin/python -m pytest -q tests/unit/test_token_budget.py
 run "SQLite threading" .venv/bin/python -m pytest -q tests/integration/test_board_db_threading.py
 run "net daemon" .venv/bin/python -m pytest -q tests/integration/test_net_daemon.py

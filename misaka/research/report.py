@@ -72,15 +72,13 @@ Wave: {wave}
 
 
 def create(con, rows, title, *, assignee="synthesizer", lens='Overall evidence and competing interpretations',
-           project=None, workspace=None, run_id=None, wave=0, preflight_path=None,
-           timeout_seconds=1200):
+           workspace=None, run_id=None, wave=0, preflight_path=None, timeout_seconds=1200):
     """Create one synthesis task; the caller links it to a research run."""
     return task_store.create_task(
         con, f"{SYNTHESIS_PREFIX}{title}",
         body=card_body(rows, title, lens=lens, run_id=run_id, wave=wave,
                        preflight_path=preflight_path),
-        assignee=assignee, project=project, workspace=workspace,
-        timeout_seconds=timeout_seconds,
+        assignee=assignee, workspace=workspace, timeout_seconds=timeout_seconds,
     )
 
 
@@ -136,7 +134,7 @@ def adjudicate(con, run, cfg, worker, *, synthesis_tasks, disagreements=()):
               + '\n# Plan, branch context, and red-team reviews\n'
               + json.dumps(supporting, ensure_ascii=False, indent=2)
               + '\n# Disagreement matrix\n' + json.dumps(list(disagreements), ensure_ascii=False, indent=2))
-    session_dir = os.path.join(root, "sessions", "root-lo")
+    session_dir = runs.session_dir(run, "root-lo")
     _obj, text, err = worker.run_llm_json(
         os.path.join(cfg["roles_root"], "last_order"), prompt,
         cfg["provider"], cfg["default_model"], cwd=root, tools=["read"],
@@ -164,7 +162,7 @@ def audit_final(con, run, cfg, worker, draft_path):
               + '# Red-team reviews and syntheses to check against\n'
               + json.dumps(_paths(con, run["id"], {"critique", "synthesis"}),
                            ensure_ascii=False, indent=2))
-    session_dir = os.path.join(root, "sessions", "final-audit")
+    session_dir = runs.session_dir(run, "final-audit")
     obj, raw, err = worker.run_llm_json(
         os.path.join(cfg["roles_root"], "redteam"), prompt,
         cfg["provider"], cfg["default_model"], cwd=root, tools=["read"],
@@ -190,7 +188,7 @@ def revise_final(con, run, cfg, worker, draft_path, audit):
 # Audit
 """
               + json.dumps(audit, ensure_ascii=False, indent=2))
-    session_dir = os.path.join(root, "sessions", "root-lo")
+    session_dir = runs.session_dir(run, "root-lo")
     _obj, text, err = worker.run_llm_json(
         os.path.join(cfg["roles_root"], "last_order"), prompt,
         cfg["provider"], cfg["default_model"], cwd=root, tools=["read"], raw=True,

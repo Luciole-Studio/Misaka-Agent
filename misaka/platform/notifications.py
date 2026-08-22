@@ -65,7 +65,7 @@ BEGIN
   VALUES
     ('research_run',NEW.id,'terminal',
      json_object('status',NEW.status,'phase',NEW.phase,'wave',NEW.wave,
-                 'project_id',NEW.project_id,'project',NEW.project_name,
+                 'workspace',NEW.workspace,
                  'final_artifact',NEW.final_artifact,
                  'error',NEW.last_error),unixepoch());
 END;

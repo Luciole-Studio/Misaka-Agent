@@ -26,19 +26,6 @@ def _parser():
     a.add_argument("--model")
     a.add_argument("--priority", type=int, default=0)
     a.add_argument("--timeout", type=int, default=900)
-    a.add_argument("--project", help="Project name or ID (default: the current workspace's project)")
-
-    pr = sub.add_parser("project", help="Create, list, archive, pin, or delete projects")
-    pr.add_argument("name", nargs="?", help="Project name to create; omit to list projects")
-    pr_act = pr.add_mutually_exclusive_group()
-    pr_act.add_argument("--archive", action="store_true", help="Archive the project")
-    pr_act.add_argument("--unarchive", action="store_true", help="Unarchive the project")
-    pr_act.add_argument("--pin", action="store_true", help="Pin the project")
-    pr_act.add_argument("--unpin", action="store_true", help="Unpin the project")
-    pr_act.add_argument("--delete", action="store_true",
-                        help="Delete the project (needs --with-cards if it still has cards)")
-    pr.add_argument("--with-cards", action="store_true",
-                    help="Also delete the project's cards permanently")
 
     tk = sub.add_parser("task", help="Manage task cards")
     tk.add_argument("task_id")
@@ -110,8 +97,7 @@ def _parser():
     rs.add_argument("--depth", type=int, default=3, help="Maximum branch depth")
 
     tr = sub.add_parser("trace", help="Show the global trace, one session's trace, or compare two")
-    tr.add_argument("targets", nargs="*", help="None: global view; one: a session; two: side-by-side comparison")
-    tr.add_argument("--project", help="Limit the global view to one project")
+    tr.add_argument("targets", nargs="*", help="None: this folder's tree; one: a session; two: side-by-side comparison")
     tr.add_argument("--watch", action="store_true", help="Keep refreshing as the trace grows")
     tr.add_argument("--plain", action="store_true", help="Print a single frame and exit")
 
@@ -150,11 +136,11 @@ def _parser():
     wsp.add_argument("arg", nargs="?", help="Node ID (read) or card ID (outline)")
 
     dc = sub.add_parser("doc", help="Index documents, search them, show their structure, and verify quotes")
-    dc.add_argument("action", choices=["add", "list", "find", "verify", "tree"])
-    dc.add_argument("arg", nargs="?", help="File path (add), query (find), quote (verify), or document ID (tree)")
+    dc.add_argument("action", choices=["add", "scan", "list", "find", "verify", "tree"])
+    dc.add_argument("arg", nargs="?", help="File path (add), folder (scan; default: this folder), "
+                                           "query (find), quote (verify), or document ID (tree)")
     dc.add_argument("--doc", help="Restrict to one document ID")
     dc.add_argument("--no-tree", action="store_true", help="Skip PageIndex structure extraction")
-    dc.add_argument("--project", help="Project to file the document under")
 
     sv = sub.add_parser("survey", help="Create a coverage-survey card for a proposition")
     sv.add_argument("proposition", help="Proposition to examine")
@@ -242,44 +228,14 @@ def main():
         from misaka.network import roster
         sys.exit(roster.cli_remove(args.sid, yes=args.yes))
     elif args.cmd == "add":
-        from misaka.platform import projects as project
         body = args.body
         if args.body_file:
             with open(args.body_file, encoding="utf-8") as f:
                 body = f.read()
-        proj = project.require(con, args.project, workspace=os.getcwd())
         tid = db.create_task(con, args.title, body=body, assignee=args.assignee,
                              model=args.model, priority=args.priority, timeout_seconds=args.timeout,
-                             project=proj, workspace=os.getcwd())
+                             workspace=os.getcwd())
         print(tid)
-    elif args.cmd == "project":
-        from misaka.platform import projects as project
-        if not args.name:
-            rows = project.listing(con, workspace=os.getcwd())
-            if not rows:
-                print("No projects in this workspace.")
-            for row in sorted(rows, key=lambda x: (
-                    bool(x["archived"]), -(x["pinned_at"] or 0), x["name"])):
-                marks = ("★" if row["pinned_at"] else "") + \
-                        (" (archived)" if row["archived"] else "")
-                print(f"{row['id']}  {row['name']} {marks}".rstrip())
-        elif args.delete:
-            ok, msg = project.delete(
-                con, args.name, with_cards=args.with_cards, workspace=os.getcwd()
-            )
-            print(msg)
-            sys.exit(0 if ok else 1)
-        elif args.archive or args.unarchive or args.pin or args.unpin:
-            ok, msg = project.set_state(
-                con, args.name,
-                archived=True if args.archive else False if args.unarchive else None,
-                pinned=True if args.pin else False if args.unpin else None,
-                workspace=os.getcwd())
-            print(msg)
-            sys.exit(0 if ok else 1)
-        else:
-            row = project.create(con, os.getcwd(), args.name)
-            print(f"{row['id']}  {row['name']}:{row['path']}")
     elif args.cmd == "tell":
         from misaka.extensions.ally import tell as ally_tell
         ok, msg = ally_tell.tell(args.message, to_addr=args.to, summary=args.summary)
@@ -296,7 +252,7 @@ def main():
         print(msg)
         sys.exit(0 if ok else 1)
     elif args.cmd == "board":
-        tail.board_view(con)
+        tail.board_view(con, db.canonical_workspace())
     elif args.cmd == "tail":
         tail.follow(con, since=args.since, once=args.no_follow)
     elif args.cmd == "plan":
@@ -331,15 +287,11 @@ def main():
         else:
             if not args.goal:
                 sys.exit("A new research run requires a question; use --resume RUN_ID to continue one.")
-            project = planner.create_project_for_question(
-                con, dict(CFG), worker_mod, args.goal, os.getcwd())
-            run = runs.create(con, project_id=project["id"], question=args.goal,
+            brief = planner.ensure_project_brief(dict(CFG), worker_mod, args.goal, os.getcwd())
+            run = runs.create(con, workspace=os.getcwd(), question=args.goal,
                               limits={"max_depth": args.depth},
                               token_start=budget.spent(con))
-            print(
-                f"Last Order created project '{project['name']}' ({project['id']}). "
-                f"Research run {run['id']}: {runs.run_dir(run)}"
-            )
+            print(f"Project brief: {brief}\nResearch run {run['id']}: {runs.run_dir(run)}")
         cfg = dict(CFG)
 
         class HeadlessRunner:
@@ -370,12 +322,13 @@ def main():
         import time as _time
 
         from misaka.observability import overview as observe
+        workspace = db.canonical_workspace()
         if not args.watch:
-            print(observe.render(con, args.project))
+            print(observe.render(con, workspace))
         else:
             try:
                 while True:
-                    print("\x1b[2J\x1b[H" + observe.render(con, args.project), flush=True)
+                    print("\x1b[2J\x1b[H" + observe.render(con, workspace), flush=True)
                     _time.sleep(2)
             except KeyboardInterrupt:
                 pass
@@ -644,11 +597,12 @@ def main():
         for c in basemap.cells(bcon, args.scheme)[:80]:
             print(f"  {c['id']:<8} {c['label']}")
     elif args.cmd == "ws":
+        workspace = db.canonical_workspace()
         if args.action == "outline":
             print(ws_index.render(ws_index.outline(
-                con, task_id=args.arg, research_store=research_runs)))
+                con, task_id=args.arg, workspace=workspace, research_store=research_runs)))
         elif args.action == "read":
-            txt = ws_index.read(con, args.arg or "", research_store=research_runs)
+            txt = ws_index.read(con, args.arg or "", workspace=workspace, research_store=research_runs)
             print(txt if txt else "Node not found; use `misaka ws outline` to list node IDs.")
         elif args.action == "reindex":
             n = 0
@@ -657,21 +611,22 @@ def main():
             print(f"Indexed {n} additional artifact(s).")
     elif args.cmd == "doc":
         if args.action == "add":
-            from misaka.platform import projects as project_store
-            project = (project_store.resolve(con, args.project, workspace=os.getcwd())
-                       if getattr(args, "project", None) else None)
-            did, n = corpus.ingest(
-                args.arg, with_tree=not args.no_tree,
-                project=project["id"] if project else None,
-                project_path=project["path"] if project else None)
+            did, n = corpus.ingest(args.arg, with_tree=not args.no_tree)
             has = corpus.doc_dir(did) and os.path.exists(os.path.join(corpus.doc_dir(did), "tree.json"))
             structure = "with PageIndex structure" if has else "page navigation only"
             print(f"Added {os.path.basename(args.arg)} as {did}: {n} pages, {structure}.")
+        elif args.action == "scan":
+            ingested, skipped = corpus.scan(args.arg or os.getcwd())
+            for did, path in ingested:
+                print(f"  {did}  {path}")
+            for path, reason in skipped:
+                print(f"  skipped {path}: {reason}")
+            print(f"Indexed {len(ingested)} file(s); skipped {len(skipped)}.")
         elif args.action == "list":
-            for d_ in corpus.docs():
+            for d_ in corpus.docs(workspace=db.canonical_workspace()):
                 print(f"  {d_['doc_id']}  {d_['pages']:>4} pages  {d_['title']}")
         elif args.action == "find":
-            hits = corpus.search_literal(args.arg, doc_id=args.doc)
+            hits = corpus.search_literal(args.arg, doc_id=args.doc, workspace=db.canonical_workspace())
             for h in hits:
                 print(f"  {h['doc_id']} p{h['page']}  {h['s'][:90]}")
             print(f"{len(hits)} match(es). Use `misaka doc verify` before citing a quotation.")

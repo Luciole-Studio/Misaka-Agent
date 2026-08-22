@@ -1,4 +1,4 @@
-"""Read-only project, task-card, to-do, and agent execution-tree rendering."""
+"""Read-only task-card, to-do, and agent execution-tree rendering, grouped by project folder."""
 
 import json
 import os
@@ -6,7 +6,6 @@ import sqlite3
 
 from misaka.platform import tasks as db
 from misaka.network import todo
-from misaka.platform import projects as project_mod
 from misaka.platform import budget
 
 GLYPH = {"running": "●", "review": "◇", "verifying": "◆", "finalizing": "◆", "ready": "○",
@@ -200,21 +199,20 @@ def _card_lines(con, r, card_indent, tail_indent):
     return out
 
 
-def render(con, project=None):
-    """Render the Project -> task card -> to-do -> agent execution tree."""
-    rows = con.execute("SELECT * FROM tasks ORDER BY project IS NULL, project, created_at"
-                       ).fetchall()
-    if project is not None:
-        resolved = project_mod.resolve(con, project)
-        rows = [r for r in rows if r["project"] == resolved["id"]]
-    by_proj = {}
+def render(con, workspace=None):
+    """Render the project folder -> task card -> to-do -> agent execution tree."""
+    sql = "SELECT * FROM tasks"
+    args = []
+    if workspace is not None:
+        sql += " WHERE workspace=?"
+        args.append(workspace)
+    rows = con.execute(sql + " ORDER BY workspace, created_at", args).fetchall()
+    by_ws = {}
     for r in rows:
-        by_proj.setdefault(r["project"], []).append(r)
+        by_ws.setdefault(r["workspace"], []).append(r)
     lines = []
-    for proj, cards in by_proj.items():
-        meta = project_mod.get(con, proj) if proj else None
-        lines.append(f'▌Project "{(meta["name"] if meta else "(unclassified)")}"'
-                     + _project_meter(con, proj))
+    for ws, cards in by_ws.items():
+        lines.append(f"▌{os.path.basename(ws.rstrip(os.sep)) or ws}  {ws}" + _workspace_meter(con, ws))
         for c in cards:
             lines += _card_lines(con, c, "├ ", "│    ")
     if not lines:
@@ -224,16 +222,12 @@ def render(con, project=None):
     return "\n".join(lines)
 
 
-def _project_meter(con, project):
-    """Render a project's research run, open issues, budget mode, and division of labor."""
-    if not project:
-        return ""
+def _workspace_meter(con, workspace):
+    """Render a project folder's latest research run, open issues, and budget mode."""
+    from misaka.research import runs
     parts = []
     try:
-        run = con.execute(
-            "SELECT * FROM research_runs WHERE project_id=? ORDER BY created_at DESC LIMIT 1",
-            (project,),
-        ).fetchone()
+        run = runs.latest(con, workspace=workspace)
     except sqlite3.Error:
         run = None
     if run:
@@ -246,28 +240,7 @@ def _project_meter(con, project):
             parts.append(f"open {open_count}")
     from misaka.config import CFG
     parts.append(budget.status(con, CFG.get("token_cap"))["mode"])
-    duty = _duty(con, project)
-    if duty:
-        parts.append("Division of labor: " + duty)
     return ' | ' + " ".join(parts)
-
-
-def _duty(con, project):
-    """Return the substantive lines of PROJECT.md's division-of-labor section, skipping parenthesised placeholders."""
-    try:
-        with open(os.path.join(project_mod.path(con, project), "PROJECT.md"),
-                  encoding="utf-8") as f:
-            text = f.read()
-    except OSError:
-        return ""
-    got, inside = [], False
-    for line in text.splitlines():
-        s = line.strip()
-        if s.startswith("## "):
-            inside = s in {"## Division of labor", "## Division of labour"}
-        elif inside and s and not s.startswith('('):
-            got.append(s)
-    return ';'.join(got)[:40]
 
 
 def transcript_tail(session_file, limit=40):

@@ -74,6 +74,8 @@ Working method:
    workspace, and session but spends quota again, so wait for the user's explicit nod first.
 5. **Do not decide on the user's behalf.** Whether to start, how to settle an acceptance dispute,
    whether to keep digging: those are the user's calls.
+6. **Keep PROJECT.md current.** It is the project brief every agent reads; when the bet, the plan,
+   or the known gaps change, edit it.
 """,
 }
 

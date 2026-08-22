@@ -38,8 +38,7 @@ def build(con, run, *, issue, parent_branch=None, max_findings=80):
                          "task_id": finding["task_id"],
                          "claim_type": finding["claim_type"], "claims": evidence})
     payload = {
-        "run_id": run["id"], "project": run["project_name"],
-        "project_id": run["project_id"], "root_question": run["question"],
+        "run_id": run["id"], "workspace": run["workspace"], "root_question": run["question"],
         "root_session": run["root_session"],
         "target_issue": {"id": issue["id"], "kind": issue["kind"],
                          "question": issue["question"], "rationale": issue["rationale"]},
@@ -59,7 +58,7 @@ def render(packet):
         "# Research Context Packet",
         "",
         f"- Run: `{packet['run_id']}`",
-        f"- Project: `{packet['project']}`",
+        f"- Workspace: `{packet['workspace']}`",
         f"- Root Last Order session: `{packet['root_session'] or 'not recorded'}`",
         "",
         '## Root question',

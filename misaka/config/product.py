@@ -18,8 +18,6 @@ CFG = {
     "net_snapshot": os.environ.get("MISAKA_NET_SNAPSHOT", "~/.misaka/net.json"),
     "provider": os.environ.get("MISAKA_PROVIDER", "sub2api-claude"),
     "default_model": os.environ.get("MISAKA_MODEL", "claude-sonnet-5"),
-    # Each new card records its workspace at creation time.
-    "workspaces_root": os.path.expanduser(os.environ.get("MISAKA_WS", "~/Documents/Misaka/workspaces")),
     "tasks_root": os.path.expanduser(os.environ.get("MISAKA_TASKS", "~/.misaka/tasks")),
     # As in pi: personalities are user data and live next to skills/MCP under
     # ~/.misaka/profiles/<role>/, never in the source tree.

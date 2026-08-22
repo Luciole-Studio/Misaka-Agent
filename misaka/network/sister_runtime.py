@@ -378,8 +378,8 @@ class SisterRuntime:
     def _workspace(self, task_id: str) -> str:
         row = db.get(self.con, task_id)
         if row is None:
-            return os.path.join(str(self.cfg["workspaces_root"]), task_id)
-        return db.workspace_for(row, self.cfg.get("workspaces_root"))
+            raise ValueError(f"Card not found: {task_id}")
+        return db.workspace_for(row)
 
     @staticmethod
     def _begin_run(handle: SisterHandle, generation: int, claim_lock: str | None) -> tuple[object, asyncio.Event]:
@@ -493,7 +493,7 @@ class SisterRuntime:
                     # writer group remains observable.
                     continue
             ok, report = worker.check_report(
-                db.workspace_for(observed, self.cfg.get("workspaces_root")),
+                db.workspace_for(observed),
                 con=self.con, task_id=observed["id"])
             if not ok and str(report).startswith("blocked:"):
                 db.block_abandoned(
@@ -619,7 +619,7 @@ class SisterRuntime:
             ):
                 raise ValueError(f"Card {task_id} was claimed by another dispatcher.")
             self._owned_claims.add(lock)
-            workspace = db.workspace_for(row, self.cfg.get("workspaces_root"))
+            workspace = db.workspace_for(row)
             try:
                 os.makedirs(workspace, exist_ok=True)
                 if not row["workspace"] and not db.set_workspace(

@@ -4,49 +4,25 @@ import json
 import os
 import re
 import shutil
-import sqlite3
 import subprocess
 import time
 
-from misaka.config import CFG
+SCAN_SUFFIXES = {".pdf", ".md", ".markdown", ".txt"}
 
 
-def _fallback_root():
-    return os.path.expanduser(os.environ.get("MISAKA_CORPUS", "~/.misaka/corpus"))
-
-
-def corpus_roots():
-    """Return project-local corpus roots followed by the global fallback root."""
-    roots = []
-    database = os.path.expanduser(CFG["db"])
-    if os.path.isfile(database):
-        try:
-            with sqlite3.connect(database) as con:
-                paths = [row[0] for row in con.execute("SELECT path FROM projects")]
-            roots.extend(os.path.join(path, "pageindex") for path in paths
-                         if os.path.isdir(os.path.join(path, "pageindex")))
-        except sqlite3.Error:
-            pass
-    fb = _fallback_root()
-    if fb not in roots:
-        roots.append(fb)
-    return roots
-
-
-def corpus_root(project_path=None):
-    """Return the storage root for a project or the global fallback corpus."""
-    if project_path:
-        return os.path.join(os.path.realpath(project_path), "pageindex")
-    return _fallback_root()
+def corpus_root():
+    """Content-addressed PageIndex store shared by every project folder."""
+    return os.path.expanduser(os.environ.get("MISAKA_PAGEINDEX", "~/.misaka/pageindex"))
 
 
 def doc_dir(doc_id):
-    """Locate an indexed document across all corpus roots."""
-    for r in corpus_roots():
-        d = os.path.join(r, doc_id)
-        if os.path.isdir(d):
-            return d
-    return None
+    d = os.path.join(corpus_root(), doc_id)
+    return d if os.path.isdir(d) else None
+
+
+def _under(path, workspace):
+    """True when ``path`` lives inside the folder ``workspace`` (symlinks resolved)."""
+    return bool(path) and os.path.realpath(path).startswith(os.path.realpath(workspace) + os.sep)
 
 
 # Content extraction and addressing
@@ -145,36 +121,29 @@ def _tree(doc_id):
         return None
 
 
-def ingest(p, title=None, with_tree=True, project=None, project_path=None, task_id=None):
+def ingest(p, title=None, with_tree=True, task_id=None):
     """Index a file under its content hash and return ``(doc_id, page_count)``.
 
-    Re-ingesting a known document only links the new ``task_id``; a document
-    already indexed under another root is copied rather than rebuilt.
+    Re-ingesting a known document only links the new ``task_id``.
     """
     p = os.path.abspath(os.path.expanduser(p))
     sha = sha256_file(p)
     doc_id = sha[:12]
-    ddir = os.path.join(corpus_root(project_path), doc_id)
-    existing = ddir if os.path.isdir(ddir) else doc_dir(doc_id)
+    ddir = os.path.join(corpus_root(), doc_id)
     if os.path.isdir(ddir):
+        # Known content: link the new task and remember this path too, so the same book
+        # used by two project folders belongs to both.
         m = _read_meta_at(ddir) or {}
         ids = list(m.get("task_ids") or ([m["task_id"]] if m.get("task_id") else []))
+        paths = list(m.get("paths") or ([m["orig_path"]] if m.get("orig_path") else []))
+        changed = False
         if task_id and task_id not in ids:
-            ids.append(task_id)
-            m["task_ids"] = ids
+            ids.append(task_id); m["task_ids"] = ids; changed = True
+        if p not in paths:
+            paths.append(p); m["paths"] = paths; changed = True
+        if changed:
             with open(os.path.join(ddir, "meta.json"), "w", encoding="utf-8") as f:
                 json.dump(m, f, ensure_ascii=False, indent=2)
-        return doc_id, int(m.get("pages", 0))
-    if existing:
-        # Reuse an existing content-addressed index instead of rebuilding the tree.
-        os.makedirs(os.path.dirname(ddir), exist_ok=True)
-        shutil.copytree(existing, ddir)
-        m = _read_meta_at(ddir) or {}
-        m.update({"title": title or os.path.basename(p), "orig_path": p,
-                  "project": project, "task_id": task_id,
-                  "task_ids": [task_id] if task_id else [], "added_at": int(time.time())})
-        with open(os.path.join(ddir, "meta.json"), "w", encoding="utf-8") as f:
-            json.dump(m, f, ensure_ascii=False, indent=2)
         return doc_id, int(m.get("pages", 0))
     pages = extract_pages(p)
     solid = sum(1 for t in pages if len(t.strip()) > 20)
@@ -195,13 +164,31 @@ def ingest(p, title=None, with_tree=True, project=None, project_path=None, task_
     if tree:
         with open(os.path.join(ddir, "tree.json"), "w", encoding="utf-8") as f:
             f.write(tree)
-    meta = {"doc_id": doc_id, "title": title or os.path.basename(p), "orig_path": p,
+    meta = {"doc_id": doc_id, "title": title or os.path.basename(p), "orig_path": p, "paths": [p],
             "sha256": sha, "pages": len(pages), "task_id": task_id,
-            "task_ids": [task_id] if task_id else [], "project": project,
-            "added_at": int(time.time())}
+            "task_ids": [task_id] if task_id else [], "added_at": int(time.time())}
     with open(os.path.join(ddir, "meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
     return doc_id, len(pages)
+
+
+def scan(directory, task_id=None):
+    """Ingest every PDF / Markdown / text file under ``directory``, skipping hidden entries.
+
+    Returns ``(ingested, skipped)`` as ``[(doc_id, path)]`` and ``[(path, reason)]``.
+    """
+    ingested, skipped = [], []
+    for base, dirs, files in os.walk(os.path.abspath(os.path.expanduser(directory))):
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        for fn in sorted(files):
+            if fn.startswith(".") or os.path.splitext(fn)[1].lower() not in SCAN_SUFFIXES:
+                continue
+            p = os.path.join(base, fn)
+            try:
+                ingested.append((ingest(p, task_id=task_id)[0], p))
+            except (ValueError, OSError) as e:
+                skipped.append((p, str(e)))
+    return ingested, skipped
 
 
 def set_task_id(doc_id, task_id):
@@ -219,22 +206,19 @@ def set_task_id(doc_id, task_id):
         json.dump(m, f, ensure_ascii=False, indent=2)
 
 
-def docs():
-    """List metadata for every indexed document across all corpus roots, oldest first."""
-    out, seen = [], set()
-    for r in corpus_roots():
-        if not os.path.isdir(r):
+def docs(workspace=None):
+    """List indexed documents oldest first; ``workspace`` keeps only those whose source file lives under that folder."""
+    root, out = corpus_root(), []
+    for name in (os.listdir(root) if os.path.isdir(root) else []):
+        ddir = os.path.join(root, name)
+        m = _read_meta_at(ddir)
+        if not m:
             continue
-        for name in os.listdir(r):
-            ddir = os.path.join(r, name)
-            m = _read_meta_at(ddir)
-            key = (m.get("project"), m.get("doc_id")) if m else None
-            if not m or key in seen:
-                continue
-            seen.add(key)
-            m = dict(m)
-            m["has_tree"] = os.path.exists(os.path.join(ddir, "tree.json"))
-            out.append(m)
+        if workspace and not any(_under(x, workspace) for x in (m.get("paths") or [m.get("orig_path")])):
+            continue
+        m = dict(m)
+        m["has_tree"] = os.path.exists(os.path.join(ddir, "tree.json"))
+        out.append(m)
     return sorted(out, key=lambda m: m.get("added_at", 0))
 
 
@@ -275,11 +259,11 @@ def page_heads(doc_id, limit=200):
     return out
 
 
-def search_literal(q, limit=10, doc_id=None):
-    """Find exact text across indexed pages."""
+def search_literal(q, limit=10, doc_id=None, workspace=None):
+    """Find exact text across indexed pages (scoped to ``workspace`` when given and no ``doc_id``)."""
     if not q:
         return []
-    targets = [doc_id] if doc_id else [m["doc_id"] for m in docs()]
+    targets = [doc_id] if doc_id else [m["doc_id"] for m in docs(workspace)]
     hits = []
     for did in targets:
         for page, text in _iter_pages(did):

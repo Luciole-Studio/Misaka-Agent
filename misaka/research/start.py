@@ -17,7 +17,7 @@ _DEPTH_QUESTION = "How deep should this research run go?"
 USAGE = (
     "Usage: /research [DEPTH]                 enter research mode; omit DEPTH to pick 2, 5, 10, or type your own.\n"
     "                                         Your next regular message becomes the research question.\n"
-    "       /research status [RUN_ID|PROJECT]  show the latest run, or the run/project you name\n"
+    "       /research status [RUN_ID]          show the latest run of this folder, or the run you name\n"
     "       /research stop [RUN_ID]            ask the latest active run (or RUN_ID) to stop\n"
     "       /research resume [RUN_ID] [ANSWER] resume a paused run, optionally answering its clarification questions"
 )
@@ -70,14 +70,18 @@ def parse_command(raw):
     return {"action": "activate", "depth": depth, "explicit": explicit}
 
 
-def _find_run(con, target=None, *, active=False):
-    if target and target.startswith("r_"):
+def _workspace(ctx):
+    return task_store.canonical_workspace(getattr(ctx, "cwd", None) or os.getcwd())
+
+
+def _find_run(con, target, workspace, *, active=False):
+    if target:
         return runs.get(con, target)
-    return runs.latest(con, project=target, active_only=active)
+    return runs.latest(con, workspace=workspace, active_only=active)
 
 
-def _status(con, target=None):
-    run = _find_run(con, target)
+def _status(con, target, workspace):
+    run = _find_run(con, target, workspace)
     if not run:
         return "No matching research run was found."
     value = runs.summary(con, run["id"])
@@ -86,7 +90,7 @@ def _status(con, target=None):
     if reading["cap"]:
         token_text += f" | global tokens {reading['used']:,}/{reading['cap']:,}"
     return (
-        f"{value['id']} | project {value['project']!r} ({value['project_id']}) | "
+        f"{value['id']} | project {runs.project_name(run)!r} ({value['workspace']}) | "
         f"{value['status']}/{value['phase']} | depth {value['wave']}/{value['limits']['max_depth']} | "
         f"tasks {value['tasks']} | branches {value['branches']} | open issues {value['open_issues']}"
         + token_text
@@ -219,17 +223,15 @@ Continue with `/research resume {run_id} YOUR_ANSWER`.""")
     intakes = set()
 
     async def begin(question, depth, workspace, ctx):
-        ctx.ui.notify("Research question received. Last Order is naming and creating the project.", "info")
-        send_progress("Research intake | Last Order is naming and drafting the project; planning starts next.",
-                      details={"stage": "project_intake", "depth": depth})
-        project = await asyncio.to_thread(
-            planner.create_project_for_question, con, dict(_cfg()), worker, question, workspace)
-        send_progress(
-            f"Research intake | project {project['name']!r} ({project['id']}) created; "
-            "creating the persistent run.",
-                      details={"stage": "project_created", "depth": depth})
+        ctx.ui.notify("Research question received. Last Order is preparing the project brief.", "info")
+        send_progress("Research intake | Last Order drafts PROJECT.md unless the folder already has one; planning starts next.",
+                      details={"stage": "brief_intake", "depth": depth})
+        brief = await asyncio.to_thread(
+            planner.ensure_project_brief, dict(_cfg()), worker, question, workspace)
+        send_progress(f"Research intake | project brief ready at {brief}; creating the persistent run.",
+                      details={"stage": "brief_ready", "depth": depth})
         run = runs.create(
-            con, project_id=project["id"], question=question, limits={"max_depth": depth},
+            con, workspace=workspace, question=question, limits={"max_depth": depth},
             token_start=budget.spent(con),
         )
         harn.sendMessage(
@@ -240,9 +242,8 @@ Continue with `/research resume {run_id} YOUR_ANSWER`.""")
         )
         launch(run["id"], ctx)
         ctx.ui.notify(
-            f"Research run started: {run['id']} | Last Order created project "
-            f"{run['project_name']!r} ({run['project_id']}) | maximum depth {depth}. "
-            "Use /research status to check progress.",
+            f"Research run started: {run['id']} | project {runs.project_name(run)!r} | "
+            f"maximum depth {depth}. Use /research status to check progress.",
             "info",
         )
 
@@ -255,7 +256,7 @@ Continue with `/research resume {run_id} YOUR_ANSWER`.""")
             send_progress(
                 f"Research intake failed: {type(error).__name__}: {error}\n"
                 "Research mode is still waiting for a question: send it again, or enter /research to leave research mode.",
-                details={"stage": "project_error", "depth": depth},
+                details={"stage": "intake_error", "depth": depth},
             )
 
     async def capture_question(event, ctx):
@@ -286,14 +287,14 @@ Continue with `/research resume {run_id} YOUR_ANSWER`.""")
                 return
             if spec["action"] == "status":
                 if intakes and not spec["target"]:
-                    ctx.ui.notify("Research intake in progress: Last Order is creating the project.", "info")
+                    ctx.ui.notify("Research intake in progress: Last Order is preparing the project brief.", "info")
                 elif pending["depth"] is not None and not spec["target"]:
                     ctx.ui.notify(f"Research mode is waiting for a question | maximum depth {pending['depth']}.", "info")
                 else:
-                    ctx.ui.notify(_status(con, spec["target"]), "info")
+                    ctx.ui.notify(_status(con, spec["target"], _workspace(ctx)), "info")
                 return
             if spec["action"] == "stop":
-                run = runs.get(con, spec["run_id"]) if spec["run_id"] else runs.latest(con, active_only=True)
+                run = _find_run(con, spec["run_id"], _workspace(ctx), active=True)
                 if not run:
                     if pending["depth"] is not None:
                         pending.update(depth=None, workspace=None)
@@ -308,7 +309,7 @@ Continue with `/research resume {run_id} YOUR_ANSWER`.""")
                 )
                 return
             if spec["action"] == "resume":
-                run = runs.get(con, spec["run_id"]) if spec["run_id"] else runs.latest(con)
+                run = _find_run(con, spec["run_id"], _workspace(ctx))
                 if not run:
                     raise ValueError("No research run to resume.")
                 if spec["clarification"]:
@@ -340,7 +341,7 @@ User clarification: {spec['clarification']}""", run["id"]))
                 ctx.ui.notify("The current turn is still running. Enter /research after it finishes.", "error")
                 return
             if intakes:
-                ctx.ui.notify("Last Order is still creating the project for the previous question; wait for it to finish.", "info")
+                ctx.ui.notify("Last Order is still preparing the project brief for the previous question; wait for it to finish.", "info")
                 return
             if pending["depth"] is not None and not spec["explicit"]:
                 pending.update(depth=None, workspace=None)
@@ -379,13 +380,11 @@ User clarification: {spec['clarification']}""", run["id"]))
                     raise ValueError(f"Depth must be an integer.\n{USAGE}") from error
                 spec["depth"] = runs.normalize_limits({"max_depth": depth})["max_depth"]
             pending["depth"] = spec["depth"]
-            pending["workspace"] = task_store.canonical_workspace(
-                getattr(ctx, "cwd", None) or os.getcwd()
-            )
+            pending["workspace"] = _workspace(ctx)
             ctx.ui.notify(
                 f"Research mode enabled | maximum depth {spec['depth']} | "
                 f"workspace {pending['workspace']}. Your next regular message becomes the "
-                "research question, and Last Order will create the project for it.",
+                "research question; Last Order drafts PROJECT.md if the folder has none.",
                 "info",
             )
         except (ValueError, RuntimeError) as error:

@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from misaka.config import CFG  # noqa: E402
 from misaka.network import validate, worker  # noqa: E402
-from misaka.platform import projects, prompt_guard, tasks  # noqa: E402
+from misaka.platform import prompt_guard, tasks  # noqa: E402
 from misaka.research import ledger, runs, workflow  # noqa: E402
 
 
@@ -17,9 +17,9 @@ def _fresh():
     root = Path(tempfile.mkdtemp(prefix="misaka-golden-"))
     CFG["tasks_root"] = str(root / "task-state")
     con = tasks.connect(str(root / "state.db"))
-    project = projects.create(con, root, "golden")
-    run = runs.create(con, project_id=project["id"], question="Why?", limits={"max_depth": 1})
-    task_id = tasks.create_task(con, "Verification", assignee="10032", project=project["id"], workspace=root)
+    (root / "PROJECT.md").write_text("# golden\n", encoding="utf-8")
+    run = runs.create(con, workspace=root, question="Why?", limits={"max_depth": 1})
+    task_id = tasks.create_task(con, "Verification", assignee="10032", workspace=root)
     runs.link_task(con, run["id"], task_id, kind="research", local_id="source")
     workspace = root / "workspace"
     workspace.mkdir()
@@ -70,8 +70,7 @@ def g3_independent_findings_stay_distinct():
     }, ensure_ascii=False), encoding="utf-8")
     workflow._copy_task_artifacts(con, run, task)
     assert ledger.ingest_report(con, run, task, payload)["findings"] == 1
-    other_id = tasks.create_task(con, "Independent review", assignee="10033",
-                                 project=run["project_id"], workspace=workspace)
+    other_id = tasks.create_task(con, "Independent review", assignee="10033", workspace=workspace)
     runs.link_task(con, run["id"], other_id, kind="research", local_id="independent")
     con.execute("UPDATE tasks SET status='done',workspace=? WHERE id=?", (str(workspace), other_id))
     other_state = Path(tasks.task_state_dir(other_id))

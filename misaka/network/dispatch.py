@@ -139,7 +139,7 @@ def reconcile(con, cfg):
         elif _pid_alive(t["worker_pid"]):
             continue
         ok, result = worker.check_report(
-            db.workspace_for(t, cfg.get("workspaces_root")), con=con, task_id=t["id"])
+            db.workspace_for(t), con=con, task_id=t["id"])
         if not ok and str(result).startswith("blocked:"):
             db.block_abandoned(
                 con, t["id"], "needs_input", str(result)[len("blocked:"):].strip(),
@@ -213,7 +213,7 @@ def run_task(con, t, cfg):
         assignee_cap=assignee_cap,
     ):
         return False
-    workspace = db.workspace_for(t, cfg.get("workspaces_root"))
+    workspace = db.workspace_for(t)
     os.makedirs(workspace, exist_ok=True)
     if not t["workspace"] and not db.set_workspace(
         con, t["id"], workspace, generation=generation, claim_lock=lock
@@ -382,7 +382,7 @@ def judge_task(con, t, cfg, verify_token=None, generation=None):
         con, t["id"], verify_token, generation=generation
     ):
         return
-    ws = db.workspace_for(t, cfg.get("workspaces_root"))
+    ws = db.workspace_for(t)
     valid, report_or_reason = worker.check_report(ws or "", task_id=t["id"])
     if not valid:
         if db.back_to_ready(

@@ -233,12 +233,12 @@ class FakeRunner:
 
 def research_dry():
     from misaka.config import CFG
-    from misaka.platform import projects
     from misaka.research import runs, workflow
 
     tmp = tempfile.mkdtemp(prefix="misaka-research-v2-")
     old_tasks_root = CFG["tasks_root"]
     CFG["tasks_root"] = os.path.join(tmp, "task-state")
+    os.environ["MISAKA_RUNS_HOME"] = os.path.join(tmp, "runs-home")
     db_path = os.path.join(tmp, "state.db")
     con = db.connect(db_path)
     profiles = os.path.join(tmp, "profiles")
@@ -252,9 +252,9 @@ def research_dry():
            "workspaces_root": os.path.join(tmp, "ws"), "provider": "x",
            "default_model": "y", "judge_timeout": 5, "token_cap": 0}
     try:
-        project = projects.create(con, tmp, "Research Workflow demo")
-        run = runs.create(con, project_id=project["id"], question="Why did this happen?",
-                          limits={"max_depth": 2})
+        with open(os.path.join(tmp, "PROJECT.md"), "w", encoding="utf-8") as f:
+            f.write("# Research Workflow demo\n")
+        run = runs.create(con, workspace=tmp, question="Why did this happen?", limits={"max_depth": 2})
         fake = ResearchFake()
         out = asyncio.run(workflow.run(
             con, cfg, FakeRunner(con, cfg["workspaces_root"]), fake,
@@ -266,7 +266,7 @@ def research_dry():
                            (run["id"],)).fetchone()[0] == 2
         assert os.path.isfile(out["final"]["path"])
         assert all(row["preflight_artifact"] for row in runs.tasks(con, run["id"]))
-        print("research dry ok — project / Last Order plan / preflight / synthesis / red team / evidence assessment / final audit, full chain")
+        print("research dry ok — PROJECT.md / Last Order plan / preflight / synthesis / red team / evidence assessment / final audit, full chain")
     finally:
         CFG["tasks_root"] = old_tasks_root
 

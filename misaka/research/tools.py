@@ -1,4 +1,5 @@
 """Read-only Research inspection tools available to agents."""
+import os
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -17,13 +18,15 @@ def register(harn, con_factory):
             "run", description="Information to return."
         )
         run_id: str | None = Field(
-            None, description="Optional research-run ID; omit to inspect the latest run."
+            None, description="Optional research-run ID; omit to inspect the latest run of the current workspace."
         )
 
-    async def execute(_tool_call_id, raw, _signal, _on_update, _ctx):
+    async def execute(_tool_call_id, raw, _signal, _on_update, ctx):
         params = raw if isinstance(raw, Params) else Params(**(raw or {}))
         con = con_factory()
-        run = runs.get(con, params.run_id) if params.run_id else runs.latest(con)
+        workspace = os.path.realpath(getattr(ctx, "cwd", None) or os.getcwd())
+        run = (runs.get(con, params.run_id) if params.run_id
+               else runs.latest(con, workspace=workspace))
         if not run:
             return _text("No research run exists.")
         if params.view == "run":

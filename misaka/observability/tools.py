@@ -1,9 +1,9 @@
-"""Read-only tools for the global task and agent execution view."""
+"""Read-only tools for the task and agent execution view."""
 
 from __future__ import annotations
 
 import asyncio
-from typing import Annotated, Optional
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -22,7 +22,7 @@ def _text(value: str):
 def _tool(harn, name, label, description, parameters, execute, snippet):
     async def wrapped(tool_call_id, raw, signal, on_update, ctx):
         args = raw if isinstance(raw, parameters) else parameters(**(raw or {}))
-        return await execute(args)
+        return await execute(args, ctx)
 
     harn.registerTool(ToolDefinition(
         name=name,
@@ -39,12 +39,13 @@ def register(harn):
         model_config = ConfigDict(extra="forbid")
 
     class TreeParams(StrictParams):
-        project: Optional[str] = Field(None, description="Optional project name or ID; omit to show all projects.")
+        pass
 
-    async def tree(params):
+    async def tree(params, ctx):
         con = tasks.connect(CFG["db"])
         try:
-            return _text(await asyncio.to_thread(overview.render, con, params.project))
+            return _text(await asyncio.to_thread(
+                overview.render, con, tasks.canonical_workspace(getattr(ctx, "cwd", None))))
         finally:
             con.close()
 
@@ -52,17 +53,17 @@ def register(harn):
         harn,
         "misaka_tree",
         "View execution tree",
-        "Show the global Project → task card → to-do → subagent tree; use `misaka tree --watch` for live updates.",
+        "Show this project folder's task card → to-do → subagent tree; use `misaka tree --watch` for live updates.",
         TreeParams,
         tree,
-        "View the global execution tree",
+        "View the execution tree of this project folder",
     )
 
     class PeekParams(StrictParams):
         task_id: TaskId = Field(description="Task-card ID to inspect.")
         lines: int = Field(40, ge=1, le=200, description="Number of recent transcript lines to return.")
 
-    async def peek(params):
+    async def peek(params, ctx):
         con = tasks.connect(CFG["db"])
         try:
             text, error = await asyncio.to_thread(

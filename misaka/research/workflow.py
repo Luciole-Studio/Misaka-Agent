@@ -12,7 +12,7 @@ import os
 import time
 from pathlib import Path
 
-from misaka.platform import budget, projects, tasks as task_store
+from misaka.platform import budget, tasks as task_store
 from misaka.research import context as context_packet
 from misaka.research import critic, ledger, planner, report, runs
 from misaka import workspace as workspace_index
@@ -91,7 +91,7 @@ def _save_plan(con, run, plan, review=None, *, branch_id=None):
 
 def _refresh_workspace_index(con, run):
     tree = workspace_index.outline(
-        con, project=run["project_id"], run_id=run["id"], research_store=runs)
+        con, workspace=run["workspace"], run_id=run["id"], research_store=runs)
     runs.write_text(
         con, run["id"], "workspace_index_json", 'Project / PageIndex workspace index',
         "workspace-index.json", json.dumps(tree, ensure_ascii=False, indent=2),
@@ -161,8 +161,7 @@ async def _submit_tasks(con, run, cfg, worker, plan, *, branch_id=None, wave=0,
         tid = task_store.create_task(
             con, spec["title"], body=planner.task_body(spec, preflight_path),
             assignee=spec["assignee"], priority=spec.get("priority", 0),
-            project=run["project_id"], workspace=run["workspace"],
-            timeout_seconds=runs.call_timeout(cfg, 1800),
+            workspace=run["workspace"], timeout_seconds=runs.call_timeout(cfg, 1800),
         )
         dependencies = list(spec.get("dependencies") or [])
         runs.link_task(con, run["id"], tid, kind="research", branch_id=branch_id,
@@ -396,10 +395,9 @@ async def _create_syntheses(con, run, cfg, worker, plan, *, wave, progress=None)
             metadata={"assignee": spec["assignee"], "session_file": session_file},
         )
         tid = report.create(
-            con, source_rows, f"{run['project_name']} · wave {wave} synthesis",
+            con, source_rows, f"{runs.project_name(run)} · wave {wave} synthesis",
             assignee=member["assignee"], lens=member["lens"],
-            project=run["project_id"], workspace=run["workspace"],
-            run_id=run["id"], wave=wave,
+            workspace=run["workspace"], run_id=run["id"], wave=wave,
             preflight_path=preflight_path, timeout_seconds=runs.call_timeout(cfg, 1200),
         )
         runs.link_task(con, run["id"], tid, kind="synthesis", wave=wave,
@@ -499,7 +497,7 @@ def _persisted_disagreements(con, run_id):
 def _partial_report(con, run, reason):
     artifacts = runs.artifacts(con, run["id"])
     lines = ['# Incomplete research run', "", f"- Run: `{run['id']}`",
-             f"- Project: `{run['project_name']}` (`{run['project_id']}`)",
+             f"- Project: `{runs.project_name(run)}` (`{run['workspace']}`)",
              f"- Reason: {reason}", "", '## Original question',
              run["question"], "", '## Saved artifacts']
     lines.extend(f"- [{row['kind']}] {row['title']} — `{row['path']}`" for row in artifacts)
@@ -530,9 +528,8 @@ async def run(con, cfg, runner, worker, *, run_id, context=None,
     run = runs.get(con, run_id)
     if not run:
         raise ValueError(f"Research run not found: {run_id}")
-    project = projects.resolve(con, run["project_id"])
-    if project["path"] != run["project_path"] or project["workspace"] != run["workspace"]:
-        raise RuntimeError("The research run no longer matches its project workspace.")
+    if not os.path.isdir(run["workspace"]):
+        raise RuntimeError(f"The research run's project folder no longer exists: {run['workspace']}")
     runs.ensure_layout(run)
     cfg = dict(cfg)
     disagreements = _persisted_disagreements(con, run_id)

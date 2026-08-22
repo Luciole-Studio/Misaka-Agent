@@ -1,4 +1,4 @@
-"""Durable SQLite storage for projects, task cards, runs, and research workflows."""
+"""Durable SQLite storage for task cards, runs, and research workflows."""
 
 import hashlib
 import json
@@ -22,10 +22,9 @@ CREATE TABLE IF NOT EXISTS tasks (
  executor TEXT, -- NULL = MISAKA card shell; JSON argv = external ally CLI
  model TEXT,
  status TEXT NOT NULL DEFAULT 'ready',
- project TEXT,
  priority INTEGER NOT NULL DEFAULT 0,
  timeout_seconds INTEGER NOT NULL DEFAULT 900,
- workspace TEXT,
+ workspace TEXT NOT NULL,
  output_dir TEXT,
  agent_id TEXT,
  session_file TEXT,
@@ -138,15 +137,6 @@ CREATE TABLE IF NOT EXISTS budget_reservations (
  expires_at INTEGER NOT NULL,
  created_at INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS projects (
- id TEXT PRIMARY KEY,
- name TEXT NOT NULL,
- workspace TEXT NOT NULL,
- path TEXT NOT NULL UNIQUE,
- archived INTEGER NOT NULL DEFAULT 0,
- pinned_at REAL,
- created_at INTEGER NOT NULL
-);
 CREATE TABLE IF NOT EXISTS todos (
  id TEXT PRIMARY KEY, -- td_xxxxxx
  task_id TEXT NOT NULL, -- Owning task card
@@ -168,7 +158,6 @@ CREATE INDEX IF NOT EXISTS idx_task_attachments_task ON task_attachments(task_id
 """
 RECLAIM_CAP = 2
 TASK_SCHEMA_VERSION = 5
-PROJECT_SCHEMA_VERSION = 2
 MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
 
 
@@ -300,37 +289,6 @@ def _migrate(con):
     for name, definition in task_columns.items():
         if name not in existing:
             con.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")
-    # Project V2 deliberately starts from a clean slate.  The one-time migration
-    # marker also drops rows created by pre-release V2 builds; no old Project is
-    # carried over.
-    project_columns = _columns(con, "projects")
-    old_project_paths = []
-    if "path" in project_columns:
-        old_project_paths = [row[0] for row in con.execute("SELECT path FROM projects")]
-    if project_columns and "id" not in project_columns:
-        con.execute("DROP TABLE projects")
-        con.execute(
-            "CREATE TABLE projects ("
-            "id TEXT PRIMARY KEY,name TEXT NOT NULL,workspace TEXT NOT NULL,"
-            "path TEXT NOT NULL UNIQUE,archived INTEGER NOT NULL DEFAULT 0,"
-            "pinned_at REAL,created_at INTEGER NOT NULL)"
-        )
-    if not con.execute(
-        "SELECT 1 FROM schema_migrations WHERE component='projects' AND version=?",
-        (PROJECT_SCHEMA_VERSION,),
-    ).fetchone():
-        for row in con.execute("SELECT id FROM tasks WHERE project IS NOT NULL").fetchall():
-            delete_task(con, row["id"], allow_active=True)
-        con.execute("DELETE FROM projects")
-        for path in old_project_paths:
-            shutil.rmtree(os.path.expanduser(path), ignore_errors=True)
-        con.execute(
-            "INSERT INTO schema_migrations(component,version,applied_at) VALUES(?,?,?)",
-            ("projects", PROJECT_SCHEMA_VERSION, int(time.time())),
-        )
-    con.execute(
-        "CREATE INDEX IF NOT EXISTS idx_projects_workspace ON projects(workspace,created_at)"
-    )
     if "run_id" not in _columns(con, "events"):
         con.execute("ALTER TABLE events ADD COLUMN run_id TEXT")
     con.execute("CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id, id)")
@@ -391,32 +349,34 @@ def task_state_dir(task_id):
     return str(Path(CFG.get("tasks_root", "~/.misaka/tasks")).expanduser() / str(task_id))
 
 
-def workspace_for(task, fallback_root=None):
-    if task["workspace"]:
-        return canonical_workspace(task["workspace"])
-    return canonical_workspace(Path(fallback_root or "~/.misaka/legacy-workspaces").expanduser()
-                               / task["id"])
+def workspace_for(task):
+    return canonical_workspace(task["workspace"])
 
 
 @_serialized
 def create_task(con, title, body="", assignee="", model=None, priority=0, timeout_seconds=900,
-                project=None, executor=None, reviewer=None, workspace=None, output_dir=None):
-    """Insert a card, record its ``created`` event, and return the new id."""
+                executor=None, reviewer=None, workspace=None, output_dir=None):
+    """Insert a card, record its ``created`` event, and return the new id.
+
+    ``workspace`` is the project folder the card belongs to; there is no default.
+    """
     reviewer = str(reviewer or "").strip() or None
     if reviewer == assignee:
         raise ValueError("The reviewer must be different from the assignee.")
+    if not workspace:
+        raise ValueError("A task card needs a workspace folder.")
     tid = "t_" + secrets.token_hex(3)
     workspace = canonical_workspace(workspace)
     output_dir = canonical_workspace(output_dir) if output_dir else None
     con.execute(
         "INSERT INTO tasks (id,title,body,assignee,reviewer,executor,model,priority,"
-        "timeout_seconds,project,workspace,output_dir,created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "timeout_seconds,workspace,output_dir,created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (tid, title, body, assignee, reviewer, json.dumps(executor) if executor else None,
-         model, priority, timeout_seconds, project, workspace, output_dir, int(time.time())),
+         model, priority, timeout_seconds, workspace, output_dir, int(time.time())),
     )
     add_event(con, tid, "created", {"title": title, "assignee": assignee,
-                                    "reviewer": reviewer, "project": project,
+                                    "reviewer": reviewer,
                                     "workspace": workspace, "executor": executor})
     return tid
 

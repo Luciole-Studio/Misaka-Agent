@@ -1,5 +1,4 @@
-"""Workspace navigation across projects, task cards, research runs, and indexed artifacts."""
-import json
+"""Workspace navigation across the project brief, task cards, research runs, and indexed artifacts."""
 import os
 
 from misaka.documents import index as corpus
@@ -38,43 +37,41 @@ def _artifact_node(row):
             "summary": row["kind"], "nodes": children[:120]}
 
 
-def _project_file(con, project):
-    if not project:
+def _project_file(workspace):
+    """Build a heading tree for ``<workspace>/PROJECT.md``, or None when there is none."""
+    if not workspace:
         return None
-    row = con.execute("SELECT id,name,path FROM projects WHERE id=?", (project,)).fetchone()
-    if not row:
-        return None
-    path = os.path.realpath(os.path.join(row["path"], "PROJECT.md"))
-    root = os.path.realpath(row["path"])
-    if not path.startswith(root + os.sep) or not os.path.isfile(path):
+    path = os.path.join(workspace, "PROJECT.md")
+    if not os.path.isfile(path):
         return None
     children = []
     try:
         for lineno, line in enumerate(open(path, encoding="utf-8", errors="replace"), 1):
             stripped = line.lstrip()
             if stripped.startswith("#"):
-                children.append({"node_id": f"project:{row['id']}#L{lineno}",
+                children.append({"node_id": f"project#L{lineno}",
                                  "title": stripped.lstrip("#").strip(),
                                  "summary": f"Line {lineno}"})
     except OSError:
         return None
-    return {"node_id": f"project:{row['id']}", "title": f"Project:{row['name']}",
-            "summary": "PROJECT.md", "nodes": children}
+    return {"node_id": "project", "title": "PROJECT.md", "summary": "Project brief",
+            "nodes": children}
 
 
-def outline(bcon, task_id=None, *, project=None, run_id=None, research_store=None):
-    """Return the workspace tree, optionally limited to a task, project, or run."""
+def outline(bcon, task_id=None, *, workspace=None, run_id=None, research_store=None):
+    """Return the workspace tree, optionally limited to a task, a project folder, or a run."""
     if task_id:
         tasks = [bcon.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()]
     elif run_id and research_store is not None:
         tasks = list(research_store.tasks(bcon, run_id))
-    elif project:
-        tasks = bcon.execute("SELECT * FROM tasks WHERE project=? ORDER BY created_at", (project,)).fetchall()
+    elif workspace:
+        tasks = bcon.execute("SELECT * FROM tasks WHERE workspace=? ORDER BY created_at",
+                             (workspace,)).fetchall()
     else:
         tasks = bcon.execute("SELECT * FROM tasks ORDER BY created_at").fetchall()
     tasks = [t for t in tasks if t]
     by_task = {}
-    all_docs = [m for m in corpus.docs() if not project or m.get("project") == project]
+    all_docs = corpus.docs(workspace=workspace)
     for m in all_docs:
         task_ids = m.get("task_ids") or ([m["task_id"]] if m.get("task_id") else [])
         for linked_task in task_ids:
@@ -95,7 +92,8 @@ def outline(bcon, task_id=None, *, project=None, run_id=None, research_store=Non
 
     run_nodes = []
     selected_runs = (
-        ([research_store.get(bcon, run_id)] if run_id else research_store.listing(bcon, project=project))
+        ([research_store.get(bcon, run_id)] if run_id
+         else research_store.listing(bcon, workspace=workspace))
         if research_store is not None
         else []
     )
@@ -120,7 +118,7 @@ def outline(bcon, task_id=None, *, project=None, run_id=None, research_store=Non
                                "summary": str(len(branch_nodes)), "nodes": branch_nodes},
                           ]})
 
-    project_node = _project_file(bcon, project)
+    project_node = _project_file(workspace)
     top_nodes = ([project_node] if project_node else []) + [
         {"node_id": "runs", "title": "Research Runs", "summary": str(len(run_nodes)),
          "nodes": run_nodes},
@@ -130,13 +128,12 @@ def outline(bcon, task_id=None, *, project=None, run_id=None, research_store=Non
          "nodes": materials},
         {"node_id": "ledger", "title": "Evidence ledger", "summary": "Research findings, quotations, and evaluations"},
     ]
-    project_name = project_node["title"].removeprefix('Project:') if project_node else project
-    tree = {"node_id": "ws", "title": f"Workspace{f' · {project_name}' if project_name else ''}",
+    name = (os.path.basename(workspace.rstrip(os.sep)) or workspace) if workspace else ""
+    return {"node_id": "ws", "title": f"Workspace{f' · {name}' if name else ''}",
             "nodes": top_nodes}
-    return tree
 
 
-def read(bcon, node_id, max_chars=6000, *, research_store=None):
+def read(bcon, node_id, max_chars=6000, *, workspace=None, research_store=None):
     """Read one workspace node by ID."""
     if node_id.startswith("task:"):
         tid, _, part = node_id[5:].partition("#")
@@ -179,14 +176,11 @@ def read(bcon, node_id, max_chars=6000, *, research_store=None):
                     end = i
                     break
         return "\n".join(lines[start:end])[:max_chars]
-    if node_id.startswith("project:"):
-        name, _, anchor = node_id[8:].partition("#L")
-        node = _project_file(bcon, name)
-        if not node:
+    if node_id == "project" or node_id.startswith("project#L"):
+        if not _project_file(workspace):
             return None
-        row = bcon.execute("SELECT path FROM projects WHERE id=?", (name,)).fetchone()
-        path = os.path.join(row["path"], "PROJECT.md")
-        text = open(path, encoding="utf-8", errors="replace").read()
+        _, _, anchor = node_id.partition("#L")
+        text = open(os.path.join(workspace, "PROJECT.md"), encoding="utf-8", errors="replace").read()
         if not anchor:
             return text[:max_chars]
         lines = text.splitlines()

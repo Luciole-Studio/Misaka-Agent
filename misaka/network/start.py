@@ -80,21 +80,18 @@ def register(harn):
     @_register(
         harn,
         name="misaka_board", label='board',
-        description="List task cards, their states, current projects, the Sister roster, and token usage.",
+        description="List this project folder's task cards and their states, the Sister roster, and token usage.",
         snippet="View the Misaka task board and Sister roster",
         parameters=BoardParams)
     async def misaka_board(tool_call_id, params, signal, on_update, ctx):
         con = _con()
-        from misaka.platform import projects as _project
-        rows = db.by_status(con, params.status) if params.status else con.execute(
-            "SELECT * FROM tasks ORDER BY created_at DESC LIMIT 40").fetchall()
-        project_names = {row["id"]: row["name"] for row in _project.listing(con)}
-        lines = [f"{r['id']}  {r['status']:<10} {r['assignee']:<14} "
-                 f"{('['+project_names.get(r['project'], r['project'])+'] ') if r['project'] else ''}"
-                 f"{r['title'][:50]}" for r in rows]
+        workspace = _workspace(ctx)
+        rows = [r for r in db.by_status(con, params.status) if r["workspace"] == workspace] \
+            if params.status else con.execute(
+                "SELECT * FROM tasks WHERE workspace=? ORDER BY created_at DESC LIMIT 40",
+                (workspace,)).fetchall()
+        lines = [f"{r['id']}  {r['status']:<10} {r['assignee']:<14} {r['title'][:50]}" for r in rows]
         b = budget.status(con, _cfg()["token_cap"])
-        projs = _project.listing(con, workspace=_workspace(ctx))
-        project_text = ", ".join(f"{p['name']}({p['id']})" for p in projs)
         from misaka.network import roster as roster_mod
         named = ", ".join(
             f"{s} ({roster_mod.describe_line(s, root=_cfg()['profiles_root']) or 'no description'})"
@@ -102,7 +99,6 @@ def register(harn):
         header = (
             f"Sister roster: {named or '(empty)'}"
             f"{' (use misaka_sister_view for full profiles)' if named else ''}\n"
-            f"Projects: {project_text or '(none in this workspace)'}\n"
             f"Budget used: {b['used']:,} tokens ({b['mode']} mode)\n\n"
         )
         return _text(header + ("\n".join(lines) if lines else "(no task cards)"))
@@ -116,8 +112,6 @@ def register(harn):
             None, description="Optional independent reviewer; must be a different Sister from the assignee."
         )
         priority: int = Field(0, description="Relative priority; higher values run first.")
-        project: Optional[str] = Field(
-            None, description="Optional project name or ID from `misaka_board`; omit for an unclassified card.")
 
 
     @_register(
@@ -128,7 +122,6 @@ def register(harn):
         guidelines=[
             "The body must contain `## goal`, `## boundaries`, and `## acceptance criteria` with verifiable outcomes.",
             "After creating cards, show the plan and wait for explicit user approval before calling `misaka_dispatch`.",
-            "When a project defines division of labor in PROJECT.md, follow it when assigning Sisters.",
         ],
         parameters=CardParams)
     async def misaka_card(tool_call_id, params, signal, on_update, ctx):
@@ -143,16 +136,12 @@ def register(harn):
         if params.reviewer == params.assignee:
             raise ValueError("The reviewer must be different from the assignee.")
         c = cards[0]
-        from misaka.platform import projects as _project
-        workspace = _workspace(ctx)
-        proj = _project.require(con, params.project, workspace=workspace)
         tid = db.create_task(con, c["title"], body=c["body"], assignee=c["assignee"],
-                             priority=c["priority"], timeout_seconds=c["timeout"], project=proj,
-                             reviewer=params.reviewer, workspace=workspace)
-        tag = f" [{proj}]" if proj else ""
+                             priority=c["priority"], timeout_seconds=c["timeout"],
+                             reviewer=params.reviewer, workspace=_workspace(ctx))
         review = f" → reviewer {params.reviewer}" if params.reviewer else ""
         return _text(
-            f"Added {tid}{tag}: {c['title']} → {c['assignee']}{review}.\n"
+            f"Added {tid}: {c['title']} → {c['assignee']}{review}.\n"
             "Work has not started. Wait for explicit user approval, then call "
             "misaka_dispatch or misaka_sister."
         )
@@ -573,29 +562,6 @@ def register(harn):
         if not params.confirmed:
             raise ValueError("Task-card deletion is irreversible and requires explicit user confirmation.")
         ok, msg = db.delete_task(_con(), params.task_id)
-        if not ok:
-            raise ValueError(msg)
-        return _text(msg)
-
-    class ProjectDeleteParams(StrictParams):
-        project_id: str = Field(description="Project ID to delete.")
-        with_cards: bool = Field(default=False,
-                                 description="Also delete the project's task cards when true.")
-        confirmed: bool = Field(
-            description="True only when the user explicitly requested this irreversible deletion.")
-
-    @_register(
-        harn,
-        name="misaka_project_delete", label="Delete project",
-        description="Permanently delete a project after explicit user confirmation; active task cards prevent deletion.",
-        snippet="Permanently delete a project",
-        guidelines=["Deletion is irreversible. Never call misaka_project_delete without an explicit user request."],
-        parameters=ProjectDeleteParams)
-    async def misaka_project_delete(tool_call_id, params, signal, on_update, ctx):
-        if not params.confirmed:
-            raise ValueError("Project deletion requires explicit user confirmation.")
-        from misaka.platform import projects as project
-        ok, msg = project.delete(_con(), params.project_id, with_cards=params.with_cards)
         if not ok:
             raise ValueError(msg)
         return _text(msg)

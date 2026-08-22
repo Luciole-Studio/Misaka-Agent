@@ -94,7 +94,7 @@ def critique_run(con, run, cfg, worker, *, wave, synthesis_tasks):
               + '\n# Current evidence ledger (give reasons for every reliability judgement)\n'
               + prompt_guard.untrusted(
                     "evidence-ledger", json.dumps(evidence_ledger, ensure_ascii=False, indent=2)))
-    session_dir = os.path.join(root, "sessions", "redteam", f"wave-{wave}")
+    session_dir = runs.session_dir(run, "redteam", f"wave-{wave}")
     obj, raw, err = worker.run_llm_json(
         ensure_profile(cfg["roles_root"]), prompt, cfg["provider"], cfg["default_model"],
         cwd=root, tools=["read"], timeout=runs.call_timeout(

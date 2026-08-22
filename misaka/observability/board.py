@@ -1,5 +1,6 @@
 """Render the task board and follow its event stream using only the standard library."""
 import json
+import os
 import sys
 import time
 
@@ -58,19 +59,25 @@ def follow(con, since=None, poll=0.5, once=False):
         time.sleep(poll)
 
 
-def board_text(con):
-    """Board text shared by the /board slash command and the CLI; returned, not printed."""
-    rows = con.execute(
-        "SELECT id,status,assignee,priority,title,project FROM tasks "
-        "ORDER BY project IS NULL, project, created_at").fetchall()   # Group by Project; unclassified cards last.
+def board_text(con, workspace=None):
+    """Board text shared by the /board slash command and the CLI; returned, not printed.
+
+    Cards are grouped by project folder; ``workspace`` limits the board to one folder.
+    """
+    sql = "SELECT id,status,assignee,priority,title,workspace FROM tasks"
+    args = []
+    if workspace:
+        sql += " WHERE workspace=?"
+        args.append(workspace)
+    rows = con.execute(sql + " ORDER BY workspace, created_at", args).fetchall()
     if not rows:
         return "(No task cards on the board.)"
     out = []
-    cur_proj = object()   # Sentinel that matches no project value, so the first group always gets a header.
+    cur = object()   # Sentinel that matches no folder, so the first group always gets a header.
     for r in rows:
-        if r["project"] != cur_proj:
-            cur_proj = r["project"]
-            out.append(f"\n▌{cur_proj or '(unclassified)'}")
+        if r["workspace"] != cur:
+            cur = r["workspace"]
+            out.append(f"\n▌{os.path.basename(cur.rstrip(os.sep)) or cur}")
         status = r["status"]
         if status == "failed":  # A card blocked on input is shown as blocked, not failed.
             hit = con.execute(
@@ -83,5 +90,5 @@ def board_text(con):
     return "\n".join(out)
 
 
-def board_view(con):
-    print(board_text(con))
+def board_view(con, workspace=None):
+    print(board_text(con, workspace))

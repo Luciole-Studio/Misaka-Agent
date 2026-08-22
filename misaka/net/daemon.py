@@ -34,7 +34,7 @@ from misaka.config import CFG
 # Wire protocol version (strict equality, as in herdr). Bump it whenever *server
 # behaviour* changes, not only method/event shapes: an unbumped behaviour change
 # once let a stale daemon slip through the version gate.
-PROTOCOL = 17   # 17: ally allow-list read from ~/.misaka/allies.json (env knob removed, hot reload)
+PROTOCOL = 18   # 18: projects.list groups cards by folder; project.set/project.delete removed
 RING_CAP = 256 * 1024          # output tail kept per pane
 FRAME_SECONDS = 0.008          # coalescing window for dirty-row broadcasts (~120 fps)
 SCROLLBACK_LINES = 2000        # scrollback history per pane
@@ -591,12 +591,9 @@ class Daemon:
                         generation=generation, pid=os.getpid(),
                         host_cap=host_cap, assignee_cap=assignee_cap):
             raise ValueError(f"Card {task_id} was claimed by another dispatcher.")
-        workspace = db.workspace_for(row, CFG.get("workspaces_root"))
+        workspace = db.workspace_for(row)
         try:
             os.makedirs(workspace, exist_ok=True)
-            if not row["workspace"] and not db.set_workspace(con, task_id, workspace,
-                                    generation=generation, claim_lock=lock):
-                raise RuntimeError("The task claim expired.")
             env = {
                 "MISAKA_USAGE_DB": _expand(CFG["db"]),
                 "MISAKA_USAGE_TASK_ID": task_id,
@@ -609,7 +606,6 @@ class Daemon:
                 # and Last Order never sees them.
                 "MISAKA_DB": _expand(CFG["db"]),
                 "MISAKA_MESSAGES": _expand(CFG["messages_db"]),
-                "MISAKA_WS": _expand(CFG["workspaces_root"]),
                 "MISAKA_TASKS": _expand(CFG["tasks_root"]),
                 "MISAKA_TASK_DIR": db.task_state_dir(task_id),
                 "MISAKA_TASK_OUTPUT_DIR": str(row["output_dir"] or workspace),
@@ -814,56 +810,28 @@ class Daemon:
             self._save_snapshot()
             return {"ok": True}
         if method == "projects.list":
-            # Project overview: projects table plus each project's cards. Order: pinned
-            # first (most recently pinned on top), then active, then archived;
-            # unfiled cards hang under name None.
-            from misaka.platform import projects as project, tasks as db
+            # A project is a folder: cards grouped by workspace, only the caller's
+            # folder when one is given (it is a project even before its first card).
+            from misaka.platform import tasks as db
             con = self._board()
             workspace = (db.canonical_workspace(params["workspace"])
                          if params.get("workspace") else None)
-            cards = {}
-            sql = "SELECT id,status,title,assignee,workspace,project FROM tasks"
+            groups = {workspace: []} if workspace else {}
+            sql = "SELECT id,status,title,assignee,workspace FROM tasks"
             args = []
             if workspace:
                 sql += " WHERE workspace=?"
                 args.append(workspace)
-            for r in con.execute(sql + " ORDER BY created_at", args):
+            for r in con.execute(sql + " ORDER BY workspace,created_at", args):
                 sess = os.path.join(db.task_state_dir(r["id"]), "session")
-                cards.setdefault(r["project"], []).append(
+                groups.setdefault(r["workspace"], []).append(
                     {"id": r["id"], "status": r["status"], "title": r["title"],
                      "assignee": r["assignee"],
                      "has_session": os.path.isdir(sess) and bool(os.listdir(sess))})
-            out = []
-            for row in project.listing(con, workspace=workspace):
-                out.append({"id": row["id"], "name": row["name"],
-                            "workspace": row["workspace"],
-                            "archived": bool(row["archived"]),
-                            "pinned_at": row["pinned_at"],
-                            "cards": cards.pop(row["id"], [])})
-            unfiled = [c for key, rows in cards.items() if key is not None
-                       for c in rows]           # cards pointing at a deleted project stay visible
-            if cards.get(None) or unfiled:
-                out.append({"id": None, "name": None, "archived": False,
-                            "pinned_at": None,
-                            "cards": unfiled + cards.get(None, [])})
-            out.sort(key=lambda p: (p["archived"], -(p["pinned_at"] or 0),
-                                    p["name"] is None, p["name"] or "~"))
-            return {"projects": out}
-        if method == "project.set":
-            from misaka.platform import projects as project
-            ok, msg = project.set_state(self._board(), params["id"],
-                                        archived=params.get("archived"),
-                                        pinned=params.get("pinned"))
-            if not ok:
-                raise ValueError(msg)
-            return {"message": msg}
-        if method == "project.delete":
-            from misaka.platform import projects as project
-            ok, msg = project.delete(self._board(), params["id"],
-                                     with_cards=params.get("with_cards", False))
-            if not ok:
-                raise ValueError(msg)
-            return {"message": msg}
+            return {"projects": [
+                {"id": ws, "name": os.path.basename(ws.rstrip(os.sep)) or ws,
+                 "workspace": ws, "cards": cards}
+                for ws, cards in groups.items()]}
         if method == "card.delete":
             # A running card still occupies a pane: refuse and let the user stop it first (the panel uses card.stop).
             if any(p.card == params["task_id"] and p.alive()

@@ -1,7 +1,8 @@
 """Persistent research-run state and file artifacts.
 
-Research prose lives in the project directory. SQLite stores only workflow
-state and relationships, so a Last Order process that died can resume the same run.
+Research prose lives under ``<workspace>/research/<run_id>``; session transcripts live
+under ``~/.misaka/runs/<run_id>/sessions``. SQLite stores only workflow state and
+relationships, so a Last Order process that died can resume the same run.
 """
 from __future__ import annotations
 
@@ -12,15 +13,12 @@ import secrets
 import time
 from pathlib import Path
 
-from misaka.platform import notifications, projects, tasks as task_store
+from misaka.platform import notifications, tasks as task_store
 
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS research_runs (
   id              TEXT PRIMARY KEY,
-  project_id      TEXT NOT NULL,
-  project_name    TEXT NOT NULL,
-  project_path    TEXT NOT NULL,
   workspace       TEXT NOT NULL,
   question        TEXT NOT NULL,
   phase           TEXT NOT NULL,
@@ -129,7 +127,7 @@ TERMINAL = ("done", "failed", "stopped")
 DEFAULT_LIMITS = {
     "max_depth": 3,
 }
-RESEARCH_SCHEMA_VERSION = 4
+RESEARCH_SCHEMA_VERSION = 5
 
 
 def init(con):
@@ -140,7 +138,7 @@ def init(con):
     ).fetchone()
     if columns and not current:
         # No migration from older schemas: old runs cannot be given an honest
-        # workspace/project identity after the fact, so drop them.
+        # workspace identity after the fact, so drop them.
         for table in (
             "research_claims", "research_evidence_assessments", "research_findings",
             "research_artifacts", "research_issues", "research_run_tasks",
@@ -197,12 +195,23 @@ def normalize_limits(raw=None):
 
 
 def run_dir(run):
-    return os.path.join(run["project_path"], "runs", run["id"])
+    return os.path.join(run["workspace"], "research", run["id"])
+
+
+def session_dir(run, *parts):
+    """Transcript directory for one of the run's one-shot model calls (kept out of the project folder)."""
+    home = os.environ.get("MISAKA_RUNS_HOME") or os.path.expanduser("~/.misaka/runs")
+    return os.path.join(home, run["id"], "sessions", *parts)
+
+
+def project_name(run):
+    """Display name of the run's project: the workspace folder's basename."""
+    return os.path.basename(run["workspace"].rstrip(os.sep)) or run["workspace"]
 
 
 def ensure_layout(run):
     root = Path(run_dir(run))
-    for rel in ("branches", "tasks", "critiques", "syntheses", "sessions"):
+    for rel in ("branches", "tasks", "critiques", "syntheses"):
         (root / rel).mkdir(parents=True, exist_ok=True)
     return str(root)
 
@@ -215,10 +224,10 @@ def _atomic_write(path, content):
     os.replace(tmp, path)
 
 
-def create(con, *, project_id, question, limits=None, token_start=0):
-    project = projects.resolve(con, project_id)
-    if not project:
-        raise ValueError("A research run must belong to an existing project.")
+def create(con, *, workspace, question, limits=None, token_start=0):
+    workspace = os.path.realpath(os.path.expanduser(str(workspace or "")))
+    if not os.path.isdir(workspace):
+        raise ValueError(f"A research run needs an existing project folder: {workspace}")
     question = str(question or "").strip()
     if len(question) < 2:
         raise ValueError("The research question cannot be empty.")
@@ -228,11 +237,10 @@ def create(con, *, project_id, question, limits=None, token_start=0):
     spec = normalize_limits(limits)
     con.execute(
         "INSERT INTO research_runs "
-        "(id,project_id,project_name,project_path,workspace,question,phase,status,limits_json,"
-        "token_start,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        (run_id, project["id"], project["name"], project["path"], project["workspace"],
-         question, "created", "active", json.dumps(spec, ensure_ascii=False),
-         int(token_start), now, now),
+        "(id,workspace,question,phase,status,limits_json,token_start,created_at,updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (run_id, workspace, question, "created", "active",
+         json.dumps(spec, ensure_ascii=False), int(token_start), now, now),
     )
     row = get(con, run_id)
     ensure_layout(row)
@@ -249,23 +257,22 @@ def get(con, run_id):
     return con.execute("SELECT * FROM research_runs WHERE id=?", (run_id,)).fetchone()
 
 
-def latest(con, project=None, active_only=False):
+def latest(con, workspace=None, active_only=False):
     init(con)
     q, args = "SELECT * FROM research_runs WHERE 1=1", []
-    if project:
-        q += " AND (project_id=? OR project_name=?)"
-        args.extend([project, project])
+    if workspace:
+        q += " AND workspace=?"
+        args.append(workspace)
     if active_only:
         q += " AND status IN ('active','waiting_input','stopping')"
     return con.execute(q + " ORDER BY created_at DESC LIMIT 1", args).fetchone()
 
 
-def listing(con, *, project=None):
+def listing(con, *, workspace=None):
     init(con)
-    if project:
+    if workspace:
         return con.execute(
-            "SELECT * FROM research_runs WHERE project_id=? OR project_name=? "
-            "ORDER BY created_at DESC", (project, project)
+            "SELECT * FROM research_runs WHERE workspace=? ORDER BY created_at DESC", (workspace,)
         ).fetchall()
     return con.execute("SELECT * FROM research_runs ORDER BY created_at DESC").fetchall()
 
@@ -578,9 +585,7 @@ def summary(con, run_id):
     if not run:
         return None
     return {
-        "id": run["id"], "project_id": run["project_id"],
-        "project": run["project_name"], "workspace": run["workspace"],
-        "phase": run["phase"],
+        "id": run["id"], "workspace": run["workspace"], "phase": run["phase"],
         "status": run["status"], "wave": run["wave"], "limits": limits(run),
         "tasks": task_count(con, run_id), "branches": len(branches(con, run_id)),
         "open_issues": len(open_issues(con, run_id)),
