@@ -210,27 +210,49 @@ def pane_state(pane):
     return "idle", True
 
 
-def sidebar_model(listing, focused_id, tab_count=1, tab_of=None):
+def space_key(pane):
+    """A pane's space: the real path of its folder (herdr's workspace identity cwd,
+    workspace.rs:1161-1173). ponytail: folder = space until sister panes carry a parent link."""
+    return os.path.realpath(pane.get("cwd") or os.getcwd())
+
+
+def tabs_by_space(tabs, space_of_pane):
+    """herdr workspace.tabs: every tab belongs to one space, here the space of its first pane.
+    Returns ``(groups, tab_of)``: ordered {space: [tree]} and {pane id: tab index within its
+    space} (workspace.rs:488-495 tab_display_name numbers tabs per workspace). Pure, so testable."""
+    groups, tab_of = {}, {}
+    for tree in tabs:
+        ids = hui.pane_ids(tree)
+        if not ids:
+            continue
+        key = space_of_pane(ids[0])
+        index = len(groups.setdefault(key, []))
+        groups[key].append(tree)
+        for pane_id in ids:
+            tab_of[pane_id] = index
+    return groups, tab_of
+
+
+def sidebar_model(listing, focused_id, active_space=None, tab_of=None, tab_counts=None):
     """Shape the pane listing into herdr's two lists. A space is a workspace = the folder its
-    panes run in (workspace.rs identity cwd), labelled by the last path component and marked
-    with its most attention-worthy pane (aggregate.rs:86-99); an agent entry is one pane that
-    runs something other than a bare shell (aggregate.rs:29-69 lists only panes with an
-    agent). Pure, so testable."""
-    tab_of = tab_of or {}
+    panes run in, labelled by the last path component and marked with its most
+    attention-worthy pane (aggregate.rs:86-99); ``active_space`` is herdr's app.active (the
+    focused pane's space when None). An agent entry is one pane that runs something other than
+    a bare shell (aggregate.rs:29-69 lists only panes with an agent); its tab number shows only
+    when its space has several tabs (sidebar.rs:166-171). Pure, so testable."""
+    tab_of, tab_counts = tab_of or {}, tab_counts or {}
     home = os.path.expanduser("~")
     spaces, by_key = [], {}
     for pane in listing:
-        key = os.path.realpath(pane.get("cwd") or os.getcwd())
+        key = space_key(pane)
         if key not in by_key:
             label = "~" if key == home else (os.path.basename(key.rstrip(os.sep)) or key)
-            by_key[key] = {"key": key, "label": label, "first": None, "active": False,
+            by_key[key] = {"key": key, "label": label, "active": key == active_space,
                            "state": "unknown", "seen": True}
             spaces.append(by_key[key])
         space = by_key[key]
         state, seen = pane_state(pane)
-        if space["first"] is None or (pane["alive"] and not space["first_alive"]):
-            space["first"], space["first_alive"] = pane["id"], pane["alive"]
-        if pane["id"] == focused_id:
+        if active_space is None and pane["id"] == focused_id:
             space["active"] = True
         if (hui.attention_priority(state, seen)
                 > hui.attention_priority(space["state"], space["seen"])):
@@ -240,11 +262,11 @@ def sidebar_model(listing, focused_id, tab_count=1, tab_of=None):
         if pane["title"] == "shell":          # ponytail: MISAKA's own shell panes carry this title
             continue
         state, seen = pane_state(pane)
-        key = os.path.realpath(pane.get("cwd") or os.getcwd())
+        key = space_key(pane)
         tab = tab_of.get(pane["id"])
         agents.append({"pane": pane["id"], "space": by_key[key]["label"],
-                       # workspace.rs:488-495 tab_display_name: auto-named tabs show their number.
-                       "tab": str(tab + 1) if (tab_count > 1 and tab is not None) else None,
+                       "tab": (str(tab + 1) if (tab is not None and tab_counts.get(key, 1) > 1)
+                               else None),
                        "agent": pane["title"] or pane["id"], "state": state, "seen": seen,
                        "active": pane["id"] == focused_id})
     return spaces, agents
@@ -313,7 +335,7 @@ def _render_spaces(canvas, spaces, area, scroll, hits):
         _put_tokens(canvas, card.x + 1, row_y,
                     [("icon", glyph, {"fg": color}), ("text", space["label"], name)],
                     max(0, card.width - 1), card.x + card.width)
-        hits.append((card, ("pane", space["first"])))
+        hits.append((card, ("space", space["key"])))
         row_y += height
     if has_bar:
         _put_scrollbar(canvas, metrics,
@@ -401,7 +423,7 @@ def _render_collapsed(canvas, spaces, agents, area, hits):
             canvas.put(ws_area.x, y, number,
                        fg=hui.TEXT if space["active"] else hui.OVERLAY0, clip=clip)
             canvas.put(ws_area.x + len(number) + 1, y, glyph, fg=color, clip=clip)
-            hits.append((hui.Rect(ws_area.x, y, ws_area.width, 1), ("pane", space["first"])))
+            hits.append((hui.Rect(ws_area.x, y, ws_area.width, 1), ("space", space["key"])))
         if divider_y is not None:
             canvas.put(ws_area.x, divider_y, "─" * ws_area.width, fg=P["surface_dim"], clip=clip)
         content = hui.Rect(detail_area.x, detail_area.y, detail_area.width,
@@ -758,8 +780,16 @@ def launch():
             if tree is not None:
                 tabs.append(tree)
 
+    def space_of(pane_id):
+        pane = next((p for p in listing if p["id"] == pane_id), None)
+        return space_key(pane) if pane else None
+
+    def visible_tabs():
+        """herdr: the tab bar and the main area show only the active workspace's tabs."""
+        return tabs_by_space(tabs, space_of)[0].get(side["ws"], [])
+
     def active_tab():
-        return next((i for i, tree in enumerate(tabs)
+        return next((i for i, tree in enumerate(visible_tabs())
                      if focused in hui.pane_ids(tree)), 0)
 
     def tab_label(tree):
@@ -770,8 +800,44 @@ def launch():
 
 
     rows, cols = _term_size()
-    # Sidebar state (herdr AppState: sidebar_width / sidebar_collapsed / agent_panel_sort).
-    side = {"w": SIDEBAR_W, "collapsed": False, "sort": "grouped"}
+    # Sidebar state (herdr AppState: sidebar_width / sidebar_collapsed / agent_panel_sort / active).
+    side = {"w": SIDEBAR_W, "collapsed": False, "sort": "grouped", "ws": workspace}
+    last_focus = {}        # space -> the pane focused last time we were there (herdr: per-workspace focus)
+    side_order = []        # space keys in sidebar order at the last draw (neighbour lookup when one closes)
+
+    def switch_space(key):
+        """herdr switch_workspace: the main area shows that space's tabs, focus returns to its last pane."""
+        side["ws"] = key
+        alive = {p["id"] for p in listing if p["alive"]}
+        target = last_focus.get(key)
+        if target not in alive or space_of(target) != key:
+            vis = visible_tabs()
+            target = hui.pane_ids(vis[0])[0] if vis else None
+        if target is None:
+            relayout()
+        else:
+            focus(target, force_layout=True)
+
+    def refocus(prefer=None, page_idx=0):
+        """After a pane went away: stay in the active space while it has panes (the tab's
+        survivor first, then the tab at the same position), else the space is gone and its
+        neighbour takes over (herdr actions.rs close_workspace: active = min(idx, len - 1))."""
+        sync_tabs()
+        alive = {p["id"] for p in listing if p["alive"]}
+        if prefer in alive and space_of(prefer) == side["ws"]:
+            focus(prefer, force_layout=True)
+            return
+        vis = visible_tabs()
+        if vis:
+            focus(hui.pane_ids(vis[min(page_idx, len(vis) - 1)])[0], force_layout=True)
+            return
+        spaces = []
+        for pane in listing:
+            if pane["alive"] and space_key(pane) not in spaces:
+                spaces.append(space_key(pane))
+        if spaces:
+            index = side_order.index(side["ws"]) if side["ws"] in side_order else 0
+            switch_space(spaces[min(index, len(spaces) - 1)])
 
     def main_col():
         """First (1-based) column of the main area: flush against the sidebar separator."""
@@ -843,13 +909,11 @@ def launch():
         paint("".join(out).encode())
     ui_map = {"bar": None, "hits": [], "sections": {}}   # Mouse hit areas: tab bar geometry plus sidebar hit rects.
 
-    def tab_index_of():
-        return {pid: idx for idx, tree in enumerate(tabs) for pid in hui.pane_ids(tree)}
-
     def draw_sidebar():
         nonlocal tab_scroll
         sync_tabs()
-        names = [tab_label(tab) for tab in tabs]
+        groups, tab_of = tabs_by_space(tabs, space_of)
+        names = [tab_label(tab) for tab in groups.get(side["ws"], [])]
         view = hui.compute_view(hui.Rect(0, 0, cols, rows), side["w"], len(tabs))
         # mouse_chrome=True: herdr's "+" new-tab button and overflow scroll buttons.
         bar = hui.compute_tab_bar_view(names, active_tab(), view["tab_bar_rect"],
@@ -858,7 +922,9 @@ def launch():
         ui_map["bar"] = bar
         tab_line = render_tab_bar(names, active_tab(), bar, view["tab_bar_rect"],
                                   tab_scroll)
-        spaces, agents = sidebar_model(listing, focused, len(tabs), tab_index_of())
+        spaces, agents = sidebar_model(listing, focused, side["ws"], tab_of,
+                                       {key: len(trees) for key, trees in groups.items()})
+        side_order[:] = [space["key"] for space in spaces]
         side_lines, ui_map["hits"], ui_map["sections"] = format_sidebar(
             spaces, agents, side["w"], rows, collapsed=side["collapsed"],
             scrolls=side_scrolls, sort=side["sort"])
@@ -1064,7 +1130,8 @@ def launch():
         view = hui.compute_view(hui.Rect(0, 0, cols, rows), side["w"], len(tabs))
         term = view["terminal_area"]
         # herdr: only the active tab is drawn; its layout is the BSP tree cut into rectangles (layout.rs collect_panes).
-        tree = tabs[active_tab()] if tabs else None
+        vis = visible_tabs()
+        tree = vis[active_tab()] if vis else None
         if tree is None:
             slices = []
             draw_sidebar()
@@ -1125,6 +1192,11 @@ def launch():
 
     def focus(pane_id, *, force_layout=False):
         nonlocal focused
+        key = space_of(pane_id)
+        if key is not None and key != side["ws"]:   # herdr: focusing a pane in another workspace activates it
+            side["ws"] = key
+            force_layout = True
+        last_focus[side["ws"]] = pane_id
         changed = focused != pane_id
         focused = pane_id
         try:
@@ -1159,7 +1231,7 @@ def launch():
         whole tree (a new column, used by MISAKA's tiling rule)."""
         nonlocal listing
         out = control.request("pane.create",
-                              {"argv": argv, "cwd": os.getcwd(), "title": title,
+                              {"argv": argv, "cwd": side["ws"], "title": title,   # lands in the active space
                                "env": {"MISAKA_THEME": hui.theme_variant()}})
         listing = panes()
         new_id = out["pane_id"]
@@ -1180,29 +1252,23 @@ def launch():
 
     def switch_tab(index):
         nonlocal tab_follow, zoom
-        if 0 <= index < len(tabs):
+        vis = visible_tabs()
+        if 0 <= index < len(vis):
             tab_follow = True
             zoom = False           # herdr: zoom is per-tab state; switching tabs leaves it.
-            focus(hui.pane_ids(tabs[index])[0], force_layout=True)
+            focus(hui.pane_ids(vis[index])[0], force_layout=True)
 
     def close_focused():
         """Close the focused pane and move focus to the next live one. Returns True when no panes remain."""
         nonlocal listing
-        page_idx = active_tab()
-        page_ids = hui.pane_ids(tabs[page_idx]) if page_idx < len(tabs) else []
+        vis, page_idx = visible_tabs(), active_tab()
+        page_ids = hui.pane_ids(vis[page_idx]) if page_idx < len(vis) else []
         survivors = [pid for pid in page_ids if pid != focused]
         control.request("pane.close", {"id": focused})
         listing = panes()
-        sync_tabs()
-        alive = [p["id"] for p in listing if p["alive"]]
-        if not alive:
+        if not any(p["alive"] for p in listing):
             return True
-        if survivors and survivors[0] in alive:
-            focus(survivors[0], force_layout=True)
-        else:
-            neighbor = tabs[min(page_idx, len(tabs) - 1)] if tabs else None
-            focus(hui.pane_ids(neighbor)[0] if neighbor else alive[0],
-                  force_layout=True)
+        refocus(survivors[0] if survivors else None, page_idx)
         return False
 
     def on_wheel(x, y, delta):
@@ -1259,8 +1325,10 @@ def launch():
                         and rect.y <= y - 1 < rect.y + rect.height), None)
             if hit is None:
                 return
-            if hit[0] == "pane":                      # A space row carries its folder's first pane (herdr: switch workspace).
+            if hit[0] == "pane":
                 focus(hit[1])
+            elif hit[0] == "space":                   # herdr: click a space = switch workspace.
+                switch_space(hit[1])
             elif hit[0] == "new":                     # herdr: new workspace = a shell in the startup folder; here a shell tab.
                 new_pane([os.environ.get("SHELL", "sh")], "shell")
             elif hit[0] == "menu":                    # herdr: the global menu; the key help is the nearest thing here.
@@ -1394,9 +1462,9 @@ def launch():
                         plain += PREFIX
                     elif key in b"123456789":          # herdr: digits switch tabs.
                         switch_tab(int(key) - 1)
-                    elif key in b"np" and tabs:        # Cycle tabs.
+                    elif key in b"np" and visible_tabs():   # Cycle the active space's tabs.
                         switch_tab((active_tab() + (1 if key == b"n" else -1))
-                                   % len(tabs))
+                                   % len(visible_tabs()))
                     elif key in b"hjkl":              # herdr focus_pane_h/j/k/l (1051-1054).
                         target = hui.find_in_direction(
                             focused,
@@ -1453,6 +1521,7 @@ def launch():
                         painted = True
                     elif msg.get("event") == "exited":
                         # The application exited, so the pane is done: close it; when none are left, return to the shell.
+                        page = active_tab()
                         try:
                             control.request("pane.close", {"id": msg["id"]})
                         except RuntimeError:
@@ -1463,7 +1532,7 @@ def launch():
                             exit_reason[0] = "closed_all"
                             return
                         if msg["id"] == focused:
-                            focus(alive[0]["id"], force_layout=True)
+                            refocus(page_idx=page)
                         else:
                             relayout()
                         painted = False
@@ -1478,6 +1547,7 @@ def launch():
                     return
                 dead = [p for p in listing if not p["alive"] and not p["card"]]
                 if dead:      # Exit events can precede the subscription and get missed; the poll cleans up.
+                    page = active_tab()
                     for pane in dead:
                         try:
                             control.request("pane.close", {"id": pane["id"]})
@@ -1489,7 +1559,7 @@ def launch():
                         exit_reason[0] = "closed_all"
                         return
                     if not any(p["id"] == focused and p["alive"] for p in listing):
-                        focus(alive[0]["id"], force_layout=True)
+                        refocus(page_idx=page)
                     else:
                         relayout()
                 draw_sidebar()
