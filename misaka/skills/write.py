@@ -184,15 +184,12 @@ def stage(payload, *, summary):
         "created_at": time.time(),
         "payload": payload,
     }
-    try:
-        d = _pending_dir()
-        d.mkdir(parents=True, exist_ok=True)
-        path = d / f"{record_id}.json"
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(item, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, path)
-    except OSError:
-        pass
+    d = _pending_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{record_id}.json"
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(item, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
     return item
 
 
@@ -223,17 +220,6 @@ def discard_pending(pending_id):
 
 
 def pending_diff(item):
-    """Unified diff between the live file and the pending write, for the user to review."""
-    import difflib
-    payload = item.get("payload") or {}
-    target = Path(payload.get("path") or "")
-    new = str(payload.get("content") or "")
-    old = ""
-    if target.is_file():
-        try:
-            old = target.read_text(encoding="utf-8-sig")
-        except OSError:
-            old = ""
-    return "\n".join(difflib.unified_diff(
-        old.splitlines(), new.splitlines(),
-        fromfile=f"live/{target.name}", tofile=f"pending/{target.name}", lineterm=""))
+    """Unified diff between the live skill tree and the pending write, for the user to review."""
+    from misaka.skills import manage
+    return manage.pending_diff(item.get("payload") or {})

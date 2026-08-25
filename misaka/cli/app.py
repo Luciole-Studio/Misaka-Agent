@@ -452,6 +452,9 @@ def main():
                     if payload.get("content"):
                         # Advisory lint findings, shown before approval.
                         print(format_findings(lint_content(payload["content"])))
+                    diff = skill_write.pending_diff(r)
+                    if diff:
+                        print("    " + diff.replace("\n", "\n    "))
                     print(f"    Approve: misaka skills approve {r['id']}")
                 for n in legacy:
                     print(f"  [directory] {n}  approve: misaka skills approve {n} --as {args.role}")

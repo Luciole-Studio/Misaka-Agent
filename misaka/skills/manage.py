@@ -386,7 +386,11 @@ def manage(action, name, *, profile_dir, content=None, file_path=None,
                        "new_string": new_string, "replace_all": replace_all,
                        "absorbed_into": absorbed_into}
             gist = _gist(action, name, content or "", file_path or "", old_string or "")
-            record = skill_write.stage(payload, summary=gist)
+            try:
+                record = skill_write.stage(payload, summary=gist)
+            except OSError as error:
+                return {"success": False,
+                        "error": f"Could not stage the skill write for review: {error}"}
             return {"success": True, "staged": True, "pending_id": record["id"],
                     "gist": gist, "message": note}
 
@@ -431,3 +435,61 @@ def apply_pending(payload):
                       absorbed_into=payload.get("absorbed_into"))
     finally:
         _bypass.reset(token)
+
+
+def pending_diff(payload):
+    """Unified diff a pending write would produce, resolving paths exactly as ``apply_pending`` will."""
+    import difflib
+
+    action = str(payload.get("action") or "")
+    name = str(payload.get("name") or "")
+    skill_dir = _skills_root(payload.get("profile_dir") or "") / name
+    file_path = payload.get("file_path")
+
+    def read(path):
+        try:
+            return path.read_text(encoding="utf-8") if path.is_file() else ""
+        except OSError:
+            return ""
+
+    def rel_name(path):
+        try:
+            return f"{name}/{path.resolve().relative_to(skill_dir.resolve())}"
+        except ValueError:
+            return f"{name}/{path.name}"
+
+    def udiff(rel, old, new):
+        return "\n".join(difflib.unified_diff(old.splitlines(), new.splitlines(),
+                                              fromfile=f"live/{rel}", tofile=f"pending/{rel}", lineterm=""))
+
+    if action == "delete":
+        if not skill_dir.is_dir():
+            return f"(skill {name!r} does not exist)"
+        parts = [udiff(rel_name(path), read(path), "")
+                 for path in sorted(p for p in skill_dir.rglob("*") if p.is_file())]
+        return "\n".join(p for p in parts if p) or f"(skill {name!r} has no files)"
+
+    if action in ("create", "edit") or (action == "patch" and not file_path):
+        target = skill_dir / "SKILL.md"
+    elif action in ("patch", "write_file", "remove_file"):
+        target, err = _resolve_target(skill_dir, file_path or "")
+        if err:
+            return f"(cannot preview: {err})"
+    else:
+        return f"(no preview for action {action!r})"
+
+    old = read(target)
+    if action in ("create", "edit"):
+        new = str(payload.get("content") or "")
+    elif action == "write_file":
+        new = str(payload.get("file_content") or "")
+    elif action == "remove_file":
+        new = ""
+    else:
+        old_string = str(payload.get("old_string") or "")
+        new_string = str(payload.get("new_string") or "")
+        if not old_string or old_string not in old:
+            return "(cannot preview: old_string does not match the live file)"
+        new = old.replace(old_string, new_string) if payload.get("replace_all") \
+            else old.replace(old_string, new_string, 1)
+    return udiff(rel_name(target), old, new) or "(no changes)"
