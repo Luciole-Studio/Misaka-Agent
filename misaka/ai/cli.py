@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Any
 
 from misaka.ai.utils.oauth import get_oauth_provider, get_oauth_providers
+from misaka.config import get_auth_path
 
-AUTH_FILE = Path("auth.json")
+AUTH_FILE = Path(get_auth_path())
 PROVIDERS = get_oauth_providers()
 
 
@@ -28,6 +29,7 @@ def load_auth() -> dict[str, dict[str, Any]]:
 
 
 def save_auth(auth: dict[str, dict[str, Any]]) -> None:
+    AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
     AUTH_FILE.write_text(json.dumps(auth, indent=2), encoding="utf-8")
 
 
@@ -92,16 +94,16 @@ async def main() -> None:
     if command is None or command in {"help", "--help", "-h"}:
         provider_list = _format_provider_list()
         print(
-            "Usage: harn-ai <command> [provider]\n\n"
+            "Usage: python -m misaka.ai <command> [provider]\n\n"
             "Commands:\n"
             "  login [provider]  Login to an OAuth provider\n"
             "  list              List available providers\n\n"
             "Providers:\n"
             f"{provider_list}\n\n"
             "Examples:\n"
-            "  harn-ai login              # interactive provider selection\n"
-            "  harn-ai login anthropic    # login to specific provider\n"
-            "  harn-ai list               # list providers\n"
+            "  python -m misaka.ai login              # interactive provider selection\n"
+            "  python -m misaka.ai login anthropic    # login to specific provider\n"
+            "  python -m misaka.ai list               # list providers\n"
         )
         return
 
@@ -133,7 +135,7 @@ async def main() -> None:
 
         if not any(provider.id == provider_id for provider in PROVIDERS):
             print(f"Unknown provider: {provider_id}", file=sys.stderr)
-            print("Use 'harn-ai list' to see available providers", file=sys.stderr)
+            print("Use 'python -m misaka.ai list' to see available providers", file=sys.stderr)
             raise SystemExit(1)
 
         print(f"Logging in to {provider_id}...")
@@ -141,7 +143,7 @@ async def main() -> None:
         return
 
     print(f"Unknown command: {command}", file=sys.stderr)
-    print("Use 'harn-ai --help' for usage", file=sys.stderr)
+    print("Use 'python -m misaka.ai --help' for usage", file=sys.stderr)
     raise SystemExit(1)
 
 

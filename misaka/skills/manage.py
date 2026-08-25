@@ -449,6 +449,8 @@ def pending_diff(payload):
     def read(path):
         try:
             return path.read_text(encoding="utf-8") if path.is_file() else ""
+        except UnicodeDecodeError:
+            return None          # binary: previewed by name only
         except OSError:
             return ""
 
@@ -459,6 +461,8 @@ def pending_diff(payload):
             return f"{name}/{path.name}"
 
     def udiff(rel, old, new):
+        if old is None or new is None:
+            return f"(binary file: {rel})"
         return "\n".join(difflib.unified_diff(old.splitlines(), new.splitlines(),
                                               fromfile=f"live/{rel}", tofile=f"pending/{rel}", lineterm=""))
 
@@ -488,6 +492,8 @@ def pending_diff(payload):
     else:
         old_string = str(payload.get("old_string") or "")
         new_string = str(payload.get("new_string") or "")
+        if old is None:
+            return f"(cannot preview: {rel_name(target)} is a binary file)"
         if not old_string or old_string not in old:
             return "(cannot preview: old_string does not match the live file)"
         new = old.replace(old_string, new_string) if payload.get("replace_all") \
