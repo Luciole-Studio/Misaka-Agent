@@ -370,13 +370,13 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
     os.makedirs(workspace, exist_ok=True)
     state_dir = task_store.task_state_dir(task["id"])
     os.makedirs(state_dir, exist_ok=True)
-    from misaka.skills import layers as skill_layers
-    skills = skill_layers.skills_stack(profile_dir, cwd=workspace)
     beast = isinstance(task, dict) and task.get("beast")
     prompt = card_prompt(task)
 
     role = profiles.role_of(profile_dir)
-    flags = ["--provider", provider, "--model", model, "--thinking", "low",
+    # --no-skills: the engine's own skill loading stays off; the skills extension reads the
+    # card's sandbox (SessionSpec.skill_roots) and nothing else.
+    flags = ["--provider", provider, "--model", model, "--thinking", "low", "--no-skills",
              "--session-dir", os.path.join(state_dir, "session")]
     ro_root = os.path.join(state_dir, ".skills-ro")
     sender = role.rsplit("/", 1)[-1]
@@ -384,15 +384,7 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
 
     kind = "beast" if beast else "card"
     delegates = not profiles.is_last_order(profile_dir)
-    factories = build_extensions(SessionSpec(
-        profile_dir=profile_dir,
-        role=role,
-        workspace=workspace,
-        kind=kind,
-        sender=sender,
-        task_id=task.get("id"),
-        tool_ceiling=SUBAGENT_TOOLS if beast and delegates else None,
-    )) or None
+    skill_roots = None
     if beast:
         # Beast mode gets no builtin tools: with DELEGATE it keeps only the subagent
         # tools, otherwise none (Last Order has no DELEGATE, so it runs tool-less).
@@ -401,9 +393,21 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
         else:
             flags += ["-nt"]
     else:
-        # Regular cards mount read-only copies of the profile's skills.
-        for d in skill_sandbox.readonly_copies(skills, ro_root):
-            flags += ["--skill", d]
+        # Regular cards run against read-only copies of the role's skill stack: skills are
+        # read-only at run time (constitution), and a card never sees the live tree.
+        from misaka.skills import layers as skill_layers
+        skill_sandbox.readonly_copies(skill_layers.skills_stack(profile_dir, cwd=workspace), ro_root)
+        skill_roots = (("sandbox", ro_root),)
+    factories = build_extensions(SessionSpec(
+        profile_dir=profile_dir,
+        role=role,
+        workspace=workspace,
+        kind=kind,
+        sender=sender,
+        task_id=task.get("id"),
+        tool_ceiling=SUBAGENT_TOOLS if beast and delegates else None,
+        skill_roots=skill_roots,
+    )) or None
     flags += ["--append-system-prompt", profiles.shared_soul()]
     from misaka.config import identity
     for section in identity.prompt_sections(profile_dir, role):

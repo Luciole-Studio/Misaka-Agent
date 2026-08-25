@@ -38,7 +38,9 @@ async def open_session(flags, cwd, extension_factories=None):
     from misaka.cli.engine import create_runtime_factory, resolve_cli_paths
     from misaka.utils.paths import normalize_path
 
-    parsed = parse_args(flags)
+    # Every headless MISAKA session runs with the engine's own skill loading off: the skills
+    # extension (misaka.skills.index) is the one place that decides what a session sees.
+    parsed = parse_args(["--no-skills", *flags])
     errs = [d.message for d in parsed.diagnostics if d.type == "error"]
     if errs:
         return None, None, "; ".join(errs)

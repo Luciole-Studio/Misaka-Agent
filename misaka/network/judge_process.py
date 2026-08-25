@@ -1,4 +1,4 @@
-"""Cancelable process boundary for the Sister red-team gate."""
+"""Cancelable process boundary for the card verification gate."""
 
 from __future__ import annotations
 

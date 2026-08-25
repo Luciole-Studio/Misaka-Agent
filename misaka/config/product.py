@@ -4,9 +4,6 @@ Constants are the configuration; a config file can come later if ever needed.
 MISAKA_* environment variables override the defaults.
 """
 import os
-from pathlib import Path
-
-REPO = str(Path(__file__).resolve().parents[2])
 
 CFG = {
     "db": os.environ.get("MISAKA_DB", "~/.misaka/board.db"),
@@ -24,7 +21,6 @@ CFG = {
     "profiles_root": os.path.expanduser("~/.misaka/profiles/sisters"),
     "roles_root": os.path.expanduser("~/.misaka/profiles"),
     "judge_timeout": int(os.environ.get("MISAKA_JUDGE_TIMEOUT", "600")),
-    "hooks_dir": os.path.join(REPO, "hooks"),
     "token_cap": int(os.environ.get("MISAKA_TOKEN_CAP", "0")),
     # Context engine: lcm = lossless compaction (originals kept in lcm.db and
     # retrievable); native = the engine's built-in one-shot summary.  Any failure

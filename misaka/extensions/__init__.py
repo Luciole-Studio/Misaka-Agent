@@ -2,7 +2,7 @@
 
     misaka/extensions/<module>             every role
     misaka/extensions/last_order/<module>  Last Order only
-    misaka/extensions/sisters/<module>     every other role (Sisters, red team, synthesizer, …)
+    misaka/extensions/sisters/<module>     every other role (the Sisters)
 
 A module takes part by defining ``activate(spec) -> register | None``: ``register(harn)``
 installs the extension into the harness, ``None`` skips it for this session.  A module may

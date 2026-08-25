@@ -101,11 +101,11 @@ def outline(bcon, task_id=None, *, workspace=None, run_id=None, research_store=N
         artifact_nodes = [_artifact_node(a) for a in research_store.artifacts(
             bcon, run["id"], root_only=True)]
         branch_nodes = []
-        for branch in research_store.branches(bcon, run["id"]):
+        for branch in research_store.nodes(bcon, run["id"]):
             children = [_artifact_node(a) for a in research_store.artifacts(
                 bcon, run["id"], branch_id=branch["id"])]
             branch_nodes.append({"node_id": f"branch:{branch['id']}",
-                                 "title": f"Branch {branch['id']}",
+                                 "title": f"Node {branch['id']}",
                                  "summary": f"{branch['status']} · depth {branch['depth']}",
                                  "nodes": children})
         run_nodes.append({"node_id": f"run:{run['id']}",
@@ -114,7 +114,7 @@ def outline(bcon, task_id=None, *, workspace=None, run_id=None, research_store=N
                           "nodes": [
                               {"node_id": f"run:{run['id']}#artifacts", "title": "Artifacts",
                                "summary": str(len(artifact_nodes)), "nodes": artifact_nodes},
-                              {"node_id": f"run:{run['id']}#branches", "title": "Extension branches",
+                              {"node_id": f"run:{run['id']}#branches", "title": "Research nodes",
                                "summary": str(len(branch_nodes)), "nodes": branch_nodes},
                           ]})
 

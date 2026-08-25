@@ -2,7 +2,7 @@
 
 Last Order never receives the generic ``Agent`` tool family.  This module
 reuses that process/transcript runtime behind a roster-bound facade, while the
-board remains the source of truth and report + red-team acceptance remains the
+board remains the source of truth and report + verified acceptance remains the
 only path to ``done``.
 """
 
@@ -264,17 +264,20 @@ class _SisterManager(SubagentManager):
         self._parent_session_id = self.board_id
         return self.runtime_dir, output
 
-    def resolve_definition(self, requested: str | None, _cwd: str) -> AgentDefinition:
+    def resolve_definition(self, requested: str | None, cwd: str) -> AgentDefinition:
         if requested not in (None, self.agent_type, "general", "general-purpose"):
             raise ValueError(f"Sister card cannot change identity to {requested!r}")
         # Identity comes first, followed by mandatory role instructions.
         from misaka.config import identity
+        from misaka.skills import layers as skill_layers
         soul = "\n\n".join(
             [Path(profiles.shared_soul()).read_text(encoding="utf-8")]
             + identity.prompt_sections(self.profile_dir,
                                        profiles.role_of(self.profile_dir)))
+        # The same stack a card in a pane sees (project, role, shared), as read-only copies.
         copies = skill_sandbox.readonly_copies(
-            profiles.skills(self.profile_dir), self.skill_root
+            skill_layers.skills_stack(self.profile_dir, cwd=cwd or self.role_context.workspace),
+            self.skill_root,
         )
         return AgentDefinition(
             name=self.agent_type,
@@ -541,10 +544,10 @@ class SisterRuntime:
                 )
 
     def _prepare_card(self, row: Mapping[str, Any]) -> dict[str, Any] | None:
+        from misaka.platform import cards
         task = dict(row)
-        task["_attachments"] = db.stage_attachments(
-            self.con, row["id"], row["workspace"] or self._workspace(row["id"])
-        )
+        base = row["workspace"] or self._workspace(row["id"])
+        task["_attachments"] = cards.attachment_list(base, row["id"], workspace=row["workspace"])
         reading = budget.status(self.con, self.cfg.get("token_cap"))
         if reading["mode"] == "stop":
             if db.back_to_ready(
@@ -872,7 +875,7 @@ class SisterRuntime:
         return out
 
     async def retry_verifying(self, task_id: str, *, context: Any) -> dict[str, Any]:
-        """Retry only the red-team gate; do not rerun a Sister unnecessarily."""
+        """Retry only the verification gate; do not rerun the working Sister unnecessarily."""
         async with self._lock:
             if self._closing:
                 raise RuntimeError("Sister runtime is closing")
@@ -905,7 +908,7 @@ class SisterRuntime:
             handle.supervisor = asyncio.create_task(
                 self._verify_existing(handle, token, done_event)
             )
-            return self.snapshot(task_id, launched=True, note="red-team retry")
+            return self.snapshot(task_id, launched=True, note="verify retry")
 
     async def _verify_existing(
         self, handle: SisterHandle, token: object, done_event: asyncio.Event
@@ -969,7 +972,7 @@ class SisterRuntime:
                 try:
                     await handle.manager.send_message(
                         handle.agent.id,
-                        "Red-team verification returned this card. Fix each item and rewrite report.json:\n"
+                        "Verification returned this card. Fix each item and rewrite report.json:\n"
                         + "\n".join(f"- {item}" for item in fixes)
                         + worker.REPORT_INSTRUCTIONS,
                         context=handle.context,
@@ -1227,6 +1230,9 @@ class SisterRuntime:
                         if changed:
                             await self._notify(handle, token)
                         return
+                    from misaka.platform import repo
+                    repo.commit_card(self._workspace(handle.board_id), handle.board_id, result,
+                                     f"card {handle.board_id}: submit")
                     if not db.mark_verifying(
                         self.con,
                         handle.board_id,
@@ -1306,7 +1312,7 @@ class SisterRuntime:
                             handle.manager.role_context, usage_claim_lock=lock
                         )
                     prompt = (
-                        "Red-team verification returned this card. Keep the same workspace, fix each item, and rewrite report.json:\n"
+                        "Verification returned this card. Keep the same workspace, fix each item, and rewrite report.json:\n"
                         + "\n".join(f"- {item}" for item in fixes)
                         + worker.REPORT_INSTRUCTIONS
                     )
@@ -1383,7 +1389,6 @@ class SisterRuntime:
                 "default_model",
                 "roles_root",
                 "profiles_root",
-                "hooks_dir",
                 "judge_timeout",
                 "token_cap",
             }
@@ -1734,7 +1739,7 @@ class SisterRuntime:
             if row is None or int(row["generation"]) != handle.generation:
                 raise RuntimeError("The Sister session changed; try again.")
             if row["status"] in {"review", "verifying", "finalizing"}:
-                raise ValueError("The Sister submitted this card and red-team verification is in progress; wait until review finishes.")
+                raise ValueError("The Sister submitted this card and verification is in progress; wait until review finishes.")
             if row["status"] == "running":
                 if not handle.claim_lock or handle.claim_lock != row["claim_lock"]:
                     raise ValueError("This card belongs to another Last Order session; send the message from its owning session.")

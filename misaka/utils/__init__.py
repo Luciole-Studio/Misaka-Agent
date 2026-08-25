@@ -1,17 +1,6 @@
 """Utility exports for the coding-agent package."""
 
 from misaka.utils.ansi import strip_ansi, stripAnsi
-from misaka.utils.image_resize import (
-    DEFAULT_MAX_BYTES as IMAGE_RESIZE_DEFAULT_MAX_BYTES,
-)
-from misaka.utils.image_resize import (
-    ImageResizeOptions,
-    ResizedImage,
-    format_dimension_note,
-    formatDimensionNote,
-    resize_image,
-    resizeImage,
-)
 from misaka.utils.mime import (
     IMAGE_TYPE_SNIFF_BYTES,
     PNG_SIGNATURE,
@@ -37,6 +26,33 @@ from misaka.utils.paths import (
     resolvePath,
 )
 from misaka.utils.shell import sanitize_binary_output, sanitizeBinaryOutput
+
+# image_resize re-exports are lazy (PEP 562): the module imports misaka.ai.types, whose
+# package __init__ boots every provider SDK. In pi (TypeScript) importing utils/paths
+# never runs a package index, so this chain does not exist there; eager Python __init__s
+# made the panel and daemon -- processes that never call a model -- pay ~0.8s of AI SDK
+# imports at startup. Provider registration is untouched: every engine process imports
+# misaka.ai.* directly (core/agent_session.py imports register_builtins itself).
+_IMAGE_RESIZE_EXPORTS = {
+    "IMAGE_RESIZE_DEFAULT_MAX_BYTES": "DEFAULT_MAX_BYTES",
+    "ImageResizeOptions": "ImageResizeOptions",
+    "ResizedImage": "ResizedImage",
+    "format_dimension_note": "format_dimension_note",
+    "formatDimensionNote": "formatDimensionNote",
+    "resize_image": "resize_image",
+    "resizeImage": "resizeImage",
+}
+
+
+def __getattr__(name):
+    source = _IMAGE_RESIZE_EXPORTS.get(name)
+    if source is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from misaka.utils import image_resize
+    value = getattr(image_resize, source)
+    globals()[name] = value
+    return value
+
 
 __all__ = [
     "IMAGE_RESIZE_DEFAULT_MAX_BYTES",

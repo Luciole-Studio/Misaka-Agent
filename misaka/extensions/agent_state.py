@@ -5,6 +5,9 @@ being guessed from the screen (src/integration/assets/pi/herdr-agent-state.ts). 
 ``agent_start`` -> working, ``agent_end`` -> idle, an AskUserQuestion in flight -> blocked
 (the panel's red dot: she is waiting for a person). Reports go to ``pane.report_state`` with a
 monotonic seq; a duplicate state is not resent. Only sessions that live in a pane take part.
+
+Each report also carries the session file this pane is writing, so the panel can mark the
+open ones in its sessions list and jump to the tab instead of opening a second one.
 """
 from __future__ import annotations
 
@@ -23,10 +26,11 @@ class Reporter:
     blocked (a question is open) beats working (a turn is running) beats idle."""
 
     def __init__(self, send):
-        self.send = send            # send(state, message, seq): blocking, may raise
+        self.send = send            # send(state, message, seq, session): blocking, may raise
         self.active = False
         self.blocked = 0
         self.message = ""
+        self.session = ""           # the file this session writes; the panel matches its list against it
         self.last = None
         self.seq = 0
 
@@ -35,14 +39,19 @@ class Reporter:
             return "blocked", self.message
         return ("working", "") if self.active else ("idle", "")
 
+    def note_session(self, ctx):
+        """The session file can change under us (resume, fork), so read it at every report."""
+        manager = getattr(ctx, "sessionManager", None)
+        self.session = getattr(manager, "sessionFile", None) or self.session
+
     async def publish(self, force=False):
         state, message = self.desired()
-        if not force and (state, message) == self.last:
+        if not force and (state, message, self.session) == self.last:
             return False
-        self.last = (state, message)
+        self.last = (state, message, self.session)
         self.seq += 1
         try:
-            await asyncio.to_thread(self.send, state, message, self.seq)
+            await asyncio.to_thread(self.send, state, message, self.seq, self.session)
         except Exception:  # noqa: BLE001 - the daemon may be gone; a status ping never breaks the session
             pass
         return True
@@ -57,21 +66,25 @@ def register(harn, send=None):
     if send is None:
         from misaka.net import client as net
 
-        def send(state, message, seq):
+        def send(state, message, seq, session=""):
             net.request("pane.report_state",
-                        {"id": pane_id, "state": state, "message": message, "seq": seq},
+                        {"id": pane_id, "state": state, "message": message, "seq": seq,
+                         "session": session},
                         timeout=3)
     reporter = Reporter(send)
 
-    async def session_start(_event, _ctx):
+    async def session_start(_event, ctx):
+        reporter.note_session(ctx)
         await reporter.publish(force=True)
 
-    async def agent_start(_event, _ctx):
+    async def agent_start(_event, ctx):
         reporter.active = True
+        reporter.note_session(ctx)
         await reporter.publish()
 
-    async def agent_end(_event, _ctx):
+    async def agent_end(_event, ctx):
         reporter.active = False
+        reporter.note_session(ctx)
         await reporter.publish()
 
     async def tool_start(event, _ctx):

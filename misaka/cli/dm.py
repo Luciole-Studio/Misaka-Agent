@@ -113,8 +113,7 @@ def deliver(to, message, sender=None, model=None, timeout=600,
         sys.exit("Message must not be empty.")
     text = dm_prefix(sender) + body if sender else body
 
-    prof, model_default, skill_flags = chat.assembly(
-        None if to == "last-order" else to)
+    prof, model_default = chat.assembly(None if to == "last-order" else to)
     home = os.path.expanduser("~")
     sess_dir = dm_session_dir(to)
     os.makedirs(sess_dir, exist_ok=True)
@@ -125,7 +124,7 @@ def deliver(to, message, sender=None, model=None, timeout=600,
     for section in identity.prompt_sections(prof, role):
         flags += ["--append-system-prompt", section]
     flags += ["--append-system-prompt", protocol_file(),
-              "--session-dir", sess_dir] + skill_flags
+              "--session-dir", sess_dir]
     env = {"MISAKA_APP_TITLE": DM_TITLE, "MISAKA_DM_SESSION": "1",
            "MISAKA_WHO": to, "MISAKA_MCP_ROLE": role,
            "MISAKA_PROFILE_DIR": prof, "MISAKA_WORKSPACE": home}

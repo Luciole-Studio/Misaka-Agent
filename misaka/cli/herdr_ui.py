@@ -16,16 +16,72 @@ RECT_DEFAULT = Rect(0, 0, 0, 0)
 # adapts to the terminal background. herdr's Catppuccin colors are not used; only
 # its role names (accent/overlay/surface...) are borrowed. variant=None follows
 # terminal background detection.
+def _query_terminal_background(in_fd=0, out_fd=1, timeout=0.25):
+    """Ask the real terminal for its background color (OSC 11) and return "light"/"dark",
+    or None when there is no answer. The engine does this inside its TUI loop; the panel
+    needs the answer before it starts, synchronously. Must only run while the tty is in
+    normal mode -- once the panel is in raw mode the reply would race the input loop."""
+    import re as _re
+    import select
+    import termios
+    import time
+    import tty
+    if not (os.isatty(in_fd) and os.isatty(out_fd)):
+        return None
+    try:
+        old = termios.tcgetattr(in_fd)
+    except termios.error:
+        return None
+    buf = b""
+    try:
+        tty.setcbreak(in_fd)              # no echo, no line buffering for the reply
+        os.write(out_fd, b"\x1b]11;?\x07")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            readable, _, _ = select.select([in_fd], [], [], deadline - time.monotonic())
+            if not readable:
+                break
+            buf += os.read(in_fd, 256)
+            if b"\x07" in buf or b"\x1b\\" in buf:
+                break
+    except OSError:
+        return None
+    finally:
+        termios.tcsetattr(in_fd, termios.TCSADRAIN, old)
+    match = _re.search(rb"\x1b\]11;[^\x07\x1b]*(?:\x07|\x1b\\)", buf)
+    if not match:
+        return None
+    from misaka.modes.interactive.theme.theme import (
+        get_theme_for_rgb_color, parse_osc11_background_color)
+    rgb = parse_osc11_background_color(match.group(0).decode("ascii", "replace"))
+    return get_theme_for_rgb_color(rgb) if rgb else None
+
+
+_VARIANT = None
+
+
 def theme_variant():
-    """Which variant (dark/light) to use; same decision as the engine's get_default_theme."""
+    """Which variant (dark/light) to use. MISAKA_THEME wins (the panel pins it for panes);
+    then a live OSC-11 query of the terminal (Terminal.app sets no COLORFGBG, so the
+    env-only detection always guessed dark on a white window); then the engine's env
+    detection. Memoized: the panel asks once at import, before raw mode."""
+    global _VARIANT
     pinned = os.environ.get("MISAKA_THEME")
     if pinned in ("dark", "light"):
         return pinned
-    try:
-        from misaka.modes.interactive.theme.theme import get_default_theme
-        return get_default_theme()
-    except Exception:  # noqa: BLE001 - if detection fails, assume dark (MISAKA's primary palette)
-        return "dark"
+    if _VARIANT is None:
+        try:
+            live = _query_terminal_background()
+        except Exception:  # noqa: BLE001 - a broken tty must not stop the panel
+            live = None
+        if live is None:
+            try:
+                from misaka.modes.interactive.theme.theme import get_default_theme
+                live = get_default_theme()
+            except Exception:  # noqa: BLE001 - if detection fails, assume dark (MISAKA's primary palette)
+                live = "dark"
+        _VARIANT = live
+    return _VARIANT
 
 
 def _load_palette(variant=None):
@@ -44,20 +100,36 @@ def _load_palette(variant=None):
         value = v.get(name, fallback).lstrip("#")
         return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
 
+    # The chrome (sidebar, tab bar, popups, borders) takes herdr's *roles* but every colour
+    # comes from the chat theme itself, so the greys share the rose hue of the text: the dim
+    # labels are the theme's own dimGray / gray, and the backgrounds sit on the straight line
+    # between black (white in the light theme) and the theme's text colour. Nothing foreign.
+    text = rgb("text", "#e2d6da")
+    gray, dim_gray = rgb("gray", "#9b8288"), rgb("dimGray", "#6e5c62")
+    anchor = (255, 255, 255) if variant == "light" else (0, 0, 0)
+
+    def tone(level):                       # level 0 = anchor, 1 = the theme's grey: backgrounds keep the rose tint
+        return blend(anchor, gray, level)
+
+    # The quiet label colour is the theme's `gray` itself -- the same colour the chat UI uses
+    # for its muted hints -- so both halves of the screen agree; the other text roles sit
+    # between it and the text colour. Lines take the theme's dimGray.
     return {
-        "accent": rgb("accent", "#cb3862"),        # focus highlight: Misaka rose
-        "overlay0": rgb("darkGray", "#4a3d42"),    # unfocused border
-        "overlay1": rgb("gray", "#9b8288"),        # inactive tab text
-        "surface0": rgb("selectedBg", "#3d2029"),  # inactive tab / sidebar selection background
-        "surface1": rgb("userMsgBg", "#33212a"),
-        "text": rgb("text", "#e2d6da"),
-        "subtext0": rgb("gray", "#9b8288"),       # inactive sidebar names
-        "surface_dim": rgb("userMsgBg", "#33212a"),   # active sidebar row background
-        "teal": rgb("roseLite", "#e8698c"),       # herdr teal: finished, nobody looked yet
-        "panel_bg": rgb("toolPendingBg", "#2a1e23"),
+        "accent": rgb("accent", "#cb3862"),        # focus highlight, borders, selection: Misaka rose
+        "overlay0": gray,                          # quiet labels: headers, footer, agent names
+        "overlay1": blend(gray, text, 0.3),        # inactive tab text, scrollbar thumb
+        "subtext0": blend(gray, text, 0.7),        # inactive sidebar names
+        "text": text,
+        "border": dim_gray,                        # unfocused pane borders
+        "surface_dim": tone(0.30),                 # active row background
+        "surface0": tone(0.40),                    # inactive tab / selected row background
+        "surface1": tone(0.50),
+        "panel_bg": tone(0.13),                    # tab bar and popup background
+        "dim_gray": dim_gray,                      # the theme's own dim grey, kept for callers
         "green": rgb("green", "#7fa87f"),
         "yellow": rgb("yellow", "#e8c15a"),
         "red": rgb("red", "#e05252"),
+        "teal": rgb("plum", "#a8557a"),            # finished, nobody looked yet (herdr: teal)
         "plum": rgb("plum", "#a8557a"),
         "rose_lite": rgb("roseLite", "#e8698c"),
         "rose_deep": rgb("roseDeep", "#8f2545"),
@@ -90,10 +162,17 @@ def sgr_bg(rgb):
 
 
 def panel_contrast_fg(bg=None):
-    """src/ui/widgets.rs panel_contrast_fg: a readable foreground for a colored background."""
+    """src/ui/widgets.rs panel_contrast_fg: a readable foreground for a colored background.
+    Picks the lighter of the theme's text/panel tones for a dark badge and the darker for a
+    light one -- returning TEXT outright painted dark-on-rose in the light theme (its TEXT
+    is dark; badge text must stay light on the accent in both variants)."""
     bg = ACCENT if bg is None else bg
-    luminance = (0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]) / 255
-    return PANEL_BG if luminance > 0.5 else TEXT
+
+    def luminance(color):
+        return (0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2]) / 255
+
+    light_tone, dark_tone = sorted((TEXT, PANEL_BG), key=luminance, reverse=True)
+    return dark_tone if luminance(bg) > 0.5 else light_tone
 
 # src/ui/tabs.rs:12-15
 MIN_TAB_WIDTH = 8
@@ -180,21 +259,44 @@ WORKSPACE_SECTION_HEADER_ROWS = 2     # src/ui/sidebar.rs:20
 AGENT_PANEL_HEADER_ROWS = 3           # src/ui/sidebar.rs:21
 
 
-def collapsed_sidebar_sections(area):
-    """src/ui/sidebar.rs:765-787: numbered spaces on top, a divider row, compact agents below;
-    under 7 rows the whole content is the space list. Returns (ws_area, divider_y | None, detail_area)."""
+def allocate_sections(total_h, specs):
+    """MISAKA addition (herdr has exactly two sections, sidebar.rs:42-57): stack any number of
+    sidebar sections. ``specs`` = [(key, weight)]; they share the height by weight, at least 3
+    rows each while the height allows, the last one absorbing the rounding. Returns
+    [(key, y, height)] in order; a section that does not fit gets height 0."""
+    out, y, given = [], 0, 0
+    total_w = sum(w for _k, w in specs) or 1
+    for index, (key, weight) in enumerate(specs):
+        if index == len(specs) - 1:
+            height = max(0, total_h - given)
+        else:
+            height = max(min(3, total_h - given), round(total_h * weight / total_w))
+        given += height
+        height = max(0, min(height, total_h - y))
+        out.append((key, y, height))
+        y += height
+    return out
+
+
+def collapsed_sidebar_sections(area, weights):
+    """src/ui/sidebar.rs:765-787 generalized to MISAKA's section list (herdr stacks exactly
+    spaces + agents; the expanded sidebar grew a sessions section, so the collapsed glance
+    mirrors the same ``weights``): one compact section per entry with a divider row between
+    neighbours; under 7 rows the whole content is the first (spaces) list.
+    Returns ([(key, Rect)], [divider_y])."""
     content = Rect(area.x, area.y, max(0, area.width - 1), area.height)
     if content.width == 0 or content.height == 0:
-        return RECT_DEFAULT, None, RECT_DEFAULT
+        return [], []
     if content.height < 7:
-        return content, None, RECT_DEFAULT
-    ws_h = -(-content.height // 2)
-    detail_h = max(0, content.height - (ws_h + 1))
-    if ws_h == 0 or detail_h == 0:
-        return content, None, RECT_DEFAULT
-    divider_y = content.y + ws_h
-    return (Rect(content.x, content.y, content.width, ws_h), divider_y,
-            Rect(content.x, divider_y + 1, content.width, detail_h))
+        return [(weights[0][0], content)], []
+    sections, dividers = [], []
+    inner = content.height - (len(weights) - 1)         # divider rows come off the top
+    for index, (key, sec_y, height) in enumerate(allocate_sections(inner, weights)):
+        y = content.y + sec_y + index                    # + one divider per earlier section
+        if index > 0 and height > 0:
+            dividers.append(y - 1)
+        sections.append((key, Rect(content.x, y, content.width, height)))
+    return sections, dividers
 
 
 def workspace_list_body_rect(area, has_scrollbar):
@@ -311,14 +413,15 @@ def fit_tokens(tokens, max_width):
     """src/ui/sidebar.rs:818-936 resolved_token_spans, the width fitting: every text token keeps
     at least one column; if even that overflows, text tokens are dropped from the left and
     re-admitted from the right while they fit; leftover width then grows them round-robin.
-    ``tokens`` = [(kind, text)] with kind "icon" (fixed width) or "text". Separator: one space
-    after an icon, " · " otherwise (sidebar/tokens.rs:158-166). Returns [(index, separator, shown)]."""
+    ``tokens`` = [(kind, text)] with kind "icon" (fixed width), "text", or "git" (a git-status
+    count). Separator: one space after an icon or before a git count, " · " otherwise
+    (sidebar/tokens.rs:144-152). Returns [(index, separator, shown)]."""
     widths = [display_width(text) for _kind, text in tokens]
     fixed = [w if kind == "icon" else 0 for (kind, _t), w in zip(tokens, widths)]
     flex = [0 if kind == "icon" else w for (kind, _t), w in zip(tokens, widths)]
 
-    def sep(prev, _cur):
-        return " " if tokens[prev][0] == "icon" else " · "
+    def sep(prev, cur):
+        return " " if tokens[prev][0] == "icon" or tokens[cur][0] == "git" else " · "
 
     def minimum(active):
         idx = [i for i, on in enumerate(active) if on]
@@ -634,6 +737,92 @@ def collect_splits(node, area, path=()):
     return out
 
 
+def get_ratio_at(node, path):
+    """src/layout.rs get_ratio_at: the ratio of the split reached by ``path`` (False = first, True = second)."""
+    for step in path:
+        if node[0] != "split":
+            return None
+        node = node[4] if step else node[3]
+    return node[2] if node[0] == "split" else None
+
+
+def set_ratio_at(node, path, ratio):
+    """src/layout.rs set_ratio_at: a copy of the tree with that split's ratio replaced (clamped)."""
+    if node[0] != "split":
+        return node
+    if not path:
+        return ("split", node[1], valid_split_ratio(ratio), node[3], node[4])
+    step, rest = path[0], path[1:]
+    first, second = node[3], node[4]
+    if step:
+        second = set_ratio_at(second, rest, ratio)
+    else:
+        first = set_ratio_at(first, rest, ratio)
+    return ("split", node[1], node[2], first, second)
+
+
+def _split_edge_distance(split, focused, nav):
+    """src/layout.rs:379-390."""
+    if nav == "left":
+        return abs(split["pos"] - focused.x)
+    if nav == "right":
+        return abs(split["pos"] - (focused.x + focused.width))
+    if nav == "up":
+        return abs(split["pos"] - focused.y)
+    return abs(split["pos"] - (focused.y + focused.height))
+
+
+def _nearest_resize_split(splits, target_dir, focused, nav):
+    """src/layout.rs:341-368: the closest split of the right orientation that touches the
+    focused pane's requested edge (within one cell) and overlaps it on the other axis."""
+    area_overlaps = (lambda s: _ranges_overlap(s["area"].y, s["area"].height, focused.y, focused.height)
+                     if nav in ("left", "right")
+                     else _ranges_overlap(s["area"].x, s["area"].width, focused.x, focused.width))
+    candidates = [s for s in splits
+                  if s["direction"] == target_dir and area_overlaps(s)
+                  and _split_edge_distance(s, focused, nav) <= 1]
+    return min(candidates, key=lambda s: _split_edge_distance(s, focused, nav), default=None)
+
+
+def resize_focused(node, focused_id, nav, delta, area):
+    """src/layout.rs:215-239 resize_focused: grow/shrink the focused pane by moving the nearest
+    split on its requested edge (falling back to the opposite edge); right/down grow the
+    ratio, left/up shrink it. Returns the new tree (unchanged when nothing applies)."""
+    focused = next((rect for pid, rect, _f in collect_panes(node, area, focused_id) if pid == focused_id), None)
+    if focused is None:
+        return node
+    splits = collect_splits(node, area)
+    target_dir = "h" if nav in ("left", "right") else "v"
+    opposite = {"left": "right", "right": "left", "up": "down", "down": "up"}[nav]
+    best = (_nearest_resize_split(splits, target_dir, focused, nav)
+            or _nearest_resize_split(splits, target_dir, focused, opposite))
+    if best is None:
+        return node
+    grows = nav in ("right", "down")
+    current = get_ratio_at(node, best["path"]) or 0.5
+    return set_ratio_at(node, best["path"], current + (delta if grows else -delta))
+
+
+def divider_at(splits, x, y):
+    """The split whose divider line holds the cell (x, y), for mouse-drag resizing (app/input/mouse.rs)."""
+    for split in splits:
+        area = split["area"]
+        if split["direction"] == "h":
+            if x == split["pos"] and area.y <= y < area.y + area.height:
+                return split
+        elif y == split["pos"] and area.x <= x < area.x + area.width:
+            return split
+    return None
+
+
+def drag_ratio(split, x, y):
+    """Ratio for a divider dragged to (x, y) inside its split's area (mouse.rs drag state machine)."""
+    area = split["area"]
+    if split["direction"] == "h":
+        return valid_split_ratio((x - area.x) / max(1, area.width))
+    return valid_split_ratio((y - area.y) / max(1, area.height))
+
+
 def _range_overlap_amount(a_start, a_len, b_start, b_len):
     """src/layout.rs:462-466."""
     return max(0, min(a_start + a_len, b_start + b_len) - max(a_start, b_start))
@@ -944,12 +1133,71 @@ def scrollbar_thumb(metrics, track):
     return track.y + thumb_top, thumb_len
 
 
+def scrollbar_thumb_grab_offset(metrics, track, row):
+    """src/ui/scrollbar.rs:72-79: rows into the thumb when a press lands on it, else None."""
+    thumb = scrollbar_thumb(metrics, track)
+    if thumb is None:
+        return None
+    top, length = thumb
+    return row - top if top <= row < top + length else None
+
+
+def _scrollbar_offset_from_thumb_top(metrics, track, thumb_top):
+    """src/ui/scrollbar.rs:81-101."""
+    if metrics["max_offset_from_bottom"] == 0:
+        return 0
+    thumb = scrollbar_thumb(metrics, track)
+    thumb_len = thumb[1] if thumb else 1
+    max_thumb_top = track.height - min(thumb_len, track.height)
+    if max_thumb_top == 0:
+        return 0
+    desired_top = min(thumb_top, max_thumb_top)
+    scrolled_from_top = round(desired_top * metrics["max_offset_from_bottom"] / max_thumb_top)
+    return max(0, metrics["max_offset_from_bottom"] - scrolled_from_top)
+
+
+def scrollbar_offset_from_row(metrics, track, row):
+    """src/ui/scrollbar.rs:103-117: a click on the track centres the thumb on that row."""
+    thumb = scrollbar_thumb(metrics, track)
+    if thumb is None:
+        return 0
+    clamped = min(max(row, track.y), track.y + max(0, track.height - 1))
+    desired_top = max(0, (clamped - track.y) - thumb[1] // 2)
+    return _scrollbar_offset_from_thumb_top(metrics, track, desired_top)
+
+
+def scrollbar_offset_from_drag_row(metrics, track, row, grab_row_offset):
+    """src/ui/scrollbar.rs:119-129: dragging keeps the grabbed thumb row under the pointer."""
+    clamped = min(max(row, track.y), track.y + max(0, track.height - 1))
+    desired_top = max(0, (clamped - track.y) - grab_row_offset)
+    return _scrollbar_offset_from_thumb_top(metrics, track, desired_top)
+
+
+def centered_popup_rect(area, popup_w, popup_h):
+    """src/ui/widgets.rs:39-49: a popup centred in ``area``, clamped to area-4 / area-2."""
+    popup_w = min(popup_w, max(0, area.width - 4))
+    popup_h = min(popup_h, max(0, area.height - 2))
+    if popup_w < 2 or popup_h < 2:
+        return None
+    return Rect(area.x + (area.width - popup_w) // 2, area.y + (area.height - popup_h) // 2,
+                popup_w, popup_h)
+
+
 def scrollbar_style(focused):
     """src/ui/scrollbar.rs:178-182: the focused pane gets a brighter, thicker thumb.
     Returns (track color, thumb color, thumb glyph); the track glyph is always '▕'."""
     if focused:
         return OVERLAY0, OVERLAY1, "▐"
     return PALETTE["surface1"], OVERLAY0, "▕"
+
+
+def pane_border_title(label, pane_width):
+    """src/ui/panes.rs:25-32: " label " for the top border, cut to pane width - 4 with an
+    ellipsis; nothing for an empty label or a pane 4 columns wide or narrower."""
+    label = (label or "").strip()
+    if not label or pane_width <= 4:
+        return None
+    return f" {truncate_end(label, pane_width - 4)} "
 
 
 def pane_inner_rect(area, borders):

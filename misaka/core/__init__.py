@@ -1,77 +1,95 @@
-"""Core modules shared between coding-agent run modes."""
+"""Core modules shared between coding-agent run modes.
 
-from misaka.core.agent_session import (
-    AgentSession,
-    AgentSessionConfig,
-    AgentSessionEvent,
-    AgentSessionEventListener,
-    ModelCycleResult,
-    PromptOptions,
-    SessionStats,
-)
-from misaka.core.agent_session_runtime import (
-    AgentSessionRuntime,
-    CreateAgentSessionRuntimeFactory,
-    CreateAgentSessionRuntimeResult,
-    createAgentSessionRuntime,
-)
-from misaka.core.agent_session_services import (
-    AgentSessionRuntimeDiagnostic,
-    AgentSessionServices,
-    CreateAgentSessionFromServicesOptions,
-    CreateAgentSessionServicesOptions,
-    createAgentSessionFromServices,
-    createAgentSessionServices,
-)
-from misaka.core.bash_executor import BashExecutorOptions, BashResult, executeBashWithOperations
-from misaka.core.compaction.compaction import CompactionResult
-from misaka.core.event_bus import EventBus, EventBusController, createEventBus
-from misaka.core.extensions import (
-    AgentEndEvent,
-    AgentStartEvent,
-    AgentToolResult,
-    AgentToolUpdateCallback,
-    BeforeAgentStartEvent,
-    BeforeAgentStartEventResult,
-    BuildSystemPromptOptions,
-    ContextEvent,
-    ExecOptions,
-    ExecResult,
-    Extension,
-    ExtensionAPI,
-    ExtensionCommandContext,
-    ExtensionContext,
-    ExtensionError,
-    ExtensionEvent,
-    ExtensionFactory,
-    ExtensionFlag,
-    ExtensionHandler,
-    ExtensionRunner,
-    ExtensionShortcut,
-    ExtensionUIContext,
-    LoadExtensionsResult,
-    MessageRenderer,
-    RegisteredCommand,
-    SessionBeforeCompactEvent,
-    SessionBeforeForkEvent,
-    SessionBeforeSwitchEvent,
-    SessionBeforeTreeEvent,
-    SessionCompactEvent,
-    SessionShutdownEvent,
-    SessionStartEvent,
-    SessionTreeEvent,
-    ToolCallEvent,
-    ToolCallEventResult,
-    ToolDefinition,
-    ToolRenderResultOptions,
-    ToolResultEvent,
-    TurnEndEvent,
-    TurnStartEvent,
-    WorkingIndicatorOptions,
-    defineTool,
-    discoverAndLoadExtensions,
-)
-from misaka.core.source_info import createSyntheticSourceInfo
+Re-exports are lazy (PEP 562): this package __init__ runs whenever any
+``misaka.core.*`` submodule is imported (the panel reads core.session_manager),
+and eager imports here dragged agent_session and the whole AI stack into
+processes that never run an engine. pi (TypeScript) has no package-index
+execution at all; loading on first use restores that semantic.
+"""
+
+import importlib
+
+_EXPORTS = {
+    "AgentEndEvent": ("misaka.core.extensions", "AgentEndEvent"),
+    "AgentSession": ("misaka.core.agent_session", "AgentSession"),
+    "AgentSessionConfig": ("misaka.core.agent_session", "AgentSessionConfig"),
+    "AgentSessionEvent": ("misaka.core.agent_session", "AgentSessionEvent"),
+    "AgentSessionEventListener": ("misaka.core.agent_session", "AgentSessionEventListener"),
+    "AgentSessionRuntime": ("misaka.core.agent_session_runtime", "AgentSessionRuntime"),
+    "AgentSessionRuntimeDiagnostic": ("misaka.core.agent_session_services", "AgentSessionRuntimeDiagnostic"),
+    "AgentSessionServices": ("misaka.core.agent_session_services", "AgentSessionServices"),
+    "AgentStartEvent": ("misaka.core.extensions", "AgentStartEvent"),
+    "AgentToolResult": ("misaka.core.extensions", "AgentToolResult"),
+    "AgentToolUpdateCallback": ("misaka.core.extensions", "AgentToolUpdateCallback"),
+    "BashExecutorOptions": ("misaka.core.bash_executor", "BashExecutorOptions"),
+    "BashResult": ("misaka.core.bash_executor", "BashResult"),
+    "BeforeAgentStartEvent": ("misaka.core.extensions", "BeforeAgentStartEvent"),
+    "BeforeAgentStartEventResult": ("misaka.core.extensions", "BeforeAgentStartEventResult"),
+    "BuildSystemPromptOptions": ("misaka.core.extensions", "BuildSystemPromptOptions"),
+    "CompactionResult": ("misaka.core.compaction.compaction", "CompactionResult"),
+    "ContextEvent": ("misaka.core.extensions", "ContextEvent"),
+    "CreateAgentSessionFromServicesOptions": ("misaka.core.agent_session_services", "CreateAgentSessionFromServicesOptions"),
+    "CreateAgentSessionRuntimeFactory": ("misaka.core.agent_session_runtime", "CreateAgentSessionRuntimeFactory"),
+    "CreateAgentSessionRuntimeResult": ("misaka.core.agent_session_runtime", "CreateAgentSessionRuntimeResult"),
+    "CreateAgentSessionServicesOptions": ("misaka.core.agent_session_services", "CreateAgentSessionServicesOptions"),
+    "EventBus": ("misaka.core.event_bus", "EventBus"),
+    "EventBusController": ("misaka.core.event_bus", "EventBusController"),
+    "ExecOptions": ("misaka.core.extensions", "ExecOptions"),
+    "ExecResult": ("misaka.core.extensions", "ExecResult"),
+    "Extension": ("misaka.core.extensions", "Extension"),
+    "ExtensionAPI": ("misaka.core.extensions", "ExtensionAPI"),
+    "ExtensionCommandContext": ("misaka.core.extensions", "ExtensionCommandContext"),
+    "ExtensionContext": ("misaka.core.extensions", "ExtensionContext"),
+    "ExtensionError": ("misaka.core.extensions", "ExtensionError"),
+    "ExtensionEvent": ("misaka.core.extensions", "ExtensionEvent"),
+    "ExtensionFactory": ("misaka.core.extensions", "ExtensionFactory"),
+    "ExtensionFlag": ("misaka.core.extensions", "ExtensionFlag"),
+    "ExtensionHandler": ("misaka.core.extensions", "ExtensionHandler"),
+    "ExtensionRunner": ("misaka.core.extensions", "ExtensionRunner"),
+    "ExtensionShortcut": ("misaka.core.extensions", "ExtensionShortcut"),
+    "ExtensionUIContext": ("misaka.core.extensions", "ExtensionUIContext"),
+    "LoadExtensionsResult": ("misaka.core.extensions", "LoadExtensionsResult"),
+    "MessageRenderer": ("misaka.core.extensions", "MessageRenderer"),
+    "ModelCycleResult": ("misaka.core.agent_session", "ModelCycleResult"),
+    "PromptOptions": ("misaka.core.agent_session", "PromptOptions"),
+    "RegisteredCommand": ("misaka.core.extensions", "RegisteredCommand"),
+    "SessionBeforeCompactEvent": ("misaka.core.extensions", "SessionBeforeCompactEvent"),
+    "SessionBeforeForkEvent": ("misaka.core.extensions", "SessionBeforeForkEvent"),
+    "SessionBeforeSwitchEvent": ("misaka.core.extensions", "SessionBeforeSwitchEvent"),
+    "SessionBeforeTreeEvent": ("misaka.core.extensions", "SessionBeforeTreeEvent"),
+    "SessionCompactEvent": ("misaka.core.extensions", "SessionCompactEvent"),
+    "SessionShutdownEvent": ("misaka.core.extensions", "SessionShutdownEvent"),
+    "SessionStartEvent": ("misaka.core.extensions", "SessionStartEvent"),
+    "SessionStats": ("misaka.core.agent_session", "SessionStats"),
+    "SessionTreeEvent": ("misaka.core.extensions", "SessionTreeEvent"),
+    "ToolCallEvent": ("misaka.core.extensions", "ToolCallEvent"),
+    "ToolCallEventResult": ("misaka.core.extensions", "ToolCallEventResult"),
+    "ToolDefinition": ("misaka.core.extensions", "ToolDefinition"),
+    "ToolRenderResultOptions": ("misaka.core.extensions", "ToolRenderResultOptions"),
+    "ToolResultEvent": ("misaka.core.extensions", "ToolResultEvent"),
+    "TurnEndEvent": ("misaka.core.extensions", "TurnEndEvent"),
+    "TurnStartEvent": ("misaka.core.extensions", "TurnStartEvent"),
+    "WorkingIndicatorOptions": ("misaka.core.extensions", "WorkingIndicatorOptions"),
+    "createAgentSessionFromServices": ("misaka.core.agent_session_services", "createAgentSessionFromServices"),
+    "createAgentSessionRuntime": ("misaka.core.agent_session_runtime", "createAgentSessionRuntime"),
+    "createAgentSessionServices": ("misaka.core.agent_session_services", "createAgentSessionServices"),
+    "createEventBus": ("misaka.core.event_bus", "createEventBus"),
+    "createSyntheticSourceInfo": ("misaka.core.source_info", "createSyntheticSourceInfo"),
+    "defineTool": ("misaka.core.extensions", "defineTool"),
+    "discoverAndLoadExtensions": ("misaka.core.extensions", "discoverAndLoadExtensions"),
+    "executeBashWithOperations": ("misaka.core.bash_executor", "executeBashWithOperations"),
+}
+
+
+def __getattr__(name):
+    entry = _EXPORTS.get(name)
+    if entry is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module, source = entry
+    value = getattr(importlib.import_module(module), source)
+    globals()[name] = value
+    return value
+
 
 __all__ = [
     "AgentEndEvent",

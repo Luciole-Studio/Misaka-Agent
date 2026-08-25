@@ -26,7 +26,9 @@ def request(method, params=None, *, timeout=10):
         while not buf.endswith(b"\n"):
             chunk = con.recv(65536)
             if not chunk:
-                break
+                # A daemon mid-shutdown accepts and then hangs up: that is "not
+                # running", never a reply to parse.
+                raise ConnectionError("the daemon closed the connection")
             buf += chunk
     finally:
         con.close()
@@ -34,6 +36,27 @@ def request(method, params=None, *, timeout=10):
     if out.get("error"):
         raise RuntimeError(out["error"])
     return out["result"]
+
+
+def _wait_for_dying_daemon(timeout):
+    """A daemon that hung up mid-shutdown still LISTENS for a moment; spawning
+    immediately makes the new daemon exit with "already running". Wait until its
+    listener is gone -- refused / missing / timed out (herdr's stale classification);
+    the file itself stays behind by design and the new daemon reclaims it."""
+    deadline = time.monotonic() + timeout
+    path = _sock_path()
+    while time.monotonic() < deadline and os.path.exists(path):
+        probe = socket.socket(socket.AF_UNIX)
+        probe.settimeout(0.5)
+        try:
+            probe.connect(path)
+        except (ConnectionRefusedError, FileNotFoundError, TimeoutError):
+            return                       # herdr's stale classification: the old daemon is gone
+        except OSError:
+            pass
+        finally:
+            probe.close()
+        time.sleep(0.05)
 
 
 def _spawn_and_wait(timeout):
@@ -64,6 +87,7 @@ def ensure(timeout=8.0):
     try:
         info = request("ping", timeout=2)
     except (ConnectionError, FileNotFoundError, OSError):
+        _wait_for_dying_daemon(timeout=min(3.0, timeout))
         return _spawn_and_wait(timeout)
     if info.get("proto") == _d.PROTOCOL:
         return info
@@ -80,9 +104,7 @@ def ensure(timeout=8.0):
         request("server.stop")
     except (RuntimeError, ConnectionError, OSError):
         pass
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline and os.path.exists(_sock_path()):
-        time.sleep(0.05)
+    _wait_for_dying_daemon(timeout=min(3.0, timeout))
     info = _spawn_and_wait(timeout)
     if info.get("proto") != _d.PROTOCOL:
         raise RuntimeError("The restarted daemon still has a protocol mismatch (an older MISAKA may be on PATH).")

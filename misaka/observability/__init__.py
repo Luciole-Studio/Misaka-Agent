@@ -1,1 +1,1 @@
-"""Read-only board and execution observability."""
+"""Read-only task-board observability."""

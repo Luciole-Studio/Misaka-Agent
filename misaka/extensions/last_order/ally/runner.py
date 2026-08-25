@@ -81,8 +81,8 @@ def card_prompt(row):
 
 
 def write_report(workspace, exit_code, output, *, assignee, task_id=None, output_dir=None):
-    """Write report.json on the ally's behalf so the board's submit -> verifying -> red-team
-    flow works unchanged (only the red team marks done; allies and Sisters are treated alike).
+    """Write report.json on the ally's behalf so the board's submit -> verifying -> verified
+    flow works unchanged (only the verification gate marks done; allies and Sisters are treated alike).
     Returns (submitted, summary).
     """
     import json as _json

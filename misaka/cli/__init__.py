@@ -8,7 +8,6 @@ import sys
 import warnings
 
 from misaka.config import APP_NAME
-from misaka.core.http_dispatcher import configureHttpDispatcher
 
 
 def _set_process_title(title: str) -> None:
@@ -36,6 +35,11 @@ async def _invoke_main(argv: list[str]) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Imported here, not at module level: this package __init__ runs for every
+    # `misaka.cli.*` submodule (panel, app, ...), and http_dispatcher drags the whole
+    # engine (core -> agent_session -> ai) into processes that never run one.
+    from misaka.core.http_dispatcher import configureHttpDispatcher
+
     _set_process_title(APP_NAME)
     os.environ["MISAKA_CODING_AGENT"] = "true"
     _suppress_runtime_warnings()

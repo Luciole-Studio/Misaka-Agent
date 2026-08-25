@@ -15,10 +15,61 @@ from misaka.platform import tasks as db
 from misaka.network import validate
 from misaka.platform import budget, notifications
 from misaka.config import CFG, sisters
-from misaka.network.sister_runtime import SisterRuntime
+from misaka.network.sister_runtime import ACTIVE_BOARD_STATUSES, SisterRuntime
 
 _CON = None
 TaskId = Annotated[str, Field(pattern=r"^t_[0-9a-f]{6}$")]
+
+
+def _session_id(ctx):
+    """This conversation's session id: stamped on the cards it creates, so a resumed
+    conversation knows which Sisters are hers."""
+    return getattr(getattr(ctx, "sessionManager", None), "sessionId", None) or None
+
+
+def _session_line(ctx, limit=10):
+    """This conversation's session id plus the ids it was forked from (header
+    ``parentSession`` chain): a fork mints a new id, but the cards stamped before the
+    fork still belong to this line."""
+    ids = [i for i in (_session_id(ctx),) if i]
+    current = getattr(getattr(ctx, "sessionManager", None), "sessionFile", None)
+    if not current:
+        return ids
+    from misaka.core.session_manager import read_session_header
+    for _ in range(limit):
+        current = (read_session_header(current) or {}).get("parentSession")
+        if not current:
+            break
+        parent_id = (read_session_header(current) or {}).get("id")
+        if parent_id and parent_id not in ids:
+            ids.append(parent_id)
+    return ids
+
+
+def _card_log(workspace, task_id, author, text):
+    """Append to the card file's ## log; a stray index row without a file must not fail the tool."""
+    from misaka.platform import cards as card_files
+    try:
+        card_files.append_log(workspace, task_id, author, text)
+    except OSError:
+        pass
+
+
+def _mirror_card(workspace, task_id, **fields):
+    """Reflect an at-rest change onto the card file; a stray index row without a file
+    (pre-migration) must not fail the tool -- the board marks it instead."""
+    from misaka.platform import cards as card_files
+    try:
+        card_files.set_fields(workspace, task_id, **fields)
+    except OSError:
+        pass
+
+
+def _pane_for_card(task_id):
+    """The live pane running or showing this card, if any (panel mode only)."""
+    from misaka.net import client as net
+    return next((p for p in net.request("panes.list")["panes"]
+                 if p.get("card") == task_id and p.get("alive")), None)
 
 
 def _cfg():
@@ -86,11 +137,18 @@ def register(harn):
     async def misaka_board(tool_call_id, params, signal, on_update, ctx):
         con = _con()
         workspace = _workspace(ctx)
-        rows = [r for r in db.by_status(con, params.status) if r["workspace"] == workspace] \
-            if params.status else con.execute(
-                "SELECT * FROM tasks WHERE workspace=? ORDER BY created_at DESC LIMIT 40",
-                (workspace,)).fetchall()
-        lines = [f"{r['id']}  {r['status']:<10} {r['assignee']:<14} {r['title'][:50]}" for r in rows]
+        from misaka.platform import cards as card_files
+        rows = card_files.board(con, workspace)
+        if params.status:
+            rows = [r for r in rows if r["status"] == params.status]
+        rows = rows[-40:]
+        mine = _session_line(ctx)
+        lines = [f"{'*' if r['origin_session'] in mine else ' '} {r['id']}  "
+                 f"{r['status']:<10} {r['assignee']:<14} {r['title'][:50]}"
+                 + ("  (no card file: run `misaka init --migrate`)" if r.get("missing_file") else "")
+                 for r in rows]
+        if mine and any(line.startswith("*") for line in lines):
+            lines.append("* = created in this conversation")
         b = budget.status(con, _cfg()["token_cap"])
         from misaka.network import roster as roster_mod
         named = ", ".join(
@@ -136,9 +194,10 @@ def register(harn):
         if params.reviewer == params.assignee:
             raise ValueError("The reviewer must be different from the assignee.")
         c = cards[0]
-        tid = db.create_task(con, c["title"], body=c["body"], assignee=c["assignee"],
-                             priority=c["priority"], timeout_seconds=c["timeout"],
-                             reviewer=params.reviewer, workspace=_workspace(ctx))
+        from misaka.platform import cards as card_files
+        tid = card_files.create(con, _workspace(ctx), c["title"], c["body"], c["assignee"],
+                                priority=c["priority"], timeout_seconds=c["timeout"],
+                                reviewer=params.reviewer, origin_session=_session_id(ctx))
         review = f" → reviewer {params.reviewer}" if params.reviewer else ""
         return _text(
             f"Added {tid}: {c['title']} → {c['assignee']}{review}.\n"
@@ -169,6 +228,7 @@ def register(harn):
             return _text("The reviewer must be different from the assignee.")
         if not db.configure_review(_con(), params.task_id, params.reviewer):
             return _text(f"Task card {params.task_id} is {row['status']}; review can be configured only while todo or ready.")
+        _mirror_card(row["workspace"], params.task_id, reviewer=params.reviewer)
         reviewer = params.reviewer or "none"
         return _text(f"Task card {params.task_id} reviewer: {reviewer}.")
 
@@ -222,7 +282,7 @@ def register(harn):
             context=ctx, tool_call_id=tool_call_id, on_update=on_update,
             task_ids=[params.task_id],
         )
-        target = "red-team verification" if params.decision == "approve" else "revision"
+        target = "verification" if params.decision == "approve" else "revision"
         state = follow[0].get("status") if follow else db.get(con, params.task_id)["status"]
         return _text(f"Review recorded: {params.decision}; moved to {target} ({state}).")
 
@@ -382,16 +442,32 @@ def register(harn):
         parameters=SisterMessageParams)
     async def misaka_sister_message(tool_call_id, params, signal, on_update, ctx):
         row = db.get(_con(), params.task_id)
-        if row is not None and str(row["claim_lock"] or "").startswith("net:"):
-            # A network-owned task receives steering through its live pane.
+        if row is None:
+            raise ValueError(f"Card not found: {params.task_id}")
+        in_panel = bool(os.environ.get("MISAKA_NET_PANE"))
+        net_owned = str(row["claim_lock"] or "").startswith("net:")
+        if net_owned or (in_panel and await asyncio.to_thread(_pane_for_card, params.task_id)):
+            # A network-owned or reopened task receives steering through its live pane.
             from misaka.net import client as net
             await asyncio.to_thread(
                 net.request, "pane.send",
                 {"card": params.task_id, "text": params.message, "enter": True})
-            db.add_comment(
-                _con(), params.task_id, "last-order", params.message, kind="steer"
-            )
+            _card_log(row["workspace"], params.task_id, "last-order", f"[steer] {params.message}")
             return _text(f"Message sent to card {params.task_id}'s pane.")
+        if in_panel and row["status"] not in ACTIVE_BOARD_STATUSES:
+            # Her session is closed: reopen it beside Last Order with the message as its first
+            # turn. Like the headless path, a finished card only restarts on the user's nod.
+            if not params.confirmed:
+                return _text(f"Card {params.task_id} is {row['status']}; continuing it starts a new "
+                             "model turn. Ask the user, then call again with confirmed=true.")
+            from misaka.net import client as net
+            out = await asyncio.to_thread(
+                net.request, "pane.resume_card",
+                {"task_id": params.task_id, "parent": os.environ["MISAKA_NET_PANE"],
+                 "say": params.message})
+            _card_log(row["workspace"], params.task_id, "last-order", f"[message] {params.message}")
+            return _text(f"Reopened card {params.task_id}'s session in pane {out['pane_id']} "
+                         "beside you and delivered the message.")
         result = await runtime.message(
             params.task_id,
             params.message,
@@ -399,11 +475,87 @@ def register(harn):
             confirmed=params.confirmed,
             context=ctx,
         )
-        db.add_comment(
-            _con(), params.task_id, "last-order", params.message,
-            kind=str(result.get("mode") or "message"),
-        )
+        row = db.get(_con(), params.task_id)
+        if row is not None:
+            _card_log(row["workspace"], params.task_id, "last-order",
+                      f"[{result.get('mode') or 'message'}] {params.message}")
         return _text(json.dumps(result, ensure_ascii=False))
+
+
+    class SisterResumeParams(StrictParams):
+        task_id: TaskId = Field(description="Card whose saved Sister session to reopen.")
+
+
+    @_register(
+        harn,
+        name="misaka_sister_resume", label="Reopen Sister session",
+        description="Reopen a finished, failed, stopped, or blocked card's saved Sister session in a pane beside you, without starting a model turn. Steer her afterwards with misaka_sister_message.",
+        snippet="Reopen a finished Sister task's session beside you",
+        guidelines=["After a resumed conversation, bring back only the cards listed as yours in the <resume-briefing>; a card that is already open in a pane is not reopened."],
+        parameters=SisterResumeParams)
+    async def misaka_sister_resume(tool_call_id, params, signal, on_update, ctx):
+        if not os.environ.get("MISAKA_NET_PANE"):
+            raise ValueError("Sister sessions reopen in panel panes; run MISAKA as the panel.")
+        live = await asyncio.to_thread(_pane_for_card, params.task_id)
+        if live:
+            return _text(f"Card {params.task_id} is already open in pane {live['id']}.")
+        from misaka.net import client as net
+        out = await asyncio.to_thread(
+            net.request, "pane.resume_card",
+            {"task_id": params.task_id, "parent": os.environ["MISAKA_NET_PANE"]})
+        return _text(f"Reopened card {params.task_id}'s session in pane {out['pane_id']} beside you.")
+
+
+    async def resume_briefing(event, ctx):
+        """A resumed conversation is told which cards it created and where they stand, so Last
+        Order brings the right Sisters back herself (misaka_sister_resume) instead of guessing
+        from the transcript. Nothing is said when the conversation has no cards. A fork is
+        the same living line twice over: its cards come via _session_line, and the in-place
+        fork restart itself needs no briefing (nothing was forgotten)."""
+        if (event or {}).get("reason") in ("reload", "fork"):
+            return
+        mine = _session_line(ctx)
+        if not mine:
+            return
+        rows = _con().execute(
+            "SELECT id,status,assignee,title FROM tasks WHERE origin_session IN "
+            f"({','.join('?' * len(mine))}) ORDER BY created_at", mine).fetchall()
+        if not rows:
+            return
+        open_cards = set()
+        if os.environ.get("MISAKA_NET_PANE"):
+            try:
+                from misaka.net import client as net
+                open_cards = {p["card"] for p in net.request("panes.list")["panes"]
+                              if p.get("card") and p.get("alive")}
+            except Exception:  # noqa: BLE001 - the daemon may be gone; the briefing still lists the cards
+                pass
+        lines = [f"  {r['id']}  {r['status']:<10} {r['assignee']:<8} {r['title'][:50]}"
+                 + ("  (open in a pane)" if r["id"] in open_cards else "") for r in rows]
+        harn.sendMessage(
+            {"customType": "resume-briefing",
+             "content": "<resume-briefing>\nCards created in this conversation:\n"
+                        + "\n".join(lines)
+                        + "\nReopen a closed one beside you with misaka_sister_resume; steer it with "
+                          "misaka_sister_message (a finished card restarts only on the user's nod).\n"
+                          "</resume-briefing>",
+             "display": True, "details": {"cards": [r["id"] for r in rows]}},
+            {"triggerTurn": False})
+
+    harn.on("session_start", resume_briefing)
+
+
+    async def settle_orphans(_event, _ctx):
+        """kill -9 leaves a running card with a live-looking claim and nobody driving it
+        (the card drives itself now; the daemon only hosts panes). Settle those whenever a
+        coordinator session starts: dispatch.reconcile checks leases and process identity."""
+        try:
+            from misaka.network import dispatch
+            await asyncio.to_thread(dispatch.reconcile, _con(), _cfg())
+        except Exception:  # noqa: BLE001 - reconciliation is a safety net, never a startup blocker
+            pass
+
+    harn.on("session_start", settle_orphans)
 
 
     class SisterStopParams(StrictParams):
@@ -464,14 +616,16 @@ def register(harn):
         snippet="View a task card's comment history",
         parameters=CardCommentsParams)
     async def misaka_card_comments(tool_call_id, params, signal, on_update, ctx):
-        rows = db.comments(
-            _con(), params.task_id, after_id=params.after_id, limit=params.limit
-        )
-        if not rows and db.get(_con(), params.task_id) is None:
+        row = db.get(_con(), params.task_id)
+        if row is None:
             raise ValueError(f"Task card not found: {params.task_id}")
-        return _text("\n".join(
-            f"#{row['id']} [{row['kind']}] {row['author']}: {row['body']}" for row in rows
-        ) or "(no comments)")
+        from misaka.platform import cards as card_files
+        try:
+            lines = card_files.read_log(row["workspace"], params.task_id)
+        except OSError:
+            lines = []
+        lines = lines[params.after_id:][-params.limit:]
+        return _text("\n".join(lines) or "(no log entries)")
 
 
     class CardAttachParams(StrictParams):
@@ -485,11 +639,12 @@ def register(harn):
         snippet="Attach a local file to a task card",
         parameters=CardAttachParams)
     async def misaka_card_attach(tool_call_id, params, signal, on_update, ctx):
-        attachment_id = await asyncio.to_thread(
-            db.attach_file, _con(), params.task_id, params.path,
-            author="last-order",
-        )
-        return _text(f"Attached local file {attachment_id} to card {params.task_id}.")
+        row = db.get(_con(), params.task_id)
+        if row is None:
+            raise ValueError(f"Task card not found: {params.task_id}")
+        from misaka.platform import cards as card_files
+        rel = await asyncio.to_thread(card_files.attach, row["workspace"], params.task_id, params.path)
+        return _text(f"Attached {rel} to card {params.task_id} (a file in the project repository).")
 
 
     class CardAttachUrlParams(StrictParams):
@@ -503,10 +658,12 @@ def register(harn):
         snippet="Attach a reference URL to a task card",
         parameters=CardAttachUrlParams)
     async def misaka_card_attach_url(tool_call_id, params, signal, on_update, ctx):
-        attachment_id = db.attach_url(
-            _con(), params.task_id, params.url, author="last-order"
-        )
-        return _text(f"Attached reference URL {attachment_id} to card {params.task_id}.")
+        row = db.get(_con(), params.task_id)
+        if row is None:
+            raise ValueError(f"Task card not found: {params.task_id}")
+        from misaka.platform import cards as card_files
+        card_files.attach_url(row["workspace"], params.task_id, params.url)
+        return _text(f"Attached reference URL to card {params.task_id}.")
 
 
     class CardAttachmentsParams(StrictParams):
@@ -519,12 +676,14 @@ def register(harn):
         snippet="View a task card's attachments",
         parameters=CardAttachmentsParams)
     async def misaka_card_attachments(tool_call_id, params, signal, on_update, ctx):
-        rows = db.attachments(_con(), params.task_id)
-        if not rows and db.get(_con(), params.task_id) is None:
+        row = db.get(_con(), params.task_id)
+        if row is None:
             raise ValueError(f"Task card not found: {params.task_id}")
+        from misaka.platform import cards as card_files
+        items = card_files.attachment_list(row["workspace"], params.task_id)
         return _text("\n".join(
-            f"{row['id']} [{row['kind']}] {row['name']} — {row['source']}"
-            for row in rows
+            f"[{item['kind']}] {item['name']} — {item.get('path') or item.get('source')}"
+            for item in items
         ) or "(No attachments.)")
 
 
@@ -545,6 +704,7 @@ def register(harn):
                 else f"Task card {params.task_id} is {row['status']}, not blocked or in triage."
             )
         row = db.get(_con(), params.task_id)
+        _mirror_card(row["workspace"], params.task_id, status=row["status"])
         return _text(f"Card {params.task_id} unblocked and returned to {row['status']}; work has not started.")
 
 
@@ -563,7 +723,11 @@ def register(harn):
     async def misaka_card_delete(tool_call_id, params, signal, on_update, ctx):
         if not params.confirmed:
             raise ValueError("Task-card deletion is irreversible and requires explicit user confirmation.")
-        ok, msg = db.delete_task(_con(), params.task_id)
+        row = db.get(_con(), params.task_id)
+        if row is None:
+            raise ValueError(f"Card not found: {params.task_id}")
+        from misaka.platform import cards as card_files
+        ok, msg = card_files.remove(_con(), row["workspace"], params.task_id)
         if not ok:
             raise ValueError(msg)
         return _text(msg)

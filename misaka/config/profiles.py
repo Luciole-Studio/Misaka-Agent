@@ -23,15 +23,6 @@ def is_last_order(profile_dir):
     return role == "last_order"
 
 
-def skills(profile_dir):
-    """List the role's skill directories (one entry per skill; symlinks allowed)."""
-    d = os.path.join(profile_dir, "skills")
-    if not os.path.isdir(d):
-        return []
-    return [os.path.join(d, x) for x in sorted(os.listdir(d))
-            if not x.startswith(".") and os.path.isdir(os.path.join(d, x))]   # stray files would break copytree downstream
-
-
 def config_yaml(profile_dir):
     """Return the path of the role's config.yaml (MCP server definitions and the like)."""
     return os.path.join(profile_dir, "config.yaml")
@@ -49,7 +40,7 @@ def shared_soul():
 
     Last Order, the Sisters, and their sub-agents all load it before their own
     SOUL.md. An existing file is never overwritten. One-shot roles (planner,
-    red team, judge) do not read it, so their audit stance is unaffected by the
+    reviewing Sister, judge) do not read it, so their audit stance is unaffected by the
     shared personality.
     """
     from misaka.config import CFG

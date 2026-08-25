@@ -21,6 +21,9 @@ class SessionSpec:
     receive_messages: bool = False
     task_id: str | None = None
     tool_ceiling: tuple[str, ...] | None = None
+    # Where this session's skills come from, as ``(layer, root)`` pairs. None = the role's
+    # three layers (project, role, shared); a card passes its read-only sandbox instead.
+    skill_roots: tuple[tuple[str, str], ...] | None = None
 
 
 def build_extensions(spec: SessionSpec) -> list[dict]:

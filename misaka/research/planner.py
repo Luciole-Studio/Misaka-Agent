@@ -1,4 +1,4 @@
-"""LLM-authored research plans with a deliberately small machine-checked envelope.
+"""Last Order's research calls and the card contracts, with a deliberately small machine-checked envelope.
 
 The prose is open-ended. Python validates only the fields needed to route
 work; it never judges whether a method, source, interpretation, or conclusion is sound.
@@ -12,8 +12,9 @@ from pathlib import Path
 
 from misaka.config import CFG
 from misaka.core.session_manager import find_most_recent_session
+from misaka.platform import prompt_guard, tasks as task_store
 from misaka.skills import layers as skill_layers
-from misaka.research import runs
+from misaka.research import ledger, runs
 
 
 PROJECT_INTAKE_CONTRACT = """You are Last Order in Research mode. Draft the project brief (PROJECT.md) for the user's research question.
@@ -52,7 +53,7 @@ Return exactly one JSON object of this shape. `plan_markdown` and `extensions` a
     "dependencies":["other-local-id"], "capabilities":["required capability"],
     "assignee":"a Sister id from the roster", "assignee_reason":"Why this Sister fits", "priority":0
   }],
-  "synthesis_team": [{"assignee":"a Sister id from the roster", "lens":"The independent perspective this synthesis takes"}],
+  "red_team": {"assignee":"a Sister id from the roster", "reason":"Why this Sister's profile fits adversarial review"},
   "extensions": {}
 }
 
@@ -61,24 +62,10 @@ Rules:
 - Use status=clarify only when research genuinely cannot continue without a human choice. Uncertainty that can be researched belongs in a probe or a task.
 - Tasks must be substantive research assignments written for this question, not mechanical templates.
 - Choose Sisters by their capability profiles; do not default to the first roster entry.
-- Provide at least two independent synthesis perspectives. Disagreements are never settled by vote.
+- The red team is the Sister whose profile makes her the best critic of this plan's conclusion; only you decide who that is.
 - Output JSON only.
 """
 
-METHOD_REVIEW_CONTRACT = """You are an independent methodology reviewer. Review the research plan only; do not answer the original question.
-Check whether the plan closes the question too early; conflates facts, causes, interpretations, consequences,
-or normative judgements; pairs methods with objects they do not fit; or leaves out sources, actors, processes,
-interactions, time horizons, prior knowledge, impacts, or counterevidence that matter. Flag any authority, mainstream view,
-contrarian view, or single theory that the plan treats as beyond question. Confirm that every task can produce auditable material.
-
-Return JSON only:
-{"approved": true|false,
- "review_markdown":"The complete review",
- "material_omissions":["Only omissions that could change the result"],
- "required_revisions":["A change the plan must make"],
- "method_probes":["A methodological uncertainty worth investigating"]}
-Prefer a structure that fits the problem over a fixed checklist. Do not pad the review with low-value items to look thorough.
-"""
 
 PREFLIGHT_CONTRACT = """You are a Sister preparing to execute a research assignment.
 Plan the investigation before starting it; do no research and draw no conclusions yet. Decide where and how to find
@@ -93,6 +80,66 @@ Return JSON only:
  "failure_modes":["A likely failure or source of bias"],
  "falsifiers":["Material that could overturn the task's working premise"],
  "stop_condition":"When the task is done, or when it can no longer proceed honestly"}
+"""
+
+
+SYNTHESIS_CONTRACT = """You are Last Order writing this node's conclusion: one synthesis of the accepted research output, in one pass.
+Read the source artifacts (summaries are navigation aids, not evidence) and check every claim against its quotation.
+
+Write free-form Markdown that separates: shared findings, competing findings, key evidence, counterevidence,
+methodological limits, value premises, and unresolved questions. Every empirical judgement cites `[task_id/path]`.
+Do not vote, do not hide competing interpretations or insufficient evidence, and introduce no facts beyond the supplied artifacts.
+State what new evidence could change the judgement. Output Markdown only; no JSON.
+"""
+
+
+PROBE_PLAN_CONTRACT = """You are Last Order. The red team found issues in this node's conclusion. For each issue, design one probe:
+a research card that tests whether the issue actually changes the conclusion. Do not replan the whole project.
+
+Return exactly one JSON object:
+{"tasks": [{
+  "issue_id":"the issue this probe tests", "local_id":"short-safe-id", "title":"Probe title",
+  "question":"The exact question the probe answers", "rationale":"How the answer bears on the conclusion",
+  "method":"How to investigate it", "source_strategy":"Where to look", "falsifiers":"What would show the conclusion is wrong",
+  "deliverable":"Path of the Markdown artifact", "dependencies":[], "capabilities":[],
+  "assignee":"a Sister id from the roster", "assignee_reason":"Why this Sister fits", "priority":0
+}]}
+Every issue gets exactly one probe. Output JSON only.
+"""
+
+
+TRIAGE_CONTRACT = """You are Last Order. Each probe below tested one issue against this node's conclusion. Read the probe artifacts and decide,
+for every issue, what the probe showed:
+- supports: the conclusion stands; the probe's material is additional support.
+- inconclusive: the probe could not settle the issue (material unavailable, sources conflict, question not answerable).
+- undermines: the conclusion is shaken; the issue deserves its own research node.
+
+Return exactly one JSON object:
+{"verdicts": [{"issue_id":"", "verdict":"supports|inconclusive|undermines", "reason":"What in the probe artifacts decides it"}]}
+Do not vote and do not soften: an undermined conclusion is undermined. Output JSON only.
+"""
+
+
+RED_TEAM_CONTRACT = """## goal
+Red-team the conclusion at `{synthesis_path}` for "{question}". Hunt for reasoning failures; do not extend the report and do not
+polish prose. Deliver `critique.md` (your review) and `critique.json` (the issues, machine-readable).
+
+## material
+- Conclusion under review: `{synthesis_path}`
+- Plan: `{plan_path}`
+- Source-task artifacts: read whichever the conclusion cites.
+{evidence}
+## what to inspect
+Facts and quotations, inference and causation, concepts and scope, methods and sampling, standpoint and bias, omitted actors or
+processes, interactions, time horizons, consequences, and normative claims disguised as facts. Different frameworks can yield
+different interpretations without either side being automatically wrong. A false objection does as much damage as a false claim.
+
+## acceptance criteria
+- `critique.md` exists and every criticism names a concrete next research step.
+- `critique.json` exists and is exactly: `{{"issues": [{{"kind": "fact|logic|causation|concept|scope|method|bias|normative|unresolved",
+  "question": "A specific question that can be researched on its own", "rationale": "Why it could change the conclusion",
+  "priority": 0, "material": true}}]}}`. Only `material: true` issues are probed; keep the list honest, not long.
+- Register both files in `report.json`.
 """
 
 
@@ -136,17 +183,10 @@ def sister_catalog(root=None):
 
 
 def method_catalog(profile_dir, cwd):
-    out, seen = [], set()
-    for directory in skill_layers.skills_stack(profile_dir, cwd=cwd):
-        path = os.path.join(directory, "SKILL.md")
-        if not os.path.isfile(path):
-            continue
-        name = os.path.basename(os.path.realpath(directory))
-        if name in seen:
-            continue
-        seen.add(name)
-        out.append({"name": name, "description": _frontmatter_description(path), "path": path})
-    return out
+    """The research methods Last Order can plan with: her skill index in this folder."""
+    from misaka.skills import index as skill_index
+    return [{"name": e["name"], "description": e["description"], "path": e["path"]}
+            for e in skill_index.build(skill_layers.skill_roots(profile_dir, cwd))]
 
 
 def _catalog_text(items):
@@ -185,17 +225,15 @@ def ensure_project_brief(cfg, worker, question, workspace):
 # The user's research question
 {question}
 """,
-        cwd=workspace, session_dir=None, tools=(),
-        timeout=120, thinking="low", model=cfg["default_model"],
+        cwd=workspace, session_dir=os.path.join(workspace, ".misaka-intake"), tools=(),
+        timeout=120, thinking="low",
     )
     if err:
-        raise RuntimeError(f"Last Order failed to draft the project brief: {err}")
-    if not isinstance(obj, dict):
-        raise ValueError("Last Order's project brief output is not an object.")
-    markdown = str(obj.get("project_markdown") or "").strip()
-    if len(markdown) < 40:
+        raise RuntimeError(f"Last Order could not draft PROJECT.md: {err}")
+    text = str((obj or {}).get("project_markdown") or "").strip()
+    if len(text) < 40:
         raise ValueError("Last Order did not generate a complete PROJECT.md.")
-    Path(path).write_text(markdown + "\n", encoding="utf-8")
+    Path(path).write_text(text.rstrip() + "\n", encoding="utf-8")
     return path
 
 
@@ -229,17 +267,8 @@ def _validate_task(raw, roster, index):
     return task
 
 
-def validate_plan(obj, roster):
-    if not isinstance(obj, dict):
-        raise ValueError("Last Order planning output is not an object.")
-    status = obj.get("status")
-    if status not in {"ready", "clarify", "probe"}:
-        raise ValueError("Last Order returned an invalid planning status.")
-    plan_markdown = obj.get("plan_markdown")
-    if not isinstance(plan_markdown, str) or len(plan_markdown.strip()) < 40:
-        raise ValueError("Last Order returned an incomplete plan_markdown value.")
-    roster_ids = {r["id"] if isinstance(r, dict) else str(r) for r in roster}
-    tasks = [_validate_task(raw, roster_ids, i) for i, raw in enumerate(obj.get("tasks") or [], 1)]
+def _validate_tasks(raw_tasks, roster_ids):
+    tasks = [_validate_task(raw, roster_ids, i) for i, raw in enumerate(raw_tasks or [], 1)]
     local_ids = [task["local_id"] for task in tasks]
     if len(local_ids) != len(set(local_ids)):
         raise ValueError("Last Order returned duplicate task local_id values.")
@@ -259,144 +288,211 @@ def validate_plan(obj, roster):
             raise ValueError("Research task dependencies contain a cycle.")
         for local_id in ready:
             pending.pop(local_id)
+    return tasks
+
+
+def validate_plan(obj, roster):
+    if not isinstance(obj, dict):
+        raise ValueError("Last Order planning output is not an object.")
+    status = obj.get("status")
+    if status not in {"ready", "clarify", "probe"}:
+        raise ValueError("Last Order returned an invalid planning status.")
+    plan_markdown = obj.get("plan_markdown")
+    if not isinstance(plan_markdown, str) or len(plan_markdown.strip()) < 40:
+        raise ValueError("Last Order returned an incomplete plan_markdown value.")
+    roster_ids = {r["id"] if isinstance(r, dict) else str(r) for r in roster}
+    tasks = _validate_tasks(obj.get("tasks"), roster_ids)
     if status == "ready" and not tasks:
         raise ValueError("A ready research plan must contain at least one task.")
-    team = []
-    team_ids = set()
-    for member in obj.get("synthesis_team") or []:
-        if not isinstance(member, dict) or member.get("assignee") not in roster_ids:
-            continue
-        if member["assignee"] in team_ids:
-            continue
-        team_ids.add(member["assignee"])
-        team.append({"assignee": member["assignee"], "lens": str(member.get("lens") or 'Independent synthesis')})
-    if status == "ready" and len(team) < 2:
-        raise ValueError(
-            "Last Order must select at least two Sisters for independent synthesis perspectives."
-        )
+    red_team = obj.get("red_team") if isinstance(obj.get("red_team"), dict) else {}
+    if status == "ready" and red_team.get("assignee") not in roster_ids:
+        raise ValueError("Last Order must name one roster Sister as the red team.")
     return {
         **obj, "status": status, "plan_markdown": plan_markdown.strip(), "tasks": tasks,
-        "synthesis_team": team,
+        "red_team": {"assignee": red_team.get("assignee"), "reason": str(red_team.get("reason") or "")},
         "clarifying_questions": [str(x) for x in obj.get("clarifying_questions") or []],
         "methods": obj.get("methods") if isinstance(obj.get("methods"), list) else [],
         "extensions": obj.get("extensions") if isinstance(obj.get("extensions"), dict) else {},
     }
 
 
-def plan_root(con, run, cfg, worker, *, revision=None):
-    root = runs.run_dir(run)
-    session_dir = runs.session_dir(run, "root-lo")
+def _roster(cfg):
     roster = sister_catalog(cfg.get("profiles_root"))
     if not roster:
         raise RuntimeError("The Sister roster is empty; research tasks cannot be assigned.")
+    return roster
+
+
+def _lo_session(run, node, *parts):
+    return runs.session_dir(run, "root-lo" if node["parent_id"] is None else f"node-{node['id']}", *parts)
+
+
+def plan(con, run, cfg, worker, node, *, context_path=None):
+    """Open or continue the node's Last Order session and return its research plan."""
+    root = runs.run_dir(run)
+    session_dir = _lo_session(run, node)
+    roster = _roster(cfg)
     methods = method_catalog(os.path.join(cfg["roles_root"], "last_order"), root)
-    prompt = (
-        ROOT_CONTRACT
-        + f"""
+    prompt = ROOT_CONTRACT
+    if node["parent_id"] is None:
+        prompt += f"""
 # Original question
 {run['question']}
-"""
-        + f"""
+
 # Project / PageIndex workspace index (read before planning)
 {root}/workspace-index.md
 """
-        + f"""
-# Sister capability profiles
-{_catalog_text(roster)}
-"""
-        + f"""
-# Method and tool skills available
-{_catalog_text(methods)}
-"""
-    )
-    if revision:
-        prompt += ('\n# Previous version of the plan\n' + _catalog_text(revision["plan"])
-                   + '\n# Methodology review findings\n' + _catalog_text(revision["review"])
-                   + "\nRevise the plan to address the review; do not defend the previous version.\n")
-    obj, raw, err = _call(
-        worker, cfg, prompt, cwd=root, session_dir=session_dir,
-        continue_session=bool(revision) or bool(find_most_recent_session(session_dir)),
-        task_id=run["id"],
-    )
-    if err:
-        raise RuntimeError(f"Last Order planning failed: {err}")
-    plan = validate_plan(obj, roster)
-    session_file = find_most_recent_session(session_dir)
-    return plan, raw, session_file
+    else:
+        prompt += f"""
+This is a targeted research node. Address the issue that undermined the parent conclusion without replanning the whole project.
 
+# Issue that opened this node
+{node['trigger_text']}
 
-def plan_branch(con, run, cfg, worker, branch, context_path, *, revision=None):
-    """Open or continue a dedicated Last Order session for one material issue confirmed by the critic."""
-    root = runs.run_dir(run)
-    session_dir = runs.session_dir(run, "branches", branch["id"])
-    roster = sister_catalog(cfg.get("profiles_root"))
-    methods = method_catalog(os.path.join(cfg["roles_root"], "last_order"), root)
-    prompt = (
-        ROOT_CONTRACT
-        + "\nThis is a targeted extension branch. Address the issue that triggered it without replanning the whole project."
-        + f"""
-# Issue that triggered this branch
-{branch['trigger_text']}
-"""
-        + f"""
 # Context packet (ancestor sessions and artifact map; read it first)
 {context_path}
 """
-        + f"""
+    prompt += f"""
 # Sister capability profiles
 {_catalog_text(roster)}
-"""
-        + f"""
+
 # Method and tool skills available
 {_catalog_text(methods)}
 """
-    )
-    if revision:
-        prompt += ('\n# Previous branch plan\n' + _catalog_text(revision["plan"])
-                   + '\n# Methodology review findings\n' + _catalog_text(revision["review"])
-                   + '\nRevise the branch plan to address the review; do not defend the previous version.\n')
     obj, raw, err = _call(
         worker, cfg, prompt, cwd=root, session_dir=session_dir,
-        continue_session=bool(revision) or bool(find_most_recent_session(session_dir)),
-        task_id=run["id"],
+        continue_session=bool(find_most_recent_session(session_dir)), task_id=run["id"],
     )
     if err:
-        raise RuntimeError(f"Last Order planning failed for branch {branch['id']}: {err}")
-    plan = validate_plan(obj, roster)
-    session_file = find_most_recent_session(session_dir)
-    return plan, raw, session_file
+        raise RuntimeError(f"Last Order planning failed for node {node['id']}: {err}")
+    return validate_plan(obj, roster), raw, find_most_recent_session(session_dir)
 
 
-def review_methods(run, cfg, worker, plan):
-    root = runs.run_dir(run)
-    session_dir = runs.session_dir(run, "method-review")
-    prompt = (METHOD_REVIEW_CONTRACT + f"""
-# Original question
-{run['question']}
-"""
-              + '\n# Plan under review\n' + _catalog_text(plan))
-    obj, raw, err = _call(
-        worker, cfg, prompt, cwd=root, session_dir=session_dir,
-        profile="redteam", tools=(), task_id=run["id"],
+def task_sources(rows):
+    """What each done card delivered: its report and the artifacts it registered, as absolute paths."""
+    parts = []
+    for row in rows:
+        report = {}
+        try:
+            with open(os.path.join(task_store.task_state_dir(row["id"]), "report.json"),
+                      encoding="utf-8") as handle:
+                report = json.load(handle)
+        except (OSError, ValueError):
+            pass
+        artifacts = []
+        for rel in report.get("artifacts") or []:
+            path = os.path.realpath(os.path.join(row["workspace"] or "", str(rel)))
+            if os.path.isfile(path):
+                artifacts.append(path)
+        parts.append({"task_id": row["id"], "title": row["title"],
+                      "summary": report.get("summary") or "", "artifacts": artifacts,
+                      "findings": report.get("findings") or [],
+                      "uncertain": report.get("uncertain") or []})
+    return parts
+
+
+def _evidence(con, run, node):
+    findings = []
+    for finding in ledger.findings(con, run["id"], branch_id=node["id"]):
+        findings.append({**dict(finding),
+                         "claims": [dict(row) for row in ledger.claims(con, finding["id"])]})
+    return prompt_guard.untrusted("evidence-ledger", json.dumps(findings, ensure_ascii=False, indent=2))
+
+
+def synthesize(con, run, cfg, worker, node, task_rows):
+    """Last Order writes the node's conclusion from its accepted cards. Returns Markdown."""
+    prompt = (SYNTHESIS_CONTRACT + f"""
+# Question
+{node['trigger_text']}
+
+# Material map (read the artifacts, not just this map)
+""" + prompt_guard.untrusted("research-material-map",
+                            json.dumps(task_sources(task_rows), ensure_ascii=False, indent=2))
+              + "\n# Evidence ledger\n" + _evidence(con, run, node))
+    session_dir = _lo_session(run, node)
+    _obj, text, err = _call(
+        worker, cfg, prompt, cwd=runs.run_dir(run), session_dir=session_dir, raw=True,
+        continue_session=bool(find_most_recent_session(session_dir)), task_id=run["id"],
+        timeout=max(900, int(cfg.get("judge_timeout", 600))),
+    )
+    if err or not text or len(text.strip()) < 80:
+        raise RuntimeError(f"Synthesis for node {node['id']} is too short or failed: {err or ''}")
+    return text.strip() + "\n"
+
+
+def red_team_body(node, *, synthesis_path, plan_path, evidence=""):
+    return RED_TEAM_CONTRACT.format(
+        question=node["trigger_text"], synthesis_path=synthesis_path, plan_path=plan_path,
+        evidence=f"- Evidence ledger:\n{evidence}\n" if evidence else "")
+
+
+def plan_probes(con, run, cfg, worker, node, issues, *, synthesis_path):
+    """One probe card per red-team issue, planned by Last Order in the node's session."""
+    roster = _roster(cfg)
+    prompt = (PROBE_PLAN_CONTRACT + f"""
+# Conclusion under test
+{synthesis_path}
+
+# Issues (each needs exactly one probe)
+{_catalog_text([{"issue_id": i["id"], "kind": i["kind"], "question": i["question"],
+                 "rationale": i["rationale"], "priority": i["priority"]} for i in issues])}
+
+# Sister capability profiles
+{_catalog_text(roster)}
+""")
+    session_dir = _lo_session(run, node)
+    obj, _raw, err = _call(
+        worker, cfg, prompt, cwd=runs.run_dir(run), session_dir=session_dir,
+        continue_session=True, task_id=run["id"],
     )
     if err:
-        raise RuntimeError(f"Method review failed: {err}")
-    if not isinstance(obj, dict) or not isinstance(obj.get("approved"), bool):
-        raise ValueError("The methodology reviewer returned an invalid response.")
-    obj["review_markdown"] = str(obj.get("review_markdown") or "").strip()
-    for key in ("material_omissions", "required_revisions", "method_probes"):
-        obj[key] = [str(x) for x in obj.get(key) or []]
-    return obj, raw
+        raise RuntimeError(f"Probe planning failed for node {node['id']}: {err}")
+    tasks = _validate_tasks((obj or {}).get("tasks"), {r["id"] for r in roster})
+    known = {i["id"] for i in issues}
+    for task in tasks:
+        if task.get("issue_id") not in known:
+            raise ValueError(f"Probe {task['local_id']} names an unknown issue: {task.get('issue_id')}")
+    return tasks
 
 
-def preflight(run, cfg, worker, task, *, branch_id=None):
+def triage(con, run, cfg, worker, node, issues, probe_rows, *, synthesis_path):
+    """Last Order decides what each probe showed. Unjudged issues count as inconclusive."""
+    by_task = {i["probe_task_id"]: i["id"] for i in issues}
+    probes = [{**s, "issue_id": by_task.get(s["task_id"])} for s in task_sources(probe_rows)]
+    prompt = (TRIAGE_CONTRACT + f"""
+# Conclusion under test
+{synthesis_path}
+
+# Issues
+{_catalog_text([{"issue_id": i["id"], "question": i["question"]} for i in issues])}
+
+# Probes (read their artifacts)
+""" + prompt_guard.untrusted("probe-results", json.dumps(probes, ensure_ascii=False, indent=2)))
+    session_dir = _lo_session(run, node)
+    obj, _raw, err = _call(
+        worker, cfg, prompt, cwd=runs.run_dir(run), session_dir=session_dir,
+        continue_session=True, task_id=run["id"],
+    )
+    if err:
+        raise RuntimeError(f"Triage failed for node {node['id']}: {err}")
+    verdicts = {i["id"]: {"verdict": "inconclusive", "reason": "Last Order did not judge this issue."}
+                for i in issues}
+    for item in (obj or {}).get("verdicts") or []:
+        if not isinstance(item, dict) or item.get("issue_id") not in verdicts:
+            continue
+        if item.get("verdict") not in {"supports", "inconclusive", "undermines"}:
+            continue
+        verdicts[item["issue_id"]] = {"verdict": item["verdict"], "reason": str(item.get("reason") or "")}
+    return verdicts
+
+
+def preflight(run, cfg, worker, task, *, node):
     root = runs.run_dir(run)
     sid = task["assignee"]
     profile = os.path.join(cfg["profiles_root"], sid)
     if not os.path.isdir(profile):
         raise ValueError(f"Sister profile not found: {sid}")
-    label = branch_id or "root"
-    session_dir = runs.session_dir(run, "preflight", label, task["local_id"])
+    session_dir = runs.session_dir(run, "preflight", node["id"], task["local_id"])
     prompt = (PREFLIGHT_CONTRACT + '\n# Original question\n' + run["question"]
               + '\n# Your research assignment\n' + _catalog_text(task)
               + f"""

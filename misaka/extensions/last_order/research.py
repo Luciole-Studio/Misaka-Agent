@@ -92,7 +92,7 @@ def _status(con, target, workspace):
     return (
         f"{value['id']} | project {runs.project_name(run)!r} ({value['workspace']}) | "
         f"{value['status']}/{value['phase']} | depth {value['wave']}/{value['limits']['max_depth']} | "
-        f"tasks {value['tasks']} | branches {value['branches']} | open issues {value['open_issues']}"
+        f"tasks {value['tasks']} | nodes {value['nodes']} | open issues {value['open_issues']}"
         + token_text
         + (f" | error {value['last_error']}" if value["last_error"] else "")
     )
@@ -228,6 +228,8 @@ Continue with `/research resume {run_id} YOUR_ANSWER`.""")
                       details={"stage": "brief_intake", "depth": depth})
         brief = await asyncio.to_thread(
             planner.ensure_project_brief, dict(_cfg()), worker, question, workspace)
+        from misaka.platform import cards as card_files
+        await asyncio.to_thread(card_files.init_project, workspace)     # the project is a git repository
         send_progress(f"Research intake | project brief ready at {brief}; creating the persistent run.",
                       details={"stage": "brief_ready", "depth": depth})
         run = runs.create(
@@ -320,17 +322,7 @@ Continue with `/research resume {run_id} YOUR_ANSWER`.""")
                                 (f"""
 
 User clarification: {spec['clarification']}""", run["id"]))
-                    # A clarification resumes the persisted Last Order session it belongs to (root or branch).
-                    phase = ("branch_planning" if run["phase"] == "branch_waiting_input"
-                             else "planning")
-                    runs.set_state(con, run["id"], phase=phase, status="active", error="")
-                elif run["status"] in {"failed", "stopped", "stopping", "waiting_input"}:
-                    phase = ("planning" if run["phase"] == "waiting_input" else
-                             "branch_planning" if run["phase"] == "branch_waiting_input" else
-                             run["phase"])
-                    runs.set_state(con, run["id"], phase=phase, status="active", error="")
-                if run["status"] in {"stopped", "stopping"}:
-                    runs.resume_stopped(con, run["id"])
+                runs.resume(con, run["id"])
                 if not launch(run["id"], ctx):
                     ctx.ui.notify(f"Research run {run['id']} is already running in this session.", "info")
                 else:

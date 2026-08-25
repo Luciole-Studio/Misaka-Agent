@@ -5,7 +5,7 @@ re-exports the public names of both halves.
 """
 from misaka.config import engine as _engine
 from misaka.config.engine import *  # noqa: F401,F403
-from misaka.config.product import CFG, REPO, sisters  # noqa: F401
+from misaka.config.product import CFG, sisters  # noqa: F401
 
 import sys as _sys
 

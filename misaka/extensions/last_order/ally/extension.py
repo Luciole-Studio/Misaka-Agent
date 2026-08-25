@@ -125,7 +125,7 @@ def register(harn):
         harn,
         name="misaka_ally_card", label="Create ally card",
         description="Create a card for a third-party agent on the same board as Sister cards. Everything about "
-                    "the card (state machine, project, submission, red-team review, audit) is identical to a "
+                    "the card (state machine, project, submission, verification, audit) is identical to a "
                     "Sister card; only the worker is an external CLI. After creating it, stop and show the user "
                     "the plan; call misaka_ally_dispatch only once they say go.",
         snippet="Create a card for a third-party agent",
@@ -155,7 +155,7 @@ def register(harn):
         name="misaka_ally_dispatch", label="Dispatch ally card",
         description="Run a ready ally card in a pane (one non-interactive pass). Asynchronous: returns "
                     "immediately; when the ally finishes, the card is submitted and moves to verifying for the "
-                    "usual red-team review. Do not poll while waiting.",
+                    "usual verification. Do not poll while waiting.",
         snippet="Dispatch an ally card",
         guidelines=["misaka_ally_dispatch spends the external agent's own quota; do not call it unless the user "
                     "explicitly said to start."],
@@ -167,7 +167,7 @@ def register(harn):
                                       {"task_id": params.task_id,
                                        "parent": os.environ.get("MISAKA_NET_PANE")})
         return _text(f"Card {params.task_id} is running in pane {out['pane_id']}. It will submit on its own "
-                     f"(moving to verifying for red-team review); go do something else meanwhile.")
+                     f"(moving to verifying); go do something else meanwhile.")
 
     class PeerMsgParams(BaseModel):
         model_config = {"extra": "forbid"}

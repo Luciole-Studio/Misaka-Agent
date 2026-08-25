@@ -51,7 +51,9 @@ def _parser():
     dmp.add_argument("--task-id", dest="dm_task", help=argparse.SUPPRESS)
     dmp.add_argument("--generation", dest="dm_gen", type=int, help=argparse.SUPPRESS)
 
-    sub.add_parser("init", help="Initialize the local database")
+    ini = sub.add_parser("init", help="Make this folder a MISAKA project (git repo + PROJECT.md + cards/) and initialize the database")
+    ini.add_argument("--migrate", action="store_true",
+                     help="One-shot: write card files for every existing board row (all projects)")
 
     nt = sub.add_parser("net", help="Control the Misaka Network daemon and its panes")
     nt_sub = nt.add_subparsers(dest="net_cmd", required=True)
@@ -76,6 +78,8 @@ def _parser():
     cs.add_argument("task_id")
     cs.add_argument("--resume", action="store_true",
                     help="Resume the card's existing session")
+    cs.add_argument("--say", metavar="TEXT",
+                    help="With --resume: deliver this message as the first turn")
 
     sub.add_parser("panel", help="Open the Misaka Network panel (default in a terminal)")
     ch = sub.add_parser("chat", help="Chat with Last Order, or with a Sister via --as")
@@ -92,10 +96,6 @@ def _parser():
     rs.add_argument("--resume", metavar="RUN_ID", help="Resume an existing research run")
     rs.add_argument("--depth", type=int, default=3, help="Maximum branch depth")
 
-    tr = sub.add_parser("trace", help="Show the global trace, one session's trace, or compare two")
-    tr.add_argument("targets", nargs="*", help="None: this folder's tree; one: a session; two: side-by-side comparison")
-    tr.add_argument("--watch", action="store_true", help="Keep refreshing as the trace grows")
-    tr.add_argument("--plain", action="store_true", help="Print a single frame and exit")
 
     lc = sub.add_parser("lcm", help="Inspect, back up, repair, or rebuild the LCM context database")
     lc.add_argument("op", nargs="?", default="status",
@@ -144,9 +144,6 @@ def _parser():
     sv.add_argument("--assignee", default="10032")
     sv.add_argument("--dry", action="store_true")
 
-    sy = sub.add_parser("synth", help="Create a synthesis card from completed cards")
-    sy.add_argument("ids", nargs="*", help="Card IDs (default: every completed card)")
-    sy.add_argument("--title", default="Synthesis report")
 
     cr = sub.add_parser("create", help="Create a new Sister")
     cr.add_argument("sid", nargs="?", help="Sister ID, such as 10033")
@@ -178,7 +175,7 @@ def main():
         daemon.main()
     elif args.cmd == "card-shell":
         from misaka.cli import card_shell
-        card_shell.launch(args.task_id, resume_only=args.resume)
+        card_shell.launch(args.task_id, resume_only=args.resume, say=args.say)
     elif args.cmd == "net":
         from misaka.net import client as net
         if args.net_cmd == "stop":
@@ -216,6 +213,14 @@ def main():
                 mark = "● busy" if out["busy"] else "○ idle"
                 print(f"{out['id']}  {mark}  {out['title']}\n    {out['why']}")
     elif args.cmd == "init":
+        from misaka.platform import cards
+        if args.migrate:
+            written, existed, no_folder = cards.migrate(con)
+            print(f"migrated {written} card(s) to files ({existed} already had files, "
+                  f"{no_folder} skipped: project folder gone)")
+        else:
+            for line in cards.init_project(os.getcwd()):
+                print(line)
         print("board:", os.path.expanduser(CFG["db"]))
     elif args.cmd == "create":
         from misaka.network import roster
@@ -224,13 +229,14 @@ def main():
         from misaka.network import roster
         sys.exit(roster.cli_remove(args.sid, yes=args.yes))
     elif args.cmd == "add":
+        from misaka.platform import cards
         body = args.body
         if args.body_file:
             with open(args.body_file, encoding="utf-8") as f:
                 body = f.read()
-        tid = db.create_task(con, args.title, body=body, assignee=args.assignee,
-                             model=args.model, priority=args.priority, timeout_seconds=args.timeout,
-                             workspace=os.getcwd())
+        tid = cards.create(con, os.getcwd(), args.title, body, args.assignee,
+                           model=args.model, priority=args.priority,
+                           timeout_seconds=args.timeout)
         print(tid)
     elif args.cmd == "tell":
         from misaka.extensions.last_order.ally import tell as ally_tell
@@ -261,17 +267,13 @@ def main():
             run = runs.get(con, args.resume)
             if not run:
                 sys.exit(f"Research run not found: {args.resume}")
-            if run["status"] in {"failed", "stopped", "waiting_input"}:
-                phase = ("planning" if run["phase"] == "waiting_input" else
-                         "branch_planning" if run["phase"] == "branch_waiting_input" else
-                         run["phase"])
-                runs.set_state(con, run["id"], phase=phase, status="active", error="")
-            if run["status"] == "stopped":
-                runs.resume_stopped(con, run["id"])
+            runs.resume(con, run["id"])
         else:
             if not args.goal:
                 sys.exit("A new research run requires a question; use --resume RUN_ID to continue one.")
             brief = planner.ensure_project_brief(dict(CFG), worker_mod, args.goal, os.getcwd())
+            from misaka.platform import cards as card_files
+            card_files.init_project(os.getcwd())
             run = runs.create(con, workspace=os.getcwd(), question=args.goal,
                               limits={"max_depth": args.depth},
                               token_start=budget.spent(con))
@@ -291,31 +293,6 @@ def main():
         final = out.get("final") or {}
         if final.get("path"):
             print(final["path"])
-    elif args.cmd == "trace":
-        if len(args.targets) > 2:
-            sys.exit("Trace accepts at most two targets.")
-        if args.targets:
-            from misaka.cli import trace_view
-            paths = []
-            for t in args.targets:
-                p, err = trace_view.locate_session(con, t)
-                if err:
-                    sys.exit(err)
-                paths.append(p)
-            sys.exit(trace_view.run(paths, watch=args.watch, plain=args.plain))
-        import time as _time
-
-        from misaka.observability import overview as observe
-        workspace = db.canonical_workspace()
-        if not args.watch:
-            print(observe.render(con, workspace))
-        else:
-            try:
-                while True:
-                    print("\x1b[2J\x1b[H" + observe.render(con, workspace), flush=True)
-                    _time.sleep(2)
-            except KeyboardInterrupt:
-                pass
     elif args.cmd == "lcm":
         import os as _os
 
@@ -412,7 +389,7 @@ def main():
             print(f"Deleted preset '{args.name}'; default: {raw.get('default_preset')}")
         else:
             print(f"MoA presets in {path}")
-            print("Use /model to select MoA·<preset>, or /moa <prompt> for a one-off request.")
+            print("Use /model to select MoA·<preset>; every turn then runs the mixture until you switch away.")
             for name, preset in cfg["presets"].items():
                 mark = "*" if name == cfg["default_preset"] else " "
                 state = "" if preset["enabled"] else " (disabled)"
@@ -547,16 +524,19 @@ def main():
         elif args.op == "scan":
             from misaka.skills.guard import format_scan_report, scan_skill
             found = False
-            for d in skill_layers.get_project_skills_dirs(args.dir or _os.getcwd()):
-                for md in skill_layers.iter_project_skill_files(d):
+            for layer, root in skill_layers.skill_roots(None, cwd=args.dir or _os.getcwd()):
+                if layer != "project":
+                    continue
+                for md in skill_layers.iter_skill_files(root):
                     found = True
                     print(format_scan_report(scan_skill(md.parent, source="project")))
             if not found:
                 print("No project skills found under skills/.")
         else:
+            from misaka.skills import index as skill_index
             prof = _os.path.join(_os.path.expanduser(CFG["roles_root"]), args.role)
-            for d in skill_layers.skills_stack(prof, cwd=_os.getcwd()):
-                print(d)
+            for e in skill_index.build(skill_layers.skill_roots(prof, cwd=_os.getcwd())):
+                print(f"{e['layer']:<9}{e['category']}/{e['name']}  {e['description']}  ({e['dir']})")
     elif args.cmd == "basemap":
         bcon = basemap.connect()
         if args.load:
@@ -623,20 +603,11 @@ def main():
         body = basemap.survey_body(cells, args.proposition)
         print(f"Loaded {len(cells)} cells ({', '.join(args.scheme)}) for a coverage survey.")
         if not args.dry:
-            tid = db.create_task(con, f"Coverage survey: {args.proposition[:30]}", body=body,
-                                 assignee=args.assignee, timeout_seconds=1800,
-                                 workspace=os.getcwd())
+            from misaka.platform import cards as card_files
+            tid = card_files.create(con, os.getcwd(), f"Coverage survey: {args.proposition[:30]}",
+                                    body, args.assignee, timeout_seconds=1800)
             print(" ", tid)
     elif args.cmd == "immune":
         b = budget.status(con, CFG["token_cap"])
         print(f"Budget: {b['used']:,} tokens" +
               (f" / {b['ratio']:.0%} of limit" if b["cap"] else " (no limit)"))
-        hooks = [h for h in sorted(os.listdir(CFG["hooks_dir"]))
-                 if os.access(os.path.join(CFG["hooks_dir"], h), os.X_OK)] if os.path.isdir(CFG["hooks_dir"]) else []
-        print(f"Artifact hooks: {len(hooks)}  {' '.join(hooks)}")
-    elif args.cmd == "synth":
-        from misaka.research import report
-        rows = report.gather(con, args.ids)
-        if not rows:
-            sys.exit("No completed cards are available for synthesis.")
-        print(report.create(con, rows, args.title), "created; run dispatch to execute it")

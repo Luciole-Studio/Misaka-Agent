@@ -1,17 +1,15 @@
-"""Run cards and reconcile their artifacts through the red-team acceptance gate."""
+"""Run cards and reconcile their artifacts through the verification gate (a Sister
+who did not write the card judges it)."""
 import json
 import os
 import secrets
 import socket
-import subprocess
 
 from misaka.platform import tasks as db
-from misaka.network import validate
-from misaka.platform import admission, budget, prompt_guard
+from misaka.platform import admission, budget
 from misaka.documents import workspace as ws_index
 from misaka.network import worker
 
-MAX_VERIFY_ROUNDS = 2
 _skipped_logged = set()
 
 
@@ -21,31 +19,6 @@ def _profile_dir(cfg, assignee):
         if os.path.isdir(d):
             return d
     return None
-
-
-def run_hooks(cfg, task, workspace):
-    """Run executable acceptance hooks and return their rejection reasons."""
-    hook_dir = cfg.get("hooks_dir") or ""
-    if not os.path.isdir(hook_dir):
-        return []
-    vetoes = []
-    for name in sorted(os.listdir(hook_dir)):
-        path = os.path.join(hook_dir, name)
-        if not os.access(path, os.X_OK) or name.startswith("."):
-            continue
-        try:
-            env = os.environ.copy()
-            env["MISAKA_TASK_DIR"] = db.task_state_dir(task["id"])
-            env["MISAKA_REPORT"] = os.path.join(env["MISAKA_TASK_DIR"], "report.json")
-            p = subprocess.run(
-                [path, workspace], capture_output=True, text=True, timeout=60, env=env
-            )
-        except (OSError, subprocess.SubprocessError) as e:
-            vetoes.append(f"Hook {name} failed to run: {e}")
-            continue
-        if p.returncode != 0:
-            vetoes.append(f"[{name}] {(p.stdout + p.stderr).strip()[:200]}")
-    return vetoes
 
 
 def _event_summary(d, nbytes):
@@ -138,8 +111,10 @@ def reconcile(con, cfg):
                 continue
         elif _pid_alive(t["worker_pid"]):
             continue
-        ok, result = worker.check_report(
-            db.workspace_for(t), con=con, task_id=t["id"])
+        ok, result = worker.check_report(db.workspace_for(t), con=con, task_id=t["id"])
+        if ok:
+            from misaka.platform import repo
+            repo.commit_card(db.workspace_for(t), t["id"], result, f"card {t['id']}: submit (reconciled)")
         if not ok and str(result).startswith("blocked:"):
             db.block_abandoned(
                 con, t["id"], "needs_input", str(result)[len("blocked:"):].strip(),
@@ -219,6 +194,7 @@ def run_task(con, t, cfg):
         con, t["id"], workspace, generation=generation, claim_lock=lock
     ):
         return False
+    run_dir = workspace
     db.add_event(
         con,
         t["id"],
@@ -228,7 +204,8 @@ def run_task(con, t, cfg):
     )
 
     task = dict(t)
-    task["_attachments"] = db.stage_attachments(con, t["id"], workspace)
+    from misaka.platform import cards as card_files
+    task["_attachments"] = card_files.attachment_list(run_dir, t["id"], workspace=workspace)
     bud = budget.status(con, cfg.get("token_cap"))
     if bud["mode"] == "stop":
         if db.back_to_ready(
@@ -260,7 +237,7 @@ def run_task(con, t, cfg):
             usage_db = None
     try:
         verdict = worker.run_card(
-            task, workspace, profile_dir, cfg["provider"], cfg["default_model"],
+            task, run_dir, profile_dir, cfg["provider"], cfg["default_model"],
             on_event=lambda line: db.add_event(
                 con,
                 t["id"],
@@ -292,6 +269,8 @@ def run_task(con, t, cfg):
                 generation=generation,
             )
     elif verdict["ok"]:
+        from misaka.platform import repo
+        repo.commit_card(run_dir, t["id"], verdict["report"], f"card {t['id']}: submit")
         if db.mark_verifying(
             con, t["id"], generation=generation, claim_lock=lock
         ):
@@ -335,9 +314,7 @@ def _publish_finalizing(con, t, verify_token, generation, reasons, artifacts=Non
         con, t["id"], verify_token, generation=generation
     ):
         return False
-    if not db.owns_verification(
-        con, t["id"], verify_token, generation=generation
-    ) or not db.finish_finalize(
+    if not db.finish_finalize(
         con, t["id"], verify_token, generation=generation
     ):
         return False
@@ -376,7 +353,9 @@ def _publish_finalizing(con, t, verify_token, generation, reasons, artifacts=Non
 
 
 def judge_task(con, t, cfg, verify_token=None, generation=None):
-    """Run the mandatory red-team gate for one verifying card."""
+    """Accept one verifying card mechanically: a valid report.json plus passing acceptance
+    is acceptance (the submission is already committed on the card's line). There is no model judge -- whether and how work
+    gets reviewed is Last Order's runtime business, arranged through ordinary cards."""
     generation = int(t["generation"] if generation is None else generation)
     if verify_token is not None and not db.owns_verification(
         con, t["id"], verify_token, generation=generation
@@ -397,26 +376,6 @@ def judge_task(con, t, cfg, verify_token=None, generation=None):
             )
         return
     verified_artifacts = list(report_or_reason.get("artifacts", []))
-    report_limit = worker.MAX_REPORT_BYTES
-    try:
-        with open(os.path.join(db.task_state_dir(t["id"]), "report.json"), "rb") as f:
-            report_bytes = f.read(report_limit + 1)
-        if len(report_bytes) > report_limit:
-            raise ValueError("report.json too large")
-        report_full = report_bytes.decode("utf-8")
-        report_raw = report_full[:4000]
-    except (OSError, UnicodeDecodeError, ValueError):
-        if db.back_to_ready(
-            con, t["id"], verify_token, generation=generation
-        ):
-            db.add_event(
-                con,
-                t["id"],
-                "verify_reclaimed",
-                {"reason": "report.json disappeared during verification"},
-                generation=generation,
-            )
-        return
     if t["status"] == "finalizing":
         decision = db.latest_payload(
             con, t["id"], "verify_decision_pass", generation=generation
@@ -428,165 +387,28 @@ def judge_task(con, t, cfg, verify_token=None, generation=None):
         _publish_finalizing(con, t, verify_token, generation, reasons,
                             artifacts=verified_artifacts)
         return
-    try:
-        uncertain = json.loads(report_full).get("uncertain") or []
-    except (ValueError, AttributeError):
-        uncertain = []
-    focus = ("\n# Author-reported uncertainties to verify first\n"
-             + "\n".join(f"- {x}" for x in uncertain[:3]) + "\n") if uncertain else ""
-    prompt = f"""# Task contract to review
-Title: {t['title']}
-
-{t['body']}
-
-# Submitted report.json
-{prompt_guard.untrusted('report.json', report_raw)}{focus}
-
-The task workspace is your working directory. Verify each acceptance criterion against the actual deliverables with the read tool. Return only this JSON object:
-{{"pass": true|false, "reasons": ["..."], "must_fix": ["..."]}}"""
-    for attempt in (1, 2):
-        if verify_token is not None and not db.owns_verification(
-            con, t["id"], verify_token, generation=generation
-        ):
-            return
-        obj, _raw, err = worker.run_llm_json(
-            os.path.join(cfg["roles_root"], "redteam"), prompt,
-            cfg["provider"], cfg["default_model"],
-            cwd=ws, tools=["read"], timeout=cfg.get("judge_timeout", 600),
-            usage_db=cfg["db"],
-            usage_task_id=t["id"],
-            usage_generation=generation,
-            usage_token_cap=cfg.get("token_cap"),
-            on_event=lambda line: db.add_event(
-                con,
-                t["id"],
-                "harn_event",
-                _compact_event(line),
-                generation=generation,
-            ),
-        )
-        errors = validate.validate_verdict(obj) if err is None else [err]
-        if not errors:
-            break
-        if verify_token is None or db.owns_verification(
-            con, t["id"], verify_token, generation=generation
-        ):
-            db.add_event(
-                con,
-                t["id"],
-                "verify_error",
-                {"attempt": attempt, "errors": errors},
-                generation=generation,
-            )
-        else:
-            return
-    if errors:
-        # Two malformed judge responses indicate infrastructure trouble; keep the task verifiable.
+    reasons = ["report.json valid"]
+    db.add_event(
+        con,
+        t["id"],
+        "verify_decision_pass",
+        {"reasons": reasons},
+        generation=generation,
+    )
+    if verify_token is None or not db.begin_finalize(
+        con, t["id"], verify_token, generation=generation
+    ):
         return
-    if obj["pass"]:
-        vetoes = run_hooks(cfg, t, t["workspace"] or "")
-        if vetoes:
-            rounds = db.bump_verify(
-                con, t["id"], verify_token, generation=generation
-            )
-            if rounds is None:
-                return
-            db.add_event(
-                con,
-                t["id"],
-                "hook_veto",
-                {"round": rounds, "vetoes": vetoes},
-                generation=generation,
-            )
-            if rounds >= MAX_VERIFY_ROUNDS:
-                failure = {
-                    "reason": "verification hooks failed repeatedly",
-                    "must_fix": vetoes,
-                }
-                if db.add_event(
-                    con,
-                    t["id"],
-                    "failed",
-                    failure,
-                    generation=generation,
-                    verify_lock=verify_token,
-                ):
-                    db.mark_failed(
-                        con, t["id"], verify_token, generation=generation
-                    )
-            else:
-                if db.back_to_ready(
-                    con, t["id"], verify_token, generation=generation
-                ):
-                    db.add_event(
-                        con,
-                        t["id"],
-                        "verify_fail",
-                        {"round": rounds, "must_fix": vetoes},
-                        generation=generation,
-                    )
-            return
-        db.add_event(
-            con,
-            t["id"],
-            "verify_decision_pass",
-            {"reasons": obj["reasons"]},
-            generation=generation,
-        )
-        if verify_token is None or not db.begin_finalize(
-            con, t["id"], verify_token, generation=generation
-        ):
-            return
-        finalizing = dict(t)
-        finalizing["status"] = "finalizing"
-        _publish_finalizing(
-            con,
-            finalizing,
-            verify_token,
-            generation,
-            obj["reasons"],
-            artifacts=verified_artifacts,
-        )
-    else:
-        rounds = db.bump_verify(
-            con, t["id"], verify_token, generation=generation
-        )
-        if rounds is None:
-            return
-        if rounds >= MAX_VERIFY_ROUNDS:
-            failure = {
-                "reason": "; ".join(obj["must_fix"]) or "verification failed repeatedly",
-                "round": rounds,
-                "must_fix": obj["must_fix"],
-            }
-            if db.add_event(
-                con,
-                t["id"],
-                "failed",
-                failure,
-                generation=generation,
-                verify_lock=verify_token,
-            ) and db.mark_failed(
-                con, t["id"], verify_token, generation=generation
-            ):
-                db.add_event(
-                    con,
-                    t["id"],
-                    "verify_gave_up",
-                    {"round": rounds, "must_fix": obj["must_fix"]},
-                    generation=generation,
-                )
-        else:
-            if db.back_to_ready(
-                con, t["id"], verify_token, generation=generation
-            ):
-                db.add_event(
-                    con,
-                    t["id"],
-                    "verify_fail",
-                    {"round": rounds, "must_fix": obj["must_fix"]},
-                    generation=generation,
-                )
+    finalizing = dict(t)
+    finalizing["status"] = "finalizing"
+    _publish_finalizing(
+        con,
+        finalizing,
+        verify_token,
+        generation,
+        reasons,
+        artifacts=verified_artifacts,
+    )
 
 
 def dispatch_once(con, cfg, task_ids=None):

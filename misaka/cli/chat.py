@@ -28,29 +28,34 @@ def _migrate_lo_soul(prof):
         pass
 
 
-def assembly(who, *, cwd=None):
+def assembly(who):
     """Shared role setup for foreground chat and the DM loop.
 
-    Returns ``(profile_dir, default_model, skill_flags)``; exits if ``who`` is not
-    a known Sister. Persona text is not resolved here; see ``config.identity``."""
+    Returns ``(profile_dir, default_model)``; exits if ``who`` is not a known Sister.
+    Persona text is not resolved here (``config.identity``), and neither are skills:
+    the skills extension discovers them from the session spec."""
     if who:
         prof = os.path.join(CFG["profiles_root"], who)
         if not os.path.isdir(prof):
             sys.exit(f"Unknown Sister {who!r}. Roster: {', '.join(sorted(sisters()))}")
-        extra = []
-        from misaka.skills import layers as skill_layers
-        for sk in skill_layers.skills_stack(prof, cwd=cwd or os.getcwd()):
-            extra += ["--skill", sk]
-        return prof, CFG["default_model"], extra
+        return prof, CFG["default_model"]
     prof = os.path.join(CFG["roles_root"], "last_order")
     _migrate_lo_soul(prof)
-    return prof, "claude-opus-5", []
+    return prof, "claude-opus-5"
 
 
 def launch(who, model=None, cont=False, pick=False, session=None):
     """Assemble the session and run interactive mode until it exits. ``who=None`` means Last Order."""
-    prof, model_default, extra = assembly(who)
-    from misaka.core.session_manager import encode_cwd
+    from misaka.core.session_manager import encode_cwd, read_session_header
+    if session:
+        # A resumed conversation goes back to the folder it worked in, whatever folder the
+        # shell or the panel sits in: the bucket, the workspace, the skills, and every tool
+        # follow the session. A folder that is gone is an error, not a silent move.
+        folder = read_session_header(session).get("cwd")
+        if not folder or not os.path.isdir(folder):
+            sys.exit(f"Cannot resume {session}: its folder {folder or '(unknown)'} no longer exists.")
+        os.chdir(folder)
+    prof, model_default = assembly(who)
     # Sessions are bucketed per role and per folder, like pi's per-cwd sessions:
     # `-c` resumes this role's conversation about *this* project.
     sess = f"~/.misaka/sessions/{who or 'last-order'}/{encode_cwd(os.getcwd())}"
@@ -59,11 +64,13 @@ def launch(who, model=None, cont=False, pick=False, session=None):
     else:
         title = "MISAKA · Last Order"
     from misaka.config import identity
-    flags = ["--provider", CFG["provider"], "--model", model or model_default,
+    # --no-skills: the engine's own skill loading stays off; the skills extension is the one
+    # place that decides what this session sees (misaka.skills.index).
+    flags = ["--provider", CFG["provider"], "--model", model or model_default, "--no-skills",
              "--append-system-prompt", profiles.shared_soul()]
     for section in identity.prompt_sections(prof, profiles.role_of(prof)):
         flags += ["--append-system-prompt", section]
-    flags += ["--session-dir", os.path.expanduser(sess)] + extra
+    flags += ["--session-dir", os.path.expanduser(sess)]
     if session:
         flags += ["--session", session]
     elif pick:

@@ -36,18 +36,6 @@ def connect(path=None) -> sqlite3.Connection:
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
     con.executescript(SCHEMA)
-    old = os.path.expanduser("~/.misaka/comms.db")
-    if not con.execute("SELECT 1 FROM messages LIMIT 1").fetchone() and os.path.exists(old):
-        try:
-            for r in sqlite3.connect(old).execute(
-                "SELECT task_id, sender, kind, body, generation, created_at"
-                " FROM messages WHERE delivered_at IS NULL ORDER BY id"):
-                con.execute(
-                    "INSERT INTO messages (to_addr, sender, body, summary, task_id, generation, created_at)"
-                    " VALUES ('last-order',?,?,?,?,?,?)",
-                    (r[1], r[3], r[2], r[0], r[4], r[5]))
-        except sqlite3.Error:
-            pass
     # Delivered messages expire after seven days; undelivered messages remain queued.
     con.execute("DELETE FROM messages WHERE delivered_at IS NOT NULL AND delivered_at < ?",
                 (int(time.time()) - 7 * 86400,))

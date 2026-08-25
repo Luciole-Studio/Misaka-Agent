@@ -324,6 +324,17 @@ def get_default_session_dir(cwd: str, agent_dir: str | None = None) -> str:
     return session_dir
 
 
+def read_session_header(file_path: str) -> dict[str, Any]:
+    """The header line of a session file (``id``, ``cwd``, ``timestamp``), or ``{}``.
+    Reads one line: the panel calls this for every file it lists."""
+    try:
+        with open(normalize_path(file_path), encoding="utf-8") as handle:
+            entry = json.loads(handle.readline())
+    except (OSError, ValueError):
+        return {}
+    return entry if isinstance(entry, dict) and entry.get("type") == "session" else {}
+
+
 def load_entries_from_file(file_path: str) -> list[FileEntry]:
     resolved_file_path = normalize_path(file_path)
     path = Path(resolved_file_path)

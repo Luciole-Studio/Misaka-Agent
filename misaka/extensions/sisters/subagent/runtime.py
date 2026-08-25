@@ -2304,8 +2304,8 @@ class SubagentManager:
                 [*normalized,
                  *(t for t in MANAGEMENT_TOOLS if t.casefold() not in denied)]))
             flags.extend(["-t", ",".join(tools)])
-        for skill in self._skill_paths(task.definition):
-            flags.extend(["--skill", skill])
+        # The skills a definition names are inlined into the child's first message
+        # (_preloaded_skills); the engine's own skill loading is off for every child.
         if task.definition.max_turns:
             flags.extend(["--subagent-max-turns", str(task.definition.max_turns)])
         return flags

@@ -1,4 +1,4 @@
-"""Isolated red-team verifier process for addressable Sister cards."""
+"""Isolated verifier process (a reviewing Sister) for addressable Sister cards."""
 
 from __future__ import annotations
 

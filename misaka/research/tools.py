@@ -14,7 +14,7 @@ def _text(value):
 
 def register(harn, con_factory):
     class Params(BaseModel):
-        view: Literal["run", "issues", "findings", "assessments"] = Field(
+        view: Literal["run", "issues", "findings"] = Field(
             "run", description="Information to return."
         )
         run_id: str | None = Field(
@@ -40,12 +40,6 @@ def register(harn, con_factory):
             return _text("\n".join(
                 f"{r['id']} [{r['status']}/{r['kind']}] {r['question']} — {r['rationale']}"
                 for r in rows) or "(empty)")
-        if params.view == "assessments":
-            rows = runs.assessments(con, run["id"])
-            return _text("\n".join(
-                f"{r['id']} wave={r['wave']} finding={r['finding_id'] or '-'} "
-                f"{r['assessment_json']}" for r in rows
-            ) or "(empty)")
         rows = ledger.findings(con, run["id"], limit=50)
         return _text("\n".join(
             f"{r['id']} [{r['claim_type']}] {r['text']}" for r in rows) or "(empty)")
@@ -53,7 +47,7 @@ def register(harn, con_factory):
     harn.registerTool(ToolDefinition(
         name="misaka_research_view", label="View research run",
         description=(
-            "Inspect a research run, its open issues, findings, and evidence assessments. "
+            "Inspect a research run, its open issues, and findings. "
             "This tool is read-only."
         ),
         parameters=Params.model_json_schema(), execute=execute,

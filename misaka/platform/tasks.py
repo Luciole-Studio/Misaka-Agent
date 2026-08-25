@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS tasks (
  timeout_seconds INTEGER NOT NULL DEFAULT 900,
  workspace TEXT NOT NULL,
  output_dir TEXT,
+ origin_session TEXT, -- id of the Last Order conversation that created the card
  agent_id TEXT,
  session_file TEXT,
  claim_lock TEXT,
@@ -35,7 +36,6 @@ CREATE TABLE IF NOT EXISTS tasks (
  current_run_id TEXT,
  generation INTEGER NOT NULL DEFAULT 1,
  notified_generation INTEGER NOT NULL DEFAULT 0,
- verify_rounds INTEGER NOT NULL DEFAULT 0,
  review_rounds INTEGER NOT NULL DEFAULT 0,
  review_feedback TEXT,
  review_lock TEXT,
@@ -89,35 +89,6 @@ CREATE TABLE IF NOT EXISTS task_runs (
  usage_tokens INTEGER NOT NULL DEFAULT 0,
  UNIQUE(task_id, generation, attempt)
 );
-CREATE TABLE IF NOT EXISTS task_links (
- parent_id TEXT NOT NULL,
- child_id TEXT NOT NULL,
- creator_run_id TEXT,
- created_at INTEGER NOT NULL,
- PRIMARY KEY(parent_id, child_id)
-);
-CREATE TABLE IF NOT EXISTS task_comments (
- id INTEGER PRIMARY KEY AUTOINCREMENT,
- task_id TEXT NOT NULL,
- run_id TEXT,
- author TEXT NOT NULL,
- body TEXT NOT NULL,
- kind TEXT NOT NULL DEFAULT 'comment',
- created_at INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS task_attachments (
- id TEXT PRIMARY KEY,
- task_id TEXT NOT NULL,
- kind TEXT NOT NULL,
- name TEXT NOT NULL,
- source TEXT NOT NULL,
- stored_path TEXT,
- sha256 TEXT,
- size_bytes INTEGER,
- status TEXT NOT NULL,
- author TEXT NOT NULL,
- created_at INTEGER NOT NULL
-);
 CREATE TABLE IF NOT EXISTS schema_migrations (
  component TEXT NOT NULL,
  version INTEGER NOT NULL,
@@ -151,10 +122,6 @@ CREATE TABLE IF NOT EXISTS todos (
 );
 CREATE INDEX IF NOT EXISTS idx_task_runs_task ON task_runs(task_id, generation, attempt);
 CREATE INDEX IF NOT EXISTS idx_task_runs_status ON task_runs(status);
-CREATE INDEX IF NOT EXISTS idx_task_links_child ON task_links(child_id);
-CREATE INDEX IF NOT EXISTS idx_task_links_parent ON task_links(parent_id);
-CREATE INDEX IF NOT EXISTS idx_task_comments_task ON task_comments(task_id, id);
-CREATE INDEX IF NOT EXISTS idx_task_attachments_task ON task_attachments(task_id, created_at);
 """
 RECLAIM_CAP = 2
 TASK_SCHEMA_VERSION = 5
@@ -284,11 +251,14 @@ def _migrate(con):
         "review_pid": "INTEGER",
         "review_identity": "TEXT",
         "output_dir": "TEXT",
+        "origin_session": "TEXT",
     }
     existing = _columns(con, "tasks")
     for name, definition in task_columns.items():
         if name not in existing:
             con.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")
+    for retired in ("task_comments", "task_attachments", "task_links"):   # phases 2-3: truth moved into the card file / repo
+        con.execute(f"DROP TABLE IF EXISTS {retired}")
     if "run_id" not in _columns(con, "events"):
         con.execute("ALTER TABLE events ADD COLUMN run_id TEXT")
     con.execute("CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id, id)")
@@ -355,10 +325,13 @@ def workspace_for(task):
 
 @_serialized
 def create_task(con, title, body="", assignee="", model=None, priority=0, timeout_seconds=900,
-                executor=None, reviewer=None, workspace=None, output_dir=None):
+                executor=None, reviewer=None, workspace=None, output_dir=None,
+                origin_session=None):
     """Insert a card, record its ``created`` event, and return the new id.
 
     ``workspace`` is the project folder the card belongs to; there is no default.
+    ``origin_session`` is the Last Order conversation that created it, so that
+    conversation can bring the right Sisters back when it is resumed.
     """
     reviewer = str(reviewer or "").strip() or None
     if reviewer == assignee:
@@ -370,10 +343,11 @@ def create_task(con, title, body="", assignee="", model=None, priority=0, timeou
     output_dir = canonical_workspace(output_dir) if output_dir else None
     con.execute(
         "INSERT INTO tasks (id,title,body,assignee,reviewer,executor,model,priority,"
-        "timeout_seconds,workspace,output_dir,created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        "timeout_seconds,workspace,output_dir,origin_session,created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (tid, title, body, assignee, reviewer, json.dumps(executor) if executor else None,
-         model, priority, timeout_seconds, workspace, output_dir, int(time.time())),
+         model, priority, timeout_seconds, workspace, output_dir, origin_session or None,
+         int(time.time())),
     )
     add_event(con, tid, "created", {"title": title, "assignee": assignee,
                                     "reviewer": reviewer,
@@ -586,6 +560,24 @@ def get(con, task_id):
 
 
 @_serialized
+def insert_index_row(con, fields, body, *, workspace):
+    """Restore one index row from a card file (misaka.platform.cards.rebuild). The file is
+    the truth; this only re-derives the index and never overwrites an existing row."""
+    con.execute(
+        "INSERT OR IGNORE INTO tasks (id,title,body,assignee,reviewer,executor,model,"
+        "priority,timeout_seconds,workspace,origin_session,status,created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (str(fields.get("id")), str(fields.get("title") or ""), body,
+         str(fields.get("assignee") or ""), fields.get("reviewer"),
+         json.dumps(fields["executor"]) if fields.get("executor") else None,
+         fields.get("model"), int(fields.get("priority") or 0),
+         int(fields.get("timeout_seconds") or 900), canonical_workspace(workspace),
+         fields.get("origin_session"), str(fields.get("status") or "ready"),
+         int(time.time())),
+    )
+
+
+@_serialized
 def delete_task(con, task_id, *, allow_active=False):
     """Delete a card and everything attached to it; active cards are refused unless ``allow_active``."""
     row = con.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
@@ -597,12 +589,15 @@ def delete_task(con, task_id, *, allow_active=False):
     con.execute("DELETE FROM events WHERE task_id=?", (task_id,))
     con.execute("DELETE FROM todos WHERE task_id=?", (task_id,))
     con.execute("DELETE FROM task_runs WHERE task_id=?", (task_id,))
-    con.execute("DELETE FROM task_links WHERE parent_id=? OR child_id=?", (task_id, task_id))
-    con.execute("DELETE FROM task_comments WHERE task_id=?", (task_id,))
-    attachments = con.execute(
-        "SELECT stored_path FROM task_attachments WHERE task_id=?", (task_id,)
-    ).fetchall()
-    con.execute("DELETE FROM task_attachments WHERE task_id=?", (task_id,))
+    try:
+        from misaka.platform import cards
+        for child in _children_of(con, task_id):
+            child_row = get(con, child)
+            remaining = [p for p in parent_ids(con, child) if p != task_id]
+            cards.set_fields(child_row["workspace"], child, needs=remaining or None)
+            promote_task(con, child)
+    except OSError:
+        pass
     con.execute(
         "DELETE FROM notification_events WHERE resource_type='task' AND resource_id=?",
         (task_id,),
@@ -612,13 +607,9 @@ def delete_task(con, task_id, *, allow_active=False):
         (task_id,),
     )
     con.execute("DELETE FROM tasks WHERE id=?", (task_id,))
-    for item in attachments:
-        try:
-            Path(item["stored_path"]).unlink(missing_ok=True) if item["stored_path"] else None
-        except OSError:
-            pass
     shutil.rmtree(task_state_dir(task_id), ignore_errors=True)
-    return True, f"Card {task_id} and its runs, dependencies, comments, attachments, events, budget, and to-do items were deleted."
+    return True, (f"Card {task_id} and its runs, dependencies, events, budget, and to-do items "
+                  "were deleted. Its file, log, and attachments live in the project repository.")
 
 
 @_serialized
@@ -666,184 +657,96 @@ def fair_ready(con, *, limit=None, lane="workers", advance=True, now=None):
 
 
 @_serialized
-def link_tasks(con, parent_id, child_id, *, creator_run_id=None) -> bool:
-    """Add a parent->child dependency (rejecting cycles) and hold the child until the parent is done."""
+def link_tasks(con, parent_id, child_id) -> bool:
+    """Make ``child`` wait for ``parent``. The edge lives on the child's card file
+    (frontmatter ``needs``); same project only. Rejects self-links, cycles, and children
+    already moving; holds the child at todo until every dependency is done."""
     if parent_id == child_id:
         raise ValueError("A task cannot depend on itself.")
-    known = con.execute(
-        "SELECT id,status FROM tasks WHERE id IN (?,?)", (parent_id, child_id)
-    ).fetchall()
-    if {row["id"] for row in known} != {parent_id, child_id}:
+    parent, child = get(con, parent_id), get(con, child_id)
+    if parent is None or child is None:
         raise ValueError("Both ends of a dependency must be existing tasks.")
-    child = next(row for row in known if row["id"] == child_id)
-    if child["status"] in {"running", "review", "verifying", "finalizing", "done", "archived"}:
+    if parent["workspace"] != child["workspace"]:
+        raise ValueError("A dependency must stay inside one project.")
+    if child["status"] in {"running", "review", "verifying", "finalizing", "done"}:
         raise ValueError(f"Child task is {child['status']}; its dependencies cannot be changed.")
-    cycle = con.execute(
-        "WITH RECURSIVE reach(id) AS ("
-        " SELECT child_id FROM task_links WHERE parent_id=?"
-        " UNION SELECT l.child_id FROM task_links l JOIN reach r ON l.parent_id=r.id"
-        ") SELECT 1 FROM reach WHERE id=? LIMIT 1",
-        (child_id, parent_id),
-    ).fetchone()
-    if cycle:
-        raise ValueError("Task dependency creates a cycle.")
+    seen, frontier = set(), [parent_id]        # cycle iff the child is already upstream of the parent
+    while frontier:
+        current = frontier.pop()
+        if current == child_id:
+            raise ValueError("Task dependency creates a cycle.")
+        if current not in seen:
+            seen.add(current)
+            frontier.extend(parent_ids(con, current))
+    needs = parent_ids(con, child_id)
+    if parent_id in needs:
+        return False
+    from misaka.platform import cards
+    cards.set_fields(child["workspace"], child_id, needs=[*needs, parent_id])
     with _write_txn(con):
-        cur = con.execute(
-            "INSERT OR IGNORE INTO task_links(parent_id,child_id,creator_run_id,created_at) "
-            "VALUES(?,?,?,?)",
-            (parent_id, child_id, creator_run_id, int(time.time())),
+        con.execute(
+            "UPDATE tasks SET status='todo' WHERE id=? AND status='ready'", (child_id,)
         )
-        if cur.rowcount == 1:
-            con.execute(
-                "UPDATE tasks SET status='todo' WHERE id=? AND status='ready'", (child_id,)
-            )
-            add_event(con, child_id, "dependency_linked", {"parent_id": parent_id})
-            promote_task(con, child_id)
-        return cur.rowcount == 1
+        add_event(con, child_id, "dependency_linked", {"parent_id": parent_id})
+        promote_task(con, child_id)
+    _mirror_status(con, child_id)
+    return True
+
+
+def _mirror_status(con, task_id):
+    """Reflect the index's at-rest status onto the card file (best effort)."""
+    row = get(con, task_id)
+    if row is None or not row["workspace"]:
+        return
+    try:
+        from misaka.platform import cards
+        cards.set_fields(row["workspace"], task_id, status=row["status"])
+    except OSError:
+        pass
 
 
 @_serialized
 def parent_ids(con, task_id):
-    return [row[0] for row in con.execute(
-        "SELECT parent_id FROM task_links WHERE child_id=? ORDER BY created_at,parent_id",
-        (task_id,),
-    ).fetchall()]
-
-
-@_serialized
-def add_comment(con, task_id, author, body, *, kind="comment") -> int:
-    body = str(body or "").strip()
-    author = str(author or "").strip()
-    if not author or not body:
-        raise ValueError("Comment author and text cannot be empty.")
-    row = con.execute("SELECT current_run_id FROM tasks WHERE id=?", (task_id,)).fetchone()
-    if row is None:
-        raise ValueError(f"Card not found: {task_id}")
-    cur = con.execute(
-        "INSERT INTO task_comments(task_id,run_id,author,body,kind,created_at) "
-        "VALUES(?,?,?,?,?,?)",
-        (task_id, row["current_run_id"], author, body, kind, int(time.time())),
-    )
-    add_event(con, task_id, "commented", {"comment_id": cur.lastrowid, "author": author})
-    return int(cur.lastrowid)
-
-
-@_serialized
-def comments(con, task_id, *, after_id=0, limit=100):
-    return con.execute(
-        "SELECT * FROM task_comments WHERE task_id=? AND id>? ORDER BY id LIMIT ?",
-        (task_id, int(after_id), max(1, min(500, int(limit)))),
-    ).fetchall()
-
-
-def _file_sha256(path):
-    digest = hashlib.sha256()
-    with open(path, "rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-@_serialized
-def attach_file(con, task_id, source, *, author="last-order", root=None):
-    if get(con, task_id) is None:
-        raise ValueError(f"Card not found: {task_id}")
-    original = Path(os.path.expanduser(str(source)))
-    if original.is_symlink():
-        raise ValueError("Attachments cannot be symbolic links.")
+    """The card's dependencies, from its file's frontmatter ``needs`` (the table is gone)."""
+    row = get(con, task_id)
+    if row is None or not row["workspace"]:
+        return []
+    from misaka.platform import cards
     try:
-        source_path = original.resolve(strict=True)
-    except OSError as error:
-        raise ValueError(f"Attachment does not exist: {source}") from error
-    if not source_path.is_file():
-        raise ValueError("Attachments must be regular files.")
-    size = source_path.stat().st_size
-    if size > MAX_ATTACHMENT_BYTES:
-        raise ValueError("Attachments may not exceed 50 MiB.")
-    attachment_id = "att_" + secrets.token_hex(5)
-    safe_name = source_path.name.replace("\x00", "") or "attachment"
-    destination_root = (Path(os.path.expanduser(root)) / task_id
-                        if root else Path(task_state_dir(task_id)) / "attachments" / "source")
-    destination_root.mkdir(parents=True, exist_ok=True)
-    destination = destination_root / f"{attachment_id}-{safe_name}"
-    temp = destination.with_suffix(destination.suffix + ".tmp")
-    try:
-        shutil.copyfile(source_path, temp)
-        os.replace(temp, destination)
-    finally:
-        temp.unlink(missing_ok=True)
-    digest = _file_sha256(destination)
-    con.execute(
-        "INSERT INTO task_attachments "
-        "(id,task_id,kind,name,source,stored_path,sha256,size_bytes,status,author,created_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-        (attachment_id, task_id, "file", safe_name, str(source_path), str(destination),
-         digest, size, "ready", author, int(time.time())),
-    )
-    add_event(con, task_id, "attachment_added", {"attachment_id": attachment_id,
-                                                   "name": safe_name, "size": size})
-    return attachment_id
+        needs = cards.read(cards.card_path(row["workspace"], task_id))["fields"].get("needs")
+    except OSError:
+        return []
+    return [str(x) for x in needs or []]
 
 
-@_serialized
-def attach_url(con, task_id, url, *, author="last-order"):
-    if get(con, task_id) is None:
-        raise ValueError(f"Card not found: {task_id}")
-    url = str(url or "").strip()
-    if not (url.startswith("https://") or url.startswith("http://")):
-        raise ValueError("Attachment URLs must use HTTP or HTTPS.")
-    attachment_id = "att_" + secrets.token_hex(5)
-    con.execute(
-        "INSERT INTO task_attachments "
-        "(id,task_id,kind,name,source,status,author,created_at) VALUES(?,?,?,?,?,?,?,?)",
-        (attachment_id, task_id, "url", url.rsplit("/", 1)[-1] or url, url,
-         "reference", author, int(time.time())),
-    )
-    add_event(con, task_id, "attachment_added", {"attachment_id": attachment_id, "url": url})
-    return attachment_id
-
-
-@_serialized
-def attachments(con, task_id):
-    return con.execute(
-        "SELECT * FROM task_attachments WHERE task_id=? ORDER BY created_at,id", (task_id,)
-    ).fetchall()
-
-
-@_serialized
-def stage_attachments(con, task_id, workspace):
-    root = Path(task_state_dir(task_id)) / "attachments" / "staged"
-    staged = []
-    for row in attachments(con, task_id):
-        if row["kind"] == "url":
-            staged.append({"kind": "url", "source": row["source"], "name": row["name"]})
+def _children_of(con, parent_id):
+    """Every card in the parent's project whose file names it in ``needs``."""
+    row = get(con, parent_id)
+    if row is None or not row["workspace"]:
+        return []
+    from misaka.platform import cards
+    out = []
+    for tid, path in cards.iter_cards(row["workspace"]):
+        try:
+            needs = cards.read(path)["fields"].get("needs") or []
+        except OSError:
             continue
-        source = Path(row["stored_path"] or "")
-        if not source.is_file() or source.is_symlink():
-            continue
-        root.mkdir(parents=True, exist_ok=True)
-        destination = root / f"{row['id']}-{row['name']}"
-        shutil.copyfile(source, destination)
-        if _file_sha256(destination) != row["sha256"]:
-            destination.unlink(missing_ok=True)
-            raise RuntimeError(f"Attachment integrity check failed: {row['id']}")
-        staged.append({"kind": "file", "path": str(destination),
-                       "name": row["name"], "sha256": row["sha256"]})
-    return staged
+        if parent_id in [str(x) for x in needs]:
+            out.append(tid)
+    return out
 
 
-@_serialized
 def dependency_state(con, task_id):
-    rows = con.execute(
-        "SELECT t.id,t.status FROM task_links l JOIN tasks t ON t.id=l.parent_id "
-        "WHERE l.child_id=? ORDER BY l.created_at,t.id",
-        (task_id,),
-    ).fetchall()
-    if not rows or all(row["status"] == "done" for row in rows):
-        return "ready", [row["id"] for row in rows]
-    if any(row["status"] in {"failed", "stopped", "archived"} for row in rows):
-        return "failed", [row["id"] for row in rows]
-    return "waiting", [row["id"] for row in rows]
+    parents = parent_ids(con, task_id)
+    statuses = []
+    for pid in parents:
+        parent = get(con, pid)
+        statuses.append(parent["status"] if parent is not None else "done")  # a deleted parent holds nobody
+    if not parents or all(status == "done" for status in statuses):
+        return "ready", parents
+    if any(status in {"failed", "stopped"} for status in statuses):
+        return "failed", parents
+    return "waiting", parents
 
 
 @_serialized
@@ -858,29 +761,29 @@ def promote_task(con, task_id) -> bool:
     )
     if cur.rowcount == 1:
         add_event(con, task_id, "dependencies_satisfied", {"parents": parents})
+        _mirror_status(con, task_id)
     return cur.rowcount == 1
 
 
 @_serialized
 def promote_dependents(con, parent_id):
     promoted = []
-    for row in con.execute(
-        "SELECT child_id FROM task_links WHERE parent_id=? ORDER BY created_at,child_id",
-        (parent_id,),
-    ).fetchall():
-        if promote_task(con, row["child_id"]):
-            promoted.append(row["child_id"])
+    for child in _children_of(con, parent_id):
+        if promote_task(con, child):
+            promoted.append(child)
     return promoted
 
 
 def _descendant_ids(con, task_id):
-    return [row[0] for row in con.execute(
-        "WITH RECURSIVE descendants(id) AS ("
-        " SELECT child_id FROM task_links WHERE parent_id=?"
-        " UNION SELECT l.child_id FROM task_links l JOIN descendants d ON l.parent_id=d.id"
-        ") SELECT id FROM descendants",
-        (task_id,),
-    ).fetchall()]
+    out, seen, frontier = [], {task_id}, [task_id]
+    while frontier:
+        current = frontier.pop(0)
+        for child in _children_of(con, current):
+            if child not in seen:
+                seen.add(child)
+                out.append(child)
+                frontier.append(child)
+    return out
 
 
 def _invalidate_descendants(con, task_id):
@@ -900,7 +803,7 @@ def _invalidate_descendants(con, task_id):
         "worker_pid=NULL,worker_identity=NULL,review_lock=NULL,review_expires=NULL,"
         "review_pid=NULL,review_identity=NULL,verify_lock=NULL,verify_expires=NULL,"
         "verify_pid=NULL,verify_identity=NULL WHERE id IN (" + marks + ") "
-        "AND status NOT IN ('todo','archived') RETURNING id",
+        "AND status<>'todo' RETURNING id",
         descendants,
     ).fetchall()]
     for child_id in changed:
@@ -1003,7 +906,7 @@ def configure_review(con, task_id, reviewer=None) -> bool:
         raise ValueError("The reviewer must be different from the assignee.")
     cur = con.execute(
         "UPDATE tasks SET reviewer=?,review_feedback=NULL WHERE id=? "
-        "AND status IN ('todo','scheduled','ready')",
+        "AND status IN ('todo','ready')",
         (reviewer, task_id),
     )
     if cur.rowcount == 1:
@@ -1074,7 +977,7 @@ def classify_failure(reason):
         return "timeout"
     if any(marker in text for marker in ("no report.json", "unparsable", "bad schema", "protocol")):
         return "protocol_violation"
-    if "verification" in text or "verify" in text or 'red team' in text:
+    if "verification" in text or "verify" in text or "review" in text:
         return "verification_failure"
     if "reclaim" in text or "crash" in text or "supervisor" in text:
         return "crash"
@@ -1150,7 +1053,7 @@ def mark_stopped(con, task_id, generation=None, claim_lock=None):
         values.extend([claim_lock, int(time.time())])
         status_clause = ""
     else:
-        status_clause = (" AND status IN ('triage','todo','scheduled','ready','running',"
+        status_clause = (" AND status IN ('triage','todo','ready','running',"
                          "'blocked','review','verifying','finalizing')")
     with _write_txn(con):
         cur = con.execute(
@@ -1185,7 +1088,7 @@ def stop_and_take_verifier(con, task_id, generation=None, claim_lock=None):
         values.extend([claim_lock, int(time.time())])
         status_clause = ""
     else:
-        status_clause = (" AND status IN ('triage','todo','scheduled','ready','running',"
+        status_clause = (" AND status IN ('triage','todo','ready','running',"
                          "'blocked','review','verifying','finalizing')")
     with _write_txn(con):
         row = con.execute(
@@ -1222,7 +1125,8 @@ def clear_verifier_process(
 
 @_serialized
 def submit_task(con, task_id, generation=None, claim_lock=None):
-    """Hand finished work to the optional peer review, then to the mandatory red-team gate."""
+    """Hand finished work to the optional peer review, then to the mandatory verification gate
+    (run by a Sister who did not write it)."""
     clauses = ["id=?"]
     values = [task_id]
     if generation is not None:
@@ -1346,10 +1250,15 @@ def request_review_changes(
             _finish_current_run(con, task_id, "changes_requested", summary=feedback[:1000])
             add_event(con, task_id, "review_changes", {"feedback": feedback[:4000]},
                       generation=generation)
-            add_comment(
-                con, task_id, f"reviewer:{reviewer_row[0] if reviewer_row else 'unknown'}",
-                feedback[:4000], kind="review",
-            )
+            ws_row = con.execute("SELECT workspace FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if ws_row is not None:
+                try:
+                    from misaka.platform import cards
+                    cards.append_log(ws_row["workspace"], task_id,
+                                     f"reviewer:{reviewer_row[0] if reviewer_row else 'unknown'}",
+                                     f"[review] {feedback[:2000]}")
+                except OSError:
+                    pass                       # a stray index row without a file: the feedback column still has it
         return cur.rowcount == 1
 
 
@@ -1369,31 +1278,6 @@ def release_review(con, task_id, lock, *, generation=None) -> bool:
         if cur.rowcount == 1:
             _finish_current_run(con, task_id, "released")
         return cur.rowcount == 1
-
-
-@_serialized
-def bump_verify(con, task_id, verify_token=None, generation=None) -> int | None:
-    generation_clause = " AND generation=?" if generation is not None else ""
-    if verify_token is None:
-        params = (task_id, generation) if generation is not None else (task_id,)
-        cur = con.execute(
-            "UPDATE tasks SET verify_rounds=verify_rounds+1 WHERE id=?"
-            + generation_clause,
-            params,
-        )
-    else:
-        params = [task_id, verify_token, int(time.time())]
-        if generation is not None:
-            params.append(generation)
-        cur = con.execute(
-            "UPDATE tasks SET verify_rounds=verify_rounds+1 "
-            "WHERE id=? AND status='verifying' AND verify_lock=? AND verify_expires>=?"
-            + generation_clause,
-            tuple(params),
-        )
-    if cur.rowcount != 1:
-        return None
-    return con.execute("SELECT verify_rounds FROM tasks WHERE id=?", (task_id,)).fetchone()[0]
 
 
 @_serialized
@@ -1541,7 +1425,7 @@ def claim_resume(
         ).fetchone()[0] >= max(0, int(assignee_cap)):
             return False
         row = con.execute(
-            "UPDATE tasks SET status='running',verify_rounds=0,review_rounds=0,"
+            "UPDATE tasks SET status='running',review_rounds=0,"
             "review_feedback=NULL,completed_at=NULL, "
             "claim_lock=?, claim_expires=?, worker_pid=?, worker_identity=?, "
             "review_lock=NULL,review_expires=NULL,review_pid=NULL,review_identity=NULL,"
@@ -1585,7 +1469,7 @@ def reopen_task(
         cur = con.execute(
             "UPDATE tasks SET status=?,generation=?,started_at=NULL,completed_at=NULL,"
             "agent_id=NULL,session_file=NULL,claim_lock=NULL,claim_expires=NULL,"
-            "worker_pid=NULL,worker_identity=NULL,verify_rounds=0,review_rounds=0,"
+            "worker_pid=NULL,worker_identity=NULL,review_rounds=0,"
             "review_feedback=NULL,review_lock=NULL,review_expires=NULL,review_pid=NULL,"
             "review_identity=NULL,verify_lock=NULL,"
             "verify_expires=NULL,verify_pid=NULL,verify_identity=NULL,block_kind=NULL,"

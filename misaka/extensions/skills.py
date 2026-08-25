@@ -1,104 +1,40 @@
-"""Progressive skill discovery, invocation, and managed mutation tools."""
-import logging
+"""Skills for one session: the index in the system prompt, ``skills_list`` /
+``skill_view`` / ``skill_manage``, and the ``/skill``, ``/learn``, ``/skill-mode``
+commands (hermes skills_tool + skill commands).
+
+The engine's own skill loading is off (``--no-skills``): this extension is the only
+thing that decides which skills a session sees -- the role's three layers, or the
+read-only sandbox a card runs against (``SessionSpec.skill_roots``).
+"""
 import os
-import re
 from pathlib import Path
 
+from misaka.skills import index as skill_index
+from misaka.skills.layers import SKILL_SUPPORT_DIRS, skill_roots
 from misaka.skills.manage import lookup_path_error
 
-logger = logging.getLogger(__name__)
-
-_SKILL_INVALID_CHARS = re.compile(r"[^a-z0-9-]")
-_SKILL_MULTI_HYPHEN = re.compile(r"-{2,}")
 _SKILL_INVOCATION_PREFIX = "[IMPORTANT: The user has invoked the "
 _SINGLE_SKILL_MARKER = "The full skill content is loaded below.]"
 _SINGLE_SKILL_INSTRUCTION = (
     "The user has provided the following instruction alongside the skill invocation: "
 )
-_SUPPORT_SUBDIRS = ("references", "templates", "scripts", "assets")
 
 
-def _slug(name):
-    slug = name.lower().replace(" ", "-").replace("_", "-")
-    slug = _SKILL_INVALID_CHARS.sub("", slug)
-    return _SKILL_MULTI_HYPHEN.sub("-", slug).strip("-")
-
-
-def scan_skill_commands(profile_dir, cwd=None):
-    """Map slash-command slugs to skill info for every skill in the profile's stack."""
-    from misaka.core.skills import load_skills_from_dir
-    from misaka.skills.layers import skills_stack
-
-    commands = {}
-    seen_names = set()
-    for skill_dir in skills_stack(profile_dir, cwd=cwd):
-        try:
-            result = load_skills_from_dir({"dir": str(skill_dir), "source": "misaka"})
-        except Exception:  # noqa: BLE001 - one invalid skill must not hide the rest
-            logger.warning("Failed to load skills from %s; skipping", skill_dir, exc_info=True)
-            continue
-        for skill in result.skills:
-            if skill.name in seen_names:
-                continue
-            slug = _slug(skill.name)
-            if not slug or slug in commands:
-                continue
-            seen_names.add(skill.name)
-            commands[slug] = {"name": skill.name,
-                              "description": skill.description or f"Invoke the {skill.name} skill",
-                              "skill_md_path": skill.filePath,
-                              "skill_dir": skill.baseDir}
-    return commands
-
-
-def build_skill_message(info, *, user_instruction="", session_id=None):
-    """Build the complete skill activation message."""
+def _body(entry, session_id=None):
+    """SKILL.md's body with template variables and inline shell applied."""
     from misaka.skills.preprocessing import preprocess_skill_content
     from misaka.utils.frontmatter import parse_frontmatter
 
-    skill_dir = Path(info["skill_dir"])
-    raw = Path(info["skill_md_path"]).read_text(encoding="utf-8")
+    raw = Path(entry["path"]).read_text(encoding="utf-8")
     body = (parse_frontmatter(raw).body or "").strip()
-    content = preprocess_skill_content(body, skill_dir, session_id=session_id)
-
-    activation_note = (f'{_SKILL_INVOCATION_PREFIX}"{info["name"]}" skill. '
-                       f"{_SINGLE_SKILL_MARKER}")
-    parts = [activation_note, "", content.strip()]
-
-    parts.append("")
-    parts.append(f"[Skill directory: {skill_dir}]")
-    parts.append(
-        "Resolve any relative paths in this skill (e.g. `scripts/foo.js`, "
-        "`templates/config.yaml`) against that directory, then run them "
-        "with the terminal tool using the absolute path.")
-
-    supporting = []
-    for subdir in _SUPPORT_SUBDIRS:
-        subdir_path = skill_dir / subdir
-        if subdir_path.exists():
-            for f in sorted(subdir_path.rglob("*")):
-                if f.is_file() and not f.is_symlink():
-                    supporting.append(str(f.relative_to(skill_dir)))
-    if supporting:
-        parts.append("")
-        parts.append("[This skill has supporting files:]")
-        for sf in supporting:
-            parts.append(f"- {sf}  ->  {skill_dir / sf}")
-
-    if user_instruction:
-        parts.append("")
-        parts.append(f"{_SINGLE_SKILL_INSTRUCTION}{user_instruction}")
-    return "\n".join(parts)
-
-
-_SUPPORT_DIRS = ("references", "templates", "assets", "scripts")
+    return preprocess_skill_content(body, Path(entry["dir"]), session_id=session_id).strip()
 
 
 def collect_linked_files(skill_dir):
-    """Return the skill's support files grouped by support directory."""
+    """The skill's support files grouped by support directory (symlinks never listed)."""
     root = Path(skill_dir)
     out = {}
-    for category in _SUPPORT_DIRS:
+    for category in sorted(SKILL_SUPPORT_DIRS):
         sub = root / category
         if not sub.is_dir():
             continue
@@ -132,80 +68,169 @@ def read_support_file(skill_dir, file_path):
         return f"[Binary file: {target.name}, {len(data)} bytes]", None
 
 
-def tools_for(profile_dir):
-    """Build progressive-disclosure skill tools for one profile."""
+def skill_content(entry, session_id=None):
+    """What ``skill_view`` returns for SKILL.md (hermes: content plus linked_files): the
+    processed body, the skill directory for relative paths, and the support-file index."""
+    linked = collect_linked_files(entry["dir"])
+    lines = [_body(entry, session_id), "", f"[Skill directory: {entry['dir']}]",
+             "Resolve relative paths in the skill against that directory."]
+    if linked:
+        lines += ["", "[Linked files: load one with skill_view(name=..., file_path=...)]"]
+        lines += [f"- {c}: {', '.join(fs)}" for c, fs in linked.items()]
+    return "\n".join(lines), linked
+
+
+def build_skill_message(entry, *, user_instruction="", session_id=None):
+    """The ``/skill`` activation message: the processed skill plus the user's instruction."""
+    skill_dir = Path(entry["dir"])
+    parts = [f'{_SKILL_INVOCATION_PREFIX}"{entry["name"]}" skill. {_SINGLE_SKILL_MARKER}',
+             "", _body(entry, session_id), "", f"[Skill directory: {skill_dir}]",
+             "Resolve any relative paths in this skill (e.g. `scripts/foo.js`, "
+             "`templates/config.yaml`) against that directory, then run them "
+             "with the terminal tool using the absolute path."]
+    supporting = [f for files in collect_linked_files(skill_dir).values() for f in files]
+    if supporting:
+        parts += ["", "[This skill has supporting files:]"]
+        parts += [f"- {sf}  ->  {skill_dir / sf}" for sf in supporting]
+    if user_instruction:
+        parts += ["", f"{_SINGLE_SKILL_INSTRUCTION}{user_instruction}"]
+    return "\n".join(parts)
+
+
+def register_for(roots, profile_dir, cwd=None):
+    """Everything skills for one session, against these layer roots; writes (``skill_manage``,
+    ``/learn``) go to the role's own ``skills/`` under ``profile_dir``. ``cwd`` is the
+    workspace the coding posture is judged in (misaka.skills.coding_context)."""
     from pydantic import BaseModel, ConfigDict, Field
 
     from misaka.core.extensions.types import ToolDefinition
+    from misaka.skills.coding_context import compact_skill_categories
+
+    roots = list(roots)
+    workspace = cwd or os.getcwd()
+
+    def entries():
+        return skill_index.build(roots)
+
+    def session_id(ctx):
+        try:
+            return str(ctx.sessionManager.getSessionId())
+        except Exception:  # noqa: BLE001 - a missing session ID should not block loading
+            return None
 
     class ListParams(BaseModel):
         model_config = ConfigDict(extra="forbid")
+        category: str = Field("", description="Optional category filter to narrow results.")
 
     class ViewParams(BaseModel):
         model_config = ConfigDict(extra="forbid")
-        name: str = Field(description="Skill name from `skills_list`.")
+        name: str = Field(description="The skill name (use skills_list to see available skills).")
         file_path: str = Field(
-            "", description="Optional support-file path within the skill; omit to read SKILL.md.")
+            "", description="OPTIONAL: Path to a linked file within the skill (e.g., 'references/api.md', "
+                            "'templates/config.yaml', 'scripts/validate.py'). Omit to get the main SKILL.md content.")
+
+    class ManageParams(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        action: str = Field(description="Operation: create, edit, patch, delete, write_file, or remove_file.")
+        name: str = Field(description="Lowercase kebab-case skill name and directory name.")
+        content: str = Field("", description="Complete SKILL.md text for create or edit.")
+        file_path: str = Field("", description="Relative support-file path, or optional patch target.")
+        file_content: str = Field("", description="Complete content for write_file.")
+        old_string: str = Field("", description="Exact text to replace; must match uniquely unless replace_all is true.")
+        new_string: str = Field("", description="Replacement text; use an empty string to remove the match.")
+        replace_all: bool = Field(False, description="Replace every match instead of requiring one unique match.")
+        absorbed_into: str = Field("", description="For delete, optional existing skill that absorbed this skill's useful content.")
 
     def register(harn):
+        # ── the index in the system prompt (hermes build_skills_system_prompt) ──
+        async def advertise(event, _ctx):
+            section = skill_index.render_prompt(entries(), skill_index.categories(roots),
+                                                compact_skill_categories(workspace))
+            if section:
+                return {"systemPrompt": event["systemPrompt"].rstrip() + "\n\n" + section}
+
+        async def fresh(_event, _ctx):
+            skill_index.invalidate()
+
+        harn.on("before_agent_start", advertise)
+        harn.on("session_start", fresh)
+
+        # ── the [Skills] block on the startup screen ──
+        # The engine's own one lists engine-loaded skills, of which there are none under
+        # --no-skills; this section takes its place (same name, same style), showing the
+        # index: names collapsed, the full category tree behind ctrl+o.
+        from misaka.core.extensions import startup_sections
+
+        def _dim(text):
+            from misaka.modes.interactive.theme.theme import theme
+            return theme.fg("dim", text)
+
+        startup_sections.register(
+            "Skills",
+            lambda: _dim("  " + (", ".join(sorted(e["name"] for e in entries())) or "(none)")),
+            lambda: "\n".join(_dim(line) for line in
+                              skill_index.index_lines(entries(), skill_index.categories(roots))
+                              ) or _dim("  (none)"))
+
+        # ── tools ──
         async def list_execute(tool_call_id, raw, signal, on_update, ctx):
-            commands = scan_skill_commands(profile_dir, cwd=os.getcwd())
-            if not commands:
-                return {"content": [{"type": "text", "text": "No skills are available."}]}
-            lines = ["Available skills (use `skill_view` to load full instructions):"]
-            for info in sorted(commands.values(), key=lambda i: i["name"]):
-                lines.append(f"- {info['name']}: {info['description']}")
-            return {"content": [{"type": "text", "text": "\n".join(lines)}],
-                    "details": {"count": len(commands)}}
+            args = raw if isinstance(raw, ListParams) else ListParams(**(raw or {}))
+            found = [e for e in entries() if not args.category or e["category"] == args.category]
+            if not found:
+                return {"content": [{"type": "text", "text": "No skills are available."}],
+                        "details": {"count": 0, "categories": []}}
+            text = ("Available skills (use skill_view(name) to load full content):\n"
+                    + "\n".join(skill_index.index_lines(found, skill_index.categories(roots))))
+            return {"content": [{"type": "text", "text": text}],
+                    "details": {"count": len(found),
+                                "categories": sorted({e["category"] for e in found})}}
 
         harn.registerTool(ToolDefinition(
             name="skills_list", label="List skills",
-            description="List available skills with a short description; use `skill_view` before applying one.",
+            description="List available skills (name + description). Use skill_view(name) to load full content.",
             parameters=ListParams.model_json_schema(), execute=list_execute,
-            promptSnippet='List the available skills'))
+            promptSnippet="List the available skills"))
 
         async def view_execute(tool_call_id, raw, signal, on_update, ctx):
             args = raw if isinstance(raw, ViewParams) else ViewParams(**(raw or {}))
             err = lookup_path_error(args.name)
             if err:
                 return {"content": [{"type": "text", "text": err}], "isError": True}
-            commands = scan_skill_commands(profile_dir, cwd=os.getcwd())
-            info = commands.get(_slug(args.name)) or next(
-                (i for i in commands.values() if i["name"] == args.name.strip()), None)
-            if info is None:
-                names = ", ".join(sorted(i["name"] for i in commands.values())) or "none"
+            # hermes collision rule: a bare name that several layers claim is refused rather
+            # than guessed -- unless one of them is the project's, which overrides on purpose.
+            found = skill_index.candidates(roots, args.name)
+            exact = [e for e in found if e["rel"] == args.name.strip()]   # the directory path inside a layer
+            project = [e for e in found if e["layer"] == "project"]
+            found = exact or project or found
+            if len({e["dir"] for e in found}) > 1:
+                paths = "; ".join(e["path"] for e in found)
+                return {"content": [{"type": "text", "text": (
+                    f"Ambiguous skill name '{args.name}': {len(found)} skills match across your "
+                    f"layers. Refusing to guess — pass the skill's path inside its layer instead "
+                    f"of the bare name (e.g. 'category/skill-name'). Matches: {paths}")}],
+                        "isError": True}
+            entry = found[0] if found else None
+            if entry is None:
+                names = ", ".join(sorted(e["name"] for e in entries())) or "none"
                 return {"content": [{"type": "text",
                                      "text": f"Unknown skill '{args.name}'. Available: {names}"}],
                         "isError": True}
             if args.file_path:
-                content, err = read_support_file(info["skill_dir"], args.file_path)
+                content, err = read_support_file(entry["dir"], args.file_path)
                 if err:
                     return {"content": [{"type": "text", "text": err}], "isError": True}
                 return {"content": [{"type": "text", "text": content}],
-                        "details": {"skill": info["name"], "file": args.file_path}}
-            try:
-                sid = str(ctx.sessionManager.getSessionId())
-            except Exception:  # noqa: BLE001 - a missing session ID should not block loading
-                sid = None
-            message = build_skill_message(info, session_id=sid)
-            linked = collect_linked_files(info["skill_dir"])
-            if linked:
-                message += ('\n\n[Support files: load one with skill_view(name=..., file_path=...)]\n'
-                            + "\n".join(f"- {c}: {', '.join(fs)}" for c, fs in linked.items()))
-            return {"content": [{"type": "text", "text": message}],
-                    "details": {"skill": info["name"], "linked_files": linked}}
+                        "details": {"skill": entry["name"], "file": args.file_path}}
+            text, linked = skill_content(entry, session_id(ctx))
+            return {"content": [{"type": "text", "text": text}],
+                    "details": {"skill": entry["name"], "linked_files": linked}}
 
-        class ManageParams(BaseModel):
-            model_config = ConfigDict(extra="forbid")
-            action: str = Field(description="Operation: create, edit, patch, delete, write_file, or remove_file.")
-            name: str = Field(description="Lowercase kebab-case skill name and directory name.")
-            content: str = Field("", description="Complete SKILL.md text for create or edit.")
-            file_path: str = Field("", description="Relative support-file path, or optional patch target.")
-            file_content: str = Field("", description="Complete content for write_file.")
-            old_string: str = Field("", description="Exact text to replace; must match uniquely unless replace_all is true.")
-            new_string: str = Field("", description="Replacement text; use an empty string to remove the match.")
-            replace_all: bool = Field(False, description="Replace every match instead of requiring one unique match.")
-            absorbed_into: str = Field("", description="For delete, optional existing skill that absorbed this skill's useful content.")
+        harn.registerTool(ToolDefinition(
+            name="skill_view", label="View skill",
+            description="Skills allow for loading information about specific tasks and workflows, as well as scripts and templates. Load a skill's full content or access its linked files (references, templates, scripts). First call returns SKILL.md content plus a 'linked_files' index showing available references/templates/scripts. To access those, call again with file_path parameter.",
+            parameters=ViewParams.model_json_schema(), execute=view_execute,
+            promptSnippet="Load a skill's full instructions",
+            promptGuidelines=["When a task matches a skill description, load it with `skill_view` before acting."]))
 
         async def manage_execute(tool_call_id, raw, signal, on_update, ctx):
             from misaka.skills import manage as skill_manage
@@ -218,6 +243,8 @@ def tools_for(profile_dir):
                 new_string=args.new_string if args.action == "patch" else None,
                 replace_all=args.replace_all,
                 absorbed_into=args.absorbed_into if args.action == "delete" else None)
+            if result.get("success"):
+                skill_index.invalidate()        # the tree changed: the next turn advertises the new state
             lines = [result.get("message") or result.get("error") or ""]
             for key in ("gist", "description_preview", "hint", "lint_hint"):
                 if result.get(key):
@@ -239,45 +266,26 @@ def tools_for(profile_dir):
                 "When the user-controlled gate blocks a write, report it and do not seek a bypass.",
             ]))
 
-        harn.registerTool(ToolDefinition(
-            name="skill_view", label="View skill",
-            description="Load a skill's processed SKILL.md and support-file index, or read one support file by relative path.",
-            parameters=ViewParams.model_json_schema(), execute=view_execute,
-            promptSnippet="Load a skill's full instructions",
-            promptGuidelines=["When a task matches a skill description, load it with `skill_view` before acting."]))
-
-    return register
-
-
-def commands_for(profile_dir):
-    """Build slash commands for a role's skill stack."""
-
-    def register(harn):
+        # ── commands ──
         async def skill_cmd(args, ctx):
             raw = (args or "").strip()
-            cwd = os.getcwd()
-            commands = scan_skill_commands(profile_dir, cwd=cwd)
+            found = entries()
             if not raw:
-                if not commands:
+                if not found:
                     ctx.ui.notify("No skills are available in the current skill stack.", "info")
                     return
-                lines = [f"/skill {slug} — {info['description']}"
-                         for slug, info in sorted(commands.items())]
+                lines = [f"/skill {skill_index.slug(e['name'])} — {e['description']}"
+                         for e in sorted(found, key=lambda e: e["name"])]
                 ctx.ui.notify('Available skills:\n' + "\n".join(lines), "info")
                 return
             name, _, instruction = raw.partition(" ")
-            info = commands.get(_slug(name))
-            if info is None:
-                ctx.ui.notify(f"Unknown skill '{name}'. Available: {', '.join(sorted(commands))}",
-                              "error")
+            entry = skill_index.find(found, name)
+            if entry is None:
+                available = ", ".join(sorted(skill_index.slug(e["name"]) for e in found))
+                ctx.ui.notify(f"Unknown skill '{name}'. Available: {available}", "error")
                 return
-            try:
-                sid = str(ctx.sessionManager.getSessionId())
-            except Exception:  # noqa: BLE001 - a missing session ID should not block invocation
-                sid = None
-            message = build_skill_message(info, user_instruction=instruction.strip(),
-                                          session_id=sid)
-            await ctx.sendUserMessage(message)
+            await ctx.sendUserMessage(build_skill_message(
+                entry, user_instruction=instruction.strip(), session_id=session_id(ctx)))
 
         harn.registerCommand("skill", {
             "handler": skill_cmd,
@@ -336,13 +344,11 @@ def commands_for(profile_dir):
 
     return register
 
+
 SESSION_KINDS = {"foreground", "dm", "card"}
 
 
 def activate(spec):
-    commands, tools = commands_for(spec.profile_dir), tools_for(spec.profile_dir)
-
-    def register(harn):
-        commands(harn)
-        tools(harn)
-    return register
+    roots = (list(spec.skill_roots) if spec.skill_roots is not None
+             else skill_roots(spec.profile_dir, spec.workspace))
+    return register_for(roots, spec.profile_dir, cwd=spec.workspace)

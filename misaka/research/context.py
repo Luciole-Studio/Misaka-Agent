@@ -7,7 +7,6 @@ without a copy of it.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from misaka.research import ledger, runs
 
@@ -26,7 +25,7 @@ def _branch_chain(con, branch):
     return list(reversed(chain))
 
 
-def build(con, run, *, issue, parent_branch=None, max_findings=80):
+def build(con, run, *, issue, parent=None, max_findings=80):
     artifacts = [{"id": a["id"], "kind": a["kind"], "title": a["title"], "path": a["path"]}
                  for a in runs.artifacts(con, run["id"])]
     findings = []
@@ -42,7 +41,7 @@ def build(con, run, *, issue, parent_branch=None, max_findings=80):
         "root_session": run["root_session"],
         "target_issue": {"id": issue["id"], "kind": issue["kind"],
                          "question": issue["question"], "rationale": issue["rationale"]},
-        "ancestor_branches": _branch_chain(con, parent_branch) if parent_branch else [],
+        "ancestor_branches": _branch_chain(con, parent) if parent else [],
         "artifact_map": artifacts, "current_evidence_backed_findings": findings,
         "notice": (
             "Ancestor sessions and artifacts remain available at their recorded paths. "
@@ -85,12 +84,12 @@ def render(packet):
     return "\n".join(lines)
 
 
-def create(con, run, *, issue, branch, parent_branch=None):
-    packet = build(con, run, issue=issue, parent_branch=parent_branch)
+def create(con, run, *, issue, node, parent=None):
+    packet = build(con, run, issue=issue, parent=parent)
     aid, path = runs.write_text(
-        con, run["id"], "context", f"Branch {branch['id']} context",
-        f"branches/{branch['id']}/context.md", render(packet), branch_id=branch["id"],
-        metadata={"issue_id": issue["id"], "parent_branch": branch["parent_id"]},
+        con, run["id"], "context", f"Node {node['id']} context",
+        f"branches/{node['id']}/context.md", render(packet), branch_id=node["id"],
+        metadata={"issue_id": issue["id"], "parent": node["parent_id"]},
     )
-    runs.set_branch(con, branch["id"], context_artifact=aid)
+    runs.set_node(con, node["id"], context_artifact=aid)
     return aid, path, packet

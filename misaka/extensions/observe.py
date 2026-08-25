@@ -1,4 +1,4 @@
-"""Read-only slash commands for board and execution-tree views of the current project folder."""
+"""Read-only slash command for the task board of the current project folder."""
 
 
 def register(harn):
@@ -19,13 +19,6 @@ def register(harn):
         "handler": board_cmd,
         "description": "Show the read-only task board of this project folder."})
 
-    async def trace_cmd(args, ctx):
-        from misaka.observability import overview as observe
-        ctx.ui.notify(observe.render(_con(), _workspace(ctx)), "info")
-
-    harn.registerCommand("trace", {
-        "handler": trace_cmd,
-        "description": "Show the read-only task card → to-do → agent execution tree of this project folder."})
 
 SESSION_KINDS = {"foreground", "dm"}
 

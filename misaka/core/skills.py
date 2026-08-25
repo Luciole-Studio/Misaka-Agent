@@ -115,8 +115,9 @@ def load_skills(options: LoadSkillsOptions) -> LoadSkillsResult:
             skill_map[skill.name] = skill
             real_path_set.add(real_path)
 
-    # MISAKA fork: no implicit skill roots. Every session receives its project/role/shared
-    # stack explicitly through --skill (misaka.skills.layers.skills_stack).
+    # MISAKA fork: no implicit skill roots, and every MISAKA session runs with --no-skills.
+    # Skills are indexed and advertised by the skills extension (misaka.skills.index), hermes
+    # style; this loader only serves explicit --skill paths.
 
     def is_under_path(target: str, root: str) -> bool:
         normalized_root = os.path.abspath(root)

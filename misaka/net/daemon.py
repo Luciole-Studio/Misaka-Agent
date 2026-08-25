@@ -7,7 +7,7 @@ The protocol is newline-delimited JSON (requests carry id/method/params).
 Card panes: ``pane.run_card`` drives the board state machine -- claim a lease,
 open a pane running an interactive session, watch for submission/timeout/exit,
 then move the card to verifying, send it back, or fail it. Acceptance stays
-with the red-team path; the daemon only owns the process and never judges
+with the verification path; the daemon only owns the process and never judges
 its own work.
 """
 import asyncio
@@ -34,7 +34,7 @@ from misaka.config import CFG
 # Wire protocol version (strict equality, as in herdr). Bump it whenever *server
 # behaviour* changes, not only method/event shapes: an unbumped behaviour change
 # once let a stale daemon slip through the version gate.
-PROTOCOL = 22   # 22: one panel at a time -- a second attach "*" is refused; ping reports `panels`
+PROTOCOL = 30   # 30: pane.close returns immediately (background SIGKILL escalation); same-size pane.resize is a no-op
 RING_CAP = 256 * 1024          # output tail kept per pane
 FRAME_SECONDS = 0.008          # coalescing window for dirty-row broadcasts (~120 fps)
 SCROLLBACK_LINES = 2000        # scrollback history per pane
@@ -229,7 +229,11 @@ def _foreground(pane):
             shown = os.path.basename(argv[0])
             if shown in ("node", "python", "python3", "bun", "deno") and len(argv) > 1:
                 shown = os.path.basename(argv[1]) or shown   # interpreter + script: use the script name
-        return {"name": shown, "proc_name": name, "pid": fg,
+        try:
+            cwd = proc.cwd()               # herdr foreground_cwd: where the foreground job really is
+        except psutil.Error:
+            cwd = None
+        return {"name": shown, "proc_name": name, "pid": fg, "cwd": cwd,
                 "cmdline": " ".join(argv)[:200] if argv else name,
                 "is_shell": shown.lstrip("-") in _SHELLS or name.lstrip("-") in _SHELLS}
     except (OSError, psutil.Error):
@@ -256,9 +260,61 @@ def _ally_name(pane):
     return fg["name"] if fg["name"] in ally_commands() else None
 
 
-def _pane_busy(pane):
+# herdr's agent-state detection for third-party agents, core rules from
+# website/agent-detection/codex.toml and claude.toml. The OSC title is the strongest signal in
+# both manifests (priority 1050-1100) because it is the agent's own announcement; the screen
+# rules below it catch the prompts that are waiting for a person.
+_ALLY_TITLE_BLOCKED = ("action required",)                 # codex osc_title_blocked (1100)
+_ALLY_BLOCKERS = (                                         # codex live_strong_blocker/weak (900, 600)
+    "press enter to confirm or esc to cancel", "enter to submit answer",
+    "enter to submit all", "allow command?", "[y/n]", "yes (y)",
+    "do you want to proceed?", "waiting for permission",   # claude 850-300
+    "do you want to allow this connection?", "tab to amend", "ctrl+e to explain")
+_ALLY_WEAK_BLOCKERS = ("do you want to", "would you like to")   # only when a yes/pointer is offered
+_ALLY_WORKING_LINE = re.compile(r"^[•◦]\s+working \([^)]*esc to interrupt\)", re.M)   # codex (500)
+_ALLY_TAIL_ROWS = 8      # herdr reads its bottom_non_empty_lines(3..5) region; a few rows more here
+
+
+def _ally_verdict(pane):
+    """``(state, why)`` for the third-party agent in this pane: "working", "blocked", "idle",
+    or "unknown" when nothing matches (herdr shows unknown rather than guessing), plus the rule
+    that decided it -- ``pane.explain`` prints the reason.
+
+    The shell heuristic in ``_pane_busy`` cannot speak for these panes: to it, codex sitting at
+    its prompt is simply "a foreground process that is not the shell", i.e. permanently busy.
+    """
+    title = (getattr(pane.screen, "title", "") or "").strip()
+    low = title.lower()
+    if any(sign in low for sign in _ALLY_TITLE_BLOCKED):
+        return "blocked", f"its terminal title asks for you ({title!r})"
+    if any(ch in _SPINNER_CHARS for ch in title):
+        return "working", f"a spinner is running in its terminal title ({title!r})"
+    try:                     # herdr's bottom_non_empty_lines region: trailing blank rows say nothing
+        lines = [row.strip() for row in pane.screen.display if row.strip()]
+        tail = "\n".join(lines[-_ALLY_TAIL_ROWS:]).lower()
+    except Exception:  # noqa: BLE001 - a screen we cannot read says nothing
+        tail = ""
+    hit = next((sign for sign in _ALLY_BLOCKERS if sign in tail), None)
+    if hit is None and any(sign in tail for sign in _ALLY_WEAK_BLOCKERS) and ("yes" in tail or "❯" in tail):
+        hit = next(sign for sign in _ALLY_WEAK_BLOCKERS if sign in tail)
+    if hit is not None:
+        return "blocked", f"its screen is waiting on {hit!r}"
+    if _ALLY_WORKING_LINE.search(tail):
+        return "working", "its screen shows the working line"
+    if title:                                  # a title with no spinner in it: waiting for you
+        return "idle", f"its terminal title has no spinner in it ({title!r})"
+    return "unknown", "it sets no terminal title and its screen says nothing"
+
+
+def _ally_state(pane):
+    return _ally_verdict(pane)[0]
+
+
+def _pane_busy(pane, ally_state=None):
     """Is the pane actually busy right now? (herdr's agent-state detection, split by pane type.)
 
+    Ally panes (codex, claude): whatever ``_ally_state`` read off the pane -- the shell rule
+    below would call them busy forever.
     Shell panes: busy when the PTY foreground process is not the shell itself
     (comparing PIDs is not enough -- ``sh -c cmd`` execs over itself).
     Agent panes: busy when the screen shows a spinner frame *and* is still
@@ -266,6 +322,8 @@ def _pane_busy(pane):
     """
     if not pane.alive():
         return False
+    if ally_state is not None:
+        return ally_state == "working"
     own = os.path.basename(pane.argv[0]) if pane.argv else ""
     if own.lstrip("-") in _SHELLS:
         try:
@@ -293,6 +351,10 @@ def _busy_reason(pane):
     """Explain why a pane is classified as busy or idle."""
     if not pane.alive():
         return "Pane process has exited."
+    ally = _ally_name(pane)
+    if ally:
+        state, why = _ally_verdict(pane)
+        return f"Ally pane ({ally}): {state}, because {why}."
     own = os.path.basename(pane.argv[0]) if pane.argv else ""
     if own.lstrip("-") in _SHELLS:
         try:
@@ -385,9 +447,9 @@ class Daemon:
         self.sock_path = _expand(sock_path or CFG["net_sock"])
         self.snapshot_path = _expand(snapshot_path or CFG["net_snapshot"])
         self.panes: dict[str, Pane] = {}
+        self._reapers = set()          # background kill-escalation tasks (close never blocks)
         self._seq = 0
         self._theme = "dark"        # session theme variant; updated when the panel creates a pane with MISAKA_THEME
-        self.layout = []            # tab layout (one split tree per tab); owned by the daemon
         self._con = None            # board connection, opened on the first card run
         self._attached: dict[asyncio.StreamWriter, str] = {}   # subscribers: connection -> pane id
         self._panels: set[asyncio.StreamWriter] = set()        # panels (attach "*"): when the last one leaves, so do we
@@ -411,6 +473,10 @@ class Daemon:
             pane.argv, cwd=pane.cwd, stdin=slave, stdout=slave, stderr=slave,
             preexec_fn=_become_session_leader,
             env={**os.environ, **(env or {}), "TERM": "xterm-256color",
+                 # The pane's terminal is OUR pyte relay, which passes 24-bit SGR through
+                 # untouched -- without this hint the engine pre-bakes every theme colour
+                 # down to the 256 palette (rose #cb3862 -> 167 salmon).
+                 "COLORTERM": "truecolor",
                  "MISAKA_NET_PANE": pane.id},
         )
         os.close(slave)
@@ -523,30 +589,52 @@ class Daemon:
         self._save_snapshot()
         return pane
 
+    async def _reap(self, proc):
+        """SIGTERM was already sent: give the process a grace period, escalate to
+        SIGKILL, and reap -- polling, so the event loop never blocks."""
+        for _ in range(40):                      # 2s grace for engines to save state
+            if proc.poll() is not None:
+                return
+            await asyncio.sleep(0.05)
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        while proc.poll() is None:
+            await asyncio.sleep(0.05)
+
     def close(self, pane_id):
         pane = self.panes.pop(pane_id, None)
         if pane is None:
             raise ValueError(f"Pane not found: {pane_id}")
         if pane.alive():
-            # Slow-exiting apps (Node CLIs like claude) can outlast both waits. A
-            # timeout must never propagate: the group has been KILLed and the
-            # kernel will reap it, while an exception would surface in the panel
-            # as "cannot close" plus a crash.
+            # herdr kills and moves on: waiting here froze every pane for up to 4s
+            # per close (cascades serially longer). SIGTERM now; a background task
+            # escalates to SIGKILL and reaps, off the event loop.
             try:
                 os.killpg(pane.proc.pid, signal.SIGTERM)
             except OSError:
                 pass
             try:
-                pane.proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(pane.proc.pid, signal.SIGKILL)
-                except OSError:
-                    pass
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is None:      # no event loop (test teardown): the old synchronous ladder
                 try:
                     pane.proc.wait(timeout=2)
                 except subprocess.TimeoutExpired:
-                    pass          # KILL was sent; the kernel finishes it, the pane is removed regardless
+                    try:
+                        os.killpg(pane.proc.pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                    try:
+                        pane.proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        pass
+            else:
+                reaper = loop.create_task(self._reap(pane.proc))
+                self._reapers.add(reaper)
+                reaper.add_done_callback(self._reapers.discard)
         if pane.fd is not None:
             try:
                 asyncio.get_running_loop().remove_reader(pane.fd)
@@ -574,6 +662,51 @@ class Daemon:
             self._con = db.connect(_expand(CFG["db"]))
         return self._con
 
+    def _card_workspace(self, row):
+        """The card's folder is its project: a pane always runs there, and a folder that is
+        gone is refused rather than recreated somewhere the user deleted it."""
+        from misaka.platform import tasks as db
+        workspace = db.workspace_for(row)
+        if not os.path.isdir(workspace):
+            raise ValueError(f"Card {row['id']}: its folder {workspace} no longer exists.")
+        return workspace
+
+    def _card_env(self, row):
+        from misaka.platform import tasks as db
+        return {
+            "MISAKA_THEME": self._theme,    # card panes follow the session theme
+            # misaka commands inside the pane (e.g. an ally's `misaka tell`) must use
+            # the daemon's databases, or messages land in a different messages.db
+            # and Last Order never sees them.
+            "MISAKA_DB": _expand(CFG["db"]),
+            "MISAKA_MESSAGES": _expand(CFG["messages_db"]),
+            "MISAKA_TASKS": _expand(CFG["tasks_root"]),
+            "MISAKA_TASK_DIR": db.task_state_dir(row["id"]),
+            "MISAKA_TASK_OUTPUT_DIR": str(row["output_dir"] or db.workspace_for(row)),
+        }
+
+    def resume_card(self, task_id, parent=None, say=None) -> Pane:
+        """Reopen a card's saved session in a pane (no claim, no contract, no model turn unless
+        ``say`` is given as the first message). Last Order uses this to bring a Sister back
+        beside her after a resumed conversation; the panel uses it for a click on a card session."""
+        from misaka.platform import tasks as db
+        from misaka.network.sister_runtime import ACTIVE_BOARD_STATUSES
+        row = db.get(self._board(), task_id)
+        if row is None:
+            raise ValueError(f"Card not found: {task_id}")
+        if row["status"] in ACTIVE_BOARD_STATUSES:
+            raise ValueError(f"Card {task_id} is still {row['status']}; steer its running pane instead.")
+        session = os.path.join(db.task_state_dir(task_id), "session")
+        if not (os.path.isdir(session) and any(n.endswith(".jsonl") for n in os.listdir(session))):
+            raise ValueError(f"Card {task_id} has no saved session to reopen.")
+        workspace = self._card_workspace(row)
+        run_dir = workspace
+        argv = [*CARD_SHELL, task_id, "--resume"] + (["--say", say] if say else [])
+        pane = self.create(argv, run_dir, title=f"{row['assignee']}·{task_id}", card=task_id,
+                           env=self._card_env(row), parent=parent)
+        self._save_snapshot()
+        return pane
+
     def run_card(self, task_id, parent=None) -> Pane:
         from misaka.platform import tasks as db
         from misaka.platform import admission, processes as process_tree
@@ -600,34 +733,27 @@ class Daemon:
                         generation=generation, pid=os.getpid(),
                         host_cap=host_cap, assignee_cap=assignee_cap):
             raise ValueError(f"Card {task_id} was claimed by another dispatcher.")
-        workspace = db.workspace_for(row)
         try:
-            os.makedirs(workspace, exist_ok=True)
+            workspace = self._card_workspace(row)
+            run_dir = workspace
             env = {
+                **self._card_env(row),
                 "MISAKA_USAGE_DB": _expand(CFG["db"]),
                 "MISAKA_USAGE_TASK_ID": task_id,
                 "MISAKA_USAGE_GENERATION": str(generation),
                 "MISAKA_USAGE_CLAIM_LOCK": lock,
                 "MISAKA_USAGE_TOKEN_CAP": str(int(CFG.get("token_cap") or 0)),
-                "MISAKA_THEME": self._theme,    # card panes follow the session theme
-                # misaka commands inside the pane (e.g. an ally's `misaka tell`) must use
-                # the daemon's databases, or messages land in a different messages.db
-                # and Last Order never sees them.
-                "MISAKA_DB": _expand(CFG["db"]),
-                "MISAKA_MESSAGES": _expand(CFG["messages_db"]),
-                "MISAKA_TASKS": _expand(CFG["tasks_root"]),
-                "MISAKA_TASK_DIR": db.task_state_dir(task_id),
-                "MISAKA_TASK_OUTPUT_DIR": str(row["output_dir"] or workspace),
             }
             if executor is None:
                 argv = [*CARD_SHELL, task_id]
             else:  # ally: the card contract is the prompt, run one non-interactive turn
                 from misaka.extensions.last_order.ally import runner as ally_runner
                 task = dict(row)
-                task["_attachments"] = db.stage_attachments(con, task_id, workspace)
+                from misaka.platform import cards
+                task["_attachments"] = cards.attachment_list(run_dir, task_id, workspace=workspace)
                 argv = ally_runner.build_argv(executor, ally_runner.card_prompt(task))
                 env["MISAKA_ALLY"] = row["assignee"]
-            pane = self.create(argv, workspace,
+            pane = self.create(argv, run_dir,
                                title=f"{row['assignee']}·{task_id}", card=task_id,
                                env=env, parent=parent)
         except BaseException:
@@ -647,12 +773,19 @@ class Daemon:
         return pane
 
     async def _watch_cards(self):
-        """Watch every card pane: submission -> verifying; timeout -> failed; exit -> reconcile against artifacts."""
+        """Watch ALLY card panes only: an external CLI cannot supervise itself, so the daemon
+        keeps its heartbeat, deadline, and exit reconciliation. A MISAKA card drives itself
+        (card_shell.Supervisor, phase 2); the daemon just hosts its pane."""
         from misaka.platform import tasks as db
-        from misaka.network import worker
 
+        worker = None
         while not self._stopping.is_set():
-            for pane in [p for p in self.panes.values() if p.card and p.claim_lock]:
+            allies = [p for p in self.panes.values() if p.card and p.claim_lock and p.ally]
+            if allies and worker is None:
+                # ~1s of engine imports: loaded only when an ally card pane actually
+                # exists, never at daemon startup (it blocked the first ping for 0.7s).
+                from misaka.network import worker
+            for pane in allies:
                 con = self._board()
                 row = db.get(con, pane.card)
                 if row is None or int(row["generation"]) != pane.generation \
@@ -705,6 +838,8 @@ class Daemon:
                             pane.last_heartbeat = time.time()
                     ok, report = worker.check_report(pane.cwd, con=con, task_id=pane.card)
                     if ok:
+                        from misaka.platform import repo
+                        repo.commit_card(pane.cwd, pane.card, report, f"card {pane.card}: submit")
                         if db.mark_verifying(con, pane.card,
                                              generation=pane.generation,
                                              claim_lock=pane.claim_lock):
@@ -741,13 +876,13 @@ class Daemon:
             except asyncio.TimeoutError:
                 pass
 
-    # ── Snapshot (shape only: layout, argv, cwd -- never process state) ──
+    # ── Snapshot (shape only: argv, cwd, card -- never process state) ──
 
     def _save_snapshot(self):
-        # The layout (tabs plus split trees) belongs to the daemon, as in herdr: clients
-        # are thin, and the layout survives the panel exiting. It used to live in the
-        # panel's memory, and detaching flattened every split into tabs.
-        data = {"version": 1, "layout": self.layout, "panes": [
+        # Shape only, for the crash trace and the pending-card notice at the next start.
+        # Nothing is recreated from it: since the daemon leaves with the panel, a restore
+        # could only raise stale Last Orders as fresh sessions in folders the user left.
+        data = {"version": 1, "panes": [
             {"id": p.id, "title": p.title, "argv": p.argv, "cwd": p.cwd,
              "card": p.card} for p in self.panes.values()]}
         tmp = self.snapshot_path + ".tmp"
@@ -757,23 +892,14 @@ class Daemon:
         os.replace(tmp, self.snapshot_path)
 
     def restore_snapshot(self):
-        """Restore = recreate ordinary panes (new process in the same cwd). Card panes are never
-        rerun automatically (they cost money; wait for a human). Returns the skipped card IDs."""
+        """Nothing is restored (see _save_snapshot); this only reports the cards that were still
+        running when the last daemon died, so the panel can say they need redispatching."""
         try:
             with open(self.snapshot_path, encoding="utf-8") as f:
                 data = json.load(f)
         except (OSError, ValueError):
             return []
-        skipped = []
-        for item in data.get("panes", []):
-            if item.get("card"):
-                skipped.append(item["card"])
-                continue
-            if os.path.isdir(item.get("cwd") or ""):
-                self.create(item["argv"], item["cwd"], title=item.get("title", ""))
-        # Restore the layout as-is; the panel's sync drops stale pane ids (recreated panes get new ids).
-        self.layout = data.get("layout") or []
-        return skipped
+        return [item["card"] for item in data.get("panes", []) if item.get("card")]
 
     # ── Protocol ──────────────────────────────────────────────
 
@@ -800,48 +926,48 @@ class Daemon:
                     mcon.close()
                 except Exception:  # noqa: BLE001 - a broken mailbox must not take the panel down
                     mail = {}
-            return {"panes": [
-                {"id": p.id, "title": p.title, "card": p.card, "cwd": p.cwd,
-                 "parent": p.parent, "reported": p.reported,
-                 "alive": p.alive(), "exit_code": p.exit_code,
-                 "status": status.get(p.card),
-                 "busy": _pane_busy(p),
-                 "foreground": _foreground(p),   # what runs in the foreground (for Last Order)
-                 "ally": _ally_name(p),          # non-empty = a third-party agent runs in this pane
-                 "mail": int(mail.get(p.card, 0)) if p.card else 0,
-                 "unseen": bool(p.card
-                                and status.get(p.card) in {"done", "failed", "stopped"}
-                                and status.get(p.card) != p.seen_status),
-                 "pid": p.proc.pid if p.proc else None} for p in self.panes.values()]}
-        if method == "layout.get":      # the daemon owns the layout, so splits survive panel restarts
-            return {"layout": self.layout}
-        if method == "layout.set":
-            self.layout = params.get("layout") or []
-            self._save_snapshot()
-            return {"ok": True}
-        if method == "projects.list":
-            # A project is a folder: cards grouped by workspace, only the caller's
-            # folder when one is given (it is a project even before its first card).
+            def row(p):
+                ally = _ally_name(p)             # non-empty = a third-party agent runs in this pane
+                state = _ally_state(p) if ally and p.alive() else None
+                return {"id": p.id, "title": p.title, "card": p.card, "cwd": p.cwd,
+                        "parent": p.parent, "reported": p.reported,
+                        "alive": p.alive(), "exit_code": p.exit_code,
+                        "status": status.get(p.card),
+                        "busy": _pane_busy(p, ally_state=state),
+                        "foreground": _foreground(p),   # what runs in the foreground (for Last Order)
+                        "ally": ally,
+                        "agent_state": state,    # herdr's detection: working / blocked / idle / unknown
+                        "mail": int(mail.get(p.card, 0)) if p.card else 0,
+                        "unseen": bool(p.card
+                                       and status.get(p.card) in {"done", "failed", "stopped"}
+                                       and status.get(p.card) != p.seen_status),
+                        # What the pane was launched on: the panel reads `--session <path>`
+                        # from it to know which conversation a pane is opening before the
+                        # session itself reports (the gap where a second click opened a
+                        # second tab).
+                        "argv": list(p.argv),
+                        "pid": p.proc.pid if p.proc else None}
+            return {"panes": [row(p) for p in self.panes.values()]}
+        if method == "cards.list":
+            # The board's cards with what the panel's sessions list needs: the folder each
+            # belongs to, whether it has a session to reopen, and which Last Order conversation
+            # created it. Given a workspace, only that folder's cards.
             from misaka.platform import tasks as db
-            con = self._board()
             workspace = (db.canonical_workspace(params["workspace"])
                          if params.get("workspace") else None)
-            groups = {workspace: []} if workspace else {}
-            sql = "SELECT id,status,title,assignee,workspace FROM tasks"
+            sql = "SELECT id,status,title,assignee,workspace,origin_session FROM tasks"
             args = []
             if workspace:
                 sql += " WHERE workspace=?"
                 args.append(workspace)
-            for r in con.execute(sql + " ORDER BY workspace,created_at", args):
+            cards = []
+            for r in self._board().execute(sql + " ORDER BY created_at", args):
                 sess = os.path.join(db.task_state_dir(r["id"]), "session")
-                groups.setdefault(r["workspace"], []).append(
-                    {"id": r["id"], "status": r["status"], "title": r["title"],
-                     "assignee": r["assignee"],
-                     "has_session": os.path.isdir(sess) and bool(os.listdir(sess))})
-            return {"projects": [
-                {"id": ws, "name": os.path.basename(ws.rstrip(os.sep)) or ws,
-                 "workspace": ws, "cards": cards}
-                for ws, cards in groups.items()]}
+                cards.append({"id": r["id"], "status": r["status"], "title": r["title"],
+                              "assignee": r["assignee"], "workspace": r["workspace"],
+                              "origin_session": r["origin_session"],
+                              "has_session": os.path.isdir(sess) and bool(os.listdir(sess))})
+            return {"cards": cards}
         if method == "card.delete":
             # A running card still occupies a pane: refuse and let the user stop it first (the panel uses card.stop).
             if any(p.card == params["task_id"] and p.alive()
@@ -866,7 +992,9 @@ class Daemon:
             if pane.reported and seq < pane.reported["seq"]:
                 return {"ok": False, "stale": True}
             pane.reported = {"state": state, "message": str(params.get("message") or "")[:240],
-                             "seq": seq}
+                             "seq": seq,
+                             # The session file this pane writes: the panel marks its list with it.
+                             "session": str(params.get("session") or "")[:1024]}
             return {"ok": True}
         if method == "pane.explain":     # like herdr's `agent explain`: why the pane is busy/idle
             pane = self.panes.get(params["id"])
@@ -907,6 +1035,10 @@ class Daemon:
         if method == "pane.run_card":
             pane = self.run_card(params["task_id"], parent=params.get("parent"))
             return {"pane_id": pane.id, "pid": pane.proc.pid, "card": pane.card}
+        if method == "pane.resume_card":
+            pane = self.resume_card(params["task_id"], parent=params.get("parent"),
+                                    say=params.get("say"))
+            return {"pane_id": pane.id, "pid": pane.proc.pid, "card": pane.card}
         if method == "pane.read":
             pane = self.panes.get(params["id"])
             if pane is None:
@@ -939,6 +1071,10 @@ class Daemon:
             if pane is None or pane.fd is None:
                 raise ValueError(f"Pane is missing or has exited: {params['id']}")
             rows, cols = int(params["rows"]), int(params["cols"])
+            if (pane.screen.lines, pane.screen.columns) == (rows, cols):
+                # herdr resizes only on a real change: an unchanged size must not
+                # SIGWINCH the app into a pointless full repaint on every tab switch.
+                return {"resized": False}
             fcntl.ioctl(pane.fd, termios.TIOCSWINSZ,
                         struct.pack("HHHH", rows, cols, 0, 0))
             pane.screen.resize(rows, cols)
@@ -1023,12 +1159,14 @@ class Daemon:
     async def run(self):
         # Singleton: if the socket answers, a daemon is already running; a stale socket is removed and recreated.
         if os.path.exists(self.sock_path):
+            # herdr ipc.rs prepare_socket_path: a live listener refuses a second server;
+            # refused / missing / timed out means a stale file to reclaim.
             probe = socket.socket(socket.AF_UNIX)
+            probe.settimeout(1.0)
             try:
                 probe.connect(self.sock_path)
-                probe.close()
                 raise SystemExit("The daemon is already running (its socket answered).")
-            except (ConnectionRefusedError, FileNotFoundError, OSError):
+            except (ConnectionRefusedError, FileNotFoundError, TimeoutError, OSError):
                 pass
             finally:
                 probe.close()
@@ -1052,14 +1190,15 @@ class Daemon:
                 self.close(pane_id)
             except ValueError:
                 pass
+        if self._reapers:      # all grace periods run in parallel; worst case ~2.5s, not 4s x panes
+            await asyncio.gather(*list(self._reapers), return_exceptions=True)
         server.close()
         for writer in list(self._clients):   # close lingering connections or wait_closed never returns
             writer.close()
         await server.wait_closed()
-        try:
-            os.unlink(self.sock_path)
-        except OSError:
-            pass
+        # herdr leaves the socket file at shutdown (ipc.rs reclaim_name(false)): the next
+        # daemon's startup probe reclaims a stale file, so no unlink can ever race a
+        # successor that has already bound the same path.
 
 
 def main():
