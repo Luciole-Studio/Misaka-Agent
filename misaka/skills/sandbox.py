@@ -39,8 +39,14 @@ def readonly_copies(skill_dirs, dest_root):
         )
     os.makedirs(dest_root, exist_ok=True)
     copies = []
+    used = set()
     for d in skill_dirs:
-        dst = os.path.join(dest_root, os.path.basename(d.rstrip("/")))
+        base = os.path.basename(d.rstrip("/")) or "skill"
+        name, n = base, 2
+        while name in used:   # two sources, one basename: keep both, deterministically
+            name, n = f"{base}-{n}", n + 1
+        used.add(name)
+        dst = os.path.join(dest_root, name)
         if os.path.exists(dst):
             cleanup(dst)
         def _ignore(src, names, _pat=shutil.ignore_patterns(".git", "__pycache__")):
