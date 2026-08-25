@@ -12,10 +12,11 @@ import hashlib
 import json
 import os
 import secrets
+import sys
 import time
 from pathlib import Path
 
-from misaka.platform import notifications, tasks as task_store
+from misaka.platform import tasks as task_store
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS research_runs (
@@ -55,6 +56,7 @@ CREATE TABLE IF NOT EXISTS research_run_tasks (
   wave            INTEGER NOT NULL DEFAULT 0,
   preflight_artifact TEXT,
   local_id        TEXT,
+  issue_id        TEXT,
   depends_json    TEXT NOT NULL DEFAULT '[]',
   created_at      INTEGER NOT NULL
 );
@@ -68,7 +70,7 @@ CREATE TABLE IF NOT EXISTS research_issues (
   rationale       TEXT NOT NULL,
   priority        INTEGER NOT NULL DEFAULT 0,
   status          TEXT NOT NULL DEFAULT 'open',
-  probe_task_id   TEXT,
+  reason          TEXT,
   child_branch_id TEXT,
   created_at      INTEGER NOT NULL
 );
@@ -120,7 +122,7 @@ NODE_TERMINAL = ("closed", "failed", "parked")
 NODE_STATES = ("queued", "planning", "waiting_input", "executing", "synthesizing", "critiquing",
                "probing", "triaging", "closing", *NODE_TERMINAL)   # closing = triaged, waiting for its children
 DEFAULT_LIMITS = {"max_depth": 3}
-RESEARCH_SCHEMA_VERSION = 6
+RESEARCH_SCHEMA_VERSION = 7
 
 
 def init(con):
@@ -130,16 +132,26 @@ def init(con):
         (RESEARCH_SCHEMA_VERSION,),
     ).fetchone()
     if columns and not current:
-        # No migration from older schemas: files are the truth, the tables are a rebuildable index.
+        # No migration from older schemas: files are the truth and the tables are meant to be a
+        # rebuildable index -- but nothing rebuilds them yet, so the old tables are renamed, not
+        # dropped, until a rebuild or an incremental migration exists.
+        suffix = f"_bak_{time.strftime('%Y%m%d%H%M%S')}"
         for table in (
             "research_claims", "research_evidence_assessments", "research_findings",
             "research_artifacts", "research_issues", "research_run_tasks",
             "research_branches", "research_runs",
         ):
-            con.execute(f'DROP TABLE IF EXISTS "{table}"')
+            if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                continue
+            for index in con.execute(f'PRAGMA index_list("{table}")').fetchall():
+                if index[3] == "c":   # named indexes stay global; free the names for the new tables
+                    con.execute(f'DROP INDEX IF EXISTS "{index[1]}"')
+            con.execute(f'ALTER TABLE "{table}" RENAME TO "{table}{suffix}"')
+        print(f"research: schema changed to v{RESEARCH_SCHEMA_VERSION}; the previous tables were kept "
+              f"as *{suffix} (no rebuild from files exists yet).", file=sys.stderr)
     con.executescript(SCHEMA)
     con.executescript(INDEXES)
-    notifications.install_research(con)
+    con.execute("DROP TRIGGER IF EXISTS research_terminal_notification")   # older boards: nothing consumes it any more
     _backfill_dependencies(con)
     con.execute(
         "INSERT OR IGNORE INTO schema_migrations(component,version,applied_at) VALUES(?,?,?)",
@@ -347,8 +359,12 @@ def stop_requested(con, run_id):
 
 
 def call_timeout(cfg, default):
-    """Per-call failure timeout; this is not a research stopping criterion."""
-    return max(1, int(default))
+    """Per-call failure timeout in seconds (``cfg["call_timeout"]`` overrides ``default``); this is not a research stopping criterion."""
+    try:
+        value = int((cfg or {}).get("call_timeout") or default)
+    except (TypeError, ValueError, AttributeError):
+        value = int(default)
+    return max(1, value)
 
 
 def task_count(con, run_id):
@@ -358,7 +374,7 @@ def task_count(con, run_id):
 
 
 def link_task(con, run_id, task_id, *, kind, node, preflight_artifact=None,
-              local_id=None, dependencies=()):
+              local_id=None, issue_id=None, dependencies=()):
     """Attach a card to a node. The card's workspace is the node's line (set by the card's creation);
     its output_dir lives under that line's copy of the run directory."""
     run = get(con, run_id)
@@ -367,12 +383,12 @@ def link_task(con, run_id, task_id, *, kind, node, preflight_artifact=None,
     dependencies = list(dependencies)
     con.execute(
         "INSERT INTO research_run_tasks "
-        "(task_id,run_id,branch_id,kind,wave,preflight_artifact,local_id,depends_json,created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
-        (task_id, run_id, node["id"], kind, int(node["depth"]), preflight_artifact, local_id,
+        "(task_id,run_id,branch_id,kind,wave,preflight_artifact,local_id,issue_id,depends_json,created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (task_id, run_id, node["id"], kind, int(node["depth"]), preflight_artifact, local_id, issue_id,
          json.dumps(dependencies, ensure_ascii=False), int(time.time())),
     )
-    output_dir = Path(node_root(run, node), "research", run_id, "tasks", task_id, "work")
+    output_dir = Path(os.path.realpath(node_root(run, node)), "research", run_id, "tasks", task_id, "work")
     output_dir.mkdir(parents=True, exist_ok=True)
     con.execute("UPDATE tasks SET output_dir=? WHERE id=?", (str(output_dir), task_id))
     for dependency in dependencies:
@@ -384,10 +400,10 @@ def link_task(con, run_id, task_id, *, kind, node, preflight_artifact=None,
             task_store.link_tasks(con, parent["task_id"], task_id)
 
 
-def tasks(con, run_id, *, kind=None, node_id=None):
+def tasks(con, run_id, *, kind=None, node_id=None, issue_id=None):
     q, args = (
         "SELECT t.*,rt.branch_id,rt.kind AS research_kind,rt.wave,rt.preflight_artifact,"
-        "rt.local_id,rt.depends_json "
+        "rt.local_id,rt.issue_id,rt.depends_json "
         "FROM research_run_tasks rt JOIN tasks t ON t.id=rt.task_id WHERE rt.run_id=?",
         [run_id],
     )
@@ -397,6 +413,9 @@ def tasks(con, run_id, *, kind=None, node_id=None):
     if node_id is not None:
         q += " AND rt.branch_id=?"
         args.append(node_id)
+    if issue_id is not None:
+        q += " AND rt.issue_id=?"
+        args.append(issue_id)
     return con.execute(q + " ORDER BY rt.created_at", args).fetchall()
 
 
@@ -431,13 +450,10 @@ def nodes(con, run_id, *, parent_id=None):
     return con.execute(q + " ORDER BY depth,created_at", args).fetchall()
 
 
-def next_node(con, run_id):
-    """The BFS frontier's head: the shallowest, oldest node still expanding."""
-    return con.execute(
-        "SELECT * FROM research_branches WHERE run_id=? "
-        "AND status NOT IN ('closing','closed','failed','parked') "
-        "ORDER BY depth,created_at LIMIT 1", (run_id,),
-    ).fetchone()
+def next_level(con, run_id):
+    """The BFS frontier: every node still expanding at the shallowest such depth, oldest first."""
+    rows = [n for n in nodes(con, run_id) if n["status"] not in ("closing", *NODE_TERMINAL)]
+    return [n for n in rows if n["depth"] == rows[0]["depth"]] if rows else []
 
 
 def set_node(con, node_id, *, status=None, session_file=None, context_artifact=None,
@@ -468,6 +484,11 @@ def node_worktree(run, node_id):
 
 def node_branch(node_id):
     return f"research/{node_id}"
+
+
+def probe_session_dir(run, issue_id):
+    """Where a Last Order fork on one issue keeps its session (forked from the node's)."""
+    return session_dir(run, f"probe-{issue_id}")
 
 
 def node_prefix(node):
@@ -508,11 +529,15 @@ def issues(con, run_id, *, node_id=None, status=None):
     return con.execute(q + " ORDER BY priority DESC,created_at", args).fetchall()
 
 
-def set_issue(con, issue_id, status, *, child_branch_id=None, probe_task_id=None):
+def issue(con, issue_id):
+    return con.execute("SELECT * FROM research_issues WHERE id=?", (issue_id,)).fetchone()
+
+
+def set_issue(con, issue_id, status, *, child_branch_id=None, reason=None):
     con.execute(
         "UPDATE research_issues SET status=?,child_branch_id=COALESCE(?,child_branch_id),"
-        "probe_task_id=COALESCE(?,probe_task_id) WHERE id=?",
-        (status, child_branch_id, probe_task_id, issue_id),
+        "reason=COALESCE(?,reason) WHERE id=?",
+        (status, child_branch_id, reason, issue_id),
     )
 
 
@@ -549,6 +574,42 @@ def write_text(con, run_id, kind, title, relative_path, content, *,
          json.dumps(metadata or {}, ensure_ascii=False), int(time.time())),
     )
     return aid, str(path)
+
+
+def register_file(con, run_id, kind, title, path, *, sha256, branch_id=None, task_id=None, metadata=None):
+    """Register a file that already exists (a Sister's artifact on its card's line) without copying it.
+    ``path`` is where it rests once merged; ``metadata["source_workspace"]`` is where it is now."""
+    path = os.path.normpath(path)
+    old = con.execute("SELECT id FROM research_artifacts WHERE path=?", (path,)).fetchone()
+    if old:
+        con.execute(
+            "UPDATE research_artifacts SET sha256=?,title=?,kind=?,task_id=?,metadata_json=?,created_at=? "
+            "WHERE id=?",
+            (sha256, str(title), str(kind), task_id, json.dumps(metadata or {}, ensure_ascii=False),
+             int(time.time()), old["id"]),
+        )
+        return old["id"], path
+    aid = "a_" + secrets.token_hex(5)
+    con.execute(
+        "INSERT INTO research_artifacts "
+        "(id,run_id,branch_id,task_id,kind,title,path,sha256,metadata_json,created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (aid, run_id, branch_id, task_id, str(kind), str(title), path, sha256,
+         json.dumps(metadata or {}, ensure_ascii=False), int(time.time())),
+    )
+    return aid, path
+
+
+def artifact_text(row):
+    """An artifact's text from where it lives now (a card's line before its node merges), else its resting path."""
+    try:
+        source = json.loads(row["metadata_json"] or "{}").get("source_workspace")
+    except ValueError:
+        source = None
+    for path in (source, row["path"]):
+        if path and os.path.isfile(path):
+            return Path(path).read_text(encoding="utf-8")
+    raise FileNotFoundError(row["path"])
 
 
 def artifacts(con, run_id, *, branch_id=None, kind=None, task_id=None, root_only=False):
