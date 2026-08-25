@@ -42,7 +42,7 @@ divide the work into tasks and choose Sisters by their profiles and skills.
 
 Return exactly one JSON object of this shape. `plan_markdown` and `extensions` are free-form:
 {
-  "status": "ready|clarify|probe",
+  "status": "ready|clarify",
   "clarifying_questions": ["A question that needs a human decision before research can continue"],
   "plan_markdown": "The complete, open-ended research plan in Markdown; never the answer",
   "methods": [{"name":"Method", "why":"Why it fits", "blind_spots":"What it may miss", "skill":"optional skill name"}],
@@ -295,7 +295,7 @@ def validate_plan(obj, roster):
     if not isinstance(obj, dict):
         raise ValueError("Last Order planning output is not an object.")
     status = obj.get("status")
-    if status not in {"ready", "clarify", "probe"}:
+    if status not in {"ready", "clarify"}:
         raise ValueError("Last Order returned an invalid planning status.")
     plan_markdown = obj.get("plan_markdown")
     if not isinstance(plan_markdown, str) or len(plan_markdown.strip()) < 40:
