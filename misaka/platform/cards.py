@@ -17,7 +17,7 @@ from pathlib import Path
 
 from ruamel.yaml import YAML
 
-from misaka.platform import tasks
+from misaka.platform import repo, tasks
 from misaka.utils.frontmatter import parse_frontmatter
 
 LOG_HEADING = "## log"
@@ -299,7 +299,7 @@ def init_project(folder):
     initial commit; an existing repository is never committed to."""
     folder = tasks.canonical_workspace(folder)
     actions = []
-    fresh = not os.path.isdir(os.path.join(folder, ".git"))
+    fresh = not repo.enabled(folder)  # a worktree's .git is a file, not a directory
     if fresh:
         subprocess.run(["git", "init", "-q"], cwd=folder, check=True)
         actions.append("git repository created")
