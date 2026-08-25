@@ -468,7 +468,6 @@ __all__ = [
     "TaskStopParams",
     "allows_subagents",
     "bind",
-    "register",
     "route_to_children",
     "wait_for_async_hooks",
     "wait_for_background_tasks",
