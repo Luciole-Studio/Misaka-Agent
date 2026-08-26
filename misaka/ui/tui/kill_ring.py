@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from collections import deque
+
+MAX_KILLS = 60          # as in Emacs: old kills fall off the far end
+
 
 class KillRing:
-    def __init__(self) -> None:
-        self._ring: list[str] = []
+    def __init__(self, limit: int = MAX_KILLS) -> None:
+        self._ring: deque[str] = deque(maxlen=max(1, limit))
 
     def push(self, text: str, opts: dict[str, bool]) -> None:
         if not text:
@@ -23,12 +27,11 @@ class KillRing:
 
     def rotate(self) -> None:
         if len(self._ring) > 1:
-            last = self._ring.pop()
-            self._ring.insert(0, last)
+            self._ring.appendleft(self._ring.pop())
 
     @property
     def length(self) -> int:
         return len(self._ring)
 
 
-__all__ = ["KillRing"]
+__all__ = ["MAX_KILLS", "KillRing"]

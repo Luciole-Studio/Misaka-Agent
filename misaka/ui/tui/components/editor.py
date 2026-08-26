@@ -303,7 +303,7 @@ class Editor:
         self.jumpMode: str | None = None
         self.preferredVisualCol: int | None = None
         self.snappedFromCursorCol: int | None = None
-        self.undoStack: UndoStack[EditorState] = UndoStack()
+        self.undoStack: UndoStack[dict[str, Any]] = UndoStack()
         self.onSubmit: Callable[[str], None] | None = None
         self.onChange: Callable[[str], None] | None = None
         self.disableSubmit = False
@@ -1443,10 +1443,13 @@ class Editor:
             self.onChange(self.getText())
 
     def pushUndoSnapshot(self) -> None:
+        # Copy exactly what editing rebinds: the line list and the paste table. Their
+        # contents are immutable strings, so a shallow copy is enough and a deep one
+        # would clone every paste payload on every keystroke.
         self.undoStack.push({
-            "state": EditorState(lines=self.state.lines, cursorLine=self.state.cursorLine,
+            "state": EditorState(lines=list(self.state.lines), cursorLine=self.state.cursorLine,
                                  cursorCol=self.state.cursorCol),
-            "pastes": self.pastes,
+            "pastes": dict(self.pastes),
             "pasteCounter": self.pasteCounter,
         })
 
