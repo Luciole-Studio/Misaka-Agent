@@ -1002,6 +1002,14 @@ class InteractiveMode:
         command_name = text[1:] if space_index == -1 else text[1:space_index]
         return bool(get_command(command_name))
 
+    def isPromptTemplate(self, text: str) -> bool:
+        """Whether this names a prompt template, which the menu offers and prompt() expands."""
+        if not text.startswith("/"):
+            return False
+        space_index = text.find(" ")
+        name = text[1:] if space_index == -1 else text[1:space_index]
+        return any(str(t.name) == name for t in getattr(self.session, "promptTemplates", []) or [])
+
     async def flushCompactionQueue(self, options: dict[str, Any] | None = None) -> None:
         if not self.compactionQueuedMessages:
             return
@@ -3062,10 +3070,12 @@ class InteractiveMode:
             await self.shutdown()
             return
 
-        # Unknown slash commands fail loudly instead of being sent to the model as text.
-        # Silently falling through showed only "Working..." and made it look as if the
-        # command had taken effect, and slash_commands still lists some unimplemented entries.
-        if text.startswith("/") and not text.startswith("//") and not self.isExtensionCommand(text):
+        # Unknown slash commands fail loudly instead of being sent to the model as text:
+        # silently falling through showed only "Working..." and made it look as though the
+        # command had taken effect. A prompt template is not unknown -- the menu offers it
+        # and AgentSession.prompt expands it -- so it passes through to the model path.
+        if (text.startswith("/") and not text.startswith("//")
+                and not self.isExtensionCommand(text) and not self.isPromptTemplate(text)):
             name = text[1:].split(" ", 1)[0]
             if name and not name[0].isdigit():
                 self._set_editor_text("")
