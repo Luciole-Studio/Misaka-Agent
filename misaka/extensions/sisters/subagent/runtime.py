@@ -47,6 +47,16 @@ from misaka.utils import atomic
 
 TERMINAL_STATUSES = frozenset({"completed", "failed", "killed"})
 BUDGET_HEARTBEAT_SECONDS = 60
+
+
+def turn_outcome(stop_requested, error, error_message, stop_reason, background):
+    """How a finished turn is recorded: an errored turn is failed -- never rewritten as completed.
+    A foreground caller still receives the partial messages; a detached one gets no result."""
+    if stop_requested:
+        return "killed", error or "Agent task was stopped", True
+    if error or stop_reason in {"error", "aborted"}:
+        return "failed", error or error_message or f"request {stop_reason}", not background
+    return "completed", None, True
 MANAGEMENT_TOOLS = ("Agent", "TaskOutput", "SendMessage", "TaskStop")
 _TOOL_CEILING_UNSET = object()
 DEFAULT_MAX_CONCURRENCY = 20
@@ -2098,24 +2108,11 @@ class SubagentManager:
             if last is not None
             else ""
         )
-        if task._stop_requested:
-            await self._finish(task, "killed", task.error or "Agent task was stopped", notify)
-        elif task.error or stop_reason in {"error", "aborted"}:
-            failure = task.error or error_message or f"request {stop_reason}"
-            if task.background:
-                task.result = None
-            else:
-                # Mirror semantics (D18): a foreground subagent is recorded as completed, but the
-                # failure details must not vanish (review 2026-08-20: error was previously set to None).
-                _log_warning(f"Foreground subagent {task.id} ended its turn with an error (recorded as completed): {failure}")
-            await self._finish(
-                task,
-                "failed" if task.background else "completed",
-                failure if task.background else None,
-                notify,
-            )
-        else:
-            await self._finish(task, "completed", None, notify)
+        status, failure, keep_result = turn_outcome(
+            task._stop_requested, task.error, error_message, stop_reason, task.background)
+        if not keep_result:
+            task.result = None                       # a detached agent's errored stream is not a result
+        await self._finish(task, status, failure, notify)
 
     def _publish_progress(self, task: AgentTask, event: Mapping[str, Any]) -> None:
         callback = task.on_update
