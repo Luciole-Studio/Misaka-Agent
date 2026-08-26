@@ -349,16 +349,13 @@ User clarification: {spec['clarification']}""", run["id"]))
         for task in intake_tasks:
             task.cancel()
         live = list(drivers.items())
-        for run_id, _task in live:       # node processes see the stop and drain; the daemon takes their panes down with the panel
+        for run_id, _task in live:       # the drivers own the run's state: they see the stop, stop their nodes and settle
             runs.request_stop(con, run_id)
-            for row in runs.tasks(con, run_id):
-                if task_store.mark_stopped(con, row["id"]):
-                    task_store.add_event(con, row["id"], "frontend_shutdown")
-        for _run_id, task in drivers:
+        for _run_id, task in live:
             if not task.done():
                 task.cancel()
-        if drivers:
-            await asyncio.gather(*(task for _run_id, task in drivers), return_exceptions=True)
+        if live:
+            await asyncio.gather(*(task for _run_id, task in live), return_exceptions=True)
         if intake_tasks:
             await asyncio.gather(*intake_tasks, return_exceptions=True)
 

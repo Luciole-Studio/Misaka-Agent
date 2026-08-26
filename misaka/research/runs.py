@@ -731,7 +731,10 @@ def artifact_text(row):
         source = None
     for path in (source, row["path"]):
         if path and os.path.isfile(path):
-            return Path(path).read_text(encoding="utf-8")
+            data = Path(path).read_bytes()
+            if hashlib.sha256(data).hexdigest() != row["sha256"]:
+                raise ValueError(f"artifact {row['id']} changed since it was registered: {path}")
+            return data.decode("utf-8")
     raise FileNotFoundError(row["path"])
 
 

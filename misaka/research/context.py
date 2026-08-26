@@ -26,23 +26,25 @@ def _branch_chain(con, branch):
     return list(reversed(chain))
 
 
-def _where(run, node, row):
-    """A Sister artifact sits on its card's line until its node merges: point the child at its own
-    copy when this line has one; a sibling branch's artifact (not merged here) keeps its recorded
-    path, so the map never names a file that does not exist on this line."""
+def _where(run, node, row, lineage):
+    """Where the child reads an artifact. One from its own lineage (an ancestor node's line, merged
+    into the child's branch) is read from the child's own copy; one from any other branch is read
+    where it was recorded -- never from a same-named file that happens to sit on this line."""
     try:
-        rel = json.loads(row["metadata_json"] or "{}").get("source_file")
+        meta = json.loads(row["metadata_json"] or "{}")
     except ValueError:
-        rel = None
-    own = os.path.join(runs.node_root(run, node), rel) if rel else None
-    for candidate in (own, row["path"]):
+        meta = {}
+    own = os.path.join(runs.node_root(run, node), meta["source_file"]) \
+        if meta.get("source_file") and row["branch_id"] in lineage else None
+    for candidate in (own, meta.get("source_workspace"), row["path"]):
         if candidate and os.path.exists(candidate):
             return candidate
     return row["path"]
 
 
 def build(con, run, *, issue, node, parent=None, max_findings=80):
-    artifacts = [{"id": a["id"], "kind": a["kind"], "title": a["title"], "path": _where(run, node, a)}
+    lineage = {entry["id"] for entry in _branch_chain(con, node)}
+    artifacts = [{"id": a["id"], "kind": a["kind"], "title": a["title"], "path": _where(run, node, a, lineage)}
                  for a in runs.artifacts(con, run["id"])]
     findings = []
     for finding in ledger.findings(con, run["id"], limit=max_findings):

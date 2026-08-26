@@ -371,11 +371,16 @@ async def _expand(con, cfg, runner, worker, run, node, *, spawner, context, tool
                 worktree = repo.branch_start(
                     run["workspace"], runs.node_branch(nid), runs.node_worktree(run, nid),
                     base=runs.node_branch(parent["id"]) if parent["parent_id"] else None)
-                if worktree:
-                    runs.set_node(con, nid, worktree=worktree)
+                if not worktree:                        # isolation is the node's precondition, not a nicety
+                    runs.set_state(con, run["id"], error=f"node {nid}: its worktree could not be created")
+                    return _close(con, run, node, "failed")
+                runs.set_node(con, nid, worktree=worktree)
             runs.set_node(con, nid, status="planning")
 
         elif status in ("planning", "waiting_input"):
+            if runs.tasks(con, run["id"], kind="research", node_id=nid):     # resumed after the plan was applied
+                runs.set_node(con, nid, status="executing")
+                continue
             context_path = None
             if node["parent_id"]:
                 issue = con.execute("SELECT * FROM research_issues WHERE child_branch_id=?", (nid,)).fetchone()
@@ -445,13 +450,17 @@ async def _expand(con, cfg, runner, worker, run, node, *, spawner, context, tool
                                 f"The red team left {len(pending)} issues on {_label(node)}; a Last Order fork investigates each.",
                                 run, issues=[i["id"] for i in pending])
                 handles = {}
-                for issue in pending:
-                    probe_dir = runs.probe_session_dir(run, issue["id"])
-                    if not os.path.isdir(probe_dir):             # resume: a fork already forked keeps its session
-                        planner.fork_session(planner._lo_session(run, node), probe_dir)
-                    runs.set_issue(con, issue["id"], "probing")
-                    handles[issue["id"]] = spawner.spawn(_probe_argv(run, issue), cwd=run["workspace"],
-                                                         title=f"LO·{nid}·{issue['id']}", place="split")
+                try:
+                    for issue in pending:
+                        probe_dir = runs.probe_session_dir(run, issue["id"])
+                        if not os.path.isdir(probe_dir):             # resume: a fork already forked keeps its session
+                            planner.fork_session(planner._lo_session(run, node), probe_dir)
+                        runs.set_issue(con, issue["id"], "probing")
+                        handles[issue["id"]] = spawner.spawn(_probe_argv(run, issue), cwd=run["workspace"],
+                                                             title=f"LO·{nid}·{issue['id']}", place="split")
+                except BaseException:
+                    _stop_all(spawner, handles)
+                    raise
                 outcome = await _wait_probes(con, cfg, spawner, run, handles, poll_seconds=poll_seconds)
                 if outcome != "done":
                     return outcome
@@ -528,19 +537,24 @@ def _partial_result(con, run, reason, *, status="stopped"):
             "run": runs.summary(con, run["id"])}
 
 
+def _stop_all(spawner, handles):
+    """Stop every started process of a batch; the one place a batch unwinds."""
+    stop = getattr(spawner, "stop", None)
+    for handle in handles.values():
+        if stop is not None:
+            try:
+                stop(handle)
+            except Exception:  # noqa: BLE001, S110 - best effort while unwinding
+                pass
+
+
 async def _wait_probes(con, cfg, spawner, run, handles, *, poll_seconds):
     """Wait until every fork has written its verdict (or the run halted). If one fork's process
     dies, the others are stopped before the error propagates."""
     try:
         return await _wait_probes_inner(con, cfg, spawner, run, handles, poll_seconds=poll_seconds)
     except BaseException:
-        for handle in handles.values():
-            stop = getattr(spawner, "stop", None)
-            if stop is not None:
-                try:
-                    stop(handle)
-                except Exception:  # noqa: BLE001, S110 - best effort while unwinding
-                    pass
+        _stop_all(spawner, handles)
         raise
 
 
@@ -641,19 +655,15 @@ async def _expand_level(con, cfg, spawner, run, level, *, poll_seconds, progress
     """Spawn every node of the level and wait until each has left the frontier (terminal,
     closing, or waiting for input). Returns "done", a halt, or a waiting_input result. If one
     node's process dies, the level's other processes are stopped before the error propagates."""
-    handles = {node["id"]: spawner.spawn(_node_argv(run, node), cwd=run["workspace"],
-                                         title=f"LO·{node['id']}", place="split") for node in level}
+    handles = {}
     try:
+        for node in level:                              # registered one by one: a failed spawn stops the started ones
+            handles[node["id"]] = spawner.spawn(_node_argv(run, node), cwd=run["workspace"],
+                                                title=f"LO·{node['id']}", place="split")
         return await _wait_level(con, cfg, spawner, run, handles, poll_seconds=poll_seconds, progress=progress,
                                  driver_lock=driver_lock)
     except BaseException:
-        for handle in handles.values():
-            stop = getattr(spawner, "stop", None)
-            if stop is not None:
-                try:
-                    stop(handle)
-                except Exception:  # noqa: BLE001, S110 - best effort while unwinding
-                    pass
+        _stop_all(spawner, handles)
         raise
 
 
