@@ -26,7 +26,6 @@ _PERMISSION_MODES = frozenset(
 )
 _MEMORY_SCOPES = frozenset({"user", "project", "local"})
 _ISOLATION_MODES = frozenset({"worktree"})
-_MISSING = object()
 
 
 @dataclass(slots=True)
@@ -308,7 +307,7 @@ def discover(
         for agent in _definitions(directory, "projectSettings"):
             merged[_canonical_name(agent.name)] = agent
 
-    result = {name: agent for name, agent in merged.items()}
+    result = dict(merged)
     general = result.get("general-purpose")
     if general is not None:
         result["general"] = general
@@ -316,12 +315,18 @@ def discover(
 
 
 def _agent_value(agent: AgentDefinition | Mapping[str, Any], *keys: str, default: Any = None) -> Any:
+    """Read one field by any of its spellings: the frontmatter key or the field name.
+
+    A parsed definition is a slotted dataclass, so subscripting it raises TypeError --
+    which is how the tool allowlist silently stopped reaching the child (audit 2026-08-27).
+    Attribute access through ``_ALIASES`` is the one way that works for both shapes.
+    """
     for key in keys:
-        try:
-            value = agent[key]
-        except (KeyError, TypeError):
-            continue
-        if value is not _MISSING:
+        if isinstance(agent, Mapping):
+            value = agent.get(key)
+        else:
+            value = getattr(agent, AgentDefinition._ALIASES.get(key, key), None)
+        if value is not None:
             return value
     return default
 
@@ -330,63 +335,23 @@ def _tool_name(spec: str) -> str:
     return spec.split("(", 1)[0].strip()
 
 
-def resolve_tools(
-    agent: AgentDefinition | Mapping[str, Any], inherited: Sequence[str] | None = None
-) -> list[str] | None:
-    """Resolve the allowlist, then apply ``disallowedTools`` by base tool name.
+def resolve_tools(agent: AgentDefinition | Mapping[str, Any]) -> list[str] | None:
+    """The child's ``-t`` allowlist, or ``None`` to inherit the parent's dynamic pool.
 
-    ``None`` means unrestricted/inherit.  An explicit empty list means no tools.
-    Pass the runtime's available tool names as ``inherited`` to resolve a
-    deny-only definition into a concrete list.
+    An absent ``tools`` and ``tools: inherit`` both mean None (the runtime keeps the
+    pool open so late MCP tools stay reachable); ``disallowedTools: "*"`` means no tools.
     """
-    raw_allow = _agent_value(agent, "tools", default=None)
+    raw_allow = _agent_value(agent, "tools")
     allow = _tools(raw_allow) if raw_allow is not None else None
     denied = _split_specs(_agent_value(agent, "disallowedTools", "disallowed", default=[]))
-
-    if allow is None:
-        resolved = None if inherited is None else list(dict.fromkeys(inherited))
-    elif inherited is None:
-        resolved = allow
-    else:
-        available = {_tool_name(tool).casefold() for tool in inherited}
-        resolved = [spec for spec in allow if _tool_name(spec).casefold() in available]
-
     if not denied:
-        return resolved
+        return allow
     if any(spec == "*" for spec in denied):
         return []
-    if resolved is None:
+    if allow is None:
         return None
     denied_names = {_tool_name(spec).casefold() for spec in denied}
-    return [spec for spec in resolved if _tool_name(spec).casefold() not in denied_names]
-
-
-def is_tool_allowed(agent: AgentDefinition | Mapping[str, Any], tool: str) -> bool:
-    """Check one tool without needing an enumerable inherited tool pool."""
-    name = _tool_name(tool).casefold()
-    denied = _split_specs(_agent_value(agent, "disallowedTools", "disallowed", default=[]))
-    if any(spec == "*" or _tool_name(spec).casefold() == name for spec in denied):
-        return False
-    raw_allow = _agent_value(agent, "tools", default=None)
-    allow = _tools(raw_allow) if raw_allow is not None else None
-    return allow is None or any(_tool_name(spec).casefold() == name for spec in allow)
-
-
-def has_required_mcp_servers(
-    agent: AgentDefinition | Mapping[str, Any], available_servers: Sequence[str]
-) -> bool:
-    """Every required pattern must occur in an available server name."""
-    required = _string_list(
-        _agent_value(agent, "requiredMcpServers", "required_mcp_servers", default=[])
-    )
-    available = [server.lower() for server in available_servers]
-    return all(any(pattern.lower() in server for server in available) for pattern in required)
-
-
-def filter_agents_by_mcp_requirements(
-    agents: Sequence[AgentDefinition], available_servers: Sequence[str]
-) -> list[AgentDefinition]:
-    return [agent for agent in agents if has_required_mcp_servers(agent, available_servers)]
+    return [spec for spec in allow if _tool_name(spec).casefold() not in denied_names]
 
 
 def roster_text(agents: Mapping[str, AgentDefinition]) -> str:
