@@ -116,7 +116,7 @@ def deliver(to, message=None, sender=None, model=None, timeout=600,
             messages.send(con, to, body, summary=(summary or body[:80]), sender=sender or "user",
                           task_id=task_id, generation=generation)
         rows = messages.pending(con, to)
-        won = messages.claim(con, [r["id"] for r in rows])
+        won = messages.claim(con, [r["id"] for r in rows], ttl_seconds=int(timeout) + 120)
         mine = [r for r in rows if r["id"] in won]
     finally:
         con.close()
@@ -166,12 +166,14 @@ def deliver(to, message=None, sender=None, model=None, timeout=600,
             from misaka.platform import budget
             budget.commit_agent_usage_path(
                 os.path.expanduser(CFG["db"]), None, f"dm:{to}", 0, spent)
-        if r["error"]:
-            con = messages.connect()                       # the turn never happened: back in the queue
-            try:
-                messages.unclaim(con, [row["id"] for row in mine])
-            finally:
-                con.close()
+        con = messages.connect()
+        try:
+            if r["error"]:
+                messages.unclaim(con, [row["id"] for row in mine])   # the turn never happened: back in the queue
+            else:
+                messages.ack(con, [row["id"] for row in mine])       # the turn consumed them, reply or not
+        finally:
+            con.close()
     if r["error"]:
         print(f"DM session failed: {r['error']}", file=sys.stderr)
         return 1

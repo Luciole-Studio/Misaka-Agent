@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS messages (
  task_id TEXT,
  generation INTEGER,
  created_at INTEGER NOT NULL,
- delivered_at INTEGER
+ delivered_at INTEGER,
+ lease_expires INTEGER
 );
 """
 
@@ -36,6 +37,8 @@ def connect(path=None) -> sqlite3.Connection:
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
     con.executescript(SCHEMA)
+    if "lease_expires" not in {row[1] for row in con.execute("PRAGMA table_info(messages)")}:
+        con.execute("ALTER TABLE messages ADD COLUMN lease_expires INTEGER")   # queues from before the lease
     # Delivered messages expire after seven days; undelivered messages remain queued.
     con.execute("DELETE FROM messages WHERE delivered_at IS NOT NULL AND delivered_at < ?",
                 (int(time.time()) - 7 * 86400,))
@@ -51,28 +54,43 @@ def send(con, to_addr, body, *, summary=None, sender=None, task_id=None, generat
 
 
 def pending(con, to_addr):
+    """Undelivered messages not currently under a live delivery lease (expired leases return)."""
     return con.execute(
-        "SELECT * FROM messages WHERE delivered_at IS NULL AND to_addr=? ORDER BY id",
-        (to_addr,)).fetchall()
+        "SELECT * FROM messages WHERE delivered_at IS NULL AND to_addr=? "
+        "AND (lease_expires IS NULL OR lease_expires<?) ORDER BY id",
+        (to_addr, int(time.time()))).fetchall()
 
 
 def unclaim(con, ids):
-    """Put claimed messages back in the queue (a delivery that failed after claiming them)."""
+    """Put leased messages back in the queue (a delivery that failed after claiming them)."""
     if ids:
         marks = ",".join("?" * len(ids))
-        con.execute(f"UPDATE messages SET delivered_at=NULL WHERE id IN ({marks})", [int(i) for i in ids])
+        con.execute(f"UPDATE messages SET lease_expires=NULL WHERE id IN ({marks}) "
+                    "AND delivered_at IS NULL", [int(i) for i in ids])
 
 
-def claim(con, ids) -> set[int]:
-    """Atomically claim queued messages and return the IDs won by this session."""
+def claim(con, ids, *, ttl_seconds=600) -> set[int]:
+    """Lease queued messages for one delivery attempt; only ``ack`` marks them delivered.
+    A deliverer that dies mid-flight leaves the lease to expire, so the next wake-up claims
+    the same rows again instead of losing them."""
     if not ids:
         return set()
+    now = int(time.time())
     marks = ",".join("?" * len(ids))
     rows = con.execute(
-        f"UPDATE messages SET delivered_at=? WHERE id IN ({marks})"
-        " AND delivered_at IS NULL RETURNING id",
-        [int(time.time()), *[int(i) for i in ids]]).fetchall()
+        f"UPDATE messages SET lease_expires=? WHERE id IN ({marks})"
+        " AND delivered_at IS NULL AND (lease_expires IS NULL OR lease_expires<?)"
+        " RETURNING id",
+        [now + max(1, int(ttl_seconds)), *[int(i) for i in ids], now]).fetchall()
     return {int(r["id"]) for r in rows}
+
+
+def ack(con, ids):
+    """The messages reached their session: delivered for good, lease closed."""
+    if ids:
+        marks = ",".join("?" * len(ids))
+        con.execute(f"UPDATE messages SET delivered_at=?, lease_expires=NULL WHERE id IN ({marks})",
+                    [int(time.time()), *[int(i) for i in ids]])
 
 
 def register(harn, *, sender, route=None, receive=False):
@@ -158,7 +176,7 @@ def register(harn, *, sender, route=None, receive=False):
         try:
             while not stop.is_set():
                 rows = pending(con, sender)
-                won = claim(con, [r["id"] for r in rows])
+                won = claim(con, [r["id"] for r in rows], ttl_seconds=60)
                 mine = [r for r in rows if r["id"] in won]
                 if mine:
                     def x(v):
@@ -183,6 +201,8 @@ def register(harn, *, sender, route=None, receive=False):
                             {"deliverAs": "followUp", "triggerTurn": True})
                     except Exception:  # noqa: BLE001 - restore delivery state so the next session can retry
                         unclaim(con, [r["id"] for r in mine])
+                    else:
+                        ack(con, [r["id"] for r in mine])
                 try:
                     await asyncio.wait_for(stop.wait(), POLL_SECONDS)
                 except TimeoutError:
