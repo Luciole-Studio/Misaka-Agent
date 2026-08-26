@@ -30,7 +30,6 @@ CREATE TABLE IF NOT EXISTS notification_subscriptions (
   lease_expires   INTEGER,
   failure_count   INTEGER NOT NULL DEFAULT 0,
   last_error      TEXT,
-  disabled        INTEGER NOT NULL DEFAULT 0,
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL,
   UNIQUE(owner,channel,resource_type,resource_id,kind)
@@ -186,7 +185,7 @@ def nack(con, subscription_id, event_id, token, error):
     now = int(time.time())
     cur = con.execute(
         "UPDATE notification_subscriptions SET lease_token=NULL,leased_event_id=NULL,"
-        "lease_expires=NULL,failure_count=failure_count+1,last_error=?,disabled=0,updated_at=? "
+        "lease_expires=NULL,failure_count=failure_count+1,last_error=?,updated_at=? "
         "WHERE id=? AND lease_token=? AND leased_event_id=?",
         (str(error)[:1000], now, subscription_id, token, int(event_id)),
     )
