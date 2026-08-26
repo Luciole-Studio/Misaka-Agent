@@ -278,6 +278,10 @@ class _SisterManager(SubagentManager):
             skills=copies,
         )
 
+    def child_env_extra(self, _task: AgentTask) -> dict[str, str]:
+        # The child indexes the read-only copies this manager made, never the live trees.
+        return {"MISAKA_SKILL_SANDBOX": self.skill_root}
+
     async def process_started(self, _task: AgentTask, process: Any) -> None:
         """Publish the real Sister child identity before it can outlive LO."""
 

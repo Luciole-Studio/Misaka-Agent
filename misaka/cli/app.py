@@ -365,21 +365,23 @@ def _cmd_auth(args, con):
     import asyncio as _asyncio
 
     from misaka.core.auth_storage import AuthStorage
-    storage = AuthStorage.create()
-    targets = [args.provider] if args.provider else sorted(storage.getAll())
+    from misaka.core.model_registry import ModelRegistry
+    registry = ModelRegistry.create(AuthStorage.create())        # the resolver every session uses: env, models.json, stored
+    known = {m.provider for m in registry.getAvailable()} | set(registry.authStorage.getAll())
+    targets = [args.provider] if args.provider else sorted(known)
     if not targets:
         print("No provider credentials are configured. See ~/.misaka/auth.json.")
         sys.exit(1)
     bad = 0
     for provider in targets:
-        status = storage.getAuthStatus(provider)
+        status = registry.getProviderAuthStatus(provider)
         mark = "✓" if status.configured or status.source else "✗"
         detail = status.source or "not configured"
         if status.label:
             detail += f" ({status.label})"
         line = f"{mark} {provider}  {detail}"
         if args.show and (status.configured or status.source):
-            key = _asyncio.run(storage.getApiKey(provider))
+            key = _asyncio.run(registry.getApiKeyForProvider(provider))
             line += f"  {key}" if key else " (credential could not be resolved)"
         print(line)
         if not (status.configured or status.source):

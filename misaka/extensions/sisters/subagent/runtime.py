@@ -1786,6 +1786,7 @@ class SubagentManager:
             env["MISAKA_PROFILE_DIR"] = self.role_context.profile_dir
         else:
             env.pop("MISAKA_PROFILE_DIR", None)
+        env.update(self.child_env_extra(task))
         if task.allowed_agent_types:
             env["MISAKA_ALLOWED_AGENT_TYPES"] = json.dumps(task.allowed_agent_types)
         else:
@@ -2418,6 +2419,10 @@ class SubagentManager:
             else:
                 lines.append(f"- read `{candidate / 'SKILL.md' if candidate.is_dir() else candidate}`")
         return ["Skills for this task; load each before starting:\n" + "\n".join(lines)] if lines else []
+
+    def child_env_extra(self, task: AgentTask) -> dict[str, str]:
+        """What a subclass adds to its children's environment (a Sister manager: its skill sandbox)."""
+        return {}
 
     def _agent_mcp_config(self, task: AgentTask) -> str | None:
         if not task.definition.mcp_servers:

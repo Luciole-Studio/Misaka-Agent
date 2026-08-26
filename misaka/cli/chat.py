@@ -25,10 +25,24 @@ def assembly(who):
     return prof, CFG["lo_model"]
 
 
+def resolve_session(session, who):
+    """The engine's own resolution (path, id prefix in this folder's bucket, then any bucket), done
+    once, here, before the folder changes -- so a prefix is not mistaken for a file and a relative
+    path is not resolved twice. Returns the absolute session file."""
+    from misaka.cli.engine import resolve_session_path
+    from misaka.core.session_manager import encode_cwd
+    bucket = os.path.expanduser(f"~/.misaka/sessions/{who or 'last-order'}/{encode_cwd(os.getcwd())}")
+    resolved = asyncio.run(resolve_session_path(session, os.getcwd(), bucket))
+    if not resolved.path:
+        sys.exit(f"No session found matching '{session}'.")
+    return resolved.path
+
+
 def launch(who, model=None, cont=False, pick=False, session=None):
     """Assemble the session and run interactive mode until it exits. ``who=None`` means Last Order."""
     from misaka.core.session_manager import encode_cwd, read_session_header
     if session:
+        session = resolve_session(session, who)
         # A resumed conversation goes back to the folder it worked in, whatever folder the
         # shell or the panel sits in: the bucket, the workspace, the skills, and every tool
         # follow the session. A folder that is gone is an error, not a silent move.

@@ -393,6 +393,7 @@ async def amain() -> int:
     workspace = os.environ.get("MISAKA_WORKSPACE") or os.getcwd()
     mcp_role = os.environ.get("MISAKA_MCP_ROLE") or role
     card = os.environ.get("MISAKA_SISTER_OWNER_TASK_ID")    # set only on the child that is a card's own session
+    sandbox = os.environ.get("MISAKA_SKILL_SANDBOX")         # a Sister card: the parent's read-only skill copies
     from misaka.app.composition import SessionSpec, build_extensions
     runtime, session, error = await engine_session.open_session(
         flags,
@@ -406,6 +407,7 @@ async def amain() -> int:
             mcp_role=mcp_role,
             receive_messages=bool(card),
             task_id=card,
+            skill_roots=(("sandbox", sandbox),) if sandbox else None,
         )),
     )
     if error:
