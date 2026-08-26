@@ -481,7 +481,7 @@ def build_params(
     # Sampling passthrough (pi #7568): model-level defaults, request-level overrides.
     # Keys already set explicitly above (temperature, max_tokens, ...) win.
     sampling: dict[str, Any] = {}
-    model_sampling = getattr(context.model, "samplingParams", None)
+    model_sampling = getattr(model, "samplingParams", None)
     if isinstance(model_sampling, dict):
         sampling.update(model_sampling)
     request_sampling = _option(options, "samplingParams")

@@ -181,7 +181,7 @@ def build_params(model: Model, context: Context, options: Any, deployment_name: 
     reasoning_summary = _option(options, "reasoningSummary")
     if model.reasoning:
         if reasoning_effort or reasoning_summary:
-            effort = model.thinkingLevelMap.get(reasoning_effort, reasoning_effort) if reasoning_effort else "medium"
+            effort = (model.thinkingLevelMap or {}).get(reasoning_effort, reasoning_effort) if reasoning_effort else "medium"
             params["reasoning"] = {"effort": effort, "summary": reasoning_summary or "auto"}
             params["include"] = ["reasoning.encrypted_content"]
         else:
