@@ -97,7 +97,7 @@ def build_skill_message(entry, *, user_instruction="", session_id=None):
     return "\n".join(parts)
 
 
-def register_for(roots, profile_dir, cwd=None):
+def register_for(roots, profile_dir, cwd=None, kind="foreground"):
     """Everything skills for one session, against these layer roots; writes (``skill_manage``,
     ``/learn``) go to the role's own ``skills/`` under ``profile_dir``. ``cwd`` is the
     workspace the coding posture is judged in (misaka.skills.coding_context)."""
@@ -162,7 +162,7 @@ def register_for(roots, profile_dir, cwd=None):
         from misaka.core.extensions import startup_sections
 
         def _dim(text):
-            from misaka.modes.interactive.theme.theme import theme
+            from misaka.ui.tui.interactive.theme.theme import theme
             return theme.fg("dim", text)
 
         startup_sections.register(
@@ -255,16 +255,17 @@ def register_for(roots, profile_dir, cwd=None):
                     "isError": not result.get("success"),
                     "details": {k: v for k, v in result.items() if k != "message"}}
 
-        harn.registerTool(ToolDefinition(
-            name="skill_manage", label="Manage skills",
-            description="Create, update, or delete a reusable skill; every change goes through approval, validation, the security scan, and the rollback ledger.",
-            parameters=ManageParams.model_json_schema(), execute=manage_execute,
-            promptSnippet="Create or update a reusable skill",
-            promptGuidelines=[
-                "New skill descriptions must be one sentence of at most 60 characters; put detail in the body.",
-                "Use `skill_manage`, never generic file tools, for every skill mutation.",
-                "When the user-controlled gate blocks a write, report it and do not seek a bypass.",
-            ]))
+        if kind != "card":             # skills are read-only at run time inside a card
+            harn.registerTool(ToolDefinition(
+                name="skill_manage", label="Manage skills",
+                description="Create, update, or delete a reusable skill; every change goes through approval, validation, the security scan, and the rollback ledger.",
+                parameters=ManageParams.model_json_schema(), execute=manage_execute,
+                promptSnippet="Create or update a reusable skill",
+                promptGuidelines=[
+                    "New skill descriptions must be one sentence of at most 60 characters; put detail in the body.",
+                    "Use `skill_manage`, never generic file tools, for every skill mutation.",
+                    "When the user-controlled gate blocks a write, report it and do not seek a bypass.",
+                ]))
 
         # ── commands ──
         async def skill_cmd(args, ctx):
@@ -321,7 +322,8 @@ def register_for(roots, profile_dir, cwd=None):
             if not value:
                 mode = skill_write.write_mode()
                 ctx.ui.notify(
-                    f"Skill write mode: {mode}\nUse `/skill-mode off|forbid|allow` to change it.",
+                    f"Skill write mode: {mode}\nUse `/skill-mode off|forbid|ask|allow` to change it "
+                    "(forbid and ask both stage writes for your review).",
                     "info",
                 )
                 return
@@ -331,16 +333,17 @@ def register_for(roots, profile_dir, cwd=None):
                 return
             cfg = skill_layers.load_skills_config()
             cfg["skill_write_mode"] = value
-            skill_layers._write_skills_config(cfg)
+            skill_layers.write_skills_config(cfg)
             ctx.ui.notify(f"Skill write mode set to {value}; it takes effect immediately.", "info")
 
-        harn.registerCommand("skill-mode", {
-            "handler": skill_mode_cmd,
-            "description": "Show or change the skill write mode: off, forbid (user review required), or allow."})
-
-        harn.registerCommand("learn", {
-            "handler": learn_cmd,
-            "description": "Create or improve a reusable skill from files, links, notes, or the workflow just completed."})
+        if kind == "foreground":         # the write mode is the user's to set, at the keyboard
+            harn.registerCommand("skill-mode", {
+                "handler": skill_mode_cmd,
+                "description": "Show or change the skill write mode: off, forbid / ask (writes wait for your review), or allow."})
+        if kind != "card":
+            harn.registerCommand("learn", {
+                "handler": learn_cmd,
+                "description": "Create or improve a reusable skill from files, links, notes, or the workflow just completed."})
 
     return register
 
@@ -351,4 +354,4 @@ SESSION_KINDS = {"foreground", "dm", "card"}
 def activate(spec):
     roots = (list(spec.skill_roots) if spec.skill_roots is not None
              else skill_roots(spec.profile_dir, spec.workspace))
-    return register_for(roots, spec.profile_dir, cwd=spec.workspace)
+    return register_for(roots, spec.profile_dir, cwd=spec.workspace, kind=spec.kind)

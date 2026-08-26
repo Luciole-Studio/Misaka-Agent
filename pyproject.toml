@@ -4,7 +4,7 @@
 #   uv pip install --python .venv -e .      # installs deps, creates .venv/bin/misaka, makes the package importable
 [project]
 name = "misaka"
-version = "0.5.0"
+version = "0.6.0"
 description = "MISAKA: a multi-agent research system for the humanities and social sciences, built on the pi/harn Python engine"
 requires-python = ">=3.12"
 dependencies = [

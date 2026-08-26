@@ -281,6 +281,9 @@ def register(harn):
             raise
         if not changed:
             return _text("Review ownership expired; no decision was recorded.")
+        if params.decision == "approve":              # the card is done; there is nothing to relaunch
+            state = db.get(con, params.task_id)["status"]
+            return _text(f"Review recorded: approve; the card is done ({state}).")
         follow = await runtime.launch_ready(
             context=ctx, tool_call_id=tool_call_id, on_update=on_update,
             task_ids=[params.task_id],

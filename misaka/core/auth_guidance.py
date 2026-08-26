@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
-from misaka.config import get_docs_path
+from misaka.config import get_auth_path, get_models_path
 
 _UNKNOWN_PROVIDER = "unknown"
 
 
 def get_provider_login_help() -> str:
-    docs_path = Path(get_docs_path())
     return "\n".join(
         [
-            "Use /login to log into a provider via OAuth or API key. See:",
-            f"  {docs_path / 'providers.md'}",
-            f"  {docs_path / 'models.md'}",
+            "Use /login to log into a provider via OAuth or API key, or set the provider's API key",
+            "in the environment. Credentials are kept in:",
+            f"  {get_auth_path()}",
+            f"Custom providers and models are defined in:",
+            f"  {get_models_path()}",
+            "`misaka auth check` reports what is configured.",
         ]
     )
 

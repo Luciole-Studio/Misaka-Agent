@@ -389,8 +389,8 @@ def main():
                 mode = skill_write.write_mode()
                 desc = {
                     "off": "agents cannot create or update skills",
-                    "forbid": "agent writes are rejected",
-                    "ask": "agent writes require user approval",
+                    "forbid": "agent writes are staged for your review (misaka skills pending); same as ask",
+                    "ask": "agent writes are staged for your review (misaka skills pending)",
                     "allow": "agent writes are applied immediately",
                 }[mode]
                 print(f"skill_write_mode = {mode} — {desc}")
