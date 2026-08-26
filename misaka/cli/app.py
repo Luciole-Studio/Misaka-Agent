@@ -5,11 +5,8 @@ import signal
 import sys
 
 from misaka.platform import tasks as db
-from misaka.research import basemap, runs as research_runs
 from misaka.platform import budget
 from misaka.documents import index as corpus
-from misaka.documents import workspace as artifact_store
-from misaka import workspace as ws_index
 from misaka.config import CFG
 from misaka.observability import board as tail
 
@@ -33,9 +30,6 @@ def _parser():
                     help="Delete the card and its event history")
 
     sub.add_parser("board", help="Show the task board")
-    t = sub.add_parser("tail", help="Follow task events")
-    t.add_argument("--since", type=int)
-    t.add_argument("--no-follow", action="store_true")
     tl = sub.add_parser("tell", help="Send a message from inside a running card")
     tl.add_argument("message", help="Message body")
     tl.add_argument("--to", default="last-order", help="Recipient; defaults to Last Order")
@@ -95,6 +89,10 @@ def _parser():
     rs.add_argument("goal", nargs="?", help="Research question for a new run")
     rs.add_argument("--resume", metavar="RUN_ID", help="Resume an existing research run")
     rs.add_argument("--depth", type=int, default=3, help="Maximum branch depth")
+    rs.add_argument("--node", nargs=2, metavar=("RUN_ID", "NODE_ID"),
+                    help="(internal) run one research node in this process")
+    rs.add_argument("--probe", nargs=2, metavar=("RUN_ID", "ISSUE_ID"),
+                    help="(internal) run Last Order's fork on one issue in this process")
 
 
     lc = sub.add_parser("lcm", help="Inspect, back up, repair, or rebuild the LCM context database")
@@ -121,15 +119,7 @@ def _parser():
     ac.add_argument("provider", nargs="?", help="Provider ID (default: every configured provider)")
     ac.add_argument("--show", action="store_true", help="Print the resolved credential")
 
-    sub.add_parser("immune", help="Show token budget and artifact-validation hooks")
 
-    bm = sub.add_parser("basemap", help="Load or inspect the research coverage taxonomies")
-    bm.add_argument("--load", action="store_true", help="Load the built-in taxonomy seeds")
-    bm.add_argument("--scheme", nargs="*", help="Only show these taxonomy schemes")
-
-    wsp = sub.add_parser("ws", help="Inspect or rebuild the artifact workspace index")
-    wsp.add_argument("action", choices=["outline", "read", "reindex"])
-    wsp.add_argument("arg", nargs="?", help="Node ID (read) or card ID (outline)")
 
     dc = sub.add_parser("doc", help="Index documents, search them, show their structure, and verify quotes")
     dc.add_argument("action", choices=["add", "scan", "list", "find", "verify", "tree"])
@@ -137,12 +127,6 @@ def _parser():
                                            "query (find), quote (verify), or document ID (tree)")
     dc.add_argument("--doc", help="Restrict to one document ID")
     dc.add_argument("--no-tree", action="store_true", help="Skip PageIndex structure extraction")
-
-    sv = sub.add_parser("survey", help="Create a coverage-survey card for a proposition")
-    sv.add_argument("proposition", help="Proposition to examine")
-    sv.add_argument("--scheme", nargs="*", default=["OCM"], help="Taxonomy schemes (default: OCM)")
-    sv.add_argument("--assignee", default="10032")
-    sv.add_argument("--dry", action="store_true")
 
 
     cr = sub.add_parser("create", help="Create a new Sister")
@@ -168,16 +152,16 @@ def main():
         chat.launch(args.as_agent, model=args.model, cont=args.cont, pick=args.pick,
                     session=args.session)
     elif args.cmd == "panel":
-        from misaka.cli import panel
+        from misaka.ui.panel import panel
         panel.launch()
     elif args.cmd == "net-daemon":
-        from misaka.net import daemon
+        from misaka.ui.panel import daemon
         daemon.main()
     elif args.cmd == "card-shell":
         from misaka.cli import card_shell
         card_shell.launch(args.task_id, resume_only=args.resume, say=args.say)
     elif args.cmd == "net":
-        from misaka.net import client as net
+        from misaka.ui.panel import client as net
         if args.net_cmd == "stop":
             try:
                 net.request("server.stop")
@@ -250,18 +234,23 @@ def main():
                                 task_id=args.dm_task, generation=args.dm_gen,
                                 summary=args.summary))
     elif args.cmd == "task":
-        ok, msg = db.delete_task(con, args.task_id)
+        from misaka.platform import cards as card_files
+        row = db.get(con, args.task_id)
+        ok, msg = (card_files.remove(con, row["workspace"], args.task_id) if row
+                   else (False, f"Card not found: {args.task_id}"))
         print(msg)
         sys.exit(0 if ok else 1)
     elif args.cmd == "board":
         tail.board_view(con, db.canonical_workspace())
-    elif args.cmd == "tail":
-        tail.follow(con, since=args.since, once=args.no_follow)
     elif args.cmd == "research":
         import asyncio as _asyncio
 
         from misaka.network import worker as worker_mod
-        from misaka.research import planner, runs, workflow
+        from misaka.research import node as research_node, planner, runs, workflow
+        if args.node:
+            sys.exit(research_node.main(*args.node))
+        if args.probe:
+            sys.exit(research_node.main_probe(*args.probe))
         runs.init(con)
         if args.resume:
             run = runs.get(con, args.resume)
@@ -278,16 +267,8 @@ def main():
                               limits={"max_depth": args.depth},
                               token_start=budget.spent(con))
             print(f"Project brief: {brief}\nResearch run {run['id']}: {runs.run_dir(run)}")
-        cfg = dict(CFG)
-
-        class HeadlessRunner:
-            async def launch_ready(self, *, task_ids=None, **_kwargs):
-                from misaka.network import dispatch
-                await _asyncio.to_thread(dispatch.dispatch_once, con, cfg, task_ids=task_ids)
-                return []
-
         out = _asyncio.run(workflow.run(
-            con, cfg, HeadlessRunner(), worker_mod,
+            con, dict(CFG), research_node.spawner(), worker_mod,
             run_id=run["id"], poll_seconds=1.0))
         print(f"Research run {run['id']}: {out['reason']}")
         final = out.get("final") or {}
@@ -424,7 +405,7 @@ def main():
             else:
                 cfg = skill_layers.load_skills_config()
                 cfg["skill_write_mode"] = args.name
-                skill_layers._write_skills_config(cfg)
+                skill_layers.write_skills_config(cfg)
                 print(f"Skill write mode set to {args.name} (effective immediately).")
         elif args.op in ("pending", "approve", "reject", "ledger", "rollback"):
             import shutil as _shutil
@@ -540,29 +521,6 @@ def main():
             prof = _os.path.join(_os.path.expanduser(CFG["roles_root"]), args.role)
             for e in skill_index.build(skill_layers.skill_roots(prof, cwd=_os.getcwd())):
                 print(f"{e['layer']:<9}{e['category']}/{e['name']}  {e['description']}  ({e['dir']})")
-    elif args.cmd == "basemap":
-        bcon = basemap.connect()
-        if args.load:
-            print(f"Loaded {basemap.load_seeds(bcon)} taxonomy cells.")
-        st = basemap.stats(bcon)
-        if not st:
-            sys.exit("The basemap is empty; run `misaka basemap --load` first.")
-        print("  ".join(f"{r['scheme']}={r['n']}" for r in st))
-        for c in basemap.cells(bcon, args.scheme)[:80]:
-            print(f"  {c['id']:<8} {c['label']}")
-    elif args.cmd == "ws":
-        workspace = db.canonical_workspace()
-        if args.action == "outline":
-            print(ws_index.render(ws_index.outline(
-                con, task_id=args.arg, workspace=workspace, research_store=research_runs)))
-        elif args.action == "read":
-            txt = ws_index.read(con, args.arg or "", workspace=workspace, research_store=research_runs)
-            print(txt if txt else "Node not found; use `misaka ws outline` to list node IDs.")
-        elif args.action == "reindex":
-            n = 0
-            for t in db.by_status(con, "done"):
-                n += len(artifact_store.ingest_artifacts(con, t))
-            print(f"Indexed {n} additional artifact(s).")
     elif args.cmd == "doc":
         if args.action == "add":
             did, n = corpus.ingest(args.arg, with_tree=not args.no_tree)
@@ -598,19 +556,3 @@ def main():
             print(f"{st['title']} ({st['mode']})")
             for pg in (st.get("pages") or [])[:40]:
                 print(f"  p{pg['page']:<4} {pg['head']}")
-    elif args.cmd == "survey":
-        bcon = basemap.connect()
-        cells = basemap.cells(bcon, args.scheme)
-        if not cells:
-                sys.exit("The basemap is empty; run `misaka basemap --load` first.")
-        body = basemap.survey_body(cells, args.proposition)
-        print(f"Loaded {len(cells)} cells ({', '.join(args.scheme)}) for a coverage survey.")
-        if not args.dry:
-            from misaka.platform import cards as card_files
-            tid = card_files.create(con, os.getcwd(), f"Coverage survey: {args.proposition[:30]}",
-                                    body, args.assignee, timeout_seconds=1800)
-            print(" ", tid)
-    elif args.cmd == "immune":
-        b = budget.status(con, CFG["token_cap"])
-        print(f"Budget: {b['used']:,} tokens" +
-              (f" / {b['ratio']:.0%} of limit" if b["cap"] else " (no limit)"))

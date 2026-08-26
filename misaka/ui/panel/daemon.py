@@ -6,8 +6,8 @@ The protocol is newline-delimited JSON (requests carry id/method/params).
 
 Card panes: ``pane.run_card`` drives the board state machine -- claim a lease,
 open a pane running an interactive session, watch for submission/timeout/exit,
-then move the card to verifying, send it back, or fail it. Acceptance stays
-with the verification path; the daemon only owns the process and never judges
+then accept the submission, send the card back, or fail it. The daemon only owns
+the process and never judges
 its own work.
 """
 import asyncio
@@ -29,12 +29,13 @@ import unicodedata
 import psutil
 import pyte
 
+from misaka.ui.panel import geometry as hui      # layout.rs port: split_at / remove_pane / pane_ids
 from misaka.config import CFG
 
 # Wire protocol version (strict equality, as in herdr). Bump it whenever *server
 # behaviour* changes, not only method/event shapes: an unbumped behaviour change
 # once let a stale daemon slip through the version gate.
-PROTOCOL = 30   # 30: pane.close returns immediately (background SIGKILL escalation); same-size pane.resize is a no-op
+PROTOCOL = 31   # 31: the daemon owns the layout (spaces/tabs/trees, herdr server model); pane.create takes `place`; no pane parent
 RING_CAP = 256 * 1024          # output tail kept per pane
 FRAME_SECONDS = 0.008          # coalescing window for dirty-row broadcasts (~120 fps)
 SCROLLBACK_LINES = 2000        # scrollback history per pane
@@ -413,11 +414,10 @@ class Pane:
                  "deadline", "proc", "fd", "buf", "started_at", "exit_code", "submitted",
                  "seen_status", "screen", "stream", "carry", "alt_screen",
                  "last_output", "last_heartbeat", "theme", "ally", "flush", "sent_cursor",
-                 "parent", "reported")
+                 "reported")
 
-    def __init__(self, pane_id, title, argv, cwd, card=None, parent=None):
+    def __init__(self, pane_id, title, argv, cwd, card=None):
         self.id, self.title, self.argv, self.cwd, self.card = pane_id, title, argv, cwd, card
-        self.parent = parent          # the pane that opened this one (Last Order dispatching a Sister); panel groups by it
         self.reported = None          # the session's own word: {"state", "message", "seq"} (herdr hook authority); None = guess from the screen
         self.claim_lock = self.generation = self.deadline = None
         self.proc = self.fd = self.exit_code = None
@@ -449,6 +449,10 @@ class Daemon:
         self.panes: dict[str, Pane] = {}
         self._reapers = set()          # background kill-escalation tasks (close never blocks)
         self._seq = 0
+        # The layout, as in herdr: the server holds spaces -> tabs -> split trees and seats every
+        # pane at creation; clients only draw it. {"id","folder","name","tabs":[{"name","tree"}]}
+        self.spaces: list[dict] = []
+        self._space_seq = 0
         self._theme = "dark"        # session theme variant; updated when the panel creates a pane with MISAKA_THEME
         self._con = None            # board connection, opened on the first card run
         self._attached: dict[asyncio.StreamWriter, str] = {}   # subscribers: connection -> pane id
@@ -575,19 +579,58 @@ class Daemon:
             except Exception:  # noqa: BLE001 - remove dead subscribers
                 self._attached.pop(writer, None)
 
-    def create(self, argv, cwd, *, title="", card=None, env=None, parent=None) -> Pane:
+    def create(self, argv, cwd, *, title="", card=None, env=None, place=None) -> Pane:
         self._seq += 1
         pane = Pane(f"p{self._seq}", title or (argv[0] if argv else ""), list(argv),
-                    cwd or os.getcwd(), card=card,
-                    parent=parent if parent in self.panes else None)
+                    cwd or os.getcwd(), card=card)
         if env and env.get("MISAKA_THEME") in ("dark", "light"):
             pane.theme = self._theme = env["MISAKA_THEME"]   # remember the session variant
         if env and env.get("MISAKA_ALLY"):
             pane.ally = env["MISAKA_ALLY"]      # transient ally: in the roster until the process exits
         self._spawn(pane, env=env)
         self.panes[pane.id] = pane
+        self._seat(pane, place or {})
         self._save_snapshot()
         return pane
+
+    # ── Layout (herdr: a pane is created INTO a slot; nothing re-homes it later) ──
+
+    def _tab_holding(self, pane_id):
+        for space in self.spaces:
+            for tab in space["tabs"]:
+                if pane_id in hui.pane_ids(hui.from_jsonable(tab["tree"])):
+                    return space, tab
+        return None
+
+    def _seat(self, pane, place):
+        """``{"split": pane_id[, "direction": "h"|"v"]}`` splits that pane in its own tab (herdr
+        split_at, 50/50); ``{"tab": pane_id}`` opens a new tab in the space holding that pane;
+        anything else (or an unknown pane) opens a new space in the pane's folder. ``name``
+        names a new tab (herdr custom_name); a new tab is otherwise named after its pane."""
+        ref = place.get("split") or place.get("tab")
+        at = self._tab_holding(ref) if ref else None
+        name = place.get("name") or pane.title
+        if at and place.get("split"):
+            tab = at[1]
+            tab["tree"] = hui.to_jsonable(hui.split_at(
+                hui.from_jsonable(tab["tree"]), ref, place.get("direction") or "h", pane.id, 0.5))
+        elif at:
+            at[0]["tabs"].append({"name": name, "tree": ["pane", pane.id]})
+        else:
+            self._space_seq += 1
+            self.spaces.append({"id": f"w{self._space_seq}", "folder": os.path.realpath(pane.cwd),
+                                "name": None, "tabs": [{"name": name, "tree": ["pane", pane.id]}]})
+
+    def _unseat(self, pane_id):
+        """layout.rs close_pane: drop the leaf; a tab left empty goes, a space left without tabs goes."""
+        for space in self.spaces:
+            for tab in space["tabs"]:
+                tree = hui.from_jsonable(tab["tree"])
+                if tree and pane_id in hui.pane_ids(tree):
+                    tree = hui.remove_pane(tree, pane_id)
+                    tab["tree"] = hui.to_jsonable(tree) if tree else None
+            space["tabs"] = [tab for tab in space["tabs"] if tab["tree"]]
+        self.spaces = [space for space in self.spaces if space["tabs"]]
 
     async def _reap(self, proc):
         """SIGTERM was already sent: give the process a grace period, escalate to
@@ -648,9 +691,7 @@ class Daemon:
             except OSError:
                 pass
             pane.fd = None
-        # No orphans: whoever this pane opened (Last Order's Sisters, a Sister's helpers) goes with it.
-        for child in [p.id for p in self.panes.values() if p.parent == pane_id]:
-            self.close(child)
+        self._unseat(pane_id)
         self._save_snapshot()
         return pane
 
@@ -685,10 +726,10 @@ class Daemon:
             "MISAKA_TASK_OUTPUT_DIR": str(row["output_dir"] or db.workspace_for(row)),
         }
 
-    def resume_card(self, task_id, parent=None, say=None) -> Pane:
+    def resume_card(self, task_id, place=None, say=None) -> Pane:
         """Reopen a card's saved session in a pane (no claim, no contract, no model turn unless
         ``say`` is given as the first message). Last Order uses this to bring a Sister back
-        beside her after a resumed conversation; the panel uses it for a click on a card session."""
+        after a resumed conversation; the panel uses it for a click on a card session."""
         from misaka.platform import tasks as db
         from misaka.network.sister_runtime import ACTIVE_BOARD_STATUSES
         row = db.get(self._board(), task_id)
@@ -703,11 +744,11 @@ class Daemon:
         run_dir = workspace
         argv = [*CARD_SHELL, task_id, "--resume"] + (["--say", say] if say else [])
         pane = self.create(argv, run_dir, title=f"{row['assignee']}·{task_id}", card=task_id,
-                           env=self._card_env(row), parent=parent)
+                           env=self._card_env(row), place=place)
         self._save_snapshot()
         return pane
 
-    def run_card(self, task_id, parent=None) -> Pane:
+    def run_card(self, task_id, place=None) -> Pane:
         from misaka.platform import tasks as db
         from misaka.platform import admission, processes as process_tree
 
@@ -755,7 +796,7 @@ class Daemon:
                 env["MISAKA_ALLY"] = row["assignee"]
             pane = self.create(argv, run_dir,
                                title=f"{row['assignee']}·{task_id}", card=task_id,
-                               env=env, parent=parent)
+                               env=env, place=place)
         except BaseException:
             db.back_to_ready(con, task_id, generation=generation, claim_lock=lock)
             raise
@@ -838,17 +879,9 @@ class Daemon:
                             pane.last_heartbeat = time.time()
                     ok, report = worker.check_report(pane.cwd, con=con, task_id=pane.card)
                     if ok:
-                        from misaka.platform import repo
-                        repo.commit_card(pane.cwd, pane.card, report, f"card {pane.card}: submit")
-                        if db.mark_verifying(con, pane.card,
-                                             generation=pane.generation,
-                                             claim_lock=pane.claim_lock):
-                            db.add_event(con, pane.card, "submitted",
-                                         {"summary": report["summary"],
-                                          "artifacts": report["artifacts"],
-                                          "notes": report.get("notes", ""),
-                                          "uncertain": report.get("uncertain", [])},
-                                         generation=pane.generation)
+                        from misaka.network import dispatch
+                        dispatch.accept(con, row, report, generation=pane.generation,
+                                        claim_lock=pane.claim_lock, workspace=pane.cwd)
                         pane.submitted = True   # keep the pane after submission so a person can continue the chat
                     elif str(report).startswith("blocked:"):
                         db.block_task(
@@ -930,7 +963,7 @@ class Daemon:
                 ally = _ally_name(p)             # non-empty = a third-party agent runs in this pane
                 state = _ally_state(p) if ally and p.alive() else None
                 return {"id": p.id, "title": p.title, "card": p.card, "cwd": p.cwd,
-                        "parent": p.parent, "reported": p.reported,
+                        "reported": p.reported,
                         "alive": p.alive(), "exit_code": p.exit_code,
                         "status": status.get(p.card),
                         "busy": _pane_busy(p, ally_state=state),
@@ -973,8 +1006,11 @@ class Daemon:
             if any(p.card == params["task_id"] and p.alive()
                    for p in self.panes.values()):
                 raise ValueError(f"Card {params['task_id']} is still running; stop it before deleting it.")
+            from misaka.platform import cards as card_files
             from misaka.platform import tasks as db
-            ok, msg = db.delete_task(self._board(), params["task_id"])
+            row = db.get(self._board(), params["task_id"])
+            ok, msg = (card_files.remove(self._board(), row["workspace"], params["task_id"]) if row
+                       else (False, f"Card not found: {params['task_id']}"))
             if not ok:
                 raise ValueError(msg)
             return {"message": msg}
@@ -1026,17 +1062,22 @@ class Daemon:
             pane.card = pane.claim_lock = None   # detach before closing so the watcher does not treat it as a crash
             self.close(pane.id)
             return {"stopped": True}
+        if method == "layout.get":       # the daemon owns the layout (herdr server model)
+            return {"spaces": self.spaces}
+        if method == "layout.set":       # client-side edits: a dragged divider, a renamed tab or space
+            self.spaces = [space for space in params.get("spaces") or [] if space.get("tabs")]
+            return {"ok": True}
         if method == "pane.create":
             pane = self.create(params["argv"], params.get("cwd"),
                                title=params.get("title", ""),
                                env=params.get("env"),      # the panel passes through theme etc.
-                               parent=params.get("parent"))
+                               place=params.get("place"))
             return {"pane_id": pane.id, "pid": pane.proc.pid}
         if method == "pane.run_card":
-            pane = self.run_card(params["task_id"], parent=params.get("parent"))
+            pane = self.run_card(params["task_id"], place=params.get("place"))
             return {"pane_id": pane.id, "pid": pane.proc.pid, "card": pane.card}
         if method == "pane.resume_card":
-            pane = self.resume_card(params["task_id"], parent=params.get("parent"),
+            pane = self.resume_card(params["task_id"], place=params.get("place"),
                                     say=params.get("say"))
             return {"pane_id": pane.id, "pid": pane.proc.pid, "card": pane.card}
         if method == "pane.read":

@@ -218,14 +218,20 @@ def board(con, workspace):
 
 
 def remove(con, workspace, task_id):
-    """Delete a card: index row (refusing active ones) and its file."""
+    """Delete a card: index row (refusing active ones) and its file. The one entry point for
+    deletion: a file left behind would resurrect the card on the next rebuild, so that is
+    reported as a failure, never as success."""
     ok, msg = tasks.delete_task(con, task_id)
     if not ok:
         return ok, msg
+    path = card_path(workspace, task_id)
     try:
-        os.remove(card_path(workspace, task_id))
-    except OSError:
+        os.remove(path)
+    except FileNotFoundError:
         pass
+    except OSError as error:
+        return False, (f"Card {task_id} left the board but its file could not be deleted ({error}); "
+                       f"remove {path} by hand or the card comes back on the next rebuild.")
     return ok, msg
 
 
