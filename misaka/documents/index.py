@@ -121,6 +121,9 @@ def _tree(doc_id):
         return None
 
 
+STAGE_SUFFIX = ".part-"     # an in-progress document: "<doc_id>.part-<pid>", never listed
+
+
 def ingest(p, title=None, with_tree=True, task_id=None):
     """Index a file under its content hash and return ``(doc_id, page_count)``.
 
@@ -156,19 +159,33 @@ def ingest(p, title=None, with_tree=True, task_id=None):
             f"text pages. Run OCR before indexing: {os.path.basename(p)}"
         )
     tree = build_tree(p) if (with_tree and len(pages) >= 20) else None
-    os.makedirs(os.path.join(ddir, "pages"), exist_ok=True)
-    for i, t in enumerate(pages):
-        with open(_page_path(ddir, i + 1), "w", encoding="utf-8") as f:
-            f.write(t)
-    shutil.copy2(p, os.path.join(ddir, "source" + os.path.splitext(p)[1].lower()))
-    if tree:
-        with open(os.path.join(ddir, "tree.json"), "w", encoding="utf-8") as f:
-            f.write(tree)
-    meta = {"doc_id": doc_id, "title": title or os.path.basename(p), "orig_path": p, "paths": [p],
-            "sha256": sha, "pages": len(pages), "task_id": task_id,
-            "task_ids": [task_id] if task_id else [], "added_at": int(time.time())}
-    with open(os.path.join(ddir, "meta.json"), "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
+    # Build the document beside its final place and move it in with one rename: the corpus holds
+    # a complete document or none, never a half-written directory that reads as "already indexed".
+    stage = f"{ddir}{STAGE_SUFFIX}{os.getpid()}"
+    shutil.rmtree(stage, ignore_errors=True)
+    try:
+        os.makedirs(os.path.join(stage, "pages"))
+        for i, t in enumerate(pages):
+            with open(_page_path(stage, i + 1), "w", encoding="utf-8") as f:
+                f.write(t)
+        shutil.copy2(p, os.path.join(stage, "source" + os.path.splitext(p)[1].lower()))
+        if tree:
+            with open(os.path.join(stage, "tree.json"), "w", encoding="utf-8") as f:
+                f.write(tree)
+        meta = {"doc_id": doc_id, "title": title or os.path.basename(p), "orig_path": p, "paths": [p],
+                "sha256": sha, "pages": len(pages), "task_id": task_id,
+                "task_ids": [task_id] if task_id else [], "added_at": int(time.time())}
+        with open(os.path.join(stage, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+        try:
+            os.replace(stage, ddir)
+        except OSError:
+            if not os.path.isdir(ddir):          # not a concurrent ingest of the same content
+                raise
+    except BaseException:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
+    shutil.rmtree(stage, ignore_errors=True)    # left only when another ingest won the rename
     return doc_id, len(pages)
 
 
@@ -210,6 +227,8 @@ def docs(workspace=None):
     """List indexed documents oldest first; ``workspace`` keeps only those whose source file lives under that folder."""
     root, out = corpus_root(), []
     for name in (os.listdir(root) if os.path.isdir(root) else []):
+        if STAGE_SUFFIX in name:
+            continue
         ddir = os.path.join(root, name)
         m = _read_meta_at(ddir)
         if not m:

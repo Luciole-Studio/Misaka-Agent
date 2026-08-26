@@ -138,6 +138,23 @@ def _parser():
     rm.add_argument("--yes", action="store_true", help="Skip confirmation")
     return p
 
+def _doc_tree_lines(tree, depth=1):
+    """``misaka doc tree``: one indented line per outline node, with its page span."""
+    import json as _json
+    if isinstance(tree, str):
+        try:
+            tree = _json.loads(tree)
+        except ValueError:
+            return []
+    lines = []
+    for node in tree or []:
+        start, end = node.get("start_index"), node.get("end_index")
+        span = f"p{start}" if start == end or end is None else f"p{start}-{end}"
+        lines.append(f"{'  ' * depth}{node.get('title', '')}  ({span})")
+        lines.extend(_doc_tree_lines(node.get("nodes") or [], depth + 1))
+    return lines
+
+
 def main():
     signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     argv = sys.argv[1:]
@@ -523,6 +540,8 @@ def main():
                 print(f"{e['layer']:<9}{e['category']}/{e['name']}  {e['description']}  ({e['dir']})")
     elif args.cmd == "doc":
         if args.action == "add":
+            if not args.arg:
+                sys.exit("Usage: misaka doc add <file> [--no-tree]")
             did, n = corpus.ingest(args.arg, with_tree=not args.no_tree)
             has = corpus.doc_dir(did) and os.path.exists(os.path.join(corpus.doc_dir(did), "tree.json"))
             structure = "with PageIndex structure" if has else "page navigation only"
@@ -543,16 +562,20 @@ def main():
                 print(f"  {h['doc_id']} p{h['page']}  {h['s'][:90]}")
             print(f"{len(hits)} match(es). Use `misaka doc verify` before citing a quotation.")
         elif args.action == "verify":
-            if not args.doc:
-                sys.exit("verify requires --doc <doc-id>.")
+            if not args.arg or not args.doc:
+                sys.exit("Usage: misaka doc verify <quote> --doc <doc-id>")
             v = corpus.verify_quote(args.doc, args.arg)
             if not v:
                 sys.exit("❌ Quote not found in that document.")
             print(f"✅ p{v['page']} offset {v['offset']}\n   claim_hash {v['claim_hash']}")
         elif args.action == "tree":
+            if not (args.arg or args.doc):
+                sys.exit("Usage: misaka doc tree <doc-id>")
             st = corpus.structure(args.arg or args.doc)
             if not st:
                 sys.exit("Document not found.")
             print(f"{st['title']} ({st['mode']})")
+            for line in _doc_tree_lines(st.get("tree")):
+                print(line)
             for pg in (st.get("pages") or [])[:40]:
                 print(f"  p{pg['page']:<4} {pg['head']}")
