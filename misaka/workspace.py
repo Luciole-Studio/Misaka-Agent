@@ -24,13 +24,14 @@ def _artifact_node(row):
     """Build a cheap heading tree for a Markdown artifact."""
     children = []
     try:
-        for lineno, line in enumerate(open(row["path"], encoding="utf-8", errors="replace"), 1):
-            stripped = line.lstrip()
-            if stripped.startswith("#"):
-                title = stripped.lstrip("#").strip()
-                if title:
-                    children.append({"node_id": f"artifact:{row['id']}#L{lineno}",
-                                     "title": title, "summary": f"Line {lineno}"})
+        with open(row["path"], encoding="utf-8", errors="replace") as f:
+            for lineno, line in enumerate(f, 1):
+                stripped = line.lstrip()
+                if stripped.startswith("#"):
+                    title = stripped.lstrip("#").strip()
+                    if title:
+                        children.append({"node_id": f"artifact:{row['id']}#L{lineno}",
+                                         "title": title, "summary": f"Line {lineno}"})
     except OSError:
         pass
     return {"node_id": f"artifact:{row['id']}", "title": row["title"],
@@ -46,12 +47,13 @@ def _project_file(workspace):
         return None
     children = []
     try:
-        for lineno, line in enumerate(open(path, encoding="utf-8", errors="replace"), 1):
-            stripped = line.lstrip()
-            if stripped.startswith("#"):
-                children.append({"node_id": f"project#L{lineno}",
-                                 "title": stripped.lstrip("#").strip(),
-                                 "summary": f"Line {lineno}"})
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for lineno, line in enumerate(f, 1):
+                stripped = line.lstrip()
+                if stripped.startswith("#"):
+                    children.append({"node_id": f"project#L{lineno}",
+                                     "title": stripped.lstrip("#").strip(),
+                                     "summary": f"Line {lineno}"})
     except OSError:
         return None
     return {"node_id": "project", "title": "PROJECT.md", "summary": "Project brief",

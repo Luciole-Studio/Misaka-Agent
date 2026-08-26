@@ -21,7 +21,7 @@ import json
 import os
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from misaka.core.extensions.types import ToolDefinition
 from misaka.extensions.sisters.subagent import agents as agent_roster
@@ -108,7 +108,6 @@ class AgentParams(_StrictModel):
         description="Optional addressable name for SendMessage",
     )
     team_name: str | None = Field(default=None, description="Reserved for agent teams")
-    mode: str | None = Field(default=None, description="Reserved teammate permission mode")
     isolation: Literal["worktree"] | None = Field(
         default=None,
         description="Run in a temporary git worktree",

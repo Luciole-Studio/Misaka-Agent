@@ -24,10 +24,6 @@ def _set_process_title(title: str) -> None:
         return
 
 
-def _suppress_runtime_warnings() -> None:
-    warnings.showwarning = lambda *args, **kwargs: None
-
-
 async def _invoke_main(argv: list[str]) -> int:
     from misaka.cli.engine import main as async_main
 
@@ -42,7 +38,6 @@ def main(argv: list[str] | None = None) -> int:
 
     _set_process_title(APP_NAME)
     os.environ["MISAKA_CODING_AGENT"] = "true"
-    _suppress_runtime_warnings()
     configureHttpDispatcher()
     resolved_argv = list(sys.argv[1:] if argv is None else argv)
     return asyncio.run(_invoke_main(resolved_argv))

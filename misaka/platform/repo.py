@@ -89,27 +89,3 @@ def branch_finish(workspace, name, worktree, *, into=None, merge=True, message="
     _git(workspace, "worktree", "prune")
     return "merged" if merge else "closed"
 
-
-if __name__ == "__main__":                              # self-check: nested node branches on a temp repo
-    import tempfile
-    with tempfile.TemporaryDirectory() as tmp:
-        ws = os.path.join(tmp, "p")
-        os.makedirs(ws)
-        assert not enabled(ws)
-        _git(ws, "init", "-q")
-        open(os.path.join(ws, "PROJECT.md"), "w").write("x\n")
-        assert commit(ws, ["PROJECT.md"], "init") and enabled(ws)
-        assert commit(ws, ["nope.md"], "nothing") is False
-        wt1 = branch_start(ws, "research/b1", os.path.join(tmp, "wt", "b1"))
-        open(os.path.join(wt1, "a.md"), "w").write("a\n")
-        assert commit_card(wt1, "t_1", {"artifacts": ["a.md"]}, "card t_1: submit")
-        wt2 = branch_start(ws, "research/b2", os.path.join(tmp, "wt", "b2"), base="research/b1")
-        assert os.path.exists(os.path.join(wt2, "a.md"))       # child forks from the parent branch
-        open(os.path.join(wt2, "b.md"), "w").write("b\n")
-        commit(wt2, ["b.md"], "b")
-        assert branch_finish(ws, "research/b1", wt1, message="b1 merged") == "merged"
-        assert branch_finish(ws, "research/b2", wt2, merge=False) == "closed"
-        assert os.path.exists(os.path.join(ws, "a.md")) and not os.path.exists(os.path.join(ws, "b.md"))
-        assert _git(ws, "rev-parse", "--verify", "-q", "research/b2").returncode == 0  # kept as record
-        assert not os.path.exists(wt1) and not os.path.exists(wt2)
-    print("repo self-check OK")

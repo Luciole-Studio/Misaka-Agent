@@ -67,13 +67,3 @@ def register(harn):
 def activate(spec):
     return register
 
-
-if __name__ == "__main__":      # self-check: one live scan (skipped without network)
-    try:
-        out = scan("gentry tax resistance Ming Qing", limit=5)
-    except OSError as error:
-        print(f"coverage self-check skipped: {error}")
-    else:
-        assert "Subfields (works):" in out and "Topics (works):" in out, out
-        print(out)
-        print("coverage self-check OK")

@@ -20,7 +20,6 @@ from misaka.config.engine import (  # noqa: F401
     get_models_path,
     get_readme_path,
     get_sessions_dir,
-    get_share_viewer_url,
     get_themes_dir,
 )
 from misaka.config.product import CFG, sisters  # noqa: F401

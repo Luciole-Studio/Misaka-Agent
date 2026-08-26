@@ -117,16 +117,8 @@ VERSION = _PACKAGE_METADATA.get("version") or "0.0.0"
 ENV_AGENT_DIR = f"{APP_NAME.upper()}_CODING_AGENT_DIR"
 ENV_SESSION_DIR = f"{APP_NAME.upper()}_CODING_AGENT_SESSION_DIR"
 
-DEFAULT_SHARE_VIEWER_URL = "https://harn.dev/session/"
-
-
 def expand_tilde_path(path: str) -> str:
     return normalize_path(path)
-
-
-def get_share_viewer_url(gist_id: str) -> str:
-    base_url = os.environ.get("MISAKA_SHARE_VIEWER_URL", DEFAULT_SHARE_VIEWER_URL)
-    return f"{base_url}#{gist_id}"
 
 
 def get_agent_dir() -> str:

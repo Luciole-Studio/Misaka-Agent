@@ -55,7 +55,6 @@ from misaka.config import (
     get_changelog_path,
     get_debug_log_path,
     get_docs_path,
-    get_share_viewer_url,
 )
 from misaka.core.bash_executor import BashResult
 from misaka.core.agent_session import parse_skill_block
@@ -2669,7 +2668,7 @@ class InteractiveMode:
             if not gist_id:
                 self.showError("Failed to parse gist ID from gh output")
                 return
-            self.showStatus(f"Share URL: {get_share_viewer_url(gist_id)}\nGist: {gist_url}")
+            self.showStatus(f"Gist: {gist_url}")
         except Exception as error:  # noqa: BLE001
             self.showError(f"Failed to create gist: {error}")
         finally:

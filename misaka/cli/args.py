@@ -354,7 +354,6 @@ Environment Variables:
   {ENV_SESSION_DIR.ljust(32)} - Session storage directory (overridden by --session-dir)
   MISAKA_PACKAGE_DIR              - Override package directory (for Nix/Guix store paths)
   MISAKA_OFFLINE                  - Disable startup network operations when set to 1/true/yes
-  MISAKA_SHARE_VIEWER_URL         - Base URL for /share command (default: https://harn.dev/session/)
 
 Built-in Tool Names:
   read   - Read file contents
