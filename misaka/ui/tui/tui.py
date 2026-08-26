@@ -877,7 +877,9 @@ class TUI(Container):
         def log_redraw(reason: str) -> None:
             if not debug_redraw:
                 return
-            log_path = Path.home() / ".misaka" / "agent" / "misaka-debug.log"
+            from misaka.config.engine import get_debug_log_path
+            log_path = Path(get_debug_log_path())
+            log_path.parent.mkdir(parents=True, exist_ok=True)
             message = (
                 f"[{_utc_iso_timestamp()}] fullRender: {reason} "
                 f"(prev={len(self.previousLines)}, new={len(new_lines)}, height={height})\n"
@@ -1066,8 +1068,9 @@ class TUI(Container):
         buffer += "\x1b[?2026l"
 
         if os.environ.get("MISAKA_TUI_DEBUG") == "1":
-            debug_dir = Path("/tmp/tui")
-            debug_dir.mkdir(parents=True, exist_ok=True)
+            from misaka.config.engine import get_agent_dir
+            debug_dir = Path(get_agent_dir()) / "debug" / "tui"    # private: a render dump carries the screen's text
+            debug_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             debug_path = debug_dir / f"render-{int(time.time() * 1000)}-{secrets.token_hex(6)}.log"
             debug_data = [
                 f"firstChanged: {first_changed}",

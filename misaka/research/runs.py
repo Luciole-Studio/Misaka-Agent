@@ -144,9 +144,9 @@ def init(con):
     if columns and current:
         return                               # current schema: nothing to migrate, nothing to replay
     if columns and not current:
-        # No migration from older schemas: files are the truth and the tables are meant to be a
-        # rebuildable index -- but nothing rebuilds them yet, so the old tables are renamed, not
-        # dropped, until a rebuild or an incremental migration exists.
+        # No in-place migration from older schemas. The prose is in files, but the workflow state
+        # (phases, waves, driver leases, task links) lives only here, so the tables cannot be rebuilt
+        # from the files: the old ones are renamed, not dropped, and carried forward column by column.
         suffix = f"_bak_{time.strftime('%Y%m%d%H%M%S')}"
         renamed = []
         for table in (

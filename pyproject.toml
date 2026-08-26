@@ -3,10 +3,19 @@
 # A user install picks its provider: `pip install 'misaka[anthropic]'` (or `misaka[providers]` for all).
 [project]
 name = "misaka"
-version = "0.8.0"
+version = "0.9.0"
 description = "MISAKA: a multi-agent research system for the humanities and social sciences, built on the pi/harn Python engine"
 readme = "README.md"
 requires-python = ">=3.12"
+authors = [{ name = "makiko", email = "nishikinokki@gmail.com" }]
+# license: not chosen yet -- the vendored PageIndex tree carries its own MIT licence (misaka/documents/pageindex)
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Environment :: Console",
+    "Topic :: Scientific/Engineering",
+]
 dependencies = [
     # engine/ai (formerly harn_ai)
     "pydantic>=2.10",

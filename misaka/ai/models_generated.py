@@ -1,4 +1,9 @@
-"""Auto-generated model catalog from upstream TypeScript definitions."""
+"""The model catalog, ported by hand from the upstream (pi) generated TypeScript catalog.
+
+There is no generator in this repository and the upstream commit of the port was not recorded:
+a refresh is a re-port from upstream's generated file, and the commit belongs in this docstring.
+Excluded from lint as generated-shaped code.
+"""
 
 from __future__ import annotations
 

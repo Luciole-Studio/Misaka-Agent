@@ -2,10 +2,9 @@ PY ?= .venv/bin/python
 
 .PHONY: check test lint build
 
-check: test build   # lint joins once the non-vendored tree is clean (phase 6)
+check: test lint build
 
 test:
-	$(PY) -m pytest -q
 	$(PY) -m pytest -q -W error
 	$(PY) -c "import compileall,sys; sys.exit(0 if compileall.compile_dir('misaka', quiet=1) else 1)"
 	$(PY) -c "import pkgutil,importlib,misaka; [importlib.import_module(m.name) for m in pkgutil.walk_packages(misaka.__path__, 'misaka.') if not m.name.endswith('__main__')]; print('import sweep ok')"

@@ -1,4 +1,5 @@
-"""Auto-generated image model catalog from upstream TypeScript definitions."""
+"""The image model catalog, ported by hand from the upstream (pi) generated TypeScript catalog;
+provenance as in models_generated.py: no generator here, upstream commit not recorded."""
 
 from __future__ import annotations
 
