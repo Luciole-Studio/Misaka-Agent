@@ -1,6 +1,7 @@
 """Execute durable Sister task cards and validate structured submissions."""
 import json
 import os
+import sqlite3
 import stat
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -282,6 +283,15 @@ def check_report(workspace, con=None, task_id=None, generation=None):
         if not notes.strip():
             return False, "blocked report missing notes"
         return False, f"blocked: {notes[:500]}"
+    if con is not None and task_id:
+        try:
+            linked = con.execute(
+                "SELECT kind FROM research_run_tasks WHERE task_id=?", (task_id,)
+            ).fetchone()
+        except sqlite3.OperationalError:            # a board that never ran research has no table
+            linked = None
+        if linked and linked["kind"] == "research" and not isinstance(report.get("findings"), list):
+            return False, "research report.json must include a `findings` array"
     if con is not None and task_id:
         from misaka.network import todo
         doing = todo.stats(con, task_id)["doing"]

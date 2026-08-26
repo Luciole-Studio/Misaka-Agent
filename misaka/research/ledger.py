@@ -62,12 +62,16 @@ def _artifact_map(con, run_id, task_id):
 def ingest_report(con, run, task, report):
     """Persist the valid findings from a task report and return a short summary.
 
-    A missing ``findings`` key is accepted for old or resumed tasks. Invalid entries
+    ``findings`` may be absent only in pre-schema reports (check_report enforces the array
+    at submission for current research cards). Invalid entries
     are dropped with a reason rather than retried: every check here is
     deterministic, so a retry would fail the same way.
     """
-    raw = report.get("findings", [])
+    raw = report.get("findings")
     if raw is None:
+        if int(report.get("schema_version") or 0) >= 1:
+            return {"findings": 0, "claims": 0,
+                    "dropped": ["findings missing from a current-schema report"]}
         raw = []
     if not isinstance(raw, list):
         return {"findings": 0, "claims": 0, "dropped": ["findings must be an array"]}
