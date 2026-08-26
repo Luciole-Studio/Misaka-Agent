@@ -684,8 +684,8 @@ async def _wait_level(con, cfg, spawner, run, handles, *, poll_seconds, progress
     last = {}
     while handles:
         await asyncio.sleep(poll_seconds)
-        if driver_lock:
-            runs.heartbeat_driver(con, run["id"], driver_lock)
+        if driver_lock and not runs.heartbeat_driver(con, run["id"], driver_lock):
+            raise RuntimeError(f"Research run {run['id']}: the driver lease was taken over by another process.")
         halted = (runs.stop_requested(con, run["id"])
                   or budget.status(con, cfg.get("token_cap"))["mode"] == "stop")
         for nid, handle in list(handles.items()):
@@ -739,7 +739,7 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
             return _partial_result(con, run, halts["budget"])
         _refresh_workspace_index(con, run)
         if run["phase"] == "created":
-            runs.set_state(con, run_id, phase="active")
+            runs.set_state(con, run_id, phase="active", driver_lock=driver_lock)
         while True:                                   # breadth-first: one level at a time, its nodes in parallel
             if lost.is_set():
                 raise RuntimeError(f"Research run {run_id}: the driver lease was taken over by another process.")
@@ -747,7 +747,7 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
             level = runs.next_level(con, run_id)
             if not level:
                 break
-            runs.set_state(con, run_id, wave=level[0]["depth"])
+            runs.set_state(con, run_id, wave=level[0]["depth"], driver_lock=driver_lock)
             await _progress(progress, "level", f"Depth {level[0]['depth']}: {len(level)} node(s) expanding.", run,
                             nodes=[n["id"] for n in level])
             result = await _expand_level(con, cfg, spawner, run, level, poll_seconds=poll_seconds, progress=progress,
@@ -764,14 +764,16 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
             settle_done_tasks(con, run_id=run_id)
             await _progress(progress, "unfinished", f"The run cannot be adjudicated: {unfinished}", run)
             return _partial_result(con, run, unfinished, status="failed")
-        runs.set_state(con, run_id, phase="finalizing")
+        runs.set_state(con, run_id, phase="finalizing", driver_lock=driver_lock)
         await _progress(progress, "finalizing", "Every node is closed; Last Order is adjudicating the final report.", run)
         result = await asyncio.to_thread(report.finalize, con, run, cfg, worker)
-        runs.set_state(con, run_id, phase="done", status="done", final_artifact=result["artifact"])
+        runs.set_state(con, run_id, phase="done", status="done", final_artifact=result["artifact"],
+                       driver_lock=driver_lock)
         _refresh_workspace_index(con, runs.get(con, run_id))
         return {"reason": "done", "final": result, "run": runs.summary(con, run_id)}
     except Exception as error:
-        runs.set_state(con, run_id, status="failed", error=f"{type(error).__name__}: {error}"[:500])
+        runs.set_state(con, run_id, status="failed", error=f"{type(error).__name__}: {error}"[:500],
+                       driver_lock=driver_lock)               # a stale driver's word no longer lands
         raise
     finally:
         keeper.cancel()

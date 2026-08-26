@@ -484,7 +484,8 @@ def _atomic_write(path, content):
 def _commit(run, node, message):
     """Record the run's state on git: the project line always, the node's line when it has one."""
     from misaka.platform import repo
-    paths = [os.path.join("research", run["id"]), "cards", "PROJECT.md"]
+    # ponytail: only this run's prose and the project brief; cards commit themselves per transition.
+    paths = [os.path.join("research", run["id"]), "PROJECT.md"]
     repo.commit(run["workspace"], paths, message)
     if node is not None and node["worktree"]:
         repo.commit(node["worktree"], paths, message)
@@ -552,7 +553,9 @@ def limits(run):
 
 
 def set_state(con, run_id, *, phase=None, status=None, error=None,
-              root_session=None, final_artifact=None, wave=None):
+              root_session=None, final_artifact=None, wave=None, driver_lock=None):
+    """Update run state. With ``driver_lock`` the write lands only while that lease is held:
+    a driver that lost its lease cannot fail or finish a run its successor now owns."""
     values, fields = [], []
     for name, value in (("phase", phase), ("status", status), ("last_error", error),
                         ("root_session", root_session), ("final_artifact", final_artifact)):
@@ -564,9 +567,13 @@ def set_state(con, run_id, *, phase=None, status=None, error=None,
         values.append(int(wave))
     fields.append("updated_at=?")
     values.extend([int(time.time()), run_id])
-    con.execute(f"UPDATE research_runs SET {','.join(fields)} WHERE id=?", values)
+    where = "id=?"
+    if driver_lock is not None:
+        where += " AND driver_lock=?"
+        values.append(driver_lock)
+    cur = con.execute(f"UPDATE research_runs SET {','.join(fields)} WHERE {where}", values)
     run = get(con, run_id)
-    if phase is not None:
+    if phase is not None and cur.rowcount == 1:
         _commit(run, None, f"research {run_id}: {phase}")
     return run
 
