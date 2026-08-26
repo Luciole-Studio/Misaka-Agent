@@ -57,7 +57,8 @@ class ProcessSpawner:
     def stop(self, proc):
         if proc.poll() is not None:
             return
-        proc.terminate()
+        from misaka.platform import processes
+        processes.terminate(proc.pid)      # the whole tree: a node's cards and LLM children must not outlive it
         try:
             proc.wait(5)
         except subprocess.TimeoutExpired:
@@ -108,6 +109,11 @@ class HeadlessRunner:
     async def launch_ready(self, *, task_ids, **_kwargs):
         from misaka.network import dispatch
         await asyncio.to_thread(dispatch.dispatch_once, self.con, self.cfg, task_ids=task_ids)
+
+    async def stop(self, task_id, **_kwargs):
+        """Inline dispatch runs a card to the end of its turn in this very process; it cannot be
+        killed from here. The drive loop already holds back ready/todo cards on a halt -- this
+        exists so a halt is an explicit no-op instead of a silently missing method."""
 
 
 class Reporter:
