@@ -338,10 +338,11 @@ def register(harn):
                 lines.append(
                     f"  {item['task_id']} → {item['sister']}  {item['status']}"
                 )
-        started = sum(item.get("status") != "error" for item in results)
+        started = sum(item.get("status") not in ("error", "queued") for item in results)
+        queued = sum(item.get("status") == "queued" for item in results)
         return _text(
-            f"Started {started} card(s); completion handling is automatic:\n"
-            + "\n".join(lines)
+            f"Started {started} card(s)" + (f", {queued} queued for capacity" if queued else "")
+            + "; completion handling is automatic:\n" + "\n".join(lines)
         )
 
 
@@ -775,8 +776,9 @@ def register(harn):
     async def collect_pending():
         """Deliver terminal-card notifications queued while no session was running, then hint about cards awaiting review."""
         con = _con()
-        subscription = notifications.subscribe(
-            con, "last-order", "board-harness", "task", "*", "terminal"
+        workspace = db.canonical_workspace(os.getcwd())
+        subscription = notifications.subscribe(               # one cursor per project: another project's
+            con, "last-order", f"board-harness:{workspace}", "task", "*", "terminal"   # cards are not ours to consume
         )
         for _ in range(100):
             event = notifications.claim_next(con, subscription)
@@ -787,8 +789,11 @@ def register(harn):
             except (TypeError, ValueError):
                 payload = {}
             generation = int(payload.get("generation") or 0)
-            delivered = runtime.notify_row(event["resource_id"])
             row = db.get(con, event["resource_id"])
+            if row is not None and row["workspace"] != workspace:
+                notifications.ack(con, subscription, event["id"], event["lease_token"])
+                continue
+            delivered = runtime.notify_row(event["resource_id"])
             consumed = (
                 delivered or row is None or int(row["generation"]) != generation
                 or int(row["notified_generation"]) >= generation
@@ -817,6 +822,7 @@ def register(harn):
         asyncio.ensure_future(collect_pending())
 
     harn.on("session_start", _kickoff)
+    harn.on("before_agent_start", _kickoff)     # a long-lived session hears about cards that finished meanwhile
 
 SESSION_KINDS = {"foreground", "dm"}
 

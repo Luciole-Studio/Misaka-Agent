@@ -56,6 +56,13 @@ def pending(con, to_addr):
         (to_addr,)).fetchall()
 
 
+def unclaim(con, ids):
+    """Put claimed messages back in the queue (a delivery that failed after claiming them)."""
+    if ids:
+        marks = ",".join("?" * len(ids))
+        con.execute(f"UPDATE messages SET delivered_at=NULL WHERE id IN ({marks})", [int(i) for i in ids])
+
+
 def claim(con, ids) -> set[int]:
     """Atomically claim queued messages and return the IDs won by this session."""
     if not ids:
@@ -70,7 +77,6 @@ def claim(con, ids) -> set[int]:
 
 def register(harn, *, sender, route=None, receive=False):
     """Register the SendMessage tool; with ``receive``, also poll this sender's inbox and deliver queued messages into the session."""
-    sender = sender.replace("_", "-")
     card_task = os.environ.get("MISAKA_USAGE_TASK_ID") or None
     raw_gen = os.environ.get("MISAKA_USAGE_GENERATION", "")
     card_gen = int(raw_gen) if raw_gen.isdigit() else None
@@ -92,27 +98,29 @@ def register(harn, *, sender, route=None, receive=False):
 
     async def execute(tool_call_id, raw, signal, on_update, ctx):
         args = raw if isinstance(raw, SendMessageParams) else SendMessageParams(**(raw or {}))
-        addr = args.to.strip().replace("_", "-")
+        addr = args.to.strip()
         known = {"last-order"} | sisters()
         if addr in known and addr != sender:
-            # Wake the recipient for one asynchronous contact turn.
-            argv = [sys.executable, "-m", "misaka", "dm",
-                    "--from", sender, "--summary", args.summary]
-            if card_task:
-                argv += ["--task-id", card_task]
-            if card_gen is not None:
-                argv += ["--generation", str(card_gen)]
-            argv += ["--", addr, args.message]
+            # The message is durable before anyone is woken: a queued row is delivered by the
+            # recipient's live session (the pump below) or by the contact turn started here,
+            # and a wake-up that dies leaves it queued for the next one.
+            con = connect()
+            try:
+                mid = send(con, addr, args.message, summary=args.summary, sender=sender,
+                           task_id=card_task, generation=card_gen)
+            finally:
+                con.close()
+            argv = [sys.executable, "-m", "misaka", "dm", "--from", sender, "--", addr]
             # Do not charge the recipient's turn to the sender's task card.
             child_env = {k: v for k, v in os.environ.items()
                          if not k.startswith("MISAKA_USAGE_")}
-            subprocess.Popen(argv, stdout=subprocess.DEVNULL,  # noqa: ASYNC220 - fire-and-forget notifier process
+            subprocess.Popen(argv, stdout=subprocess.DEVNULL,  # noqa: ASYNC220 - fire-and-forget wake-up; the row is the message
                              stderr=subprocess.DEVNULL,
                              start_new_session=True, env=child_env)
             return {"content": [{"type": "text", "text": (
-                f"Message sent to {addr}. Continue working without waiting for a reply; "
-                "delivery does not change task-card state or authorize new work.")}],
-                "details": {"to": addr}}
+                f"Message #{mid} queued for {addr} and its session woken. Continue working without waiting "
+                "for a reply; delivery does not change task-card state or authorize new work.")}],
+                "details": {"to": addr, "message_id": mid}}
         if route is not None:
             hit = await route(args.to, args.message, args.summary, ctx)
             if hit is not None:
@@ -174,10 +182,7 @@ def register(harn, *, sender, route=None, receive=False):
                              "display": True, "details": {"count": len(mine)}},
                             {"deliverAs": "followUp", "triggerTurn": True})
                     except Exception:  # noqa: BLE001 - restore delivery state so the next session can retry
-                        marks = ",".join("?" * len(mine))
-                        con.execute(
-                            f"UPDATE messages SET delivered_at=NULL WHERE id IN ({marks})",
-                            [int(r["id"]) for r in mine])
+                        unclaim(con, [r["id"] for r in mine])
                 try:
                     await asyncio.wait_for(stop.wait(), POLL_SECONDS)
                 except TimeoutError:

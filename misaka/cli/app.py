@@ -38,7 +38,7 @@ def _parser():
 
     dmp = sub.add_parser("dm", help="Deliver a message to an agent's contact session and run one turn")
     dmp.add_argument("to", help="Recipient: last-order or a Sister ID")
-    dmp.add_argument("message", help="Message body")
+    dmp.add_argument("message", nargs="?", help="Message body (omitted: deliver what is already queued)")
     dmp.add_argument("--from", dest="sender", help="Sender role (default: the user)")
     dmp.add_argument("--model", help="Override the recipient's model")
     dmp.add_argument("--timeout", type=int, default=600, help="Seconds to wait for a reply")

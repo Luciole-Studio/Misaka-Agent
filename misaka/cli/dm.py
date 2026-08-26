@@ -89,29 +89,42 @@ def _serial(to):
     finally:
         os.close(fd)   # Closing releases the lock.
 
-def deliver(to, message, sender=None, model=None, timeout=600,
+def deliver(to, message=None, sender=None, model=None, timeout=600,
             task_id=None, generation=None, summary=None):
-    """Deliver one message into ``to``'s contact session and run a turn.
+    """Queue ``message`` (when given) and deliver everything queued for ``to`` into its contact
+    session in one turn. A message is a row first: the turn claims the rows, and a failed
+    turn puts them back for the next wake-up.
 
-    Returns an exit code: 0 got a reply, 1 the session failed (message not
-    delivered), 2 timed out (message delivered; a late reply is not lost).
-    ``task_id``, ``generation`` and ``summary`` only go into the audit row."""
+    Returns an exit code: 0 got a reply (or nothing was queued), 1 the session failed
+    (messages back in the queue), 2 timed out (delivered; a late reply is not lost)."""
     from misaka.cli import chat
     from misaka.config import profiles, sisters
     from misaka.network import messages
     from misaka.platform.session import run_coro, run_session
 
-    to = (to or "").strip().replace("_", "-")
-    sender = (sender or "").strip().replace("_", "-") or None
+    to = (to or "").strip()
+    sender = (sender or "").strip() or None
     known = {"last-order"} | sisters()
     if to not in known:
         sys.exit(f"Unknown recipient '{to}'. Available recipients: {', '.join(sorted(known))}.")
     if sender == to:
         sys.exit("Sender and recipient must be different.")
     body = (message or "").strip()
-    if not body:
-        sys.exit("Message must not be empty.")
-    text = dm_prefix(sender) + body if sender else body
+    con = messages.connect()
+    try:
+        if body:
+            messages.send(con, to, body, summary=(summary or body[:80]), sender=sender or "user",
+                          task_id=task_id, generation=generation)
+        rows = messages.pending(con, to)
+        won = messages.claim(con, [r["id"] for r in rows])
+        mine = [r for r in rows if r["id"] in won]
+    finally:
+        con.close()
+    if not mine:
+        print(f"Nothing is queued for {to}.")
+        return 0
+    text = "\n\n".join((dm_prefix(r["sender"]) + r["body"]) if r["sender"] and r["sender"] != "user" else r["body"]
+                       for r in mine)
 
     prof, model_default = chat.assembly(None if to == "last-order" else to)
     home = os.path.expanduser("~")
@@ -152,12 +165,10 @@ def deliver(to, message, sender=None, model=None, timeout=600,
             from misaka.platform import budget
             budget.commit_agent_usage_path(
                 os.path.expanduser(CFG["db"]), None, f"dm:{to}", 0, spent)
-        if not r["error"]:
-            con = messages.connect()
+        if r["error"]:
+            con = messages.connect()                       # the turn never happened: back in the queue
             try:
-                messages.claim(con, [messages.send(
-                    con, to, text, summary=(summary or body[:80]),
-                    sender=sender or "user", task_id=task_id, generation=generation)])
+                messages.unclaim(con, [row["id"] for row in mine])
             finally:
                 con.close()
     if r["error"]:

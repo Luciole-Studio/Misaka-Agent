@@ -80,7 +80,27 @@ def card_prompt(row):
     return CONTRACT.format(body=body).strip()
 
 
-def write_report(workspace, exit_code, output, *, assignee, task_id=None, output_dir=None, generation=None):
+def _artifacts(root, workspace, since):
+    """Files under ``root`` written during the run (mtime >= ``since``), nested ones included;
+    hidden entries, the board's own folders and report.json are not deliverables."""
+    out = []
+    for base, dirs, files in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d not in ("cards", "research", "node_modules"))
+        for name in sorted(files):
+            path = os.path.join(base, name)
+            if name.startswith(".") or name == "report.json":
+                continue
+            try:
+                if since is not None and os.path.getmtime(path) < since:
+                    continue
+            except OSError:
+                continue
+            out.append(os.path.relpath(path, workspace))
+    return out
+
+
+def write_report(workspace, exit_code, output, *, assignee, task_id=None, output_dir=None, generation=None,
+                 since=None):
     """Write report.json on the ally's behalf so the board's submit -> done
     flow works unchanged (only the verification gate marks done; allies and Sisters are treated alike).
     Returns (submitted, summary).
@@ -91,15 +111,7 @@ def write_report(workspace, exit_code, output, *, assignee, task_id=None, output
     tail = summarize(output, 2000).strip()
     if not tail:
         return False, f"Ally {assignee} produced no output."
-    artifacts = []
-    artifact_root = output_dir or workspace
-    try:
-        artifacts = sorted(os.path.relpath(os.path.join(artifact_root, f), workspace)
-                           for f in os.listdir(artifact_root)
-                           if not f.startswith(".") and f != "report.json"
-                           and os.path.isfile(os.path.join(artifact_root, f)))
-    except OSError:
-        pass
+    artifacts = _artifacts(output_dir or workspace, workspace, since)
     report = {"schema_version": 1, "status": "done",
               **({"generation": int(generation)} if generation is not None else {}),
               "summary": tail[-1500:],
@@ -115,11 +127,11 @@ def write_report(workspace, exit_code, output, *, assignee, task_id=None, output
     return True, report["summary"]
 
 
-def finish(workspace, exit_code, output, *, assignee, task_id, output_dir=None, generation=None):
+def finish(workspace, exit_code, output, *, assignee, task_id, output_dir=None, generation=None, since=None):
     """Wrap up after the ally process exits: write report.json, then mail Last Order. Returns (submitted, summary)."""
     ok, summary = write_report(
         workspace, exit_code, output, assignee=assignee,
-        task_id=task_id, output_dir=output_dir, generation=generation)
+        task_id=task_id, output_dir=output_dir, generation=generation, since=since)
     head = "finished and submitted" if ok else "could not submit"
     try:
         notify(task_id, f"Ally {assignee} {head} (card {task_id}):\n\n{summary}",

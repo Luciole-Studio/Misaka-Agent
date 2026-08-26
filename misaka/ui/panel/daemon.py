@@ -895,7 +895,8 @@ class Daemon:
             undo()
             raise
         pane.claim_lock, pane.generation = lock, generation
-        pane.deadline = time.time() + int(row["timeout_seconds"])
+        pane.started = time.time()
+        pane.deadline = pane.started + int(row["timeout_seconds"])
         # Owner = the pane's process group: if the daemon dies, reconcile reclaims by group identity (same marker as child.py).
         identity = process_tree.identity(pane.proc.pid)
         db.set_pid(con, task_id, pane.proc.pid,
@@ -940,7 +941,8 @@ class Daemon:
                             pane.exit_code if pane.exit_code is not None else -1,
                             pane.buf.decode("utf-8", errors="replace"),
                             assignee=pane.ally, task_id=pane.card,
-                            output_dir=row["output_dir"], generation=pane.generation)
+                            output_dir=row["output_dir"], generation=pane.generation,
+                            since=getattr(pane, "started", None))
                     ok, report = worker.check_report(pane.cwd, con=con, task_id=pane.card, generation=pane.generation)
                     blocked_reason = (str(report)[len("blocked:"):].strip()
                                       if not ok and str(report).startswith("blocked:") else None)
