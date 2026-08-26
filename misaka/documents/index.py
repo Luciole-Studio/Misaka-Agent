@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import threading
 import time
@@ -11,6 +12,7 @@ import time
 from misaka.utils import atomic
 
 SCAN_SUFFIXES = {".pdf", ".md", ".markdown", ".txt"}
+DOC_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 
 
 def corpus_root():
@@ -18,18 +20,61 @@ def corpus_root():
     return os.path.expanduser(os.environ.get("MISAKA_PAGEINDEX", "~/.misaka/pageindex"))
 
 
-def doc_dir(doc_id):
-    d = os.path.join(corpus_root(), doc_id)
-    return d if os.path.isdir(d) else None
+def _real_directory(path, root):
+    """True for a real directory below ``root``; redirects are not corpus data."""
+    try:
+        mode = os.stat(path, follow_symlinks=False).st_mode
+        resolved, resolved_root = os.path.realpath(path), os.path.realpath(root)
+        return (stat.S_ISDIR(mode) and resolved != resolved_root
+                and os.path.commonpath((resolved_root, resolved)) == resolved_root)
+    except (OSError, ValueError):
+        return False
+
+
+def _real_file(path, root):
+    """True for a regular, non-symlink file contained by ``root``."""
+    try:
+        mode = os.stat(path, follow_symlinks=False).st_mode
+        resolved, resolved_root = os.path.realpath(path), os.path.realpath(root)
+        return (stat.S_ISREG(mode) and resolved != resolved_root
+                and os.path.commonpath((resolved_root, resolved)) == resolved_root)
+    except (OSError, ValueError):
+        return False
+
+
+def resolve_doc(doc_id, workspace=None):
+    """Return one valid corpus directory, optionally owned by ``workspace``."""
+    if not isinstance(doc_id, str) or not DOC_ID_RE.fullmatch(doc_id):
+        return None
+    root = os.path.realpath(corpus_root())
+    ddir = os.path.join(root, doc_id)
+    if not _real_directory(ddir, root):
+        return None
+    ddir = os.path.realpath(ddir)
+    meta = _read_meta_at(ddir)
+    if not isinstance(meta, dict):
+        return None
+    sha = str(meta.get("sha256") or "")
+    if meta.get("doc_id") != doc_id or not re.fullmatch(r"[0-9a-f]{64}", sha) \
+            or not sha.startswith(doc_id):
+        return None
+    paths = meta.get("paths")
+    sources = paths if isinstance(paths, list) and paths else [meta.get("orig_path")]
+    if workspace and not any(under(path, workspace) for path in sources):
+        return None
+    return ddir
 
 
 def under(path, workspace):
     """True when ``path`` lives inside the folder ``workspace`` (symlinks resolved, whole path
     components: ``/`` contains ``/tmp/a``, ``/tmp/ab`` is not under ``/tmp/a``)."""
-    if not path:
+    if not path or not workspace:
         return False
-    p, w = os.path.realpath(path), os.path.realpath(workspace)
-    return p != w and os.path.commonpath([p, w]) == w
+    try:
+        p, w = os.path.realpath(os.fspath(path)), os.path.realpath(os.fspath(workspace))
+        return p != w and os.path.commonpath([p, w]) == w
+    except (TypeError, ValueError):
+        return False
 
 
 # Content extraction and addressing
@@ -111,24 +156,27 @@ def _page_path(ddir, page):
 
 def _read_meta_at(ddir):
     """Read metadata from a known document directory."""
+    path = os.path.join(ddir, "meta.json")
+    if not _real_file(path, ddir):
+        return None
     try:
-        with open(os.path.join(ddir, "meta.json"), encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except (OSError, ValueError):
         return None
 
 
-def _meta(doc_id):
-    ddir = doc_dir(doc_id)
+def _meta(doc_id, workspace=None):
+    ddir = resolve_doc(doc_id, workspace=workspace)
     return _read_meta_at(ddir) if ddir else None
 
 
-def _tree(doc_id):
-    ddir = doc_dir(doc_id)
+def _tree(doc_id, workspace=None):
+    ddir = resolve_doc(doc_id, workspace=workspace)
     if not ddir:
         return None
     tp = os.path.join(ddir, "tree.json")
-    if not os.path.exists(tp):
+    if not _real_file(tp, ddir):
         return None
     try:
         with open(tp, encoding="utf-8") as f:
@@ -175,8 +223,13 @@ def ingest(p, title=None, with_tree=True, task_id=None):
     sha = sha256_file(p)
     doc_id = sha[:12]
     ddir = os.path.join(corpus_root(), doc_id)
-    if os.path.isdir(ddir):
-        return doc_id, _link(ddir, p, task_id)
+    existing = resolve_doc(doc_id)
+    if existing:
+        if (_read_meta_at(existing) or {}).get("sha256") != sha:
+            raise ValueError(f"Document ID collision: {doc_id}")
+        return doc_id, _link(existing, p, task_id)
+    if os.path.lexists(ddir):
+        raise ValueError(f"Invalid or colliding corpus entry: {doc_id}")
     pages = extract_pages(p)
     solid = sum(1 for t in pages if len(t.strip()) > 20)
     if not pages or not solid:
@@ -209,9 +262,11 @@ def ingest(p, title=None, with_tree=True, task_id=None):
         try:
             os.replace(stage, ddir)
         except OSError:
-            if not os.path.isdir(ddir):          # not a concurrent ingest of the same content
+            existing = resolve_doc(doc_id)
+            if not existing or (_read_meta_at(existing) or {}).get("sha256") != sha:
+                # Not a concurrent ingest of the same content.
                 raise
-            _link(ddir, p, task_id)              # the loser still owns this task's link to the document
+            _link(existing, p, task_id)          # the loser still owns this task's link to the document
     except BaseException:
         shutil.rmtree(stage, ignore_errors=True)
         raise
@@ -238,13 +293,13 @@ def scan(directory, task_id=None, with_tree=True):
     return ingested, skipped
 
 
-def set_task_id(doc_id, task_id):
+def set_task_id(doc_id, task_id, workspace=None):
     """Associate an indexed document with a task card."""
-    ddir = doc_dir(doc_id)
+    ddir = resolve_doc(doc_id, workspace=workspace)
     if not ddir:
         return
     with _meta_lock(ddir):
-        m = _meta(doc_id) or {}
+        m = _meta(doc_id, workspace=workspace) or {}
         m["task_id"] = task_id
         ids = list(m.get("task_ids") or [])
         if task_id and task_id not in ids:
@@ -257,51 +312,53 @@ def docs(workspace=None):
     """List indexed documents oldest first; ``workspace`` keeps only those whose source file lives under that folder."""
     root, out = corpus_root(), []
     for name in (os.listdir(root) if os.path.isdir(root) else []):
-        if STAGE_SUFFIX in name:
+        ddir = resolve_doc(name, workspace=workspace)
+        if not ddir:
             continue
-        ddir = os.path.join(root, name)
         m = _read_meta_at(ddir)
-        if not m:
-            continue
-        if workspace and not any(under(x, workspace) for x in (m.get("paths") or [m.get("orig_path")])):
-            continue
         m = dict(m)
-        m["has_tree"] = os.path.exists(os.path.join(ddir, "tree.json"))
+        m["has_tree"] = _real_file(os.path.join(ddir, "tree.json"), ddir)
         out.append(m)
     return sorted(out, key=lambda m: m.get("added_at", 0))
 
 
-def _iter_pages(doc_id, lo=None, hi=None):
+def _iter_pages(doc_id, lo=None, hi=None, workspace=None):
     """Yield selected pages in order without loading the entire document."""
-    ddir = doc_dir(doc_id)
+    ddir = resolve_doc(doc_id, workspace=workspace)
     if not ddir:
         return
     pdir = os.path.join(ddir, "pages")
-    if not os.path.isdir(pdir):
+    if not _real_directory(pdir, ddir):
         return
     numbered = [(int(m.group(1)), fn) for fn in os.listdir(pdir) if (m := re.match(r"p(\d+)\.txt$", fn))]
     for pg, fn in sorted(numbered):                       # by number: p10000 comes after p9999
         if (lo is not None and pg < lo) or (hi is not None and pg > hi):
             continue
-        with open(os.path.join(pdir, fn), encoding="utf-8", errors="replace") as f:
+        page_path = os.path.join(pdir, fn)
+        if not _real_file(page_path, pdir):
+            continue
+        with open(page_path, encoding="utf-8", errors="replace") as f:
             yield pg, f.read()
 
 
-def read_page(doc_id, page):
-    ddir = doc_dir(doc_id)
+def read_page(doc_id, page, workspace=None):
+    ddir = resolve_doc(doc_id, workspace=workspace)
     if not ddir:
         return None
+    pdir = os.path.join(ddir, "pages")
+    if not _real_directory(pdir, ddir):
+        return None
     fp = _page_path(ddir, page)
-    if not os.path.exists(fp):
+    if not _real_file(fp, pdir):
         return None
     with open(fp, encoding="utf-8", errors="replace") as f:
         return f.read()
 
 
-def page_heads(doc_id, limit=200):
+def page_heads(doc_id, limit=200, workspace=None):
     """Return the first nonempty line of each page as a fallback outline."""
     out = []
-    for page, text in _iter_pages(doc_id):
+    for page, text in _iter_pages(doc_id, workspace=workspace):
         first = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
         out.append({"page": page, "head": first[:60]})
         if len(out) >= limit:
@@ -316,7 +373,7 @@ def search_literal(q, limit=10, doc_id=None, workspace=None):
     targets = [doc_id] if doc_id else [m["doc_id"] for m in docs(workspace)]
     hits = []
     for did in targets:
-        for page, text in _iter_pages(did):
+        for page, text in _iter_pages(did, workspace=workspace):
             pos = text.find(q)
             if pos >= 0:
                 lo = max(0, pos - 12)
@@ -327,13 +384,13 @@ def search_literal(q, limit=10, doc_id=None, workspace=None):
     return hits
 
 
-def verify_quote(doc_id, quote, page=None):
+def verify_quote(doc_id, quote, page=None, workspace=None):
     """Verify an exact quotation, optionally on one page, ignoring whitespace differences."""
     norm = lambda s: re.sub(r"\s+", "", s)
     nq = norm(quote)
     if not nq:
         return None
-    for pg, text in _iter_pages(doc_id, lo=page, hi=page):
+    for pg, text in _iter_pages(doc_id, lo=page, hi=page, workspace=workspace):
         pos = norm(text).find(nq)
         if pos < 0:
             continue
@@ -348,9 +405,9 @@ def verify_quote(doc_id, quote, page=None):
     return None
 
 
-def tree_outline(doc_id, max_nodes=120):
-    tree = _tree(doc_id)
-    m = _meta(doc_id)
+def tree_outline(doc_id, max_nodes=120, workspace=None):
+    tree = _tree(doc_id, workspace=workspace)
+    m = _meta(doc_id, workspace=workspace)
     if not tree or not m:
         return None
     out, n = [f"# {m['title']}"], [0]
@@ -370,8 +427,8 @@ def tree_outline(doc_id, max_nodes=120):
     return "\n".join(out)
 
 
-def node_pages(doc_id, node_id):
-    tree = _tree(doc_id)
+def node_pages(doc_id, node_id, workspace=None):
+    tree = _tree(doc_id, workspace=workspace)
     if not tree:
         return None
     found = []
@@ -389,14 +446,14 @@ def node_pages(doc_id, node_id):
     return found[0] if found and found[0][0] else None
 
 
-def read_pages(doc_id, start, end, max_chars=12000, offset=0):
+def read_pages(doc_id, start, end, max_chars=12000, offset=0, workspace=None):
     """The pages' text as one window: ``offset`` characters in, ``max_chars`` long, with a note
     on how to continue when there is more -- so a single page longer than the window is read
     in successive calls rather than never. Pages are read only up to the window's end."""
     offset = max(0, int(offset or 0))
     stop = offset + max_chars
     pieces, seen, more = [], 0, False
-    for page, t in _iter_pages(doc_id, lo=start, hi=end):
+    for page, t in _iter_pages(doc_id, lo=start, hi=end, workspace=workspace):
         chunk = f"\n--- p{page} ---\n{t}"
         if seen + len(chunk) > offset:
             pieces.append(chunk[max(0, offset - seen):stop - seen])
@@ -410,11 +467,12 @@ def read_pages(doc_id, start, end, max_chars=12000, offset=0):
     return window
 
 
-def structure(doc_id):
-    m = _meta(doc_id)
+def structure(doc_id, workspace=None):
+    m = _meta(doc_id, workspace=workspace)
     if not m:
         return None
-    tree = _tree(doc_id)
+    tree = _tree(doc_id, workspace=workspace)
     if tree:
         return {"mode": "tree", "title": m["title"], "tree": tree}
-    return {"mode": "pages", "title": m["title"], "pages": page_heads(doc_id, limit=10000)}
+    return {"mode": "pages", "title": m["title"],
+            "pages": page_heads(doc_id, limit=10000, workspace=workspace)}

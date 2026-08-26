@@ -71,12 +71,13 @@ def register(harn):
         ],
         parameters=OutlineParams)
     async def doc_outline(tool_call_id, params, signal, on_update, ctx):
-        o = await _off_loop(corpus.tree_outline, params.doc_id)
+        workspace = _workspace(ctx)
+        o = await _off_loop(corpus.tree_outline, params.doc_id, workspace=workspace)
         if _aborted(signal):
             return _text("Cancelled.")
         if o:
             return _text(o + "\n\nUse doc_read(doc_id, node=<node-id>) to read a section.")
-        st = await _off_loop(corpus.structure, params.doc_id)
+        st = await _off_loop(corpus.structure, params.doc_id, workspace=workspace)
         if not st:
             return _text("Document not found. Use doc_list to find its document ID.")
         heads = "\n".join(f"  p{p['page']}  {p['head']}" for p in st.get("pages", [])[:80])
@@ -95,8 +96,10 @@ def register(harn):
         snippet="Read original text by outline node or page range",
         parameters=ReadParams)
     async def doc_read(tool_call_id, params, signal, on_update, ctx):
+        workspace = _workspace(ctx)
         if params.node:
-            span = await _off_loop(corpus.node_pages, params.doc_id, params.node)
+            span = await _off_loop(corpus.node_pages, params.doc_id, params.node,
+                                   workspace=workspace)
             if not span:
                 return _text(f"Node {params.node} was not found. Use doc_outline first.")
             start, end = span
@@ -108,7 +111,8 @@ def register(harn):
                 return _text("pages must be a single page such as '32' or a range such as '32-40'.")
         else:
             return _text("Provide either node or pages.")
-        txt = await _off_loop(corpus.read_pages, params.doc_id, start, end, offset=params.offset)
+        txt = await _off_loop(corpus.read_pages, params.doc_id, start, end,
+                              offset=params.offset, workspace=workspace)
         if _aborted(signal):
             return _text("Cancelled.")
         return _text(txt or f"No text was extracted from p{start}-{end}; the pages may contain only images.")
@@ -173,7 +177,8 @@ def register(harn):
         ],
         parameters=VerifyParams)
     async def doc_verify(tool_call_id, params, signal, on_update, ctx):
-        v = await _off_loop(corpus.verify_quote, params.doc_id, params.quote)
+        v = await _off_loop(corpus.verify_quote, params.doc_id, params.quote,
+                            workspace=_workspace(ctx))
         if _aborted(signal):
             return _text("Cancelled.")
         if not v:
