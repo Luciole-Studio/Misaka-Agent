@@ -206,18 +206,21 @@ def _create(profile_dir, name, content):
 
 
 def _resolve_target(skill_dir, file_path):
-    """Resolve a support-file path within a skill directory."""
+    """Return a lexical support-file path, rejecting redirects inside the skill."""
     err = lookup_path_error(file_path)
     if err:
         return None, err
     from misaka.skills.guard import SKILL_IGNORE_FILENAMES
     if Path(file_path).name in SKILL_IGNORE_FILENAMES:
         return None, f"{file_path} controls what the security scanner sees; it is not written through skill_manage."
-    target = (Path(skill_dir) / file_path).resolve()
-    try:
-        target.relative_to(Path(skill_dir).resolve())
-    except ValueError:
-        return None, f"Path escapes the skill directory: {file_path}"
+    current = Path(skill_dir)
+    if current.is_symlink():
+        return None, f"Skill mutation paths cannot contain symlinks: {current}"
+    for part in Path(file_path).parts:
+        current /= part
+        if current.is_symlink():
+            return None, f"Skill mutation paths cannot contain symlinks: {current}"
+    target = Path(skill_dir) / file_path
     return target, None
 
 
@@ -234,6 +237,8 @@ def _require_skill(profile_dir, name):
     skill_dir, err = _skill_dir(profile_dir, name)
     if err:
         return None, err
+    if skill_dir.is_symlink():
+        return None, f"Skill mutation paths cannot contain symlinks: {skill_dir}"
     if not (skill_dir / "SKILL.md").is_file():
         return None, f"Skill '{name}' does not exist in this role."
     return skill_dir, None
@@ -438,9 +443,20 @@ def _precheck(action, skill_dir, name, content, file_path, file_content, old_str
     return None
 
 
+def _pending_payload(action, name, profile_dir, content, file_path, file_content,
+                     old_string, new_string, replace_all, absorbed_into, base):
+    """The exact payload whose canonical hash is reviewed and later executed."""
+    return {"action": action, "name": name, "profile_dir": profile_dir,
+            "content": content, "file_path": file_path,
+            "file_content": file_content, "old_string": old_string,
+            "new_string": new_string, "replace_all": replace_all,
+            "absorbed_into": absorbed_into, "base": base}
+
+
 def manage(action, name, *, profile_dir, content=None, file_path=None,
            file_content=None, old_string=None, new_string=None,
-           replace_all=False, absorbed_into=None, base=None):
+           replace_all=False, absorbed_into=None, base=None,
+           approved_payload_hash=None):
     """Apply one validated skill mutation through the write gate, under the skill lock, into the
     ledger; ``base`` is the digest of the live tree an approved pending write was reviewed against."""
     if action not in _ACTIONS:
@@ -457,12 +473,10 @@ def manage(action, name, *, profile_dir, content=None, file_path=None,
         if decision == "off":
             return {"success": False, "error": note}
         if decision == "stage":
-            payload = {"action": action, "name": name, "profile_dir": profile_dir,
-                       "content": content, "file_path": file_path,
-                       "file_content": file_content, "old_string": old_string,
-                       "new_string": new_string, "replace_all": replace_all,
-                       "absorbed_into": absorbed_into,
-                       "base": skill_write.digest(skill_dir)}       # what the reviewer will look at
+            payload = _pending_payload(
+                action, name, profile_dir, content, file_path, file_content,
+                old_string, new_string, replace_all, absorbed_into,
+                skill_write.digest(skill_dir))                       # what the reviewer will look at
             gist = _gist(action, name, content or "", file_path or "", old_string or "")
             try:
                 record = skill_write.stage(payload, summary=gist)
@@ -473,6 +487,18 @@ def manage(action, name, *, profile_dir, content=None, file_path=None,
                     "gist": gist, "message": note}
 
     with skill_write.mutation_lock():
+        if approved_payload_hash is not None:
+            execution_payload = _pending_payload(
+                action, name, profile_dir, content, file_path, file_content,
+                old_string, new_string, replace_all, absorbed_into, base)
+            try:
+                execution_hash = skill_write.payload_sha256(execution_payload)
+            except (TypeError, ValueError):
+                return {"success": False, "error": "Approved skill payload is not valid canonical JSON."}
+            if execution_hash != approved_payload_hash:
+                return {"success": False, "error": (
+                    "Pending skill payload changed after review; nothing was applied. "
+                    "Inspect and stage the request again.")}
         if base is not None and skill_write.digest(skill_dir) != base:
             return {"success": False, "error": (f"Skill '{name}' changed after this write was reviewed; look at it "
                                                 "again with `misaka skills pending` and stage it anew.")}
@@ -494,7 +520,8 @@ def manage(action, name, *, profile_dir, content=None, file_path=None,
 
         if result.get("success"):
             evidence = {k: v for k, v in (("file_path", file_path),
-                                          ("absorbed_into", absorbed_into)) if v is not None}
+                                          ("absorbed_into", absorbed_into),
+                                          ("payload_sha256", approved_payload_hash)) if v is not None}
             try:
                 skill_write.record(action, name, before=before, after_root=skill_dir, evidence=evidence)
             except OSError as error:                       # unrecorded is unapplied: the tree goes back
@@ -505,8 +532,13 @@ def manage(action, name, *, profile_dir, content=None, file_path=None,
     return result
 
 
-def apply_pending(payload):
-    """Apply a user-approved pending write, bypassing the gate it already passed."""
+def apply_pending(record):
+    """Apply one integrity-checked review record, bypassing the gate it already passed."""
+    integrity_error = skill_write.pending_integrity_error(
+        record, file_id=record.get("_pending_file_id") if isinstance(record, dict) else None)
+    if integrity_error:
+        return {"success": False, "error": f"Approval integrity check failed: {integrity_error}"}
+    payload = dict(record["payload"])
     token = _bypass.set(True)
     try:
         return manage(payload.get("action", ""), payload.get("name", ""),
@@ -518,7 +550,8 @@ def apply_pending(payload):
                       new_string=payload.get("new_string"),
                       replace_all=bool(payload.get("replace_all")),
                       absorbed_into=payload.get("absorbed_into"),
-                      base=payload.get("base"))
+                      base=payload.get("base"),
+                      approved_payload_hash=record["payload_sha256"])
     finally:
         _bypass.reset(token)
 

@@ -1,8 +1,13 @@
-"""User-controlled skill write gate, provenance, ledger, and rollback support."""
-import contextvars
+"""User-controlled skill workflow, provenance, ledger, and rollback support.
+
+This is not an OS security boundary: a process with unrestricted shell access can edit
+its environment and the same files directly.
+"""
 import hashlib
+import hmac
 import json
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -15,12 +20,8 @@ MUTATING_ACTIONS = ("create", "edit", "patch", "delete", "write_file", "remove_f
 
 
 def agent_session():
-    """True inside any agent shell (every Sister, card and child process sets these); review
-    decisions and the write mode belong to the person at the keyboard."""
+    """Best-effort workflow marker set by Sister, card, and child processes."""
     return bool(os.environ.get("MISAKA_WHO") or os.environ.get("MISAKA_USAGE_TASK_ID"))
-
-_ORIGIN = contextvars.ContextVar("misaka_skill_write_origin", default="user")
-
 
 def _root():
     return Path(os.path.expanduser("~/.misaka"))
@@ -40,20 +41,9 @@ def write_mode():
     return mode if mode in WRITE_MODES else DEFAULT_WRITE_MODE
 
 
-# Origin tracking
-
-def set_origin(origin):
-    """Set the write origin for this context and return its reset token."""
-    return _ORIGIN.set(str(origin or "user"))
-
-
-def reset_origin(token):
-    _ORIGIN.reset(token)
-
-
 def current_origin():
-    """Return the actor responsible for the current write."""
-    return _ORIGIN.get()
+    """Return the process role responsible for the current write."""
+    return "agent" if agent_session() else "user"
 
 
 # Review ledger
@@ -196,6 +186,40 @@ def _pending_dir():
     return _root() / "pending" / "skills"
 
 
+_PENDING_FILE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_PAYLOAD_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def canonical_payload(payload):
+    """Canonical JSON bytes used by review, approval, and execution."""
+    if not isinstance(payload, dict):
+        raise TypeError("Pending skill payload must be an object.")
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                      allow_nan=False).encode("utf-8")
+
+
+def payload_sha256(payload):
+    return hashlib.sha256(canonical_payload(payload)).hexdigest()
+
+
+def pending_integrity_error(item, *, file_id=None):
+    """Return why a pending record is not bound to its payload, else ``None``."""
+    if not isinstance(item, dict):
+        return "Pending skill record is not an object."
+    expected = item.get("payload_sha256")
+    if not isinstance(expected, str) or not _PAYLOAD_SHA256.fullmatch(expected):
+        return "Pending skill record has no valid payload SHA-256."
+    try:
+        actual = payload_sha256(item.get("payload"))
+    except (TypeError, ValueError):
+        return "Pending skill payload is not valid canonical JSON."
+    if not hmac.compare_digest(actual, expected):
+        return "Pending skill payload changed after it was staged."
+    if item.get("id") != expected or (file_id is not None and file_id != expected):
+        return "Pending skill record ID does not match its payload SHA-256."
+    return None
+
+
 def evaluate_gate():
     """Return the configured write decision and a user-facing explanation."""
     mode = write_mode()
@@ -214,9 +238,10 @@ def evaluate_gate():
 
 def stage(payload, *, summary):
     """Save a pending skill write for user review and return the pending record."""
-    record_id = uuid.uuid4().hex[:8]
+    record_id = payload_sha256(payload)
     item = {
         "id": record_id,
+        "payload_sha256": record_id,
         "summary": (summary or "").strip(),
         "origin": current_origin(),
         "created_at": time.time(),
@@ -236,17 +261,26 @@ def list_pending():
     out = []
     for f in files:
         try:
-            out.append(json.loads(f.read_text(encoding="utf-8")))
+            item = json.loads(f.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-    return sorted(out, key=lambda r: r.get("created_at", 0))
+        if not isinstance(item, dict):
+            continue
+        item["_pending_file_id"] = f.stem
+        item["_integrity_error"] = pending_integrity_error(item, file_id=f.stem)
+        out.append(item)
+    return sorted(out, key=lambda r: r.get("created_at", 0)
+                  if isinstance(r.get("created_at", 0), (int, float)) else 0)
 
 
 def get_pending(pending_id):
-    return next((r for r in list_pending() if r["id"] == pending_id), None)
+    return next((r for r in list_pending()
+                 if r.get("_pending_file_id") == pending_id or r.get("id") == pending_id), None)
 
 
 def discard_pending(pending_id):
+    if not isinstance(pending_id, str) or not _PENDING_FILE_ID.fullmatch(pending_id):
+        return False
     try:
         (_pending_dir() / f"{pending_id}.json").unlink()
         return True
@@ -257,4 +291,8 @@ def discard_pending(pending_id):
 def pending_diff(item):
     """Unified diff between the live skill tree and the pending write, for the user to review."""
     from misaka.skills import manage
+    error = pending_integrity_error(
+        item, file_id=item.get("_pending_file_id") if isinstance(item, dict) else None)
+    if error:
+        return f"(cannot preview: {error})"
     return manage.pending_diff(item.get("payload") or {})

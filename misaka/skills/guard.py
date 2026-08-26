@@ -1,30 +1,19 @@
-"""Static security scanner and trust-aware install policy for external skills."""
+"""Static heuristic scanner and source-label policy for skill changes."""
 
 import fnmatch
-import hashlib
-import json
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-SCANNER_VERSION = "skills-guard-v1"
-
-
-
-
 # ---------------------------------------------------------------------------
-# Hardcoded trust configuration
+# Caller-supplied source labels
 # ---------------------------------------------------------------------------
 
 TRUSTED_REPOS = {
     "openai/skills",
     "anthropics/skills",
     "huggingface/skills",
-    # NVIDIA-verified skills: each entry ships a signed `skill.oms.sig`
-    # and a governance `skill-card.md` (sync pipeline drops anything
-    # missing the signature or card). Catalog details:
-    # https://github.com/NVIDIA/skills
     "NVIDIA/skills",
 }
 
@@ -61,12 +50,11 @@ class Finding:
 class ScanResult:
     skill_name: str
     source: str
-    trust_level: str    # "builtin" | "trusted" | "community"
+    trust_level: str    # "builtin" | "trusted" | "community" | "agent-created"
     verdict: str        # "safe" | "caution" | "dangerous"
     findings: list[Finding] = field(default_factory=list)
     scanned_at: str = ""
     summary: str = ""
-    scan_provenance: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -612,7 +600,7 @@ def scan_file(file_path: Path, rel_path: str = "") -> list[Finding]:
 
 def scan_skill(skill_path: Path, source: str = "community", *, honor_ignore: bool = True) -> ScanResult:
     """
-    Scan all files in a skill directory for security threats.
+    Scan a skill directory for configured static warning patterns.
 
     Performs:
     1. Structural checks (file count, total size, binary files, symlinks)
@@ -629,10 +617,10 @@ def scan_skill(skill_path: Path, source: str = "community", *, honor_ignore: boo
 
     Args:
         skill_path: Path to the skill directory (must contain SKILL.md)
-        source: Source identifier for trust level resolution (e.g. "openai/skills")
+        source: Caller-supplied label for policy selection; it is not authenticated
 
     Returns:
-        ScanResult with verdict, findings, and trust metadata
+        ScanResult with verdict, findings, and source-label metadata
     """
     skill_name = skill_path.name
     trust_level = _resolve_trust_level(source)
@@ -669,97 +657,13 @@ def scan_skill(skill_path: Path, source: str = "community", *, honor_ignore: boo
     )
 
 
-def _content_digest(skill_path: Path) -> str:
-    """Canonical SHA-256 over relative paths and exact file bytes.
-
-    Files are keyed and ordered by their POSIX relative path string,
-    case-sensitively. Sorting ``Path`` objects is case-insensitive on Windows,
-    so the same skill would hash differently there; sorting the POSIX strings
-    keeps the digest OS-independent.
-    """
-    h = hashlib.sha256()
-    if skill_path.is_dir():
-        entries = sorted(
-            (file_path.relative_to(skill_path).as_posix(), file_path)
-            for file_path in skill_path.rglob("*")
-            if file_path.is_file()
-        )
-        for rel, file_path in entries:
-            h.update(rel.encode("utf-8") + b"\x00")
-            h.update(file_path.read_bytes())
-    else:
-        h.update(skill_path.read_bytes())
-    return h.hexdigest()
-
-
-def full_content_hash(skill_path: Path) -> str:
-    """Full canonical digest used to bind scanner attestations."""
-    return f"sha256:{_content_digest(skill_path)}"
-
-
-def _finding_dict(finding: Finding) -> dict:
-    return {key: getattr(finding, key) for key in (
-        "pattern_id", "severity", "category", "file", "line", "match", "description"
-    )}
-
-
-def scan_skill_cached(
-    skill_path: Path,
-    source: str = "community",
-    *,
-    source_url: str = "",
-    cache_dir: Path | None = None,
-) -> tuple[ScanResult, dict]:
-    """Return a scan plus attestation, caching only exact current content."""
-    bundle_hash = full_content_hash(skill_path)
-    cache_root = cache_dir or skill_path.parent / ".scan-cache"
-    source_identity = hashlib.sha256(f"{source}\0{source_url}".encode()).hexdigest()[:16]
-    cache_file = cache_root / f"{bundle_hash.split(':', 1)[1]}-{source_identity}.json"
-    try:
-        cached = json.loads(cache_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        cached = None
-    if (isinstance(cached, dict)
-            and cached.get("bundle_hash") == bundle_hash
-            and cached.get("scanner_version") == SCANNER_VERSION
-            and cached.get("source") == source
-            and cached.get("source_url") == source_url):
-        result = ScanResult(
-            skill_name=skill_path.name, source=source,
-            trust_level=cached["trust_level"], verdict=cached["verdict"],
-            findings=[Finding(**item) for item in cached.get("findings", [])],
-            scanned_at=cached["scanned_at"], summary=cached.get("summary", ""),
-        )
-        provenance = dict(cached)
-        provenance["fresh"] = False
-        result.scan_provenance = provenance
-        return result, provenance
-
-    result = scan_skill(skill_path, source=source)
-    findings = [_finding_dict(item) for item in result.findings]
-    provenance = {
-        "source": source, "source_url": source_url, "bundle_hash": bundle_hash,
-        "scanner_version": SCANNER_VERSION, "verdict": result.verdict,
-        "trust_level": result.trust_level, "findings": findings,
-        "rules": sorted({item["pattern_id"] for item in findings}),
-        "scanned_at": result.scanned_at, "summary": result.summary, "fresh": True,
-    }
-    try:
-        cache_root.mkdir(parents=True, exist_ok=True)
-        cache_file.write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
-    except OSError:
-        pass
-    result.scan_provenance = provenance
-    return result, provenance
-
-
 def should_allow_install(result: ScanResult, force: bool = False) -> tuple[bool, str]:
     """
-    Determine whether a skill should be installed based on scan result and trust.
+    Decide whether scanned skill content passes the configured source-label policy.
 
     Args:
         result: Scan result from scan_skill()
-        force: If True, override blocked policy decisions for this scan result
+        force: If True, override eligible blocked decisions for this scan result
 
     Returns:
         (allowed, reason) tuple
@@ -773,7 +677,7 @@ def should_allow_install(result: ScanResult, force: bool = False) -> tuple[bool,
 
     if force and not (result.verdict == "dangerous" and result.trust_level in ("community", "trusted")):
         return True, (
-            f"Force-installed despite {result.verdict} verdict "
+            f"Allowed by force despite {result.verdict} verdict "
             f"({len(result.findings)} findings)"
         )
 
@@ -831,15 +735,6 @@ def format_scan_report(result: ScanResult) -> str:
     lines.append(f"Decision: {status} — {reason}")
 
     return "\n".join(lines)
-
-
-def content_hash(skill_path: Path) -> str:
-    """Short SHA-256 digest of all files in a skill directory, for integrity tracking.
-
-    Relative paths are mixed into the hash alongside file contents, so swapping
-    the contents of two files in a skill changes the hash.
-    """
-    return f"sha256:{_content_digest(skill_path)[:16]}"
 
 
 # ---------------------------------------------------------------------------
@@ -1085,7 +980,7 @@ def _load_skill_ignore(skill_dir: Path):
 
 
 def _resolve_trust_level(source: str) -> str:
-    """Map a source identifier to a trust level."""
+    """Map a caller-supplied source label to a policy bucket; no source authentication."""
     prefix_aliases = (
         "skills-sh/",
         "skills.sh/",
@@ -1101,12 +996,10 @@ def _resolve_trust_level(source: str) -> str:
     # Agent-created skills get their own permissive trust level
     if normalized_source == "agent-created":
         return "agent-created"
-    # Official optional skills must be identified by source provenance, not by
-    # user-controlled GitHub identifiers such as "official/<repo>".
+    # The reserved label is supplied by the product's own call path.
     if normalized_source == "official":
         return "builtin"
-    # Check if source matches any trusted repo exactly, or a skill path inside
-    # that repo. Do not trust sibling repositories that merely share a prefix.
+    # Match only the configured labels or their paths; labels do not verify repository identity.
     for trusted in TRUSTED_REPOS:
         if normalized_source == trusted or normalized_source.startswith(f"{trusted}/"):
             return "trusted"
@@ -1132,7 +1025,7 @@ def _determine_verdict(findings: list[Finding]) -> str:
 def _build_summary(name: str, source: str, trust: str, verdict: str, findings: list[Finding]) -> str:
     """Build a one-line summary of the scan result."""
     if not findings:
-        return f"{name}: clean scan, no threats detected"
+        return f"{name}: no configured warning patterns matched"
 
     categories = {f.category for f in findings}
     return f"{name}: {verdict} — {len(findings)} finding(s) in {', '.join(sorted(categories))}"
