@@ -1504,7 +1504,7 @@ def launch():
         board, newest first. "here" = the active space's folder; "all" = every folder, grouped.
         Every item carries the folder it worked in: reopening always goes back there."""
         from misaka.config import sisters as roster
-        from misaka.core.session_manager import encode_cwd
+        from misaka.core.session_manager import get_session_dir_for_cwd
         space = active_space()
         raw = space["folder"] if space else os.getcwd()
         folder = os.path.realpath(raw)
@@ -1512,19 +1512,16 @@ def launch():
         root = os.path.expanduser("~/.misaka/sessions")
 
         def files(role):
-            # encode_cwd does not resolve symlinks, and a folder reaches us either resolved (a
-            # process cwd) or as typed: look in both buckets or the list is silently empty
-            # (/tmp vs /private/tmp on this machine). "all" walks every folder bucket (not dm/).
             if everything:
                 try:
                     buckets = [b for b in os.listdir(os.path.join(root, role)) if b.startswith("--")]
                 except OSError:
                     buckets = []
+                directories = [os.path.join(root, role, bucket) for bucket in buckets]
             else:
-                buckets = {encode_cwd(raw), encode_cwd(folder)}
+                directories = [get_session_dir_for_cwd(raw, os.path.join(root, role))]
             names = []
-            for bucket in buckets:
-                here = os.path.join(root, role, bucket)
+            for here in directories:
                 try:
                     names += [os.path.join(here, n) for n in os.listdir(here) if n.endswith(".jsonl")]
                 except OSError:

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
+import stat
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field, is_dataclass
@@ -26,7 +28,7 @@ from misaka.agent.types import AgentMessage
 from misaka.ai.types import ImageContent, MessageValue, TextContent
 from misaka.config import get_agent_dir, get_sessions_dir
 from misaka.utils import atomic
-from misaka.utils.paths import normalize_path, resolve_path
+from misaka.utils.paths import canonicalize_path, normalize_path, resolve_path
 
 CURRENT_SESSION_VERSION = 3
 
@@ -51,6 +53,14 @@ _UNSET = object()
 _SAFE_PATH_LEADING_SEPARATORS = re.compile(r"^[/\\]+")
 _SAFE_PATH_SEPARATORS = re.compile(r"[/\\:]")
 MAX_CONCURRENT_SESSION_INFO_LOADS = 10
+
+
+class InvalidSessionFileError(ValueError):
+    """Raised when an explicitly selected session is not valid JSONL."""
+
+    def __init__(self, file_path: str, reason: str = "empty or invalid") -> None:
+        super().__init__(f"Invalid session file ({reason}): {file_path}")
+        self.file_path = file_path
 
 
 @dataclass(slots=True, frozen=True)
@@ -311,17 +321,99 @@ def build_session_context(
     return SessionContext(messages=messages, thinkingLevel=thinking_level, model=model)
 
 
-def encode_cwd(cwd: str) -> str:
-    """Encode a working directory as one path-safe segment (``--Users-me-proj--``)."""
+def _canonical_cwd(cwd: str) -> str:
+    return os.path.normcase(canonicalize_path(resolve_path(cwd)))
+
+
+def _legacy_encode_cwd(cwd: str) -> str:
     normalized_cwd = _SAFE_PATH_LEADING_SEPARATORS.sub("", resolve_path(cwd))
     return f"--{_SAFE_PATH_SEPARATORS.sub('-', normalized_cwd)}--"
 
 
+def encode_cwd(cwd: str) -> str:
+    """Encode a canonical working directory as a readable, collision-resistant segment."""
+    canonical_cwd = _canonical_cwd(cwd)
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", canonical_cwd.strip("/\\")).strip("-")
+    digest = hashlib.sha256(os.fsencode(canonical_cwd)).hexdigest()
+    return f"--{(slug or 'root')[-64:]}-{digest}--"
+
+
+def get_session_dir_for_cwd(cwd: str, sessions_root: str) -> str:
+    """Return the canonical cwd bucket, carrying matching legacy sessions forward."""
+    root = resolve_path(sessions_root)
+    canonical_cwd = _canonical_cwd(cwd)
+    session_dir = os.path.join(root, encode_cwd(canonical_cwd))
+    os.makedirs(session_dir, exist_ok=True)
+
+    legacy_dirs = {
+        os.path.join(root, _legacy_encode_cwd(cwd)),
+        os.path.join(root, _legacy_encode_cwd(canonical_cwd)),
+    }
+    for legacy_dir in legacy_dirs:
+        if normalize_path(legacy_dir) == normalize_path(session_dir):
+            continue
+        try:
+            names = os.listdir(legacy_dir)
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".jsonl"):
+                continue
+            source = os.path.join(legacy_dir, name)
+            try:
+                before = os.stat(source, follow_symlinks=False)
+                if not stat.S_ISREG(before.st_mode):
+                    continue
+                source_id = hashlib.sha256(os.fsencode(normalize_path(source))).hexdigest()
+                destination = os.path.join(session_dir, f"legacy-{source_id}.jsonl")
+                if os.path.isfile(destination):
+                    current = os.stat(destination, follow_symlinks=False)
+                    if not stat.S_ISREG(current.st_mode):
+                        continue
+                    if before.st_size <= current.st_size and before.st_mtime_ns <= current.st_mtime_ns:
+                        continue
+                payload = Path(source).read_bytes()
+                entries = _parse_jsonl_entries(payload.decode("utf-8"), strict=True)
+                after = os.stat(source, follow_symlinks=False)
+            except (OSError, UnicodeError, json.JSONDecodeError, TypeError):
+                continue
+            if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+                    after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+                continue                         # an old process is still appending; retry next time
+            header = entries[0] if entries else {}
+            header_cwd = header.get("cwd")
+            if header.get("type") != "session" or not isinstance(header.get("id"), str) \
+                    or not isinstance(header_cwd, str) or _canonical_cwd(header_cwd) != canonical_cwd:
+                continue
+            try:
+                from filelock import FileLock
+
+                with FileLock(destination + ".migration.lock"):
+                    if not os.path.lexists(destination):
+                        atomic.write_bytes(destination, payload, mode=0o600)
+                        continue
+                    destination_stat = os.stat(destination, follow_symlinks=False)
+                    if not stat.S_ISREG(destination_stat.st_mode):
+                        continue
+                    # A process opened before the bucket migration may still append to the old
+                    # path. Carry only that append-only tail across; never replace a destination
+                    # that may meanwhile have acquired a branch of its own.
+                    destination_payload = Path(destination).read_bytes()
+                    if len(payload) <= len(destination_payload) or not payload.startswith(destination_payload):
+                        continue
+                    with open(destination, "ab") as handle:
+                        handle.write(payload[len(destination_payload):])
+                        handle.flush()
+                        os.fsync(handle.fileno())
+            except OSError:
+                continue
+
+    return session_dir
+
+
 def get_default_session_dir(cwd: str, agent_dir: str | None = None) -> str:
     resolved_agent_dir = resolve_path(get_agent_dir() if agent_dir is None else agent_dir)
-    session_dir = os.path.join(resolved_agent_dir, "sessions", encode_cwd(cwd))
-    os.makedirs(session_dir, exist_ok=True)
-    return session_dir
+    return get_session_dir_for_cwd(cwd, os.path.join(resolved_agent_dir, "sessions"))
 
 
 def read_session_header(file_path: str) -> dict[str, Any]:
@@ -335,19 +427,26 @@ def read_session_header(file_path: str) -> dict[str, Any]:
     return entry if isinstance(entry, dict) and entry.get("type") == "session" else {}
 
 
-def load_entries_from_file(file_path: str) -> list[FileEntry]:
+def load_entries_from_file(file_path: str, *, strict: bool = False) -> list[FileEntry]:
     resolved_file_path = normalize_path(file_path)
     path = Path(resolved_file_path)
     if not path.exists():
         return []
 
     content = path.read_text(encoding="utf-8")
-    entries = _parse_jsonl_entries(content)
+    try:
+        entries = _parse_jsonl_entries(content, strict=strict)
+    except (json.JSONDecodeError, TypeError) as error:
+        raise InvalidSessionFileError(resolved_file_path, str(error)) from error
     if not entries:
+        if strict:
+            raise InvalidSessionFileError(resolved_file_path)
         return entries
 
     header = entries[0]
     if header.get("type") != "session" or not isinstance(header.get("id"), str):
+        if strict:
+            raise InvalidSessionFileError(resolved_file_path, "missing session header")
         return []
     return entries
 
@@ -408,14 +507,9 @@ class SessionManager:
     def setSessionFile(self, sessionFile: str) -> None:
         self.sessionFile = resolve_path(sessionFile)
         if os.path.exists(self.sessionFile):
-            self.fileEntries = load_entries_from_file(self.sessionFile)
+            self.fileEntries = load_entries_from_file(self.sessionFile, strict=True)
             if not self.fileEntries:
-                explicit_path = self.sessionFile
-                self.newSession()
-                self.sessionFile = explicit_path
-                self._rewriteFile()
-                self.flushed = True
-                return
+                raise InvalidSessionFileError(self.sessionFile)
 
             header = next((entry for entry in self.fileEntries if entry.get("type") == "session"), None)
             self.sessionId = (
@@ -845,7 +939,9 @@ class SessionManager:
         cwdOverride: str | None = None,
     ) -> SessionManager:
         resolved_path = resolve_path(path)
-        entries = load_entries_from_file(resolved_path)
+        if not os.path.isfile(resolved_path):
+            raise FileNotFoundError(resolved_path)
+        entries = load_entries_from_file(resolved_path, strict=True)
         header = next((entry for entry in entries if entry.get("type") == "session"), None)
         cwd = (
             cwdOverride
@@ -871,7 +967,12 @@ class SessionManager:
     def forkFrom(cls, sourcePath: str, targetCwd: str, sessionDir: str | None = None) -> SessionManager:
         resolved_source_path = resolve_path(sourcePath)
         resolved_target_cwd = resolve_path(targetCwd)
-        source_entries = load_entries_from_file(resolved_source_path)
+        try:
+            source_entries = load_entries_from_file(resolved_source_path, strict=True)
+        except (OSError, UnicodeError, InvalidSessionFileError) as error:
+            raise RuntimeError(
+                f"Cannot fork: source session file is empty or invalid: {resolved_source_path}"
+            ) from error
         if not source_entries:
             raise RuntimeError(f"Cannot fork: source session file is empty or invalid: {resolved_source_path}")
 
@@ -958,7 +1059,7 @@ class SessionManager:
         return sessions
 
 
-def _parse_jsonl_entries(content: str) -> list[FileEntry]:
+def _parse_jsonl_entries(content: str, *, strict: bool = False) -> list[FileEntry]:
     entries: list[FileEntry] = []
     for line in content.splitlines():
         if not line.strip():
@@ -966,9 +1067,13 @@ def _parse_jsonl_entries(content: str) -> list[FileEntry]:
         try:
             parsed = json.loads(line)
         except json.JSONDecodeError:
+            if strict:
+                raise
             continue
         if isinstance(parsed, dict):
             entries.append(parsed)
+        elif strict:
+            raise TypeError("session entries must be JSON objects")
     return entries
 
 

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
-import shutil
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, NotRequired, Protocol, TypedDict
 
 from misaka.core.agent_session_services import (
@@ -18,7 +20,12 @@ from misaka.core.agent_session_services import (
 )
 from misaka.core.extensions.runner import emit_session_shutdown_event
 from misaka.core.session_cwd import assert_session_cwd_exists
-from misaka.core.session_manager import NewSessionOptions, SessionManager
+from misaka.core.session_manager import (
+    NewSessionOptions,
+    SessionManager,
+    load_entries_from_file,
+)
+from misaka.utils import atomic
 from misaka.utils.paths import resolve_path
 
 
@@ -371,21 +378,36 @@ class AgentSessionRuntime:
         cwdOverride: str | None = None,
     ) -> dict[str, bool]:
         resolved_path = resolve_path(inputPath)
-        if not os.path.exists(resolved_path):
+        if not os.path.isfile(resolved_path):
             raise SessionImportFileNotFoundError(resolved_path)
+
+        # Validate the source before creating or replacing anything in the store.
+        await asyncio.to_thread(load_entries_from_file, resolved_path, strict=True)
 
         session_dir = self.session.sessionManager.getSessionDir()
         if not os.path.exists(session_dir):
             os.makedirs(session_dir, exist_ok=True)
 
-        destination_path = os.path.join(session_dir, os.path.basename(resolved_path))
+        if os.path.dirname(resolved_path) == resolve_path(session_dir):
+            destination_path = resolved_path
+        else:
+            destination_path = os.path.join(session_dir, f"import-{uuid.uuid4().hex}.jsonl")
         before_result = await self.emitBeforeSwitch("resume", destination_path)
         if before_result["cancelled"]:
             return before_result
 
         previous_session_file = self.session.sessionFile
-        if os.path.abspath(destination_path) != resolved_path:
-            shutil.copyfile(resolved_path, destination_path)
+        if destination_path != resolved_path:
+            payload = await asyncio.to_thread(Path(resolved_path).read_bytes)
+            await asyncio.to_thread(atomic.write_bytes, destination_path, payload, mode=0o600)
+            try:
+                await asyncio.to_thread(load_entries_from_file, destination_path, strict=True)
+            except BaseException:
+                try:
+                    os.unlink(destination_path)
+                except OSError:
+                    pass
+                raise
 
         session_manager = SessionManager.open(destination_path, session_dir, cwdOverride)
         assert_session_cwd_exists(session_manager, self.cwd)
