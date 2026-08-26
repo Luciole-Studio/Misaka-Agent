@@ -34,6 +34,39 @@ def _skills_root(profile_dir):
     return Path(profile_dir) / "skills"
 
 
+def _skill_dir(profile_dir, name):
+    """The one way from a skill name to its directory: ``(skill_dir, None)`` or ``(None, error)``.
+    The name must be a plain identifier and the directory, symlinks followed, must stay inside
+    the role's skills root; every read and write path goes through here."""
+    err = lookup_path_error(name)
+    if err:
+        return None, err
+    if not _VALID_NAME.fullmatch(name):
+        return None, f"Invalid skill name '{name}'; use lowercase letters, numbers, underscores, and hyphens."
+    root = _skills_root(profile_dir)
+    skill_dir = root / name
+    try:
+        resolved, root_resolved = skill_dir.resolve(), root.resolve()
+        resolved.relative_to(root_resolved)
+    except ValueError:
+        return None, f"Skill '{name}' resolves outside this role's skill directory."
+    except OSError as error:
+        return None, f"Cannot resolve skill '{name}': {error}"
+    return skill_dir, None
+
+
+def _is_skill_md(target, skill_dir):
+    """True when ``target`` is the skill's SKILL.md -- by file identity, so ``skill.md`` on a
+    case-insensitive filesystem counts too."""
+    main = Path(skill_dir) / "SKILL.md"
+    try:
+        if target.name.casefold() == "skill.md" and target.parent.resolve() == main.parent.resolve():
+            return True
+        return main.exists() and target.exists() and os.path.samefile(target, main)
+    except OSError:
+        return False
+
+
 def validate_frontmatter(content, *, new_skill=False):
     """Return an error message if the SKILL.md frontmatter or body is invalid, else None."""
     from misaka.core.skills import SKILL_PROMPT_DESC_LIMIT
@@ -122,14 +155,12 @@ def _invalidate_index():
 
 
 def _create(profile_dir, name, content):
-    err = None if _VALID_NAME.fullmatch(name) else \
-        f"Invalid skill name '{name}'; use lowercase letters, numbers, underscores, and hyphens."
+    skill_dir, err = _skill_dir(profile_dir, name)
     err = err or validate_frontmatter(content, new_skill=True)
     err = err or validate_content_size(content)
     if err:
         return {"success": False, "error": err}
 
-    skill_dir = _skills_root(profile_dir) / name
     if skill_dir.exists():
         return {"success": False, "error": f"Skill {name!r} already exists: {skill_dir}"}
 
@@ -183,7 +214,9 @@ def _resolve_target(skill_dir, file_path):
 
 def _require_skill(profile_dir, name):
     """Return ``(skill_dir, None)`` for an existing skill, or ``(None, error)``."""
-    skill_dir = _skills_root(profile_dir) / name
+    skill_dir, err = _skill_dir(profile_dir, name)
+    if err:
+        return None, err
     if not (skill_dir / "SKILL.md").is_file():
         return None, f"Skill '{name}' does not exist in this role."
     return skill_dir, None
@@ -210,7 +243,7 @@ def _write_file(profile_dir, name, file_path, file_content):
     target, err = _resolve_target(skill_dir, file_path)
     if err:
         return {"success": False, "error": err}
-    if target.name == "SKILL.md":
+    if _is_skill_md(target, skill_dir):
         return {"success": False, "error": "Use create or edit for SKILL.md so frontmatter is validated."}
 
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -284,7 +317,7 @@ def _patch_skill(profile_dir, name, old_string, new_string, file_path=None,
     err = validate_content_size(new_content, label=label)
     if err:
         return {"success": False, "error": err}
-    if not file_path:
+    if not file_path or _is_skill_md(target, skill_dir):
         err = validate_frontmatter(new_content)
         if err:
             return {"success": False, "error": f"This patch would break SKILL.md structure: {err}"}
@@ -307,8 +340,8 @@ def _delete_skill(profile_dir, name, absorbed_into=None):
     if absorbed_target:
         if absorbed_target == name:
             return {"success": False, "error": "absorbed_into cannot name the skill being deleted."}
-        umbrella = _skills_root(profile_dir) / absorbed_target
-        if not (umbrella / "SKILL.md").is_file():
+        umbrella, err = _skill_dir(profile_dir, absorbed_target)
+        if err or not (umbrella / "SKILL.md").is_file():
             return {"success": False,
                     "error": f"Absorbing skill '{absorbed_target}' does not exist; create or update it before deletion."}
     root = _skills_root(profile_dir).resolve()
@@ -331,7 +364,7 @@ def _remove_file(profile_dir, name, file_path):
     target, err = _resolve_target(skill_dir, file_path)
     if err:
         return {"success": False, "error": err}
-    if target.name == "SKILL.md":
+    if _is_skill_md(target, skill_dir):
         return {"success": False, "error": "remove_file cannot delete SKILL.md; use delete for the whole skill."}
     if not target.exists():
         available = [str(f.relative_to(skill_dir))
@@ -394,7 +427,9 @@ def manage(action, name, *, profile_dir, content=None, file_path=None,
             return {"success": True, "staged": True, "pending_id": record["id"],
                     "gist": gist, "message": note}
 
-    skill_dir = _skills_root(profile_dir) / name
+    skill_dir, err = _skill_dir(profile_dir, name)
+    if err:
+        return {"success": False, "error": err}
     before = skill_write.snapshot(skill_dir)
 
     if action == "create":
@@ -443,7 +478,9 @@ def pending_diff(payload):
 
     action = str(payload.get("action") or "")
     name = str(payload.get("name") or "")
-    skill_dir = _skills_root(payload.get("profile_dir") or "") / name
+    skill_dir, err = _skill_dir(payload.get("profile_dir") or "", name)
+    if err:
+        return f"(cannot preview: {err})"
     file_path = payload.get("file_path")
 
     def read(path):
