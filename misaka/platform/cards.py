@@ -310,31 +310,69 @@ def _card_values(fields, body):
 
 
 def reconcile_one(con, workspace, task_id):
-    """Refresh one idle index row from its card; false means it is unsafe to dispatch."""
+    """Refresh one idle index row from its card; return the parsed card, or None if unusable.
+
+    Returning the card lets the caller answer further questions about it -- dependencies,
+    say -- without reading the file a second time.
+    """
     workspace = tasks.canonical_workspace(workspace)
     path = card_path(workspace, task_id)
     if os.path.islink(path) or not os.path.isfile(path):
-        return False
+        return None
     try:
         card = read(path)
         fields = card["fields"]
         if str(fields.get("id") or "") != str(task_id):
-            return False
+            return None
         values = _card_values(fields, card["body"])
     except (OSError, TypeError, ValueError):
-        return False
+        return None
     row = con.execute("SELECT status,workspace FROM tasks WHERE id=?", (task_id,)).fetchone()
     if row is None:
-        return bool(tasks.insert_index_row(con, fields, card["body"], workspace=workspace))
+        return card if tasks.insert_index_row(con, fields, card["body"], workspace=workspace) else None
     if tasks.canonical_workspace(row["workspace"]) != workspace:
-        return False
+        return None
     if row["status"] in {"running", "review"}:
-        return True                         # an in-flight contract is immutable until it rests again
+        return card                         # an in-flight contract is immutable until it rests again
     con.execute(
         "UPDATE tasks SET title=?,body=?,assignee=?,reviewer=?,executor=?,model=?,priority=?,"
         "timeout_seconds=?,origin_session=?,status=?,generation=? WHERE id=?",
         (*values.values(), task_id),
     )
+    return card
+
+
+def _needs(card):
+    """The card's declared dependencies, or None when the edge list is malformed."""
+    raw = card["fields"].get("needs") or []
+    if not isinstance(raw, list) or any(not isinstance(parent, str) or not parent for parent in raw):
+        return None
+    return list(dict.fromkeys(raw))
+
+
+def dispatchable(con, workspace, task_id):
+    """Whether this one card may be claimed -- without walking the whole project.
+
+    A parent releases its child only by reaching ``done``, and a card reaches ``done``
+    either by passing this same check on its own way out or by a person writing it into
+    the file (which is what "the file is the contract" means). So the project-wide
+    ``needs`` fixed point that :func:`reconcile` computes is index-rebuild work, not
+    per-claim work: doing it inside every claim made one dispatch tick read every card
+    file once per claim.
+    """
+    workspace = tasks.canonical_workspace(workspace)
+    card = reconcile_one(con, workspace, task_id)
+    if card is None:
+        return False
+    needs = _needs(card)
+    if needs is None or task_id in needs:
+        return False
+    for parent in needs:
+        row = con.execute("SELECT status,workspace FROM tasks WHERE id=?", (parent,)).fetchone()
+        if row is None or row["status"] != "done":
+            return False
+        if tasks.canonical_workspace(row["workspace"]) != workspace:
+            return False
     return True
 
 
@@ -348,16 +386,14 @@ def reconcile(con, workspace):
     """
     workspace = tasks.canonical_workspace(workspace)
     contracts = {}
-    for task_id, path in iter_cards(workspace):
-        if not reconcile_one(con, workspace, task_id):
+    for task_id, _path in iter_cards(workspace):
+        card = reconcile_one(con, workspace, task_id)
+        if card is None:
             continue
-        try:
-            raw = read(path)["fields"].get("needs") or []
-        except (OSError, TypeError, ValueError):
+        needs = _needs(card)          # one read per card: reconcile_one already parsed it
+        if needs is None:
             continue
-        if not isinstance(raw, list) or any(not isinstance(parent, str) or not parent for parent in raw):
-            continue
-        contracts[task_id] = list(dict.fromkeys(raw))
+        contracts[task_id] = needs
 
     # ponytail: O(cards^2) fixed-point validation; use a graph library only if
     # projects grow large enough for reconciliation to show up in profiles.

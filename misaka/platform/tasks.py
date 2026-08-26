@@ -356,11 +356,12 @@ def workspace_for(task):
 
 
 def _card_dispatchable(con, task_id):
+    """One card's file-side gate, checked per claim; the project-wide pass is per tick."""
     row = con.execute("SELECT workspace FROM tasks WHERE id=?", (task_id,)).fetchone()
     if row is None:
         return False
     from misaka.platform import cards
-    return task_id in cards.reconcile(con, row["workspace"])
+    return cards.dispatchable(con, row["workspace"], task_id)
 
 
 @_serialized
