@@ -6,7 +6,6 @@ import asyncio
 import os
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -26,6 +25,7 @@ from misaka.core.tools.render_utils import (
 from misaka.core.tools.tool_definition_wrapper import wrap_tool_definition
 from misaka.ui.tui import Container, Text
 from misaka.ui.tui.interactive.theme.theme import get_language_from_path, highlight_code
+from misaka.utils import atomic
 
 
 class WriteToolInput(BaseModel):
@@ -63,7 +63,7 @@ class WriteCallRenderComponent(Text):
 @dataclass(slots=True)
 class _DefaultWriteOperations:
     async def writeFile(self, absolute_path: str, content: str) -> None:
-        await asyncio.to_thread(Path(absolute_path).write_text, content, encoding="utf-8", newline="")
+        await asyncio.to_thread(atomic.write_text, absolute_path, content)   # atomic; keeps the file's mode
 
     async def mkdir(self, directory: str) -> None:
         await asyncio.to_thread(os.makedirs, directory, exist_ok=True)

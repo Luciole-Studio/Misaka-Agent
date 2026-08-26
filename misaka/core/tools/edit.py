@@ -34,6 +34,7 @@ from misaka.core.tools.path_utils import resolve_to_cwd
 from misaka.core.tools.render_utils import invalid_arg_text
 from misaka.core.tools.tool_definition_wrapper import wrap_tool_definition
 from misaka.ui.tui import Box, Container, Spacer, Text
+from misaka.utils import atomic
 
 type EditPreview = EditDiffResult | EditDiffError
 
@@ -116,7 +117,7 @@ class _DefaultEditOperations:
         return await asyncio.to_thread(Path(absolute_path).read_bytes)
 
     async def writeFile(self, absolute_path: str, content: str) -> None:
-        await asyncio.to_thread(Path(absolute_path).write_text, content, encoding="utf-8", newline="")
+        await asyncio.to_thread(atomic.write_text, absolute_path, content)   # atomic; keeps the file's mode
 
     async def access(self, absolute_path: str) -> None:
         def _check() -> None:
@@ -448,7 +449,13 @@ def create_edit_tool_definition(
                     if aborted:
                         return None
 
-                    raw_content = buffer.decode("utf-8", errors="replace")
+                    try:
+                        raw_content = buffer.decode("utf-8")
+                    except UnicodeDecodeError as error:
+                        raise RuntimeError(
+                            f"Could not edit file: {path}. It is not valid UTF-8 text ({error}); "
+                            "editing it as text would corrupt it. Use bash for binary files."
+                        ) from None
                     bom, content = strip_bom(raw_content)
                     original_ending = detect_line_ending(content)
                     normalized_content = normalize_to_lf(content)
