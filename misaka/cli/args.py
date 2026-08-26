@@ -351,7 +351,6 @@ Environment Variables:
   AWS_REGION                       - AWS region for Amazon Bedrock (e.g., us-east-1)
   {ENV_AGENT_DIR.ljust(32)} - Config directory (default: ~/{CONFIG_DIR_NAME}/agent)
   {ENV_SESSION_DIR.ljust(32)} - Session storage directory (overridden by --session-dir)
-  MISAKA_PACKAGE_DIR              - Override package directory (for Nix/Guix store paths)
   MISAKA_OFFLINE                  - Disable startup network operations when set to 1/true/yes
 
 Built-in Tool Names:
