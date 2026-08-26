@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import re
@@ -17,6 +16,11 @@ except ImportError:  # optional extra: misaka[google]
     GoogleGenAI = None
 
 from misaka.ai.models import calculate_cost, clamp_thinking_level
+from misaka.ai.providers._common import (
+    _close_stream,
+    _iterate_async_iterable,
+    _prepare_sdk_params,
+)
 from misaka.ai.providers.google import (
     _build_tool_call,
     _coalesce_attr,
@@ -87,65 +91,6 @@ API_VERSION = "v1"
 GCP_VERTEX_CREDENTIALS_MARKER = "gcp-vertex-credentials"
 _API_VERSION_PATTERN = re.compile(r"^v\d+(?:beta\d*)?$")
 _PLACEHOLDER_API_KEY_PATTERN = re.compile(r"^<[^>]+>$")
-
-
-def _create_abort_wait_task(signal: Any) -> asyncio.Task[None] | None:
-    if signal is None or not hasattr(signal, "wait"):
-        return None
-    return asyncio.create_task(signal.wait())
-
-
-async def _close_stream(stream_obj: Any) -> None:
-    if stream_obj is None:
-        return
-    for close_name in ("aclose", "close"):
-        close = getattr(stream_obj, close_name, None)
-        if callable(close):
-            try:
-                await _maybe_await(close())
-            except Exception:  # noqa: BLE001
-                return
-            return
-
-
-async def _await_with_signal(awaitable: Any, signal: Any, *, on_abort: Any = None) -> Any:
-    if _is_aborted(signal):
-        if isinstance(awaitable, asyncio.Future):
-            awaitable.cancel()
-        else:
-            close = getattr(awaitable, "close", None)
-            if callable(close):
-                close()
-        if on_abort is not None:
-            await _maybe_await(on_abort())
-        raise RuntimeError("Request was aborted")
-
-    task = asyncio.ensure_future(awaitable)
-    abort_task = _create_abort_wait_task(signal)
-    try:
-        if abort_task is not None:
-            done, _ = await asyncio.wait({task, abort_task}, return_when=asyncio.FIRST_COMPLETED)
-            if abort_task in done and not task.done():
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-                if on_abort is not None:
-                    await _maybe_await(on_abort())
-                raise RuntimeError("Request was aborted")
-        return await task
-    finally:
-        if abort_task is not None:
-            abort_task.cancel()
-            await asyncio.gather(abort_task, return_exceptions=True)
-
-
-async def _iterate_async_iterable(iterable: Any, signal: Any = None, *, on_abort: Any = None):
-    iterator = iterable.__aiter__()
-    while True:
-        try:
-            item = await _await_with_signal(iterator.__anext__(), signal, on_abort=on_abort)
-        except StopAsyncIteration:
-            return
-        yield item
 
 
 def _format_google_vertex_error(error: Any) -> str:
@@ -546,16 +491,6 @@ def build_params(
         "contents": contents,
         "config": config,
     }
-
-
-def _prepare_sdk_params(params: Mapping[str, Any]) -> dict[str, Any]:
-    sdk_params = dict(params)
-    config = sdk_params.get("config")
-    if isinstance(config, Mapping):
-        sdk_params["config"] = {
-            key: value for key, value in config.items() if key != "abortSignal" and value is not None
-        }
-    return sdk_params
 
 
 def get_disabled_thinking_config(model: Model) -> dict[str, Any]:

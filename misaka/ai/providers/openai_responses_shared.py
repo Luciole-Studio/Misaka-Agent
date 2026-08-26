@@ -8,6 +8,7 @@ from collections.abc import AsyncIterable, Iterable
 from typing import Any, TypedDict
 
 from misaka.ai.models import calculate_cost
+from misaka.ai.providers._common import _empty_usage
 from misaka.ai.providers.transform_messages import transform_messages
 from misaka.ai.types import (
     AssistantMessage,
@@ -259,10 +260,6 @@ def _map_stop_reason(status: str | None) -> StopReason:
     if status in {"in_progress", "queued"}:
         return "stop"
     raise RuntimeError(f"Unhandled stop reason: {status}")
-
-
-def _empty_usage() -> Usage:
-    return Usage(input=0, output=0, cacheRead=0, cacheWrite=0, totalTokens=0, cost=UsageCost(input=0, output=0, cacheRead=0, cacheWrite=0, total=0))
 
 
 async def process_responses_stream(

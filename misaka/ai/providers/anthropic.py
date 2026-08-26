@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
 import time
 from collections.abc import AsyncIterator, Iterable, Mapping
 from typing import Any, Literal, TypedDict
@@ -16,6 +14,16 @@ except ImportError:  # optional extra: misaka[anthropic]
 
 from misaka.ai.env_api_keys import get_env_api_key
 from misaka.ai.models import calculate_cost
+from misaka.ai.providers._common import (
+    _await_maybe_with_signal,
+    _close_stream,
+    _empty_usage,
+    _is_aborted,
+    _iterate_async_iterable,
+    _maybe_await,
+    _option,
+    resolve_cache_retention,
+)
 from misaka.ai.providers.cloudflare import resolve_cloudflare_base_url
 from misaka.ai.providers.github_copilot_headers import (
     build_copilot_dynamic_headers,
@@ -53,8 +61,6 @@ from misaka.ai.types import (
     ToolCallEndEvent,
     ToolCallStartEvent,
     ToolResultMessage,
-    Usage,
-    UsageCost,
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
@@ -124,110 +130,6 @@ class ServerSentEvent(dict[str, Any]):
     raw: list[str]
 
 
-def _option(options: Any, name: str, default: Any = None) -> Any:
-    if options is None:
-        return default
-    if isinstance(options, Mapping):
-        value = options.get(name, default)
-    else:
-        value = getattr(options, name, default)
-    return default if value is None else value
-
-
-async def _maybe_await(value: Any) -> Any:
-    if hasattr(value, "__await__"):
-        return await value
-    return value
-
-
-def _is_aborted(signal: Any) -> bool:
-    if signal is None:
-        return False
-    if getattr(signal, "aborted", False):
-        return True
-    return bool(getattr(signal, "is_set", lambda: False)())
-
-
-def _create_abort_wait_task(signal: Any) -> asyncio.Task[None] | None:
-    if signal is None or not hasattr(signal, "wait"):
-        return None
-    return asyncio.create_task(signal.wait())
-
-
-async def _close_stream(stream_obj: Any) -> None:
-    if stream_obj is None:
-        return
-    for close_name in ("aclose", "close"):
-        close = getattr(stream_obj, close_name, None)
-        if callable(close):
-            try:
-                await _maybe_await(close())
-            except Exception:  # noqa: BLE001
-                return
-            return
-
-
-async def _await_with_signal(awaitable: Any, signal: Any, *, on_abort: Any = None) -> Any:
-    if _is_aborted(signal):
-        if isinstance(awaitable, asyncio.Future):
-            awaitable.cancel()
-        else:
-            close = getattr(awaitable, "close", None)
-            if callable(close):
-                close()
-        if on_abort is not None:
-            await _maybe_await(on_abort())
-        raise RuntimeError("Request was aborted")
-
-    task = asyncio.ensure_future(awaitable)
-    abort_task = _create_abort_wait_task(signal)
-    try:
-        if abort_task is not None:
-            done, _ = await asyncio.wait({task, abort_task}, return_when=asyncio.FIRST_COMPLETED)
-            if abort_task in done and not task.done():
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-                if on_abort is not None:
-                    await _maybe_await(on_abort())
-                raise RuntimeError("Request was aborted")
-        return await task
-    finally:
-        if abort_task is not None:
-            abort_task.cancel()
-            await asyncio.gather(abort_task, return_exceptions=True)
-
-
-async def _await_maybe_with_signal(value: Any, signal: Any, *, on_abort: Any = None) -> Any:
-    if hasattr(value, "__await__"):
-        return await _await_with_signal(value, signal, on_abort=on_abort)
-    if _is_aborted(signal):
-        if on_abort is not None:
-            await _maybe_await(on_abort())
-        raise RuntimeError("Request was aborted")
-    return value
-
-
-async def _iterate_async_iterable(iterable: Any, signal: Any = None, *, on_abort: Any = None) -> AsyncIterator[Any]:
-    iterator = iterable.__aiter__()
-    while True:
-        try:
-            item = await _await_with_signal(iterator.__anext__(), signal, on_abort=on_abort)
-        except StopAsyncIteration:
-            return
-        yield item
-
-
-def _empty_usage() -> Usage:
-    return Usage(
-        input=0,
-        output=0,
-        cacheRead=0,
-        cacheWrite=0,
-        totalTokens=0,
-        cost=UsageCost(input=0, output=0, cacheRead=0, cacheWrite=0, total=0),
-    )
-
-
 def _merge_headers(*header_sources: Mapping[str, Any] | None) -> dict[str, Any]:
     merged: dict[str, Any] = {}
     for headers in header_sources:
@@ -238,12 +140,6 @@ def _merge_headers(*header_sources: Mapping[str, Any] | None) -> dict[str, Any]:
                 continue
             merged[str(key)] = value
     return merged
-
-
-def resolve_cache_retention(cache_retention: CacheRetention | None = None) -> CacheRetention:
-    if cache_retention:
-        return cache_retention
-    return "long" if os.environ.get("MISAKA_CACHE_RETENTION") == "long" else "short"
 
 
 def _force_adaptive_thinking(model: Model) -> bool | None:

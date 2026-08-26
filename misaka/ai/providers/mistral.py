@@ -36,8 +36,6 @@ from misaka.ai.types import (
     ToolCallDeltaEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
-    Usage,
-    UsageCost,
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.hash import short_hash
@@ -49,6 +47,13 @@ try:
 except ImportError:  # optional extra: misaka[mistral]
     _MistralClient = None
 
+from misaka.ai.providers._common import (
+    _empty_usage,
+    _is_aborted,
+    _maybe_await,
+    _option,
+    safe_json_stringify,
+)
 from misaka.ai.providers.sdk import require
 
 MISTRAL_TOOL_CALL_ID_LENGTH = 9
@@ -79,20 +84,6 @@ class MistralOptions(TypedDict, total=False):
     toolChoice: Literal["auto", "none", "any", "required"] | MistralToolChoiceObject
     promptMode: Literal["reasoning"]
     reasoningEffort: MistralReasoningEffort
-
-
-def _option(options: Any, name: str, default: Any = None) -> Any:
-    if options is None:
-        return default
-    if isinstance(options, Mapping):
-        return options.get(name, default)
-    return getattr(options, name, default)
-
-
-async def _maybe_await(value: Any) -> Any:
-    if hasattr(value, "__await__"):
-        return await value
-    return value
 
 
 async def _await_with_abort(request_factory: Any, signal: Any) -> Any:
@@ -134,25 +125,6 @@ def _coalesce_attr(obj: Any, *names: str) -> Any:
         if value is not None:
             return value
     return None
-
-
-def _is_aborted(signal: Any) -> bool:
-    if signal is None:
-        return False
-    if getattr(signal, "aborted", False):
-        return True
-    return bool(getattr(signal, "is_set", lambda: False)())
-
-
-def _empty_usage() -> Usage:
-    return Usage(
-        input=0,
-        output=0,
-        cacheRead=0,
-        cacheWrite=0,
-        totalTokens=0,
-        cost=UsageCost(input=0, output=0, cacheRead=0, cacheWrite=0, total=0),
-    )
 
 
 async def _iterate_with_abort(iterable: AsyncIterable[Any], signal: Any) -> AsyncIterable[Any]:
@@ -348,14 +320,6 @@ def truncate_error_text(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return f"{text[:max_chars]}... [truncated {len(text) - max_chars} chars]"
-
-
-def safe_json_stringify(value: Any) -> str:
-    try:
-        serialized = json.dumps(value)
-        return str(value) if serialized is None else serialized
-    except Exception:  # noqa: BLE001
-        return str(value)
 
 
 def build_request_kwargs(model: Model, options: StreamOptions | Mapping[str, Any] | None = None) -> dict[str, Any]:

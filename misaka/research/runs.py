@@ -134,13 +134,10 @@ DEFAULT_LIMITS = {"max_depth": 3}
 RESEARCH_SCHEMA_VERSION = 10   # 10: node/probe runner identity on the row, visible to a successor driver
 DRIVER_TTL_SECONDS = 300
 RESEARCH_TABLES = (
-    "research_claims", "research_evidence_assessments", "research_findings",
-    "research_artifacts", "research_issues", "research_run_tasks",
-    "research_branches", "research_runs",
+    "research_claims", "research_findings", "research_artifacts",
+    "research_issues", "research_run_tasks", "research_branches", "research_runs",
 )
-ACTIVE_RESEARCH_TABLES = tuple(
-    table for table in RESEARCH_TABLES if table != "research_evidence_assessments"
-)
+ACTIVE_RESEARCH_TABLES = RESEARCH_TABLES
 
 
 def _execute_script(con, source):

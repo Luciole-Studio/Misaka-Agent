@@ -21,6 +21,14 @@ import httpx
 
 from misaka.ai.env_api_keys import get_env_api_key
 from misaka.ai.models import clamp_thinking_level
+from misaka.ai.providers._common import (
+    _create_abort_wait_task,
+    _is_aborted,
+    _maybe_await,
+    _option,
+    apply_service_tier_pricing,
+    get_service_tier_cost_multiplier,
+)
 from misaka.ai.providers.openai_prompt_cache import clamp_openai_prompt_cache_key
 from misaka.ai.providers.openai_responses_shared import (
     convert_responses_messages,
@@ -38,7 +46,6 @@ from misaka.ai.types import (
     SimpleStreamOptions,
     StartEvent,
     StreamOptions,
-    Usage,
 )
 from misaka.ai.utils.diagnostics import (
     append_assistant_message_diagnostic,
@@ -127,28 +134,6 @@ class _CachedWebSocketConnection:
     continuation: _CachedWebSocketContinuationState | None = None
 
 
-def _option(options: Any, name: str, default: Any = None) -> Any:
-    if options is None:
-        return default
-    if isinstance(options, Mapping):
-        return options.get(name, default)
-    return getattr(options, name, default)
-
-
-async def _maybe_await(value: Any) -> Any:
-    if hasattr(value, "__await__"):
-        return await value
-    return value
-
-
-def _is_aborted(signal: Any) -> bool:
-    if signal is None:
-        return False
-    if getattr(signal, "aborted", False):
-        return True
-    return bool(getattr(signal, "is_set", lambda: False)())
-
-
 async def _sleep(ms: int, signal: Any = None) -> None:
     await _await_with_abort(asyncio.sleep(ms / 1000), signal)
 
@@ -185,12 +170,6 @@ def _parse_retry_after_delay_ms(response: httpx.Response, default_delay_ms: int)
             return max(0, int((retry_at - time.time()) * 1000))
 
     return default_delay_ms
-
-
-def _create_abort_wait_task(signal: Any) -> asyncio.Task[None] | None:
-    if signal is None or not hasattr(signal, "wait"):
-        return None
-    return asyncio.create_task(signal.wait())
 
 
 async def _await_with_abort(awaitable: Any, signal: Any, *, on_abort: Any = None) -> Any:
@@ -312,25 +291,6 @@ def build_request_body(
             }
 
     return {key: value for key, value in body.items() if value is not None}
-
-
-def get_service_tier_cost_multiplier(model: Model, service_tier: str | None) -> float:
-    if service_tier == "flex":
-        return 0.5
-    if service_tier == "priority":
-        return 2.5 if model.id == "gpt-5.5" else 2.0
-    return 1.0
-
-
-def apply_service_tier_pricing(usage: Usage, service_tier: str | None, model: Model) -> None:
-    multiplier = get_service_tier_cost_multiplier(model, service_tier)
-    if multiplier == 1:
-        return
-    usage.cost.input *= multiplier
-    usage.cost.output *= multiplier
-    usage.cost.cacheRead *= multiplier
-    usage.cost.cacheWrite *= multiplier
-    usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite
 
 
 def resolve_codex_service_tier(response_service_tier: str | None, request_service_tier: str | None) -> str | None:

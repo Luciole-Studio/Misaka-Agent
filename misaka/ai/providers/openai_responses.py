@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator
 from typing import Any, Literal, TypedDict
 
 try:
@@ -18,6 +17,18 @@ import misaka.ai.providers.cloudflare as _cloudflare
 import misaka.ai.providers.github_copilot_headers as _copilot_headers
 from misaka.ai.env_api_keys import get_env_api_key
 from misaka.ai.models import clamp_thinking_level
+from misaka.ai.providers._common import (
+    _await_maybe_with_signal,
+    _await_with_signal,
+    _close_stream,
+    _compat_value,
+    _empty_usage,
+    _is_aborted,
+    _maybe_await,
+    _option,
+    apply_service_tier_pricing,
+    resolve_cache_retention,
+)
 from misaka.ai.providers.openai_prompt_cache import clamp_openai_prompt_cache_key
 from misaka.ai.providers.openai_responses_shared import (
     convert_responses_messages,
@@ -36,7 +47,6 @@ from misaka.ai.types import (
     SimpleStreamOptions,
     StartEvent,
     StreamOptions,
-    Usage,
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
@@ -63,88 +73,6 @@ class OpenAIResponsesOptions(TypedDict, total=False):
     reasoningEffort: Literal["minimal", "low", "medium", "high", "xhigh"]
     reasoningSummary: Literal["auto", "detailed", "concise"] | None
     serviceTier: Literal["auto", "default", "flex", "scale", "priority"]
-
-
-def _option(options: Any, name: str, default: Any = None) -> Any:
-    if options is None:
-        return default
-    if isinstance(options, dict):
-        return options.get(name, default)
-    return getattr(options, name, default)
-
-
-async def _maybe_await(value: Any) -> Any:
-    if hasattr(value, "__await__"):
-        return await value
-    return value
-
-
-def _compat_value(compat: Any, name: str, default: Any = None) -> Any:
-    if compat is None:
-        return default
-    if isinstance(compat, Mapping):
-        return compat.get(name, default)
-    return getattr(compat, name, default)
-
-
-def _is_aborted(signal: Any) -> bool:
-    if signal is None:
-        return False
-    if getattr(signal, "aborted", False):
-        return True
-    return bool(getattr(signal, "is_set", lambda: False)())
-
-
-def _create_abort_wait_task(signal: Any) -> asyncio.Task[None] | None:
-    if signal is None or not hasattr(signal, "wait"):
-        return None
-    return asyncio.create_task(signal.wait())
-
-
-async def _await_with_signal(awaitable: Any, signal: Any, *, on_abort: Any = None) -> Any:
-    if _is_aborted(signal):
-        if isinstance(awaitable, asyncio.Future):
-            awaitable.cancel()
-        else:
-            close = getattr(awaitable, "close", None)
-            if callable(close):
-                close()
-        if on_abort is not None:
-            await _maybe_await(on_abort())
-        raise RuntimeError("Request was aborted")
-
-    task = asyncio.ensure_future(awaitable)
-    abort_task = _create_abort_wait_task(signal)
-    try:
-        if abort_task is not None:
-            done, _ = await asyncio.wait({task, abort_task}, return_when=asyncio.FIRST_COMPLETED)
-            if abort_task in done and not task.done():
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-                if on_abort is not None:
-                    await _maybe_await(on_abort())
-                raise RuntimeError("Request was aborted")
-        return await task
-    finally:
-        if abort_task is not None:
-            abort_task.cancel()
-            await asyncio.gather(abort_task, return_exceptions=True)
-
-
-async def _await_maybe_with_signal(value: Any, signal: Any, *, on_abort: Any = None) -> Any:
-    if hasattr(value, "__await__"):
-        return await _await_with_signal(value, signal, on_abort=on_abort)
-    if _is_aborted(signal):
-        if on_abort is not None:
-            await _maybe_await(on_abort())
-        raise RuntimeError("Request was aborted")
-    return value
-
-
-def resolve_cache_retention(cache_retention: CacheRetention | None = None) -> CacheRetention:
-    if cache_retention:
-        return cache_retention
-    return "long" if os.environ.get("MISAKA_CACHE_RETENTION") == "long" else "short"
 
 
 def get_compat(model: Model) -> dict[str, bool]:
@@ -174,18 +102,6 @@ def format_openai_responses_error(error: Any) -> str:
         return json.dumps(error)
     except (TypeError, ValueError):
         return str(error)
-
-
-def _empty_usage() -> Usage:
-    return AssistantMessage(
-        content=[],
-        api="openai-responses",
-        provider="openai",
-        model="",
-        usage={"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}},
-        stopReason="stop",
-        timestamp=0,
-    ).usage
 
 
 def create_client(
@@ -283,34 +199,6 @@ def build_params(model: Model, context: Context, options: Any = None) -> dict[st
                 params["reasoning"] = {"effort": "none" if off_value is None else off_value}
 
     return params
-
-
-def get_service_tier_cost_multiplier(model: Model, service_tier: str | None) -> float:
-    if service_tier == "flex":
-        return 0.5
-    if service_tier == "priority":
-        return 2.5 if model.id == "gpt-5.5" else 2.0
-    return 1.0
-
-
-def apply_service_tier_pricing(usage: Usage, service_tier: str | None, model: Model) -> None:
-    multiplier = get_service_tier_cost_multiplier(model, service_tier)
-    if multiplier == 1:
-        return
-    usage.cost.input *= multiplier
-    usage.cost.output *= multiplier
-    usage.cost.cacheRead *= multiplier
-    usage.cost.cacheWrite *= multiplier
-    usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite
-
-
-async def _close_stream(stream_obj: Any) -> None:
-    close = getattr(stream_obj, "close", None)
-    if callable(close):
-        try:
-            await _maybe_await(close())
-        except Exception:  # noqa: BLE001
-            return
 
 
 async def _iterate_stream(stream_obj: Any, signal: Any = None) -> AsyncIterator[dict[str, Any]]:
