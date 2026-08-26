@@ -2,7 +2,7 @@
 ``skill_view`` / ``skill_manage``, and the ``/skill``, ``/learn``, ``/skill-mode``
 commands (hermes skills_tool + skill commands).
 
-The engine's own skill loading is off (``--no-skills``): this extension is the only
+The engine has no skill loading of its own: this extension is the only
 thing that decides which skills a session sees -- the role's three layers, or the
 read-only sandbox a card runs against (``SessionSpec.skill_roots``).
 """
@@ -157,7 +157,7 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
 
         # ── the [Skills] block on the startup screen ──
         # The engine's own one lists engine-loaded skills, of which there are none under
-        # --no-skills; this section takes its place (same name, same style), showing the
+        # the engine has no skill section of its own; this one takes its place (same name, same style), showing the
         # index: names collapsed, the full category tree behind ctrl+o.
         from misaka.core.extensions import startup_sections
 

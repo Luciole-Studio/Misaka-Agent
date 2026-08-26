@@ -69,7 +69,7 @@ def _is_skill_md(target, skill_dir):
 
 def validate_frontmatter(content, *, new_skill=False):
     """Return an error message if the SKILL.md frontmatter or body is invalid, else None."""
-    from misaka.core.skills import SKILL_PROMPT_DESC_LIMIT
+    from misaka.skills.index import SKILL_PROMPT_DESC_LIMIT
     from misaka.utils.frontmatter import parse_frontmatter
 
     if not str(content or "").strip():
@@ -135,7 +135,7 @@ def _lint_findings(skill_md):
 
 def _description_preview(content):
     """Return the description exactly as the prompt index will display it."""
-    from misaka.core.skills import is_skill_description_truncated, truncate_skill_description
+    from misaka.skills.index import is_skill_description_truncated, truncate_skill_description
     from misaka.utils.frontmatter import parse_frontmatter
     desc = str((parse_frontmatter(content).frontmatter or {}).get("description") or "")
     if not is_skill_description_truncated(desc):
@@ -145,13 +145,8 @@ def _description_preview(content):
 
 def _invalidate_index():
     """Drop the cached skill index so the next prompt build sees the change."""
-    try:
-        from misaka.core import skills as _skills
-        invalidate = getattr(_skills, "invalidate_skills_cache", None)
-        if callable(invalidate):
-            invalidate()
-    except Exception:  # noqa: BLE001
-        pass
+    from misaka.skills import index
+    index.invalidate()
 
 
 def _create(profile_dir, name, content):

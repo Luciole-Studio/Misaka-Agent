@@ -650,15 +650,6 @@ async def _run_rpc_mode(runtime_host: Any, *, input_stream: Any | None = None) -
                         "sourceInfo": template.sourceInfo,
                     }
                 )
-            for skill in session.resourceLoader.getSkills()["skills"]:
-                commands.append(
-                    {
-                        "name": f"skill:{skill.name}",
-                        "description": skill.description,
-                        "source": "skill",
-                        "sourceInfo": skill.sourceInfo,
-                    }
-                )
             return success(request_id, "get_commands", {"commands": commands})
 
         display_command_type = command_type if command_type is not None else "undefined"

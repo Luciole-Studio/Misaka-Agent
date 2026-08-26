@@ -561,7 +561,7 @@ class InteractiveMode:
                     get_registered_commands=lambda: [],
                     get_message_renderer=lambda _custom_type: None,
                 ),
-                resourceLoader=SimpleNamespace(getSkills=lambda: {"skills": []}, getThemes=lambda: {"themes": []}),
+                resourceLoader=SimpleNamespace(getThemes=lambda: {"themes": []}),
                 modelRegistry=SimpleNamespace(
                     authStorage=SimpleNamespace(get=lambda *_args, **_kwargs: None),
                     getApiKeyForProvider=_noop_async,
@@ -735,7 +735,6 @@ class InteractiveMode:
         self.extensionTerminalInputUnsubscribers: set[Callable[[], None]] = set(
             getattr(self, "extensionTerminalInputUnsubscribers", set())
         )
-        self.skillCommands: dict[str, str] = dict(getattr(self, "skillCommands", {}))
         self.fdPath = getattr(self, "fdPath", None)
         self.anthropicSubscriptionWarningShown = bool(
             getattr(self, "anthropicSubscriptionWarningShown", False)
@@ -832,27 +831,13 @@ class InteractiveMode:
 
         commands = list(builtin_commands)
         seen_names = {command.name for command in commands}
-        self.skillCommands.clear()
         get_slash_commands = _callable_attr(self.session, "getSlashCommands") or _callable_attr(
             self.session, "getCommands"
         )
         if get_slash_commands is not None:
-            get_enable_skill_commands = _callable_attr(self.settingsManager, "getEnableSkillCommands")
-            skill_commands_enabled = get_enable_skill_commands is None or bool(get_enable_skill_commands())
-            skill_paths: dict[str, str] = {}
-            resource_loader = getattr(self.session, "resourceLoader", None)
-            get_skills = _callable_attr(resource_loader, "getSkills")
-            if get_skills is not None:
-                skill_result = get_skills() or {}
-                for skill in _value(skill_result, "skills", []) or []:
-                    skill_name = str(_value(skill, "name", "")).strip()
-                    if skill_name:
-                        skill_paths[f"skill:{skill_name}"] = str(_value(skill, "filePath", ""))
             for command_info in get_slash_commands() or []:
                 command_name = str(_value(command_info, "name", "")).strip()
                 if not command_name or command_name in seen_names:
-                    continue
-                if command_name.startswith("skill:") and not skill_commands_enabled:
                     continue
                 seen_names.add(command_name)
                 commands.append(
@@ -864,8 +849,6 @@ class InteractiveMode:
                         ),
                     )
                 )
-                if command_name in skill_paths:
-                    self.skillCommands[command_name] = skill_paths[command_name]
 
         cwd = str(self.sessionManager.getCwd())
         return CombinedAutocompleteProvider(commands, cwd, self.fdPath)
@@ -1907,13 +1890,11 @@ class InteractiveMode:
         if resource_loader is None:
             return
 
-        get_skills = _callable_attr(resource_loader, "getSkills")
         get_prompts = _callable_attr(resource_loader, "getPrompts")
         get_themes = _callable_attr(resource_loader, "getThemes")
         get_agents_files = _callable_attr(resource_loader, "getAgentsFiles")
         get_extensions = _callable_attr(resource_loader, "getExtensions")
 
-        skills_result = get_skills() if get_skills is not None else {"skills": [], "diagnostics": []}
         prompts_result = get_prompts() if get_prompts is not None else {"prompts": [], "diagnostics": []}
         themes_result = get_themes() if get_themes is not None else {"themes": [], "diagnostics": []}
         extensions_result = (
@@ -1933,8 +1914,6 @@ class InteractiveMode:
             path = _value(extension, "path")
             if source_info is not None and path:
                 source_infos[str(path)] = source_info
-        for skill in _value(skills_result, "skills", []) or []:
-            source_infos[str(_value(skill, "filePath", ""))] = _value(skill, "sourceInfo")
         for prompt in _value(prompts_result, "prompts", []) or []:
             source_infos[str(_value(prompt, "filePath", ""))] = _value(prompt, "sourceInfo")
         for loaded_theme in _value(themes_result, "themes", []) or []:
@@ -1976,30 +1955,6 @@ class InteractiveMode:
                     "\n".join(
                         interactive_theme.theme.fg("dim", f"  {self.formatDisplayPath(str(_value(item, 'path', '')))}")
                         for item in context_files
-                    ),
-                )
-
-            skills = _value(skills_result, "skills", []) or []
-            if skills:
-                skill_items = [
-                    {"path": str(_value(skill, "filePath", "")), "sourceInfo": _value(skill, "sourceInfo")}
-                    for skill in skills
-                ]
-                add_loaded_section(
-                    "Skills",
-                    interactive_theme.theme.fg(
-                        "dim",
-                        "  " + ", ".join(sorted(str(_value(skill, "name", "")) for skill in skills)),
-                    ),
-                    self.formatScopeGroups(
-                        self.buildScopeGroups(skill_items),
-                        {
-                            "formatPath": lambda item: self.formatDisplayPath(str(_value(item, "path", ""))),
-                            "formatPackagePath": lambda item, _source: self.getShortPath(
-                                str(_value(item, "path", "")),
-                                _value(item, "sourceInfo"),
-                            ),
-                        },
                     ),
                 )
 
@@ -2088,7 +2043,6 @@ class InteractiveMode:
 
         if show_diagnostics:
             diagnostic_sections = [
-                ("Skill conflicts", _value(skills_result, "diagnostics", []) or []),
                 ("Prompt conflicts", _value(prompts_result, "diagnostics", []) or []),
             ]
 

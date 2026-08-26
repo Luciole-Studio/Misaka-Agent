@@ -34,7 +34,6 @@ from misaka.core.prompt_templates import PromptTemplate
 from misaka.core.resource_loader import DefaultResourceLoader, ResourceLoader
 from misaka.core.session_manager import SessionManager, get_default_session_dir
 from misaka.core.settings_manager import SettingsManager
-from misaka.core.skills import Skill
 from misaka.core.timings import time
 from misaka.core.tools import (
     Tool,
@@ -459,7 +458,6 @@ __all__ = [
     "ExtensionContext",
     "PromptTemplate",
     "SessionImportFileNotFoundError",
-    "Skill",
     "SlashCommandInfo",
     "SlashCommandSource",
     "Tool",

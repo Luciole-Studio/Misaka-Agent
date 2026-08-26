@@ -26,7 +26,6 @@ from misaka.core.extensions.types import (
 from misaka.core.package_manager import DefaultPackageManager, PathMetadata, ResolvedResource
 from misaka.core.prompt_templates import PromptTemplate, load_prompt_templates
 from misaka.core.settings_manager import SettingsManager
-from misaka.core.skills import LoadSkillsResult, Skill, load_skills
 from misaka.core.source_info import SourceInfo, create_source_info
 from misaka.ui.tui.interactive.theme.theme import Theme, load_theme_from_path
 from misaka.utils.paths import canonicalize_path, is_local_path, resolve_path
@@ -38,7 +37,6 @@ class ResourcePathEntry(TypedDict):
 
 
 class ResourceExtensionPaths(TypedDict, total=False):
-    skillPaths: list[ResourcePathEntry]
     promptPaths: list[ResourcePathEntry]
     themePaths: list[ResourcePathEntry]
 
@@ -52,29 +50,21 @@ class DefaultResourceLoaderOptions(_DefaultResourceLoaderOptionsRequired, total=
     settingsManager: SettingsManager
     eventBus: Any
     additionalExtensionPaths: list[str]
-    additionalSkillPaths: list[str]
     additionalPromptTemplatePaths: list[str]
     additionalThemePaths: list[str]
     extensionFactories: list[InlineExtension]
     noExtensions: bool
-    noSkills: bool
     noPromptTemplates: bool
     noThemes: bool
     noContextFiles: bool
     systemPrompt: str
     appendSystemPrompt: list[str]
     extensionsOverride: Any
-    skillsOverride: Any
     promptsOverride: Any
     themesOverride: Any
     agentsFilesOverride: Any
     systemPromptOverride: Any
     appendSystemPromptOverride: Any
-
-
-class SkillsResult(TypedDict):
-    skills: list[Skill]
-    diagnostics: list[ResourceDiagnostic]
 
 
 class PromptsResult(TypedDict):
@@ -93,8 +83,6 @@ class AgentsFilesResult(TypedDict):
 
 class ResourceLoader(Protocol):
     def getExtensions(self) -> LoadExtensionsResult: ...
-
-    def getSkills(self) -> SkillsResult: ...
 
     def getPrompts(self) -> PromptsResult: ...
 
@@ -170,19 +158,16 @@ class DefaultResourceLoader:
     packageManager: DefaultPackageManager
     eventBus: Any | None = None
     additionalExtensionPaths: list[str] = field(default_factory=list)
-    additionalSkillPaths: list[str] = field(default_factory=list)
     additionalPromptTemplatePaths: list[str] = field(default_factory=list)
     additionalThemePaths: list[str] = field(default_factory=list)
     extensionFactories: list[InlineExtension] = field(default_factory=list)
     noExtensions: bool = False
-    noSkills: bool = False
     noPromptTemplates: bool = False
     noThemes: bool = False
     noContextFiles: bool = False
     systemPromptSource: str | None = None
     appendSystemPromptSource: list[str] | None = None
     extensionsOverride: Any = None
-    skillsOverride: Any = None
     promptsOverride: Any = None
     themesOverride: Any = None
     agentsFilesOverride: Any = None
@@ -191,9 +176,6 @@ class DefaultResourceLoader:
     extensionsResult: LoadExtensionsResult = field(
         default_factory=lambda: LoadExtensionsResult(extensions=[], errors=[], runtime=create_extension_runtime())
     )
-    skills: list[Skill] = field(default_factory=list)
-    skillDiagnostics: list[ResourceDiagnostic] = field(default_factory=list)
-    _skillsGeneration: int | None = None   # skill index generation; getSkills rescans when it changes
     prompts: list[PromptTemplate] = field(default_factory=list)
     promptDiagnostics: list[ResourceDiagnostic] = field(default_factory=list)
     themes: list[Theme] = field(default_factory=list)
@@ -201,10 +183,8 @@ class DefaultResourceLoader:
     agentsFiles: list[dict[str, str]] = field(default_factory=list)
     systemPrompt: str | None = None
     appendSystemPrompt: list[str] = field(default_factory=list)
-    lastSkillPaths: list[str] = field(default_factory=list)
     lastPromptPaths: list[str] = field(default_factory=list)
     lastThemePaths: list[str] = field(default_factory=list)
-    extensionSkillSourceInfos: dict[str, SourceInfo] = field(default_factory=dict)
     extensionPromptSourceInfos: dict[str, SourceInfo] = field(default_factory=dict)
     extensionThemeSourceInfos: dict[str, SourceInfo] = field(default_factory=dict)
 
@@ -217,28 +197,22 @@ class DefaultResourceLoader:
         )
         self.eventBus = options.get("eventBus") or createEventBus()
         self.additionalExtensionPaths = list(options.get("additionalExtensionPaths", []))
-        self.additionalSkillPaths = list(options.get("additionalSkillPaths", []))
         self.additionalPromptTemplatePaths = list(options.get("additionalPromptTemplatePaths", []))
         self.additionalThemePaths = list(options.get("additionalThemePaths", []))
         self.extensionFactories = list(options.get("extensionFactories", []))
         self.noExtensions = options.get("noExtensions", False)
-        self.noSkills = options.get("noSkills", False)
         self.noPromptTemplates = options.get("noPromptTemplates", False)
         self.noThemes = options.get("noThemes", False)
         self.noContextFiles = options.get("noContextFiles", False)
         self.systemPromptSource = options.get("systemPrompt")
         self.appendSystemPromptSource = options.get("appendSystemPrompt")
         self.extensionsOverride = options.get("extensionsOverride")
-        self.skillsOverride = options.get("skillsOverride")
         self.promptsOverride = options.get("promptsOverride")
         self.themesOverride = options.get("themesOverride")
         self.agentsFilesOverride = options.get("agentsFilesOverride")
         self.systemPromptOverride = options.get("systemPromptOverride")
         self.appendSystemPromptOverride = options.get("appendSystemPromptOverride")
         self.extensionsResult = LoadExtensionsResult(extensions=[], errors=[], runtime=create_extension_runtime())
-        self.skills = []
-        self.skillDiagnostics = []
-        self._skillsGeneration = None
         self.prompts = []
         self.promptDiagnostics = []
         self.themes = []
@@ -246,26 +220,13 @@ class DefaultResourceLoader:
         self.agentsFiles = []
         self.systemPrompt = None
         self.appendSystemPrompt = []
-        self.lastSkillPaths = []
         self.lastPromptPaths = []
         self.lastThemePaths = []
-        self.extensionSkillSourceInfos = {}
         self.extensionPromptSourceInfos = {}
         self.extensionThemeSourceInfos = {}
 
     def getExtensions(self) -> LoadExtensionsResult:
         return self.extensionsResult
-
-    def getSkills(self) -> SkillsResult:
-        # Rescan when skills on disk changed (after save/approve/disable the session
-        # index must not stay a startup snapshot)
-        from misaka.core.skills import skills_cache_generation
-        generation = skills_cache_generation()
-        if generation != self._skillsGeneration:
-            self._skillsGeneration = generation
-            if getattr(self, "lastSkillPaths", None) is not None:
-                self._update_skills_from_paths(self.lastSkillPaths)
-        return {"skills": self.skills, "diagnostics": self.skillDiagnostics}
 
     def getPrompts(self) -> PromptsResult:
         return {"prompts": self.prompts, "diagnostics": self.promptDiagnostics}
@@ -283,20 +244,13 @@ class DefaultResourceLoader:
         return self.appendSystemPrompt
 
     def extendResources(self, paths: ResourceExtensionPaths) -> None:
-        skill_paths = self._normalize_extension_paths(paths.get("skillPaths", []))
         prompt_paths = self._normalize_extension_paths(paths.get("promptPaths", []))
         theme_paths = self._normalize_extension_paths(paths.get("themePaths", []))
 
-        for entry in skill_paths:
-            self.extensionSkillSourceInfos[entry["path"]] = create_source_info(entry["path"], entry["metadata"])
         for entry in prompt_paths:
             self.extensionPromptSourceInfos[entry["path"]] = create_source_info(entry["path"], entry["metadata"])
         for entry in theme_paths:
             self.extensionThemeSourceInfos[entry["path"]] = create_source_info(entry["path"], entry["metadata"])
-
-        if skill_paths:
-            self.lastSkillPaths = self._merge_paths(self.lastSkillPaths, [entry["path"] for entry in skill_paths])
-            self._update_skills_from_paths(self.lastSkillPaths)
 
         if prompt_paths:
             self.lastPromptPaths = self._merge_paths(self.lastPromptPaths, [entry["path"] for entry in prompt_paths])
@@ -315,7 +269,6 @@ class DefaultResourceLoader:
         )
 
         metadata_by_path: dict[str, PathMetadata] = {}
-        self.extensionSkillSourceInfos = {}
         self.extensionPromptSourceInfos = {}
         self.extensionThemeSourceInfos = {}
 
@@ -329,36 +282,14 @@ class DefaultResourceLoader:
             return [resource.path for resource in get_enabled_resources(resources)]
 
         enabled_extensions = enabled_paths(resolved_paths.extensions)
-        enabled_skill_resources = get_enabled_resources(resolved_paths.skills)
         enabled_prompts = enabled_paths(resolved_paths.prompts)
         enabled_themes = enabled_paths(resolved_paths.themes)
-
-        def map_skill_path(resource: ResolvedResource) -> str:
-            if resource.metadata.get("source") != "auto" and resource.metadata.get("origin") != "package":
-                return resource.path
-            try:
-                if not os.path.isdir(resource.path):
-                    return resource.path
-            except Exception:  # noqa: BLE001
-                return resource.path
-            skill_file = os.path.join(resource.path, "SKILL.md")
-            if os.path.exists(skill_file):
-                if skill_file not in metadata_by_path:
-                    metadata_by_path[skill_file] = resource.metadata
-                return skill_file
-            return resource.path
-
-        enabled_skills = [map_skill_path(resource) for resource in enabled_skill_resources]
 
         for resource in cli_extension_paths.extensions:
             if resource.path not in metadata_by_path:
                 metadata_by_path[resource.path] = {"source": "cli", "scope": "temporary", "origin": "top-level"}
-        for resource in cli_extension_paths.skills:
-            if resource.path not in metadata_by_path:
-                metadata_by_path[resource.path] = {"source": "cli", "scope": "temporary", "origin": "top-level"}
 
         cli_enabled_extensions = enabled_paths(cli_extension_paths.extensions)
-        cli_enabled_skills = enabled_paths(cli_extension_paths.skills)
         cli_enabled_prompts = enabled_paths(cli_extension_paths.prompts)
         cli_enabled_themes = enabled_paths(cli_extension_paths.themes)
 
@@ -391,23 +322,6 @@ class DefaultResourceLoader:
             else extensions_result
         )
         self._apply_extension_source_info(self.extensionsResult.extensions, metadata_by_path)
-
-        skill_paths = (
-            self._merge_paths(cli_enabled_skills, self.additionalSkillPaths)
-            if self.noSkills
-            else self._merge_paths([*cli_enabled_skills, *enabled_skills], self.additionalSkillPaths)
-        )
-        self.lastSkillPaths = skill_paths
-        self._update_skills_from_paths(skill_paths, metadata_by_path)
-        for raw_path in self.additionalSkillPaths:
-            if is_local_path(raw_path):
-                resolved = self._resolve_resource_path(raw_path)
-                if not os.path.exists(resolved) and not any(
-                    diagnostic.path == resolved for diagnostic in self.skillDiagnostics
-                ):
-                    self.skillDiagnostics.append(
-                        ResourceDiagnostic(type="error", message="Skill path does not exist", path=resolved)
-                    )
 
         prompt_paths = (
             self._merge_paths(cli_enabled_prompts, self.additionalPromptTemplatePaths)
@@ -495,43 +409,6 @@ class DefaultResourceLoader:
                 }
             )
         return normalized
-
-    def _update_skills_from_paths(
-        self,
-        skill_paths: list[str],
-        metadata_by_path: dict[str, PathMetadata] | None = None,
-    ) -> None:
-        if self.noSkills and not skill_paths:
-            skills_result = LoadSkillsResult(skills=[], diagnostics=[])
-        else:
-            skills_result = load_skills(
-                {
-                    "cwd": self.cwd,
-                    "agentDir": self.agentDir,
-                    "skillPaths": skill_paths,
-                    "includeDefaults": False,
-                }
-            )
-
-        resolved = self.skillsOverride(skills_result) if callable(self.skillsOverride) else skills_result
-        self.skills = [
-            Skill(
-                name=skill.name,
-                description=skill.description,
-                filePath=skill.filePath,
-                baseDir=skill.baseDir,
-                sourceInfo=self._find_source_info_for_path(
-                    skill.filePath,
-                    self.extensionSkillSourceInfos,
-                    metadata_by_path,
-                )
-                or skill.sourceInfo
-                or self._get_default_source_info_for_path(skill.filePath),
-                disableModelInvocation=skill.disableModelInvocation,
-            )
-            for skill in resolved.skills
-        ]
-        self.skillDiagnostics = list(resolved.diagnostics)
 
     def _update_prompts_from_paths(
         self,

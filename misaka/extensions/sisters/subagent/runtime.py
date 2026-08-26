@@ -2318,8 +2318,8 @@ class SubagentManager:
                 [*normalized,
                  *(t for t in MANAGEMENT_TOOLS if t.casefold() not in denied)]))
             flags.extend(["-t", ",".join(tools)])
-        # The skills a definition names are inlined into the child's first message
-        # (_preloaded_skills); the engine's own skill loading is off for every child.
+        # The skills a definition names are pointed at in the child's first message
+        # (_preloaded_skills); it loads them on demand like any session.
         if task.definition.max_turns:
             flags.extend(["--subagent-max-turns", str(task.definition.max_turns)])
         return flags
@@ -2400,17 +2400,20 @@ class SubagentManager:
         return resolved
 
     def _preloaded_skills(self, task: AgentTask) -> list[str]:
-        loaded: list[str] = []
+        """Point the child at the skills its definition names. It loads them on demand like any
+        session -- ``skill_view`` for one in its index, ``read`` for a definition-local path --
+        instead of every SKILL.md being inlined into its first message."""
+        from misaka.skills import index as skill_index, layers as skill_layers
+        indexed = {Path(p).name for p in skill_layers.skills_stack(
+            self.role_context.profile_dir or None, cwd=self.role_context.workspace or None)}
+        lines: list[str] = []
         for path in self._skill_paths(task.definition):
             candidate = Path(path)
-            skill_file = candidate / "SKILL.md" if candidate.is_dir() else candidate
-            try:
-                body = skill_file.read_text(encoding="utf-8").strip()
-            except (OSError, UnicodeError):
-                continue
-            if body:
-                loaded.append(f'<skill name="{escape(candidate.name)}">\n{body}\n</skill>')
-        return loaded
+            if candidate.is_dir() and candidate.name in indexed:
+                lines.append(f"- `skill_view {skill_index.slug(candidate.name)}`")
+            else:
+                lines.append(f"- read `{candidate / 'SKILL.md' if candidate.is_dir() else candidate}`")
+        return ["Skills for this task; load each before starting:\n" + "\n".join(lines)] if lines else []
 
     def _agent_mcp_config(self, task: AgentTask) -> str | None:
         if not task.definition.mcp_servers:

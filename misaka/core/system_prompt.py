@@ -5,7 +5,6 @@ from __future__ import annotations
 import datetime as _datetime
 from typing import NotRequired, TypedDict
 
-from misaka.core.skills import Skill, format_skills_for_prompt
 
 
 class BuildSystemPromptOptions(TypedDict):
@@ -16,7 +15,6 @@ class BuildSystemPromptOptions(TypedDict):
     promptGuidelines: NotRequired[list[str]]
     appendSystemPrompt: NotRequired[str]
     contextFiles: NotRequired[list[dict[str, str]]]
-    skills: NotRequired[list[Skill]]
 
 
 def build_system_prompt(options: BuildSystemPromptOptions) -> str:
@@ -27,7 +25,6 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
     append_system_prompt = options.get("appendSystemPrompt")
     cwd = options["cwd"]
     context_files = options.get("contextFiles") or []
-    skills = options.get("skills") or []
 
     prompt_cwd = cwd.replace("\\", "/")
     date = _datetime.date.today().isoformat()
@@ -39,8 +36,6 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
             prompt += append_section
         if context_files:
             prompt += _format_project_context(context_files)
-        if (selected_tools is None or "read" in selected_tools) and skills:
-            prompt += format_skills_for_prompt(skills)
         prompt += f"\nCurrent date: {date}"
         # Trailing newline: anything appended to the prompt later must start on its own line (upstream #7887/3dd4623ee)
         prompt += f"\nCurrent working directory: {prompt_cwd}\n"
@@ -63,7 +58,6 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
     has_grep = "grep" in tools
     has_find = "find" in tools
     has_ls = "ls" in tools
-    has_read = "read" in tools
 
     if has_bash and not has_grep and not has_find and not has_ls:
         add_guideline("Use bash for file operations like ls, rg, find")
@@ -97,8 +91,6 @@ Guidelines:
 {guidelines_text}"""
     if context_files:
         prompt += _format_project_context(context_files)
-    if has_read and skills:
-        prompt += format_skills_for_prompt(skills)
     prompt += f"\nCurrent date: {date}"
     prompt += f"\nCurrent working directory: {prompt_cwd}"
     return prompt

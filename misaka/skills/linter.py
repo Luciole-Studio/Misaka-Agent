@@ -30,7 +30,7 @@ class Finding:
 
 def lint_content(content, skill_dir=None):
     """Check one SKILL.md document and its optional support directory."""
-    from misaka.core.skills import SKILL_PROMPT_DESC_LIMIT, is_skill_description_truncated
+    from misaka.skills.index import SKILL_PROMPT_DESC_LIMIT, is_skill_description_truncated
     from misaka.utils.frontmatter import parse_frontmatter
 
     findings = []

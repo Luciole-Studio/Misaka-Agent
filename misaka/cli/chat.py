@@ -64,9 +64,9 @@ def launch(who, model=None, cont=False, pick=False, session=None):
     else:
         title = "MISAKA · Last Order"
     from misaka.config import identity
-    # --no-skills: the engine's own skill loading stays off; the skills extension is the one
-    # place that decides what this session sees (misaka.skills.index).
-    flags = ["--provider", CFG["provider"], "--model", model or model_default, "--no-skills",
+    # The engine has no skill loading of its own; the skills extension is the one place that
+    # decides what this session sees (misaka.skills.index).
+    flags = ["--provider", CFG["provider"], "--model", model or model_default,
              "--append-system-prompt", profiles.shared_soul()]
     for section in identity.prompt_sections(prof, profiles.role_of(prof)):
         flags += ["--append-system-prompt", section]

@@ -461,7 +461,6 @@ class ResourcesDiscoverEvent(TypedDict):
 
 
 class ResourcesDiscoverResult(TypedDict, total=False):
-    skillPaths: list[str]
     promptPaths: list[str]
     themePaths: list[str]
 
@@ -948,7 +947,6 @@ class Extension:
 
 @dataclass(slots=True)
 class _LoadedExtension(Extension):
-    skillPaths: list[str] = field(default_factory=list)
     promptPaths: list[str] = field(default_factory=list)
     themePaths: list[str] = field(default_factory=list)
     systemPrompt: str | None = None

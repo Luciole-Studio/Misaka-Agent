@@ -45,8 +45,6 @@ class Args:
     noExtensions: bool = False
     print: bool = False
     export: str | None = None
-    noSkills: bool = False
-    skills: list[str] | None = None
     promptTemplates: list[str] | None = None
     noPromptTemplates: bool = False
     themes: list[str] | None = None
@@ -159,10 +157,6 @@ def parse_args(args: list[str]) -> Args:
             index += 1
         elif arg in {"--no-extensions", "-ne"}:
             result.noExtensions = True
-        elif arg == "--skill" and has_next:
-            result.skills = result.skills or []
-            result.skills.append(args[index + 1])
-            index += 1
         elif arg == "--prompt-template" and has_next:
             result.promptTemplates = result.promptTemplates or []
             result.promptTemplates.append(args[index + 1])
@@ -179,8 +173,6 @@ def parse_args(args: list[str]) -> Args:
             else:
                 result.useTheme = theme_name
                 index += 1
-        elif arg in {"--no-skills", "-ns"}:
-            result.noSkills = True
         elif arg in {"--no-prompt-templates", "-np"}:
             result.noPromptTemplates = True
         elif arg == "--no-themes":
@@ -269,8 +261,6 @@ Options:
   --thinking <level>             Set thinking level: off, minimal, low, medium, high, xhigh
   --extension, -e <path>         Load an extension file (can be used multiple times)
   --no-extensions, -ne           Disable extension discovery (explicit -e paths still work)
-  --skill <path>                 Load a skill file or directory (can be used multiple times)
-  --no-skills, -ns               Disable skills discovery and loading
   --prompt-template <path>       Load a prompt template file or directory (can be used multiple times)
   --no-prompt-templates, -np     Disable prompt template discovery and loading
   --theme <path>                 Load a theme file or directory (can be used multiple times)

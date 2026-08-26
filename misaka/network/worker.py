@@ -395,9 +395,9 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
     prompt = card_prompt(task)
 
     role = profiles.role_of(profile_dir)
-    # --no-skills: the engine's own skill loading stays off; the skills extension reads the
+    # The engine has no skill loading of its own; the skills extension reads the
     # card's sandbox (SessionSpec.skill_roots) and nothing else.
-    flags = ["--provider", provider, "--model", model, "--thinking", "low", "--no-skills",
+    flags = ["--provider", provider, "--model", model, "--thinking", "low",
              "--session-dir", os.path.join(state_dir, "session")]
     ro_root = os.path.join(state_dir, ".skills-ro")
     sender = role.rsplit("/", 1)[-1]

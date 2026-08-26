@@ -76,7 +76,6 @@ from misaka.core.tools.tool_definition_wrapper import (
     wrap_tool_definition,
 )
 from misaka.ui.tui.interactive.theme.theme import theme
-from misaka.utils.frontmatter import strip_frontmatter
 from misaka.utils.paths import resolve_path
 from misaka.utils.sleep import sleep
 
@@ -460,7 +459,6 @@ class AgentSession:
                         current_images = list(transformed_images)
 
             if resolved.expandPromptTemplates:
-                current_text = self._expand_skill_command(current_text)
                 current_text = expand_prompt_template(current_text, self.promptTemplates)
 
             if self.isStreaming:
@@ -550,15 +548,13 @@ class AgentSession:
     async def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         if text.startswith("/"):
             self._throw_if_extension_command(text)
-        expanded_text = self._expand_skill_command(text)
-        expanded_text = expand_prompt_template(expanded_text, self.promptTemplates)
+        expanded_text = expand_prompt_template(text, self.promptTemplates)
         await self._queue_steer(expanded_text, images)
 
     async def followUp(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         if text.startswith("/"):
             self._throw_if_extension_command(text)
-        expanded_text = self._expand_skill_command(text)
-        expanded_text = expand_prompt_template(expanded_text, self.promptTemplates)
+        expanded_text = expand_prompt_template(text, self.promptTemplates)
         await self._queue_follow_up(expanded_text, images)
 
     def _emit_queue_update(self) -> None:
@@ -588,38 +584,6 @@ class AgentSession:
                 f'Extension command "/{command_name}" cannot be queued. '
                 "Use prompt() or execute the command when not streaming."
             )
-
-    def _expand_skill_command(self, text: str) -> str:
-        if not text.startswith("/skill:"):
-            return text
-
-        command_text = text[7:]
-        skill_name, _, raw_args = command_text.partition(" ")
-        args = raw_args.strip()
-        for skill in (self._resourceLoader.getSkills() or {}).get("skills", []):
-            if _value(skill, "name") != skill_name:
-                continue
-            skill_file_path = str(_value(skill, "filePath", ""))
-            try:
-                with open(skill_file_path, encoding="utf-8") as handle:
-                    body = strip_frontmatter(handle.read()).strip()
-                skill_block = (
-                    f'<skill name="{_value(skill, "name")}" location="{skill_file_path}">\n'
-                    f'References are relative to {_value(skill, "baseDir")}.\n\n'
-                    f"{body}\n"
-                    "</skill>"
-                )
-                return f"{skill_block}\n\n{args}" if args else skill_block
-            except Exception as error:  # noqa: BLE001
-                self._extensionRunner.emit_error(
-                    ExtensionError(
-                        extensionPath=skill_file_path,
-                        event="skill_expansion",
-                        error=str(error),
-                    )
-                )
-                return text
-        return text
 
     def setSessionName(self, name: str) -> None:
         self.sessionManager.appendSessionInfo(name)
@@ -830,23 +794,6 @@ class AgentSession:
                 )
             )
 
-        skills_result = self._resourceLoader.getSkills() or {}
-        for skill in _value(skills_result, "skills", []) or []:
-            name = str(_value(skill, "name", "")).strip()
-            if not name:
-                continue
-            commands.append(
-                _make_slash_command_info(
-                    f"skill:{name}",
-                    "skill",
-                    _value(skill, "sourceInfo")
-                    or create_synthetic_source_info(
-                        f"<skill:{name}>",
-                        {"source": "auto", "scope": "project", "origin": "skill"},
-                    ),
-                    _value(skill, "description"),
-                )
-            )
 
         return commands
 
@@ -1644,12 +1591,11 @@ class AgentSession:
             return
 
         discovered = await self._extensionRunner.emit_resources_discover(self._cwd, reason)
-        if not discovered["skillPaths"] and not discovered["promptPaths"] and not discovered["themePaths"]:
+        if not discovered["promptPaths"] and not discovered["themePaths"]:
             return
 
         self._resourceLoader.extendResources(
             {
-                "skillPaths": self._build_extension_resource_paths(discovered["skillPaths"]),
                 "promptPaths": self._build_extension_resource_paths(discovered["promptPaths"]),
                 "themePaths": self._build_extension_resource_paths(discovered["themePaths"]),
             }
@@ -2076,7 +2022,6 @@ class AgentSession:
         append_system_prompt = "\n\n".join(loader_append_system_prompt) if loader_append_system_prompt else None
         self._baseSystemPromptOptions = {
             "cwd": self._cwd,
-            "skills": self._resourceLoader.getSkills()["skills"],
             "contextFiles": self._resourceLoader.getAgentsFiles()["agentsFiles"],
             "customPrompt": loader_system_prompt,
             "appendSystemPrompt": append_system_prompt,

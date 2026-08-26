@@ -880,7 +880,6 @@ class ExtensionRunner:
 
     async def emit_resources_discover(self, cwd: str, reason: str) -> dict[str, list[dict[str, str]]]:
         ctx = self.create_context()
-        skill_paths: list[dict[str, str]] = []
         prompt_paths: list[dict[str, str]] = []
         theme_paths: list[dict[str, str]] = []
         for extension in self.extensions:
@@ -894,7 +893,6 @@ class ExtensionRunner:
                     if hasattr(handler_result, "__await__"):
                         handler_result = await handler_result
                     for field_name, target in (
-                        ("skillPaths", skill_paths),
                         ("promptPaths", prompt_paths),
                         ("themePaths", theme_paths),
                     ):
@@ -903,7 +901,6 @@ class ExtensionRunner:
                 except Exception as error:
                     self._emit_extension_exception(extension.path, "resources_discover", error)
         return {
-            "skillPaths": skill_paths,
             "promptPaths": prompt_paths,
             "themePaths": theme_paths,
         }

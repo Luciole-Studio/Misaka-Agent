@@ -40,7 +40,7 @@ async def open_session(flags, cwd, extension_factories=None):
 
     # Every headless MISAKA session runs with the engine's own skill loading off: the skills
     # extension (misaka.skills.index) is the one place that decides what a session sees.
-    parsed = parse_args(["--no-skills", *flags])
+    parsed = parse_args(list(flags))
     errs = [d.message for d in parsed.diagnostics if d.type == "error"]
     if errs:
         return None, None, "; ".join(errs)

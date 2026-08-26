@@ -3,7 +3,7 @@
 Port of hermes ``build_skills_system_prompt`` / ``skills_list`` / ``skill_view``
 lookups. Like pi and hermes, only each SKILL.md's frontmatter is read -- the body
 loads on demand through ``skill_view``. The engine's own skill loading is off for
-every MISAKA session (``--no-skills``): the extension in
+every MISAKA session: the extension in
 :mod:`misaka.extensions.skills` is the one consumer of this index, so a session's
 skills are decided in exactly one place.
 
@@ -18,7 +18,6 @@ import os
 import re
 from pathlib import Path
 
-from misaka.core.skills import truncate_skill_description
 from misaka.skills.layers import (
     PERSONAL_LAYERS, disabled_skill_names, home, iter_skill_files, walk_skill_tree,
 )
@@ -28,6 +27,24 @@ _INVALID = re.compile(r"[^a-z0-9-]")
 _MULTI_HYPHEN = re.compile(r"-{2,}")
 _CACHE = {}                 # (roots, disabled) -> (entries, categories, candidates)
 SNAPSHOT_VERSION = 1
+
+# Cap on description length in the system-prompt skill index (hermes SKILL_PROMPT_DESC_LIMIT).
+# The index lives in every session, so longer descriptions are truncated; learn_prompt's hard
+# "<= 60 characters" rule comes from this limit.
+SKILL_PROMPT_DESC_LIMIT = 60
+
+
+def truncate_skill_description(description):
+    """Description for the index: truncate with an ellipsis past the limit (hermes extract_skill_description)."""
+    desc = str(description or "").strip().strip("'\"")
+    if len(desc) > SKILL_PROMPT_DESC_LIMIT:
+        return desc[: SKILL_PROMPT_DESC_LIMIT - 3] + "..."
+    return desc
+
+
+def is_skill_description_truncated(description):
+    """Whether this description would be truncated in the index (used by the linter and /learn)."""
+    return len(str(description or "").strip().strip("'\"")) > SKILL_PROMPT_DESC_LIMIT
 
 
 def _snapshot_dir():

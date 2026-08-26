@@ -376,7 +376,6 @@ def create_runtime_factory(
     auth_storage: AuthStorage,
     *,
     resolved_extension_paths: list[str] | None = None,
-    resolved_skill_paths: list[str] | None = None,
     resolved_prompt_template_paths: list[str] | None = None,
     resolved_theme_paths: list[str] | None = None,
     extension_factories: list[Any] | None = None,
@@ -384,7 +383,6 @@ def create_runtime_factory(
     async def _factory(runtime_options: dict[str, Any]) -> CreateAgentSessionRuntimeResult:
         resource_loader_options: dict[str, Any] = {
             "noExtensions": parsed.noExtensions,
-            "noSkills": parsed.noSkills,
             "noPromptTemplates": parsed.noPromptTemplates,
             "noThemes": parsed.noThemes,
             "noContextFiles": parsed.noContextFiles,
@@ -393,8 +391,6 @@ def create_runtime_factory(
         }
         if resolved_extension_paths is not None:
             resource_loader_options["additionalExtensionPaths"] = resolved_extension_paths
-        if resolved_skill_paths is not None:
-            resource_loader_options["additionalSkillPaths"] = resolved_skill_paths
         if resolved_prompt_template_paths is not None:
             resource_loader_options["additionalPromptTemplatePaths"] = resolved_prompt_template_paths
         if resolved_theme_paths is not None:
@@ -666,7 +662,6 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
     time_mark("createSessionManager")
 
     resolved_extension_paths = resolve_cli_paths(cwd, parsed.extensions)
-    resolved_skill_paths = resolve_cli_paths(cwd, parsed.skills)
     resolved_prompt_template_paths = resolve_cli_paths(cwd, parsed.promptTemplates)
     resolved_theme_paths = resolve_cli_paths(cwd, parsed.themes)
     auth_storage = AuthStorage.create()
@@ -677,7 +672,6 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
                 parsed,
                 auth_storage,
                 resolved_extension_paths=resolved_extension_paths,
-                resolved_skill_paths=resolved_skill_paths,
                 resolved_prompt_template_paths=resolved_prompt_template_paths,
                 resolved_theme_paths=resolved_theme_paths,
                 extension_factories=options.get("extensionFactories") if options else None,

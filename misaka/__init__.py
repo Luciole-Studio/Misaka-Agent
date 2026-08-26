@@ -235,16 +235,6 @@ _register(
     "RetrySettings",
     "SettingsManager",
 )
-_register(
-    "misaka.core.skills",
-    "formatSkillsForPrompt",
-    "LoadSkillsFromDirOptions",
-    "LoadSkillsResult",
-    "loadSkills",
-    "loadSkillsFromDir",
-    "Skill",
-    "SkillFrontmatter",
-)
 _register("misaka.core.source_info", "createSyntheticSourceInfo")
 _register(
     "misaka.core.tools",
