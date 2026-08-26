@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import os
+import secrets
 import time
 import traceback
 from dataclasses import dataclass
@@ -217,7 +218,8 @@ async def login_anthropic(options: dict[str, Any]) -> OAuthCredentials:
     pkce = await generate_pkce()
     verifier = pkce.verifier
     challenge = pkce.challenge
-    server = await _start_callback_server(verifier)
+    expected_state = secrets.token_hex(16)
+    server = await _start_callback_server(expected_state)
 
     code: str | None = None
     state: str | None = None
@@ -233,7 +235,7 @@ async def login_anthropic(options: dict[str, Any]) -> OAuthCredentials:
                 "scope": SCOPES,
                 "code_challenge": challenge,
                 "code_challenge_method": "S256",
-                "state": verifier,
+                "state": expected_state,
             }
         )
         options["onAuth"](
@@ -270,10 +272,10 @@ async def login_anthropic(options: dict[str, Any]) -> OAuthCredentials:
                 state = result["state"]
             elif manual_input:
                 parsed = _parse_authorization_input(manual_input)
-                if parsed["state"] and parsed["state"] != verifier:
+                if parsed["state"] and parsed["state"] != expected_state:
                     raise RuntimeError("OAuth state mismatch")
                 code = parsed["code"]
-                state = parsed["state"] if parsed["state"] is not None else verifier
+                state = parsed["state"] if parsed["state"] is not None else expected_state
 
             if not code:
                 await manual_task
@@ -281,10 +283,10 @@ async def login_anthropic(options: dict[str, Any]) -> OAuthCredentials:
                     raise manual_error
                 if manual_input:
                     parsed = _parse_authorization_input(manual_input)
-                    if parsed["state"] and parsed["state"] != verifier:
+                    if parsed["state"] and parsed["state"] != expected_state:
                         raise RuntimeError("OAuth state mismatch")
                     code = parsed["code"]
-                    state = parsed["state"] if parsed["state"] is not None else verifier
+                    state = parsed["state"] if parsed["state"] is not None else expected_state
         else:
             result = await server.wait_for_code()
             if result and result.get("code"):
@@ -294,10 +296,10 @@ async def login_anthropic(options: dict[str, Any]) -> OAuthCredentials:
         if not code:
             input_text = await options["onPrompt"]({"message": "Paste the authorization code or full redirect URL:", "placeholder": REDIRECT_URI})
             parsed = _parse_authorization_input(input_text)
-            if parsed["state"] and parsed["state"] != verifier:
+            if parsed["state"] and parsed["state"] != expected_state:
                 raise RuntimeError("OAuth state mismatch")
             code = parsed["code"]
-            state = parsed["state"] if parsed["state"] is not None else verifier
+            state = parsed["state"] if parsed["state"] is not None else expected_state
 
         if not code:
             raise RuntimeError("Missing authorization code")

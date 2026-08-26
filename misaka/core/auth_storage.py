@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import random
+import stat
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -74,12 +75,87 @@ class FileAuthStorageBackend(AuthStorageBackend):
             return
         parent_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
+    @staticmethod
+    def _validate_file_stat(value: os.stat_result) -> None:
+        if not stat.S_ISREG(value.st_mode):
+            raise RuntimeError("Auth storage must be a regular file")
+        if value.st_nlink != 1:
+            raise RuntimeError("Auth storage must not be hard-linked")
+        if value.st_size == 0:
+            raise RuntimeError("Auth storage is empty; restore or remove it before retrying")
+
+    def _open_existing(self) -> int:
+        before = os.lstat(self.authPath)
+        self._validate_file_stat(before)
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(self.authPath, flags)
+        try:
+            opened = os.fstat(fd)
+            self._validate_file_stat(opened)
+            if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+                raise RuntimeError("Auth storage changed while it was being opened")
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+
+    def _restrict_file_mode(self, fd: int) -> None:
+        if os.fstat(fd).st_mode & 0o077 and hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
+
     def ensureFileExists(self) -> None:
-        if os.path.exists(self.authPath):
-            if os.stat(self.authPath).st_mode & 0o077:      # a store from before 0600 was enforced
-                os.chmod(self.authPath, 0o600)
+        try:
+            fd = self._open_existing()
+        except FileNotFoundError:
+            fd = None
+        else:
+            try:
+                self._restrict_file_mode(fd)               # stores from before 0600 was enforced
+            finally:
+                os.close(fd)
             return
-        atomic.write_text(self.authPath, "{}", mode=0o600)
+
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+        try:
+            fd = os.open(self.authPath, flags, 0o600)
+        except FileExistsError:                            # another creator won; trust it only after validation
+            fd = self._open_existing()
+            try:
+                self._restrict_file_mode(fd)
+            finally:
+                os.close(fd)
+            return
+
+        created = None
+        try:
+            created = os.fstat(fd)
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
+            payload = memoryview(b"{}")
+            while payload:
+                written = os.write(fd, payload)
+                if written <= 0:
+                    raise OSError("Could not initialize auth storage")
+                payload = payload[written:]
+            os.fsync(fd)
+            os.close(fd)
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                current = os.lstat(self.authPath)
+                if created is not None and (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino):
+                    os.unlink(self.authPath)
+            except OSError:
+                pass
+            raise
+
+    def _read_file(self) -> str:
+        fd = self._open_existing()
+        with os.fdopen(fd, encoding="utf-8-sig") as handle:
+            return handle.read()
 
     def _create_lock(self) -> FileLock:
         return FileLock(self._lock_path(), timeout=0)
@@ -140,14 +216,10 @@ class FileAuthStorageBackend(AuthStorageBackend):
 
     def withLock(self, fn: Callable[[str | None], LockResult]) -> Any:
         self.ensureParentDir()
-        self.ensureFileExists()
-
         lock = self._acquire_lock_sync_with_retry()
         try:
-            current = None
-            if os.path.exists(self.authPath):
-                with open(self.authPath, encoding="utf-8-sig") as handle:
-                    current = handle.read()
+            self.ensureFileExists()
+            current = self._read_file()
             outcome = fn(current)
             if outcome.next is not None:
                 atomic.write_text(self.authPath, outcome.next, mode=0o600)
@@ -157,16 +229,13 @@ class FileAuthStorageBackend(AuthStorageBackend):
 
     async def withLockAsync(self, fn: Callable[[str | None], Awaitable[LockResult]]) -> Any:
         self.ensureParentDir()
-        self.ensureFileExists()
-
         lock = await self._acquire_lock_async_with_retry()
         expected_signature = self._lock_signature()
         try:
             self._assert_lock_uncompromised(expected_signature)
-            current = None
-            if os.path.exists(self.authPath):
-                with open(self.authPath, encoding="utf-8-sig") as handle:  # noqa: ASYNC230 - a small JSON file under the credential lock
-                    current = handle.read()
+            self.ensureFileExists()
+            self._assert_lock_uncompromised(expected_signature)
+            current = self._read_file()
             outcome = await fn(current)
             self._assert_lock_uncompromised(expected_signature)
             if outcome.next is not None:
