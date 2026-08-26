@@ -123,7 +123,8 @@ ACTIVE = ("active", "waiting_input", "stopping")
 TERMINAL = ("done", "failed", "stopped")
 NODE_TERMINAL = ("closed", "failed", "parked")
 NODE_STATES = ("queued", "planning", "waiting_input", "executing", "synthesizing", "critiquing",
-               "probing", "triaging", "closing", *NODE_TERMINAL)   # closing = triaged, waiting for its children
+               "probing", "triaging", "closing", "conflict", *NODE_TERMINAL)
+# closing = triaged, waiting for its children; conflict = its branch did not merge, a human resolves it
 DEFAULT_LIMITS = {"max_depth": 3}
 RESEARCH_SCHEMA_VERSION = 8    # 8: driver lease on runs; unique local ids per node
 DRIVER_TTL_SECONDS = 300
@@ -181,11 +182,25 @@ def _carry_forward(con, renamed):
         if not shared:
             continue
         cols = ",".join(f'"{col}"' for col in shared)
+        if table == "research_run_tasks" and "local_id" in shared:
+            # Before v8 a node's probes could reuse local ids; the new unique index would drop the
+            # later ones. Suffix the duplicates in the backup first so every link survives.
+            duplicates = con.execute(
+                f'SELECT rowid FROM "{backup}" WHERE local_id IS NOT NULL AND rowid NOT IN '
+                f'(SELECT MIN(rowid) FROM "{backup}" WHERE local_id IS NOT NULL GROUP BY run_id, branch_id, local_id)'
+            ).fetchall()
+            for (rowid,) in duplicates:
+                con.execute(f'UPDATE "{backup}" SET local_id = local_id || \'#\' || task_id WHERE rowid=?', (rowid,))
         try:
             copied[table] = con.execute(
                 f'INSERT OR IGNORE INTO "{table}" ({cols}) SELECT {cols} FROM "{backup}"').rowcount
         except Exception as error:  # noqa: BLE001 - one table must not block the others
             print(f"research: could not carry {table} forward from {backup}: {error}", file=sys.stderr)
+            continue
+        expected = con.execute(f'SELECT COUNT(*) FROM "{backup}"').fetchone()[0]
+        if copied[table] != expected:
+            print(f"research: {table}: {expected - copied[table]} row(s) could not be carried forward; "
+                  f"they remain in {backup}", file=sys.stderr)
     return copied
 
 
@@ -552,8 +567,9 @@ def nodes(con, run_id, *, parent_id=None):
 
 
 def next_level(con, run_id):
-    """The BFS frontier: every node still expanding at the shallowest such depth, oldest first."""
-    rows = [n for n in nodes(con, run_id) if n["status"] not in ("closing", *NODE_TERMINAL)]
+    """The BFS frontier: every node still expanding at the shallowest such depth, oldest first.
+    A node in ``conflict`` waits for a human, not for a process."""
+    rows = [n for n in nodes(con, run_id) if n["status"] not in ("closing", "conflict", *NODE_TERMINAL)]
     return [n for n in rows if n["depth"] == rows[0]["depth"]] if rows else []
 
 

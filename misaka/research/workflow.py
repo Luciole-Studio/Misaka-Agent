@@ -138,9 +138,11 @@ async def _submit_tasks(con, run, cfg, worker, node, specs, *, kind, issue_id=No
             "SELECT task_id FROM research_run_tasks WHERE run_id=? AND branch_id=? AND local_id=?",
             (run["id"], node["id"], spec["local_id"]),
         ).fetchone()
-        if existing:                                   # a resume after a crash: the card already exists
-            local_to_task[spec["local_id"]] = existing["task_id"]
+        if existing and task_store.get(con, existing["task_id"]) is not None:
+            local_to_task[spec["local_id"]] = existing["task_id"]   # a resume after a crash: the card already exists
             continue
+        if existing:                                   # the card was deleted: drop the stale link and rebuild it
+            con.execute("DELETE FROM research_run_tasks WHERE task_id=?", (existing["task_id"],))
         await _progress(progress, "preflight",
                         f"Sister {spec['assignee']} is planning its approach for {spec['title']!r}.", run)
         preflight, _raw, session = await asyncio.to_thread(
@@ -325,6 +327,8 @@ def _close(con, run, node, status):
         if outcome == "conflict":
             runs.set_state(con, run["id"],
                            error=f"node {node['id']}: merge conflict; resolve branch {runs.node_branch(node['id'])} by hand")
+            runs.set_node(con, node["id"], status="conflict")     # a state, not a string: resume cannot clear it
+            return "conflict"
         elif outcome == "merged":
             runs.relocate_node_tasks(con, node, node["worktree"], into)
     if status != "closed":
@@ -467,16 +471,38 @@ async def _expand(con, cfg, runner, worker, run, node, *, spawner, context, tool
 
 
 def _unfinished_reason(con, run_id):
-    """Why the run must not be adjudicated as done: nodes that failed, or a merge conflict that
-    left a branch's work outside the line the report is written from."""
-    failed = [n["id"] for n in runs.nodes(con, run_id) if n["status"] == "failed"]
+    """Why the run must not be adjudicated as done: nodes that failed, or nodes whose branch is
+    still in conflict (their work is not on the line the report is written from)."""
     parts = []
-    if failed:
-        parts.append(f"{len(failed)} node(s) failed: {', '.join(failed)}")
-    error = str((runs.get(con, run_id) or {})["last_error"] or "")
-    if "merge conflict" in error:
-        parts.append(error)
+    for status, label in (("failed", "failed"), ("conflict", "in merge conflict")):
+        ids = [n["id"] for n in runs.nodes(con, run_id) if n["status"] == status]
+        if ids:
+            parts.append(f"{len(ids)} node(s) {label}: {', '.join(ids)}")
     return "; ".join(parts) or None
+
+
+def _settle_conflicts(con, run):
+    """A human merged a conflicted branch by hand: the node closes and its cards move to the parent line."""
+    for node in runs.nodes(con, run["id"]):
+        if node["status"] != "conflict" or not node["worktree"]:
+            continue
+        parent = runs.node(con, node["parent_id"])
+        into = parent["worktree"] if parent and parent["worktree"] else run["workspace"]
+        if repo.branch_merged(run["workspace"], runs.node_branch(node["id"]), into):
+            repo.branch_finish(run["workspace"], runs.node_branch(node["id"]), node["worktree"], into=into,
+                               merge=False, remove=True)
+            runs.relocate_node_tasks(con, node, node["worktree"], into)
+            runs.set_node(con, node["id"], status="closed")
+
+
+async def _keep_lease(con, run_id, lock, lost):
+    """Renew the driver lease in the background for as long as the run is being driven; a failed
+    renewal (another driver took over) raises the flag the main loop checks."""
+    while True:
+        await asyncio.sleep(runs.DRIVER_TTL_SECONDS / 3)
+        if not runs.heartbeat_driver(con, run_id, lock):
+            lost.set()
+            return
 
 
 def _partial_result(con, run, reason, *, status="stopped"):
@@ -601,7 +627,7 @@ async def _wait_level(con, cfg, spawner, run, handles, *, poll_seconds, progress
             if node["status"] != last.get(nid):
                 last[nid] = node["status"]
                 await _progress(progress, "node", f"{_label(node)}: {node['status']}.", run, node=nid)
-            if node["status"] in ("closing", "waiting_input", *runs.NODE_TERMINAL):
+            if node["status"] in ("closing", "waiting_input", "conflict", *runs.NODE_TERMINAL):
                 handles.pop(nid)
             elif not spawner.alive(handle):
                 if halted:
@@ -637,7 +663,10 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
     runs.ensure_layout(run)
     cfg = dict(cfg)
     halts = {"stopped": "The user requested a stop.", "budget": "The shared token budget limit was reached."}
+    lost = asyncio.Event()
+    keeper = asyncio.create_task(_keep_lease(con, run_id, driver_lock, lost))
     try:
+        _settle_conflicts(con, run)
         if runs.stop_requested(con, run_id):
             return _partial_result(con, run, halts["stopped"])
         if budget.status(con, cfg.get("token_cap"))["mode"] != "normal":
@@ -646,7 +675,8 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
         if run["phase"] == "created":
             runs.set_state(con, run_id, phase="active")
         while True:                                   # breadth-first: one level at a time, its nodes in parallel
-            runs.heartbeat_driver(con, run_id, driver_lock)
+            if lost.is_set():
+                raise RuntimeError(f"Research run {run_id}: the driver lease was taken over by another process.")
             _settle_closing(con, run)
             level = runs.next_level(con, run_id)
             if not level:
@@ -661,6 +691,8 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
             if result in halts:
                 settle_done_tasks(con, run_id=run_id)
                 return _partial_result(con, run, halts[result])
+        if lost.is_set():
+            raise RuntimeError(f"Research run {run_id}: the driver lease was taken over by another process.")
         unfinished = _unfinished_reason(con, run_id)
         if unfinished:
             settle_done_tasks(con, run_id=run_id)
@@ -676,6 +708,7 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
         runs.set_state(con, run_id, status="failed", error=f"{type(error).__name__}: {error}"[:500])
         raise
     finally:
+        keeper.cancel()
         runs.release_driver(con, run_id, driver_lock)
 
 
