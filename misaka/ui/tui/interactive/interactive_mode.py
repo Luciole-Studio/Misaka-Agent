@@ -38,7 +38,6 @@ from misaka.core.agent_session_runtime import SessionImportFileNotFoundError
 from misaka.core.bash_executor import BashResult
 from misaka.core.extensions import startup_sections
 from misaka.core.footer_data_provider import FooterDataProvider
-from misaka.core.http_dispatcher import configureHttpDispatcher
 from misaka.core.keybindings import KeybindingsManager
 from misaka.core.messages import createCompactionSummaryMessage
 from misaka.core.model_resolver import (
@@ -3244,7 +3243,6 @@ class InteractiveMode:
 
         try:
             await self.session.reload()
-            configureHttpDispatcher(_safe_call_int(self.settingsManager, "getHttpIdleTimeoutMs", 300_000))
             self.keybindings.reload()
             active_header = self.customHeader or self.builtInHeader
             set_expanded = _callable_attr(active_header, "setExpanded")
@@ -4104,7 +4102,6 @@ class InteractiveMode:
         self._request_render()
 
     def applyRuntimeSettings(self) -> None:
-        configureHttpDispatcher(_safe_call_int(self.settingsManager, "getHttpIdleTimeoutMs", 300_000))
         self.footer.setSession(self.session)
         set_auto_compact_enabled = _callable_attr(self.footer, "setAutoCompactEnabled")
         if set_auto_compact_enabled is not None:
@@ -5228,17 +5225,6 @@ class InteractiveMode:
             if set_auto_compact_enabled is not None:
                 set_auto_compact_enabled(enabled)
 
-        def _on_http_idle_timeout_ms_change(timeout_ms: int) -> None:
-            set_http_idle_timeout_ms = _callable_attr(self.settingsManager, "setHttpIdleTimeoutMs")
-            if set_http_idle_timeout_ms is not None:
-                set_http_idle_timeout_ms(timeout_ms)
-            configureHttpDispatcher(timeout_ms)
-            self.showStatus(
-                f"HTTP idle timeout: {timeout_ms / 1000:g} sec"
-                if timeout_ms
-                else "HTTP idle timeout: disabled"
-            )
-
         def _on_theme_change(theme_name: str) -> None:
             result = interactive_theme.set_theme(theme_name, True)
             set_theme = _callable_attr(self.settingsManager, "setTheme")
@@ -5316,7 +5302,6 @@ class InteractiveMode:
                         steeringMode=str(getattr(self.session, "steeringMode", "one-at-a-time")),
                         followUpMode=str(getattr(self.session, "followUpMode", "one-at-a-time")),
                         transport=str(_safe_call_str(self.settingsManager, "getTransport", "sse")),
-                        httpIdleTimeoutMs=_safe_call_int(self.settingsManager, "getHttpIdleTimeoutMs", 300_000),
                         thinkingLevel=self._get_session_thinking_level(),
                         availableThinkingLevels=list(get_available_thinking_levels() or [])
                         if get_available_thinking_levels is not None
@@ -5365,7 +5350,6 @@ class InteractiveMode:
                             _callable_attr(self.session, "setFollowUpMode") and self.session.setFollowUpMode(mode)
                         ),
                         onTransportChange=_on_transport_change,
-                        onHttpIdleTimeoutMsChange=_on_http_idle_timeout_ms_change,
                         onThinkingLevelChange=lambda level: (
                             _callable_attr(self.session, "setThinkingLevel") and self.session.setThinkingLevel(level),
                             self.footer.invalidate(),

@@ -15,10 +15,6 @@ from filelock import FileLock, Timeout
 
 from misaka.ai.types import Transport
 from misaka.config import CONFIG_DIR_NAME, get_agent_dir
-from misaka.core.http_dispatcher import (
-    DEFAULT_HTTP_IDLE_TIMEOUT_MS,
-    parseHttpIdleTimeoutMs,
-)
 from misaka.utils import atomic
 from misaka.utils.paths import normalize_path, resolve_path
 
@@ -516,20 +512,6 @@ class SettingsManager:
             "maxRetries": self._nullish(retry_settings.get("maxRetries"), 3),
             "baseDelayMs": self._nullish(retry_settings.get("baseDelayMs"), 2000),
         }
-
-    def getHttpIdleTimeoutMs(self) -> int:
-        value = self.settings.get("httpIdleTimeoutMs")
-        timeout_ms = parseHttpIdleTimeoutMs(value)
-        if timeout_ms is not None:
-            return timeout_ms
-        if value is not None:
-            raise ValueError(f"Invalid httpIdleTimeoutMs setting: {value}")
-        return DEFAULT_HTTP_IDLE_TIMEOUT_MS
-
-    def setHttpIdleTimeoutMs(self, timeoutMs: int) -> None:
-        if not isinstance(timeoutMs, (int, float)) or isinstance(timeoutMs, bool) or timeoutMs < 0 or not float(timeoutMs) < float("inf"):
-            raise ValueError(f"Invalid httpIdleTimeoutMs setting: {timeoutMs}")
-        self._set_global_value("httpIdleTimeoutMs", int(timeoutMs // 1))
 
     def getProviderRetrySettings(self) -> dict[str, Any]:
         provider = self._settings_object("retry").get("provider")

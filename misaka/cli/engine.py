@@ -29,7 +29,6 @@ from misaka.core.agent_session_services import (
 from misaka.core.auth_guidance import formatNoModelsAvailableMessage
 from misaka.core.auth_storage import AuthStorage
 from misaka.core.export_html import export_from_file
-from misaka.core.http_dispatcher import configureHttpDispatcher
 from misaka.core.keybindings import KeybindingsManager
 from misaka.core.model_registry import ModelRegistry
 from misaka.core.model_resolver import ScopedModel, resolveCliModel, resolveModelScope
@@ -650,7 +649,6 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
         session = runtime.session
         settings_manager = services.settingsManager
         model_registry = services.modelRegistry
-        configureHttpDispatcher(settings_manager.getHttpIdleTimeoutMs())
 
         if parsed.help:
             extension_flags = [

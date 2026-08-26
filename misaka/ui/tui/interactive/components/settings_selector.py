@@ -8,10 +8,6 @@ from typing import Literal
 
 from misaka.agent.types import ThinkingLevel
 from misaka.ai.types import Transport
-from misaka.core.http_dispatcher import (
-    HTTP_IDLE_TIMEOUT_CHOICES,
-    formatHttpIdleTimeoutMs,
-)
 from misaka.core.settings_manager import WarningSettings
 from misaka.ui.tui import (
     Container,
@@ -61,7 +57,6 @@ class SettingsConfig:
     steeringMode: SteeringMode
     followUpMode: SteeringMode
     transport: Transport
-    httpIdleTimeoutMs: int
     thinkingLevel: ThinkingLevel
     availableThinkingLevels: list[ThinkingLevel]
     currentTheme: str
@@ -90,7 +85,6 @@ class SettingsCallbacks:
     onSteeringModeChange: Callable[[SteeringMode], None]
     onFollowUpModeChange: Callable[[SteeringMode], None]
     onTransportChange: Callable[[Transport], None]
-    onHttpIdleTimeoutMsChange: Callable[[int], None]
     onThinkingLevelChange: Callable[[ThinkingLevel], None]
     onThemeChange: Callable[[str], None]
     onThemePreview: Callable[[str], None] | None
@@ -221,16 +215,6 @@ class SettingsSelectorComponent(Container):
                 description="Preferred transport for providers that support multiple transports",
                 currentValue=config.transport,
                 values=["sse", "websocket", "websocket-cached", "auto"],
-            ),
-            SettingItem(
-                id="http-idle-timeout",
-                label="HTTP idle timeout",
-                description=(
-                    "Maximum idle gap while waiting for HTTP headers or body chunks. "
-                    "Disable for local models that pause longer than five minutes."
-                ),
-                currentValue=formatHttpIdleTimeoutMs(config.httpIdleTimeoutMs),
-                values=[choice["label"] for choice in HTTP_IDLE_TIMEOUT_CHOICES],
             ),
             SettingItem(
                 id="hide-thinking",
@@ -464,10 +448,6 @@ class SettingsSelectorComponent(Container):
                 callbacks.onFollowUpModeChange(new_value)
             case "transport":
                 callbacks.onTransportChange(new_value)  # type: ignore[arg-type]
-            case "http-idle-timeout":
-                choice = next((item for item in HTTP_IDLE_TIMEOUT_CHOICES if item["label"] == new_value), None)
-                if choice is not None:
-                    callbacks.onHttpIdleTimeoutMsChange(int(choice["timeoutMs"]))
             case "hide-thinking":
                 callbacks.onHideThinkingBlockChange(new_value == "true")
             case "collapse-changelog":
