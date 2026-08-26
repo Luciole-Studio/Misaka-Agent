@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import threading
 from pathlib import Path
@@ -76,13 +75,17 @@ def watch_with_error_handler(path: str, listener: WatchListener, on_error: Any) 
 
 
 def _snapshot(path: str) -> tuple[Any, ...]:
+    """What this watcher compares, ten times a second, for the life of the process.
+
+    Identity plus size plus both timestamps is what the watched files (git HEAD, a reftable
+    listing) actually change. Hashing their whole contents on every tick, as this used to,
+    bought nothing: a write that leaves all four unchanged is not a write.
+    """
     stat = os.stat(path)
-    base = (stat.st_mode, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    base = (stat.st_mode, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
     if os.path.isdir(path):
-        children = tuple(sorted(entry.name for entry in os.scandir(path)))
-        return (*base, children)
-    digest = hashlib.blake2b(Path(path).read_bytes(), digest_size=16).digest()
-    return (*base, digest)
+        return (*base, tuple(sorted(entry.name for entry in os.scandir(path))))
+    return base
 
 
 __all__ = [

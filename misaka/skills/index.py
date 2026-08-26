@@ -62,9 +62,12 @@ def slug(name):
 
 
 def invalidate():
-    """Forget the in-process index: called at session start, at every turn start (the skills
-    extension) and after a skill is written, so a tree edited outside the session (git, an
-    editor) shows by the next turn. The disk snapshots need no help -- their manifests notice."""
+    """Forget the in-process index. Called after this session writes a skill.
+
+    A tree edited from outside (git, an editor) does not need this: ``build`` revalidates
+    each layer's mtime/size manifest on every call, so a change shows on the next turn
+    without throwing the cache away -- which is what made the cache never hit.
+    """
     _CACHE.clear()
 
 
@@ -182,10 +185,25 @@ def _key(roots):
 
 
 def _cached(roots):
-    key = _key(roots)
-    if key not in _CACHE:
-        _CACHE[key] = _assemble(roots, set(key[1]))
-    return _CACHE[key]
+    """Assemble once per (roots, disabled, on-disk state).
+
+    The manifest is the same mtime/size fingerprint the disk snapshots use, so an edit made
+    outside this process invalidates the entry by changing the key, and an unchanged tree
+    costs one stat per skill file instead of a full re-scan.
+    """
+    key = (*_key(roots), tuple(sorted((layer, _manifest_digest(root)) for layer, root in roots)))
+    entry = _CACHE.get(key)
+    if entry is None:
+        _CACHE.clear()                       # only the current state is worth keeping
+        entry = _CACHE[key] = _assemble(roots, set(key[1]))
+    return entry
+
+
+def _manifest_digest(root):
+    """A stable fingerprint of one layer's skill files, cheap enough to take every turn."""
+    return hashlib.sha256(
+        json.dumps(_manifest(root), sort_keys=True).encode()
+    ).hexdigest()
 
 
 def build(roots):

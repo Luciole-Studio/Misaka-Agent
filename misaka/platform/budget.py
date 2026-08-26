@@ -21,11 +21,21 @@ empty report or claim `done` when the deliverables do not exist.
 
 
 def spent(con):
-    """Return total token usage recorded in the event ledger."""
-    total = 0
-    for kind, payload in con.execute(
-            "SELECT kind,payload FROM events "
-            "WHERE kind IN ('harn_event','budget_usage') AND payload LIKE '%totalTokens%'"):
+    """Total token usage in the event ledger, counted incrementally.
+
+    The ledger only grows, so re-reading and re-parsing every historical usage event on each
+    call -- and the research loop checks the budget on every tick -- is work already done.
+    Only rows past the last seen id are parsed. The running total rides on the connection
+    object, so it dies with the connection; a plain ``sqlite3.Connection`` cannot carry an
+    attribute and simply recounts.
+    """
+    last_id, total = getattr(con, "_misaka_spent", (0, 0))
+    highest = last_id
+    for event_id, kind, payload in con.execute(
+            "SELECT id,kind,payload FROM events "
+            "WHERE id>? AND kind IN ('harn_event','budget_usage') AND payload LIKE '%totalTokens%'",
+            (last_id,)):
+        highest = max(highest, int(event_id))
         try:
             d = json.loads(payload)
         except (ValueError, TypeError):
@@ -40,6 +50,10 @@ def spent(con):
             u = m.get("usage") if isinstance(m, dict) else None
             if isinstance(u, dict) and isinstance(u.get("totalTokens"), int):
                 total += u["totalTokens"]
+    try:
+        con._misaka_spent = (highest, total)
+    except AttributeError:                   # a bare sqlite3.Connection: recount next time
+        pass
     return total
 
 
