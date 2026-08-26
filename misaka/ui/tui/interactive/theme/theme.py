@@ -932,7 +932,6 @@ except Exception:  # noqa: BLE001 - the module must import even with a broken de
     theme = Theme({}, {}, name="uninitialized")
 
 
-initTheme = init_theme
 onThemeChange = on_theme_change
 setTheme = set_theme
 highlightCode = highlight_code
@@ -944,7 +943,6 @@ __all__ = [
     "ThemeColor",
     "ThemeInfo",
     "highlightCode",
-    "initTheme",
     "onThemeChange",
     "setTheme",
     "theme",

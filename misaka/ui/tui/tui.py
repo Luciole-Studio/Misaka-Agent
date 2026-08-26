@@ -265,8 +265,10 @@ class TUI(Container):
         self._renderLock = threading.Lock()
         self.cursorRow = 0
         self.hardwareCursorRow = 0
-        self.showHardwareCursor = os.environ.get("MISAKA_HARDWARE_CURSOR") == "1"
-        self.clearOnShrink = os.environ.get("MISAKA_CLEAR_ON_SHRINK") == "1"
+        # SettingsManager already resolves these (settings.json first, then the environment)
+        # and hands the answer in; reading the environment again here was a second truth.
+        self.showHardwareCursor = False
+        self.clearOnShrink = False
         self.maxLinesRendered = 0
         self.previousViewportTop = 0
         self.fullRedrawCount = 0

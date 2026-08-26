@@ -62,6 +62,5 @@ def register_built_in_images_api_providers() -> None:
 register_built_in_images_api_providers()
 
 generateImagesOpenRouter = generate_images_openrouter
-registerBuiltInImagesApiProviders = register_built_in_images_api_providers
 
-__all__ = ["generateImagesOpenRouter", "registerBuiltInImagesApiProviders"]
+__all__ = ["generateImagesOpenRouter"]

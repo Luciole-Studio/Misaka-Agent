@@ -98,13 +98,6 @@ async def read_piped_stdin() -> str | None:
     return content.strip() or None
 
 
-def is_truthy_env_flag(value: str | None) -> bool:
-    if not value:
-        return False
-    lowered = value.lower()
-    return value == "1" or lowered in {"true", "yes"}
-
-
 def resolve_app_mode(parsed: Args, stdin_is_tty: bool) -> AppMode:
     if parsed.mode == "json":
         return "json"
@@ -138,25 +131,6 @@ def report_diagnostics(
 
 def _format_colored_message(text: str, color: str) -> str:
     return f"{color}{text}{_RESET}"
-
-
-async def _drain_output_stream(stream: Any) -> None:
-    writable_length = getattr(stream, "writableLength", None)
-    once = getattr(stream, "once", None)
-    if isinstance(writable_length, int) and writable_length > 0 and callable(once):
-        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-
-        def _on_drain(*_args: Any) -> None:
-            if not future.done():
-                future.set_result(None)
-
-        once("drain", _on_drain)
-        await future
-        return
-
-    flush = getattr(stream, "flush", None)
-    if callable(flush):
-        flush()
 
 
 async def prepare_initial_message(

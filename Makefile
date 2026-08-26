@@ -1,8 +1,8 @@
 PY ?= .venv/bin/python
 
-.PHONY: check test lint build
+.PHONY: check test lint dead build
 
-check: test lint build
+check: test lint dead build
 
 test:
 	$(PY) -m pytest -q -W error
@@ -11,6 +11,10 @@ test:
 
 lint:
 	$(PY) -m ruff check misaka tests --exclude misaka/documents/pageindex --exclude misaka/ai/models_generated.py --exclude misaka/ai/image_models_generated.py
+
+# A module-level name nobody reads is rot; catching it here is cheaper than an audit.
+dead:
+	$(PY) scripts/deadcheck.py
 
 build:
 	uv build -q && uv lock --check

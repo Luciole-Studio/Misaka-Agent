@@ -361,11 +361,9 @@ Built-in Tool Names:
 
 
 isValidThinkingLevel = is_valid_thinking_level
-parseArgs = parse_args
 
 __all__ = [
     "Args",
     "Mode",
     "isValidThinkingLevel",
-    "parseArgs",
     ]

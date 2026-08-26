@@ -192,10 +192,9 @@ class RoleContext:
             profile_dir=os.path.abspath(os.path.expanduser(resolved_profile)) if resolved_profile else "",
             workspace=resolved_workspace,
             mcp_role=mcp_role or os.environ.get("MISAKA_MCP_ROLE") or resolved_role,
-            model_override=(
-                os.environ.get("CLAUDE_CODE_SUBAGENT_MODEL")
-                or os.environ.get("MISAKA_SUBAGENT_MODEL")
-            ),
+            # MISAKA's own variable first. The ported order let another product's
+            # environment decide which model MISAKA's subagents run on.
+            model_override=os.environ.get("MISAKA_SUBAGENT_MODEL"),
             allowed_agent_types=allowed,
             parent_agent_id=os.environ.get("MISAKA_SUBAGENT_ID") or None,
             tool_ceiling=ceiling,
@@ -398,8 +397,7 @@ def resolve_model_spec(
     if parent is None:
         raise ValueError("The parent session has no model")
     spec = (
-        env.get("CLAUDE_CODE_SUBAGENT_MODEL")
-        or env.get("MISAKA_SUBAGENT_MODEL")
+        env.get("MISAKA_SUBAGENT_MODEL")
         or call_model
         or definition_model
         or "inherit"
@@ -550,7 +548,9 @@ def format_task_output(data: Mapping[str, Any]) -> str:
     if task.get("output"):
         output = str(task["output"])
         try:
-            maximum = min(160_000, max(1, int(os.environ.get("TASK_MAX_OUTPUT_LENGTH", "32000"))))
+            # Prefixed: an unprefixed TASK_MAX_OUTPUT_LENGTH picks up whatever the
+            # surrounding environment happens to mean by that name.
+            maximum = min(160_000, max(1, int(os.environ.get("MISAKA_TASK_MAX_OUTPUT", "32000"))))
         except ValueError:
             maximum = 32_000
         if len(output) > maximum:
@@ -1217,7 +1217,7 @@ class SubagentManager:
             if inspect.isawaitable(available_models):
                 available_models = await available_models
             model_env = (
-                {"CLAUDE_CODE_SUBAGENT_MODEL": self.role_context.model_override}
+                {"MISAKA_SUBAGENT_MODEL": self.role_context.model_override}
                 if self.role_context.model_override
                 else {}
             )
@@ -2818,7 +2818,7 @@ class SubagentManager:
         if inspect.isawaitable(available_models):
             available_models = await available_models
         model_env = (
-            {"CLAUDE_CODE_SUBAGENT_MODEL": self.role_context.model_override}
+            {"MISAKA_SUBAGENT_MODEL": self.role_context.model_override}
             if self.role_context.model_override
             else {}
         )

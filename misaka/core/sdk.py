@@ -412,7 +412,6 @@ def _content_text(block: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
-createAgentSession = create_agent_session
 createBashTool = create_bash_tool
 createEditTool = create_edit_tool
 createFindTool = create_find_tool
@@ -450,7 +449,6 @@ __all__ = [
     "SlashCommandSource",
     "Tool",
     "ToolDefinition",
-    "createAgentSession",
     "createAgentSessionFromServices",
     "createAgentSessionRuntime",
     "createAgentSessionServices",

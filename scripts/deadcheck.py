@@ -46,6 +46,19 @@ ALLOWED: dict[str, str] = {
     "pytest_configure": "pytest hook",
 }
 
+# Names with no reader that are staying anyway, by the owner's decision rather than because
+# anything reaches them. Kept apart from ALLOWED on purpose: ALLOWED is a claim about how the
+# code works, and this is a claim about what was decided. Emptying this list is the goal.
+OWNER_EXCLUDED: dict[str, str] = {
+    "get_image_model": "image stack, excluded from the sixth-round cleanup",
+    "get_image_providers": "image stack, excluded from the sixth-round cleanup",
+    "get_image_models": "image stack, excluded from the sixth-round cleanup",
+    "should_apply_directness_rank_adjustment": "LCM, excluded from the sixth-round cleanup",
+    "compute_directness_rank_bonus_upper_bound": "LCM, excluded from the sixth-round cleanup",
+    "compute_like_fallback_fetch_limit": "LCM, excluded from the sixth-round cleanup",
+    "compute_search_candidate_cap": "LCM, excluded from the sixth-round cleanup",
+}
+
 _TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
@@ -124,7 +137,7 @@ def scan() -> list[str]:
 
     dead: list[str] = []
     for rel, name, lineno in candidates:
-        if name in ALLOWED:
+        if name in ALLOWED or name in OWNER_EXCLUDED:
             continue
         readers = corpus[name] - definitions[name] - exported[name]
         if readers <= 0:
@@ -136,7 +149,10 @@ def scan() -> list[str]:
 def main() -> int:
     dead = scan()
     if not dead:
-        print("deadcheck: no unreferenced module-level names")
+        print(
+            f"deadcheck: no unreferenced module-level names "
+            f"({len(OWNER_EXCLUDED)} kept by decision, see OWNER_EXCLUDED)"
+        )
         return 0
     print(f"deadcheck: {len(dead)} module-level name(s) with no reader:", file=sys.stderr)
     for line in dead:
