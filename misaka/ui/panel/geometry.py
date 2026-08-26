@@ -53,12 +53,12 @@ def _query_terminal_background(in_fd=0, out_fd=1, timeout=0.25):
     match = _re.search(rb"\x1b\]11;[^\x07\x1b]*(?:\x07|\x1b\\)", buf)
     if not match:
         return None
-    from misaka.ui.tui.interactive.theme.theme import (
-        get_theme_for_rgb_color,
+    from misaka.ui.tui.terminal_colors import (
         parse_osc11_background_color,
+        theme_for_rgb_color,
     )
     rgb = parse_osc11_background_color(match.group(0).decode("ascii", "replace"))
-    return get_theme_for_rgb_color(rgb) if rgb else None
+    return theme_for_rgb_color(rgb) if rgb else None
 
 
 _VARIANT = None

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -83,13 +82,9 @@ class ThemeInfo(TypedDict):
     path: str | None
 
 
+from misaka.ui.tui.terminal_colors import RgbColor, rgb_luminance
+
 type TerminalTheme = Literal["dark", "light"]
-
-
-class RgbColor(TypedDict):
-    r: int
-    g: int
-    b: int
 
 
 class TerminalThemeDetection(TypedDict):
@@ -321,16 +316,8 @@ def _required_theme_color_keys() -> set[str]:
 
 
 def _ansi_luminance(index: int) -> float:
-    color = _color256_to_hex(index).lstrip("#")
-    red = int(color[0:2], 16)
-    green = int(color[2:4], 16)
-    blue = int(color[4:6], 16)
-
-    def to_linear(component: int) -> float:
-        scaled = component / 255.0
-        return scaled / 12.92 if scaled <= 0.03928 else ((scaled + 0.055) / 1.055) ** 2.4
-
-    return 0.2126 * to_linear(red) + 0.7152 * to_linear(green) + 0.0722 * to_linear(blue)
+    red, green, blue = _hex_to_rgb(_color256_to_hex(index))
+    return rgb_luminance(RgbColor(r=red, g=green, b=blue))
 
 
 def _get_colorfgbg_background_index(colorfgbg: str) -> int | None:
@@ -343,58 +330,6 @@ def _get_colorfgbg_background_index(colorfgbg: str) -> int | None:
         if 0 <= background <= 255:
             return background
     return None
-
-
-def _get_rgb_color_luminance(rgb: RgbColor) -> float:
-    def to_linear(channel: int) -> float:
-        value = channel / 255
-        return value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
-
-    return 0.2126 * to_linear(rgb["r"]) + 0.7152 * to_linear(rgb["g"]) + 0.0722 * to_linear(rgb["b"])
-
-
-def get_theme_for_rgb_color(rgb: RgbColor) -> TerminalTheme:
-    return "light" if _get_rgb_color_luminance(rgb) >= 0.5 else "dark"
-
-
-def _parse_osc_hex_channel(channel: str) -> int | None:
-    if not re.fullmatch(r"[0-9a-f]+", channel, re.IGNORECASE):
-        return None
-    max_value = 16 ** len(channel) - 1
-    if max_value <= 0:
-        return None
-    return round((int(channel, 16) / max_value) * 255)
-
-
-def parse_osc11_background_color(data: str) -> RgbColor | None:
-    match = re.match(r"^\x1b\]11;([^\x07\x1b]*)(?:\x07|\x1b\\)$", data, re.IGNORECASE)
-    if match is None:
-        return None
-
-    value = match.group(1).strip()
-    if value.startswith("#"):
-        hex_value = value[1:]
-        if re.fullmatch(r"[0-9a-f]{6}", hex_value, re.IGNORECASE):
-            red, green, blue = _hex_to_rgb(value)
-            return {"r": red, "g": green, "b": blue}
-        if re.fullmatch(r"[0-9a-f]{12}", hex_value, re.IGNORECASE):
-            red = _parse_osc_hex_channel(hex_value[0:4])
-            green = _parse_osc_hex_channel(hex_value[4:8])
-            blue = _parse_osc_hex_channel(hex_value[8:12])
-            if red is not None and green is not None and blue is not None:
-                return {"r": red, "g": green, "b": blue}
-        return None
-
-    rgb_value = re.sub(r"^rgba?:", "", value, flags=re.IGNORECASE)
-    channels = rgb_value.split("/")
-    if len(channels) != 3:
-        return None
-    red = _parse_osc_hex_channel(channels[0])
-    green = _parse_osc_hex_channel(channels[1])
-    blue = _parse_osc_hex_channel(channels[2])
-    if red is None or green is None or blue is None:
-        return None
-    return {"r": red, "g": green, "b": blue}
 
 
 def detect_terminal_background(
@@ -1023,7 +958,6 @@ except Exception:  # noqa: BLE001 - the module must import even with a broken de
 
 
 isLightTheme = lambda theme_name=None: theme_name == "light"
-parseOsc11BackgroundColor = parse_osc11_background_color
 initTheme = init_theme
 onThemeChange = on_theme_change
 setTheme = set_theme
@@ -1036,7 +970,6 @@ def is_light_theme(theme_name: str | None = None) -> bool:
 isLightTheme = is_light_theme
 
 __all__ = [
-    "RgbColor",
     "TerminalTheme",
     "TerminalThemeDetection",
     "TerminalThemeDetectionOptions",
@@ -1048,7 +981,6 @@ __all__ = [
     "initTheme",
     "isLightTheme",
     "onThemeChange",
-    "parseOsc11BackgroundColor",
     "setTheme",
     "theme",
     ]

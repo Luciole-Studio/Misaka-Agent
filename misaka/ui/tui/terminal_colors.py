@@ -79,6 +79,24 @@ def parse_osc11_background_color(data: str) -> RgbColor | None:
     return RgbColor(r=r, g=g, b=b)
 
 
+def rgb_luminance(rgb: RgbColor) -> float:
+    """Relative luminance (WCAG), with the sRGB transfer function applied.
+
+    Skipping the gamma step -- as one caller used to -- makes mid grey read as light while
+    every other caller called it dark, so one terminal got two answers.
+    """
+    def to_linear(channel: int) -> float:
+        value = channel / 255
+        return value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * to_linear(rgb.r) + 0.7152 * to_linear(rgb.g) + 0.0722 * to_linear(rgb.b)
+
+
+def theme_for_rgb_color(rgb: RgbColor) -> TerminalColorScheme:
+    """The variant that reads well against this background."""
+    return "light" if rgb_luminance(rgb) >= 0.5 else "dark"
+
+
 def parse_terminal_color_scheme_report(data: str) -> TerminalColorScheme | None:
     match = COLOR_SCHEME_REPORT_PATTERN.match(data)
     if match is None:
@@ -97,4 +115,6 @@ __all__ = [
     "parseTerminalColorSchemeReport",
     "parse_osc11_background_color",
     "parse_terminal_color_scheme_report",
+    "rgb_luminance",
+    "theme_for_rgb_color",
 ]

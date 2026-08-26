@@ -4788,8 +4788,8 @@ class InteractiveMode:
                 return
             if rgb is None:
                 return
-            luminance = (0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b) / 255
-            _apply_bg_lightness(luminance > 0.5)
+            from misaka.ui.tui.terminal_colors import theme_for_rgb_color
+            _apply_bg_lightness(theme_for_rgb_color(rgb) == "light")
 
         self._schedule_task(_probe_terminal_background())
         self.isInitialized = True
