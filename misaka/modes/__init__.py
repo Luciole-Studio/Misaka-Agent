@@ -10,14 +10,6 @@ _PUBLIC_EXPORTS: dict[str, tuple[str, str]] = {
     "InteractiveModeOptions": ("misaka.ui.tui.interactive.interactive_mode", "InteractiveModeOptions"),
     "PrintModeOptions": ("misaka.modes.print_mode", "PrintModeOptions"),
     "runPrintMode": ("misaka.modes.print_mode", "runPrintMode"),
-    "ModelInfo": ("misaka.modes.rpc.rpc_client", "ModelInfo"),
-    "RpcClient": ("misaka.modes.rpc.rpc_client", "RpcClient"),
-    "RpcClientOptions": ("misaka.modes.rpc.rpc_client", "RpcClientOptions"),
-    "RpcEventListener": ("misaka.modes.rpc.rpc_client", "RpcEventListener"),
-    "runRpcMode": ("misaka.modes.rpc.rpc_mode", "runRpcMode"),
-    "RpcCommand": ("misaka.modes.rpc.rpc_types", "RpcCommand"),
-    "RpcResponse": ("misaka.modes.rpc.rpc_types", "RpcResponse"),
-    "RpcSessionState": ("misaka.modes.rpc.rpc_types", "RpcSessionState"),
 }
 
 __all__ = list(_PUBLIC_EXPORTS)

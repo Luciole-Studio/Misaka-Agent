@@ -163,7 +163,7 @@ type SwitchSessionHandler = Callable[[str, dict[str, Any] | None], Awaitable[dic
 type ReloadHandler = Callable[[], Awaitable[None]]
 type ShutdownHandler = Callable[[], None]
 type ModelSelectSource = Literal["set", "cycle", "restore"]
-type InputSource = Literal["interactive", "rpc", "extension"]
+type InputSource = Literal["interactive", "extension"]
 type MessageRenderer[TDetails] = Callable[[CustomMessage[TDetails], "MessageRenderOptions", Theme], Component | None]
 type ExtensionHandler[TEvent, TResult] = Callable[
     [TEvent, "ExtensionContext"],

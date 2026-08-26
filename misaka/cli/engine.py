@@ -45,7 +45,6 @@ from misaka.core.settings_manager import SettingsManager
 from misaka.core.timings import print_timings, reset_timings
 from misaka.core.timings import time as time_mark
 from misaka.modes import runPrintMode as run_print_mode
-from misaka.modes.rpc import run_rpc_mode
 from misaka.ui.tui import TUI, ProcessTerminal, setKeybindings
 from misaka.ui.tui.interactive import InteractiveMode
 from misaka.ui.tui.interactive.components.extension_selector import (
@@ -54,7 +53,7 @@ from misaka.ui.tui.interactive.components.extension_selector import (
 from misaka.ui.tui.interactive.theme.theme import init_theme, stop_theme_watcher
 from misaka.utils.paths import is_local_path, normalize_path, resolve_path
 
-AppMode = Literal["interactive", "print", "json", "rpc"]
+AppMode = Literal["interactive", "print", "json"]
 PrintOutputMode = Literal["text", "json"]
 
 _RED = "\x1b[31m"
@@ -115,8 +114,6 @@ def is_truthy_env_flag(value: str | None) -> bool:
 
 
 def resolve_app_mode(parsed: Args, stdin_is_tty: bool) -> AppMode:
-    if parsed.mode == "rpc":
-        return "rpc"
     if parsed.mode == "json":
         return "json"
     if parsed.print or not stdin_is_tty:
@@ -584,10 +581,6 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
         print(f"Exported to: {result}")
         return finish(0)
 
-    if parsed.mode == "rpc" and parsed.fileArgs:
-        print(_format_colored_message("Error: @file arguments are not supported in RPC mode", _RED), file=sys.stderr)
-        return finish(1)
-
     try:
         validate_fork_flags(parsed)
     except ValueError as error:
@@ -680,11 +673,9 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
             )
             return 0
 
-        stdin_content = None
-        if app_mode != "rpc":
-            stdin_content = await read_piped_stdin()
-            if stdin_content is not None and app_mode == "interactive":
-                app_mode = "print"
+        stdin_content = await read_piped_stdin()
+        if stdin_content is not None and app_mode == "interactive":
+            app_mode = "print"
         time_mark("readPipedStdin")
 
         initial_message, initial_images = await prepare_initial_message(
@@ -713,10 +704,6 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
-
-        if app_mode == "rpc":
-            print_timings()
-            return await run_rpc_mode(runtime)
 
         if app_mode == "interactive":
             interactive_mode = InteractiveMode(

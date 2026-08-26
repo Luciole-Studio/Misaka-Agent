@@ -97,7 +97,7 @@ async def dispose(runtime):
 
 def event_line(ev):
     """Serialize an engine event in the existing JSONL wire format."""
-    from misaka.modes.rpc.jsonl import to_json_event
+    from misaka.modes.jsonl import to_json_event
     return json.dumps(to_json_event(ev), ensure_ascii=False, separators=(",", ":"))
 
 

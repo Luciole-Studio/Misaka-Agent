@@ -10,7 +10,7 @@ from misaka.ai.types import ModelThinkingLevel
 from misaka.config import APP_NAME, CONFIG_DIR_NAME, ENV_AGENT_DIR, ENV_SESSION_DIR
 from misaka.core.extensions.types import ExtensionFlag
 
-Mode = Literal["text", "json", "rpc"]
+Mode = Literal["text", "json"]
 
 
 @dataclass(slots=True)
@@ -80,7 +80,7 @@ def parse_args(args: list[str]) -> Args:
             result.version = True
         elif arg == "--mode" and has_next:
             mode = args[index + 1]
-            if mode in {"text", "json", "rpc"}:
+            if mode in {"text", "json"}:
                 result.mode = mode
             index += 1
         elif arg in {"--continue", "-c"}:
@@ -234,7 +234,7 @@ Options:
   --api-key <key>                API key (defaults to env vars)
   --system-prompt <text>         System prompt (default: coding assistant prompt)
   --append-system-prompt <text>  Append text or file contents to the system prompt (can be used multiple times)
-  --mode <mode>                  Output mode: text (default), json, or rpc
+  --mode <mode>                  Output mode: text (default) or json
   --print, -p                    Non-interactive mode: process prompt and exit
   --continue, -c                 Continue previous session
   --resume, -r                   Select a session to resume

@@ -46,7 +46,7 @@ def _content_type(block: Any) -> str | None:
 
 
 def _serialize_json_line(value: Any) -> str:
-    from misaka.modes.rpc.jsonl import to_json_event
+    from misaka.modes.jsonl import to_json_event
     return json.dumps(to_json_event(value), ensure_ascii=False, separators=(",", ":")) + "\n"
 
 
