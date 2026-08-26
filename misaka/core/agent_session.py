@@ -2654,8 +2654,6 @@ def _calculate_context_tokens(usage: dict[str, Any]) -> int:
     )
 
 
-parseSkillBlock = parse_skill_block
-
 __all__ = [
     "AgentSession",
     "AgentSessionConfig",
@@ -2667,6 +2665,5 @@ __all__ = [
     "PromptOptions",
     "SessionStats",
     "SessionTokenStats",
-    "parseSkillBlock",
     "parse_skill_block",
 ]

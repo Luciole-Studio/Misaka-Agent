@@ -94,15 +94,9 @@ def get_new_entries(entries: list[ChangelogEntry], last_version: str) -> list[Ch
     return [entry for entry in entries if compare_versions(entry, last) > 0]
 
 
-compareVersions = compare_versions
 getChangelogPath = get_changelog_path
-getNewEntries = get_new_entries
-parseChangelog = parse_changelog
 
 __all__ = [
     "ChangelogEntry",
-    "compareVersions",
     "getChangelogPath",
-    "getNewEntries",
-    "parseChangelog",
-]
+    ]

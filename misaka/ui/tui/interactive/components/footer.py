@@ -175,7 +175,4 @@ class FooterComponent:
         return lines
 
 
-formatTokens = format_tokens
-sanitizeStatusText = sanitize_status_text
-
 __all__ = ["FooterComponent"]

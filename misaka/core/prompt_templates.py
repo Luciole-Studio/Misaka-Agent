@@ -191,16 +191,7 @@ def _load_template_from_file(file_path: str, source_info: SourceInfo) -> PromptT
         return None
 
 
-expandPromptTemplate = expand_prompt_template
-loadPromptTemplates = load_prompt_templates
-parseCommandArgs = parse_command_args
-substituteArgs = substitute_args
-
 __all__ = [
     "LoadPromptTemplatesOptions",
     "PromptTemplate",
-    "expandPromptTemplate",
-    "loadPromptTemplates",
-    "parseCommandArgs",
-    "substituteArgs",
-]
+    ]

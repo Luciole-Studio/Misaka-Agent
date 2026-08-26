@@ -86,14 +86,12 @@ def parse_terminal_color_scheme_report(data: str) -> TerminalColorScheme | None:
     return "light" if match.group(1) == "2" else "dark"
 
 
-isOsc11BackgroundColorResponse = is_osc11_background_color_response
 parseOsc11BackgroundColor = parse_osc11_background_color
 parseTerminalColorSchemeReport = parse_terminal_color_scheme_report
 
 __all__ = [
     "RgbColor",
     "TerminalColorScheme",
-    "isOsc11BackgroundColorResponse",
     "is_osc11_background_color_response",
     "parseOsc11BackgroundColor",
     "parse_osc11_background_color",

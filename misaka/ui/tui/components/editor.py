@@ -1789,14 +1789,9 @@ class Editor:
         self.requestAutocomplete(force=self.autocompleteState == "force", explicitTab=False)
 
 
-segmentWithMarkers = segment_with_markers
-isPasteMarker = is_paste_marker
-wordWrapLine = word_wrap_line
-
 __all__ = [
     "Editor",
     "EditorOptions",
     "EditorTheme",
     "TextChunk",
-    "wordWrapLine",
-]
+    ]

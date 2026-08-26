@@ -121,12 +121,7 @@ def oauth_error_html(message: str, details: str | None = None) -> str:
     )
 
 
-oauthSuccessHtml = oauth_success_html
-oauthErrorHtml = oauth_error_html
-
 __all__ = [
-    "oauthErrorHtml",
-    "oauthSuccessHtml",
     "oauth_error_html",
     "oauth_success_html",
 ]

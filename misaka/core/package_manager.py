@@ -802,11 +802,5 @@ __all__ = [
     "PathMetadata",
     "ResolvedResource",
     "ResolvedPaths",
-    "MissingSourceAction",
-    "ProgressEvent",
-    "ProgressCallback",
-    "PackageUpdate",
-    "ConfiguredPackage",
-    "PackageManager",
     "DefaultPackageManager",
 ]

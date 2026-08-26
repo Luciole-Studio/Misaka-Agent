@@ -632,12 +632,8 @@ streamGoogle = stream_google
 streamSimpleGoogle = stream_simple_google
 createClient = create_client
 buildParams = build_params
-isGemma4Model = is_gemma4_model
-isGemini3ProModel = is_gemini3_pro_model
-isGemini3FlashModel = is_gemini3_flash_model
 getDisabledThinkingConfig = get_disabled_thinking_config
 getThinkingLevel = get_thinking_level
-getGoogleBudget = get_google_budget
 
 __all__ = [
     "GoogleOptions",

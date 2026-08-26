@@ -132,9 +132,7 @@ def render_diff(diffText: str, _options: RenderDiffOptions | None = None) -> str
     return "\n".join(result)
 
 
-parseDiffLine = parse_diff_line
 renderDiff = render_diff
-renderIntraLineDiff = render_intra_line_diff
 replaceTabs = replace_tabs
 
 __all__ = [

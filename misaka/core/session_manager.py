@@ -1241,17 +1241,7 @@ def _dump_jsonl(entries: list[FileEntry]) -> str:
     return "".join(f"{_dump_json(entry)}\n" for entry in entries)
 
 
-createSessionId = create_session_id
-generateId = generate_id
-migrateV1ToV2 = migrate_v1_to_v2
-migrateV2ToV3 = migrate_v2_to_v3
-migrateSessionEntries = migrate_session_entries
-parseSessionEntries = parse_session_entries
-getLatestCompactionEntry = get_latest_compaction_entry
 buildSessionContext = build_session_context
-getDefaultSessionDir = get_default_session_dir
-loadEntriesFromFile = load_entries_from_file
-findMostRecentSession = find_most_recent_session
 
 __all__ = [
     "CURRENT_SESSION_VERSION",
@@ -1274,12 +1264,6 @@ __all__ = [
     "SessionInfo",
     "SessionListProgress",
     "ReadonlySessionManager",
-    "migrateSessionEntries",
-    "parseSessionEntries",
-    "getLatestCompactionEntry",
     "buildSessionContext",
-    "getDefaultSessionDir",
-    "loadEntriesFromFile",
-    "findMostRecentSession",
     "SessionManager",
 ]

@@ -400,12 +400,6 @@ def stream_simple_azure_openai_responses(
 
 streamAzureOpenAIResponses = stream_azure_openai_responses
 streamSimpleAzureOpenAIResponses = stream_simple_azure_openai_responses
-parseDeploymentNameMap = parse_deployment_name_map
-resolveDeploymentName = resolve_deployment_name
-formatAzureOpenAIError = format_azure_openai_error
-normalizeAzureBaseUrl = normalize_azure_base_url
-buildDefaultBaseUrl = build_default_base_url
-resolveAzureConfig = resolve_azure_config
 createClient = create_client
 buildParams = build_params
 

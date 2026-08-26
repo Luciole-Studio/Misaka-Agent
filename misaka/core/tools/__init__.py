@@ -175,7 +175,6 @@ type ToolDef = ToolDefinition[Any, Any]
 type ToolName = Literal["read", "bash", "edit", "write", "grep", "find", "ls"]
 
 all_tool_names: set[ToolName] = {"read", "bash", "edit", "write", "grep", "find", "ls"}
-allToolNames = all_tool_names
 
 
 class ToolsOptions(TypedDict, total=False):
@@ -320,14 +319,8 @@ def create_all_tools(
     }
 
 
-createToolDefinition = create_tool_definition
-createTool = create_tool
-createCodingToolDefinitions = create_coding_tool_definitions
-createReadOnlyToolDefinitions = create_read_only_tool_definitions
-createAllToolDefinitions = create_all_tool_definitions
 createCodingTools = create_coding_tools
 createReadOnlyTools = create_read_only_tools
-createAllTools = create_all_tools
 
 __all__ = [
     "BashOperations",
@@ -386,14 +379,7 @@ __all__ = [
     "Tool",
     "ToolDef",
     "ToolName",
-    "allToolNames",
     "ToolsOptions",
-    "createToolDefinition",
-    "createTool",
-    "createCodingToolDefinitions",
-    "createReadOnlyToolDefinitions",
-    "createAllToolDefinitions",
     "createCodingTools",
     "createReadOnlyTools",
-    "createAllTools",
-]
+    ]

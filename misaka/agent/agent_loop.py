@@ -887,22 +887,13 @@ def _coerce_before_tool_call_result(
     )
 
 
-agentLoop = agent_loop
-agentLoopContinue = agent_loop_continue
-runAgentLoop = run_agent_loop
-runAgentLoopContinue = run_agent_loop_continue
-
 __all__ = [
     "AgentEventSink",
-    "agentLoop",
-    "agentLoopContinue",
     "agent_loop",
     "agent_loop_continue",
     "create_tool_result_message",
     "emit_tool_result_message",
     "execute_tool_calls",
-    "runAgentLoop",
-    "runAgentLoopContinue",
     "run_agent_loop",
     "run_agent_loop_continue",
     "stream_assistant_response",

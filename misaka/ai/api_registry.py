@@ -80,8 +80,3 @@ def clear_api_providers() -> None:
     _api_provider_registry.clear()
 
 
-registerApiProvider = register_api_provider
-getApiProvider = get_api_provider
-getApiProviders = get_api_providers
-unregisterApiProviders = unregister_api_providers
-clearApiProviders = clear_api_providers

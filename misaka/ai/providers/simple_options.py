@@ -66,12 +66,5 @@ def adjust_max_tokens_for_thinking(
     return AdjustedThinkingTokens(maxTokens=max_tokens, thinkingBudget=thinking_budget)
 
 
-buildBaseOptions = build_base_options
-clampReasoning = clamp_reasoning
-adjustMaxTokensForThinking = adjust_max_tokens_for_thinking
-
 __all__ = [
-    "adjustMaxTokensForThinking",
-    "buildBaseOptions",
-    "clampReasoning",
-]
+    ]

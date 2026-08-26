@@ -486,21 +486,10 @@ async def process_responses_stream(
             raise RuntimeError("Unknown error (no error details in response)")
 
 
-encodeTextSignatureV1 = encode_text_signature_v1
-parseTextSignature = parse_text_signature
-convertResponsesMessages = convert_responses_messages
-convertResponsesTools = convert_responses_tools
-processResponsesStream = process_responses_stream
-
 __all__ = [
     "ConvertResponsesMessagesOptions",
     "ConvertResponsesToolsOptions",
     "OpenAIResponsesStreamOptions",
-    "convertResponsesMessages",
-    "convertResponsesTools",
-    "encodeTextSignatureV1",
-    "parseTextSignature",
-    "processResponsesStream",
     "convert_responses_messages",
     "convert_responses_tools",
     "encode_text_signature_v1",

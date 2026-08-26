@@ -143,22 +143,11 @@ class Error(RuntimeError):
     """Local error type mirroring the upstream tooling surface."""
 
 
-findBashOnPath = find_bash_on_path
-getShellConfig = get_shell_config
-getShellEnv = get_shell_env
 sanitizeBinaryOutput = sanitize_binary_output
-trackDetachedChildPid = track_detached_child_pid
-untrackDetachedChildPid = untrack_detached_child_pid
 killTrackedDetachedChildren = kill_tracked_detached_children
-killProcessTree = kill_process_tree
 
 __all__ = [
     "ShellConfig",
-    "getShellConfig",
-    "getShellEnv",
-    "killProcessTree",
     "killTrackedDetachedChildren",
     "sanitizeBinaryOutput",
-    "trackDetachedChildPid",
-    "untrackDetachedChildPid",
-]
+    ]

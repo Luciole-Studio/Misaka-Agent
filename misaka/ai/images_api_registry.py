@@ -54,5 +54,3 @@ def get_images_api_provider(api: str) -> ImagesApiProvider | None:
     return entry.provider if entry else None
 
 
-registerImagesApiProvider = register_images_api_provider
-getImagesApiProvider = get_images_api_provider

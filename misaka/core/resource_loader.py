@@ -790,7 +790,6 @@ def _load_context_file_from_dir(dir_path: str) -> dict[str, str] | None:
 
 DefaultResourceLoaderOptions = DefaultResourceLoaderOptions
 ResourceLoaderLike = ResourceLoader
-loadProjectContextFiles = load_project_context_files
 
 __all__ = [
     "DefaultResourceLoader",
@@ -799,5 +798,4 @@ __all__ = [
     "ResourceDiagnostic",
     "ResourceExtensionPaths",
     "ResourceLoader",
-    "loadProjectContextFiles",
-]
+    ]

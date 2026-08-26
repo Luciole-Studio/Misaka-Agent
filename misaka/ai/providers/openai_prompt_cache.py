@@ -14,4 +14,3 @@ def clamp_openai_prompt_cache_key(key: str | None) -> str | None:
     return "".join(chars[:OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH])
 
 
-clampOpenAIPromptCacheKey = clamp_openai_prompt_cache_key

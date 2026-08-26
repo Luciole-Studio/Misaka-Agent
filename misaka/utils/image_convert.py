@@ -41,8 +41,5 @@ async def convert_to_png(base64_data: str, mime_type: str) -> ConvertedImage | N
         raw_image.close()
 
 
-convertToPng = convert_to_png
-
 __all__ = [
-    "convertToPng",
-]
+    ]

@@ -443,7 +443,6 @@ def attach_guidance(messages: list[Any], guidance: str) -> list[Any]:
     return [*messages, UserMessage(content=guidance, timestamp=now)]
 
 
-
 _TURN_STATE: dict[tuple[str, str], dict[str, Any]] = {}
 
 
@@ -732,5 +731,3 @@ def preset_models(*, resolve_aggregators: bool = True) -> list[Model]:
     return out
 
 
-streamMoa = stream_moa
-streamSimpleMoa = stream_simple_moa

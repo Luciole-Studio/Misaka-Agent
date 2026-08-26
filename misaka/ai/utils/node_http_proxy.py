@@ -109,12 +109,7 @@ def create_http_proxy_agents_for_target(target_url: str | ParseResult) -> NodeHt
     return NodeHttpProxyAgents(httpAgent=proxy, httpsAgent=proxy)
 
 
-resolveHttpProxyUrlForTarget = resolve_http_proxy_url_for_target
-createHttpProxyAgentsForTarget = create_http_proxy_agents_for_target
-
 __all__ = [
     "NodeHttpProxyAgents",
     "UNSUPPORTED_PROXY_PROTOCOL_MESSAGE",
-    "createHttpProxyAgentsForTarget",
-    "resolveHttpProxyUrlForTarget",
-]
+    ]

@@ -986,8 +986,6 @@ def _result_future(value: Any) -> Any:
     return _done()
 
 
-emitSessionShutdownEvent = emit_session_shutdown_event
-
 __all__ = [
     "ExtensionErrorListener",
     "ExtensionRunner",
@@ -997,5 +995,4 @@ __all__ = [
     "ReloadHandler",
     "ShutdownHandler",
     "SwitchSessionHandler",
-    "emitSessionShutdownEvent",
-]
+    ]

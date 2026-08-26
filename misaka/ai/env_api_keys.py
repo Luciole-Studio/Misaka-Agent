@@ -134,5 +134,4 @@ def get_env_api_key(provider: str) -> str | None:
     return None
 
 
-findEnvKeys = find_env_keys
 getEnvApiKey = get_env_api_key

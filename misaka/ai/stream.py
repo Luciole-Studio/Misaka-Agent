@@ -45,7 +45,6 @@ async def complete_simple(
     return await stream_simple(model, context, options).result()
 
 
-completeSimple = complete_simple
 streamSimple = stream_simple
 getEnvApiKey = get_env_api_key
 
@@ -54,5 +53,4 @@ __all__ = [
     "stream",
     "complete",
     "streamSimple",
-    "completeSimple",
-]
+    ]

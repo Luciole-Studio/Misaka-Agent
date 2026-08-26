@@ -172,18 +172,9 @@ def filter_and_sort_sessions(
     return [session for session, _score in scored]
 
 
-filterAndSortSessions = filter_and_sort_sessions
-hasSessionName = has_session_name
-matchSession = match_session
-parseSearchQuery = parse_search_query
-
 __all__ = [
     "MatchResult",
     "NameFilter",
     "ParsedSearchQuery",
     "SortMode",
-    "filterAndSortSessions",
-    "hasSessionName",
-    "matchSession",
-    "parseSearchQuery",
-]
+    ]

@@ -297,12 +297,7 @@ def validate_tool_arguments(tool: Tool, tool_call: ToolCall) -> Any:
     raise TypeError("Tool.parameters must be a Pydantic model class or JSON schema mapping")
 
 
-validateToolCall = validate_tool_call
-validateToolArguments = validate_tool_arguments
-
 __all__ = [
-    "validateToolArguments",
-    "validateToolCall",
     "validate_tool_arguments",
     "validate_tool_call",
 ]

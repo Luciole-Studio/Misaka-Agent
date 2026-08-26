@@ -315,16 +315,6 @@ def _arch() -> str:
     return machine
 
 
-commandExists = command_exists
-downloadFile = download_file
-downloadTool = download_tool
-extractTarGzArchive = extract_tar_gz_archive
-extractZipArchive = extract_zip_archive
-findBinaryRecursively = find_binary_recursively
-getLatestVersion = get_latest_version
-isOfflineModeEnabled = is_offline_mode_enabled
-
-
 def getToolPath(tool: ToolName) -> str | None:
     return get_tool_path(tool)
 

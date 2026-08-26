@@ -226,14 +226,8 @@ def run_migrations(cwd: str) -> dict[str, list[str]]:
     }
 
 
-migrateAuthToAuthJson = migrate_auth_to_auth_json
-migrateSessionsFromAgentRoot = migrate_sessions_from_agent_root
-showDeprecationWarnings = show_deprecation_warnings
 runMigrations = run_migrations
 
 __all__ = [
-    "migrateAuthToAuthJson",
-    "migrateSessionsFromAgentRoot",
-    "showDeprecationWarnings",
     "runMigrations",
 ]

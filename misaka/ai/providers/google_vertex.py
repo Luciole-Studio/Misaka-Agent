@@ -581,17 +581,8 @@ def get_gemini3_thinking_level(effort: ClampedThinkingLevel, model: Model) -> Go
 streamGoogleVertex = stream_google_vertex
 streamSimpleGoogleVertex = stream_simple_google_vertex
 createClient = create_client
-createClientWithApiKey = create_client_with_api_key
-buildHttpOptions = build_http_options
-resolveCustomBaseUrl = resolve_custom_base_url
-baseUrlIncludesApiVersion = base_url_includes_api_version
-resolveApiKey = resolve_api_key
-isPlaceholderApiKey = is_placeholder_api_key
-resolveProject = resolve_project
-resolveLocation = resolve_location
 buildParams = build_params
 getDisabledThinkingConfig = get_disabled_thinking_config
-getGemini3ThinkingLevel = get_gemini3_thinking_level
 
 __all__ = [
     "GoogleVertexOptions",

@@ -1,16 +1,26 @@
-"""config package: engine settings, product CFG, role paths, and migrations.
-
-Existing ``from misaka.config import X`` imports keep working: this __init__
-re-exports the public names of both halves.
-"""
-from misaka.config import engine as _engine
-from misaka.config.engine import *  # noqa: F401,F403
+"""config package: engine settings (misaka.config.engine), product CFG and the roster
+(misaka.config.product), role paths (profiles, identity) and migrations. The names below
+are the ones the codebase imports as ``from misaka.config import X``."""
+from misaka.config.engine import (  # noqa: F401
+    APP_NAME,
+    APP_TITLE,
+    CONFIG_DIR_NAME,
+    ENV_AGENT_DIR,
+    ENV_SESSION_DIR,
+    VERSION,
+    expand_tilde_path,
+    get_agent_dir,
+    get_auth_path,
+    get_bin_dir,
+    get_changelog_path,
+    get_custom_themes_dir,
+    get_debug_log_path,
+    get_docs_path,
+    get_export_template_dir,
+    get_models_path,
+    get_readme_path,
+    get_sessions_dir,
+    get_share_viewer_url,
+    get_themes_dir,
+)
 from misaka.config.product import CFG, sisters  # noqa: F401
-
-import sys as _sys
-
-_self = _sys.modules[__name__]
-for _k in dir(_engine):          # snake_case names outside __all__ (get_agent_dir etc.) must stay importable too
-    if not _k.startswith("_") and not hasattr(_self, _k):
-        setattr(_self, _k, getattr(_engine, _k))
-del _sys, _self, _k

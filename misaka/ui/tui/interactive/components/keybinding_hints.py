@@ -53,16 +53,12 @@ def raw_key_hint(key: str, description: str) -> str:
     return theme.fg("dim", format_key_text(key)) + theme.fg("text", f" {description}")
 
 
-formatKeyText = format_key_text
-keyDisplayText = key_display_text
 keyHint = key_hint
 keyText = key_text
 rawKeyHint = raw_key_hint
 
 __all__ = [
     "KeyTextFormatOptions",
-    "formatKeyText",
-    "keyDisplayText",
     "keyHint",
     "keyText",
     "rawKeyHint",

@@ -281,10 +281,6 @@ def _timestamp_ms() -> int:
     return int(time.time() * 1000)
 
 
-collectEntriesForBranchSummary = collect_entries_for_branch_summary
-generateBranchSummary = generate_branch_summary
-prepareBranchEntries = prepare_branch_entries
-
 __all__ = [
     "BranchPreparation",
     "BranchSummaryDetails",
@@ -292,7 +288,4 @@ __all__ = [
     "CollectEntriesResult",
     "FileOperations",
     "GenerateBranchSummaryOptions",
-    "collectEntriesForBranchSummary",
-    "generateBranchSummary",
-    "prepareBranchEntries",
-]
+    ]

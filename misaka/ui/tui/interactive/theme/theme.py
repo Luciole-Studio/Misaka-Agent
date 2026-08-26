@@ -1018,35 +1018,12 @@ except Exception:
     theme = Theme({}, {}, name="uninitialized")
 
 
-getAvailableThemes = get_available_themes
-getAvailableThemesWithPaths = get_available_themes_with_paths
-getBuiltinThemes = get_builtin_themes
-getThemeForRgbColor = get_theme_for_rgb_color
-getDefaultTheme = get_default_theme
-detectTerminalBackground = detect_terminal_background
-getEditorTheme = get_editor_theme
-getMarkdownTheme = get_markdown_theme
 isLightTheme = lambda theme_name=None: theme_name == "light"
 parseOsc11BackgroundColor = parse_osc11_background_color
-getResolvedThemeColors = get_resolved_theme_colors
-getSelectListTheme = get_select_list_theme
-getSettingsListTheme = get_settings_list_theme
-getThemeByName = get_theme_by_name
-getThemeExportColors = get_theme_export_colors
 initTheme = init_theme
-loadTheme = load_theme
-loadThemeFromPath = load_theme_from_path
-loadThemeJson = load_theme_json
 onThemeChange = on_theme_change
-resolveThemeColors = resolve_theme_colors
-setCurrentThemeName = set_current_theme_name
-setGlobalTheme = set_global_theme
-setRegisteredThemes = set_registered_themes
 setTheme = set_theme
-setThemeInstance = set_theme_instance
-stopThemeWatcher = stop_theme_watcher
 highlightCode = highlight_code
-getLanguageFromPath = get_language_from_path
 
 def is_light_theme(theme_name: str | None = None) -> bool:
     return theme_name == "light"
@@ -1063,28 +1040,11 @@ __all__ = [
     "RgbColor",
     "TerminalThemeDetection",
     "TerminalThemeDetectionOptions",
-    "getAvailableThemes",
-    "getAvailableThemesWithPaths",
-    "loadThemeFromPath",
-    "getThemeByName",
-    "getThemeForRgbColor",
     "parseOsc11BackgroundColor",
-    "detectTerminalBackground",
-    "getDefaultTheme",
     "theme",
-    "setRegisteredThemes",
     "initTheme",
     "setTheme",
-    "setThemeInstance",
     "onThemeChange",
-    "stopThemeWatcher",
-    "getResolvedThemeColors",
     "isLightTheme",
-    "getThemeExportColors",
     "highlightCode",
-    "getLanguageFromPath",
-    "getMarkdownTheme",
-    "getSelectListTheme",
-    "getEditorTheme",
-    "getSettingsListTheme",
-]
+    ]

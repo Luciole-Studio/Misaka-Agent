@@ -1188,18 +1188,11 @@ def stream_simple_anthropic(
 streamAnthropic = stream_anthropic
 streamSimpleAnthropic = stream_simple_anthropic
 resolveCacheRetention = resolve_cache_retention
-getAnthropicCompat = get_anthropic_compat
-toClaudeCodeName = to_claude_code_name
-fromClaudeCodeName = from_claude_code_name
-convertContentBlocks = convert_content_blocks
 createClient = create_client
 buildParams = build_params
 convertMessages = convert_messages
-shouldUseFineGrainedToolStreamingBeta = should_use_fine_grained_tool_streaming_beta
 convertTools = convert_tools
 mapStopReason = map_stop_reason
-iterateSseMessages = iterate_sse_messages
-iterateAnthropicEvents = iterate_anthropic_events
 mapThinkingLevelToEffort = map_thinking_level_to_effort
 
 __all__ = [

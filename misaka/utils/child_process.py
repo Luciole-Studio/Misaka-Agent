@@ -95,12 +95,5 @@ async def wait_for_child_process(child: subprocess.Popen[str] | subprocess.Popen
                 continue
 
 
-spawnProcess = spawn_process
-spawnProcessSync = spawn_process_sync
-waitForChildProcess = wait_for_child_process
-
 __all__ = [
-    "spawnProcess",
-    "spawnProcessSync",
-    "waitForChildProcess",
-]
+    ]

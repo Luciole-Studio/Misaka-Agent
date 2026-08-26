@@ -1238,26 +1238,8 @@ def stream_simple_openai_codex_responses(
 
 streamOpenAICodexResponses = stream_openai_codex_responses
 streamSimpleOpenAICodexResponses = stream_simple_openai_codex_responses
-buildRequestBody = build_request_body
 getServiceTierCostMultiplier = get_service_tier_cost_multiplier
 applyServiceTierPricing = apply_service_tier_pricing
-resolveCodexServiceTier = resolve_codex_service_tier
-resolveCodexUrl = resolve_codex_url
-resolveCodexWebSocketUrl = resolve_codex_websocket_url
-processStream = process_stream
-isCodexNonTransportError = is_codex_non_transport_error
-mapCodexEvents = map_codex_events
-normalizeCodexStatus = normalize_codex_status
-parseSSE = parse_sse
-parseErrorResponse = parse_error_response
-extractAccountId = extract_account_id
-createCodexRequestId = create_codex_request_id
-buildSSEHeaders = build_sse_headers
-buildWebSocketHeaders = build_websocket_headers
-processWebSocketStream = process_websocket_stream
-getOpenAICodexWebSocketDebugStats = get_openai_codex_websocket_debug_stats
-resetOpenAICodexWebSocketDebugStats = reset_openai_codex_websocket_debug_stats
-closeOpenAICodexWebSocketSessions = close_openai_codex_websocket_sessions
 
 __all__ = [
     "DEFAULT_CODEX_BASE_URL",
@@ -1265,25 +1247,7 @@ __all__ = [
     "OpenAICodexResponsesOptions",
     "OpenAICodexWebSocketDebugStats",
     "applyServiceTierPricing",
-    "buildRequestBody",
-    "buildSSEHeaders",
-    "buildWebSocketHeaders",
-    "closeOpenAICodexWebSocketSessions",
-    "createCodexRequestId",
-    "extractAccountId",
-    "getOpenAICodexWebSocketDebugStats",
     "getServiceTierCostMultiplier",
-    "isCodexNonTransportError",
-    "mapCodexEvents",
-    "normalizeCodexStatus",
-    "parseErrorResponse",
-    "parseSSE",
-    "processStream",
-    "processWebSocketStream",
-    "resetOpenAICodexWebSocketDebugStats",
-    "resolveCodexServiceTier",
-    "resolveCodexUrl",
-    "resolveCodexWebSocketUrl",
     "streamOpenAICodexResponses",
     "streamSimpleOpenAICodexResponses",
     "apply_service_tier_pricing",

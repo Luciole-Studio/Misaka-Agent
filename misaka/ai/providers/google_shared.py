@@ -284,24 +284,15 @@ def map_stop_reason_string(reason: str) -> StopReason:
     return "error"
 
 
-isThinkingPart = is_thinking_part
-retainThoughtSignature = retain_thought_signature
-requiresToolCallId = requires_tool_call_id
 convertMessages = convert_messages
 convertTools = convert_tools
 mapToolChoice = map_tool_choice
 mapStopReason = map_stop_reason
-mapStopReasonString = map_stop_reason_string
-sanitizeForOpenApi = sanitize_for_openapi
 
 __all__ = [
     "GoogleThinkingLevel",
-    "isThinkingPart",
-    "retainThoughtSignature",
-    "requiresToolCallId",
     "convertMessages",
     "convertTools",
     "mapToolChoice",
     "mapStopReason",
-    "mapStopReasonString",
-]
+    ]

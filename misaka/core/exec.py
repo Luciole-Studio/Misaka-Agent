@@ -191,10 +191,7 @@ async def exec_command(
         await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
 
 
-execCommand = exec_command
-
 __all__ = [
     "ExecOptions",
     "ExecResult",
-    "execCommand",
-]
+    ]

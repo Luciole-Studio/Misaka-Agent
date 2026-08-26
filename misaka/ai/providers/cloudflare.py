@@ -40,14 +40,9 @@ def resolve_cloudflare_base_url(model: Model) -> str:
     return _PLACEHOLDER_PATTERN.sub(replace, url)
 
 
-isCloudflareProvider = is_cloudflare_provider
-resolveCloudflareBaseUrl = resolve_cloudflare_base_url
-
 __all__ = [
     "CLOUDFLARE_WORKERS_AI_BASE_URL",
     "CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL",
     "CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL",
     "CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL",
-    "isCloudflareProvider",
-    "resolveCloudflareBaseUrl",
-]
+    ]

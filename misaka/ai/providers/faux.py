@@ -616,22 +616,11 @@ def register_faux_provider(options: RegisterFauxProviderOptions | dict[str, Any]
     )
 
 
-fauxText = faux_text
-fauxThinking = faux_thinking
-fauxToolCall = faux_tool_call
-fauxAssistantMessage = faux_assistant_message
-registerFauxProvider = register_faux_provider
-
 __all__ = [
     "FauxModelDefinition",
     "FauxContentBlock",
-    "fauxText",
-    "fauxThinking",
-    "fauxToolCall",
-    "fauxAssistantMessage",
     "FauxResponseFactory",
     "FauxResponseStep",
     "RegisterFauxProviderOptions",
     "FauxProviderRegistration",
-    "registerFauxProvider",
-]
+    ]

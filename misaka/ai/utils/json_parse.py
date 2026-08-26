@@ -143,12 +143,5 @@ def parse_streaming_json(partial_json: str | None) -> TJson:
                 return {}
 
 
-repairJson = repair_json
-parseJsonWithRepair = parse_json_with_repair
-parseStreamingJson = parse_streaming_json
-
 __all__ = [
-    "repairJson",
-    "parseJsonWithRepair",
-    "parseStreamingJson",
-]
+    ]

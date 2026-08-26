@@ -27,6 +27,3 @@ def get_image_models(provider: str) -> list[ImagesModel]:
     return list(models.values()) if models else []
 
 
-getImageModel = get_image_model
-getImageProviders = get_image_providers
-getImageModels = get_image_models

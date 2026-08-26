@@ -85,11 +85,6 @@ def _snapshot(path: str) -> tuple[Any, ...]:
     return (*base, digest)
 
 
-closeWatcher = close_watcher
-watchWithErrorHandler = watch_with_error_handler
-
 __all__ = [
     "FS_WATCH_RETRY_DELAY_MS",
-    "closeWatcher",
-    "watchWithErrorHandler",
-]
+    ]

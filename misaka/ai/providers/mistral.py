@@ -789,23 +789,7 @@ def map_chat_stop_reason(reason: str | None) -> StopReason:
 
 streamMistral = stream_mistral
 streamSimpleMistral = stream_simple_mistral
-createOutput = create_output
-createMistralToolCallIdNormalizer = create_mistral_tool_call_id_normalizer
-deriveMistralToolCallId = derive_mistral_tool_call_id
-formatMistralError = format_mistral_error
-truncateErrorText = truncate_error_text
-buildRequestOptions = build_request_kwargs
-buildChatPayload = build_chat_payload
-consumeChatStream = consume_chat_stream
-toFunctionTools = to_function_tools
-stripSymbolKeys = strip_symbol_keys
-toChatMessages = to_chat_messages
-buildToolResultText = build_tool_result_text
-usesReasoningEffort = uses_reasoning_effort
-usesPromptModeReasoning = uses_prompt_mode_reasoning
-mapReasoningEffort = map_reasoning_effort
 mapToolChoice = map_tool_choice
-mapChatStopReason = map_chat_stop_reason
 
 __all__ = [
     "MistralOptions",

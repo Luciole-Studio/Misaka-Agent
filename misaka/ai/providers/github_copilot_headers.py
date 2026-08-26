@@ -28,12 +28,5 @@ def build_copilot_dynamic_headers(*, messages: list[MessageValue], hasImages: bo
     return headers
 
 
-inferCopilotInitiator = infer_copilot_initiator
-hasCopilotVisionInput = has_copilot_vision_input
-buildCopilotDynamicHeaders = build_copilot_dynamic_headers
-
 __all__ = [
-    "inferCopilotInitiator",
-    "hasCopilotVisionInput",
-    "buildCopilotDynamicHeaders",
-]
+    ]

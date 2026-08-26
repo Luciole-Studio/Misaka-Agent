@@ -51,10 +51,5 @@ def _yaml_load(content: str) -> Any:
     return yaml.load(content)
 
 
-parseFrontmatter = parse_frontmatter
-stripFrontmatter = strip_frontmatter
-
 __all__ = [
-    "parseFrontmatter",
-    "stripFrontmatter",
-]
+    ]

@@ -319,13 +319,7 @@ def _platform() -> str:
 def _get_native_clipboard() -> _NativeClipboard | None:
     return _get_native_clipboard_backend()
 
-extensionForImageMimeType = extension_for_image_mime_type
-isWaylandSession = is_wayland_session
-readClipboardImage = read_clipboard_image
 
 __all__ = [
     "ClipboardImage",
-    "extensionForImageMimeType",
-    "isWaylandSession",
-    "readClipboardImage",
-]
+    ]

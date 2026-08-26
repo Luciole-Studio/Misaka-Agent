@@ -156,7 +156,5 @@ def _get_native_clipboard() -> _NativeClipboard | None:
 
 
 copyToClipboard = copy_to_clipboard
-emitOsc52 = emit_osc52
-isRemoteSession = is_remote_session
 
 __all__ = ["copyToClipboard"]

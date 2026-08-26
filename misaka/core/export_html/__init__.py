@@ -349,16 +349,7 @@ async def export_from_file(
     return output_path
 
 
-deriveExportColors = derive_export_colors
-exportFromFile = export_from_file
-exportSessionToHtml = export_session_to_html
-generateHtml = generate_html
-generateThemeVars = generate_theme_vars
-preRenderCustomTools = pre_render_custom_tools
-
 __all__ = [
     "ExportOptions",
     "ToolHtmlRenderer",
-    "exportFromFile",
-    "exportSessionToHtml",
-]
+    ]

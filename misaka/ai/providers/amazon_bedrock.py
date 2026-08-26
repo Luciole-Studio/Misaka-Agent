@@ -1022,32 +1022,11 @@ def safe_json_stringify(value: Any) -> str:
 streamBedrock = stream_bedrock
 streamSimpleBedrock = stream_simple_bedrock
 createClient = create_client
-buildClientSettings = build_client_settings
-formatBedrockError = format_bedrock_error
-handleContentBlockStart = handle_content_block_start
-handleContentBlockDelta = handle_content_block_delta
-handleMetadata = handle_metadata
-handleContentBlockStop = handle_content_block_stop
-getModelMatchCandidates = get_model_match_candidates
-supportsAdaptiveThinking = supports_adaptive_thinking
-supportsNativeXhighEffort = supports_native_xhigh_effort
 mapThinkingLevelToEffort = map_thinking_level_to_effort
 resolveCacheRetention = resolve_cache_retention
-isAnthropicClaudeModel = is_anthropic_claude_model
-supportsPromptCaching = supports_prompt_caching
-supportsThinkingSignature = supports_thinking_signature
 buildSystemPrompt = build_system_prompt
-normalizeToolCallId = normalize_tool_call_id
 convertMessages = convert_messages
-convertToolConfig = convert_tool_config
 mapStopReason = map_stop_reason
-getConfiguredBedrockRegion = get_configured_bedrock_region
-hasConfiguredBedrockProfile = has_configured_bedrock_profile
-getStandardBedrockEndpointRegion = get_standard_bedrock_endpoint_region
-shouldUseExplicitBedrockEndpoint = should_use_explicit_bedrock_endpoint
-isGovCloudBedrockTarget = is_govcloud_bedrock_target
-buildAdditionalModelRequestFields = build_additional_model_request_fields
-createImageBlock = create_image_block
 
 __all__ = [
     "BedrockOptions",

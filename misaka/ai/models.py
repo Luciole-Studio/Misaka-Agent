@@ -86,8 +86,4 @@ def models_are_equal(a: Model | None, b: Model | None) -> bool:
 
 getModel = get_model
 getProviders = get_providers
-getModels = get_models
-calculateCost = calculate_cost
-getSupportedThinkingLevels = get_supported_thinking_levels
-clampThinkingLevel = clamp_thinking_level
 modelsAreEqual = models_are_equal

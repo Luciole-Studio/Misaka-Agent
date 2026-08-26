@@ -293,8 +293,6 @@ def reset_api_providers() -> None:
 
 register_built_in_api_providers()
 
-setBedrockProviderModule = set_bedrock_provider_module
-registerBuiltInApiProviders = register_built_in_api_providers
 resetApiProviders = reset_api_providers
 streamAnthropic = stream_anthropic
 streamSimpleAnthropic = stream_simple_anthropic
@@ -314,7 +312,6 @@ streamOpenAIResponses = stream_openai_responses
 streamSimpleOpenAIResponses = stream_simple_openai_responses
 
 __all__ = [
-    "setBedrockProviderModule",
     "streamAnthropic",
     "streamSimpleAnthropic",
     "streamAzureOpenAIResponses",
@@ -331,6 +328,5 @@ __all__ = [
     "streamSimpleOpenAICompletions",
     "streamOpenAIResponses",
     "streamSimpleOpenAIResponses",
-    "registerBuiltInApiProviders",
     "resetApiProviders",
 ]

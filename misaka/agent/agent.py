@@ -608,9 +608,6 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
-defaultConvertToLlm = default_convert_to_llm
-createMutableAgentState = _create_mutable_agent_state
-
 __all__ = [
     "AbortController",
     "AbortSignal",
@@ -622,7 +619,5 @@ __all__ = [
     "MutableAgentState",
     "PendingMessageQueue",
     "QueueMode",
-    "createMutableAgentState",
-    "defaultConvertToLlm",
     "default_convert_to_llm",
 ]

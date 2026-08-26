@@ -1095,30 +1095,20 @@ streamOpenAICompletions = stream_openai_completions
 streamSimpleOpenAICompletions = stream_simple_openai_completions
 createClient = create_client
 buildParams = build_params
-getCompatCacheControl = get_compat_cache_control
-applyAnthropicCacheControl = apply_anthropic_cache_control
 convertMessages = convert_messages
 convertTools = convert_tools
-parseChunkUsage = parse_chunk_usage
 mapStopReason = map_stop_reason
-detectCompat = detect_compat
 getCompat = get_compat
-hasToolHistory = has_tool_history
 resolveCacheRetention = resolve_cache_retention
 
 __all__ = [
     "OpenAICompletionsOptions",
-    "applyAnthropicCacheControl",
     "buildParams",
     "convertMessages",
     "convertTools",
     "createClient",
-    "detectCompat",
     "getCompat",
-    "getCompatCacheControl",
-    "hasToolHistory",
     "mapStopReason",
-    "parseChunkUsage",
     "resolveCacheRetention",
     "streamOpenAICompletions",
     "streamSimpleOpenAICompletions",

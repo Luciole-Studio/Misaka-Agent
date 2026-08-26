@@ -370,12 +370,10 @@ Built-in Tool Names:
 
 isValidThinkingLevel = is_valid_thinking_level
 parseArgs = parse_args
-printHelp = print_help
 
 __all__ = [
     "Args",
     "Mode",
     "isValidThinkingLevel",
     "parseArgs",
-    "printHelp",
-]
+    ]

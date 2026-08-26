@@ -217,15 +217,9 @@ def _scope_for_token(token: Any) -> str | None:
     return None
 
 
-highlightHtml = render_highlighted_html
-renderHighlightedHtml = render_highlighted_html
-supportsLanguage = supports_language
-
 __all__ = [
     "HighlightFormatter",
     "HighlightOptions",
     "HighlightTheme",
     "highlight",
-    "renderHighlightedHtml",
-    "supportsLanguage",
-]
+    ]

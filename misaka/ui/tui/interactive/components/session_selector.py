@@ -886,9 +886,6 @@ class SessionSelectorComponent(Container, Focusable):
 
 
 shortenPath = shorten_path
-formatSessionDate = format_session_date
-buildSessionTree = build_session_tree
-flattenSessionTree = flatten_session_tree
 
 __all__ = [
     "SessionSelectorComponent",

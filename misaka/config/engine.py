@@ -229,26 +229,7 @@ def get_debug_log_path() -> str:
     return str(Path(get_agent_dir()) / f"{APP_NAME}-debug.log")
 
 
-expandTildePath = expand_tilde_path
-getShareViewerUrl = get_share_viewer_url
-getAgentDir = get_agent_dir
-getCustomThemesDir = get_custom_themes_dir
-getModelsPath = get_models_path
-getAuthPath = get_auth_path
-getSettingsPath = get_settings_path
-getToolsDir = get_tools_dir
-getBinDir = get_bin_dir
-getPromptsDir = get_prompts_dir
-getPackageDir = get_package_dir
-getThemesDir = get_themes_dir
-getExportTemplateDir = get_export_template_dir
-getPackageJsonPath = get_package_json_path
-getReadmePath = get_readme_path
-getDocsPath = get_docs_path
-getExamplesPath = get_examples_path
 getChangelogPath = get_changelog_path
-getSessionsDir = get_sessions_dir
-getDebugLogPath = get_debug_log_path
 
 __all__ = [
     "APP_NAME",
@@ -258,24 +239,5 @@ __all__ = [
     "ENV_SESSION_DIR",
     "PACKAGE_NAME",
     "VERSION",
-    "expandTildePath",
-    "getAgentDir",
-    "getAuthPath",
-    "getBinDir",
     "getChangelogPath",
-    "getCustomThemesDir",
-    "getDebugLogPath",
-    "getDocsPath",
-    "getExamplesPath",
-    "getExportTemplateDir",
-    "getModelsPath",
-    "getPackageDir",
-    "getPackageJsonPath",
-    "getPromptsDir",
-    "getReadmePath",
-    "getSessionsDir",
-    "getSettingsPath",
-    "getShareViewerUrl",
-    "getThemesDir",
-    "getToolsDir",
-]
+    ]

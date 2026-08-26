@@ -185,8 +185,5 @@ def transform_messages(
     return result
 
 
-transformMessages = transform_messages
-
 __all__ = [
-    "transformMessages",
-]
+    ]

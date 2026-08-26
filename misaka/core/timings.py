@@ -47,11 +47,6 @@ def print_timings() -> None:
     print("------------------------\n", file=sys.stderr)
 
 
-printTimings = print_timings
-resetTimings = reset_timings
-
 __all__ = [
-    "resetTimings",
     "time",
-    "printTimings",
-]
+    ]

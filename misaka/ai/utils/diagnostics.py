@@ -77,16 +77,7 @@ def append_assistant_message_diagnostic(message: Any, diagnostic: AssistantMessa
     setattr(message, "diagnostics", diagnostics)
 
 
-formatThrownValue = format_thrown_value
-extractDiagnosticError = extract_diagnostic_error
-createAssistantMessageDiagnostic = create_assistant_message_diagnostic
-appendAssistantMessageDiagnostic = append_assistant_message_diagnostic
-
 __all__ = [
     "DiagnosticErrorInfo",
     "AssistantMessageDiagnostic",
-    "formatThrownValue",
-    "extractDiagnosticError",
-    "createAssistantMessageDiagnostic",
-    "appendAssistantMessageDiagnostic",
-]
+    ]

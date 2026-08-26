@@ -56,11 +56,6 @@ def _decode_code_point(code_point: int) -> str | None:
         return None
 
 
-decodeHtmlEntity = decode_html_entity
-decodeHtmlEntityAt = decode_html_entity_at
-
 __all__ = [
     "DecodedHtmlEntity",
-    "decodeHtmlEntity",
-    "decodeHtmlEntityAt",
-]
+    ]

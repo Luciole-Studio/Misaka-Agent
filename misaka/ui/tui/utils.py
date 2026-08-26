@@ -890,7 +890,6 @@ def extract_segments(
 
 visibleWidth = visible_width
 normalizeTerminalOutput = normalize_terminal_output
-extractAnsiCode = extract_ansi_code
 wrapTextWithAnsi = wrap_text_with_ansi
 isWhitespaceChar = is_whitespace_char
 isPunctuationChar = is_punctuation_char
@@ -903,7 +902,6 @@ getSegmenter = get_segmenter
 
 __all__ = [
     "applyBackgroundToLine",
-    "extractAnsiCode",
     "extractSegments",
     "getSegmenter",
     "isPunctuationChar",

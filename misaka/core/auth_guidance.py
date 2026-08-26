@@ -33,18 +33,12 @@ def format_no_api_key_found_message(provider: str) -> str:
     return f"No API key found for {provider_display}.\n\n{get_provider_login_help()}"
 
 
-formatNoApiKeyFoundMessage = format_no_api_key_found_message
-formatNoModelSelectedMessage = format_no_model_selected_message
 formatNoModelsAvailableMessage = format_no_models_available_message
-getProviderLoginHelp = get_provider_login_help
 
 __all__ = [
-    "formatNoApiKeyFoundMessage",
-    "formatNoModelSelectedMessage",
     "formatNoModelsAvailableMessage",
     "format_no_api_key_found_message",
     "format_no_model_selected_message",
     "format_no_models_available_message",
-    "getProviderLoginHelp",
     "get_provider_login_help",
 ]

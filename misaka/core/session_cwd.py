@@ -69,16 +69,7 @@ def assert_session_cwd_exists(session_manager: SessionCwdSource, fallback_cwd: s
         raise MissingSessionCwdError(issue)
 
 
-getMissingSessionCwdIssue = get_missing_session_cwd_issue
-formatMissingSessionCwdError = format_missing_session_cwd_error
-formatMissingSessionCwdPrompt = format_missing_session_cwd_prompt
-assertSessionCwdExists = assert_session_cwd_exists
-
 __all__ = [
     "MissingSessionCwdError",
     "SessionCwdIssue",
-    "assertSessionCwdExists",
-    "formatMissingSessionCwdError",
-    "formatMissingSessionCwdPrompt",
-    "getMissingSessionCwdIssue",
-]
+    ]

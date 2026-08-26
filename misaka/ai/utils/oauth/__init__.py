@@ -116,11 +116,8 @@ async def get_oauth_api_key(
 
 getOAuthProvider = get_oauth_provider
 registerOAuthProvider = register_oauth_provider
-unregisterOAuthProvider = unregister_oauth_provider
 resetOAuthProviders = reset_oauth_providers
 getOAuthProviders = get_oauth_providers
-getOAuthProviderInfoList = get_oauth_provider_info_list
-refreshOAuthToken = refresh_oauth_token
 getOAuthApiKey = get_oauth_api_key
 
 __all__ = [
@@ -141,7 +138,6 @@ __all__ = [
     "getGitHubCopilotBaseUrl",
     "getOAuthApiKey",
     "getOAuthProvider",
-    "getOAuthProviderInfoList",
     "getOAuthProviders",
     "githubCopilotOAuthProvider",
     "loginAnthropic",
@@ -156,9 +152,7 @@ __all__ = [
     "pollOAuthDeviceCodeFlow",
     "refreshAnthropicToken",
     "refreshGitHubCopilotToken",
-    "refreshOAuthToken",
     "refreshOpenAICodexToken",
     "registerOAuthProvider",
     "resetOAuthProviders",
-    "unregisterOAuthProvider",
-]
+    ]

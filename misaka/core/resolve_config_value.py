@@ -132,7 +132,6 @@ def clear_config_value_cache() -> None:
 resolveConfigValue = resolve_config_value
 resolveConfigValueUncached = resolve_config_value_uncached
 resolveConfigValueOrThrow = resolve_config_value_or_throw
-resolveHeaders = resolve_headers
 resolveHeadersOrThrow = resolve_headers_or_throw
 clearConfigValueCache = clear_config_value_cache
 
@@ -141,6 +140,5 @@ __all__ = [
     "resolveConfigValue",
     "resolveConfigValueOrThrow",
     "resolveConfigValueUncached",
-    "resolveHeaders",
     "resolveHeadersOrThrow",
 ]

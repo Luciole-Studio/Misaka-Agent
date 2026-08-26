@@ -94,11 +94,8 @@ def create_assistant_message_event_stream() -> AssistantMessageEventStream:
     return AssistantMessageEventStream()
 
 
-createAssistantMessageEventStream = create_assistant_message_event_stream
-
 __all__ = [
     "AssistantMessageEventStream",
     "EventStream",
-    "createAssistantMessageEventStream",
     "create_assistant_message_event_stream",
 ]

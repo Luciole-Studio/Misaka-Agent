@@ -713,11 +713,6 @@ async def _resolved(value: str) -> str:
 
 calculateContextTokens = calculate_context_tokens
 estimateContextTokens = estimate_context_tokens
-estimateTokens = estimate_tokens
-findCutPoint = find_cut_point
-findTurnStartIndex = find_turn_start_index
-generateSummary = generate_summary
-getLastAssistantUsage = get_last_assistant_usage
 prepareCompaction = prepare_compaction
 shouldCompact = should_compact
 
@@ -732,11 +727,6 @@ __all__ = [
     "calculateContextTokens",
     "compact",
     "estimateContextTokens",
-    "estimateTokens",
-    "findCutPoint",
-    "findTurnStartIndex",
-    "generateSummary",
-    "getLastAssistantUsage",
     "prepareCompaction",
     "shouldCompact",
 ]
