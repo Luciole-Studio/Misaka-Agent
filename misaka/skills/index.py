@@ -62,9 +62,9 @@ def slug(name):
 
 
 def invalidate():
-    """Forget the in-process index: called at session start and after a skill is written,
-    the two moments the skill tree can change under a running session. The disk snapshots
-    need no help -- their manifests notice the change."""
+    """Forget the in-process index: called at session start, at every turn start (the skills
+    extension) and after a skill is written, so a tree edited outside the session (git, an
+    editor) shows by the next turn. The disk snapshots need no help -- their manifests notice."""
     _CACHE.clear()
 
 

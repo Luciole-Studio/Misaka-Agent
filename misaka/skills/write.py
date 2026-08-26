@@ -72,10 +72,7 @@ def _store_blob(path):
     digest = hashlib.sha256(data).hexdigest()
     blob = _blob_dir() / digest
     if not blob.exists():
-        blob.parent.mkdir(parents=True, exist_ok=True)
-        tmp = blob.with_suffix(".tmp")
-        tmp.write_bytes(data)
-        os.replace(tmp, blob)
+        atomic.write_bytes(blob, data)
     return digest
 
 
@@ -89,6 +86,40 @@ def snapshot(root):
         if f.is_file() and not f.is_symlink():
             out.append({"path": str(f.relative_to(root)), "sha256": _store_blob(f)})
     return out
+
+
+def digest(root):
+    """One hash of a skill tree's content: what a pending write was reviewed against, checked
+    again at approval so a tree that changed in between is not patched blind."""
+    return hashlib.sha256(json.dumps(snapshot(root), sort_keys=True).encode()).hexdigest()
+
+
+def restore(root, before):
+    """Put a skill tree back to a snapshot: its files from the blobs, everything else gone."""
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    keep = set()
+    for item in before:
+        dest = root / item["path"]
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes((_blob_dir() / item["sha256"]).read_bytes())
+        keep.add(dest.resolve())
+    for f in sorted(root.rglob("*"), reverse=True):       # deepest first, so emptied directories go too
+        if f.is_file() and f.resolve() not in keep:
+            f.unlink()
+        elif f.is_dir() and not any(f.iterdir()):
+            f.rmdir()
+    if not before and not any(root.iterdir()):
+        root.rmdir()
+
+
+def mutation_lock():
+    """The one lock every live-skill mutation (apply, approve, rollback) runs under, so snapshot,
+    write, scan and ledger happen as a unit. ponytail: one lock for all roles; per role if it contends."""
+    from filelock import FileLock
+    path = _root() / "skills" / ".write.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return FileLock(str(path))
 
 
 def record(action, skill, *, before=None, after_root=None, evidence=None):
@@ -146,25 +177,16 @@ def rollback(entry_id, skill_root):
     for item in target["before"]:
         if not (_blob_dir() / item["sha256"]).exists():
             return False, f"Missing rollback blob for {item['path']} ({item['sha256'][:12]})."
-    try:
-        record("pre-rollback", target["skill"], after_root=root, evidence={"rollback_of": entry_id})
-    except OSError as error:
-        return False, f"The skill ledger cannot be written ({error}); nothing was rolled back."
-    root.mkdir(parents=True, exist_ok=True)
-    keep = set()
-    for item in target["before"]:
-        dest = root / item["path"]
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes((_blob_dir() / item["sha256"]).read_bytes())
-        keep.add(dest.resolve())
-    for item in target["after"]:
-        dest = root / item["path"]
-        if dest.is_file() and dest.resolve() not in keep:
-            dest.unlink()
-    try:
-        record("rollback", target["skill"], after_root=root, evidence={"rollback_of": entry_id})
-    except OSError as error:
-        return True, f"Rolled back {target['skill']} ({len(target['before'])} files), but the ledger could not record it: {error}"
+    with mutation_lock():
+        try:
+            record("pre-rollback", target["skill"], after_root=root, evidence={"rollback_of": entry_id})
+        except OSError as error:
+            return False, f"The skill ledger cannot be written ({error}); nothing was rolled back."
+        restore(root, target["before"])
+        try:
+            record("rollback", target["skill"], after_root=root, evidence={"rollback_of": entry_id})
+        except OSError as error:
+            return True, f"Rolled back {target['skill']} ({len(target['before'])} files), but the ledger could not record it: {error}"
     return True, f"Rolled back {target['skill']} ({len(target['before'])} files)."
 
 

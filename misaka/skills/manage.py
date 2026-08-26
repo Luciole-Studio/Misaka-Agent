@@ -5,11 +5,11 @@ import shutil
 from pathlib import Path
 
 from misaka.skills import write as skill_write
+from misaka.skills.linter import NAME_RE
 from misaka.utils import atomic
 
 MAX_SKILL_CONTENT_CHARS = 40_000
 MAX_DESCRIPTION_LENGTH = 1024
-_VALID_NAME = __import__("re").compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 _bypass = contextvars.ContextVar("misaka_skill_gate_bypass", default=False)
 
@@ -42,8 +42,8 @@ def _skill_dir(profile_dir, name):
     err = lookup_path_error(name)
     if err:
         return None, err
-    if not _VALID_NAME.fullmatch(name):
-        return None, f"Invalid skill name '{name}'; use lowercase letters, numbers, underscores, and hyphens."
+    if not NAME_RE.fullmatch(name) or len(name) > 64:
+        return None, f"Invalid skill name '{name}'; use up to 64 lowercase letters, numbers, underscores, and hyphens."
     root = _skills_root(profile_dir)
     skill_dir = root / name
     try:
@@ -69,27 +69,23 @@ def _is_skill_md(target, skill_dir):
 
 
 def validate_frontmatter(content, *, new_skill=False):
-    """Return an error message if the SKILL.md frontmatter or body is invalid, else None."""
+    """Return an error message if the SKILL.md is invalid, else None. The linter's error rules are
+    the validator: what a write refuses is exactly what ``lint_skill`` would flag as an error,
+    plus the size limits only a write enforces."""
     from misaka.skills.index import SKILL_PROMPT_DESC_LIMIT
-    from misaka.utils.frontmatter import FrontmatterError, parse_frontmatter
+    from misaka.skills.linter import lint_content
+    from misaka.utils.frontmatter import parse_frontmatter
 
     if not str(content or "").strip():
         return "Content cannot be empty."
     text = str(content).lstrip("﻿")
     if not text.startswith("---"):
         return "SKILL.md must start with YAML frontmatter (`---`)."
-    try:
-        parsed = parse_frontmatter(text)
-    except FrontmatterError as error:
-        return f"Frontmatter is not valid YAML: {error}"
-    fm = parsed.frontmatter
-    if not isinstance(fm, dict) or not fm:
-        return "Frontmatter is unclosed or is not a key-value mapping."
-    if not isinstance(fm.get("name"), str) or not fm["name"].strip():
-        return "Frontmatter must contain a non-empty `name` string."
-    if not isinstance(fm.get("description"), str) or not fm["description"].strip():
-        return "Frontmatter must contain a non-empty `description` string."
-    desc = fm["description"].strip().strip("'\"")
+    errors = [f.message for f in lint_content(text) if f.severity == "error"]
+    if errors:
+        return "; ".join(errors)
+    parsed = parse_frontmatter(text)                     # the linter parsed it: valid, typed name and description
+    desc = parsed.frontmatter["description"].strip().strip("'\"")
     if len(desc) > MAX_DESCRIPTION_LENGTH:
         return f"Description exceeds {MAX_DESCRIPTION_LENGTH} characters."
     if new_skill and len(desc) > SKILL_PROMPT_DESC_LIMIT:
@@ -421,13 +417,40 @@ def _gist(action, name, content="", file_path="", old_string=""):
     return f"{label} '{name}': {desc[:60]}" if desc else f"{label} '{name}'"
 
 
+def _precheck(action, skill_dir, name, content, file_path, file_content, old_string, new_string):
+    """The pure checks, before the gate and the lock: a request that could never apply is refused
+    now, not staged for the user to review and fail at approval."""
+    if action in ("create", "edit"):
+        return (validate_frontmatter(content, new_skill=action == "create") or name_mismatch(name, content)
+                or validate_content_size(content))
+    if action == "write_file":
+        if file_content is None:
+            return "write_file requires file_content; pass an empty string for an empty file"
+        return _support_file_error(file_content, file_path) or _resolve_target(skill_dir, file_path)[1]
+    if action == "patch":
+        if not old_string:
+            return "patch requires old_string"
+        if new_string is None:
+            return "patch requires new_string; use an empty string to remove the match"
+        return _resolve_target(skill_dir, file_path)[1] if file_path else None
+    if action == "remove_file":
+        return _resolve_target(skill_dir, file_path)[1]
+    return None
+
+
 def manage(action, name, *, profile_dir, content=None, file_path=None,
            file_content=None, old_string=None, new_string=None,
-           replace_all=False, absorbed_into=None):
-    """Apply one validated skill mutation through the write gate and ledger."""
+           replace_all=False, absorbed_into=None, base=None):
+    """Apply one validated skill mutation through the write gate, under the skill lock, into the
+    ledger; ``base`` is the digest of the live tree an approved pending write was reviewed against."""
     if action not in _ACTIONS:
         return {"success": False,
                 "error": f"Unknown action {action!r}. Available: {', '.join(_ACTIONS)}"}
+    skill_dir, err = _skill_dir(profile_dir, name)
+    err = err or _precheck(action, skill_dir, name, content or "", file_path or "",
+                           file_content, old_string or "", new_string)
+    if err:
+        return {"success": False, "error": err}
 
     if not _bypass.get():
         decision, note = skill_write.evaluate_gate()
@@ -438,7 +461,8 @@ def manage(action, name, *, profile_dir, content=None, file_path=None,
                        "content": content, "file_path": file_path,
                        "file_content": file_content, "old_string": old_string,
                        "new_string": new_string, "replace_all": replace_all,
-                       "absorbed_into": absorbed_into}
+                       "absorbed_into": absorbed_into,
+                       "base": skill_write.digest(skill_dir)}       # what the reviewer will look at
             gist = _gist(action, name, content or "", file_path or "", old_string or "")
             try:
                 record = skill_write.stage(payload, summary=gist)
@@ -448,33 +472,36 @@ def manage(action, name, *, profile_dir, content=None, file_path=None,
             return {"success": True, "staged": True, "pending_id": record["id"],
                     "gist": gist, "message": note}
 
-    skill_dir, err = _skill_dir(profile_dir, name)
-    if err:
-        return {"success": False, "error": err}
-    before = skill_write.snapshot(skill_dir)
+    with skill_write.mutation_lock():
+        if base is not None and skill_write.digest(skill_dir) != base:
+            return {"success": False, "error": (f"Skill '{name}' changed after this write was reviewed; look at it "
+                                                "again with `misaka skills pending` and stage it anew.")}
+        before = skill_write.snapshot(skill_dir)
 
-    if action == "create":
-        result = _create(profile_dir, name, content or "")
-    elif action == "edit":
-        result = _edit_skill(profile_dir, name, content or "")
-    elif action == "patch":
-        result = _patch_skill(profile_dir, name, old_string or "", new_string,
-                              file_path=file_path, replace_all=replace_all)
-    elif action == "delete":
-        result = _delete_skill(profile_dir, name, absorbed_into=absorbed_into)
-    elif action == "remove_file":
-        result = _remove_file(profile_dir, name, file_path or "")
-    else:
-        result = _write_file(profile_dir, name, file_path or "", file_content)
+        if action == "create":
+            result = _create(profile_dir, name, content or "")
+        elif action == "edit":
+            result = _edit_skill(profile_dir, name, content or "")
+        elif action == "patch":
+            result = _patch_skill(profile_dir, name, old_string or "", new_string,
+                                  file_path=file_path, replace_all=replace_all)
+        elif action == "delete":
+            result = _delete_skill(profile_dir, name, absorbed_into=absorbed_into)
+        elif action == "remove_file":
+            result = _remove_file(profile_dir, name, file_path or "")
+        else:
+            result = _write_file(profile_dir, name, file_path or "", file_content)
 
-    if result.get("success"):
-        evidence = {k: v for k, v in (("file_path", file_path),
-                                      ("absorbed_into", absorbed_into)) if v is not None}
-        try:
-            skill_write.record(action, name, before=before, after_root=skill_dir, evidence=evidence)
-        except OSError as error:
-            result["ledger_error"] = f"The change was applied but could not be recorded in the skill ledger: {error}"
-        _invalidate_index()
+        if result.get("success"):
+            evidence = {k: v for k, v in (("file_path", file_path),
+                                          ("absorbed_into", absorbed_into)) if v is not None}
+            try:
+                skill_write.record(action, name, before=before, after_root=skill_dir, evidence=evidence)
+            except OSError as error:                       # unrecorded is unapplied: the tree goes back
+                skill_write.restore(skill_dir, before)
+                result = {"success": False,
+                          "error": f"The skill ledger could not be written ({error}); the change was rolled back."}
+            _invalidate_index()
     return result
 
 
@@ -490,7 +517,8 @@ def apply_pending(payload):
                       old_string=payload.get("old_string"),
                       new_string=payload.get("new_string"),
                       replace_all=bool(payload.get("replace_all")),
-                      absorbed_into=payload.get("absorbed_into"))
+                      absorbed_into=payload.get("absorbed_into"),
+                      base=payload.get("base"))
     finally:
         _bypass.reset(token)
 

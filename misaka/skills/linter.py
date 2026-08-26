@@ -2,7 +2,7 @@
 import re
 from pathlib import Path
 
-_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")     # the one rule for a skill's name, which is its directory
 _MARKETING = ("powerful", "comprehensive", "seamless", "advanced", "robust",
               "revolutionary", "industry-leading")
 _SHELL_TO_TOOL = {
@@ -43,10 +43,10 @@ def lint_content(content, skill_dir=None):
     fm = parsed.frontmatter or {}
     body = parsed.body or ""
 
-    name = str(fm.get("name") or "")
+    name = fm.get("name") if isinstance(fm.get("name"), str) else ""
     if not name:
-        findings.append(Finding("name-missing", "error", "frontmatter is missing `name`"))
-    elif not _NAME_RE.fullmatch(name):
+        findings.append(Finding("name-missing", "error", "frontmatter is missing a `name` string"))
+    elif not NAME_RE.fullmatch(name):
         findings.append(Finding("name-format", "error",
                                 f"name '{name}' must start with a lowercase letter or digit and use only a-z, 0-9, _, or -"))
     elif len(name) > 64:
@@ -58,9 +58,9 @@ def lint_content(content, skill_dir=None):
             f"name '{name}' does not match directory '{Path(skill_dir).name}'",
         ))
 
-    desc = str(fm.get("description") or "").strip()
+    desc = fm.get("description").strip() if isinstance(fm.get("description"), str) else ""
     if not desc:
-        findings.append(Finding("description-missing", "error", "frontmatter is missing `description`"))
+        findings.append(Finding("description-missing", "error", "frontmatter is missing a `description` string"))
     else:
         if is_skill_description_truncated(desc):
             findings.append(Finding(

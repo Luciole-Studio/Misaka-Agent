@@ -23,9 +23,13 @@ def doc_dir(doc_id):
     return d if os.path.isdir(d) else None
 
 
-def _under(path, workspace):
-    """True when ``path`` lives inside the folder ``workspace`` (symlinks resolved)."""
-    return bool(path) and os.path.realpath(path).startswith(os.path.realpath(workspace) + os.sep)
+def under(path, workspace):
+    """True when ``path`` lives inside the folder ``workspace`` (symlinks resolved, whole path
+    components: ``/`` contains ``/tmp/a``, ``/tmp/ab`` is not under ``/tmp/a``)."""
+    if not path:
+        return False
+    p, w = os.path.realpath(path), os.path.realpath(workspace)
+    return p != w and os.path.commonpath([p, w]) == w
 
 
 # Content extraction and addressing
@@ -101,7 +105,7 @@ def build_tree(p):
 # File-tree storage
 
 def _page_path(ddir, page):
-    # ponytail: four digits cover 9,999 pages; expand only for a real larger document.
+    # ponytail: four digits keep the names aligned up to 9,999 pages; readers sort by number, so more still works.
     return os.path.join(ddir, "pages", f"p{page:04d}.txt")
 
 
@@ -259,7 +263,7 @@ def docs(workspace=None):
         m = _read_meta_at(ddir)
         if not m:
             continue
-        if workspace and not any(_under(x, workspace) for x in (m.get("paths") or [m.get("orig_path")])):
+        if workspace and not any(under(x, workspace) for x in (m.get("paths") or [m.get("orig_path")])):
             continue
         m = dict(m)
         m["has_tree"] = os.path.exists(os.path.join(ddir, "tree.json"))
@@ -275,11 +279,8 @@ def _iter_pages(doc_id, lo=None, hi=None):
     pdir = os.path.join(ddir, "pages")
     if not os.path.isdir(pdir):
         return
-    for fn in sorted(os.listdir(pdir)):
-        m = re.match(r"p(\d+)\.txt$", fn)
-        if not m:
-            continue
-        pg = int(m.group(1))
+    numbered = [(int(m.group(1)), fn) for fn in os.listdir(pdir) if (m := re.match(r"p(\d+)\.txt$", fn))]
+    for pg, fn in sorted(numbered):                       # by number: p10000 comes after p9999
         if (lo is not None and pg < lo) or (hi is not None and pg > hi):
             continue
         with open(os.path.join(pdir, fn), encoding="utf-8", errors="replace") as f:
@@ -391,13 +392,21 @@ def node_pages(doc_id, node_id):
 def read_pages(doc_id, start, end, max_chars=12000, offset=0):
     """The pages' text as one window: ``offset`` characters in, ``max_chars`` long, with a note
     on how to continue when there is more -- so a single page longer than the window is read
-    in successive calls rather than never."""
-    text = "".join(f"\n--- p{page} ---\n{t}" for page, t in _iter_pages(doc_id, lo=start, hi=end))
+    in successive calls rather than never. Pages are read only up to the window's end."""
     offset = max(0, int(offset or 0))
-    window = text[offset:offset + max_chars]
-    if offset + max_chars < len(text):
-        window += (f"\n… ({len(text) - offset - max_chars:,} more characters; call again with "
-                   f"offset={offset + max_chars} to continue)")
+    stop = offset + max_chars
+    pieces, seen, more = [], 0, False
+    for page, t in _iter_pages(doc_id, lo=start, hi=end):
+        chunk = f"\n--- p{page} ---\n{t}"
+        if seen + len(chunk) > offset:
+            pieces.append(chunk[max(0, offset - seen):stop - seen])
+        seen += len(chunk)
+        if seen > stop:
+            more = True
+            break
+    window = "".join(pieces)
+    if more:
+        window += f"\n… (more; call again with offset={stop} to continue)"
     return window
 
 

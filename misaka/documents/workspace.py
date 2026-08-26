@@ -22,13 +22,8 @@ def ingest_artifacts(con, task, artifacts=None):
     collected = []
     for relative in artifacts:
         relative = str(relative)
-        path = os.path.realpath(os.path.join(root, relative))
-        if (
-            not root
-            or os.path.isabs(relative)
-            or not path.startswith(root + os.sep)
-            or not os.path.isfile(path)
-        ):
+        path = os.path.join(root, relative)
+        if not root or os.path.isabs(relative) or not corpus.under(path, root) or not os.path.isfile(path):
             continue
         try:
             doc_id, _pages = corpus.ingest(path, title=f"[{task['id']}] {relative}",
