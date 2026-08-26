@@ -1,5 +1,6 @@
 """Session adapter for creating, resuming, and driving engine sessions."""
 import asyncio
+import weakref
 import json
 import os
 import threading
@@ -91,11 +92,33 @@ def event_line(ev):
     return json.dumps(to_json_event(ev), ensure_ascii=False, separators=(",", ":"))
 
 
+_ENV_LOCKS = weakref.WeakKeyDictionary()      # one lock per event loop
+
+
+def _env_lock():
+    loop = asyncio.get_running_loop()
+    lock = _ENV_LOCKS.get(loop)
+    if lock is None:
+        lock = _ENV_LOCKS[loop] = asyncio.Lock()
+    return lock
+
+
 async def run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
                       extension_factories=None):
-    """Run one prompt in a throwaway session and return its final text, timeout flag, error, and token usage."""
+    """Run one prompt in a throwaway session and return its final text, timeout flag, error, and token usage.
+
+    The session's identity (role, profile, workspace, usage lease, MCP config) travels through
+    ``os.environ`` because the extensions read it there, so two sessions in one process must not
+    overlap: the environment window is held under a per-loop lock. Separate processes (nodes,
+    cards) are naturally isolated."""
+    async with _env_lock():
+        return await _run_session(flags, prompt, cwd, on_event=on_event, timeout=timeout, env=env,
+                                  extension_factories=extension_factories)
+
+
+async def _run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
+                       extension_factories=None):
     old_env = {}
-    # Worker processes isolate these environment changes from parallel sessions.
     for k, v in (env or {}).items():
         old_env[k] = os.environ.get(k)
         os.environ[k] = v
