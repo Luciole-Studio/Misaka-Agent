@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import bisect
 import difflib
 import errno as errno_module
 import unicodedata
@@ -86,38 +87,76 @@ def restore_line_endings(text: str, ending: str) -> str:
     return text.replace("\n", "\r\n") if ending == "\r\n" else text
 
 
+_COMPAT_CHAR_MAP = str.maketrans({
+    "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'",
+    "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u201f": '"',
+    "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-",
+    "\u2014": "-", "\u2015": "-", "\u2212": "-",
+    "\u00a0": " ", "\u2002": " ", "\u2003": " ", "\u2004": " ",
+    "\u2005": " ", "\u2006": " ", "\u2007": " ", "\u2008": " ",
+    "\u2009": " ", "\u200a": " ", "\u202f": " ", "\u205f": " ",
+    "\u3000": " ",
+})
+
+
 def normalize_for_fuzzy_match(text: str) -> str:
-    return (
-        "\n".join(line.rstrip() for line in unicodedata.normalize("NFKC", text).split("\n"))
-        .replace("\u2018", "'")
-        .replace("\u2019", "'")
-        .replace("\u201a", "'")
-        .replace("\u201b", "'")
-        .replace("\u201c", '"')
-        .replace("\u201d", '"')
-        .replace("\u201e", '"')
-        .replace("\u201f", '"')
-        .replace("\u2010", "-")
-        .replace("\u2011", "-")
-        .replace("\u2012", "-")
-        .replace("\u2013", "-")
-        .replace("\u2014", "-")
-        .replace("\u2015", "-")
-        .replace("\u2212", "-")
-        .replace("\u00a0", " ")
-        .replace("\u2002", " ")
-        .replace("\u2003", " ")
-        .replace("\u2004", " ")
-        .replace("\u2005", " ")
-        .replace("\u2006", " ")
-        .replace("\u2007", " ")
-        .replace("\u2008", " ")
-        .replace("\u2009", " ")
-        .replace("\u200a", " ")
-        .replace("\u202f", " ")
-        .replace("\u205f", " ")
-        .replace("\u3000", " ")
-    )
+    return "\n".join(
+        line.rstrip() for line in unicodedata.normalize("NFKC", text).split("\n")
+    ).translate(_COMPAT_CHAR_MAP)
+
+
+def _norm_frag(text: str) -> str:
+    """``normalize_for_fuzzy_match`` for an intra-line fragment: no per-line rstrip."""
+    return unicodedata.normalize("NFKC", text).translate(_COMPAT_CHAR_MAP)
+
+
+# A pathological single line longer than this skips original-text recovery for its
+# boundary fragment (the per-column search below is quadratic in the line length).
+_RECOVERY_SCAN_LIMIT = 5000
+
+
+def _orig_col(orig_line: str, norm_line: str, col: int) -> int | None:
+    """Index into ``orig_line`` whose prefix normalizes to ``norm_line[:col]``, or None.
+
+    NFKC is not prefix-stable (composition can merge characters at a cut point), so this
+    scans candidate cut points instead of mapping arithmetically. Newlines never interact
+    across NFKC, which is what makes the per-line search sound.
+    """
+    if col == 0:
+        return 0
+    if col > len(norm_line) or len(orig_line) > _RECOVERY_SCAN_LIMIT:
+        return None
+    target = norm_line[:col]
+    for cut in range(1, len(orig_line) + 1):
+        if _norm_frag(orig_line[:cut]) == target:
+            return cut
+    return None
+
+
+def _recover_gap(
+    orig_lines: list[str],
+    norm_lines: list[str],
+    start: tuple[int, int],
+    end: tuple[int, int],
+) -> str:
+    """The original spelling of the normalized-content span ``start``..``end`` (line, col).
+
+    Whole lines inside the span are returned verbatim from the original. A boundary that
+    cuts a line mid-way is recovered through ``_orig_col``; when that fails, only that
+    line's fragment falls back to its normalized form.
+    """
+    (line_a, col_a), (line_b, col_b) = start, end
+    if line_a == line_b:
+        cut_a = _orig_col(orig_lines[line_a], norm_lines[line_a], col_a)
+        cut_b = _orig_col(orig_lines[line_a], norm_lines[line_a], col_b)
+        if cut_a is not None and cut_b is not None and cut_a <= cut_b:
+            return orig_lines[line_a][cut_a:cut_b]
+        return norm_lines[line_a][col_a:col_b]
+    cut_a = _orig_col(orig_lines[line_a], norm_lines[line_a], col_a)
+    head = orig_lines[line_a][cut_a:] if cut_a is not None else norm_lines[line_a][col_a:]
+    cut_b = _orig_col(orig_lines[line_b], norm_lines[line_b], col_b)
+    tail = orig_lines[line_b][:cut_b] if cut_b is not None else norm_lines[line_b][:col_b]
+    return "\n".join([head, *orig_lines[line_a + 1 : line_b], tail])
 
 
 def fuzzy_find_text(content: str, old_text: str) -> FuzzyMatchResult:
@@ -252,6 +291,22 @@ def apply_edits_to_normalized_content(
                 "Merge them into one edit or target disjoint regions."
             )
 
+    if base_content is not normalized_content:
+        # Fuzzy coordinates, original bytes: matches were found in the normalized text, but
+        # the file must not be rewritten in normalized form — that silently NFKC-folds every
+        # untouched line (curly quotes, full-width characters, ligatures), which for a corpus
+        # of humanities sources is data corruption, not normalization. Splice each newText at
+        # its matched span and recover every gap between spans from the original content.
+        reconstructed = _splice_edits_preserving_original(
+            normalized_content, base_content, matched_edits
+        )
+        if reconstructed is not None:
+            if reconstructed == normalized_content:
+                raise _get_no_change_error(path, len(normalized_edits))
+            return AppliedEditsResult(baseContent=normalized_content, newContent=reconstructed)
+        # Line structure diverged under normalization (never observed for NFKC; guarded
+        # anyway): fall back to the normalized splice below rather than corrupt offsets.
+
     new_content = base_content
     for matched in reversed(matched_edits):
         new_content = (
@@ -264,6 +319,50 @@ def apply_edits_to_normalized_content(
         raise _get_no_change_error(path, len(normalized_edits))
 
     return AppliedEditsResult(baseContent=base_content, newContent=new_content)
+
+
+def _splice_edits_preserving_original(
+    normalized_content: str,
+    base_content: str,
+    matched_edits: list[_MatchedEdit],
+) -> str | None:
+    """Apply ``matched_edits`` (spans in ``base_content`` coordinates) onto the original
+    ``normalized_content``. Returns None when the two texts do not share line structure."""
+    orig_lines = normalized_content.split("\n")
+    norm_lines = base_content.split("\n")
+    if len(orig_lines) != len(norm_lines):
+        return None
+
+    line_starts = [0]
+    for line in norm_lines:
+        line_starts.append(line_starts[-1] + len(line) + 1)
+
+    def locate(index: int) -> tuple[int, int]:
+        line_number = bisect.bisect_right(line_starts, index) - 1
+        return line_number, index - line_starts[line_number]
+
+    pieces: list[str] = []
+    cursor = 0
+    for matched in matched_edits:
+        pieces.append(_recover_gap(orig_lines, norm_lines, locate(cursor), locate(matched.matchIndex)))
+        span_end = matched.matchIndex + matched.matchLength
+        if matched.newText == base_content[matched.matchIndex : span_end]:
+            # A no-op edit (oldText == newText modulo normalization) must not fold the
+            # span's original spelling; keeping the original bytes also lets a lone no-op
+            # surface as the "No changes" error instead of a silent success.
+            pieces.append(_recover_gap(orig_lines, norm_lines, locate(matched.matchIndex), locate(span_end)))
+        else:
+            pieces.append(matched.newText)
+        cursor = span_end
+    # The final gap runs to the end of the file: take the original tail verbatim. Mapping
+    # only the start avoids locate(len(base_content)) landing before the last line's
+    # trailing whitespace when the file has no final newline (the last line is rstripped
+    # in normalized coordinates, so an end-mapped cut would drop that whitespace).
+    tail_line, tail_col = locate(cursor)
+    cut = _orig_col(orig_lines[tail_line], norm_lines[tail_line], tail_col)
+    head = orig_lines[tail_line][cut:] if cut is not None else norm_lines[tail_line][tail_col:]
+    pieces.append("\n".join([head, *orig_lines[tail_line + 1 :]]))
+    return "".join(pieces)
 
 
 def generate_unified_patch(path: str, old_content: str, new_content: str, context_lines: int = 4) -> str:
