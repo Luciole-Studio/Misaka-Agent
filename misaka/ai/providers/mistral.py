@@ -47,14 +47,9 @@ try:
 except ImportError:  # optional extra: misaka[mistral]
     _MistralClient = None
 
-from misaka.ai.providers._common import (
-    _empty_usage,
-    _is_aborted,
-    _option,
-    safe_json_stringify,
-)
+from misaka.ai.providers._common import _empty_usage, _option, safe_json_stringify
 from misaka.ai.providers.sdk import require
-from misaka.utils.values import maybe_await
+from misaka.utils.values import maybe_await, signal_aborted
 
 MISTRAL_TOOL_CALL_ID_LENGTH = 9
 MAX_MISTRAL_ERROR_BODY_CHARS = 4000
@@ -87,7 +82,7 @@ class MistralOptions(TypedDict, total=False):
 
 
 async def _await_with_abort(request_factory: Any, signal: Any) -> Any:
-    if _is_aborted(signal):
+    if signal_aborted(signal):
         raise RuntimeError("Request was aborted")
 
     request = request_factory()
@@ -131,7 +126,7 @@ async def _iterate_with_abort(iterable: AsyncIterable[Any], signal: Any) -> Asyn
     iterator = aiter(iterable)
 
     while True:
-        if _is_aborted(signal):
+        if signal_aborted(signal):
             raise RuntimeError("Request was aborted")
 
         next_item = anext(iterator, _STREAM_END)
@@ -210,14 +205,14 @@ def stream_mistral(
             stream.push(StartEvent(partial=output))
             await consume_chat_stream(model, output, stream, mistral_stream, _option(options, "signal"))
 
-            if _is_aborted(_option(options, "signal")):
+            if signal_aborted(_option(options, "signal")):
                 raise RuntimeError("Request was aborted")
             if output.stopReason in {"aborted", "error"}:
                 raise RuntimeError("An unknown error occurred")
 
             stream.push(DoneEvent(reason=output.stopReason, message=output))
         except Exception as error:  # noqa: BLE001
-            output.stopReason = "aborted" if _is_aborted(_option(options, "signal")) else "error"
+            output.stopReason = "aborted" if signal_aborted(_option(options, "signal")) else "error"
             output.errorMessage = format_mistral_error(error)
             stream.push(ErrorEvent(reason=output.stopReason, error=output))
         finally:

@@ -20,7 +20,6 @@ from misaka.ai.providers._common import (
     _await_with_signal,
     _close_stream,
     _empty_usage,
-    _is_aborted,
     _option,
     resolve_cache_retention,
 )
@@ -67,7 +66,7 @@ from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stre
 from misaka.ai.utils.headers import headers_to_record
 from misaka.ai.utils.json_parse import parse_streaming_json
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
-from misaka.utils.values import maybe_await, read_field
+from misaka.utils.values import maybe_await, read_field, signal_aborted
 
 
 def _set_extra(params: dict[str, Any], key: str, value: Any) -> None:
@@ -335,7 +334,7 @@ def stream_openai_completions(
             for block in list(output.content):
                 finish_block(block)
 
-            if _is_aborted(_option(options, "signal")):
+            if signal_aborted(_option(options, "signal")):
                 raise RuntimeError("Request was aborted")
             if output.stopReason == "aborted":
                 raise RuntimeError("Request was aborted")
@@ -346,7 +345,7 @@ def stream_openai_completions(
 
             stream.push(DoneEvent(reason=output.stopReason, message=output))
         except Exception as error:  # noqa: BLE001
-            output.stopReason = "aborted" if _is_aborted(_option(options, "signal")) else "error"
+            output.stopReason = "aborted" if signal_aborted(_option(options, "signal")) else "error"
             output.errorMessage = _format_completion_error(error)
             error_payload = getattr(error, "error", None)
             raw_metadata = (

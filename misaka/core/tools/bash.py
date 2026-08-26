@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
-from misaka.core.tools._common import _is_aborted, _string_arg, abort_race
+from misaka.core.tools._common import _string_arg, abort_race
 from misaka.core.tools.output_accumulator import (
     OutputAccumulator,
     OutputAccumulatorOptions,
@@ -39,7 +39,7 @@ from misaka.utils.shell import (
     track_detached_child_pid,
     untrack_detached_child_pid,
 )
-from misaka.utils.values import read_field
+from misaka.utils.values import read_field, signal_aborted
 
 _BASH_PREVIEW_LINES = 5
 _BASH_UPDATE_THROTTLE_SECONDS = 0.1
@@ -217,7 +217,7 @@ class _LocalBashOperations:
                 else:
                     exit_code = await wait_task
 
-                if _is_aborted(signal):
+                if signal_aborted(signal):
                     raise RuntimeError("aborted")
                 if timed_out:
                     raise RuntimeError(f"timeout:{timeout}")

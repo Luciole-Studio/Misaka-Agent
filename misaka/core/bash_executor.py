@@ -14,6 +14,7 @@ from misaka.core.tools.bash import BashOperations
 from misaka.core.tools.truncate import DEFAULT_MAX_BYTES, truncate_tail
 from misaka.utils.ansi import strip_ansi
 from misaka.utils.shell import sanitize_binary_output
+from misaka.utils.values import signal_aborted
 
 
 class BashExecutorOptions(TypedDict, total=False):
@@ -28,10 +29,6 @@ class BashResult:
     cancelled: bool
     truncated: bool
     fullOutputPath: str | None = None
-
-
-def _is_aborted(signal: Any | None) -> bool:
-    return bool(getattr(signal, "aborted", False))
 
 
 def _js_string_length(value: str) -> int:
@@ -104,7 +101,7 @@ async def execute_bash_with_operations(
             if truncated.truncated:
                 ensure_temp_file()
             close_temp_file()
-            if _is_aborted(resolved_options.get("signal")):
+            if signal_aborted(resolved_options.get("signal")):
                 return BashResult(
                     output=truncated.content if truncated.truncated else full_output,
                     exitCode=None,
@@ -119,7 +116,7 @@ async def execute_bash_with_operations(
         if truncated.truncated:
             ensure_temp_file()
         close_temp_file()
-        cancelled = _is_aborted(resolved_options.get("signal"))
+        cancelled = signal_aborted(resolved_options.get("signal"))
         return BashResult(
             output=truncated.content if truncated.truncated else full_output,
             exitCode=None if cancelled else result.get("exitCode"),

@@ -18,11 +18,6 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 
-def _is_aborted(signal: Any | None) -> bool:
-    """Whether the caller has already given up on this tool call."""
-    return bool(getattr(signal, "aborted", False))
-
-
 def abort_wait_task(signal: Any | None) -> asyncio.Task[None] | None:
     """A task that finishes when the caller aborts, or None if this signal cannot say.
 

@@ -17,7 +17,6 @@ from misaka.ai.types import Api, ImageContent, Model, TextContent
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.tools._common import (
     _ignore_background_task_result,
-    _is_aborted,
     _string_arg,
     abort_race,
 )
@@ -41,7 +40,7 @@ from misaka.ui.tui.interactive.theme.theme import get_language_from_path, highli
 from misaka.utils.image_resize import format_dimension_note, resize_image
 from misaka.utils.mime import detect_supported_image_mime_type_from_file
 from misaka.utils.paths import format_path_relative_to_cwd_or_absolute
-from misaka.utils.values import read_field
+from misaka.utils.values import read_field, signal_aborted
 
 
 class ReadToolInput(BaseModel):
@@ -246,12 +245,12 @@ def create_read_tool_definition(
         parsed = ReadToolInput.model_validate(params)
         absolute_path = resolve_read_path(parsed.path, cwd)
 
-        if _is_aborted(signal):
+        if signal_aborted(signal):
             raise RuntimeError("Operation aborted")
 
         async def worker() -> AgentToolResult:
             await operations.access(absolute_path)
-            if _is_aborted(signal):
+            if signal_aborted(signal):
                 return AgentToolResult(content=[], details=None)
 
             detect_mime = getattr(operations, "detectImageMimeType", None)
@@ -344,7 +343,7 @@ def create_read_tool_definition(
 
                 content = [TextContent(text=output_text)]
 
-            if _is_aborted(signal):
+            if signal_aborted(signal):
                 return AgentToolResult(content=[], details=None)
             return AgentToolResult(content=content, details=details)
 
@@ -359,7 +358,7 @@ def create_read_tool_definition(
                 raise RuntimeError("Operation aborted")
 
             result = await worker_task
-            if _is_aborted(signal):
+            if signal_aborted(signal):
                 raise RuntimeError("Operation aborted")
             return result
 

@@ -29,7 +29,6 @@ from misaka.ai.providers._common import (
     _await_with_signal,
     _close_stream,
     _empty_usage,
-    _is_aborted,
     _option,
     resolve_cache_retention,
     safe_json_stringify,
@@ -74,7 +73,7 @@ from misaka.ai.utils.headers import headers_to_record
 from misaka.ai.utils.json_parse import parse_streaming_json
 from misaka.ai.utils.node_http_proxy import create_http_proxy_agents_for_target
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
-from misaka.utils.values import maybe_await
+from misaka.utils.values import maybe_await, signal_aborted
 
 BedrockThinkingDisplay = Literal["summarized", "omitted"]
 
@@ -248,7 +247,7 @@ def stream_bedrock(
                 if next_input is not None:
                     command_input = next_input
 
-            if _is_aborted(signal):
+            if signal_aborted(signal):
                 raise RuntimeError("Request was aborted")
 
             request_input = {key: value for key, value in command_input.items() if value is not None}
@@ -268,7 +267,7 @@ def stream_bedrock(
             partial_json: dict[int, str] = {}
 
             async for item in iterate_stream_events(response_stream, signal):
-                if _is_aborted(signal):
+                if signal_aborted(signal):
                     raise RuntimeError("Request was aborted")
 
                 if "messageStart" in item:
@@ -311,14 +310,14 @@ def stream_bedrock(
                         exception_name = event_name[0].upper() + event_name[1:]
                         raise BedrockRuntimeServiceException(exception_name, str(payload.get("message") or ""))
 
-            if _is_aborted(signal):
+            if signal_aborted(signal):
                 raise RuntimeError("Request was aborted")
             if output.stopReason in {"error", "aborted"}:
                 raise RuntimeError("An unknown error occurred")
 
             stream.push(DoneEvent(reason=output.stopReason, message=output))
         except Exception as error:  # noqa: BLE001
-            output.stopReason = "aborted" if _is_aborted(signal) else "error"
+            output.stopReason = "aborted" if signal_aborted(signal) else "error"
             output.errorMessage = format_bedrock_error(error)
             stream.push(ErrorEvent(reason=output.stopReason, error=output))
         finally:

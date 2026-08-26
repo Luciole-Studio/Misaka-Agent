@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
-from misaka.core.tools._common import _drain_worker, _is_aborted, abort_race
+from misaka.core.tools._common import _drain_worker, abort_race
 from misaka.core.tools.file_mutation_queue import with_file_mutation_queue
 from misaka.core.tools.path_utils import resolve_to_cwd
 from misaka.core.tools.render_utils import (
@@ -27,7 +27,7 @@ from misaka.core.tools.tool_definition_wrapper import wrap_tool_definition
 from misaka.ui.tui import Container, Text
 from misaka.ui.tui.interactive.theme.theme import get_language_from_path, highlight_code
 from misaka.utils import atomic
-from misaka.utils.values import read_field
+from misaka.utils.values import read_field, signal_aborted
 
 
 class WriteToolInput(BaseModel):
@@ -245,7 +245,7 @@ def create_write_tool_definition(
         directory = os.path.dirname(absolute_path)
 
         async def mutate() -> AgentToolResult:
-            if _is_aborted(signal):
+            if signal_aborted(signal):
                 raise RuntimeError("Operation aborted")
 
             aborted = False

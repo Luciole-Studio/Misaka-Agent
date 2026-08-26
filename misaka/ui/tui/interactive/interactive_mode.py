@@ -146,7 +146,7 @@ from misaka.utils.clipboard_image import (
 )
 from misaka.utils.shell import kill_tracked_detached_children
 from misaka.utils.tools_manager import find_tool
-from misaka.utils.values import maybe_await, read_field
+from misaka.utils.values import maybe_await, read_field, signal_aborted
 
 interactive_theme = import_module("misaka.ui.tui.interactive.theme.theme")
 
@@ -303,15 +303,11 @@ def _make_bash_truncation_result(content: str) -> TruncationResult:
     )
 
 
-def _is_signal_aborted(signal: Any) -> bool:
-    return bool(getattr(signal, "aborted", False))
-
-
 def _register_abort_handler(signal: Any, callback: Callable[[], None]) -> Callable[[], None]:
     if signal is None:
         return lambda: None
 
-    if _is_signal_aborted(signal):
+    if signal_aborted(signal):
         callback()
         return lambda: None
 
@@ -2042,7 +2038,7 @@ class InteractiveMode:
         opts: dict[str, Any] | None = None,
     ) -> str | None:
         signal = read_field(opts, "signal")
-        if _is_signal_aborted(signal):
+        if signal_aborted(signal):
             return None
 
         loop = asyncio.get_running_loop()
@@ -2123,7 +2119,7 @@ class InteractiveMode:
         opts: dict[str, Any] | None = None,
     ) -> str | None:
         signal = read_field(opts, "signal")
-        if _is_signal_aborted(signal):
+        if signal_aborted(signal):
             return None
 
         loop = asyncio.get_running_loop()

@@ -45,7 +45,7 @@ from misaka.ai.types import (
 )
 from misaka.ai.utils.event_stream import EventStream
 from misaka.ai.utils.validation import validate_tool_arguments
-from misaka.utils.values import maybe_await
+from misaka.utils.values import maybe_await, signal_aborted
 
 type AgentEventSink = Callable[[AgentEvent], Awaitable[None] | None]
 
@@ -459,7 +459,7 @@ async def execute_tool_calls_sequential(
         finalized_calls.append(finalized)
         messages.append(tool_result_message)
 
-        if _signal_aborted(signal):
+        if signal_aborted(signal):
             break
 
     for finalized in await _answer_unreached_tool_calls(tool_calls, len(finalized_calls), emit):
@@ -503,7 +503,7 @@ async def execute_tool_calls_parallel(
             )
             await emit_tool_execution_end(finalized, emit)
             finalized_entries.append(finalized)
-            if _signal_aborted(signal):
+            if signal_aborted(signal):
                 break
             continue
 
@@ -521,7 +521,7 @@ async def execute_tool_calls_parallel(
             return finalized
 
         finalized_entries.append(finalize())
-        if _signal_aborted(signal):
+        if signal_aborted(signal):
             break
 
     finalized_entries.extend(
@@ -554,7 +554,7 @@ def _reraise_if_caller_cancelled(error: BaseException, signal: Any | None) -> No
     ``task.cancel()`` never arrives and the loop keeps running. When our own abort
     signal is set the cancellation is ours, and the aborted result is the honest answer.
     """
-    if isinstance(error, asyncio.CancelledError) and not _signal_aborted(signal):
+    if isinstance(error, asyncio.CancelledError) and not signal_aborted(signal):
         raise error
 
 
@@ -635,7 +635,7 @@ async def prepare_tool_call(
                 )
             )
             before_result = _coerce_before_tool_call_result(before_result)
-            if _signal_aborted(signal):
+            if signal_aborted(signal):
                 return ImmediateToolCallOutcome(
                     kind="immediate",
                     result=create_error_tool_result("Operation aborted"),
@@ -655,7 +655,7 @@ async def prepare_tool_call(
                     update={"arguments": before_result.updatedInput}
                 )
                 validated_args = validate_tool_arguments(tool, prepared_tool_call)
-        if _signal_aborted(signal):
+        if signal_aborted(signal):
             return ImmediateToolCallOutcome(
                 kind="immediate",
                 result=create_error_tool_result("Operation aborted"),
@@ -860,16 +860,6 @@ def _to_mapping(value: Any) -> dict[str, Any]:
     if is_dataclass(value):
         return {field.name: getattr(value, field.name) for field in fields(value)}
     raise TypeError(f"Cannot convert {type(value).__name__} to mapping")
-
-
-def _signal_aborted(signal: Any | None) -> bool:
-    if signal is None:
-        return False
-    if hasattr(signal, "aborted"):
-        return bool(signal.aborted)
-    if hasattr(signal, "is_set"):
-        return bool(signal.is_set())
-    return False
 
 
 def _coerce_agent_tool_result(value: AgentToolResult | dict[str, Any]) -> AgentToolResult:

@@ -20,7 +20,6 @@ from misaka.ai.providers._common import (
     _await_with_signal,
     _close_stream,
     _empty_usage,
-    _is_aborted,
     _option,
 )
 from misaka.ai.providers.openai_prompt_cache import clamp_openai_prompt_cache_key
@@ -43,7 +42,7 @@ from misaka.ai.types import (
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
-from misaka.utils.values import maybe_await
+from misaka.utils.values import maybe_await, signal_aborted
 
 DEFAULT_AZURE_API_VERSION = "v1"
 AZURE_TOOL_CALL_PROVIDERS = {"openai", "openai-codex", "opencode", "azure-openai-responses"}
@@ -291,7 +290,7 @@ def stream_azure_openai_responses(
             signal = _option(options, "signal")
             await process_responses_stream(_iterate_stream(openai_stream, signal), output, stream, model)
 
-            if _is_aborted(signal):
+            if signal_aborted(signal):
                 raise RuntimeError("Request was aborted")
             if output.stopReason in {"aborted", "error"}:
                 raise RuntimeError("An unknown error occurred")
@@ -301,7 +300,7 @@ def stream_azure_openai_responses(
                 _delete_stream_scratch_field(block, "index")
                 _delete_stream_scratch_field(block, "partialJson")
             signal = _option(options, "signal")
-            output.stopReason = "aborted" if _is_aborted(signal) else "error"
+            output.stopReason = "aborted" if signal_aborted(signal) else "error"
             output.errorMessage = format_azure_openai_error(error)
             stream.push(ErrorEvent(reason=output.stopReason, error=output))
         finally:

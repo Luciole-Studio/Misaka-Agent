@@ -23,7 +23,6 @@ from misaka.ai.env_api_keys import get_env_api_key
 from misaka.ai.models import clamp_thinking_level
 from misaka.ai.providers._common import (
     _create_abort_wait_task,
-    _is_aborted,
     _option,
     apply_service_tier_pricing,
     get_service_tier_cost_multiplier,
@@ -53,7 +52,7 @@ from misaka.ai.utils.diagnostics import (
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
-from misaka.utils.values import maybe_await
+from misaka.utils.values import maybe_await, signal_aborted
 
 DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api"
 JWT_CLAIM_PATH = "https://api.openai.com/auth"
@@ -173,7 +172,7 @@ def _parse_retry_after_delay_ms(response: httpx.Response, default_delay_ms: int)
 
 
 async def _await_with_abort(awaitable: Any, signal: Any, *, on_abort: Any = None) -> Any:
-    if _is_aborted(signal):
+    if signal_aborted(signal):
         if isinstance(awaitable, asyncio.Future):
             awaitable.cancel()
         else:
@@ -628,7 +627,7 @@ async def _connect_websocket(
     connector = await _get_websocket_connector()
     if connector is None:
         raise RuntimeError("WebSocket transport is not available in this runtime")
-    if _is_aborted(signal):
+    if signal_aborted(signal):
         raise RuntimeError("Request was aborted")
 
     websocket_headers = dict(headers)
@@ -656,7 +655,7 @@ async def _connect_websocket(
             abort_task.cancel()
             await asyncio.gather(abort_task, return_exceptions=True)
 
-    if _is_aborted(signal):
+    if signal_aborted(signal):
         _run_socket_close_nowait(socket, 1000, "aborted")
         raise RuntimeError("Request was aborted")
     return socket
@@ -732,7 +731,7 @@ async def _acquire_websocket(
 
 async def parse_websocket(socket: Any, signal: Any = None) -> AsyncIterator[dict[str, Any]]:
     while True:
-        if _is_aborted(signal):
+        if signal_aborted(signal):
             raise RuntimeError("Request was aborted")
 
         recv_task = asyncio.create_task(maybe_await(socket.recv()))
@@ -892,7 +891,7 @@ async def process_websocket_stream(
                 "applyServiceTierPricing": lambda usage, tier: apply_service_tier_pricing(usage, tier, model),
             },
         )
-        if _is_aborted(_option(options, "signal")):
+        if signal_aborted(_option(options, "signal")):
             keep_connection = False
         elif use_cached_context and entry is not None and output.responseId:
             response_items = [
@@ -985,13 +984,13 @@ def stream_openai_codex_responses(
                         lambda: websocket_state.__setitem__("started", True),
                         options,
                     )
-                    if _is_aborted(_option(options, "signal")):
+                    if signal_aborted(_option(options, "signal")):
                         raise RuntimeError("Request was aborted")
                     stream.push(DoneEvent(reason=output.stopReason, message=output))
                     stream.end()
                     return
                 except Exception as error:
-                    aborted = _is_aborted(_option(options, "signal"))
+                    aborted = signal_aborted(_option(options, "signal"))
                     if aborted or is_codex_non_transport_error(error):
                         raise
                     append_assistant_message_diagnostic(
@@ -1021,7 +1020,7 @@ def stream_openai_codex_responses(
             async with httpx.AsyncClient(follow_redirects=True) as client:
                 last_error: RuntimeError | None = None
                 for attempt in range(MAX_RETRIES + 1):
-                    if _is_aborted(signal):
+                    if signal_aborted(signal):
                         raise RuntimeError("Request was aborted")
                     try:
                         request = client.build_request("POST", url, headers=sse_headers, json=body)
@@ -1063,7 +1062,7 @@ def stream_openai_codex_responses(
                 stream.push(StartEvent(partial=output))
                 await process_stream(response, output, stream, model, options)
 
-                if _is_aborted(signal):
+                if signal_aborted(signal):
                     raise RuntimeError("Request was aborted")
                 stream.push(DoneEvent(reason=output.stopReason, message=output))
             stream.end()
@@ -1076,7 +1075,7 @@ def stream_openai_codex_responses(
                     delattr(block, "partialJson")
                 except AttributeError:
                     continue
-            output.stopReason = "aborted" if _is_aborted(_option(options, "signal")) else "error"
+            output.stopReason = "aborted" if signal_aborted(_option(options, "signal")) else "error"
             output.errorMessage = str(error)
             stream.push(ErrorEvent(reason=output.stopReason, error=output))
             stream.end()

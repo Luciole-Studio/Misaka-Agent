@@ -12,6 +12,7 @@ import httpx
 from misaka.ai.models import get_models
 from misaka.ai.utils.oauth.device_code import poll_oauth_device_code_flow
 from misaka.ai.utils.oauth.types import OAuthCredentials, OAuthLoginCallbacks
+from misaka.utils.values import signal_aborted
 
 CLIENT_ID = base64.b64decode("SXYxLmI1MDdhMDhjODdlY2ZlOTg=").decode("utf-8")
 COPILOT_HEADERS = {
@@ -52,16 +53,6 @@ def _get_base_url_from_token(token: str) -> str | None:
         return None
     api_host = re.sub(r"^proxy\.", "api.", match.group(1))
     return f"https://{api_host}"
-
-
-def _signal_aborted(signal: Any) -> bool:
-    if signal is None:
-        return False
-    if hasattr(signal, "aborted"):
-        return bool(signal.aborted)
-    if hasattr(signal, "is_set"):
-        return bool(signal.is_set())
-    return False
 
 
 def get_github_copilot_base_url(token: str | None = None, enterprise_domain: str | None = None) -> str:
@@ -237,7 +228,7 @@ async def login_github_copilot(options: dict[str, Any]) -> OAuthCredentials:
     )
 
     signal = options.get("signal")
-    if _signal_aborted(signal):
+    if signal_aborted(signal):
         raise RuntimeError("Login cancelled")
 
     trimmed = input_text.strip()

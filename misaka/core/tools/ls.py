@@ -14,11 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
-from misaka.core.tools._common import (
-    _ignore_background_task_result,
-    _is_aborted,
-    abort_race,
-)
+from misaka.core.tools._common import _ignore_background_task_result, abort_race
 from misaka.core.tools.path_utils import resolve_to_cwd
 from misaka.core.tools.render_utils import (
     get_text_output,
@@ -35,7 +31,7 @@ from misaka.core.tools.truncate import (
     truncate_head,
 )
 from misaka.ui.tui import Text
-from misaka.utils.values import maybe_await, read_field
+from misaka.utils.values import maybe_await, read_field, signal_aborted
 
 T = TypeVar("T")
 
@@ -157,7 +153,7 @@ def create_ls_tool_definition(
         _on_update: Callable[[AgentToolResult], None] | None = None,
         _ctx: Any = None,
     ) -> AgentToolResult:
-        if _is_aborted(signal):
+        if signal_aborted(signal):
             raise RuntimeError("Operation aborted")
 
         parsed = LsToolInput.model_validate(params)

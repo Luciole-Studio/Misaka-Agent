@@ -7,14 +7,11 @@ from pydantic import BaseModel, Field
 from misaka.core.extensions.types import ToolDefinition
 from misaka.documents import index as corpus
 from misaka.platform.prompt_guard import untrusted
+from misaka.utils.values import signal_aborted
 
 
 def _text(s):
     return {"content": [{"type": "text", "text": s}], "details": {}}
-
-
-def _aborted(signal):
-    return bool(getattr(signal, "aborted", False))
 
 
 async def _off_loop(fn, *args, **kwargs):
@@ -52,7 +49,7 @@ def register(harn):
         parameters=ListParams)
     async def doc_list(tool_call_id, params, signal, on_update, ctx):
         rows = await _off_loop(corpus.docs, workspace=_workspace(ctx))
-        if _aborted(signal):
+        if signal_aborted(signal):
             return _text("Cancelled.")
         if params.query:
             rows = [r for r in rows if params.query.lower() in (r["title"] or "").lower()]
@@ -74,7 +71,7 @@ def register(harn):
     async def doc_outline(tool_call_id, params, signal, on_update, ctx):
         workspace = _workspace(ctx)
         o = await _off_loop(corpus.tree_outline, params.doc_id, workspace=workspace)
-        if _aborted(signal):
+        if signal_aborted(signal):
             return _text("Cancelled.")
         if o:
             return _text(untrusted(params.doc_id, o)
@@ -114,7 +111,7 @@ def register(harn):
             return _text("Provide either node or pages.")
         txt = await _off_loop(corpus.read_pages, params.doc_id, start, end,
                               offset=params.offset, workspace=workspace)
-        if _aborted(signal):
+        if signal_aborted(signal):
             return _text("Cancelled.")
         if not txt:
             return _text(f"No text was extracted from p{start}-{end}; the pages may contain only images.")
@@ -132,7 +129,7 @@ def register(harn):
     async def doc_find(tool_call_id, params, signal, on_update, ctx):
         hits = await _off_loop(corpus.search_literal, params.query, doc_id=params.doc_id or None,
                                workspace=_workspace(ctx))
-        if _aborted(signal):
+        if signal_aborted(signal):
             return _text("Cancelled.")
         if not hits:
             return _text("No matches.")
@@ -162,7 +159,7 @@ def register(harn):
                 added, skipped = [], [(path, str(e))]
         else:
             return _text(f"Not found: {params.path}")
-        if _aborted(signal):
+        if signal_aborted(signal):
             return _text("Cancelled (the indexing itself completed).")
         lines = [f"  {did}  {os.path.relpath(p, ws)}" for did, p in added]
         lines += [f"  skipped  {os.path.relpath(p, ws)}: {why}" for p, why in skipped]
@@ -183,7 +180,7 @@ def register(harn):
     async def doc_verify(tool_call_id, params, signal, on_update, ctx):
         v = await _off_loop(corpus.verify_quote, params.doc_id, params.quote,
                             workspace=_workspace(ctx))
-        if _aborted(signal):
+        if signal_aborted(signal):
             return _text("Cancelled.")
         if not v:
             return _text("❌ The quotation was not found. Do not cite it as a verified quotation.")

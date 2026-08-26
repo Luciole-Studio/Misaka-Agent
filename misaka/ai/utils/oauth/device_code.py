@@ -7,6 +7,8 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal, TypedDict
 
+from misaka.utils.values import signal_aborted
+
 CANCEL_MESSAGE = "Login cancelled"
 TIMEOUT_MESSAGE = "Device flow timed out"
 SLOW_DOWN_TIMEOUT_MESSAGE = (
@@ -52,18 +54,8 @@ class OAuthDeviceCodePollOptions(TypedDict, total=False):
     signal: Any | None
 
 
-def _signal_aborted(signal: Any) -> bool:
-    if signal is None:
-        return False
-    if hasattr(signal, "aborted"):
-        return bool(signal.aborted)
-    if hasattr(signal, "is_set"):
-        return bool(signal.is_set())
-    return False
-
-
 async def _abortable_sleep(ms: int, signal: Any, cancel_message: str) -> None:
-    if _signal_aborted(signal):
+    if signal_aborted(signal):
         raise RuntimeError(cancel_message)
 
     # Wait on the abort itself instead of waking twenty times a second for the whole
@@ -77,7 +69,7 @@ async def _abortable_sleep(ms: int, signal: Any, cancel_message: str) -> None:
             waiters.append(asyncio.create_task(result))
     try:
         await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
-        if _signal_aborted(signal):
+        if signal_aborted(signal):
             raise RuntimeError(cancel_message)
     finally:
         for task in waiters:
@@ -109,7 +101,7 @@ async def poll_oauth_device_code_flow(
 
     slow_down_responses = 0
     while time.time() < deadline:
-        if _signal_aborted(signal):
+        if signal_aborted(signal):
             raise RuntimeError(CANCEL_MESSAGE)
 
         remaining_ms = int(max(0, deadline - time.time()) * 1000) if deadline != float("inf") else interval_ms

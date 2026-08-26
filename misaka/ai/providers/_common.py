@@ -17,15 +17,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from misaka.ai.types import CacheRetention, Model, Usage, UsageCost
-from misaka.utils.values import maybe_await
-
-
-def _is_aborted(signal: Any) -> bool:
-    if signal is None:
-        return False
-    if getattr(signal, "aborted", False):
-        return True
-    return bool(getattr(signal, "is_set", lambda: False)())
+from misaka.utils.values import maybe_await, signal_aborted
 
 
 def _create_abort_wait_task(signal: Any) -> asyncio.Task[None] | None:
@@ -35,7 +27,7 @@ def _create_abort_wait_task(signal: Any) -> asyncio.Task[None] | None:
 
 
 async def _await_with_signal(awaitable: Any, signal: Any, *, on_abort: Any = None) -> Any:
-    if _is_aborted(signal):
+    if signal_aborted(signal):
         if isinstance(awaitable, asyncio.Future):
             awaitable.cancel()
         else:
@@ -67,7 +59,7 @@ async def _await_with_signal(awaitable: Any, signal: Any, *, on_abort: Any = Non
 async def _await_maybe_with_signal(value: Any, signal: Any, *, on_abort: Any = None) -> Any:
     if hasattr(value, "__await__"):
         return await _await_with_signal(value, signal, on_abort=on_abort)
-    if _is_aborted(signal):
+    if signal_aborted(signal):
         if on_abort is not None:
             await maybe_await(on_abort())
         raise RuntimeError("Request was aborted")

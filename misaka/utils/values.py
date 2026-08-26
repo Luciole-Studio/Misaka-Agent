@@ -35,3 +35,12 @@ async def maybe_await(value: Any) -> Any:
     if inspect.isawaitable(value):
         return await value
     return value
+
+
+def signal_aborted(signal: Any) -> bool:
+    """Whether the caller has given up on this call.
+
+    Eleven modules had grown their own copy of this line under three names -- ``_is_aborted``,
+    ``_signal_aborted``, ``_aborted``. It is the same question, so it has one answer.
+    """
+    return bool(read_field(signal, "aborted", False))

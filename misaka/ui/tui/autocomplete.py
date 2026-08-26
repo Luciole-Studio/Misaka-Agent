@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from misaka.ui.tui.fuzzy import fuzzyFilter
+from misaka.utils.values import signal_aborted
 
 PATH_DELIMITERS = {" ", "\t", '"', "'", "="}
 _MISSING = object()
@@ -111,18 +112,6 @@ def build_completion_value(path: str, *, is_directory: bool, is_at_prefix: bool,
     return f'{prefix}"{path}"'
 
 
-def _is_aborted(signal: Any) -> bool:
-    if signal is None:
-        return False
-    aborted = getattr(signal, "aborted", None)
-    if isinstance(aborted, bool):
-        return aborted
-    is_set = getattr(signal, "is_set", None)
-    if callable(is_set):
-        return bool(is_set())
-    return False
-
-
 def _get_prop(value: object, key: str, default: object = None) -> object:
     if isinstance(value, Mapping):
         return value.get(key, default)
@@ -140,7 +129,7 @@ async def _wait_for_abort(signal: Any) -> None:
     if signal is None:
         await asyncio.Future()
         return
-    if _is_aborted(signal):
+    if signal_aborted(signal):
         return
 
     wait = getattr(signal, "wait", None)
@@ -189,7 +178,7 @@ async def walk_directory_with_fd(
     max_results: int,
     signal: Any,
 ) -> list[dict[str, object]]:
-    if _is_aborted(signal):
+    if signal_aborted(signal):
         return []
 
     args = [
@@ -248,7 +237,7 @@ async def walk_directory_with_fd(
         except asyncio.CancelledError:
             pass
 
-    if _is_aborted(signal) or return_code != 0 or not stdout:
+    if signal_aborted(signal) or return_code != 0 or not stdout:
         return []
 
     lines = [line for line in stdout.strip().splitlines() if line]
@@ -620,14 +609,14 @@ class CombinedAutocompleteProvider:
         return score
 
     async def getFuzzyFileSuggestions(self, query: str, *, isQuotedPrefix: bool, signal: Any) -> list[AutocompleteItem]:
-        if not self.fdPath or _is_aborted(signal):
+        if not self.fdPath or signal_aborted(signal):
             return []
         try:
             scoped_query = self.resolveScopedFuzzyQuery(query)
             fd_base_dir = scoped_query["baseDir"] if scoped_query is not None else self.basePath
             fd_query = scoped_query["query"] if scoped_query is not None else query
             entries = await walk_directory_with_fd(fd_base_dir, self.fdPath, fd_query, 100, signal)
-            if _is_aborted(signal):
+            if signal_aborted(signal):
                 return []
 
             scored_entries = []

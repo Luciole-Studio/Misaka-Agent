@@ -6,6 +6,8 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, TypedDict
 
+from misaka.utils.values import signal_aborted
+
 _EXIT_STDIO_GRACE_SECONDS = 0.1
 _FORCE_KILL_DELAY_SECONDS = 5.0
 
@@ -24,10 +26,6 @@ class ExecResult:
     killed: bool
 
 
-def _is_aborted(signal: Any | None) -> bool:
-    return bool(getattr(signal, "aborted", False))
-
-
 async def _wait_for_abort(signal: Any) -> None:
     wait = getattr(signal, "wait", None)
     if callable(wait):
@@ -35,7 +33,7 @@ async def _wait_for_abort(signal: Any) -> None:
         if asyncio.iscoroutine(result) or isinstance(result, asyncio.Future):
             await result
             return
-    while not _is_aborted(signal):
+    while not signal_aborted(signal):
         await asyncio.sleep(0.01)
 
 
@@ -150,7 +148,7 @@ async def exec_command(
         force_kill_task = asyncio.create_task(_force_kill_after_delay(process))
 
     try:
-        if _is_aborted(signal):
+        if signal_aborted(signal):
             kill_process()
 
         pending = [wait_task]

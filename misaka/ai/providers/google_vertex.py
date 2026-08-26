@@ -26,7 +26,6 @@ from misaka.ai.providers.google import (
     _coalesce_attr,
     _empty_usage,
     _finish_current_block,
-    _is_aborted,
     _nested_option,
     _option,
     get_google_budget,
@@ -68,6 +67,7 @@ from misaka.ai.types import (
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
+from misaka.utils.values import signal_aborted
 
 ClampedThinkingLevel = Literal["minimal", "low", "medium", "high"]
 
@@ -147,7 +147,7 @@ def stream_google_vertex(
 
             current_block: TextContent | ThinkingContent | None = None
             async for chunk in _iterate_async_iterable(google_stream, signal, on_abort=lambda: _close_stream(google_stream)):
-                if _is_aborted(signal):
+                if signal_aborted(signal):
                     raise RuntimeError("Request was aborted")
 
                 output.responseId = output.responseId or _coalesce_attr(chunk, "response_id", "responseId")
@@ -277,14 +277,14 @@ def stream_google_vertex(
 
             _finish_current_block(current_block, output, stream)
 
-            if _is_aborted(signal):
+            if signal_aborted(signal):
                 raise RuntimeError("Request was aborted")
             if output.stopReason in {"aborted", "error"}:
                 raise RuntimeError("An unknown error occurred")
 
             stream.push(DoneEvent(reason=output.stopReason, message=output))
         except Exception as error:  # noqa: BLE001
-            output.stopReason = "aborted" if _is_aborted(signal) else "error"
+            output.stopReason = "aborted" if signal_aborted(signal) else "error"
             output.errorMessage = _format_google_vertex_error(error)
             stream.push(ErrorEvent(reason=output.stopReason, error=output))
         finally:
@@ -443,7 +443,7 @@ def build_params(
     options: StreamOptions | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     signal = _option(options, "signal")
-    if signal is not None and _is_aborted(signal):
+    if signal is not None and signal_aborted(signal):
         raise RuntimeError("Request aborted")
 
     contents = convert_messages(model, context)

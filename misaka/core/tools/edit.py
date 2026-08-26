@@ -15,12 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
-from misaka.core.tools._common import (
-    _drain_worker,
-    _is_aborted,
-    _string_arg,
-    abort_race,
-)
+from misaka.core.tools._common import _drain_worker, _string_arg, abort_race
 from misaka.core.tools.edit_diff import (
     Edit,
     EditDiffError,
@@ -40,7 +35,7 @@ from misaka.core.tools.render_utils import invalid_arg_text, shorten_path
 from misaka.core.tools.tool_definition_wrapper import wrap_tool_definition
 from misaka.ui.tui import Box, Container, Spacer, Text
 from misaka.utils import atomic
-from misaka.utils.values import read_field
+from misaka.utils.values import read_field, signal_aborted
 
 type EditPreview = EditDiffResult | EditDiffError
 
@@ -356,7 +351,7 @@ def create_edit_tool_definition(
         absolute_path = resolve_to_cwd(path, cwd)
 
         async def mutate() -> AgentToolResult:
-            if _is_aborted(signal):
+            if signal_aborted(signal):
                 raise RuntimeError("Operation aborted")
 
             aborted = False

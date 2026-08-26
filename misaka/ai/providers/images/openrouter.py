@@ -27,7 +27,7 @@ from misaka.ai.types import (
 )
 from misaka.ai.utils.headers import headers_to_record
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
-from misaka.utils.values import maybe_await
+from misaka.utils.values import maybe_await, signal_aborted
 
 
 async def generate_images_openrouter(
@@ -104,13 +104,13 @@ async def generate_images_openrouter(
 
         return output
     except Exception as error:  # noqa: BLE001
-        output.stopReason = "aborted" if _signal_aborted(options.signal if options else None) else "error"
+        output.stopReason = "aborted" if signal_aborted(options.signal if options else None) else "error"
         output.errorMessage = _format_openrouter_error(error)
         return output
 
 
 async def _await_with_signal(request_factory: Callable[[], Any], signal: Any) -> Any:
-    if _signal_aborted(signal):
+    if signal_aborted(signal):
         raise RuntimeError("Request aborted")
 
     request = request_factory()
@@ -200,16 +200,6 @@ def _parse_usage(raw_usage: Any, model: ImagesModel) -> Usage:
     )
     usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite
     return usage
-
-
-def _signal_aborted(signal: Any) -> bool:
-    if signal is None:
-        return False
-    if hasattr(signal, "aborted"):
-        return bool(signal.aborted)
-    if hasattr(signal, "is_set"):
-        return bool(signal.is_set())
-    return False
 
 
 def _format_openrouter_error(error: Any) -> str:

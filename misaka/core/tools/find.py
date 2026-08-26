@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
-from misaka.core.tools._common import _is_aborted, abort_race
+from misaka.core.tools._common import abort_race
 from misaka.core.tools.path_utils import resolve_to_cwd
 from misaka.core.tools.render_utils import (
     get_text_output,
@@ -31,7 +31,7 @@ from misaka.core.tools.truncate import (
 )
 from misaka.ui.tui import Text
 from misaka.utils.tools_manager import find_tool, missing_tool_message
-from misaka.utils.values import maybe_await, read_field
+from misaka.utils.values import maybe_await, read_field, signal_aborted
 
 T = TypeVar("T")
 
@@ -168,7 +168,7 @@ async def _run_fd_search(fd_path: str, args: list[str], signal: Any | None) -> t
 
         stdout, stderr = await communicate_task
 
-    if _is_aborted(signal):
+    if signal_aborted(signal):
         raise RuntimeError("Operation aborted")
 
     return stdout, stderr, process.returncode
@@ -187,7 +187,7 @@ def create_find_tool_definition(
         _on_update: Callable[[AgentToolResult], None] | None = None,
         _ctx: Any = None,
     ) -> AgentToolResult:
-        if _is_aborted(signal):
+        if signal_aborted(signal):
             raise RuntimeError("Operation aborted")
 
         parsed = FindToolInput.model_validate(params)
@@ -197,7 +197,7 @@ def create_find_tool_definition(
         if custom_ops is not None and callable(getattr(custom_ops, "glob", None)):
             if not await maybe_await(custom_ops.exists(search_path)):
                 raise RuntimeError(f"Path not found: {search_path}")
-            if _is_aborted(signal):
+            if signal_aborted(signal):
                 raise RuntimeError("Operation aborted")
 
             results = await maybe_await(
@@ -207,7 +207,7 @@ def create_find_tool_definition(
                     {"ignore": ["**/node_modules/**", "**/.git/**"], "limit": effective_limit},
                 )
             )
-            if _is_aborted(signal):
+            if signal_aborted(signal):
                 raise RuntimeError("Operation aborted")
             if not results:
                 return AgentToolResult(content=[TextContent(text="No files found matching pattern")], details=None)
@@ -234,7 +234,7 @@ def create_find_tool_definition(
             )
 
         fd_path = find_tool("fd")
-        if _is_aborted(signal):
+        if signal_aborted(signal):
             raise RuntimeError("Operation aborted")
         if not fd_path:
             raise RuntimeError(missing_tool_message("fd"))

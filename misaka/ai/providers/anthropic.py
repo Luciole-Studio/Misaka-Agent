@@ -18,7 +18,6 @@ from misaka.ai.providers._common import (
     _await_maybe_with_signal,
     _close_stream,
     _empty_usage,
-    _is_aborted,
     _iterate_async_iterable,
     _option,
     resolve_cache_retention,
@@ -65,7 +64,7 @@ from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stre
 from misaka.ai.utils.headers import headers_to_record
 from misaka.ai.utils.json_parse import parse_json_with_repair, parse_streaming_json
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
-from misaka.utils.values import maybe_await
+from misaka.utils.values import maybe_await, signal_aborted
 
 AnthropicEffort = Literal["low", "medium", "high", "xhigh", "max"]
 AnthropicThinkingDisplay = Literal["summarized", "omitted"]
@@ -662,7 +661,7 @@ async def _iter_response_lines(source: Any, signal: Any = None) -> AsyncIterator
                 yield line.decode("utf-8") if isinstance(line, bytes) else str(line)
             return
         for line in lines:
-            if _is_aborted(signal):
+            if signal_aborted(signal):
                 raise RuntimeError("Request was aborted")
             yield line.decode("utf-8") if isinstance(line, bytes) else str(line)
         return
@@ -693,7 +692,7 @@ async def _iter_response_lines(source: Any, signal: Any = None) -> AsyncIterator
                 consumed = _consume_line(buffer)
     else:
         for chunk in body:
-            if _is_aborted(signal):
+            if signal_aborted(signal):
                 raise RuntimeError("Request was aborted")
             if isinstance(chunk, bytes):
                 buffer += chunk.decode("utf-8")
@@ -719,7 +718,7 @@ async def _iter_response_lines(source: Any, signal: Any = None) -> AsyncIterator
 async def iterate_sse_messages(source: Any, signal: Any = None) -> AsyncIterator[ServerSentEvent]:
     state: dict[str, Any] = {"event": None, "data": [], "raw": []}
     async for line in _iter_response_lines(source, signal):
-        if _is_aborted(signal):
+        if signal_aborted(signal):
             raise RuntimeError("Request was aborted")
         event = _decode_sse_line(line, state)
         if event is not None:
@@ -1020,13 +1019,13 @@ def stream_anthropic(
                     if isinstance(usage, Mapping):
                         _update_usage_from_anthropic_usage(output, usage, model)
 
-            if _is_aborted(_option(options, "signal")):
+            if signal_aborted(_option(options, "signal")):
                 raise RuntimeError("Request was aborted")
             if output.stopReason in {"aborted", "error"}:
                 raise RuntimeError("An unknown error occurred")
             stream.push(DoneEvent(reason=output.stopReason, message=output))
         except Exception as error:  # noqa: BLE001 - every failure becomes an error event on the stream
-            output.stopReason = "aborted" if _is_aborted(_option(options, "signal")) else "error"
+            output.stopReason = "aborted" if signal_aborted(_option(options, "signal")) else "error"
             output.errorMessage = _format_anthropic_error(error)
             stream.push(ErrorEvent(reason=output.stopReason, error=output))
         finally:
