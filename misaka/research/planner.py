@@ -37,8 +37,12 @@ Start by working out what the user is actually asking, what else the question co
 premises are untested. Then map the relevant objects, processes, interactions, prior knowledge, time horizons,
 consequences, feedback effects, and disciplines. Pick the methods, theories, analytical frameworks, and source
 strategies that fit the problem, and state each method's blind spots and the competing approaches. The method
-catalog is a menu, not a requirement: combine, reject, or add methods as the problem demands. Only after that
-divide the work into tasks and choose Sisters by their profiles and skills.
+catalog is a menu, not a requirement: combine, reject, or add methods as the problem demands. Before dividing the
+work, check the design for dimensions it forgot: read the `coverage-maps` skill from the method catalog (its references
+are maps of fields, facets, kinds of question, and traditions) and call `coverage_scan` with two or three phrasings of
+the question to see where the literature actually discusses it. Only after that divide the work into tasks and choose
+Sisters by their profiles and skills. `plan_markdown` must end with a section "Coverage maps used": which maps and scans
+you consulted, which you did not and why, and which dimensions they surfaced.
 
 Return exactly one JSON object of this shape. `plan_markdown` and `extensions` are free-form:
 {
@@ -93,30 +97,25 @@ State what new evidence could change the judgement. Output Markdown only; no JSO
 """
 
 
-PROBE_PLAN_CONTRACT = """You are Last Order. The red team found issues in this node's conclusion. For each issue, design one probe:
-a research card that tests whether the issue actually changes the conclusion. Do not replan the whole project.
+PROBE_CONTRACT = """You are Last Order's fork on ONE issue the red team raised against this node's conclusion. You keep the
+node's whole planning context; this issue is the only thing you investigate. Do not replan the project.
+
+Each round, do one of two things:
+- open research cards that test the issue (one or several; choose Sisters by their profiles), or
+- when what the cards returned settles it, give the verdict.
 
 Return exactly one JSON object:
 {"tasks": [{
-  "issue_id":"the issue this probe tests", "local_id":"short-safe-id", "title":"Probe title",
-  "question":"The exact question the probe answers", "rationale":"How the answer bears on the conclusion",
-  "method":"How to investigate it", "source_strategy":"Where to look", "falsifiers":"What would show the conclusion is wrong",
-  "deliverable":"Path of the Markdown artifact", "dependencies":[], "capabilities":[],
-  "assignee":"a Sister id from the roster", "assignee_reason":"Why this Sister fits", "priority":0
-}]}
-Every issue gets exactly one probe. Output JSON only.
-"""
-
-
-TRIAGE_CONTRACT = """You are Last Order. Each probe below tested one issue against this node's conclusion. Read the probe artifacts and decide,
-for every issue, what the probe showed:
-- supports: the conclusion stands; the probe's material is additional support.
-- inconclusive: the probe could not settle the issue (material unavailable, sources conflict, question not answerable).
-- undermines: the conclusion is shaken; the issue deserves its own research node.
-
-Return exactly one JSON object:
-{"verdicts": [{"issue_id":"", "verdict":"supports|inconclusive|undermines", "reason":"What in the probe artifacts decides it"}]}
-Do not vote and do not soften: an undermined conclusion is undermined. Output JSON only.
+   "local_id":"short-safe-id", "title":"Card title", "question":"The exact question the card answers",
+   "rationale":"How the answer bears on the issue", "method":"How to investigate it", "source_strategy":"Where to look",
+   "falsifiers":"What would show the conclusion is wrong", "deliverable":"Path of the Markdown artifact",
+   "dependencies":[], "capabilities":[], "assignee":"a Sister id from the roster", "assignee_reason":"Why this Sister fits",
+   "priority":0}],
+ "verdict": null | {"verdict":"supports|inconclusive|undermines", "reason":"What in the card artifacts decides it"}}
+- supports: the conclusion stands; the material is additional support.
+- inconclusive: the issue cannot be settled (material unavailable, sources conflict, question not answerable).
+- undermines: the conclusion is shaken; the issue deserves a research node of its own.
+A round without tasks must carry a verdict. Do not vote and do not soften. Output JSON only.
 """
 
 
@@ -131,8 +130,10 @@ polish prose. Deliver `critique.md` (your review) and `critique.json` (the issue
 {evidence}
 ## what to inspect
 Facts and quotations, inference and causation, concepts and scope, methods and sampling, standpoint and bias, omitted actors or
-processes, interactions, time horizons, consequences, and normative claims disguised as facts. Different frameworks can yield
-different interpretations without either side being automatically wrong. A false objection does as much damage as a false claim.
+processes, interactions, time horizons, consequences, and normative claims disguised as facts. For omissions, use the
+`coverage-maps` skill (maps of fields, facets, kinds of question, traditions) and `coverage_scan` (where the literature discusses
+this question): a dimension the conclusion never touches is an issue. Different frameworks can yield different interpretations
+without either side being automatically wrong. A false objection does as much damage as a false claim.
 
 ## acceptance criteria
 - `critique.md` exists and every criticism names a concrete next research step.
@@ -199,8 +200,7 @@ def _call(worker, cfg, prompt, *, cwd, session_dir, continue_session=False,
     kwargs = dict(
         cwd=cwd, tools=list(tools),
         timeout=runs.call_timeout(
-            cfg, timeout or max(600, int(cfg.get("judge_timeout", 600)))),
-        bare=True, soul=False,
+            cfg, timeout or max(600, int(cfg.get("judge_timeout", 600)))), soul=False,
         raw=raw, usage_db=cfg.get("db"), usage_task_id=task_id,
         usage_generation=1, usage_token_cap=cfg.get("token_cap"),
         session_dir=session_dir, continue_session=continue_session,
@@ -214,6 +214,15 @@ def _call(worker, cfg, prompt, *, cwd, session_dir, continue_session=False,
     )
 
 
+def intake_session_dir(cfg, workspace):
+    """Where the PROJECT.md intake conversation is kept: under the runs root, never inside the
+    project folder (a fresh project is committed wholesale by ``misaka init``)."""
+    import hashlib
+    root = (cfg or {}).get("tasks_root") or os.path.expanduser("~/.misaka/tasks")
+    digest = hashlib.sha256(str(Path(workspace).expanduser().resolve()).encode("utf-8")).hexdigest()[:12]
+    return os.path.join(root, "intake", digest)
+
+
 def ensure_project_brief(cfg, worker, question, workspace):
     """Return ``<workspace>/PROJECT.md``, letting Last Order draft it when the folder has none."""
     workspace = str(Path(workspace).expanduser().resolve())
@@ -225,7 +234,7 @@ def ensure_project_brief(cfg, worker, question, workspace):
 # The user's research question
 {question}
 """,
-        cwd=workspace, session_dir=os.path.join(workspace, ".misaka-intake"), tools=(),
+        cwd=workspace, session_dir=intake_session_dir(cfg, workspace), tools=(),
         timeout=120, thinking="low",
     )
     if err:
@@ -332,7 +341,7 @@ def plan(con, run, cfg, worker, node, *, context_path=None):
     root = runs.run_dir(run)
     session_dir = _lo_session(run, node)
     roster = _roster(cfg)
-    methods = method_catalog(os.path.join(cfg["roles_root"], "last_order"), root)
+    methods = method_catalog(os.path.join(cfg["roles_root"], "last_order"), run["workspace"])   # the project folder's skills/, not the run dir's
     prompt = ROOT_CONTRACT
     if node["parent_id"] is None:
         prompt += f"""
@@ -360,7 +369,7 @@ This is a targeted research node. Address the issue that undermined the parent c
 {_catalog_text(methods)}
 """
     obj, raw, err = _call(
-        worker, cfg, prompt, cwd=root, session_dir=session_dir,
+        worker, cfg, prompt, cwd=root, session_dir=session_dir, tools=("read", "coverage_scan"),
         continue_session=bool(find_most_recent_session(session_dir)), task_id=run["id"],
     )
     if err:
@@ -391,7 +400,8 @@ def task_sources(rows):
     return parts
 
 
-def _evidence(con, run, node):
+def evidence_block(con, run, node):
+    """The node's evidence ledger (findings with their verbatim claims), wrapped as untrusted data."""
     findings = []
     for finding in ledger.findings(con, run["id"], branch_id=node["id"]):
         findings.append({**dict(finding),
@@ -408,7 +418,7 @@ def synthesize(con, run, cfg, worker, node, task_rows):
 # Material map (read the artifacts, not just this map)
 """ + prompt_guard.untrusted("research-material-map",
                             json.dumps(task_sources(task_rows), ensure_ascii=False, indent=2))
-              + "\n# Evidence ledger\n" + _evidence(con, run, node))
+              + "\n# Evidence ledger\n" + evidence_block(con, run, node))
     session_dir = _lo_session(run, node)
     _obj, text, err = _call(
         worker, cfg, prompt, cwd=runs.run_dir(run), session_dir=session_dir, raw=True,
@@ -426,64 +436,58 @@ def red_team_body(node, *, synthesis_path, plan_path, evidence=""):
         evidence=f"- Evidence ledger:\n{evidence}\n" if evidence else "")
 
 
-def plan_probes(con, run, cfg, worker, node, issues, *, synthesis_path):
-    """One probe card per red-team issue, planned by Last Order in the node's session."""
+def fork_session(source_dir, target_dir):
+    """A pi fork of the newest session in ``source_dir`` into ``target_dir``: the whole line so far,
+    with ``parentSession`` recorded. None when there is nothing to fork (the fork then starts fresh)."""
+    from misaka.core.session_manager import SessionManager
+    source = find_most_recent_session(source_dir)
+    if not source:
+        return None
+    os.makedirs(target_dir, exist_ok=True)
+    manager = SessionManager.open(source, target_dir)
+    leaf = manager.getLeafId()
+    if not leaf:
+        return None
+    branched = manager.createBranchedSession(leaf)
+    if branched and not os.path.isfile(branched):
+        manager.rewrite_file()  # the write is deferred until an assistant turn; the fork resumes from disk
+    return branched
+
+
+def probe_step(con, run, cfg, worker, node, issue, cards, *, synthesis_path, round_no, rounds):
+    """One round of the fork on ``issue``: more cards, or the verdict. Returns (tasks, verdict)."""
     roster = _roster(cfg)
-    prompt = (PROBE_PLAN_CONTRACT + f"""
+    prompt = (PROBE_CONTRACT + f"""
+# Issue
+{_catalog_text({"id": issue["id"], "kind": issue["kind"], "question": issue["question"], "rationale": issue["rationale"]})}
+
 # Conclusion under test
 {synthesis_path}
 
-# Issues (each needs exactly one probe)
-{_catalog_text([{"issue_id": i["id"], "kind": i["kind"], "question": i["question"],
-                 "rationale": i["rationale"], "priority": i["priority"]} for i in issues])}
+# Round {round_no} of {rounds}. Cards returned so far (read their artifacts; none yet on round 1)
+""" + prompt_guard.untrusted("probe-results", json.dumps(task_sources(cards), ensure_ascii=False, indent=2))
+              + f"""
 
 # Sister capability profiles
 {_catalog_text(roster)}
 """)
-    session_dir = _lo_session(run, node)
+    session_dir = runs.probe_session_dir(run, issue["id"])
     obj, _raw, err = _call(
         worker, cfg, prompt, cwd=runs.run_dir(run), session_dir=session_dir,
-        continue_session=True, task_id=run["id"],
+        continue_session=bool(find_most_recent_session(session_dir)), task_id=run["id"],
     )
     if err:
-        raise RuntimeError(f"Probe planning failed for node {node['id']}: {err}")
-    tasks = _validate_tasks((obj or {}).get("tasks"), {r["id"] for r in roster})
-    known = {i["id"] for i in issues}
-    for task in tasks:
-        if task.get("issue_id") not in known:
-            raise ValueError(f"Probe {task['local_id']} names an unknown issue: {task.get('issue_id')}")
-    return tasks
-
-
-def triage(con, run, cfg, worker, node, issues, probe_rows, *, synthesis_path):
-    """Last Order decides what each probe showed. Unjudged issues count as inconclusive."""
-    by_task = {i["probe_task_id"]: i["id"] for i in issues}
-    probes = [{**s, "issue_id": by_task.get(s["task_id"])} for s in task_sources(probe_rows)]
-    prompt = (TRIAGE_CONTRACT + f"""
-# Conclusion under test
-{synthesis_path}
-
-# Issues
-{_catalog_text([{"issue_id": i["id"], "question": i["question"]} for i in issues])}
-
-# Probes (read their artifacts)
-""" + prompt_guard.untrusted("probe-results", json.dumps(probes, ensure_ascii=False, indent=2)))
-    session_dir = _lo_session(run, node)
-    obj, _raw, err = _call(
-        worker, cfg, prompt, cwd=runs.run_dir(run), session_dir=session_dir,
-        continue_session=True, task_id=run["id"],
-    )
-    if err:
-        raise RuntimeError(f"Triage failed for node {node['id']}: {err}")
-    verdicts = {i["id"]: {"verdict": "inconclusive", "reason": "Last Order did not judge this issue."}
-                for i in issues}
-    for item in (obj or {}).get("verdicts") or []:
-        if not isinstance(item, dict) or item.get("issue_id") not in verdicts:
-            continue
-        if item.get("verdict") not in {"supports", "inconclusive", "undermines"}:
-            continue
-        verdicts[item["issue_id"]] = {"verdict": item["verdict"], "reason": str(item.get("reason") or "")}
-    return verdicts
+        raise RuntimeError(f"The fork on issue {issue['id']} failed: {err}")
+    obj = obj if isinstance(obj, dict) else {}
+    tasks = _validate_tasks(obj.get("tasks"), {r["id"] for r in roster})
+    verdict = obj.get("verdict")
+    if verdict is not None:
+        if not isinstance(verdict, dict) or verdict.get("verdict") not in {"supports", "inconclusive", "undermines"}:
+            raise ValueError(f"The fork on issue {issue['id']} returned an invalid verdict.")
+        verdict = {"verdict": verdict["verdict"], "reason": str(verdict.get("reason") or "")}
+    if not tasks and verdict is None:
+        raise ValueError(f"The fork on issue {issue['id']} neither opened cards nor gave a verdict.")
+    return tasks, verdict
 
 
 def preflight(run, cfg, worker, task, *, node):
@@ -502,7 +506,7 @@ def preflight(run, cfg, worker, task, *, node):
     obj, raw, err = worker.run_llm_json(
         profile, prompt, cfg["provider"], cfg["default_model"], cwd=root,
         tools=[], timeout=runs.call_timeout(
-            cfg, max(300, int(cfg.get("judge_timeout", 600)))), bare=True,
+            cfg, max(300, int(cfg.get("judge_timeout", 600)))),
         usage_db=cfg.get("db"), usage_task_id=run["id"], usage_generation=1,
         usage_token_cap=cfg.get("token_cap"), session_dir=session_dir,
         thinking="medium",
@@ -514,7 +518,8 @@ def preflight(run, cfg, worker, task, *, node):
     return obj, raw, find_most_recent_session(session_dir)
 
 
-def task_body(task, preflight_path):
+def task_body(task, preflight_path, evidence=""):
+    ledger = f"\n## evidence so far\nWhat earlier cards established (read the sources; do not repeat them):\n{evidence}\n" if evidence else ""
     return f"""## research question
 {task['question']}
 
@@ -528,7 +533,7 @@ Potential falsifiers: {task.get('falsifiers') or 'Identify evidence that could o
 
 ## preflight plan
 Read `{preflight_path}` first and work from that plan. Change course when a key premise fails, and record why.
-
+{ledger}
 ## deliverable
 {task['deliverable']}
 
