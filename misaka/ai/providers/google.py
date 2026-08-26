@@ -632,9 +632,6 @@ def get_google_budget(
 
 streamGoogle = stream_google
 streamSimpleGoogle = stream_simple_google
-createClient = create_client
-buildParams = build_params
-getDisabledThinkingConfig = get_disabled_thinking_config
 getThinkingLevel = get_thinking_level
 
 __all__ = [

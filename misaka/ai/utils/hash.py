@@ -49,6 +49,4 @@ def short_hash(text: str) -> str:
     return _to_base36(h2 & 0xFFFFFFFF) + _to_base36(h1 & 0xFFFFFFFF)
 
 
-shortHash = short_hash
-
-__all__ = ["shortHash"]
+__all__ = ["short_hash"]

@@ -99,6 +99,4 @@ def _read_text(path: str) -> str:
         return handle.read()
 
 
-processFileArguments = process_file_arguments
-
-__all__ = ["ProcessFileOptions", "ProcessedFiles", "processFileArguments"]
+__all__ = ["ProcessFileOptions", "ProcessedFiles", "process_file_arguments"]

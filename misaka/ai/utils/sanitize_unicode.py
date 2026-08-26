@@ -25,6 +25,4 @@ def sanitize_surrogates(text: str) -> str:
     return "".join(result)
 
 
-sanitizeSurrogates = sanitize_surrogates
-
-__all__ = ["sanitizeSurrogates", "sanitize_surrogates"]
+__all__ = ["sanitize_surrogates"]

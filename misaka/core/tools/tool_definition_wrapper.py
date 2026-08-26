@@ -49,12 +49,5 @@ def create_tool_definition_from_agent_tool(tool: Any) -> ToolDefinition[Any, Any
     )
 
 
-wrapToolDefinition = wrap_tool_definition
-wrapToolDefinitions = wrap_tool_definitions
-createToolDefinitionFromAgentTool = create_tool_definition_from_agent_tool
-
 __all__ = [
-    "createToolDefinitionFromAgentTool",
-    "wrapToolDefinition",
-    "wrapToolDefinitions",
 ]

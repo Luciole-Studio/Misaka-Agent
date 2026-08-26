@@ -285,15 +285,6 @@ def map_stop_reason_string(reason: str) -> StopReason:
     return "error"
 
 
-convertMessages = convert_messages
-convertTools = convert_tools
-mapToolChoice = map_tool_choice
-mapStopReason = map_stop_reason
-
 __all__ = [
     "GoogleThinkingLevel",
-    "convertMessages",
-    "convertTools",
-    "mapStopReason",
-    "mapToolChoice",
     ]

@@ -46,6 +46,4 @@ def build_initial_message(
     )
 
 
-buildInitialMessage = build_initial_message
-
-__all__ = ["InitialMessageInput", "InitialMessageResult", "buildInitialMessage"]
+__all__ = ["InitialMessageInput", "InitialMessageResult", "build_initial_message"]

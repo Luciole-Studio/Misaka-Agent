@@ -441,9 +441,6 @@ async def execute_hook(
     return _result(reason=f"unknown hook type: {kind}")
 
 
-run_hook = execute_hook
-
-
 __all__ = [
     "HookEvaluator",
     "HookResult",
@@ -451,6 +448,5 @@ __all__ = [
     "execute_hook",
     "json_payload",
     "parse_hook_output",
-    "run_hook",
     "set_hook_evaluator",
 ]

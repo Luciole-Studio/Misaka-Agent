@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from misaka.ai.api_registry import get_api_provider
-from misaka.ai.env_api_keys import get_env_api_key
 from misaka.ai.providers import register_builtins as _register_builtins  # noqa: F401
 from misaka.ai.types import (
     AssistantMessage,
@@ -51,11 +50,8 @@ async def complete_simple(
 
 
 streamSimple = stream_simple
-getEnvApiKey = get_env_api_key
-
 __all__ = [
     "complete",
-    "getEnvApiKey",
     "stream",
     "streamSimple",
     ]

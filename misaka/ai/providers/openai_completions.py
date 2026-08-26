@@ -1102,34 +1102,19 @@ def _format_completion_error(error: Any) -> str:
 
 streamOpenAICompletions = stream_openai_completions
 streamSimpleOpenAICompletions = stream_simple_openai_completions
-createClient = create_client
-buildParams = build_params
-convertMessages = convert_messages
-convertTools = convert_tools
-mapStopReason = map_stop_reason
-getCompat = get_compat
-resolveCacheRetention = resolve_cache_retention
-
 __all__ = [
     "OpenAICompletionsOptions",
     "apply_anthropic_cache_control",
-    "buildParams",
     "build_params",
-    "convertMessages",
-    "convertTools",
     "convert_messages",
     "convert_tools",
-    "createClient",
     "create_client",
     "detect_compat",
-    "getCompat",
     "get_compat",
     "get_compat_cache_control",
     "has_tool_history",
-    "mapStopReason",
     "map_stop_reason",
     "parse_chunk_usage",
-    "resolveCacheRetention",
     "resolve_cache_retention",
     "streamOpenAICompletions",
     "streamSimpleOpenAICompletions",

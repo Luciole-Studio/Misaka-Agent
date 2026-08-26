@@ -155,6 +155,5 @@ def _get_native_clipboard() -> _NativeClipboard | None:
     return _get_native_clipboard_backend()
 
 
-copyToClipboard = copy_to_clipboard
 
-__all__ = ["copyToClipboard"]
+__all__ = ["copy_to_clipboard", "emit_osc52", "is_remote_session", "is_wayland_session"]

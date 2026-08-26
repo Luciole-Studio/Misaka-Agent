@@ -1149,7 +1149,6 @@ def stream_simple_openai_codex_responses(
 
 streamOpenAICodexResponses = stream_openai_codex_responses
 streamSimpleOpenAICodexResponses = stream_simple_openai_codex_responses
-getServiceTierCostMultiplier = get_service_tier_cost_multiplier
 applyServiceTierPricing = apply_service_tier_pricing
 
 __all__ = [
@@ -1164,7 +1163,6 @@ __all__ = [
     "close_openai_codex_websocket_sessions",
     "create_codex_request_id",
     "extract_account_id",
-    "getServiceTierCostMultiplier",
     "get_service_tier_cost_multiplier",
     "is_codex_non_transport_error",
     "map_codex_events",

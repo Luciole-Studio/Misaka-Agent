@@ -39,7 +39,6 @@ from misaka.config import get_agent_dir
 logger = logging.getLogger(__name__)
 from misaka.core.provider_display_names import BUILT_IN_PROVIDER_DISPLAY_NAMES
 from misaka.core.resolve_config_value import (
-    clearConfigValueCache,
     resolveConfigValueOrThrow,
     resolveConfigValueUncached,
     resolveHeadersOrThrow,
@@ -467,9 +466,6 @@ def _oauth_name(value: Any) -> str | None:
     else:
         name = getattr(value, "name", None)
     return name if isinstance(name, str) else None
-
-
-clearApiKeyCache = clearConfigValueCache
 
 
 class ModelRegistry:
@@ -926,5 +922,4 @@ __all__ = [
     "ModelRegistry",
     "ProviderConfigInput",
     "ResolvedRequestAuth",
-    "clearApiKeyCache",
 ]

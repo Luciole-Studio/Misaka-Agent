@@ -133,7 +133,6 @@ def render_diff(diffText: str, _options: RenderDiffOptions | None = None) -> str
 
 
 renderDiff = render_diff
-replaceTabs = replace_tabs
 
 __all__ = [
     "RenderDiffOptions",

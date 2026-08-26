@@ -197,10 +197,7 @@ def create_tool_html_renderer(deps: ToolHtmlRendererDeps | dict[str, Any]) -> To
     return _ToolHtmlRenderer(resolved)
 
 
-createToolHtmlRenderer = create_tool_html_renderer
-
 __all__ = [
     "ToolHtmlRenderer",
     "ToolHtmlRendererDeps",
-    "createToolHtmlRenderer",
 ]

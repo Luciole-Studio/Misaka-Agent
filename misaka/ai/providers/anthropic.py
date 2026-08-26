@@ -1196,14 +1196,6 @@ def stream_simple_anthropic(
 
 streamAnthropic = stream_anthropic
 streamSimpleAnthropic = stream_simple_anthropic
-resolveCacheRetention = resolve_cache_retention
-createClient = create_client
-buildParams = build_params
-convertMessages = convert_messages
-convertTools = convert_tools
-mapStopReason = map_stop_reason
-mapThinkingLevelToEffort = map_thinking_level_to_effort
-
 __all__ = [
     "AnthropicEffort",
     "AnthropicOptions",

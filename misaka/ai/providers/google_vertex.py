@@ -582,10 +582,6 @@ def get_gemini3_thinking_level(effort: ClampedThinkingLevel, model: Model) -> Go
 
 streamGoogleVertex = stream_google_vertex
 streamSimpleGoogleVertex = stream_simple_google_vertex
-createClient = create_client
-buildParams = build_params
-getDisabledThinkingConfig = get_disabled_thinking_config
-
 __all__ = [
     "GoogleVertexOptions",
     "streamGoogleVertex",

@@ -404,9 +404,6 @@ def stream_simple_azure_openai_responses(
 
 streamAzureOpenAIResponses = stream_azure_openai_responses
 streamSimpleAzureOpenAIResponses = stream_simple_azure_openai_responses
-createClient = create_client
-buildParams = build_params
-
 __all__ = [
     "AzureOpenAIResponsesOptions",
     "streamAzureOpenAIResponses",

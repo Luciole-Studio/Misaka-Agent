@@ -957,7 +957,6 @@ except Exception:  # noqa: BLE001 - the module must import even with a broken de
     theme = Theme({}, {}, name="uninitialized")
 
 
-isLightTheme = lambda theme_name=None: theme_name == "light"
 initTheme = init_theme
 onThemeChange = on_theme_change
 setTheme = set_theme
@@ -966,8 +965,6 @@ highlightCode = highlight_code
 def is_light_theme(theme_name: str | None = None) -> bool:
     return theme_name == "light"
 
-
-isLightTheme = is_light_theme
 
 __all__ = [
     "TerminalTheme",
@@ -979,7 +976,6 @@ __all__ = [
     "ThemeInfo",
     "highlightCode",
     "initTheme",
-    "isLightTheme",
     "onThemeChange",
     "setTheme",
     "theme",

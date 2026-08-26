@@ -186,13 +186,8 @@ class OutputAccumulator:
         self.rawChunks = []
 
 
-defaultTempFilePath = default_temp_file_path
-byteLength = byte_length
-
 __all__ = [
     "OutputAccumulator",
     "OutputAccumulatorOptions",
     "OutputSnapshot",
-    "byteLength",
-    "defaultTempFilePath",
 ]

@@ -36,4 +36,3 @@ def string_enum(
     return schema
 
 
-StringEnum = string_enum

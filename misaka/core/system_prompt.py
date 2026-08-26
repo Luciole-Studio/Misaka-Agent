@@ -103,9 +103,6 @@ def _format_project_context(context_files: list[dict[str, str]]) -> str:
     return prompt
 
 
-buildSystemPrompt = build_system_prompt
-
 __all__ = [
     "BuildSystemPromptOptions",
-    "buildSystemPrompt",
 ]

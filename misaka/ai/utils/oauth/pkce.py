@@ -24,6 +24,4 @@ async def generate_pkce() -> _PKCECodes:
     return _PKCECodes(verifier=verifier, challenge=challenge)
 
 
-generatePKCE = generate_pkce
-
-__all__ = ["generatePKCE", "generate_pkce"]
+__all__ = ["generate_pkce"]

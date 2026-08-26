@@ -75,6 +75,4 @@ async def _select_session(
             ui.stop()
 
 
-selectSession = select_session
-
-__all__ = ["selectSession"]
+__all__ = ["select_session"]

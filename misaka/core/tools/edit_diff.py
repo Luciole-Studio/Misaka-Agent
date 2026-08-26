@@ -428,33 +428,10 @@ async def compute_edit_diff(path: str, old_text: str, new_text: str, cwd: str) -
     return await compute_edits_diff(path, [Edit(oldText=old_text, newText=new_text)], cwd)
 
 
-detectLineEnding = detect_line_ending
-normalizeToLF = normalize_to_lf
-restoreLineEndings = restore_line_endings
-normalizeForFuzzyMatch = normalize_for_fuzzy_match
-fuzzyFindText = fuzzy_find_text
-stripBom = strip_bom
-applyEditsToNormalizedContent = apply_edits_to_normalized_content
-generateUnifiedPatch = generate_unified_patch
-generateDiffString = generate_diff_string
-computeEditsDiff = compute_edits_diff
-computeEditDiff = compute_edit_diff
-
 __all__ = [
     "AppliedEditsResult",
     "Edit",
     "EditDiffError",
     "EditDiffResult",
     "FuzzyMatchResult",
-    "applyEditsToNormalizedContent",
-    "computeEditDiff",
-    "computeEditsDiff",
-    "detectLineEnding",
-    "fuzzyFindText",
-    "generateDiffString",
-    "generateUnifiedPatch",
-    "normalizeForFuzzyMatch",
-    "normalizeToLF",
-    "restoreLineEndings",
-    "stripBom",
 ]

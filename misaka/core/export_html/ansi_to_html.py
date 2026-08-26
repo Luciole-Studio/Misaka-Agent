@@ -175,7 +175,5 @@ def ansi_lines_to_html(lines: list[str]) -> str:
     return "".join(f'<div class="ansi-line">{ansi_to_html(line) or "&nbsp;"}</div>' for line in lines)
 
 
-color256ToHex = color256_to_hex
-
 __all__ = [
     ]

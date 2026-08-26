@@ -883,7 +883,6 @@ class SessionSelectorComponent(Container, Focusable):
         return self.sessionList
 
 
-shortenPath = shorten_path
 
 __all__ = [
     "SessionSelectorComponent",

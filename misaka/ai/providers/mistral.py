@@ -790,8 +790,6 @@ def map_chat_stop_reason(reason: str | None) -> StopReason:
 
 streamMistral = stream_mistral
 streamSimpleMistral = stream_simple_mistral
-mapToolChoice = map_tool_choice
-
 __all__ = [
     "MistralOptions",
     "streamMistral",

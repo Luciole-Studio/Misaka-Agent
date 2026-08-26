@@ -92,17 +92,8 @@ def invalid_arg_text(theme: object) -> str:
     return theme.fg("error", "[invalid arg]")
 
 
-shortenPath = shorten_path
-replaceTabs = replace_tabs
-normalizeDisplayText = normalize_display_text
 getTextOutput = get_text_output
-invalidArgText = invalid_arg_text
-
 __all__ = [
     "ToolRenderResultLike",
     "getTextOutput",
-    "invalidArgText",
-    "normalizeDisplayText",
-    "replaceTabs",
-    "shortenPath",
 ]

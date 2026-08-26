@@ -1025,13 +1025,6 @@ def safe_json_stringify(value: Any) -> str:
 
 streamBedrock = stream_bedrock
 streamSimpleBedrock = stream_simple_bedrock
-createClient = create_client
-mapThinkingLevelToEffort = map_thinking_level_to_effort
-resolveCacheRetention = resolve_cache_retention
-buildSystemPrompt = build_system_prompt
-convertMessages = convert_messages
-mapStopReason = map_stop_reason
-
 __all__ = [
     "BedrockOptions",
     "BedrockThinkingDisplay",

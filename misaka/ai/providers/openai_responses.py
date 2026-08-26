@@ -458,11 +458,6 @@ def stream_simple_openai_responses(
 
 streamOpenAIResponses = stream_openai_responses
 streamSimpleOpenAIResponses = stream_simple_openai_responses
-resolveCacheRetention = resolve_cache_retention
-getCompat = get_compat
-createClient = create_client
-buildParams = build_params
-getServiceTierCostMultiplier = get_service_tier_cost_multiplier
 applyServiceTierPricing = apply_service_tier_pricing
 
 __all__ = [
