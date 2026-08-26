@@ -5,32 +5,17 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from pathlib import Path
 from typing import Any
 
 from misaka.ai.utils.oauth import get_oauth_provider, get_oauth_providers
 from misaka.config import get_auth_path
+from misaka.core.auth_storage import AuthStorage   # the one credential store: 0600, locked, never clobbers
 
-AUTH_FILE = Path(get_auth_path())
 PROVIDERS = get_oauth_providers()
 
 
 async def _prompt(question: str) -> str:
     return await asyncio.to_thread(input, question)
-
-
-def load_auth() -> dict[str, dict[str, Any]]:
-    if not AUTH_FILE.exists():
-        return {}
-    try:
-        return json.loads(AUTH_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-def save_auth(auth: dict[str, dict[str, Any]]) -> None:
-    AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
-    AUTH_FILE.write_text(json.dumps(auth, indent=2), encoding="utf-8")
 
 
 async def login(provider_id: str) -> None:
@@ -77,10 +62,15 @@ async def login(provider_id: str) -> None:
         onManualCodeInput = None
 
     credentials = await provider.login(_Callbacks())
-    auth = load_auth()
-    auth[provider_id] = {"type": "oauth", **credentials.model_dump(mode="json")}
-    save_auth(auth)
-    print(f"\nCredentials saved to {AUTH_FILE}")
+    storage = AuthStorage.create()
+    if storage.loadError is not None:
+        print(f"Cannot read {get_auth_path()}: {storage.loadError}", file=sys.stderr)
+        raise SystemExit(1)
+    storage.set(provider_id, {"type": "oauth", **credentials.model_dump(mode="json")})
+    if storage.errors:
+        print(f"Credentials were NOT saved to {get_auth_path()}: {storage.errors[-1]}", file=sys.stderr)
+        raise SystemExit(1)
+    print(f"\nCredentials saved to {get_auth_path()}")
 
 
 def _format_provider_list() -> str:

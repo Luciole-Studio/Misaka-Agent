@@ -24,42 +24,44 @@ def migrate_auth_to_auth_json() -> list[str]:
     oauth_path = agent_dir / "oauth.json"
     settings_path = agent_dir / "settings.json"
 
-    if auth_path.exists():
+    if auth_path.exists() and auth_path.stat().st_size > 2:     # "{}" is an empty store, not a finished migration
         return []
 
+    # Read every old source first; nothing is renamed or rewritten until the new store holds it.
     migrated: dict[str, object] = {}
-    providers: list[str] = []
-
+    settings: dict | None = None
     if oauth_path.exists():
         try:
-            oauth = json.loads(oauth_path.read_text(encoding="utf-8"))
-            for provider, credential in oauth.items():
-                migrated[provider] = {"type": "oauth", **credential}
-                providers.append(str(provider))
-            oauth_path.rename(oauth_path.with_suffix(".json.migrated"))
-        except Exception:
+            for provider, credential in json.loads(oauth_path.read_text(encoding="utf-8")).items():
+                migrated[str(provider)] = {"type": "oauth", **credential}
+        except Exception:  # noqa: BLE001 - an unreadable oauth.json is left in place
             pass
-
     if settings_path.exists():
         try:
             settings = json.loads(settings_path.read_text(encoding="utf-8"))
-            api_keys = settings.get("apiKeys")
-            if isinstance(api_keys, dict):
-                for provider, key in api_keys.items():
-                    if provider not in migrated and isinstance(key, str):
-                        migrated[provider] = {"type": "api_key", "key": key}
-                        providers.append(str(provider))
-                settings.pop("apiKeys", None)
-                settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
-        except Exception:
-            pass
+            api_keys = settings.get("apiKeys") if isinstance(settings, dict) else None
+            for provider, key in (api_keys or {}).items():
+                if provider not in migrated and isinstance(key, str):
+                    migrated[str(provider)] = {"type": "api_key", "key": key}
+        except Exception:  # noqa: BLE001
+            settings = None
+    if not migrated:
+        return []
 
-    if migrated:
-        auth_path.parent.mkdir(parents=True, exist_ok=True)
-        auth_path.write_text(json.dumps(migrated, indent=2), encoding="utf-8")
-        os.chmod(auth_path, 0o600)
+    from misaka.core.auth_storage import AuthStorage
+    storage = AuthStorage.create(str(auth_path))
+    for provider, credential in migrated.items():
+        storage.set(provider, credential)
+    storage.reload()
+    if storage.loadError is not None or storage.errors or not all(storage.has(p) for p in migrated):
+        return []                                              # the store did not take it: old sources stay untouched
 
-    return providers
+    if oauth_path.exists():
+        oauth_path.rename(oauth_path.with_suffix(".json.migrated"))
+    if settings is not None and isinstance(settings, dict) and "apiKeys" in settings:
+        settings.pop("apiKeys", None)
+        settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    return list(migrated)
 
 
 def migrate_sessions_from_agent_root() -> None:
