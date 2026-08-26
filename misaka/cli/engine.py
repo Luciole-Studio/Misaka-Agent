@@ -535,9 +535,6 @@ async def create_session_manager(
 
 
 async def main(args: list[str], options: MainOptions | None = None) -> int:
-    if "--offline" in args or is_truthy_env_flag(os.environ.get("MISAKA_OFFLINE")):
-        os.environ["MISAKA_OFFLINE"] = "1"
-
     parsed = parse_args(args)
     for diagnostic in parsed.diagnostics:
         prefix = "Error" if diagnostic.type == "error" else "Warning"

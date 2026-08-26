@@ -30,7 +30,7 @@ from misaka.core.tools.truncate import (
     truncate_head,
 )
 from misaka.ui.tui import Text
-from misaka.utils.tools_manager import ensure_tool
+from misaka.utils.tools_manager import find_tool, missing_tool_message
 from misaka.utils.values import maybe_await, read_field
 
 T = TypeVar("T")
@@ -233,11 +233,11 @@ def create_find_tool_definition(
                 details=_details_or_none(details),
             )
 
-        fd_path = await ensure_tool("fd", silent=True)
+        fd_path = find_tool("fd")
         if _is_aborted(signal):
             raise RuntimeError("Operation aborted")
         if not fd_path:
-            raise RuntimeError("fd is not available and could not be downloaded")
+            raise RuntimeError(missing_tool_message("fd"))
 
         args: list[str] = [
             "--glob",

@@ -34,7 +34,7 @@ from misaka.core.tools.truncate import (
     truncate_line,
 )
 from misaka.ui.tui import Text
-from misaka.utils.tools_manager import ensure_tool
+from misaka.utils.tools_manager import find_tool, missing_tool_message
 from misaka.utils.values import maybe_await, read_field
 
 T = TypeVar("T")
@@ -196,9 +196,9 @@ def create_grep_tool_definition(
             raise RuntimeError("Operation aborted")
 
         parsed = GrepToolInput.model_validate(params)
-        rg_path = await ensure_tool("rg", silent=True)
+        rg_path = find_tool("rg")
         if not rg_path:
-            raise RuntimeError("ripgrep (rg) is not available and could not be downloaded")
+            raise RuntimeError(missing_tool_message("rg"))
 
         search_path = resolve_to_cwd(parsed.path or ".", cwd)
         try:

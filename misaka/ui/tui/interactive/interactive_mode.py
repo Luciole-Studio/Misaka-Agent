@@ -142,7 +142,7 @@ from misaka.utils.clipboard_image import (
     read_clipboard_image,
 )
 from misaka.utils.shell import kill_tracked_detached_children
-from misaka.utils.tools_manager import ensureTool
+from misaka.utils.tools_manager import find_tool
 from misaka.utils.values import maybe_await, read_field
 
 interactive_theme = import_module("misaka.ui.tui.interactive.theme.theme")
@@ -4530,8 +4530,7 @@ class InteractiveMode:
             return
 
         self.registerSignalHandlers()
-        fd_path, _rg_path = await asyncio.gather(ensureTool("fd"), ensureTool("rg"))
-        self.fdPath = fd_path
+        self.fdPath = find_tool("fd")
         setKeybindings(self.keybindings)
         themes_result = {}
         get_themes = _callable_attr(getattr(self.session, "resourceLoader", None), "getThemes")

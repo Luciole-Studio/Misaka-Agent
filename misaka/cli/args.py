@@ -51,7 +51,6 @@ class Args:
     noThemes: bool = False
     noContextFiles: bool = False
     listModels: str | bool | None = None
-    offline: bool = False
     verbose: bool = False
     messages: list[str] = field(default_factory=list)
     fileArgs: list[str] = field(default_factory=list)
@@ -186,8 +185,6 @@ def parse_args(args: list[str]) -> Args:
                 result.listModels = True
         elif arg == "--verbose":
             result.verbose = True
-        elif arg == "--offline":
-            result.offline = True
         elif arg.startswith("@"):
             result.fileArgs.append(arg[1:])
         elif arg.startswith("--"):
@@ -260,7 +257,6 @@ Options:
   --export <file>                Export session file to HTML and exit
   --list-models [search]         List available models (with optional fuzzy search)
   --verbose                      Force verbose startup (overrides quietStartup setting)
-  --offline                      Disable startup network operations (same as MISAKA_OFFLINE=1)
   --help, -h                     Show this help
   --version, -v                  Show version number
 
@@ -351,7 +347,6 @@ Environment Variables:
   AWS_REGION                       - AWS region for Amazon Bedrock (e.g., us-east-1)
   {ENV_AGENT_DIR.ljust(32)} - Config directory (default: ~/{CONFIG_DIR_NAME}/agent)
   {ENV_SESSION_DIR.ljust(32)} - Session storage directory (overridden by --session-dir)
-  MISAKA_OFFLINE                  - Disable startup network operations when set to 1/true/yes
 
 Built-in Tool Names:
   read   - Read file contents
