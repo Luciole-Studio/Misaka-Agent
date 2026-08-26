@@ -7,7 +7,6 @@ import hashlib
 import json
 import os
 import re
-import stat
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field, is_dataclass
@@ -331,79 +330,13 @@ def encode_cwd(cwd: str) -> str:
 
 
 def get_session_dir_for_cwd(cwd: str, sessions_root: str) -> str:
-    """Return the canonical cwd bucket, carrying matching legacy sessions forward."""
-    root = resolve_path(sessions_root)
-    canonical_cwd = _canonical_cwd(cwd)
-    session_dir = os.path.join(root, encode_cwd(canonical_cwd))
+    """The canonical bucket for this working directory."""
+    session_dir = os.path.join(resolve_path(sessions_root), encode_cwd(_canonical_cwd(cwd)))
     os.makedirs(session_dir, mode=0o700, exist_ok=True)
     try:
         os.chmod(session_dir, 0o700)              # buckets from before privacy was enforced
     except OSError:
         pass
-
-    legacy_dirs = {
-        os.path.join(root, _legacy_encode_cwd(cwd)),
-        os.path.join(root, _legacy_encode_cwd(canonical_cwd)),
-    }
-    for legacy_dir in legacy_dirs:
-        if normalize_path(legacy_dir) == normalize_path(session_dir):
-            continue
-        try:
-            names = os.listdir(legacy_dir)
-        except OSError:
-            continue
-        for name in names:
-            if not name.endswith(".jsonl"):
-                continue
-            source = os.path.join(legacy_dir, name)
-            try:
-                before = os.stat(source, follow_symlinks=False)
-                if not stat.S_ISREG(before.st_mode):
-                    continue
-                source_id = hashlib.sha256(os.fsencode(normalize_path(source))).hexdigest()
-                destination = os.path.join(session_dir, f"legacy-{source_id}.jsonl")
-                if os.path.isfile(destination):
-                    current = os.stat(destination, follow_symlinks=False)
-                    if not stat.S_ISREG(current.st_mode):
-                        continue
-                    if before.st_size <= current.st_size and before.st_mtime_ns <= current.st_mtime_ns:
-                        continue
-                payload = Path(source).read_bytes()
-                entries = _parse_jsonl_entries(payload.decode("utf-8"), strict=True)
-                after = os.stat(source, follow_symlinks=False)
-            except (OSError, UnicodeError, json.JSONDecodeError, TypeError):
-                continue
-            if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
-                    after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
-                continue                         # an old process is still appending; retry next time
-            header = entries[0] if entries else {}
-            header_cwd = header.get("cwd")
-            if header.get("type") != "session" or not isinstance(header.get("id"), str) \
-                    or not isinstance(header_cwd, str) or _canonical_cwd(header_cwd) != canonical_cwd:
-                continue
-            try:
-                from filelock import FileLock
-
-                with FileLock(destination + ".migration.lock"):
-                    if not os.path.lexists(destination):
-                        atomic.write_bytes(destination, payload, mode=0o600)
-                        continue
-                    destination_stat = os.stat(destination, follow_symlinks=False)
-                    if not stat.S_ISREG(destination_stat.st_mode):
-                        continue
-                    # A process opened before the bucket migration may still append to the old
-                    # path. Carry only that append-only tail across; never replace a destination
-                    # that may meanwhile have acquired a branch of its own.
-                    destination_payload = Path(destination).read_bytes()
-                    if len(payload) <= len(destination_payload) or not payload.startswith(destination_payload):
-                        continue
-                    with open(destination, "ab") as handle:
-                        handle.write(payload[len(destination_payload):])
-                        handle.flush()
-                        os.fsync(handle.fileno())
-            except OSError:
-                continue
-
     return session_dir
 
 

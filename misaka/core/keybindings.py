@@ -265,8 +265,9 @@ class KeybindingsManager(TuiKeybindingsManager):
         raw_config = _load_raw_config(path)
         if raw_config is None:
             return {}
-        migrated = migrateKeybindingsConfig(raw_config)["config"]
-        return _to_keybindings_config(migrated)
+        # The pre-release action-name rename is a one-shot in config/migrations.py; running
+        # its sixty-entry table on every load and every /reload bought nothing.
+        return _to_keybindings_config(raw_config)
 
 __all__ = [
     "KEYBINDINGS",

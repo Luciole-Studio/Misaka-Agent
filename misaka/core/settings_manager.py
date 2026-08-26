@@ -189,7 +189,7 @@ class SettingsManager:
         storage.withLock(scope, capture)
         if not content:
             return {}
-        return cls.migrateSettings(json.loads(content.removeprefix("\ufeff")))
+        return json.loads(content.removeprefix("\ufeff"))
 
     @classmethod
     def tryLoadFromStorage(cls, storage: SettingsStorage, scope: SettingsScope) -> dict[str, Any]:
@@ -288,11 +288,7 @@ class SettingsManager:
         modifiedNestedFields: dict[str, set[str]],
     ) -> None:
         def persist(current: str | None) -> str:
-            current_file_settings = (
-                self.migrateSettings(json.loads(current.removeprefix("\ufeff")))
-                if current
-                else {}
-            )
+            current_file_settings = json.loads(current.removeprefix("\ufeff")) if current else {}
             merged_settings: Settings = copy.deepcopy(current_file_settings)
             for field in modifiedFields:
                 value = snapshotSettings.get(field)

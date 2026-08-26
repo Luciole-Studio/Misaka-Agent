@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 
@@ -86,6 +87,78 @@ def migrate_sessions_from_agent_root() -> None:
             session_file.rename(target_path)
         except (OSError, ValueError, IndexError):
             continue
+
+
+def migrate_legacy_session_buckets() -> int:
+    """Move sessions out of the pre-canonical ``--path-with-dashes--`` buckets.
+
+    The bucket name became a slug plus a hash of the canonical path (two different projects
+    could collide before that). This used to run inside every session-directory lookup --
+    twice per ``misaka chat`` launch, and once per panel session-list refresh.
+    """
+    from misaka.core.session_manager import (
+        _canonical_cwd,
+        _legacy_encode_cwd,
+        encode_cwd,
+        read_session_header,
+    )
+
+    # Two roots hold cwd buckets: the engine's own (agent/sessions) and the product's
+    # per-role tree (~/.misaka/sessions/<role>/). Both were named the old way.
+    roots = [Path(get_agent_dir()) / "sessions", Path.home() / CONFIG_DIR_NAME / "sessions"]
+    role_dirs = [entry for root in roots if root.is_dir()
+                 for entry in sorted(root.iterdir()) if entry.is_dir()]
+    moved = 0
+    for role_dir in role_dirs:
+        for bucket in sorted(role_dir.iterdir()):
+            if not bucket.is_dir() or not bucket.name.startswith("--"):
+                continue
+            for session_file in sorted(bucket.glob("*.jsonl")):
+                header = read_session_header(str(session_file))
+                cwd = header.get("cwd")
+                if not isinstance(cwd, str) or not cwd:
+                    continue
+                canonical = _canonical_cwd(cwd)
+                if bucket.name not in {_legacy_encode_cwd(cwd), _legacy_encode_cwd(canonical)}:
+                    continue                       # already canonical, or someone else's bucket
+                target_dir = role_dir / encode_cwd(canonical)
+                if target_dir == bucket:
+                    continue
+                target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+                target = target_dir / session_file.name
+                if target.exists():
+                    target = target_dir / f"legacy-{session_file.stem}.jsonl"
+                if target.exists():
+                    continue
+                atomic.write_bytes(target, session_file.read_bytes(), mode=0o600)
+                session_file.unlink()
+                moved += 1
+            with contextlib.suppress(OSError):
+                bucket.rmdir()                     # only when it is empty
+    return moved
+
+
+def migrate_settings_file() -> bool:
+    """Fold pre-release settings shapes into the current ones, once.
+
+    ``SettingsManager`` used to apply these on every read *and* every write, so a session
+    replacement or ``/reload`` re-ran the whole table. Nothing outside this machine ever
+    wrote the old keys.
+    """
+    from misaka.core.settings_manager import SettingsManager
+
+    path = Path(get_agent_dir()) / "settings.json"
+    try:
+        current = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(current, dict):
+        return False
+    migrated = SettingsManager.migrateSettings(current)
+    if migrated == current:
+        return False
+    atomic.write_text(path, json.dumps(migrated, indent=2, ensure_ascii=False))
+    return True
 
 
 def migrate_commands_to_prompts(base_dir: str, label: str) -> bool:
@@ -181,11 +254,14 @@ def migrate_extension_system(cwd: str) -> list[str]:
 def run_migrations(cwd: str) -> dict[str, list[str]]:
     migrated_auth_providers = migrate_auth_to_auth_json()
     migrate_sessions_from_agent_root()
+    moved_sessions = migrate_legacy_session_buckets()
+    migrate_settings_file()
     migrate_tools_to_bin()
     migrate_keybindings_config_file()
     deprecation_warnings = migrate_extension_system(cwd)
     return {
         "migratedAuthProviders": migrated_auth_providers,
+        "movedSessions": moved_sessions,
         "deprecationWarnings": deprecation_warnings,
     }
 
