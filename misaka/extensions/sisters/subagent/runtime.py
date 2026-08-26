@@ -2591,11 +2591,6 @@ class SubagentManager:
         async with self._notification_lock:
             if task.notified:
                 return
-            task.notified = True
-            try:
-                await task.persist()
-            except Exception:  # noqa: BLE001, S110 - the notification proceeds; a failed persist is retried on the next transition
-                pass
             details = task.notification_data()
             message = build_task_notification(details)
             try:
@@ -2609,7 +2604,13 @@ class SubagentManager:
                     {"deliverAs": "followUp", "triggerTurn": True},
                 )
             except RuntimeError:
-                # The parent session may have shut down; transcript/meta still retain the result.
+                # The parent session may have shut down. Stay un-notified: the next transition,
+                # restore or task_output can still deliver; transcript/meta retain the result.
+                return
+            task.notified = True                      # delivered: only now is the fact persisted
+            try:
+                await task.persist()
+            except Exception:  # noqa: BLE001, S110 - the message went out; persistence retries on the next transition
                 pass
 
     async def task_output(
