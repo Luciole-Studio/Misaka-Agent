@@ -83,9 +83,7 @@ class FileSettingsStorage(SettingsStorage):
                 if attempt == max_attempts:
                     raise
                 last_error = error
-                start = time.perf_counter()
-                while (time.perf_counter() - start) * 1000 < delay_ms:
-                    pass
+                time.sleep(delay_ms / 1000)      # the sibling credential store already sleeps here
 
         raise last_error or Exception("Failed to acquire settings lock")
 

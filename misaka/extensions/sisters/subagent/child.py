@@ -242,6 +242,9 @@ def _terminal_error(messages: list[dict[str, Any]]) -> str | None:
     return str(detail or f"request {reason}")
 
 
+_PARENT_WATCH_SECONDS = 1.0
+
+
 async def _watch_parent() -> None:
     """Fence the whole agent group if its direct supervisor disappears.
 
@@ -255,7 +258,9 @@ async def _watch_parent() -> None:
         return
     expected = int(raw)
     while True:
-        await asyncio.sleep(0.1)
+        # Once a second: a supervisor that died is still noticed promptly, and a machine
+        # running a dozen children no longer spends 120 syscalls a second asking.
+        await asyncio.sleep(_PARENT_WATCH_SECONDS)
         if os.getppid() == expected:
             continue
         if os.name == "posix":

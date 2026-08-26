@@ -66,17 +66,24 @@ async def _abortable_sleep(ms: int, signal: Any, cancel_message: str) -> None:
     if _signal_aborted(signal):
         raise RuntimeError(cancel_message)
 
+    # Wait on the abort itself instead of waking twenty times a second for the whole
+    # login window, which can be a quarter of an hour.
     sleep_task = asyncio.create_task(asyncio.sleep(ms / 1000))
+    waiters: list[asyncio.Task[Any]] = [sleep_task]
+    wait = getattr(signal, "wait", None)
+    if callable(wait):
+        result = wait()
+        if isinstance(result, Awaitable):
+            waiters.append(asyncio.create_task(result))
     try:
-        while not sleep_task.done():
-            if _signal_aborted(signal):
-                sleep_task.cancel()
-                raise RuntimeError(cancel_message)
-            await asyncio.sleep(0.05)
-        await sleep_task
+        await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+        if _signal_aborted(signal):
+            raise RuntimeError(cancel_message)
     finally:
-        if not sleep_task.done():
-            sleep_task.cancel()
+        for task in waiters:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*waiters, return_exceptions=True)
 
 
 async def poll_oauth_device_code_flow(

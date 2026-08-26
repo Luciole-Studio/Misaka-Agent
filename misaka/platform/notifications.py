@@ -70,7 +70,16 @@ def _txn(con):
             raise
 
 
+NOTIFICATION_SCHEMA_VERSION = 1
+
+
 def init(con):
+    """Tables and trigger every connect; the one-off backfill only until it is recorded.
+
+    The trigger has to match the code that reads its events, so repairing it is an invariant
+    worth re-asserting on every connection. The backfill is not: it is a correlated scan of
+    the whole task table, and it used to run from every ``subscribe`` as well.
+    """
     con.executescript(SCHEMA)
     task_columns = {
         row[1] for row in con.execute("PRAGMA table_info(tasks)").fetchall()
@@ -82,6 +91,11 @@ def init(con):
                 "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?", (obsolete,)
             ).fetchone():
                 con.execute(f'DROP TRIGGER "{obsolete}"')
+        if con.execute(
+            "SELECT 1 FROM schema_migrations WHERE component='notifications' AND version=?",
+            (NOTIFICATION_SCHEMA_VERSION,),
+        ).fetchone():
+            return
         con.execute(
             "INSERT OR IGNORE INTO notification_events"
             "(resource_type,resource_id,kind,payload,dedupe_key,created_at) "
@@ -92,6 +106,10 @@ def init(con):
             "AND n.resource_id=t.id AND n.kind='terminal' "
             "AND n.payload=json_object('status',t.status,'generation',t.generation))"
         )
+    con.execute(
+        "INSERT OR IGNORE INTO schema_migrations(component,version,applied_at) VALUES(?,?,?)",
+        ("notifications", NOTIFICATION_SCHEMA_VERSION, int(time.time())),
+    )
 
 
 def publish(con, resource_type, resource_id, kind, payload=None, *, dedupe_key=None):
@@ -107,7 +125,6 @@ def publish(con, resource_type, resource_id, kind, payload=None, *, dedupe_key=N
 
 def subscribe(con, owner, channel, resource_type="*", resource_id="*", kind="*", *,
               from_now=False):
-    init(con)
     signature = f"{owner}\x00{channel}\x00{resource_type}\x00{resource_id}\x00{kind}"
     subscription_id = "ns_" + hashlib.sha256(signature.encode()).hexdigest()[:16]
     now = int(time.time())
