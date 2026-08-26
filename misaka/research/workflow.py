@@ -3,7 +3,9 @@
 A node is one conclusion. Its routine (``_expand``) is the same for the root and for every
 node opened under it: Last Order plans, Sisters research, Last Order synthesizes, the
 red-team Sister she named finds issues, one probe card tests each issue, Last Order triages,
-and only an issue that undermines the conclusion opens a child node. The frontier is FIFO by
+and only an issue that undermines the conclusion opens a child node. Each issue is investigated by
+a fork of the node's Last Order session (its own process, its own Sisters) that returns the verdict;
+the fork that found the conclusion undermined becomes the child node's Last Order. The frontier is FIFO by
 (depth, created_at); the depth limit bounds how many times a conclusion may be overturned in
 a chain. Code enforces the order, the depth, persistence, and artifact integrity; the models
 keep every judgement call.
@@ -11,8 +13,11 @@ keep every judgement call.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
+import shutil
+import sys
 from pathlib import Path
 
 from misaka.platform import budget, cards as card_files, repo, tasks as task_store
@@ -21,24 +26,21 @@ from misaka.research import ledger, planner, report, runs
 from misaka import workspace as workspace_index
 
 POLL_SECONDS = 2.0
-ACTIVE_TASKS = ("running", "review", "verifying", "finalizing")
+MAX_PROBE_ROUNDS = 3          # ponytail: a fork opens cards at most this many times before it must judge
+ACTIVE_TASKS = ("running", "review")
 TERMINAL_TASKS = ("done", "failed", "stopped")
 
 RESEARCH_DISCIPLINE = """[Research Workflow active]
 Last Order is now in Research mode. Each node of the research tree runs the same routine: Last Order plans and assigns
 Sisters (every task starts with a preflight plan), Last Order writes the node's conclusion in one pass, the red-team Sister she
-named finds issues in it, one probe card tests each issue, and Last Order judges what every probe showed. Only an issue that
-undermines the conclusion opens a child node; the tree is expanded breadth-first up to the chosen depth.
+named finds issues in it, and a fork of Last Order's session investigates each issue with Sisters of its own and returns a
+verdict. Only an issue that undermines the conclusion opens a child node (the fork becomes its Last Order); the tree is
+expanded breadth-first up to the chosen depth.
 
 Code enforces phase order, depth, persistence, and artifact integrity. The models keep the judgement calls: framing, methods,
 Sister selection, source quality, task count, and what shakes a conclusion. The rule against answering lifts only at final
 adjudication, which must keep competing conclusions side by side wherever the evidence cannot decide between them.
 """
-
-
-class NullRunner:
-    async def launch_ready(self, **_kwargs):
-        raise RuntimeError("No Sister task runtime is available for this research session.")
 
 
 async def _progress(callback, stage, message, run=None, **details):
@@ -93,14 +95,40 @@ def _refresh_workspace_index(con, run):
     )
 
 
+def _node_argv(run, node):
+    return [sys.executable, "-m", "misaka", "research", "--node", run["id"], node["id"]]
+
+
+def _probe_argv(run, issue):
+    return [sys.executable, "-m", "misaka", "research", "--probe", run["id"], issue["id"]]
+
+
 def _label(node):
     return "the root question" if node["parent_id"] is None else f"node {node['id']}"
 
 
-async def _submit_tasks(con, run, cfg, worker, node, specs, *, kind, progress=None):
-    """Preflight every spec, then open its card on the node's line. Returns local_id -> task id."""
+def _scope_local_ids(specs, prefix):
+    """Copies of ``specs`` with ``local_id`` and ``dependencies`` prefixed by ``prefix``. Local
+    ids are unique inside one plan only; probes of different issues (and rounds) on the same node
+    reuse ``a``/``b``, so they get ``<issue>.r<round>.`` in front before anything is keyed on them."""
+    if not prefix:
+        return list(specs)
+    out = []
+    for spec in specs:
+        scoped = dict(spec)
+        scoped["local_id"] = prefix + str(spec["local_id"])
+        scoped["dependencies"] = [prefix + str(dep) for dep in (spec.get("dependencies") or [])]
+        out.append(scoped)
+    return out
+
+
+async def _submit_tasks(con, run, cfg, worker, node, specs, *, kind, issue_id=None, evidence="", progress=None,
+                        local_prefix=""):
+    """Preflight every spec, then open its card on the node's line. Returns local_id -> task id
+    (the scoped id when ``local_prefix`` is set)."""
     root = runs.node_root(run, node)
     local_to_task = {}
+    specs = _scope_local_ids(specs, local_prefix)
     for spec in specs:
         if runs.stop_requested(con, run["id"]):
             break
@@ -112,11 +140,11 @@ async def _submit_tasks(con, run, cfg, worker, node, specs, *, kind, progress=No
                            f"tasks/{spec['local_id']}-preflight.md",
                            preflight["preflight_markdown"].rstrip() + "\n",
                            assignee=spec["assignee"], session_file=session)
-        tid = card_files.create(con, root, spec["title"], planner.task_body(spec, path),
+        tid = card_files.create(con, root, spec["title"], planner.task_body(spec, path, evidence=evidence),
                                 spec["assignee"], priority=spec.get("priority", 0),
                                 timeout_seconds=runs.call_timeout(cfg, 1800))
         runs.link_task(con, run["id"], tid, kind=kind, node=node, preflight_artifact=aid,
-                       local_id=spec["local_id"], dependencies=spec.get("dependencies") or [])
+                       local_id=spec["local_id"], issue_id=issue_id, dependencies=spec.get("dependencies") or [])
         local_to_task[spec["local_id"]] = tid
     # depends_json keeps Last Order's plan as written; the cards' frontmatter `needs` is the executable projection of it.
     for spec in specs:
@@ -151,13 +179,13 @@ async def _stop_active(runner, task_ids, context):
     )
 
 
-async def _drive_tasks(con, cfg, runner, run_id, *, context=None,
+async def _drive_tasks(con, cfg, runner, run_id, *, scope, context=None,
                        tool_call_id="research", poll_seconds=POLL_SECONDS, progress=None):
-    """Drive this run's open cards until none is left; tasks waiting on dependencies stay in ``todo``."""
+    """Drive the cards in ``scope`` (task ids) until none is open; tasks waiting on dependencies stay in ``todo``."""
     last_snapshot = None
     while True:
         run = runs.get(con, run_id)
-        linked = runs.tasks(con, run_id)
+        linked = [row for row in runs.tasks(con, run_id) if row["id"] in scope]
         snapshot = tuple((row["id"], row["status"]) for row in linked)
         if snapshot != last_snapshot:
             counts = {}
@@ -176,7 +204,7 @@ async def _drive_tasks(con, cfg, runner, run_id, *, context=None,
                     task_store.mark_stopped(con, row["id"])
             return halt
         _release_dependencies(con, run_id)
-        linked = runs.tasks(con, run_id)
+        linked = [row for row in runs.tasks(con, run_id) if row["id"] in scope]
         free = max(0, max(1, int(cfg.get("research_parallel", 4)))
                    - sum(1 for row in linked if row["status"] in ACTIVE_TASKS))
         ready = [row["id"] for row in linked if row["status"] == "ready"][:free]
@@ -188,14 +216,15 @@ async def _drive_tasks(con, cfg, runner, run_id, *, context=None,
             continue
         if any(row["status"] == "todo" for row in linked):
             _release_dependencies(con, run_id)
-            if any(row["status"] == "todo" for row in runs.tasks(con, run_id)):
+            if any(row["status"] == "todo" and row["id"] in scope for row in runs.tasks(con, run_id)):
                 raise RuntimeError("Research task dependencies cannot advance; the graph may contain a cycle.")
             continue
         return "done"
 
 
-def _copy_task_artifacts(con, run, task):
-    """Copy a done card's registered text artifacts into the run directory (the project's line)."""
+def _register_task_artifacts(con, run, task):
+    """Register a done card's text artifacts where they are: on the card's line, at their project-relative
+    path (the same path once the node merges). Nothing is copied."""
     link = con.execute("SELECT * FROM research_run_tasks WHERE task_id=?", (task["id"],)).fetchone()
     if not link or not task["workspace"]:
         return
@@ -207,26 +236,25 @@ def _copy_task_artifacts(con, run, task):
     for rel in data.get("artifacts") or []:
         source = Path(task["workspace"], str(rel)).resolve()
         try:
-            source.relative_to(Path(task["workspace"]).resolve())
+            inside = source.relative_to(Path(task["workspace"]).resolve())
         except ValueError:
             continue
         if not source.is_file():
             continue
         try:
-            text = source.read_text(encoding="utf-8")
+            raw = source.read_bytes()
+            raw.decode("utf-8")
         except (OSError, UnicodeDecodeError):
             continue  # binary originals are handled by corpus/PageIndex ingestion
-        if link["kind"] == "red_team":
-            kind, dest = "critique", runs.node_prefix(node) + f"critique/{source.name}"
-        else:
-            kind, dest = "task_output", f"tasks/{task['id']}/{source.name}"
-        runs.write_text(con, run["id"], kind, f"[{task['id']}] {source.name}", dest, text,
-                        branch_id=_bid(node), task_id=task["id"],
-                        metadata={"source_workspace": str(source), "source_file": str(rel)})
+        kind = "critique" if link["kind"] == "red_team" else "task_output"
+        runs.register_file(con, run["id"], kind, f"[{task['id']}] {source.name}",
+                           os.path.join(run["workspace"], str(inside)), sha256=hashlib.sha256(raw).hexdigest(),
+                           branch_id=_bid(node), task_id=task["id"],
+                           metadata={"source_workspace": str(source), "source_file": str(rel)})
 
 
 def settle_done_tasks(con, *, run_id):
-    """Copy accepted artifacts and ingest the Sisters' findings, once per task generation."""
+    """Register accepted artifacts and ingest the Sisters' findings, once per task generation."""
     run = runs.get(con, run_id)
     for task in runs.tasks(con, run_id):
         if task["status"] != "done":
@@ -234,7 +262,7 @@ def settle_done_tasks(con, *, run_id):
         generation = int(task["generation"])
         if task_store.latest_payload(con, task["id"], "research_v2_settled", generation=generation):
             continue
-        _copy_task_artifacts(con, run, task)
+        _register_task_artifacts(con, run, task)
         result = {"kind": task["research_kind"]}
         if task["research_kind"] != "red_team":
             try:
@@ -255,7 +283,7 @@ def _ingest_critique(con, run, node, task):
             if a["path"].endswith(".json")]
     if not rows:
         raise RuntimeError(f"The red team card {task['id']} delivered no critique.json.")
-    data = json.loads(Path(rows[-1]["path"]).read_text(encoding="utf-8"))
+    data = json.loads(runs.artifact_text(rows[-1]))
     for item in (data.get("issues") if isinstance(data, dict) else None) or []:
         if not isinstance(item, dict) or not item.get("material"):
             continue
@@ -302,12 +330,15 @@ def _settle_closing(con, run):
         _close(con, run, waiting[-1], "closed")
 
 
-async def _expand(con, cfg, runner, worker, run, node, *, context, tool_call_id, poll_seconds, progress):
+async def _expand(con, cfg, runner, worker, run, node, *, spawner, context, tool_call_id, poll_seconds, progress):
     """Advance one node through its routine. Returns the node's terminal status, a halt
     ("stopped" / "budget"), or a waiting_input result dict."""
-    drive = lambda: _drive_tasks(con, cfg, runner, run["id"], context=context,   # noqa: E731
-                                 tool_call_id=tool_call_id, poll_seconds=poll_seconds, progress=progress)
     nid = node["id"]
+
+    def drive(kind):
+        scope = {row["id"] for row in runs.tasks(con, run["id"], kind=kind, node_id=nid)}
+        return _drive_tasks(con, cfg, runner, run["id"], scope=scope, context=context,
+                            tool_call_id=tool_call_id, poll_seconds=poll_seconds, progress=progress)
     while True:
         node = runs.node(con, nid)
         status = node["status"]
@@ -348,7 +379,7 @@ async def _expand(con, cfg, runner, worker, run, node, *, context, tool_call_id,
             runs.set_node(con, nid, status="executing")
 
         elif status == "executing":
-            outcome = await drive()
+            outcome = await drive("research")
             if outcome != "done":
                 return outcome
             settle_done_tasks(con, run_id=run["id"])
@@ -369,11 +400,12 @@ async def _expand(con, cfg, runner, worker, run, node, *, context, tool_call_id,
                 await _progress(progress, "red_team",
                                 f"Sister {plan['red_team']['assignee']} is red-teaming the conclusion for {_label(node)}.", run)
                 body = planner.red_team_body(node, synthesis_path=_artifact_path(con, run, node, "synthesis"),
-                                             plan_path=_artifact_path(con, run, node, "plan"))
+                                             plan_path=_artifact_path(con, run, node, "plan"),
+                                             evidence=planner.evidence_block(con, run, node))
                 tid = card_files.create(con, runs.node_root(run, node), f"Red team · {_label(node)}", body,
                                         plan["red_team"]["assignee"], timeout_seconds=runs.call_timeout(cfg, 1800))
                 runs.link_task(con, run["id"], tid, kind="red_team", node=node, local_id="red-team")
-            outcome = await drive()
+            outcome = await drive("red_team")
             if outcome != "done":
                 return outcome
             settle_done_tasks(con, run_id=run["id"])
@@ -384,48 +416,57 @@ async def _expand(con, cfg, runner, worker, run, node, *, context, tool_call_id,
             runs.set_node(con, nid, status="probing")
 
         elif status == "probing":
-            open_issues = runs.issues(con, run["id"], node_id=nid, status="open")
-            if open_issues:
+            pending = [i for i in runs.issues(con, run["id"], node_id=nid) if i["status"] in ("open", "probing")]
+            if pending:
                 await _progress(progress, "probing",
-                                f"The red team left {len(open_issues)} issues on {_label(node)}; Last Order is planning probes.", run)
-                specs = await asyncio.to_thread(planner.plan_probes, con, run, cfg, worker, node, open_issues,
-                                                synthesis_path=_artifact_path(con, run, node, "synthesis"))
-                _write(con, run, node, "probes_json", "Probe plan", "probes.json",
-                       json.dumps(specs, ensure_ascii=False, indent=2))
-                local_to_task = await _submit_tasks(con, run, cfg, worker, node, specs, kind="probe", progress=progress)
-                for spec in specs:
-                    if spec["local_id"] in local_to_task:
-                        runs.set_issue(con, spec["issue_id"], "probing", probe_task_id=local_to_task[spec["local_id"]])
-            if runs.issues(con, run["id"], node_id=nid, status="probing"):
-                outcome = await drive()
+                                f"The red team left {len(pending)} issues on {_label(node)}; a Last Order fork investigates each.",
+                                run, issues=[i["id"] for i in pending])
+                handles = {}
+                for issue in pending:
+                    probe_dir = runs.probe_session_dir(run, issue["id"])
+                    if not os.path.isdir(probe_dir):             # resume: a fork already forked keeps its session
+                        planner.fork_session(planner._lo_session(run, node), probe_dir)
+                    runs.set_issue(con, issue["id"], "probing")
+                    handles[issue["id"]] = spawner.spawn(_probe_argv(run, issue), cwd=run["workspace"],
+                                                         title=f"LO·{nid}·{issue['id']}", place="split")
+                outcome = await _wait_probes(con, cfg, spawner, run, handles, poll_seconds=poll_seconds)
                 if outcome != "done":
                     return outcome
-                settle_done_tasks(con, run_id=run["id"])
             runs.set_node(con, nid, status="triaging")
 
         elif status == "triaging":
-            issues = runs.issues(con, run["id"], node_id=nid, status="probing")
-            if issues:
-                verdicts = await asyncio.to_thread(
-                    planner.triage, con, run, cfg, worker, node, issues, _done(con, run, node, "probe"),
-                    synthesis_path=_artifact_path(con, run, node, "synthesis"))
-                _write(con, run, node, "triage_json", "Probe triage", "triage.json",
-                       json.dumps(verdicts, ensure_ascii=False, indent=2))
-                for issue in issues:
-                    verdict = verdicts[issue["id"]]["verdict"]
-                    if verdict == "undermines" and node["depth"] < runs.limits(run)["max_depth"]:
-                        child = runs.create_node(con, run["id"], trigger=issue["question"],
-                                                 parent_id=nid, depth=node["depth"] + 1)
-                        runs.set_issue(con, issue["id"], "undermines", child_branch_id=child["id"])
-                    else:
-                        runs.set_issue(con, issue["id"], "parked" if verdict == "undermines" else verdict)
+            for issue in runs.issues(con, run["id"], node_id=nid):
+                if issue["status"] != "undermines" or issue["child_branch_id"]:
+                    continue
+                if node["depth"] < runs.limits(run)["max_depth"]:
+                    child = runs.create_node(con, run["id"], trigger=issue["question"], parent_id=nid,
+                                             depth=node["depth"] + 1)
+                    probe_dir = runs.probe_session_dir(run, issue["id"])
+                    if os.path.isdir(probe_dir):                 # the fork that found it becomes the child's Last Order
+                        shutil.copytree(probe_dir, planner._lo_session(run, child), dirs_exist_ok=True)
+                    runs.set_issue(con, issue["id"], "undermines", child_branch_id=child["id"])
+                else:
+                    runs.set_issue(con, issue["id"], "parked")
             return _close(con, run, node, "closed")
 
         else:
             raise RuntimeError(f"Node {nid} is in an unknown state: {status}")
 
 
-def _partial_result(con, run, reason):
+def _unfinished_reason(con, run_id):
+    """Why the run must not be adjudicated as done: nodes that failed, or a merge conflict that
+    left a branch's work outside the line the report is written from."""
+    failed = [n["id"] for n in runs.nodes(con, run_id) if n["status"] == "failed"]
+    parts = []
+    if failed:
+        parts.append(f"{len(failed)} node(s) failed: {', '.join(failed)}")
+    error = str((runs.get(con, run_id) or {})["last_error"] or "")
+    if "merge conflict" in error:
+        parts.append(error)
+    return "; ".join(parts) or None
+
+
+def _partial_result(con, run, reason, *, status="stopped"):
     artifacts = runs.artifacts(con, run["id"])
     lines = ['# Incomplete research run', "", f"- Run: `{run['id']}`",
              f"- Project: `{runs.project_name(run)}` (`{run['workspace']}`)",
@@ -434,15 +475,113 @@ def _partial_result(con, run, reason):
     lines.extend(f"- [{row['kind']}] {row['title']} — `{row['path']}`" for row in artifacts)
     lines += ["", "This document records where the run stopped. It is not a final report, and the research is incomplete.", ""]
     aid, path = runs.write_text(con, run["id"], "partial", 'Incomplete research run', "partial.md", "\n".join(lines))
-    runs.set_state(con, run["id"], status="stopped", final_artifact=aid)
-    return {"reason": "stopped", "final": {"artifact": aid, "path": path,
+    runs.set_state(con, run["id"], status=status, final_artifact=aid)
+    return {"reason": status, "final": {"artifact": aid, "path": path,
             "content": Path(path).read_text(encoding="utf-8")},
             "run": runs.summary(con, run["id"])}
 
 
-async def run(con, cfg, runner, worker, *, run_id, context=None,
-              tool_call_id="research", poll_seconds=POLL_SECONDS, progress=None):
-    """Advance one persisted research run until it finishes, stops, or needs user input."""
+async def _wait_probes(con, cfg, spawner, run, handles, *, poll_seconds):
+    """Wait until every fork has written its verdict (or the run halted)."""
+    while handles:
+        await asyncio.sleep(poll_seconds)
+        halted = (runs.stop_requested(con, run["id"])
+                  or budget.status(con, cfg.get("token_cap"))["mode"] != "normal")
+        for iid, handle in list(handles.items()):
+            if runs.issue(con, iid)["status"] != "probing":
+                handles.pop(iid)
+            elif not spawner.alive(handle):
+                if halted:
+                    handles.pop(iid)
+                else:
+                    raise RuntimeError(f"The fork on issue {iid} ended without a verdict; resume the run to retry it.")
+    if runs.stop_requested(con, run["id"]):
+        return "stopped"
+    if budget.status(con, cfg.get("token_cap"))["mode"] != "normal":
+        return "budget"
+    return "done"
+
+
+async def expand_node(con, cfg, runner, worker, *, run_id, node_id, spawner, progress=None):
+    """One node's routine, as run by its own process (misaka.research.node)."""
+    runs.init(con)
+    run, node = runs.get(con, run_id), runs.node(con, node_id)
+    if not run or not node:
+        raise ValueError(f"Research node not found: {run_id}/{node_id}")
+    return await _expand(con, dict(cfg), runner, worker, run, node, spawner=spawner, context=None,
+                         tool_call_id=f"research:{run_id}:{node_id}", poll_seconds=POLL_SECONDS,
+                         progress=progress)
+
+
+async def probe(con, cfg, runner, worker, *, run_id, issue_id, progress=None, poll_seconds=POLL_SECONDS):
+    """Last Order's fork on one issue, as run by its own process: open cards, read what they
+    returned, judge. Ends with the issue's verdict written; halts propagate like a node's."""
+    runs.init(con)
+    run, issue = runs.get(con, run_id), runs.issue(con, issue_id)
+    if not run or not issue:
+        raise ValueError(f"Research issue not found: {run_id}/{issue_id}")
+    node = runs.node(con, issue["branch_id"])
+    synthesis_path = _artifact_path(con, run, node, "synthesis")
+    for round_no in range(1, MAX_PROBE_ROUNDS + 1):
+        cards = [t for t in runs.tasks(con, run_id, issue_id=issue_id) if t["status"] == "done"]
+        await _progress(progress, "probe", f"Fork on issue {issue_id}: round {round_no}, {len(cards)} card(s) in.", run)
+        tasks, verdict = await asyncio.to_thread(
+            planner.probe_step, con, run, dict(cfg), worker, node, issue, cards,
+            synthesis_path=synthesis_path, round_no=round_no, rounds=MAX_PROBE_ROUNDS)
+        if verdict:
+            runs.set_issue(con, issue_id, verdict["verdict"], reason=verdict["reason"])
+            return verdict["verdict"]
+        opened = await _submit_tasks(con, run, dict(cfg), worker, node, tasks, kind="probe", issue_id=issue_id,
+                                     evidence=planner.evidence_block(con, run, node), progress=progress,
+                                     local_prefix=f"{issue_id}.r{round_no}.")
+        outcome = await _drive_tasks(con, dict(cfg), runner, run_id, scope=set(opened.values()),
+                                     tool_call_id=f"research:{run_id}:{issue_id}", poll_seconds=poll_seconds,
+                                     progress=progress)
+        if outcome != "done":
+            return outcome
+        settle_done_tasks(con, run_id=run_id)
+    runs.set_issue(con, issue_id, "inconclusive", reason=f"No verdict after {MAX_PROBE_ROUNDS} rounds of cards.")
+    return "inconclusive"
+
+
+async def _expand_level(con, cfg, spawner, run, level, *, poll_seconds, progress):
+    """Spawn every node of the level and wait until each has left the frontier (terminal,
+    closing, or waiting for input). Returns "done", a halt, or a waiting_input result."""
+    handles = {node["id"]: spawner.spawn(_node_argv(run, node), cwd=run["workspace"],
+                                         title=f"LO·{node['id']}", place="split") for node in level}
+    last = {}
+    while handles:
+        await asyncio.sleep(poll_seconds)
+        halted = (runs.stop_requested(con, run["id"])
+                  or budget.status(con, cfg.get("token_cap"))["mode"] != "normal")
+        for nid, handle in list(handles.items()):
+            node = runs.node(con, nid)
+            if node["status"] != last.get(nid):
+                last[nid] = node["status"]
+                await _progress(progress, "node", f"{_label(node)}: {node['status']}.", run, node=nid)
+            if node["status"] in ("closing", "waiting_input", *runs.NODE_TERMINAL):
+                handles.pop(nid)
+            elif not spawner.alive(handle):
+                if halted:
+                    handles.pop(nid)
+                else:
+                    raise RuntimeError(f"Node {nid}'s process ended while {node['status']}; resume the run to retry it.")
+    waiting = [n for n in runs.nodes(con, run["id"]) if n["status"] == "waiting_input"]
+    if waiting:
+        questions = [f"[{n['id']}] {q}" for n in waiting
+                     for q in ((_json_artifact(con, run, n, "plan_json") or {}).get("clarifying_questions") or [])]
+        runs.set_state(con, run["id"], phase="waiting_input", status="waiting_input")
+        return {"reason": "waiting_input", "questions": questions, "run": runs.summary(con, run["id"])}
+    if runs.stop_requested(con, run["id"]):
+        return "stopped"
+    if budget.status(con, cfg.get("token_cap"))["mode"] != "normal":
+        return "budget"
+    return "done"
+
+
+async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, progress=None):
+    """Advance one persisted research run until it finishes, stops, or needs user input.
+    Nodes are processes (misaka.research.node); ``spawner`` starts one and says whether it lives."""
     runs.init(con)
     run = runs.get(con, run_id)
     if not run:
@@ -460,21 +599,25 @@ async def run(con, cfg, runner, worker, *, run_id, context=None,
         _refresh_workspace_index(con, run)
         if run["phase"] == "created":
             runs.set_state(con, run_id, phase="active")
-        # ponytail: nodes expand one at a time (cards within a node run in parallel);
-        # expand siblings concurrently if wall-clock ever matters.
-        while True:
+        while True:                                   # breadth-first: one level at a time, its nodes in parallel
             _settle_closing(con, run)
-            node = runs.next_node(con, run_id)
-            if node is None:
+            level = runs.next_level(con, run_id)
+            if not level:
                 break
-            runs.set_state(con, run_id, wave=node["depth"])
-            result = await _expand(con, cfg, runner, worker, run, node, context=context,
-                                   tool_call_id=tool_call_id, poll_seconds=poll_seconds, progress=progress)
+            runs.set_state(con, run_id, wave=level[0]["depth"])
+            await _progress(progress, "level", f"Depth {level[0]['depth']}: {len(level)} node(s) expanding.", run,
+                            nodes=[n["id"] for n in level])
+            result = await _expand_level(con, cfg, spawner, run, level, poll_seconds=poll_seconds, progress=progress)
             if isinstance(result, dict):
                 return result
             if result in halts:
                 settle_done_tasks(con, run_id=run_id)
                 return _partial_result(con, run, halts[result])
+        unfinished = _unfinished_reason(con, run_id)
+        if unfinished:
+            settle_done_tasks(con, run_id=run_id)
+            await _progress(progress, "unfinished", f"The run cannot be adjudicated: {unfinished}", run)
+            return _partial_result(con, run, unfinished, status="failed")
         runs.set_state(con, run_id, phase="finalizing")
         await _progress(progress, "finalizing", "Every node is closed; Last Order is adjudicating the final report.", run)
         result = await asyncio.to_thread(report.finalize, con, run, cfg, worker)
@@ -487,7 +630,6 @@ async def run(con, cfg, runner, worker, *, run_id, context=None,
 
 
 if __name__ == "__main__":                          # self-check: a two-level tree with a fake worker, no LLM
-    import re
     import sys
     import tempfile
 
@@ -500,18 +642,16 @@ if __name__ == "__main__":                          # self-check: a two-level tr
         def run_llm_json(self, profile_dir, prompt, *_args, raw=False, **_kwargs):
             if prompt.startswith(planner.PREFLIGHT_CONTRACT):
                 return {"preflight_markdown": "Look at the one source we have and quote it faithfully."}, "", None
-            if prompt.startswith(planner.SYNTHESIS_CONTRACT) or prompt.startswith(report.FINAL_CONTRACT):
+            if any(prompt.startswith(c) for c in (planner.SYNTHESIS_CONTRACT, report.FINAL_CONTRACT, report.SURVEY_CONTRACT)):
                 return None, "# Conclusion\n\n" + "The evidence supports the claim [t/out.md]. " * 6, None
-            if prompt.startswith(planner.PROBE_PLAN_CONTRACT):
-                ids = re.findall(r'"issue_id": "(i_[0-9a-f]+)"', prompt)
-                return {"tasks": [{"issue_id": i, "local_id": f"probe-{n}", "title": f"Probe {n}",
-                                   "question": "Does it hold?", "rationale": "Tests the issue",
-                                   "deliverable": "out.md", "assignee": "s1"} for n, i in enumerate(ids, 1)]}, "", None
-            if prompt.startswith(planner.TRIAGE_CONTRACT):
-                self.triages += 1
-                ids = re.findall(r'"issue_id": "(i_[0-9a-f]+)"', prompt)
-                verdict = "undermines" if self.triages <= self.levels else "supports"
-                return {"verdicts": [{"issue_id": i, "verdict": verdict, "reason": "scripted"} for i in ids]}, "", None
+            if prompt.startswith(planner.PROBE_CONTRACT):
+                if "# Round 1 of" in prompt:                      # first round: one card
+                    return {"tasks": [{"local_id": "probe-1", "title": "Probe", "question": "Does it hold?",
+                                       "rationale": "Tests the issue", "deliverable": "out.md", "assignee": "s1"}],
+                            "verdict": None}, "", None
+                self.triages += 1                                 # second round: judge
+                verdict = "undermines" if self.triages <= self.levels + 1 else "supports"
+                return {"tasks": [], "verdict": {"verdict": verdict, "reason": "scripted"}}, "", None
             if prompt.startswith(planner.ROOT_CONTRACT):
                 return {"status": "ready", "plan_markdown": "A plan that is long enough to pass the envelope check.",
                         "tasks": [{"local_id": "t1", "title": "Read the source", "question": "What does it say?",
@@ -531,22 +671,44 @@ if __name__ == "__main__":                          # self-check: a two-level tr
                 link = self.con.execute("SELECT kind FROM research_run_tasks WHERE task_id=?", (tid,)).fetchone()
                 state = Path(task_store.task_state_dir(tid))
                 state.mkdir(parents=True, exist_ok=True)
+                out = Path(row["output_dir"])                # as the card prompt says: deliverables go under output_dir
+                out.mkdir(parents=True, exist_ok=True)
+                rel = lambda name: os.path.relpath(out / name, row["workspace"])   # noqa: E731
                 if link["kind"] == "red_team":
                     self.red_teams += 1
-                    issues = [{"kind": "scope", "question": f"Is the scope right? ({tid})", "rationale": "x",
-                               "priority": 1, "material": True}] if self.red_teams <= self.levels else []
-                    Path(row["workspace"], "critique.md").write_text("# Review\n", encoding="utf-8")
-                    Path(row["workspace"], "critique.json").write_text(json.dumps({"issues": issues}), encoding="utf-8")
-                    report_ = {"artifacts": ["critique.md", "critique.json"]}
+                    count = 2 if self.red_teams == 1 else 1        # the root leaves two issues: siblings in one level
+                    issues = [{"kind": "scope", "question": f"Is the scope right? ({tid}/{i})", "rationale": "x",
+                               "priority": 1, "material": True} for i in range(count)] if self.red_teams <= self.levels else []
+                    (out / "critique.md").write_text("# Review\n", encoding="utf-8")
+                    (out / "critique.json").write_text(json.dumps({"issues": issues}), encoding="utf-8")
+                    report_ = {"artifacts": [rel("critique.md"), rel("critique.json")]}
                 else:
-                    Path(row["workspace"], f"{tid}.md").write_text("Finding one\n", encoding="utf-8")
-                    report_ = {"artifacts": [f"{tid}.md"],
+                    (out / "out.md").write_text("Finding one\n", encoding="utf-8")
+                    report_ = {"artifacts": [rel("out.md")],
                                "findings": [{"text": "Finding one is a self-contained claim", "claim_type": "fact",
-                                             "source_file": f"{tid}.md", "quote": "Finding one"}]}
+                                             "source_file": rel("out.md"), "quote": "Finding one"}]}
                 (state / "report.json").write_text(json.dumps({
                     "schema_version": 1, "status": "done", "summary": "scripted", "uncertain": [], "notes": "", **report_}))
                 repo.commit_card(row["workspace"], tid, report_, f"card {tid}: submit")
                 self.con.execute("UPDATE tasks SET status='done' WHERE id=?", (tid,))
+
+    class InlineSpawner:                 # the self-check's "process": an asyncio task in this loop
+        def __init__(self, con, runner, worker):
+            self.con, self.runner, self.worker = con, runner, worker
+
+        def spawn(self, argv, *, cwd, title, place="split"):
+            run_id, target = argv[-2], argv[-1]
+            if "--node" in argv:
+                coro = expand_node(self.con, cfg, self.runner, self.worker, run_id=run_id, node_id=target,
+                                   spawner=self)
+            else:
+                coro = probe(self.con, cfg, self.runner, self.worker, run_id=run_id, issue_id=target, poll_seconds=0)
+            return asyncio.ensure_future(coro)
+
+        def alive(self, task):
+            if task.done() and task.exception():
+                raise task.exception()
+            return not task.done()
 
     tmp = tempfile.mkdtemp(prefix="misaka-research-")
     os.environ["MISAKA_RUNS_HOME"] = os.path.join(tmp, "runs")
@@ -562,20 +724,29 @@ if __name__ == "__main__":                          # self-check: a two-level tr
            "judge_timeout": 5, "token_cap": 0}
     con = task_store.connect(cfg["db"])
     r = runs.create(con, workspace=ws, question="Does the source support the claim?", limits={"max_depth": 2})
-    out = asyncio.run(run(con, cfg, FakeRunner(con, 2), FakeWorker(2), run_id=r["id"], poll_seconds=0))
+    out = asyncio.run(run(con, cfg, InlineSpawner(con, FakeRunner(con, 2), FakeWorker(2)), FakeWorker(2),
+                          run_id=r["id"], poll_seconds=0))
     assert out["reason"] == "done", out
-    root, child, grandchild = tree = runs.nodes(con, r["id"])
-    assert [n["depth"] for n in tree] == [0, 1, 2] and all(n["status"] == "closed" for n in tree), [dict(n) for n in tree]
-    assert child["parent_id"] == root["id"] and grandchild["parent_id"] == child["id"]
-    kinds = sorted(t["research_kind"] for t in runs.tasks(con, r["id"]))
-    assert kinds == ["probe", "probe", "red_team", "red_team", "red_team", "research", "research", "research"], kinds
-    assert sorted(i["status"] for i in runs.issues(con, r["id"])) == ["undermines", "undermines"]
-    assert Path(ws, "research", r["id"], "final.md").is_file()
+    tree = runs.nodes(con, r["id"])
+    root, siblings, grandchild = tree[0], tree[1:3], tree[3]
+    assert [n["depth"] for n in tree] == [0, 1, 1, 2] and all(n["status"] == "closed" for n in tree), [dict(n) for n in tree]
+    assert {n["parent_id"] for n in siblings} == {root["id"]} and grandchild["parent_id"] in {n["id"] for n in siblings}
+    from collections import Counter
+    kinds = Counter(t["research_kind"] for t in runs.tasks(con, r["id"]))
+    assert kinds == {"research": 4, "red_team": 4, "probe": 3}, kinds
+    assert [i["status"] for i in runs.issues(con, r["id"])] == ["undermines"] * 3
+    assert all(i["reason"] == "scripted" for i in runs.issues(con, r["id"]))
+    assert all(t["issue_id"] for t in runs.tasks(con, r["id"], kind="probe"))
+    assert Path(ws, "research", r["id"], "final.md").is_file() and Path(ws, "research", r["id"], "survey.md").is_file()
     assert not runs.get(con, r["id"])["last_error"], runs.get(con, r["id"])["last_error"]
-    # post-order: the grandchild merged into the child's branch, the child (carrying it) into master -- one merge point on master
-    assert repo._git(ws, "rev-list", "--merges", "--count", "--first-parent", "HEAD").stdout.strip() == "1"
-    merged_into_child = repo._git(ws, "branch", "--merged", f"research/{child['id']}").stdout
-    assert f"research/{grandchild['id']}" in merged_into_child, merged_into_child
+    assert all([x.name for x in d.iterdir()] == ["work"]                                   # originals only, no copies
+               for d in Path(ws, "research", r["id"], "tasks").iterdir() if d.is_dir())
+    assert len(ledger.findings(con, r["id"])) == 7, len(ledger.findings(con, r["id"]))     # every card's quote checked at its origin
+    assert all(a["path"].startswith(os.path.realpath(ws)) for a in runs.artifacts(con, r["id"], kind="task_output"))
+    # post-order: the grandchild merged into its parent's branch, each sibling into master -- two merge points on master
+    assert repo._git(ws, "rev-list", "--merges", "--count", "--first-parent", "HEAD").stdout.strip() == "2"
+    merged_into_parent = repo._git(ws, "branch", "--merged", f"research/{grandchild['parent_id']}").stdout
+    assert f"research/{grandchild['id']}" in merged_into_parent, merged_into_parent
     log = repo._git(ws, "log", "--oneline").stdout
     missing = [(t["id"], t["research_kind"], t["workspace"]) for t in runs.tasks(con, r["id"]) if f"card {t['id']}: submit" not in log]
     assert not missing, (missing, repo._git(ws, "log", "--all", "--graph", "--oneline").stdout)
@@ -583,8 +754,8 @@ if __name__ == "__main__":                          # self-check: a two-level tr
     print(repo._git(ws, "log", "--graph", "--oneline").stdout, file=sys.stderr)
     # depth 0: the undermining issue is parked, no child node
     r0 = runs.create(con, workspace=ws, question="Second run", limits={"max_depth": 0})
-    worker0 = FakeWorker()
-    asyncio.run(run(con, cfg, FakeRunner(con), worker0, run_id=r0["id"], poll_seconds=0))
+    asyncio.run(run(con, cfg, InlineSpawner(con, FakeRunner(con), FakeWorker()), FakeWorker(),
+                    run_id=r0["id"], poll_seconds=0))
     assert len(runs.nodes(con, r0["id"])) == 1
-    assert [i["status"] for i in runs.issues(con, r0["id"])] == ["parked"]
+    assert [i["status"] for i in runs.issues(con, r0["id"])] == ["parked", "parked"]
     print("workflow self-check OK", file=sys.stderr)
