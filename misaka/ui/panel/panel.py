@@ -1,4 +1,4 @@
-"""Multi-pane panel: MISAKA's default entry point (herdr-style; geometry from herdr_ui).
+"""Multi-pane panel: MISAKA's default entry point (herdr-style; geometry from geometry.py).
 
 Rendering: the daemon keeps a terminal emulator per pane; the panel subscribes
 to dirty rows from every pane and lays them out itself: herdr's sidebar on the left
@@ -29,8 +29,8 @@ import termios
 import time
 import unicodedata
 
-from misaka.cli import herdr_ui as hui
-from misaka.net import client as net
+from misaka.ui.panel import geometry as hui
+from misaka.ui.panel import client as net
 
 def _prefix_key():
     """Prefix key, default ctrl+b. Inside tmux that key is taken, so set
@@ -224,35 +224,6 @@ def pane_state(pane):
 
 LO_TITLE = "Last Order"      # the panel opens Last Order panes with this title; they are space roots
 SISTERS_LABEL = "sisters"    # the footer launcher (herdr: "menu"); it opens the Sister roster
-TAB_PANE_CAP = 6             # ponytail: three columns of two on a ~180-column screen; past that, a new tab
-
-
-def next_tile_placement(tree):
-    """MISAKA's seating rule for summoned Sisters (not from herdr): at most two panes per column,
-    stacking below first, then a new column on the right once the column is full.
-    Returns ``(pane_to_split, direction)``; ``None`` means wrap the whole tree (new column).
-
-        1 [A]   2 [A]   3 [A][C]   4 [A][C]   5 [A][C][E]
-                  [B]     [B]        [B][D]     [B][D]
-    """
-    ids = hui.pane_ids(tree)
-    if len(ids) % 2 == 0:                      # Every column holds two: open a new column on the right.
-        return None, "h"
-    placed = hui.collect_panes(tree, hui.Rect(0, 0, 1000, 1000), ids[0])
-    rightmost = max(placed, key=lambda item: (item[1].x, -item[1].y))
-    return rightmost[0], "v"                   # Stack inside the rightmost column.
-
-
-def tile_into(tree, pane_id):
-    """Seat ``pane_id`` in ``tree`` by the rule above; a new column takes an equal share of the
-    width (existing columns keep cols/(cols+1)). Pure, so testable."""
-    target, direction = next_tile_placement(tree)
-    if target is None:
-        columns = (len(hui.pane_ids(tree)) + 1) // 2
-        return hui.split_root(tree, direction, pane_id, columns / (columns + 1))
-    return hui.split_at(tree, target, direction, pane_id, 0.5)
-
-
 def space_key(pane):
     """A pane's folder as a real path (herdr's workspace identity cwd, workspace.rs:1161-1173)."""
     return os.path.realpath(pane.get("cwd") or os.getcwd())
@@ -309,7 +280,7 @@ def sidebar_model(spaces, listing, focused_id, active_id):
 
 # Cards in these statuses legitimately own their card/<id> branch; any other card/* branch
 # is stray -- a conflict return or a deleted card, waiting for a human.
-GIT_OWNED = ("running", "verifying", "review", "finalizing", "blocked", "triage")
+GIT_OWNED = ("running", "review", "blocked", "triage")
 
 
 def git_info(folder, active_cards=()):
@@ -354,7 +325,7 @@ def _sorted_agents(agents, sort):
 
 def _put_tokens(canvas, x, y, tokens, max_width, clip):
     """sidebar.rs:818-936 resolved_token_spans, the drawing half: separators in overlay0 dim,
-    each token in its own style, widths from herdr_ui.fit_tokens.
+    each token in its own style, widths from geometry.fit_tokens.
     ``tokens`` = [(kind, text, style kwargs)]."""
     for index, sep, shown in hui.fit_tokens([(k, t) for k, t, _s in tokens], max_width):
         if sep:
@@ -846,23 +817,6 @@ def kin_pane(path, listing):
     return None
 
 
-def card_seat(card, listing):
-    """Where a reopened card session sits: beside the Last Order that created it when her pane
-    is live, else beside a Last Order in the card's folder, else on its own (``None``). A pane
-    reports the session file it writes (``<stamp>_<id>.jsonl``); a Last Order that forked is
-    still the origin -- her fork lineage (parentSession chain) counts as her."""
-    origin = card.get("origin_session")
-    folder = os.path.realpath(card.get("workspace") or "")
-    live = [p for p in listing if p.get("alive") and p.get("title") == LO_TITLE]
-    marker = f"_{origin}.jsonl"
-    for pane in live:
-        reported = (pane.get("reported") or {}).get("session", "")
-        if origin and reported and (reported.endswith(marker)
-                                    or any(p.endswith(marker) for p in session_lineage(reported))):
-            return pane["id"]
-    return next((p["id"] for p in live if space_key(p) == folder), None)
-
-
 def session_key(action):
     """The identity of the session a row points at: the file, or the card that owns one."""
     if action[0] == "sess-card":
@@ -1347,9 +1301,10 @@ def launch():
     # engine's fake block, which suddenly looks brighter. (Bitten twice: IME input, click-to-focus.)
     pane_cursor = {}          # pane id -> {"at": [col, row], "hidden": bool}
     slices = []
-    # herdr semantics: a tab is a page holding a BSP split tree (layout.rs port; nodes in herdr_ui).
-    spaces = []          # herdr Workspaces, explicit: {"id", "folder", "name", "tabs": [trees]}
-    space_seq = [0]
+    # herdr semantics: a tab is a page holding a BSP split tree (layout.rs port; nodes in geometry.py).
+    # The daemon owns the layout and seats every pane (herdr server model); this is a view of it.
+    spaces = []          # [{"id", "folder", "name", "tabs": [trees], "tab_names": [str | None]}]
+    auto_names = {}      # pane -> the session file its tab name came from (renamed when the pane moves on)
 
     def active_space():
         return next((space for space in spaces if space["id"] == side["ws"]), None)
@@ -1363,60 +1318,47 @@ def launch():
         return next((space for space in spaces
                      if any(pane_id in hui.pane_ids(tree) for tree in space["tabs"])), None)
 
-    def add_space(folder, tree=None):
-        space_seq[0] += 1
-        space = {"id": f"w{space_seq[0]}", "folder": folder, "name": None,
-                 "tabs": [tree] if tree else []}
-        spaces.append(space)
-        return space
+    layout_rev = {"n": None}          # the daemon revision the current view is based on
 
-    def sync_tabs():
-        """Drop dead panes from every space's tabs and seat new ones: a pane whose parent sits
-        in some tab joins that tab by the tiling rule (until TAB_PANE_CAP); anything else opens
-        a tab in the space whose folder it runs in (the active one first), or a space of its
-        own. A space left without tabs goes away (herdr closes a workspace with its last pane).
-        Returns True when anything changed."""
-        alive = [p["id"] for p in listing if p["alive"]]
-        by_id = {p["id"]: p for p in listing}
-        before = [(space["id"], list(space["tabs"])) for space in spaces]
-        for space in spaces:
-            trees = []
-            for tree in space["tabs"]:
-                for pid in hui.pane_ids(tree):
+    def _layout_snapshot():
+        return [(s["id"], list(s["tabs"]), list(s["tab_names"]), s["name"]) for s in spaces]
+
+    def reload_layout():
+        """Pull the daemon's layout. Panes that already exited are left out of the view (the poll
+        closes them). Returns True when anything changed."""
+        before = _layout_snapshot()
+        alive = {p["id"] for p in listing if p["alive"]}
+        payload = control.request("layout.get")
+        layout_rev["n"] = payload.get("revision")
+        got = []
+        for space in payload["spaces"]:
+            trees, names = [], []
+            for tab in space["tabs"]:
+                tree = hui.from_jsonable(tab["tree"])
+                for pid in (hui.pane_ids(tree) if tree else []):
                     if pid not in alive:
-                        tree = hui.remove_pane(tree, pid)
-                        if tree is None:
-                            break
+                        tree = hui.remove_pane(tree, pid) if tree else None
                 if tree is not None:
                     trees.append(tree)
-            space["tabs"] = trees
-        spaces[:] = [space for space in spaces if space["tabs"]]
-        for pid in alive:
-            if space_holding(pid) is not None:
-                continue
-            parent = by_id[pid].get("parent")
-            home = space_holding(parent) if parent else None
-            if home is not None:
-                index = next(i for i, tree in enumerate(home["tabs"]) if parent in hui.pane_ids(tree))
-                if len(hui.pane_ids(home["tabs"][index])) < TAB_PANE_CAP:
-                    home["tabs"][index] = tile_into(home["tabs"][index], pid)   # Summoned: next to whoever summoned her.
-                else:
-                    home["tabs"].append(("pane", pid))
-                continue
-            folder = space_key(by_id[pid])
-            current = active_space()
-            target = (current if current and current["folder"] == folder
-                      else next((space for space in spaces if space["folder"] == folder), None))
-            if target is not None:
-                target["tabs"].append(("pane", pid))
-            else:
-                add_space(folder, ("pane", pid))
-        return before != [(space["id"], list(space["tabs"])) for space in spaces]
+                    names.append(tab.get("name"))
+            if trees:
+                got.append({"id": space["id"], "folder": space["folder"], "name": space.get("name"),
+                            "tabs": trees, "tab_names": names})
+        spaces[:] = got
+        return before != _layout_snapshot()
 
-    # herdr custom_name for tabs, keyed by the tab's first pane; a space carries its own "name".
-    # Layout and names live here only: the daemon leaves with the panel, so there is no later
-    # panel to hand them to, and a resumed session rebuilds its seating from cwd and parent.
-    custom_names = {"tabs": {}, "auto": {}}   # "auto": pane -> the session file its tab name came from
+    def push_layout():
+        """A client-side edit (a dragged divider, a rename) goes back to the daemon, against the
+        revision this view was built on; if the daemon moved on meanwhile, its layout wins."""
+        try:
+            out = control.request("layout.set", {"revision": layout_rev["n"], "spaces": [
+                {"id": s["id"], "folder": s["folder"], "name": s["name"],
+                 "tabs": [{"name": name, "tree": hui.to_jsonable(tree)}
+                          for name, tree in zip(s["tab_names"], s["tabs"])]}
+                for s in spaces]})
+            layout_rev["n"] = out.get("revision", layout_rev["n"])
+        except RuntimeError:
+            reload_layout()
 
     def space_of(pane_id):
         space = space_holding(pane_id)
@@ -1434,13 +1376,19 @@ def launch():
         return next((i for i, tree in enumerate(visible_tabs())
                      if focused in hui.pane_ids(tree)), 0)
 
-    def tab_label(tree):
-        ids = hui.pane_ids(tree)
-        if ids and ids[0] in custom_names["tabs"]:            # herdr custom_name wins over the automatic label
-            return custom_names["tabs"][ids[0]]
-        first = next((p for p in listing if p["id"] == ids[0]), None)
-        name = (first or {}).get("title") or (ids[0] if ids else "?")
-        return name + (f" +{len(ids) - 1}" if len(ids) > 1 else "")
+    def tab_label(index):
+        """herdr tab_display_name: the custom name, else the 1-based position."""
+        space = active_space()
+        name = space["tab_names"][index] if space and index < len(space["tab_names"]) else None
+        return name or str(index + 1)
+
+    def rename_tab_of(pane_id, name):
+        space = space_holding(pane_id)
+        if space is None:
+            return
+        index = next(i for i, tree in enumerate(space["tabs"]) if pane_id in hui.pane_ids(tree))
+        space["tab_names"][index] = name or None
+        push_layout()
 
 
     rows, cols = _term_size()
@@ -1468,7 +1416,7 @@ def launch():
         """After a pane went away: stay in the active space while it has panes (the tab's
         survivor first, then the tab at the same position), else the space is gone and its
         neighbour takes over (herdr actions.rs close_workspace: active = min(idx, len - 1))."""
-        sync_tabs()
+        reload_layout()
         alive = {p["id"] for p in listing if p["alive"]}
         if prefer in alive and space_of(prefer) == side["ws"]:
             focus(prefer, force_layout=True)
@@ -1652,46 +1600,53 @@ def launch():
                      if row["kind"] == "item" and row["action"] == action), None)
 
     def reopen_session(hit):
-        """A click on a past session: go to its open pane, or reopen it where it worked. A Last
-        Order conversation goes back to its own folder (a space there, made if missing; the
-        tab named after the conversation); a Sister's direct chat sits beside the focused pane
-        when that pane is in her folder; a card session sits beside the Last Order that
-        created it (card_seat). A folder that is gone is refused, never recreated."""
+        """A click on a past session: go to its open pane, or reopen it where it worked. A fork
+        relative already open gets its kin split beside it (the fork rule). Otherwise a Last
+        Order conversation opens a space of its own in its folder, named after the conversation;
+        a Sister's chat or card session opens a new tab in the space of its folder (the active
+        one first). A folder that is gone is refused, never recreated."""
         nonlocal listing
         open_pane = session_pane(hit)
         if open_pane:                                 # already in a tab: go there, never open a second one
             focus(open_pane)
             return
         row = session_row(hit) or {}
+        folder = row.get("folder")
         if hit[0] == "sess-card":
             card = next((c for c in cards_cache["items"] if c["id"] == hit[1]), {})
+            folder = os.path.realpath(card.get("workspace") or folder or "")
+        if not folder or not os.path.isdir(folder):
+            show_bottom_bar(f" cannot reopen: folder {folder or '?'} is gone")
+            return
+
+        def tab_in(folder):
+            """A new tab in the space of this folder (the active one first), else a space of its own."""
+            current = active_space()
+            space = (current if current and current["folder"] == folder
+                     else next((s for s in spaces if s["folder"] == folder), None))
+            return {"tab": hui.pane_ids(space["tabs"][0])[0]} if space else {"space": True}
+
+        if hit[0] == "sess-card":
             try:
-                out = control.request("pane.resume_card",
-                                      {"task_id": hit[1], "parent": card_seat(card, listing)})
+                out = control.request("pane.resume_card", {"task_id": hit[1], "place": tab_in(folder)})
             except RuntimeError as error:
                 show_bottom_bar(f" {error}")
                 return
             listing = panes()
-            sync_tabs()
+            reload_layout()
             focus(out["pane_id"], force_layout=True)
-            return
-        folder = row.get("folder")
-        if not folder or not os.path.isdir(folder):
-            show_bottom_bar(f" cannot reopen: folder {folder or '?'} is gone")
             return
         if hit[0] == "sess-lo":
             kin = kin_pane(hit[1], listing)     # a fork relative already open: sit beside it
+            place = {"split": kin} if kin else {"space": True, "name": row.get("label") or LO_TITLE}
             pane_id = new_pane([sys.executable, "-m", "misaka", "chat", "--session", hit[1]],
-                               LO_TITLE, parent=kin, tile=True, cwd=folder)
-            if kin is None:                     # a tab of its own gets the conversation's name
-                custom_names["tabs"][pane_id] = row.get("label") or LO_TITLE
-                custom_names["auto"][pane_id] = hit[1]
+                               LO_TITLE, place=place, cwd=folder)
+            if kin is None:
+                auto_names[pane_id] = hit[1]
         else:
-            current = next((p for p in listing if p["id"] == focused), None)
-            beside = (kin_pane(hit[2], listing)
-                      or (focused if current and space_key(current) == folder else None))
+            kin = kin_pane(hit[2], listing)
             new_pane([sys.executable, "-m", "misaka", "chat", "--as", hit[1], "--session", hit[2]],
-                     hit[1], parent=beside, tile=True, cwd=folder)
+                     hit[1], place={"split": kin} if kin else tab_in(folder), cwd=folder)
 
     # The Sister roster popup (herdr's global menu, Mode::GlobalMenu): a modal that eats
     # keys and clicks until it closes.
@@ -1741,8 +1696,8 @@ def launch():
     def menu_choose(index):
         name = menu["items"][index]
         close_menu()
-        if name != "no sisters":   # Open her next to the active space's Last Order (tiling rule).
-            new_pane([sys.executable, "-m", "misaka", "chat", "--as", name], name, parent=focused, tile=True)
+        if name != "no sisters":   # A Sister gets a tab of her own in the active space.
+            new_pane([sys.executable, "-m", "misaka", "chat", "--as", name], name, place={"tab": focused})
 
     # The navigator (prefix+g, herdr Mode::Navigator): a modal tree of every space and agent.
     nav = {"open": False, "query": "", "search": False, "filter": None, "selected": 0,
@@ -1969,6 +1924,7 @@ def launch():
         if tree in trees and hui.get_ratio_at(tree, state["split"]["path"]) != ratio:
             new_tree = hui.set_ratio_at(tree, state["split"]["path"], ratio)
             trees[trees.index(tree)] = new_tree
+            push_layout()
             state["tree"] = new_tree
             state["split"] = next((s for s in hui.collect_splits(new_tree, chrome_state["area"])
                                    if s["path"] == state["split"]["path"]), state["split"])
@@ -1981,16 +1937,16 @@ def launch():
     rename = {"open": False, "kind": "tab", "target": None, "value": "", "hits": [], "rect": None}
 
     def open_rename(kind):
+        current = active_space()
         if kind == "tab":
-            _index, tree = current_tree()
+            index, tree = current_tree()
             if tree is None:
                 return
-            target = hui.pane_ids(tree)[0]
+            target = index
+            value = (current["tab_names"][index] or "") if current else ""
         else:
             target = side["ws"]
-        current = active_space()
-        value = (custom_names["tabs"].get(target, "") if kind == "tab"
-                 else ((current or {}).get("name") or ""))
+            value = (current or {}).get("name") or ""
         rename.update(open=True, kind=kind, target=target, value=value)
         draw_rename()
 
@@ -2011,15 +1967,17 @@ def launch():
         if save:
             value = rename["value"].strip()
             if rename["kind"] == "tab":
-                custom_names["auto"].pop(rename["target"], None)   # a typed name is never auto-refreshed
-                if value:
-                    custom_names["tabs"][rename["target"]] = value
-                else:
-                    custom_names["tabs"].pop(rename["target"], None)
+                space, index = active_space(), rename["target"]
+                if space is not None and index < len(space["tabs"]):
+                    for pid in hui.pane_ids(space["tabs"][index]):
+                        auto_names.pop(pid, None)   # a typed name is never auto-refreshed
+                    space["tab_names"][index] = value or None
             else:
                 space = next((s for s in spaces if s["id"] == rename["target"]), None)
                 if space is not None:
                     space["name"] = value or None
+            if space is not None:
+                push_layout()
         rename["open"] = False
         chrome_cache["rows"] = []
         relayout()
@@ -2429,8 +2387,7 @@ def launch():
 
     def draw_sidebar():
         nonlocal tab_scroll
-        sync_tabs()
-        names = [tab_label(tab) for tab in tabs_of()]
+        names = [tab_label(index) for index in range(len(tabs_of()))]
         view = hui.compute_view(hui.Rect(0, 0, cols, rows), side["w"], len(names))
         # mouse_chrome=True: herdr's "+" new-tab button and overflow scroll buttons.
         zoomed = {active_tab()} if zoom else ()   # herdr: zoom is per tab; only the active one can be zoomed here
@@ -2654,7 +2611,7 @@ def launch():
 
     def relayout():
         nonlocal slices
-        sync_tabs()
+        reload_layout()
         view = hui.compute_view(hui.Rect(0, 0, cols, rows), side["w"], len(tabs_of()))
         term = view["terminal_area"]
         # herdr: only the active tab is drawn; its layout is the BSP tree cut into rectangles (layout.rs collect_panes).
@@ -2759,59 +2716,28 @@ def launch():
                 draw_borders()
             draw_sidebar()
 
-    _FOCUSED = object()          # Default target: split the currently focused pane.
-    _ACTIVE = object()           # Default parent: the active space's Last Order.
-
-    def new_pane(argv, title, *, split=None, target=_FOCUSED, parent=_ACTIVE, tile=False,
-                 cwd=None):
-        """split=None opens a new tab; split="h"/"v" splits ``target`` in the current tab;
-        tile=True seats the pane next to its parent by the tiling rule (sync_tabs does it).
-        target=_FOCUSED splits the focused pane (herdr split_focused); target=None wraps the
-        whole tree (a new column). The pane lands in the active space's folder and, unless
-        ``parent`` says otherwise, under the current tab's first pane (so closing that one
-        takes it along); parent=None makes it independent."""
+    def new_pane(argv, title, *, place, cwd=None):
+        """Ask the daemon for a pane seated at ``place`` (Daemon._seat): {"split": pane},
+        {"tab": pane}, or {"space": True}; "name" inside it names a new tab. The pane lands in
+        the focused job's folder unless ``cwd`` says otherwise (herdr terminal.new_cwd="current")."""
         nonlocal listing
         space = active_space()
-        trees = tabs_of()
-        index = active_tab()
-        if parent is _ACTIVE:
-            parent = hui.pane_ids(trees[index])[0] if trees and index < len(trees) else None
         current = next((p for p in listing if p["id"] == focused), {})
-        cwd = cwd or ((current.get("foreground") or {}).get("cwd")   # herdr terminal.new_cwd="current":
-                      or (space["folder"] if space else os.getcwd()))  # a split follows the focused job's cd
+        cwd = cwd or ((current.get("foreground") or {}).get("cwd")
+                      or (space["folder"] if space else os.getcwd()))
         out = control.request("pane.create", {
-            "argv": argv, "cwd": cwd, "title": title,
-            "parent": parent, "env": {"MISAKA_THEME": hui.theme_variant()}})
+            "argv": argv, "cwd": cwd, "title": title, "place": place,
+            "env": {"MISAKA_THEME": hui.theme_variant()}})
         listing = panes()
-        new_id = out["pane_id"]
-        if tile or space is None:
-            sync_tabs()                    # Seats it by parent, else by folder, else in a space of its own.
-            if space is None:
-                side["ws"] = space_of(new_id)
-        elif split is not None:
-            if index < len(trees):
-                if target is None:
-                    trees[index] = hui.split_root(trees[index], split, new_id)
-                else:
-                    # layout.rs:143 split_focused: only the focused leaf becomes a split node.
-                    pane_target = focused if target is _FOCUSED else target
-                    trees[index] = hui.split_at(trees[index], pane_target, split, new_id, 0.5)
-        else:
-            trees.append(("pane", new_id))
-        focus(new_id, force_layout=True)
-        return new_id
+        reload_layout()
+        focus(out["pane_id"], force_layout=True)
+        return out["pane_id"]
 
     def new_space_here():
         """herdr new_workspace (the " new" button): another space in the same folder, its root a shell."""
-        nonlocal listing
         space = active_space()
-        folder = space["folder"] if space else os.getcwd()
-        out = control.request("pane.create", {
-            "argv": [os.environ.get("SHELL", "sh")], "cwd": folder, "title": "shell",
-            "env": {"MISAKA_THEME": hui.theme_variant()}})
-        listing = panes()
-        created = add_space(folder, ("pane", out["pane_id"]))
-        switch_space(created["id"])
+        new_pane([os.environ.get("SHELL", "sh")], "shell", place={"space": True},
+                 cwd=space["folder"] if space else os.getcwd())
 
     def switch_tab(index):
         nonlocal tab_follow, zoom
@@ -2924,7 +2850,7 @@ def launch():
                     return
             rect = bar.new_tab_hit_area
             if rect.width and rect.x <= cx < rect.x + rect.width:
-                new_pane([os.environ.get("SHELL", "sh")], "shell")
+                new_pane([os.environ.get("SHELL", "sh")], "shell", place={"tab": focused})
             return
         if x <= side["w"]:                            # Sidebar: hit rects, last drawn wins (the toggle sits over the list).
             hit = next((action for rect, action in reversed(ui_map["hits"])
@@ -2945,16 +2871,16 @@ def launch():
                 else:
                     prefix_pending = 1
                     draw_prefix_bar()
-            elif hit[0] == "sisters":                 # agents footer: summon a Sister into the current tab.
+            elif hit[0] == "sisters":                 # agents footer: summon a Sister as a new tab.
                 open_menu()
             elif hit[0] == "sessgroup":               # MISAKA: the Last Order / Sisters groups fold.
                 sess_folds.symmetric_difference_update({hit[1]})
                 refresh_sessions()
                 chrome_cache["rows"] = []
                 draw_sidebar()
-            elif hit[0] == "sessnew":                 # agents footer: a fresh Last Order session as a new tab here
+            elif hit[0] == "sessnew":                 # agents footer: a fresh Last Order session, a space of its own here
                 space = active_space()
-                new_pane([sys.executable, "-m", "misaka", "chat"], LO_TITLE, parent=None,
+                new_pane([sys.executable, "-m", "misaka", "chat"], LO_TITLE, place={"space": True},
                          cwd=space["folder"] if space else None)
             elif hit[0] == "sessmode":                # sessions header: this folder <-> every folder
                 side["sess_mode"] = "all" if side["sess_mode"] == "here" else "here"
@@ -2997,11 +2923,11 @@ def launch():
         chrome_cache["rows"] = []          # The row cache must be invalidated after a clear, or the sidebar draws nothing.
         stream.send("pane.attach", {"id": "*"})
         refresh_cards()
+        reload_layout()        # the daemon seated every pane (Last Order included) in a space
         for space in spaces:               # warm the branch rows so the first frame has them
             git_folders.add(os.path.realpath(space["folder"]))
         refresh_git(time.monotonic())
         refresh_sessions()
-        sync_tabs()            # Seat every pane (Last Order included) in a space.
         side["ws"] = space_of(focused) or (spaces[0]["id"] if spaces else None)
         focus(focused, force_layout=True)
         last_poll = 0.0
@@ -3139,11 +3065,11 @@ def launch():
                         zoom = not zoom
                         relayout()
                     elif key == b"c":                  # herdr new_tab (model.rs:1039).
-                        new_pane([os.environ.get("SHELL", "sh")], "shell")
+                        new_pane([os.environ.get("SHELL", "sh")], "shell", place={"tab": focused})
                     elif key == b"v":                  # split_vertical (1062): side by side.
-                        new_pane([os.environ.get("SHELL", "sh")], "shell", split="h")
+                        new_pane([os.environ.get("SHELL", "sh")], "shell", place={"split": focused, "direction": "h"})
                     elif key == b"-":                  # split_horizontal (1063): stacked.
-                        new_pane([os.environ.get("SHELL", "sh")], "shell", split="v")
+                        new_pane([os.environ.get("SHELL", "sh")], "shell", place={"split": focused, "direction": "v"})
                     elif key == b"g":                  # herdr goto (prefix+g): the navigator.
                         open_nav()
                     elif key == b"[":                  # herdr copy_mode (prefix+[).
@@ -3216,11 +3142,11 @@ def launch():
                 except (RuntimeError, ConnectionError):
                     return
                 for pane in listing:      # /new and in-place forks swap the file under a named tab
-                    source = custom_names["auto"].get(pane["id"])
+                    source = auto_names.get(pane["id"])
                     reported = (pane.get("reported") or {}).get("session")
                     if source and reported and os.path.realpath(reported) != os.path.realpath(source):
-                        custom_names["auto"][pane["id"]] = reported
-                        custom_names["tabs"][pane["id"]] = session_meta(reported)["title"]
+                        auto_names[pane["id"]] = reported
+                        rename_tab_of(pane["id"], session_meta(reported)["title"])
                 dead = [p for p in listing if not p["alive"] and not p["card"]]
                 if dead:      # Exit events can precede the subscription and get missed; the poll cleans up.
                     page = active_tab()
@@ -3239,7 +3165,7 @@ def launch():
                         refocus(page_idx=page)
                     else:
                         relayout()
-                if sync_tabs():        # A summoned Sister was seated in a tab: lay the panes out again.
+                if reload_layout():    # a pane opened elsewhere (a summoned Sister, a fork): lay the panes out again
                     relayout()
                 else:
                     draw_sidebar()

@@ -409,6 +409,16 @@ def _scroll_pane(pane, delta=0, to=None):
     screen.dirty.update(range(screen.lines))
 
 
+def _seated_pane_ids(spaces):
+    """Every pane id a layout seats."""
+    out = set()
+    for space in spaces:
+        for tab in space.get("tabs") or []:
+            tree = hui.from_jsonable(tab["tree"]) if tab.get("tree") else None
+            out.update(hui.pane_ids(tree) if tree else [])
+    return out
+
+
 class Pane:
     __slots__ = ("id", "title", "argv", "cwd", "card", "claim_lock", "generation",
                  "deadline", "proc", "fd", "buf", "started_at", "exit_code", "submitted",
@@ -453,6 +463,7 @@ class Daemon:
         # pane at creation; clients only draw it. {"id","folder","name","tabs":[{"name","tree"}]}
         self.spaces: list[dict] = []
         self._space_seq = 0
+        self.layout_revision = 0    # bumps on every layout change; clients edit against it
         self._theme = "dark"        # session theme variant; updated when the panel creates a pane with MISAKA_THEME
         self._con = None            # board connection, opened on the first card run
         self._attached: dict[asyncio.StreamWriter, str] = {}   # subscribers: connection -> pane id
@@ -620,6 +631,7 @@ class Daemon:
             self._space_seq += 1
             self.spaces.append({"id": f"w{self._space_seq}", "folder": os.path.realpath(pane.cwd),
                                 "name": None, "tabs": [{"name": name, "tree": ["pane", pane.id]}]})
+        self.layout_revision += 1
 
     def _unseat(self, pane_id):
         """layout.rs close_pane: drop the leaf; a tab left empty goes, a space left without tabs goes."""
@@ -631,6 +643,22 @@ class Daemon:
                     tab["tree"] = hui.to_jsonable(tree) if tree else None
             space["tabs"] = [tab for tab in space["tabs"] if tab["tree"]]
         self.spaces = [space for space in self.spaces if space["tabs"]]
+        self.layout_revision += 1
+
+    def apply_layout(self, spaces, revision=None):
+        """A client-side edit of the layout. It must be based on the revision the client last saw
+        (an edit racing another client's is refused, not merged blindly), and it can never make
+        a live pane disappear: a pane the edit omits is seated again."""
+        if revision is not None and int(revision) != self.layout_revision:
+            raise ValueError(f"stale layout (revision {revision}, current {self.layout_revision}); reload it first")
+        incoming = [space for space in spaces if space.get("tabs")]
+        seated = _seated_pane_ids(incoming)
+        self.spaces = incoming
+        for pane in list(self.panes.values()):
+            if pane.id not in seated and pane.alive():
+                self._seat(pane, {})
+        self.layout_revision += 1
+        return {"ok": True, "revision": self.layout_revision}
 
     async def _reap(self, proc):
         """SIGTERM was already sent: give the process a grace period, escalate to
@@ -1063,10 +1091,9 @@ class Daemon:
             self.close(pane.id)
             return {"stopped": True}
         if method == "layout.get":       # the daemon owns the layout (herdr server model)
-            return {"spaces": self.spaces}
+            return {"spaces": self.spaces, "revision": self.layout_revision}
         if method == "layout.set":       # client-side edits: a dragged divider, a renamed tab or space
-            self.spaces = [space for space in params.get("spaces") or [] if space.get("tabs")]
-            return {"ok": True}
+            return self.apply_layout(params.get("spaces") or [], params.get("revision"))
         if method == "pane.create":
             pane = self.create(params["argv"], params.get("cwd"),
                                title=params.get("title", ""),
