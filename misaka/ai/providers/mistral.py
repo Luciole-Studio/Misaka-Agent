@@ -46,8 +46,10 @@ from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
 
 try:
     from mistralai.client import Mistral as _MistralClient
-except Exception:  # noqa: BLE001
+except ImportError:  # optional extra: misaka[mistral]
     _MistralClient = None
+
+from misaka.ai.providers.sdk import require
 
 MISTRAL_TOOL_CALL_ID_LENGTH = 9
 MAX_MISTRAL_ERROR_BODY_CHARS = 4000
@@ -189,8 +191,7 @@ async def _iterate_with_abort(iterable: AsyncIterable[Any], signal: Any) -> Asyn
 
 
 def _get_mistral_client_class():
-    if _MistralClient is None:
-        raise RuntimeError("The `mistralai` package is required for the Mistral provider.")
+    require(_MistralClient, "mistralai")
     return _MistralClient
 
 

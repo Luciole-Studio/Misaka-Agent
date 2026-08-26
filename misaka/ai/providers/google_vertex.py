@@ -11,7 +11,12 @@ from collections.abc import Mapping
 from typing import Any, Literal, TypedDict
 from urllib.parse import urlparse
 
-from google.genai import Client as GoogleGenAI
+try:
+    from google.genai import Client as GoogleGenAI
+except ImportError:  # optional extra: misaka[google]
+    GoogleGenAI = None
+
+from misaka.ai.providers.sdk import require
 
 from misaka.ai.models import calculate_cost, clamp_thinking_level
 from misaka.ai.providers.google import (
@@ -407,7 +412,7 @@ def create_client(
 ) -> GoogleGenAI:
     http_options = build_http_options(model, options_headers) or {}
     http_options.setdefault("apiVersion", API_VERSION)
-    return GoogleGenAI(
+    return require(GoogleGenAI, "google-genai")(
         vertexai=True,
         project=project,
         location=location,
@@ -422,7 +427,7 @@ def create_client_with_api_key(
 ) -> GoogleGenAI:
     http_options = build_http_options(model, options_headers) or {}
     http_options.setdefault("apiVersion", API_VERSION)
-    return GoogleGenAI(
+    return require(GoogleGenAI, "google-genai")(
         vertexai=True,
         api_key=api_key,
         http_options=http_options,

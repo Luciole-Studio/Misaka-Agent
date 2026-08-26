@@ -1,7 +1,6 @@
 # MISAKA: dependencies are the union of the inlined pi/harn Python engine and the MISAKA product layer.
-# Rebuild the environment (two steps):
-#   uv venv .venv --python 3.13
-#   uv pip install --python .venv -e .      # installs deps, creates .venv/bin/misaka, makes the package importable
+# Development environment: `uv sync` (the dev group brings every provider SDK and the pageindex extra).
+# A user install picks its provider: `pip install 'misaka[anthropic]'` (or `misaka[providers]` for all).
 [project]
 name = "misaka"
 version = "0.6.0"
@@ -13,47 +12,41 @@ dependencies = [
     "pydantic>=2.10",
     "jsonschema>=4.23",
     "httpx>=0.28",
-    "httpx-sse>=0.4",
-    "openai>=1.60",
-    "anthropic>=0.45",
-    "google-genai>=1.0",
-    "boto3>=1.35",
-    "mistralai>=1.5",
     "json-repair>=0.30",
-    "websockets>=16",
     # engine/agent (formerly harn_agent)
-    "aiofiles>=24.1",
     "ruamel.yaml>=0.18",
-    "jsonlines>=4.0",
     "pathspec>=0.12",
     # net (pane hosting: one terminal emulator screen per pane)
     "pyte>=0.8.2",
     # engine/tui (formerly harn_tui)
-    "blessed>=1.20",
     "markdown-it-py>=4.2",
     "mdit-py-plugins>=0.4",   # dollarmath: LaTeX math detection (parity with pi 05e89b4)
     "pylatexenc>=2.10",       # LaTeX -> Unicode rendering layer
-    "rich>=13.9",
     "wcwidth>=0.2",
-    "rapidfuzz>=3.10",
-    "term-image>=0.7",
     # engine/coding_agent (formerly harn_coding_agent)
-    "click>=8.1",
     "psutil>=6.1",
     "wcmatch>=10.0",
     "filelock>=3.16",
     "pygments>=2.18",
-    "diff-match-patch>=20230430",
-    "python-frontmatter>=1.1",
     # MISAKA's own (mcp.py reads config.yaml)
     "pyyaml>=6.0",
+    # documents: PDF page text (the pageindex extra pins the same package)
+    "pypdfium2>=4.30",
+    # utils/image_resize, clipboard_image (was only transitively present through term-image)
+    "pillow>=10",
 ]
 
 [project.optional-dependencies]
+# Provider SDKs are extras: a user install picks the ones it talks to.
+anthropic = ["anthropic>=0.45"]
+openai = ["openai>=1.60"]
+google = ["google-genai>=1.0"]
+bedrock = ["boto3>=1.35"]
+mistral = ["mistralai>=1.5"]
+providers = ["misaka[anthropic,openai,google,bedrock,mistral]"]
 lcm-semantic = ["fastembed"]
 pageindex = [
     "PyPDF2==3.0.1",
-    "pymupdf==1.26.4",
     "pypdfium2==4.30.0",
     "regex>=2024.0.0",
     "sortedcontainers==2.4.0",
@@ -67,7 +60,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-asyncio>=1", "ruff>=0.5"]
+dev = ["misaka[providers,pageindex]", "pytest>=8", "pytest-asyncio>=1", "ruff>=0.5"]
 
 [tool.hatch.build.targets.wheel]
 # Every importable package at the repo root (exposed by the editable install; replaces a hand-written .pth)

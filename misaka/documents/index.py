@@ -48,9 +48,12 @@ def _pdf_pages(p):
     except (OSError, subprocess.SubprocessError):
         pass
     try:
-        import fitz
-        with fitz.open(p) as doc:
-            return [pg.get_text() for pg in doc]
+        import pypdfium2 as pdfium
+        pdf = pdfium.PdfDocument(p)
+        try:
+            return [page.get_textpage().get_text_bounded() for page in pdf]
+        finally:
+            pdf.close()
     except Exception:  # noqa: BLE001
         return []
 

@@ -8,7 +8,12 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from openai import AsyncOpenAI
+try:
+    from openai import AsyncOpenAI
+except ImportError:  # optional extra: misaka[openai]
+    AsyncOpenAI = None
+
+from misaka.ai.providers.sdk import require
 
 from misaka.ai.env_api_keys import get_env_api_key
 from misaka.ai.types import AssistantImages, ImageContent, ImagesContext, ImagesModel, ImagesOptions, TextContent, Usage
@@ -148,7 +153,7 @@ def _create_client(
     }
     if max_retries is not None:
         client_kwargs["max_retries"] = max_retries
-    return AsyncOpenAI(**client_kwargs)
+    return require(AsyncOpenAI, "openai")(**client_kwargs)
 
 
 def _build_params(model: ImagesModel, context: ImagesContext) -> dict[str, Any]:

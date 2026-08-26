@@ -13,10 +13,18 @@ from dataclasses import dataclass
 from typing import Any, Literal, TypedDict
 from urllib.parse import urlparse
 
-import boto3
-from botocore import UNSIGNED
-from botocore.config import Config
-from botocore.exceptions import ClientError
+try:
+    import boto3
+    from botocore import UNSIGNED
+    from botocore.config import Config
+    from botocore.exceptions import ClientError
+except ImportError:  # optional extra: misaka[bedrock]
+    boto3 = UNSIGNED = Config = None
+
+    class ClientError(Exception):  # keeps `except ClientError` valid; never raised without boto3
+        pass
+
+from misaka.ai.providers.sdk import require
 
 from misaka.ai.models import calculate_cost
 from misaka.ai.providers.simple_options import adjust_max_tokens_for_thinking, build_base_options, clamp_reasoning
@@ -215,7 +223,7 @@ def _empty_usage() -> Usage:
 
 def create_client(model: Model, options: StreamOptions | dict[str, Any] | None = None) -> Any:
     settings = build_client_settings(model, options)
-    session = boto3.Session(profile_name=settings.profile_name)
+    session = require(boto3, "boto3").Session(profile_name=settings.profile_name)
     client_kwargs: dict[str, Any] = {}
     if settings.region_name is not None:
         client_kwargs["region_name"] = settings.region_name

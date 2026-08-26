@@ -10,7 +10,12 @@ import time
 from collections.abc import Mapping
 from typing import Any, Literal, TypedDict
 
-from google.genai import Client as GoogleGenAI
+try:
+    from google.genai import Client as GoogleGenAI
+except ImportError:  # optional extra: misaka[google]
+    GoogleGenAI = None
+
+from misaka.ai.providers.sdk import require
 
 from misaka.ai.env_api_keys import get_env_api_key
 from misaka.ai.models import calculate_cost, clamp_thinking_level
@@ -241,7 +246,7 @@ def create_client(
     if model.headers or options_headers:
         http_options["headers"] = {**(model.headers or {}), **dict(options_headers or {})}
 
-    return GoogleGenAI(
+    return require(GoogleGenAI, "google-genai")(
         api_key=api_key,
         http_options=http_options or None,
     )

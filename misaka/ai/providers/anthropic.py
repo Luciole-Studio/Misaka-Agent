@@ -9,7 +9,12 @@ import time
 from collections.abc import AsyncIterable, AsyncIterator, Iterable, Mapping
 from typing import Any, Literal, TypedDict
 
-from anthropic import AsyncAnthropic, omit
+try:
+    from anthropic import AsyncAnthropic, omit
+except ImportError:  # optional extra: misaka[anthropic]
+    AsyncAnthropic = omit = None
+
+from misaka.ai.providers.sdk import require
 
 from misaka.ai.env_api_keys import get_env_api_key
 from misaka.ai.models import calculate_cost
@@ -347,7 +352,7 @@ def create_client(
         beta_features.append(INTERLEAVED_THINKING_BETA)
 
     if model.provider == "cloudflare-ai-gateway":
-        client = AsyncAnthropic(
+        client = require(AsyncAnthropic, "anthropic")(
             api_key=None,
             auth_token=None,
             base_url=resolve_cloudflare_base_url(model),
@@ -367,7 +372,7 @@ def create_client(
         return client, False
 
     if model.provider == "github-copilot":
-        client = AsyncAnthropic(
+        client = require(AsyncAnthropic, "anthropic")(
             api_key=None,
             auth_token=api_key,
             base_url=model.baseUrl,
@@ -385,7 +390,7 @@ def create_client(
         return client, False
 
     if is_oauth_token(api_key):
-        client = AsyncAnthropic(
+        client = require(AsyncAnthropic, "anthropic")(
             api_key=None,
             auth_token=api_key,
             base_url=model.baseUrl,
@@ -408,7 +413,7 @@ def create_client(
         if session_id and get_anthropic_compat(model)["sendSessionAffinityHeaders"]
         else None
     )
-    client = AsyncAnthropic(
+    client = require(AsyncAnthropic, "anthropic")(
         api_key=api_key,
         auth_token=None,
         base_url=model.baseUrl,

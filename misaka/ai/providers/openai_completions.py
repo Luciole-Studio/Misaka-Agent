@@ -9,7 +9,12 @@ import time
 from collections.abc import AsyncIterable, AsyncIterator, Mapping
 from typing import Any, Literal, TypedDict
 
-from openai import AsyncOpenAI
+try:
+    from openai import AsyncOpenAI
+except ImportError:  # optional extra: misaka[openai]
+    AsyncOpenAI = None
+
+from misaka.ai.providers.sdk import require
 
 from misaka.ai.env_api_keys import get_env_api_key
 from misaka.ai.models import calculate_cost, clamp_thinking_level
@@ -503,7 +508,7 @@ def create_client(
     else:
         default_headers = headers
 
-    return AsyncOpenAI(
+    return require(AsyncOpenAI, "openai")(
         api_key=api_key,
         base_url=resolve_cloudflare_base_url(model) if is_cloudflare_provider(model.provider) else model.baseUrl,
         default_headers=default_headers,

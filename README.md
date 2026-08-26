@@ -6,8 +6,9 @@ A multi-agent research system for the humanities and social sciences. Last Order
 
 ```sh
 uv venv .venv --python 3.13
-uv sync --group dev            # product + test tooling
-uv sync --extra pageindex      # PDF outline extraction (pypdfium2, PyPDF2, ...)
+uv sync                        # development: product, every provider SDK, PDF outline extraction, test tooling
+pip install 'misaka[anthropic]'   # a user install picks its provider SDKs: anthropic / openai / google / bedrock / mistral
+                                  # (misaka[providers] = all five; misaka[pageindex] = PDF outline extraction)
 ```
 
 ## Run

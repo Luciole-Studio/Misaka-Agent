@@ -10,7 +10,12 @@ from collections.abc import AsyncIterable
 from typing import Any, Literal, TypedDict
 from urllib.parse import urlparse, urlunparse
 
-from openai import AsyncAzureOpenAI
+try:
+    from openai import AsyncAzureOpenAI
+except ImportError:  # optional extra: misaka[openai]
+    AsyncAzureOpenAI = None
+
+from misaka.ai.providers.sdk import require
 
 from misaka.ai.env_api_keys import get_env_api_key
 from misaka.ai.models import clamp_thinking_level
@@ -171,7 +176,7 @@ def create_client(model: Model, api_key: str, options: Any = None) -> AsyncAzure
         headers.update(_option(options, "headers"))
 
     config = resolve_azure_config(model, options)
-    return AsyncAzureOpenAI(
+    return require(AsyncAzureOpenAI, "openai")(
         api_key=api_key,
         api_version=config["apiVersion"],
         default_headers=headers,
