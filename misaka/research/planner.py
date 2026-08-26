@@ -13,7 +13,6 @@ from pathlib import Path
 from misaka.config import CFG
 from misaka.core.session_manager import find_most_recent_session
 from misaka.platform import prompt_guard
-from misaka.platform import tasks as task_store
 from misaka.research import ledger, runs
 from misaka.skills import layers as skill_layers
 
@@ -382,26 +381,37 @@ This is a targeted research node. Address the issue that undermined the parent c
     return validate_plan(obj, roster), raw, find_most_recent_session(session_dir)
 
 
-def task_sources(rows):
-    """What each done card delivered: its report and the artifacts it registered, as absolute paths."""
+def task_sources(con, run, rows):
+    """What each done card delivered, from frozen records only: its submitted event (this
+    generation), its registered artifacts, and the evidence ledger -- never the mutable
+    report.json a finished worker could still rewrite."""
     parts = []
     for row in rows:
-        report = {}
+        event = con.execute(
+            "SELECT payload FROM events WHERE task_id=? AND kind='submitted' AND generation=? "
+            "ORDER BY id DESC LIMIT 1", (row["id"], row["generation"])).fetchone()
         try:
-            with open(os.path.join(task_store.task_state_dir(row["id"]), "report.json"),
-                      encoding="utf-8") as handle:
-                report = json.load(handle)
-        except (OSError, ValueError):
-            pass
+            payload = json.loads(event["payload"] or "{}") if event else {}
+        except (TypeError, ValueError):
+            payload = {}
         artifacts = []
-        for rel in report.get("artifacts") or []:
-            path = os.path.realpath(os.path.join(row["workspace"] or "", str(rel)))
+        for item in runs.artifacts(con, run["id"], task_id=row["id"]):
+            path = runs.artifact_path(item)
             if os.path.isfile(path):
                 artifacts.append(path)
+        finds = []
+        for finding in ledger.findings(con, run["id"], task_id=row["id"]):
+            claims = con.execute(
+                "SELECT source_file, quote FROM research_claims WHERE finding_id=?",
+                (finding["id"],)).fetchall()
+            entry = {"text": finding["text"], "claim_type": finding["claim_type"]}
+            if claims:
+                entry.update(source_file=claims[0]["source_file"], quote=claims[0]["quote"])
+            finds.append(entry)
         parts.append({"task_id": row["id"], "title": row["title"],
-                      "summary": report.get("summary") or "", "artifacts": artifacts,
-                      "findings": report.get("findings") or [],
-                      "uncertain": report.get("uncertain") or []})
+                      "summary": str(payload.get("summary") or ""), "artifacts": artifacts,
+                      "findings": finds,
+                      "uncertain": payload.get("uncertain") or []})
     return parts
 
 
@@ -422,7 +432,7 @@ def synthesize(con, run, cfg, worker, node, task_rows):
 
 # Material map (read the artifacts, not just this map)
 """ + prompt_guard.untrusted("research-material-map",
-                            json.dumps(task_sources(task_rows), ensure_ascii=False, indent=2))
+                            json.dumps(task_sources(con, run, task_rows), ensure_ascii=False, indent=2))
               + "\n# Evidence ledger\n" + evidence_block(con, run, node))
     session_dir = _lo_session(run, node)
     _obj, text, err = _call(
@@ -473,7 +483,7 @@ def probe_step(con, run, cfg, worker, node, issue, cards, *, synthesis_path, rou
 {synthesis_path}
 
 # Round {round_no} of {rounds}. Cards returned so far (read their artifacts; none yet on round 1)
-""" + prompt_guard.untrusted("probe-results", json.dumps(task_sources(cards), ensure_ascii=False, indent=2))
+""" + prompt_guard.untrusted("probe-results", json.dumps(task_sources(con, run, cards), ensure_ascii=False, indent=2))
               + f"""
 
 # Sister capability profiles
