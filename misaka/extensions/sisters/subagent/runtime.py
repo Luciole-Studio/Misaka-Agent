@@ -1280,14 +1280,19 @@ class SubagentManager:
             task.cwd = task.worktree.path
         elif effective_isolation:
             raise ValueError(f"Unsupported agent isolation mode: {effective_isolation}")
-        await task.persist()
-        async with self._lock:
-            if self._closed:
-                raise RuntimeError("Sub-agent manager is closed")
-            self._tasks[agent_id] = task
-            if name:
-                self._names[name] = agent_id
-        return task
+        try:
+            await task.persist()
+            async with self._lock:
+                if self._closed:
+                    raise RuntimeError("Sub-agent manager is closed")
+                self._tasks[agent_id] = task
+                if name:
+                    self._names[name] = agent_id
+            return task
+        except BaseException:
+            if task.worktree is not None:
+                await self._cleanup_worktree(task)        # a task that never started leaves no branch behind
+            raise
 
     def run_background(self, task: AgentTask, prompt: str, *, notify: bool = True) -> None:
         """Run a detached turn.

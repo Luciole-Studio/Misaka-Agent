@@ -509,12 +509,6 @@ MAX_TOTAL_SIZE_KB = 1024  # 1MB total is suspicious for a skill
 MAX_SINGLE_FILE_KB = 256  # individual file > 256KB is suspicious
 
 # File extensions to scan (text files only — skip binary)
-SCANNABLE_EXTENSIONS = {
-    '.md', '.txt', '.py', '.sh', '.bash', '.js', '.ts', '.rb',
-    '.yaml', '.yml', '.json', '.toml', '.cfg', '.ini', '.conf',
-    '.html', '.css', '.xml', '.tex', '.r', '.jl', '.pl', '.php',
-}
-
 # Known binary extensions that should NOT be in a skill
 SUSPICIOUS_BINARY_EXTENSIONS = {
     '.exe', '.dll', '.so', '.dylib', '.bin', '.dat', '.com',
@@ -561,8 +555,8 @@ def scan_file(file_path: Path, rel_path: str = "") -> list[Finding]:
     if not rel_path:
         rel_path = file_path.name
 
-    if file_path.suffix.lower() not in SCANNABLE_EXTENSIONS and file_path.name != "SKILL.md":
-        return []
+    if file_path.suffix.lower() in SUSPICIOUS_BINARY_EXTENSIONS:
+        return []                                  # the structural check flags it; it is not text to read
 
     try:
         content = file_path.read_text(encoding='utf-8')
@@ -616,7 +610,7 @@ def scan_file(file_path: Path, rel_path: str = "") -> list[Finding]:
     return findings
 
 
-def scan_skill(skill_path: Path, source: str = "community") -> ScanResult:
+def scan_skill(skill_path: Path, source: str = "community", *, honor_ignore: bool = True) -> ScanResult:
     """
     Scan all files in a skill directory for security threats.
 
@@ -646,7 +640,7 @@ def scan_skill(skill_path: Path, source: str = "community") -> ScanResult:
     all_findings: list[Finding] = []
 
     if skill_path.is_dir():
-        ignore = _load_skill_ignore(skill_path)
+        ignore = _load_skill_ignore(skill_path) if honor_ignore else (lambda _rel: False)
 
         # Structural checks first (honoring the ignore list)
         all_findings.extend(_check_structure(skill_path, ignore=ignore))
@@ -1013,11 +1007,11 @@ def _unicode_char_name(char: str) -> str:
 # Ignore-file names a skill may ship to exclude dev/docs artifacts from the
 # scan. `.skillignore` is the native name; `.clawhubignore` is honored for
 # compatibility with skills published through ClawHub.
-_SKILL_IGNORE_FILENAMES = (".skillignore", ".clawhubignore")
+SKILL_IGNORE_FILENAMES = (".skillignore", ".clawhubignore")
 
 # Paths that are NEVER scanned regardless of ignore patterns, and SKILL.md
 # which can never be un-scanned via the ignore file.
-_ALWAYS_IGNORED_NAMES = set(_SKILL_IGNORE_FILENAMES)
+_ALWAYS_IGNORED_NAMES = set(SKILL_IGNORE_FILENAMES)
 _NEVER_IGNORABLE = {"SKILL.md"}
 
 
@@ -1033,7 +1027,7 @@ def _load_skill_ignore(skill_dir: Path):
     always excluded; ``SKILL.md`` can never be excluded.
     """
     patterns: list[str] = []
-    for name in _SKILL_IGNORE_FILENAMES:
+    for name in SKILL_IGNORE_FILENAMES:
         ig = skill_dir / name
         try:
             if ig.is_file():

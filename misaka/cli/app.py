@@ -4,12 +4,12 @@ import os
 import signal
 import sys
 
-from misaka.utils import atomic
 from misaka.config import CFG
 from misaka.documents import index as corpus
 from misaka.observability import board as tail
 from misaka.platform import budget
 from misaka.platform import tasks as db
+from misaka.utils import atomic
 
 
 def _parser():
@@ -452,8 +452,7 @@ def _cmd_skills(args, con):
                 f"Unknown skill write mode: {args.name}. "
                 f"Available modes: {', '.join(skill_write.WRITE_MODES)}"
             )
-        elif _os.environ.get("MISAKA_WHO") or _os.environ.get("MISAKA_USAGE_TASK_ID"):
-            # These variables are set in every agent shell; only a human may change this.
+        elif skill_write.agent_session():
             sys.exit("Skill write mode can only be changed by the user, not from an agent session.")
         else:
             cfg = skill_layers.load_skills_config()
@@ -461,23 +460,15 @@ def _cmd_skills(args, con):
             skill_layers.write_skills_config(cfg)
             print(f"Skill write mode set to {args.name} (effective immediately).")
     elif args.op in ("pending", "approve", "reject", "ledger", "rollback"):
-        import shutil as _shutil
-
         from misaka.skills import write as skill_write
-        staging = _os.path.expanduser("~/.misaka/pending/skills/workspace")
         live = _os.path.join(CFG["roles_root"], args.role, "skills")
-
-        def _staged():
-            if not _os.path.isdir(staging):
-                return []
-            return sorted(d for d in _os.listdir(staging)
-                          if _os.path.isdir(_os.path.join(staging, d)))
+        if args.op in ("approve", "reject", "rollback") and skill_write.agent_session():
+            sys.exit("Skill review decisions are the user's; they cannot be made from an agent session.")
 
         if args.op == "pending":
             print(f"Skill write mode: {skill_write.write_mode()}")
             records = skill_write.list_pending()
-            legacy = _staged()
-            if not records and not legacy:
+            if not records:
                 print("No skills are awaiting review.")
             from misaka.skills.linter import format_findings, lint_content
             for r in records:
@@ -490,8 +481,6 @@ def _cmd_skills(args, con):
                 if diff:
                     print("    " + diff.replace("\n", "\n    "))
                 print(f"    Approve: misaka skills approve {r['id']}")
-            for n in legacy:
-                print(f"  [directory] {n}  approve: misaka skills approve {n} --as {args.role}")
         elif args.op == "approve":
             if not args.name:
                 sys.exit("Usage: misaka skills approve <pending-id-or-skill-name>")
@@ -507,20 +496,7 @@ def _cmd_skills(args, con):
                 skill_write.discard_pending(record["id"])
                 print("Approved and applied.")
             else:
-                src = _os.path.join(staging, args.name)
-                if not _os.path.isdir(src):
-                    sys.exit(f"No pending skill named '{args.name}'.")
-                dst = _os.path.join(live, args.name)
-                before = skill_write.snapshot(dst)
-                _os.makedirs(live, exist_ok=True)
-                if _os.path.isdir(dst):
-                    _shutil.rmtree(dst)
-                _shutil.copytree(src, dst)
-                _shutil.rmtree(src)
-                eid = skill_write.record("approve", args.name, before=before,
-                                         after_root=dst,
-                                         evidence={"from": "pending", "role": args.role})
-                print(f"Approved and installed: {dst} (ledger entry {eid})")
+                sys.exit(f"No pending write named '{args.name}'.")
         elif args.op == "reject":
             if not args.name:
                 sys.exit("Usage: misaka skills reject <pending-id-or-skill-name>")
@@ -533,20 +509,17 @@ def _cmd_skills(args, con):
                                    evidence={"pending_id": record["id"]})
                 print(f"Rejected: {record['summary']}")
             else:
-                src = _os.path.join(staging, args.name)
-                if not _os.path.isdir(src):
-                    sys.exit(f"No pending skill named '{args.name}'.")
-                _shutil.rmtree(src)
-                skill_write.record("reject", args.name, evidence={"role": args.role})
-                print(f"Rejected and removed pending skill: {args.name}")
+                sys.exit(f"No pending write named '{args.name}'.")
         elif args.op == "ledger":
             rows = skill_write.entries(limit=30)
             if not rows:
                 print("The skill ledger is empty.")
             for e in rows:
+                rollbackable = e.get("rollbackable", e["action"] in skill_write.MUTATING_ACTIONS)
                 print(
                     f"{e['ts']}  {e['id']}  {e['actor']:<12} {e['action']:<12} "
                     f"{e['skill']}  (before {len(e['before'])}/after {len(e['after'])})"
+                    + ("" if rollbackable else "  [not rollbackable]")
                 )
         else:   # rollback
             if not args.name:

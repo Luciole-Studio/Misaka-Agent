@@ -11,6 +11,13 @@ from misaka.utils import atomic
 
 WRITE_MODES = ("off", "forbid", "ask", "allow")
 DEFAULT_WRITE_MODE = "forbid"
+MUTATING_ACTIONS = ("create", "edit", "patch", "delete", "write_file", "remove_file", "approve")
+
+
+def agent_session():
+    """True inside any agent shell (every Sister, card and child process sets these); review
+    decisions and the write mode belong to the person at the keyboard."""
+    return bool(os.environ.get("MISAKA_WHO") or os.environ.get("MISAKA_USAGE_TASK_ID"))
 
 _ORIGIN = contextvars.ContextVar("misaka_skill_write_origin", default="user")
 
@@ -96,6 +103,7 @@ def record(action, skill, *, before=None, after_root=None, evidence=None):
         "evidence": evidence or {},
         "before": before if before is not None else [],
         "after": snapshot(after_root) if after_root else [],
+        "rollbackable": action in MUTATING_ACTIONS,     # bookkeeping entries restore nothing
     }
     path = _ledger_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -127,13 +135,17 @@ def rollback(entry_id, skill_root):
     target = next((e for e in entries() if e["id"] == entry_id), None)
     if target is None:
         return False, f"Skill ledger entry not found: {entry_id}"
+    if not target.get("rollbackable", target["action"] in MUTATING_ACTIONS):
+        return False, f"Ledger entry {entry_id} records '{target['action']}', not a change that can be rolled back."
     root = Path(skill_root)
+    try:
+        root.resolve().relative_to(_root().resolve())    # whether or not it exists yet
+    except ValueError:
+        return False, "Rollback target must be inside ~/.misaka."
     # Verify every required blob before changing the live skill.
     for item in target["before"]:
         if not (_blob_dir() / item["sha256"]).exists():
             return False, f"Missing rollback blob for {item['path']} ({item['sha256'][:12]})."
-    if root.exists() and not str(root.resolve()).startswith(str(_root().resolve())):
-        return False, "Rollback target must be inside ~/.misaka."
     try:
         record("pre-rollback", target["skill"], after_root=root, evidence={"rollback_of": entry_id})
     except OSError as error:

@@ -85,11 +85,11 @@ def validate_frontmatter(content, *, new_skill=False):
     fm = parsed.frontmatter
     if not isinstance(fm, dict) or not fm:
         return "Frontmatter is unclosed or is not a key-value mapping."
-    if "name" not in fm:
-        return "Frontmatter must contain a `name` field."
-    if "description" not in fm:
-        return "Frontmatter must contain a `description` field."
-    desc = str(fm["description"]).strip().strip("'\"")
+    if not isinstance(fm.get("name"), str) or not fm["name"].strip():
+        return "Frontmatter must contain a non-empty `name` string."
+    if not isinstance(fm.get("description"), str) or not fm["description"].strip():
+        return "Frontmatter must contain a non-empty `description` string."
+    desc = fm["description"].strip().strip("'\"")
     if len(desc) > MAX_DESCRIPTION_LENGTH:
         return f"Description exceeds {MAX_DESCRIPTION_LENGTH} characters."
     if new_skill and len(desc) > SKILL_PROMPT_DESC_LIMIT:
@@ -131,7 +131,7 @@ def _security_scan(skill_dir):
             scan_skill,
             should_allow_install,
         )
-        result = scan_skill(Path(skill_dir), source="agent-created")
+        result = scan_skill(Path(skill_dir), source="agent-created", honor_ignore=False)   # never the skill's own ignore file
         allowed, reason = should_allow_install(result)
     except Exception as error:  # noqa: BLE001 - whatever failed inside the scanner, the answer is "not scanned"
         return f"The security scan could not run ({type(error).__name__}: {error}); the change was not applied."
@@ -214,12 +214,23 @@ def _resolve_target(skill_dir, file_path):
     err = lookup_path_error(file_path)
     if err:
         return None, err
+    from misaka.skills.guard import SKILL_IGNORE_FILENAMES
+    if Path(file_path).name in SKILL_IGNORE_FILENAMES:
+        return None, f"{file_path} controls what the security scanner sees; it is not written through skill_manage."
     target = (Path(skill_dir) / file_path).resolve()
     try:
         target.relative_to(Path(skill_dir).resolve())
     except ValueError:
         return None, f"Path escapes the skill directory: {file_path}"
     return target, None
+
+
+def _support_file_error(text, label):
+    """One limit for support files, the scanner's: what it would refuse to read is refused here."""
+    from misaka.skills.guard import MAX_SINGLE_FILE_KB
+    if len(text.encode("utf-8")) > MAX_SINGLE_FILE_KB * 1024:
+        return f"{label} exceeds {MAX_SINGLE_FILE_KB} KB, the security scanner's single-file limit."
+    return None
 
 
 def _require_skill(profile_dir, name):
@@ -239,12 +250,9 @@ def _atomic_write(target, text):
 def _write_file(profile_dir, name, file_path, file_content):
     if file_content is None:
         return {"success": False, "error": "write_file requires file_content; pass an empty string for an empty file"}
-    from misaka.skills.guard import (
-        MAX_SINGLE_FILE_KB,  # one limit for support files: the scanner's
-    )
-    if len(file_content.encode("utf-8")) > MAX_SINGLE_FILE_KB * 1024:
-        return {"success": False,
-                "error": f"Support file exceeds {MAX_SINGLE_FILE_KB} KB, the security scanner's single-file limit."}
+    err = _support_file_error(file_content, file_path)
+    if err:
+        return {"success": False, "error": err}
     skill_dir, err = _require_skill(profile_dir, name)
     if err:
         return {"success": False, "error": err}
@@ -322,13 +330,15 @@ def _patch_skill(profile_dir, name, old_string, new_string, file_path=None,
         else content.replace(old_string, new_string, 1)
 
     label = file_path or "SKILL.md"
-    err = validate_content_size(new_content, label=label)
-    if err:
-        return {"success": False, "error": err}
     if not file_path or _is_skill_md(target, skill_dir):
-        err = validate_frontmatter(new_content)
+        err = (validate_content_size(new_content) or validate_frontmatter(new_content)
+               or name_mismatch(name, new_content))
         if err:
             return {"success": False, "error": f"This patch would break SKILL.md structure: {err}"}
+    else:
+        err = _support_file_error(new_content, label)
+        if err:
+            return {"success": False, "error": err}
 
     _atomic_write(target, new_content)
     scan_error = _security_scan(skill_dir)
@@ -402,8 +412,11 @@ def _gist(action, name, content="", file_path="", old_string=""):
         return f"patch skill {name}{('/' + file_path) if file_path else ''}: {old_string[:40]}…"
     if action == "delete":
         return f"Delete skill '{name}'"
-    from misaka.utils.frontmatter import parse_frontmatter
-    desc = str((parse_frontmatter(content or "").frontmatter or {}).get("description") or "")
+    from misaka.utils.frontmatter import FrontmatterError, parse_frontmatter
+    try:
+        desc = str((parse_frontmatter(content or "").frontmatter or {}).get("description") or "")
+    except FrontmatterError:
+        desc = ""
     label = "Rewrite skill" if action == "edit" else "Create skill"
     return f"{label} '{name}': {desc[:60]}" if desc else f"{label} '{name}'"
 

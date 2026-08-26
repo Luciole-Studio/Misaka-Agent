@@ -144,6 +144,7 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
     def register(harn):
         # ── the index in the system prompt (hermes build_skills_system_prompt) ──
         async def advertise(event, _ctx):
+            skill_index.invalidate()          # skills edited outside this session (git, an editor) show next turn
             section = skill_index.render_prompt(entries(), skill_index.categories(roots),
                                                 compact_skill_categories(workspace))
             if section:
@@ -154,6 +155,32 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
 
         harn.on("before_agent_start", advertise)
         harn.on("session_start", fresh)
+
+        # Live skill trees change only through skill_manage (gate, scan, ledger): the generic file
+        # and shell tools are refused on them in every kind of session. A card's sandbox copies are
+        # not live trees, so reading them stays possible.
+        live_roots = set()
+        for _layer, root in skill_roots(profile_dir, workspace):
+            live_roots.update({os.path.abspath(root), os.path.realpath(root)})
+
+        def _touches_live_skills(tool, args):
+            if tool in ("write", "edit"):
+                target = os.path.realpath(os.path.join(workspace, os.path.expanduser(str(args.get("path") or ""))))
+                return any(target == root or target.startswith(root + os.sep) for root in live_roots)
+            if tool == "bash":
+                command = str(args.get("command") or "")
+                return any(root in command for root in live_roots)   # ponytail: a text match; the shell is not parsed
+            return False
+
+        async def guard_live_skills(event, _ctx):
+            args = event.get("input") if isinstance(event, dict) else getattr(event, "input", None)
+            tool = event.get("toolName") if isinstance(event, dict) else getattr(event, "toolName", "")
+            if _touches_live_skills(str(tool or ""), args if isinstance(args, dict) else {}):
+                return {"block": True, "reason": "Live skill trees change only through skill_manage (approval, scan, "
+                                                 "ledger); generic file and shell tools are refused there."}
+            return None
+
+        harn.on("tool_call", guard_live_skills)
 
         # ── the [Skills] block on the startup screen ──
         # The engine's own one lists engine-loaded skills, of which there are none under
@@ -200,8 +227,8 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
             # than guessed -- unless one of them is the project's, which overrides on purpose.
             found = skill_index.candidates(roots, args.name)
             exact = [e for e in found if e["rel"] == args.name.strip()]   # the directory path inside a layer
-            project = [e for e in found if e["layer"] == "project"]
-            found = exact or project or found
+            found = exact or found
+            found = [e for e in found if e["layer"] == "project"] or found   # the index's promise: project shadows the rest
             if len({e["dir"] for e in found}) > 1:
                 paths = "; ".join(e["path"] for e in found)
                 return {"content": [{"type": "text", "text": (

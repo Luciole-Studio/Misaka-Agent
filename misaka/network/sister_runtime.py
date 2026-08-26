@@ -1051,6 +1051,7 @@ class SisterRuntime:
                     except BaseException:  # noqa: BLE001, S110 - closing during teardown must not mask the board transition
                         pass
                     self._handles.pop(handle.board_id, None)
+                    self._owned_claims.discard(handle.claim_lock)
             done_event.set()
 
 
@@ -1420,6 +1421,7 @@ class SisterRuntime:
                     pass
                 done_event.set()
                 self._handles.pop(task_id, None)
+                self._owned_claims.discard(lock)
                 raise
             self._event(handle, "message", {"summary": summary, "mode": "resume"})
             handle.supervisor = asyncio.create_task(

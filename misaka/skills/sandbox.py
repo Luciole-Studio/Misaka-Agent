@@ -18,13 +18,14 @@ def _tree_size(path):
 
 
 def _strip_write(path):
+    entries = [path]
     for root, dirs, files in os.walk(path):
-        for name in files + dirs:
-            p = os.path.join(root, name)
-            try:
-                os.chmod(p, os.stat(p).st_mode & ~stat.S_IWUSR & ~stat.S_IWGRP & ~stat.S_IWOTH)
-            except OSError:
-                pass
+        entries.extend(os.path.join(root, name) for name in files + dirs)
+    for p in entries:                                  # the copy's own directory included: no new files either
+        try:
+            os.chmod(p, os.stat(p).st_mode & ~stat.S_IWUSR & ~stat.S_IWGRP & ~stat.S_IWOTH)
+        except OSError:
+            pass
 
 
 def readonly_copies(skill_dirs, dest_root):
@@ -47,7 +48,7 @@ def readonly_copies(skill_dirs, dest_root):
             name, n = f"{base}-{n}", n + 1
         used.add(name.casefold())
         dst = os.path.join(dest_root, name)
-        if os.path.exists(dst):
+        if os.path.lexists(dst):
             cleanup(dst)
         def _ignore(src, names):
             # Exclude symlinks so copies cannot escape the size check or sandbox.
@@ -65,14 +66,18 @@ def readonly_copies(skill_dirs, dest_root):
 
 
 def cleanup(dest_root):
-    """Restore write permission and remove a sandbox copy."""
+    """Restore write permission and remove a sandbox copy -- or whatever else sits at its place."""
+    if os.path.islink(dest_root) or os.path.isfile(dest_root):
+        os.unlink(dest_root)
+        return
     if not os.path.isdir(dest_root):
         return
+    entries = [dest_root]
     for root, dirs, files in os.walk(dest_root):
-        for name in files + dirs:
-            p = os.path.join(root, name)
-            try:
-                os.chmod(p, os.stat(p).st_mode | stat.S_IWUSR)
-            except OSError:
-                pass
+        entries.extend(os.path.join(root, name) for name in files + dirs)
+    for p in entries:
+        try:
+            os.chmod(p, os.stat(p).st_mode | stat.S_IWUSR)
+        except OSError:
+            pass
     shutil.rmtree(dest_root, ignore_errors=True)
