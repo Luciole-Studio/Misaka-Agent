@@ -2,7 +2,7 @@
 
 Last Order never receives the generic ``Agent`` tool family.  This module
 reuses that process/transcript runtime behind a roster-bound facade, while the
-board remains the source of truth and report + verified acceptance remains the
+board remains the source of truth and a valid report remains the
 only path to ``done``.
 """
 
@@ -32,7 +32,6 @@ from misaka.skills import sandbox as skill_sandbox
 from misaka.core.session_manager import find_most_recent_session
 from misaka.network import worker
 from misaka.platform import tasks as db
-from misaka.network import judge_process
 from misaka.extensions.sisters.subagent.agents import AgentDefinition
 from misaka.extensions.sisters.subagent.runtime import (
     AgentTask,
@@ -42,15 +41,13 @@ from misaka.extensions.sisters.subagent.runtime import (
 )
 
 TERMINAL_BOARD_STATUSES = frozenset({"done", "failed", "stopped", "blocked", "triage"})
-ACTIVE_BOARD_STATUSES = frozenset({"running", "review", "verifying", "finalizing"})
+ACTIVE_BOARD_STATUSES = frozenset({"running", "review"})
 from misaka.extensions.sisters.subagent.child import PROCESS_GROUP_IDENTITY  # single source of truth for the wire constant
 STATUS_MAP = {
     "ready": "pending",
     "todo": "pending",
     "running": "running",
     "review": "running",
-    "verifying": "running",
-    "finalizing": "running",
     "done": "completed",
     "failed": "failed",
     "blocked": "blocked",
@@ -353,6 +350,13 @@ class SisterHandle:
     run_token: object = field(default_factory=object, repr=False)
 
 
+class _CountingSemaphore(asyncio.Semaphore):
+    """asyncio.Semaphore that can report its free slots (the stdlib keeps the count private)."""
+
+    @property
+    def available(self) -> int:
+        return max(0, self._value)  # noqa: SLF001 - the one place that touches the internal counter
+
 class SisterRuntime:
     """Session-local supervisor backed by durable board rows and transcripts."""
 
@@ -362,10 +366,7 @@ class SisterRuntime:
         self._cfg_factory = cfg_factory
         self._handles: dict[str, SisterHandle] = {}
         self._lock = asyncio.Lock()
-        self._judge_semaphore = asyncio.Semaphore(
-            max(1, int(os.environ.get("MISAKA_MAX_CONCURRENT_JUDGES", "2")))
-        )
-        self._sister_semaphore = asyncio.Semaphore(admission.limits()[0])
+        self._sister_semaphore = _CountingSemaphore(admission.limits()[0])
         self._owner_identity = _process_identity(os.getpid())
         self._owned_claims: set[str] = set()
         self._closing = False
@@ -495,53 +496,8 @@ class SisterRuntime:
                     # Never publish a replacement workspace owner while an old
                     # writer group remains observable.
                     continue
-            ok, report = worker.check_report(
-                db.workspace_for(observed),
-                con=self.con, task_id=observed["id"])
-            if not ok and str(report).startswith("blocked:"):
-                db.block_abandoned(
-                    self.con, observed["id"], "needs_input",
-                    str(report)[len("blocked:"):].strip(),
-                    generation=observed["generation"], claim_lock=observed["claim_lock"],
-                    worker_pid=observed["worker_pid"],
-                    worker_identity=observed["worker_identity"],
-                    claim_expires=observed["claim_expires"],
-                )
-                continue
-            submitted = bool(ok)
-            if not db.reclaim_abandoned(
-                self.con,
-                observed["id"],
-                generation=observed["generation"],
-                claim_lock=observed["claim_lock"],
-                worker_pid=observed["worker_pid"],
-                worker_identity=observed["worker_identity"],
-                claim_expires=observed["claim_expires"],
-                submitted=submitted,
-            ):
-                continue
-            if submitted:
-                db.add_event(
-                    self.con,
-                    observed["id"],
-                    "submitted",
-                    {
-                        "summary": report["summary"],
-                        "artifacts": report.get("artifacts", []),
-                        "notes": report.get("notes", ""),
-                        "uncertain": report.get("uncertain", []),
-                        "reconciled": True,
-                    },
-                    generation=observed["generation"],
-                )
-            else:
-                db.add_event(
-                    self.con,
-                    observed["id"],
-                    "reclaimed",
-                    {"reason": str(report)[:500]},
-                    generation=observed["generation"],
-                )
+            from misaka.network import dispatch
+            dispatch.finish_abandoned(self.con, observed)
 
     def _prepare_card(self, row: Mapping[str, Any]) -> dict[str, Any] | None:
         from misaka.platform import cards
@@ -564,17 +520,6 @@ class SisterRuntime:
                     generation=row["generation"],
                 )
             return None
-        feedback = db.latest_payload(
-            self.con, row["id"], "verify_fail", generation=row["generation"]
-        )
-        if feedback:
-            payload = _json(feedback)
-            fixes = payload.get("must_fix", []) if isinstance(payload, dict) else []
-            prefix = task.get("feedback") or ""
-            task["feedback"] = prefix + (
-                "\n⚠️ Verification found issues that must be fixed:\n"
-                + "\n".join(f"- {item}" for item in fixes)
-            )
         if reading["mode"] == "beast":
             task["beast"] = True
             db.add_event(self.con, row["id"], "beast_mode", reading)
@@ -806,50 +751,30 @@ class SisterRuntime:
         if self._closing:
             raise RuntimeError("Sister runtime is closing")
         await asyncio.to_thread(self._reconcile_abandoned, task_ids)
-        free = max(0, self._sister_semaphore._value)
+        free = self._sister_semaphore.available
         default_ready = None
         if task_ids is None:
             default_ready = [
                 row["id"] for row in db.fair_ready(self.con, limit=free, lane="workers")
             ]
-        wanted = list(
-            dict.fromkeys(
-                task_ids
-                if task_ids is not None
-                else [
-                    *default_ready,
-                    *[row["id"] for row in db.by_status(self.con, "verifying")],
-                    *[row["id"] for row in db.by_status(self.con, "finalizing")],
-                ]
-            )
-        )
+        wanted = list(dict.fromkeys(task_ids if task_ids is not None else default_ready))
         if not wanted:
             return []
 
         # Take a slot before taking a lease: cards that do not fit stay ready for
         # the next round instead of holding a lease they cannot run under.
-        verifyish, ready_ids = [], []
-        for task_id in wanted:
-            row = db.get(self.con, task_id)
-            if row is not None and row["status"] in {"verifying", "finalizing"}:
-                verifyish.append(task_id)
-            else:
-                ready_ids.append(task_id)
         if task_ids is None:
-            selected = set(ready_ids)
+            selected = set(wanted)
             deferred = [
                 row["id"] for row in db.by_status(self.con, "ready")
                 if row["id"] not in selected
             ]
-            starting = verifyish + ready_ids
+            starting = wanted
         else:
-            deferred = ready_ids[free:]
-            starting = verifyish + ready_ids[:free]
+            deferred = wanted[free:]
+            starting = wanted[:free]
 
         async def start(task_id: str) -> dict[str, Any]:
-            row = db.get(self.con, task_id)
-            if row is not None and row["status"] in {"verifying", "finalizing"}:
-                return await self.retry_verifying(task_id, context=context)
             return await self.launch(
                 task_id,
                 context=context,
@@ -874,139 +799,6 @@ class SisterRuntime:
         ]
         return out
 
-    async def retry_verifying(self, task_id: str, *, context: Any) -> dict[str, Any]:
-        """Retry only the verification gate; do not rerun the working Sister unnecessarily."""
-        async with self._lock:
-            if self._closing:
-                raise RuntimeError("Sister runtime is closing")
-            row = db.get(self.con, task_id)
-            if row is None or row["status"] not in {"verifying", "finalizing"}:
-                raise ValueError(f"Card {task_id} is not awaiting verification or finalization.")
-            generation = int(row["generation"])
-            current = self._handles.get(task_id)
-            if (
-                current
-                and not current.done.is_set()
-                and current.generation == generation
-            ):
-                return self.snapshot(task_id, launched=False, note="already verifying")
-            try:
-                handle = await self._restore(task_id, context)
-            except ValueError:
-                handle = SisterHandle(
-                    board_id=task_id,
-                    sister=row["assignee"],
-                    manager=None,
-                    agent=None,
-                    context=context,
-                    timeout=row["timeout_seconds"],
-                    generation=generation,
-                )
-                self._handles[task_id] = handle
-            handle.context = context
-            token, done_event = self._begin_run(handle, generation, None)
-            handle.supervisor = asyncio.create_task(
-                self._verify_existing(handle, token, done_event)
-            )
-            return self.snapshot(task_id, launched=True, note="verify retry")
-
-    async def _verify_existing(
-        self, handle: SisterHandle, token: object, done_event: asyncio.Event
-    ) -> None:
-        try:
-            await self._judge(handle.board_id)
-            async with handle.state_lock:
-                row = self._row_for_run(handle, token)
-                if row is None:
-                    return
-                if handle.stop_requested:
-                    await self._finish_stop(handle, token)
-                    return
-                if row["status"] in TERMINAL_BOARD_STATUSES:
-                    await self._notify(handle, token)
-                    return
-                if row["status"] in {"verifying", "finalizing"}:
-                    self._event(handle, "judge_deferred", {})
-                    return
-                if row["status"] != "ready":
-                    return  # another owner won a same-generation retry
-                if self._closing:
-                    return
-                if not handle.manager or not handle.agent:
-                    # A legacy CLI card has no addressable transcript.  It is
-                    # ready and can be launched as a fresh Sister later.
-                    return
-                feedback = _json(
-                    db.latest_payload(
-                        self.con,
-                        handle.board_id,
-                        "verify_fail",
-                        generation=handle.generation,
-                    )
-                ) or {}
-                fixes = feedback.get("must_fix") or []
-                reading = budget.status(self.con, self.cfg.get("token_cap"))
-                if reading["mode"] == "stop":
-                    self._event(handle, "budget_stop", reading)
-                    return
-                handle.manager.beast = reading["mode"] == "beast"
-                lock = f"lo-retry:{os.getpid()}:{secrets.token_hex(4)}"
-                if not db.claim(
-                    self.con,
-                    handle.board_id,
-                    lock,
-                    ttl_seconds=max(1800, handle.timeout + 60),
-                    generation=handle.generation,
-                    pid=os.getpid(),
-                    worker_identity=self._owner_identity,
-                    **_admission_limits(),
-                ):
-                    return
-                self._owned_claims.add(lock)
-                handle.claim_lock = lock
-                if handle.manager and hasattr(handle.manager, "role_context"):
-                    handle.manager.role_context = replace(
-                        handle.manager.role_context, usage_claim_lock=lock
-                    )
-                _previous_report(handle.board_id)
-                try:
-                    await handle.manager.send_message(
-                        handle.agent.id,
-                        "Verification returned this card. Fix each item and rewrite report.json:\n"
-                        + "\n".join(f"- {item}" for item in fixes)
-                        + worker.REPORT_INSTRUCTIONS,
-                        context=handle.context,
-                        notify=False,
-                    )
-                except BaseException:
-                    db.back_to_ready(
-                        self.con,
-                        handle.board_id,
-                        generation=handle.generation,
-                        claim_lock=lock,
-                    )
-                    raise
-            await self._supervise(handle, token, done_event)
-        except asyncio.CancelledError:
-            if self._is_current(handle, token) and handle.stop_requested:
-                await self._finish_stop(handle, token)
-            raise
-        except Exception as error:
-            row = self._row_for_run(handle, token)
-            if row is not None and row["status"] == "running" and handle.claim_lock:
-                reason = f"judge retry: {error}"
-                if self._owned_event(
-                    handle, str(handle.claim_lock), "failed", {"reason": reason}
-                ) and db.mark_failed(
-                    self.con,
-                    handle.board_id,
-                    generation=handle.generation,
-                    claim_lock=handle.claim_lock,
-                ):
-                    if not self._closing:
-                        await self._notify(handle, token)
-        finally:
-            done_event.set()
 
     async def _await_turn(
         self, handle: SisterHandle, runner: asyncio.Task[None]
@@ -1096,23 +888,9 @@ class SisterRuntime:
         if row is None:
             return
         claim_lock = handle.claim_lock if row["status"] == "running" else None
-        changed, verify_pid, verify_identity = db.stop_and_take_verifier(
-            self.con,
-            handle.board_id,
-            generation=handle.generation,
-            claim_lock=claim_lock,
-        )
-        if changed:
+        if db.mark_stopped(self.con, handle.board_id, generation=handle.generation,
+                           claim_lock=claim_lock):
             self._event(handle, "stopped", {"by": "Last Order"})
-            if verify_pid:
-                await judge_process.terminate_owned(verify_pid, verify_identity)
-            db.clear_verifier_process(
-                self.con,
-                handle.board_id,
-                verify_pid,
-                verify_identity,
-                generation=handle.generation,
-            )
         row = self._row_for_run(handle, token)
         if row is not None and row["status"] in TERMINAL_BOARD_STATUSES:
             await self._notify(handle, token)
@@ -1230,109 +1008,16 @@ class SisterRuntime:
                         if changed:
                             await self._notify(handle, token)
                         return
-                    from misaka.platform import repo
-                    repo.commit_card(self._workspace(handle.board_id), handle.board_id, result,
-                                     f"card {handle.board_id}: submit")
-                    if not db.mark_verifying(
-                        self.con,
-                        handle.board_id,
-                        generation=handle.generation,
-                        claim_lock=handle.claim_lock,
-                    ):
+                    from misaka.network import dispatch
+                    if not dispatch.accept(self.con, row, result, generation=handle.generation,
+                                           claim_lock=handle.claim_lock,
+                                           workspace=self._workspace(handle.board_id)):
                         return
-                    self._event(
-                        handle,
-                        "submitted",
-                        {
-                            "summary": result["summary"],
-                            "artifacts": result["artifacts"],
-                            "notes": result.get("notes", ""),
-                            "uncertain": result.get("uncertain", []),
-                        },
-                    )
-
                     if db.get(self.con, handle.board_id)["status"] == "review":
-                        self._event(
-                            handle,
-                            "review_requested",
-                            {"reviewer": row["reviewer"]},
-                        )
+                        self._event(handle, "review_requested", {"reviewer": row["reviewer"]})
                         return
-
-                await self._judge(handle.board_id)
-                async with handle.state_lock:
-                    row = self._row_for_run(handle, token)
-                    if row is None:
-                        return
-                    if handle.stop_requested:
-                        await self._finish_stop(handle, token)
-                        return
-                    if row["status"] in TERMINAL_BOARD_STATUSES:
-                        await self._notify(handle, token)
-                        return
-                    if row["status"] in {"verifying", "finalizing"}:
-                        # Verifier infrastructure failed; leave durable state
-                        # for a later retry rather than blaming the Sister.
-                        self._event(handle, "judge_deferred", {})
-                        return
-                    if row["status"] != "ready":
-                        return  # another runtime owns this generation now
-                    if self._closing:
-                        return
-
-                    feedback = _json(
-                        db.latest_payload(
-                            self.con,
-                            handle.board_id,
-                            "verify_fail",
-                            generation=handle.generation,
-                        )
-                    ) or {}
-                    fixes = feedback.get("must_fix") or []
-                    reading = budget.status(self.con, self.cfg.get("token_cap"))
-                    if reading["mode"] == "stop":
-                        self._event(handle, "budget_stop", reading)
-                        return
-                    lock = f"lo-retry:{os.getpid()}:{secrets.token_hex(4)}"
-                    if not db.claim(
-                        self.con,
-                        handle.board_id,
-                        lock,
-                        ttl_seconds=max(1800, handle.timeout + 60),
-                        generation=handle.generation,
-                        pid=os.getpid(),
-                        worker_identity=self._owner_identity,
-                        **_admission_limits(),
-                    ):
-                        return
-                    self._owned_claims.add(lock)
-                    handle.claim_lock = lock
-                    if hasattr(handle.manager, "role_context"):
-                        handle.manager.role_context = replace(
-                            handle.manager.role_context, usage_claim_lock=lock
-                        )
-                    prompt = (
-                        "Verification returned this card. Keep the same workspace, fix each item, and rewrite report.json:\n"
-                        + "\n".join(f"- {item}" for item in fixes)
-                        + worker.REPORT_INSTRUCTIONS
-                    )
-                    _previous_report(handle.board_id)
-                    handle.manager.beast = reading["mode"] == "beast"
-                    try:
-                        await handle.manager.send_message(
-                            handle.agent.id,
-                            prompt,
-                            context=handle.context,
-                            notify=False,
-                        )
-                    except BaseException:
-                        db.back_to_ready(
-                            self.con,
-                            handle.board_id,
-                            generation=handle.generation,
-                            claim_lock=lock,
-                        )
-                        raise
+                    await self._notify(handle, token)
+                    return
         except asyncio.CancelledError:
             async with handle.state_lock:
                 row = self._row_for_run(handle, token)
@@ -1374,82 +1059,6 @@ class SisterRuntime:
                     self._handles.pop(handle.board_id, None)
             done_event.set()
 
-    async def _judge(self, task_id: str) -> Mapping[str, Any]:
-        initial = db.get(self.con, task_id)
-        if initial is None:
-            raise ValueError(f"Card not found: {task_id}")
-        generation = int(initial["generation"])
-        cfg = {
-            key: value
-            for key, value in self.cfg.items()
-            if key
-            in {
-                "db",
-                "provider",
-                "default_model",
-                "roles_root",
-                "profiles_root",
-                "judge_timeout",
-                "token_cap",
-            }
-        }
-        ttl = max(1800, int(cfg.get("judge_timeout", 600)) * 7 + 300)
-        async with self._judge_semaphore:
-            row: Mapping[str, Any] = {}
-            for attempt in range(3):
-                token = f"verify:{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(8)}"
-                if not db.claim_verification(
-                    self.con, task_id, token, ttl, generation=generation
-                ):
-                    return dict(db.get(self.con, task_id))
-                try:
-                    # Wall clock is not the lease: the child runs at most two judge
-                    # rounds, so a hung judge must not burn the whole verification TTL.
-                    wall = min(ttl, int(cfg.get("judge_timeout", 600)) * 2 + 300)
-                    result = await judge_process.run(
-                        cfg, task_id, token, wall, generation=generation
-                    )
-                    if result.returncode:
-                        db.add_event(
-                            self.con,
-                            task_id,
-                            "judge_process_error",
-                            {
-                                "returncode": result.returncode,
-                                "stderr": result.stderr[-1000:],
-                            },
-                            generation=generation,
-                        )
-                    elif not result.stdout.strip():
-                        db.add_event(
-                            self.con,
-                            task_id,
-                            "judge_process_error",
-                            {"error": "empty stdout"},
-                            generation=generation,
-                        )
-                except asyncio.CancelledError:
-                    raise
-                except Exception as error:  # verifier infrastructure is retriable, not Sister failure
-                    db.add_event(
-                        self.con,
-                        task_id,
-                        "judge_process_error",
-                        {"error": f"{type(error).__name__}: {error}"[:1000]},
-                        generation=generation,
-                    )
-                finally:
-                    db.release_verification(
-                        self.con, task_id, token, generation=generation
-                    )
-                row = dict(db.get(self.con, task_id))
-                if int(row["generation"]) != generation:
-                    break
-                if row["status"] not in {"verifying", "finalizing"}:
-                    break
-                if attempt < 2:
-                    await asyncio.sleep(0.25 * (2**attempt))
-            return row
 
     async def _notify(self, handle: SisterHandle, token: object) -> None:
         if (
@@ -1738,8 +1347,8 @@ class SisterRuntime:
             row = db.get(self.con, task_id)
             if row is None or int(row["generation"]) != handle.generation:
                 raise RuntimeError("The Sister session changed; try again.")
-            if row["status"] in {"review", "verifying", "finalizing"}:
-                raise ValueError("The Sister submitted this card and verification is in progress; wait until review finishes.")
+            if row["status"] == "review":
+                raise ValueError("The Sister submitted this card and its review is in progress; wait until the review finishes.")
             if row["status"] == "running":
                 if not handle.claim_lock or handle.claim_lock != row["claim_lock"]:
                     raise ValueError("This card belongs to another Last Order session; send the message from its owning session.")
@@ -1836,21 +1445,7 @@ class SisterRuntime:
                 raise ValueError(f"Card {task_id} is not running (current status: {status}).")
             if row["status"] == "running" and row["claim_lock"] not in self._owned_claims:
                 raise ValueError("This card belongs to another Last Order session; stop it from its owning session.")
-            try:
-                handle = await self._restore(task_id, context)
-            except ValueError:
-                if row["status"] not in {"verifying", "finalizing"}:
-                    raise
-                handle = SisterHandle(
-                    board_id=task_id,
-                    sister=row["assignee"],
-                    manager=None,
-                    agent=None,
-                    context=context,
-                    timeout=row["timeout_seconds"],
-                    generation=int(row["generation"]),
-                )
-                self._handles[task_id] = handle
+            handle = await self._restore(task_id, context)
             async with handle.state_lock:
                 row = db.get(self.con, task_id)
                 if row is None or int(row["generation"]) != handle.generation:
@@ -1862,21 +1457,13 @@ class SisterRuntime:
                 token = handle.run_token
                 done_event = handle.done
                 handle.stop_requested = True
-                if row["status"] in {"verifying", "finalizing"}:
-                    await self._finish_stop(handle, token)
-                elif (
+                if (
                     handle.agent
                     and handle.manager
                     and handle.agent.status in {"running", "pending"}
                 ):
                     await handle.manager.stop_task(handle.agent.id, context=context)
-            if row["status"] in {"verifying", "finalizing"}:
-                if handle.supervisor and not handle.supervisor.done():
-                    handle.supervisor.cancel()
-                    await asyncio.gather(handle.supervisor, return_exceptions=True)
-                done_event.set()
-                wait_done = False
-            elif handle.supervisor:
+            if handle.supervisor:
                 wait_done = True
             else:
                 await self._finish_stop(handle, token)

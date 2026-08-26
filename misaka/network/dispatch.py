@@ -1,5 +1,6 @@
-"""Run cards and reconcile their artifacts through the verification gate (a Sister
-who did not write the card judges it)."""
+"""Run cards headlessly and settle their submissions. Submission is acceptance: a valid
+report.json, committed on the card's line, makes the card done (or hands it to the reviewer
+it names); nothing re-checks it afterwards."""
 import json
 import os
 import secrets
@@ -111,51 +112,8 @@ def reconcile(con, cfg):
                 continue
         elif _pid_alive(t["worker_pid"]):
             continue
-        ok, result = worker.check_report(db.workspace_for(t), con=con, task_id=t["id"])
-        if ok:
-            from misaka.platform import repo
-            repo.commit_card(db.workspace_for(t), t["id"], result, f"card {t['id']}: submit (reconciled)")
-        if not ok and str(result).startswith("blocked:"):
-            db.block_abandoned(
-                con, t["id"], "needs_input", str(result)[len("blocked:"):].strip(),
-                generation=t["generation"], claim_lock=t["claim_lock"],
-                worker_pid=t["worker_pid"], worker_identity=t["worker_identity"],
-                claim_expires=t["claim_expires"],
-            )
-            continue
-        if not db.reclaim_abandoned(
-            con,
-            t["id"],
-            generation=t["generation"],
-            claim_lock=t["claim_lock"],
-            worker_pid=t["worker_pid"],
-            worker_identity=t["worker_identity"],
-            claim_expires=t["claim_expires"],
-            submitted=bool(ok),
-        ):
-            continue
-        if ok:
-            db.add_event(
-                con,
-                t["id"],
-                "submitted",
-                {
-                    "summary": result["summary"],
-                    "artifacts": result.get("artifacts", []),
-                    "notes": result.get("notes", ""),
-                    "uncertain": result.get("uncertain", []),
-                    "reconciled": True,
-                },
-                generation=t["generation"],
-            )
-        else:
-            db.add_event(
-                con,
-                t["id"],
-                "reclaimed",
-                {"reason": str(result)},
-                generation=t["generation"],
-            )
+        finish_abandoned(con, t)
+
 
 
 def run_task(con, t, cfg):
@@ -218,17 +176,6 @@ def run_task(con, t, cfg):
     if bud["mode"] == "beast":
         db.add_event(con, t["id"], "beast_mode", bud)
         task["beast"] = True
-    fb = db.latest_payload(
-        con, t["id"], "verify_fail", generation=generation
-    )
-    if fb:
-        fixes = json.loads(fb).get("must_fix", [])
-        task["feedback"] = (
-            (task.get("feedback") or "")
-            + "⚠️ The previous submission was rejected. Address these required fixes:\n"
-            + "\n".join(f"- {item}" for item in fixes)
-        )
-
     usage_db = cfg.get("db")
     if not usage_db:
         try:
@@ -269,23 +216,7 @@ def run_task(con, t, cfg):
                 generation=generation,
             )
     elif verdict["ok"]:
-        from misaka.platform import repo
-        repo.commit_card(run_dir, t["id"], verdict["report"], f"card {t['id']}: submit")
-        if db.mark_verifying(
-            con, t["id"], generation=generation, claim_lock=lock
-        ):
-            db.add_event(
-                con,
-                t["id"],
-                "submitted",
-                {
-                    "summary": verdict["report"]["summary"],
-                    "artifacts": verdict["report"]["artifacts"],
-                    "notes": verdict["report"].get("notes", ""),
-                    "uncertain": verdict["report"].get("uncertain", []),
-                },
-                generation=generation,
-            )
+        accept(con, t, verdict["report"], generation=generation, claim_lock=lock, workspace=run_dir)
     else:
         failure = {
             "reason": str(verdict["reason"]),
@@ -308,107 +239,102 @@ def run_task(con, t, cfg):
     return True
 
 
-def _publish_finalizing(con, t, verify_token, generation, reasons, artifacts=None):
-    """Complete finalization: index artifacts and record ``verify_pass``. Returns False if this judge no longer owns the verification."""
-    if verify_token is None or not db.owns_verification(
-        con, t["id"], verify_token, generation=generation
-    ):
-        return False
-    if not db.finish_finalize(
-        con, t["id"], verify_token, generation=generation
-    ):
-        return False
+def _submitted(report):
+    return {"summary": report["summary"], "artifacts": report.get("artifacts", []),
+            "notes": report.get("notes", ""), "uncertain": report.get("uncertain", [])}
 
-    got = []
-    index_error = None
+
+def _owned(con, task_id, *, generation, claim_lock):
+    """True while the card is still running under this exact claim (the fence ``submit_task``
+    applies), so no git side effect happens on behalf of an owner the board has already replaced."""
+    row = db.get(con, task_id)
+    if row is None or (generation is not None and int(row["generation"]) != int(generation)):
+        return False
+    if claim_lock is None:
+        return True
+    return (row["status"] == "running" and row["claim_lock"] == claim_lock
+            and row["claim_expires"] is not None and int(row["claim_expires"]) >= int(_now()))
+
+
+def _fence_intact(con, t):
+    """True while the abandoned card still carries the exact ownership ``reclaim_abandoned`` matches."""
+    row = db.get(con, t["id"])
+    return row is not None and row["status"] == "running" and all(
+        row[key] == t[key] for key in ("generation", "claim_lock", "worker_pid", "worker_identity", "claim_expires"))
+
+
+def _now():
+    import time
+    return int(time.time())
+
+
+def finish_abandoned(con, t):
+    """The shared tail of both reconcilers (``reconcile`` here, the Sister runtime's
+    ``_reconcile_abandoned``): validate the dead worker's report and, under its exact ownership
+    fence, block it, accept it (commit + corpus) or send it back. Returns ``"blocked"``,
+    ``"submitted"``, ``"reclaimed"`` or ``None`` when someone else got there first."""
+    from misaka.platform import repo
+    ok, result = worker.check_report(db.workspace_for(t), con=con, task_id=t["id"])
+    fence = dict(generation=t["generation"], claim_lock=t["claim_lock"], worker_pid=t["worker_pid"],
+                 worker_identity=t["worker_identity"], claim_expires=t["claim_expires"])
+    if not ok and str(result).startswith("blocked:"):
+        return "blocked" if db.block_abandoned(
+            con, t["id"], "needs_input", str(result)[len("blocked:"):].strip(), **fence) else None
+    if ok:
+        if not _fence_intact(con, t):
+            return None
+        repo.commit_card(db.workspace_for(t), t["id"], result, f"card {t['id']}: submit (reconciled)")
+    if not db.reclaim_abandoned(con, t["id"], submitted=bool(ok), **fence):
+        return None
+    if ok:
+        db.add_event(con, t["id"], "submitted", {**_submitted(result), "reconciled": True},
+                     generation=t["generation"])
+        index_artifacts(con, t["id"], result.get("artifacts", []), t["generation"])
+        return "submitted"
+    db.add_event(con, t["id"], "reclaimed", {"reason": str(result)[:500]}, generation=t["generation"])
+    return "reclaimed"
+
+
+def index_after_review(con, task_id, generation):
+    """A reviewer's approval finishes the card: its last submitted artifacts join the corpus now."""
+    row = con.execute(
+        "SELECT payload FROM events WHERE task_id=? AND kind='submitted' ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
     try:
-        got = ws_index.ingest_artifacts(con, t, artifacts=artifacts)
-    except Exception as error:  # A derived-index failure must not block task finalization.
-        index_error = error
+        artifacts = json.loads(row["payload"] or "{}").get("artifacts") or [] if row else []
+    except (TypeError, ValueError):
+        artifacts = []
+    index_artifacts(con, task_id, artifacts, generation)
 
-    if index_error is not None:
-        db.add_event(
-            con,
-            t["id"],
-            "index_error",
-            {"error": str(index_error)[:200]},
-            generation=generation,
-        )
-    elif got:
-        db.add_event(
-            con,
-            t["id"],
-            "indexed",
-            {"docs": [item[0] for item in got]},
-            generation=generation,
-        )
-    db.add_event(
-        con,
-        t["id"],
-        "verify_pass",
-        {"reasons": reasons},
-        generation=generation,
-    )
+
+def accept(con, t, report, *, generation, claim_lock, workspace):
+    """Submission is acceptance: commit the report's artifacts on the card's line; the card is
+    done (or waits for the reviewer it names) and its artifacts join the corpus. The commit
+    happens only for the card's current owner; the CAS in ``submit_task`` is the final word."""
+    from misaka.platform import repo
+    if not _owned(con, t["id"], generation=generation, claim_lock=claim_lock):
+        return False
+    repo.commit_card(workspace, t["id"], report, f"card {t['id']}: submit")
+    if not db.submit_task(con, t["id"], generation=generation, claim_lock=claim_lock):
+        return False
+    db.add_event(con, t["id"], "submitted", _submitted(report), generation=generation)
+    index_artifacts(con, t["id"], report.get("artifacts", []), generation)
     return True
 
 
-def judge_task(con, t, cfg, verify_token=None, generation=None):
-    """Accept one verifying card mechanically: a valid report.json plus passing acceptance
-    is acceptance (the submission is already committed on the card's line). There is no model judge -- whether and how work
-    gets reviewed is Last Order's runtime business, arranged through ordinary cards."""
-    generation = int(t["generation"] if generation is None else generation)
-    if verify_token is not None and not db.owns_verification(
-        con, t["id"], verify_token, generation=generation
-    ):
+def index_artifacts(con, task_id, artifacts, generation):
+    """A done card's artifacts join the corpus (PageIndex); an index failure never blocks the card."""
+    row = db.get(con, task_id)
+    if row is None or row["status"] != "done":
         return
-    ws = db.workspace_for(t)
-    valid, report_or_reason = worker.check_report(ws or "", task_id=t["id"])
-    if not valid:
-        if db.back_to_ready(
-            con, t["id"], verify_token, generation=generation
-        ):
-            db.add_event(
-                con,
-                t["id"],
-                "verify_reclaimed",
-                {"reason": f"verifying report invalid: {report_or_reason}"[:500]},
-                generation=generation,
-            )
+    try:
+        got = ws_index.ingest_artifacts(con, row, artifacts=artifacts)
+    except Exception as error:  # noqa: BLE001 - a derived index must not undo an acceptance
+        db.add_event(con, task_id, "index_error", {"error": str(error)[:200]}, generation=generation)
         return
-    verified_artifacts = list(report_or_reason.get("artifacts", []))
-    if t["status"] == "finalizing":
-        decision = db.latest_payload(
-            con, t["id"], "verify_decision_pass", generation=generation
-        )
-        try:
-            reasons = json.loads(decision or "{}").get("reasons") or []
-        except (TypeError, ValueError, AttributeError):
-            reasons = []
-        _publish_finalizing(con, t, verify_token, generation, reasons,
-                            artifacts=verified_artifacts)
-        return
-    reasons = ["report.json valid"]
-    db.add_event(
-        con,
-        t["id"],
-        "verify_decision_pass",
-        {"reasons": reasons},
-        generation=generation,
-    )
-    if verify_token is None or not db.begin_finalize(
-        con, t["id"], verify_token, generation=generation
-    ):
-        return
-    finalizing = dict(t)
-    finalizing["status"] = "finalizing"
-    _publish_finalizing(
-        con,
-        finalizing,
-        verify_token,
-        generation,
-        reasons,
-        artifacts=verified_artifacts,
-    )
+    if got:
+        db.add_event(con, task_id, "indexed", {"docs": [item[0] for item in got]}, generation=generation)
 
 
 def dispatch_once(con, cfg, task_ids=None):
@@ -419,20 +345,54 @@ def dispatch_once(con, cfg, task_ids=None):
         if wanted is not None and t["id"] not in wanted:
             continue
         n += run_task(con, db.get(con, t["id"]), cfg) or 0
-    for t in [*db.by_status(con, "verifying"), *db.by_status(con, "finalizing")]:
-        if wanted is not None and t["id"] not in wanted:
-            continue
-        token = f"judge:{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(4)}"
-        ttl = max(1800, int(cfg.get("judge_timeout", 600)) * 7 + 300)
-        generation = int(t["generation"])
-        if db.claim_verification(
-            con, t["id"], token, ttl, generation=generation
-        ):
-            try:
-                judge_task(con, db.get(con, t["id"]), cfg, token, generation=generation)
-            finally:
-                db.release_verification(
-                    con, t["id"], token, generation=generation
-                )
-            n += 1
     return n
+
+
+if __name__ == "__main__":      # self-check: submission is acceptance (done / review / reclaimed after a crash)
+    import tempfile
+    import time as _time
+    from pathlib import Path
+
+    from misaka.config import CFG
+    from misaka.platform import repo
+
+    tmp = tempfile.mkdtemp(prefix="misaka-accept-")
+    CFG["tasks_root"] = os.path.join(tmp, "task-state")
+    ws_index.ingest_artifacts = lambda con, task, artifacts=None: [("doc", a) for a in artifacts or []]  # no corpus here
+    ws = os.path.join(tmp, "p")
+    os.makedirs(os.path.join(ws, "cards"))
+    repo._git(ws, "init", "-q")
+    Path(ws, "PROJECT.md").write_text("x\n")
+    repo.commit(ws, ["PROJECT.md"], "init")
+    con = db.connect(os.path.join(tmp, "board.db"))
+
+    def card(**kw):
+        tid = db.create_task(con, "t", body="## goal\nx", assignee="s1", workspace=ws, **kw)
+        Path(ws, "cards", f"{tid}.md").write_text("card\n")
+        assert db.claim(con, tid, "lock", ttl_seconds=60, generation=1, pid=os.getpid())
+        Path(ws, f"{tid}.md").write_text("out\n")
+        return tid, {"summary": "s", "artifacts": [f"{tid}.md"], "uncertain": [], "notes": ""}
+
+    tid, rep = card()                                                   # plain card: submit == done
+    assert accept(con, db.get(con, tid), rep, generation=1, claim_lock="lock", workspace=ws)
+    row = db.get(con, tid)
+    assert row["status"] == "done" and row["completed_at"] and row["claim_lock"] is None, dict(row)
+    assert f"card {tid}: submit" in repo._git(ws, "log", "--oneline").stdout
+    kinds = [r["kind"] for r in con.execute("SELECT kind FROM events WHERE task_id=? ORDER BY id", (tid,))]
+    assert kinds[-2:] == ["submitted", "indexed"], kinds
+    assert not accept(con, db.get(con, tid), rep, generation=1, claim_lock="lock", workspace=ws)   # not running any more
+
+    tid, rep = card(reviewer="r1")                                     # a named reviewer gates acceptance
+    assert accept(con, db.get(con, tid), rep, generation=1, claim_lock="lock", workspace=ws)
+    assert db.get(con, tid)["status"] == "review"
+    assert db.claim_review(con, tid, "r1", "rlock", generation=1)
+    assert db.approve_review(con, tid, "rlock", generation=1)
+    assert db.get(con, tid)["status"] == "done"
+
+    tid, rep = card()                                                   # the worker died after writing a valid report
+    t = db.get(con, tid)
+    assert db.reclaim_abandoned(con, tid, generation=1, claim_lock="lock", worker_pid=t["worker_pid"],
+                                worker_identity=t["worker_identity"], claim_expires=t["claim_expires"], submitted=True)
+    index_artifacts(con, tid, rep["artifacts"], 1)
+    assert db.get(con, tid)["status"] == "done"
+    print("dispatch accept self-check OK")

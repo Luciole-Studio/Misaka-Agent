@@ -67,7 +67,7 @@ def _mirror_card(workspace, task_id, **fields):
 
 def _pane_for_card(task_id):
     """The live pane running or showing this card, if any (panel mode only)."""
-    from misaka.net import client as net
+    from misaka.ui.panel import client as net
     return next((p for p in net.request("panes.list")["panes"]
                  if p.get("card") == task_id and p.get("alive")), None)
 
@@ -124,7 +124,7 @@ def register(harn):
     class BoardParams(BaseModel):
         status: Optional[str] = Field(None, description=(
             "Optional task status: todo, ready, running, blocked, triage, review, "
-            "verifying, finalizing, done, failed, or stopped."
+            "done, failed, or stopped."
         ))
 
 
@@ -164,7 +164,7 @@ def register(harn):
 
     class CardParams(BaseModel):
         title: str = Field(description="Short task-card title.")
-        body: str = Field(description="Task contract containing `## goal`, `## boundaries`, and `## acceptance criteria`.")
+        body: str = Field(description="Task contract: `## goal`, `## boundaries`, and a required, testable `## acceptance criteria` section.")
         assignee: str = Field(description="Sister ID from the `misaka_board` roster.")
         reviewer: Optional[str] = Field(
             None, description="Optional independent reviewer; must be a different Sister from the assignee."
@@ -178,7 +178,7 @@ def register(harn):
         description="Create a durable Sister task with explicit scope and testable acceptance criteria; this does not start work.",
         snippet="Create a Sister task card with goal, boundaries, and acceptance criteria",
         guidelines=[
-            "The body must contain `## goal`, `## boundaries`, and `## acceptance criteria` with verifiable outcomes.",
+            "The body should contain `## goal` and `## boundaries`, and must contain `## acceptance criteria` with verifiable outcomes (the only section that is validated).",
             "After creating cards, show the plan and wait for explicit user approval before calling `misaka_dispatch`.",
         ],
         parameters=CardParams)
@@ -268,6 +268,9 @@ def register(harn):
                     con, params.task_id, lock, generation=int(row["generation"]),
                     summary=params.feedback,
                 )
+                if changed:
+                    from misaka.network import dispatch
+                    dispatch.index_after_review(con, params.task_id, int(row["generation"]))
             else:
                 changed = db.request_review_changes(
                     con, params.task_id, lock, params.feedback,
@@ -282,9 +285,9 @@ def register(harn):
             context=ctx, tool_call_id=tool_call_id, on_update=on_update,
             task_ids=[params.task_id],
         )
-        target = "verification" if params.decision == "approve" else "revision"
         state = follow[0].get("status") if follow else db.get(con, params.task_id)["status"]
-        return _text(f"Review recorded: {params.decision}; moved to {target} ({state}).")
+        outcome = "the card is done" if params.decision == "approve" else "sent back for revision"
+        return _text(f"Review recorded: {params.decision}; {outcome} ({state}).")
 
 
     class DispatchParams(StrictParams):
@@ -305,18 +308,14 @@ def register(harn):
         if not params.confirmed:
             return _text("Work was not started. Show the plan and wait for explicit user approval.")
         con = _con()
-        ready = (
-            len(db.by_status(con, "ready"))
-            + len(db.by_status(con, "verifying"))
-            + len(db.by_status(con, "finalizing"))
-        )
+        ready = len(db.by_status(con, "ready"))
         if not ready:
             return _text("No task cards are ready to run.")
         if on_update:
             on_update({"content": [{"type": "text", "text": f"Starting {ready} card(s)…"}], "details": {}})
         if os.environ.get("MISAKA_NET_PANE"):
-            # Start worker cards in visible panes; verification still uses the runtime.
-            from misaka.net import client as net
+            # Start worker cards in visible panes, a tab each.
+            from misaka.ui.panel import client as net
             wanted = set(params.task_ids or [])
             lines, started = [], 0
             for row in db.fair_ready(con, lane="workers"):
@@ -325,19 +324,11 @@ def register(harn):
                 try:
                     out = await asyncio.to_thread(
                         net.request, "pane.run_card",
-                        {"task_id": row["id"], "parent": os.environ["MISAKA_NET_PANE"]})
+                        {"task_id": row["id"], "place": {"tab": os.environ["MISAKA_NET_PANE"]}})
                     started += 1
                     lines.append(f"""  {row['id']} → {row['assignee']}  pane {out['pane_id']}""")
                 except Exception as error:  # noqa: BLE001 - report individual launch failures
                     lines.append(f"  {row['id']} failed to start: {error}")
-            verifyish = [r["id"] for r in
-                         [*db.by_status(con, "verifying"), *db.by_status(con, "finalizing")]
-                         if not wanted or r["id"] in wanted]
-            if verifyish:
-                for item in await runtime.launch_ready(
-                        context=ctx, tool_call_id=tool_call_id,
-                        on_update=on_update, task_ids=verifyish):
-                    lines.append(f"  {item.get('task_id', '?')}  {item.get('status', '?')}")
             return _text(f"Started {started} card(s) in network panes:\n" + "\n".join(lines))
         results = await runtime.launch_ready(
             context=ctx,
@@ -379,10 +370,10 @@ def register(harn):
             return _text("Work was not started. Show the plan and wait for explicit user approval.")
         row = db.get(_con(), params.task_id)
         if os.environ.get("MISAKA_NET_PANE") and row is not None and row["status"] == "ready":
-            from misaka.net import client as net
+            from misaka.ui.panel import client as net
             out = await asyncio.to_thread(
                 net.request, "pane.run_card",
-                {"task_id": params.task_id, "parent": os.environ["MISAKA_NET_PANE"]})
+                {"task_id": params.task_id, "place": {"tab": os.environ["MISAKA_NET_PANE"]}})
             return _text(f"Card {params.task_id} started in pane {out['pane_id']}.")
         result = await runtime.launch(
             params.task_id,
@@ -448,7 +439,7 @@ def register(harn):
         net_owned = str(row["claim_lock"] or "").startswith("net:")
         if net_owned or (in_panel and await asyncio.to_thread(_pane_for_card, params.task_id)):
             # A network-owned or reopened task receives steering through its live pane.
-            from misaka.net import client as net
+            from misaka.ui.panel import client as net
             await asyncio.to_thread(
                 net.request, "pane.send",
                 {"card": params.task_id, "text": params.message, "enter": True})
@@ -460,14 +451,14 @@ def register(harn):
             if not params.confirmed:
                 return _text(f"Card {params.task_id} is {row['status']}; continuing it starts a new "
                              "model turn. Ask the user, then call again with confirmed=true.")
-            from misaka.net import client as net
+            from misaka.ui.panel import client as net
             out = await asyncio.to_thread(
                 net.request, "pane.resume_card",
-                {"task_id": params.task_id, "parent": os.environ["MISAKA_NET_PANE"],
+                {"task_id": params.task_id, "place": {"tab": os.environ["MISAKA_NET_PANE"]},
                  "say": params.message})
             _card_log(row["workspace"], params.task_id, "last-order", f"[message] {params.message}")
             return _text(f"Reopened card {params.task_id}'s session in pane {out['pane_id']} "
-                         "beside you and delivered the message.")
+                         "in a tab of its own and delivered the message.")
         result = await runtime.message(
             params.task_id,
             params.message,
@@ -482,6 +473,21 @@ def register(harn):
         return _text(json.dumps(result, ensure_ascii=False))
 
 
+    class CardTodosParams(StrictParams):
+        task_id: TaskId = Field(description="Card whose to-do list to show.")
+
+
+    @_register(
+        harn,
+        name="misaka_card_todos", label="View a card's to-do list",
+        description="Show a Sister card's nested to-do items, owners, statuses, and blocker notes as she keeps them.",
+        snippet="Check a card's to-do list",
+        parameters=CardTodosParams)
+    async def misaka_card_todos(tool_call_id, params, signal, on_update, ctx):
+        from misaka.network import todo
+        return _text(todo.render(_con(), params.task_id))
+
+
     class SisterResumeParams(StrictParams):
         task_id: TaskId = Field(description="Card whose saved Sister session to reopen.")
 
@@ -489,21 +495,22 @@ def register(harn):
     @_register(
         harn,
         name="misaka_sister_resume", label="Reopen Sister session",
-        description="Reopen a finished, failed, stopped, or blocked card's saved Sister session in a pane beside you, without starting a model turn. Steer her afterwards with misaka_sister_message.",
-        snippet="Reopen a finished Sister task's session beside you",
+        description="Reopen a finished, failed, stopped, or blocked card's saved Sister session in a tab of its own, without starting a model turn. Steer her afterwards with misaka_sister_message.",
+        snippet="Reopen a finished Sister task's session in its own tab",
         guidelines=["After a resumed conversation, bring back only the cards listed as yours in the <resume-briefing>; a card that is already open in a pane is not reopened."],
         parameters=SisterResumeParams)
     async def misaka_sister_resume(tool_call_id, params, signal, on_update, ctx):
         if not os.environ.get("MISAKA_NET_PANE"):
-            raise ValueError("Sister sessions reopen in panel panes; run MISAKA as the panel.")
+            return _text(f"No panel, so there is no pane to reopen card {params.task_id} in. To continue her, "
+                         "send the next instruction with misaka_sister_message (confirmed=true); it resumes her session.")
         live = await asyncio.to_thread(_pane_for_card, params.task_id)
         if live:
             return _text(f"Card {params.task_id} is already open in pane {live['id']}.")
-        from misaka.net import client as net
+        from misaka.ui.panel import client as net
         out = await asyncio.to_thread(
             net.request, "pane.resume_card",
-            {"task_id": params.task_id, "parent": os.environ["MISAKA_NET_PANE"]})
-        return _text(f"Reopened card {params.task_id}'s session in pane {out['pane_id']} beside you.")
+            {"task_id": params.task_id, "place": {"tab": os.environ["MISAKA_NET_PANE"]}})
+        return _text(f"Reopened card {params.task_id}'s session in pane {out['pane_id']} (a tab of its own).")
 
 
     async def resume_briefing(event, ctx):
@@ -525,7 +532,7 @@ def register(harn):
         open_cards = set()
         if os.environ.get("MISAKA_NET_PANE"):
             try:
-                from misaka.net import client as net
+                from misaka.ui.panel import client as net
                 open_cards = {p["card"] for p in net.request("panes.list")["panes"]
                               if p.get("card") and p.get("alive")}
             except Exception:  # noqa: BLE001 - the daemon may be gone; the briefing still lists the cards
@@ -536,7 +543,7 @@ def register(harn):
             {"customType": "resume-briefing",
              "content": "<resume-briefing>\nCards created in this conversation:\n"
                         + "\n".join(lines)
-                        + "\nReopen a closed one beside you with misaka_sister_resume; steer it with "
+                        + "\nReopen a closed one in its own tab with misaka_sister_resume; steer it with "
                           "misaka_sister_message (a finished card restarts only on the user's nod).\n"
                           "</resume-briefing>",
              "display": True, "details": {"cards": [r["id"] for r in rows]}},
@@ -566,7 +573,7 @@ def register(harn):
     @_register(
         harn,
         name="misaka_sister_stop", label="Stop Sister task",
-        description="Stop a running or verifying Sister task after explicit user confirmation.",
+        description="Stop a running Sister task after explicit user confirmation.",
         snippet="Stop a running Sister task",
         parameters=SisterStopParams)
     async def misaka_sister_stop(tool_call_id, params, signal, on_update, ctx):
@@ -574,7 +581,7 @@ def register(harn):
         if row is not None and str(row["claim_lock"] or "").startswith("net:"):
             if not params.confirmed:
                 raise ValueError("Explicit user confirmation is required before stopping a Sister.")
-            from misaka.net import client as net
+            from misaka.ui.panel import client as net
             await asyncio.to_thread(net.request, "card.stop", {"task_id": params.task_id})
             return _text(f"Stopped card {params.task_id} and closed its pane.")
         result = await runtime.stop(
@@ -606,7 +613,7 @@ def register(harn):
 
     class CardCommentsParams(StrictParams):
         task_id: TaskId = Field(description="Task-card ID whose comments should be listed")
-        after_id: int = Field(0, ge=0, description="Only return comments after this comment ID")
+        after_id: int = Field(0, ge=0, description="Only return log entries whose index is greater than this value (each returned line starts with its index)")
         limit: int = Field(50, ge=1, le=200, description="Maximum comments to return")
 
     @_register(
@@ -624,8 +631,8 @@ def register(harn):
             lines = card_files.read_log(row["workspace"], params.task_id)
         except OSError:
             lines = []
-        lines = lines[params.after_id:][-params.limit:]
-        return _text("\n".join(lines) or "(no log entries)")
+        entries = [(index, line) for index, line in enumerate(lines, 1) if index > params.after_id][-params.limit:]
+        return _text("\n".join(f"{index}: {line}" for index, line in entries) or "(no log entries)")
 
 
     class CardAttachParams(StrictParams):
@@ -775,7 +782,7 @@ def register(harn):
     harn.on("session_shutdown", cleanup)
 
     async def collect_pending():
-        """Deliver terminal-card notifications queued while no session was running, then hint about cards awaiting review or verification."""
+        """Deliver terminal-card notifications queued while no session was running, then hint about cards awaiting review."""
         con = _con()
         subscription = notifications.subscribe(
             con, "last-order", "board-harness", "task", "*", "terminal"
@@ -806,23 +813,12 @@ def register(harn):
                 )
                 break
         reviewing = [r["id"] for r in db.by_status(con, "review")]
-        verifying = [r["id"] for r in db.by_status(con, "verifying")]
-        verifying += [r["id"] for r in db.by_status(con, "finalizing")]
         if reviewing:
             harn.sendMessage(
                 {"customType": "board-hint", "display": True,
                  "content": f"{len(reviewing)} task cards await independent review "
                             f"({', '.join(reviewing[:5])}{'…' if len(reviewing) > 5 else ''}).",
                  "details": {"reviewing": reviewing}},
-                {"deliverAs": "followUp", "triggerTurn": False},
-            )
-        if verifying:
-            harn.sendMessage(
-                {"customType": "board-hint", "display": True,
-                 "content": f"{len(verifying)} task cards are waiting for verification "
-                            f"({', '.join(verifying[:5])}{'…' if len(verifying) > 5 else ''}). "
-                            "Say 'run' to continue verification.",
-                 "details": {"verifying": verifying}},
                 {"deliverAs": "followUp", "triggerTurn": False},
             )
 
