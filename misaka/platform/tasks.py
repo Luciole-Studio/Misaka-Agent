@@ -530,13 +530,6 @@ def _finish_current_run(
 
 
 @_serialized
-def runs_for(con, task_id):
-    return con.execute(
-        "SELECT * FROM task_runs WHERE task_id=? ORDER BY generation,attempt", (task_id,)
-    ).fetchall()
-
-
-@_serialized
 def claim(
     con,
     task_id,
@@ -1016,11 +1009,6 @@ def _terminal_transition(
                 promote_dependents(con, task_id)
             _mirror_status(con, task_id, commit=True)
         return cur.rowcount == 1
-
-
-@_serialized
-def mark_done(con, task_id, generation=None, claim_lock=None):
-    return _terminal_transition(con, task_id, "done", generation, claim_lock)
 
 
 def classify_failure(reason):

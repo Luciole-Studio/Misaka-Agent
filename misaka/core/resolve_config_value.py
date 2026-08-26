@@ -101,17 +101,6 @@ def resolve_config_value_or_throw(config: str, description: str) -> str:
     raise RuntimeError(f"Failed to resolve {description}")
 
 
-def resolve_headers(headers: dict[str, str] | None) -> dict[str, str] | None:
-    if not headers:
-        return None
-    resolved: dict[str, str] = {}
-    for key, value in headers.items():
-        resolved_value = resolve_config_value(value)
-        if resolved_value:
-            resolved[key] = resolved_value
-    return resolved or None
-
-
 def resolve_headers_or_throw(
     headers: dict[str, str] | None,
     description: str,
@@ -133,10 +122,7 @@ resolveConfigValue = resolve_config_value
 resolveConfigValueUncached = resolve_config_value_uncached
 resolveConfigValueOrThrow = resolve_config_value_or_throw
 resolveHeadersOrThrow = resolve_headers_or_throw
-clearConfigValueCache = clear_config_value_cache
-
 __all__ = [
-    "clearConfigValueCache",
     "resolveConfigValue",
     "resolveConfigValueOrThrow",
     "resolveConfigValueUncached",

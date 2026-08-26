@@ -153,13 +153,6 @@ async def _load_provider_module(
     return await task
 
 
-def set_bedrock_provider_module(module: Any) -> None:
-    global _bedrock_provider_module_override
-    stream = module.streamBedrock
-    stream_simple = module.streamSimpleBedrock
-    _bedrock_provider_module_override = LazyProviderModule(stream=stream, streamSimple=stream_simple)
-
-
 async def _load_anthropic_provider_module() -> LazyProviderModule:
     return await _load_provider_module(
         "anthropic-messages",

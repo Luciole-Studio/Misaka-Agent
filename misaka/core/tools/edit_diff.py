@@ -424,10 +424,6 @@ async def compute_edits_diff(path: str, edits: list[Edit | dict[str, str]], cwd:
         return EditDiffError(error=str(error))
 
 
-async def compute_edit_diff(path: str, old_text: str, new_text: str, cwd: str) -> EditDiffResult | EditDiffError:
-    return await compute_edits_diff(path, [Edit(oldText=old_text, newText=new_text)], cwd)
-
-
 __all__ = [
     "AppliedEditsResult",
     "Edit",

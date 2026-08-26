@@ -196,14 +196,6 @@ def _migrate_to_current_version(entries: list[FileEntry]) -> bool:
     return True
 
 
-def migrate_session_entries(entries: list[FileEntry]) -> None:
-    _migrate_to_current_version(entries)
-
-
-def parse_session_entries(content: str) -> list[FileEntry]:
-    return _parse_jsonl_entries(content)
-
-
 def get_latest_compaction_entry(entries: list[SessionEntry]) -> SessionEntry | None:
     for entry in reversed(entries):
         if entry.get("type") == "compaction":

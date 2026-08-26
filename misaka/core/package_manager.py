@@ -7,8 +7,7 @@ from __future__ import annotations
 
 import os
 import stat as stat_module
-import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict, cast
@@ -88,21 +87,6 @@ def _to_posix_path(path: str) -> str:
     return path.replace(os.sep, "/")
 
 
-def _get_env() -> Mapping[str, str]:
-    if sys.platform != "linux" or len(os.environ) > 0:
-        return os.environ
-    try:
-        data = Path("/proc/self/environ").read_text(encoding="utf-8")
-    except OSError:
-        return os.environ
-    env: dict[str, str] = {}
-    for entry in data.split("\0"):
-        index = entry.find("=")
-        if index > 0:
-            env[entry[:index]] = entry[index + 1 :]
-    return env
-
-
 def _get_home_dir() -> str:
     return os.environ.get("HOME") or str(Path.home())
 
@@ -154,10 +138,6 @@ def _is_pattern(value: str) -> bool:
 
 def _is_override_pattern(value: str) -> bool:
     return value.startswith(("!", "+", "-"))
-
-
-def _has_glob_pattern(value: str) -> bool:
-    return "*" in value or "?" in value
 
 
 def _split_patterns(entries: list[str]) -> tuple[list[str], list[str]]:

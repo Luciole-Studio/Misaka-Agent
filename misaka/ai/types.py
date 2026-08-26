@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Mapping
 from copy import deepcopy
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -12,59 +12,12 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 from misaka.ai.utils.diagnostics import AssistantMessageDiagnostic
 
-KnownApi: TypeAlias = Literal[
-    "openai-completions",
-    "mistral-conversations",
-    "openai-responses",
-    "azure-openai-responses",
-    "openai-codex-responses",
-    "anthropic-messages",
-    "bedrock-converse-stream",
-    "google-generative-ai",
-    "google-vertex",
-]
 Api: TypeAlias = str
 
-KnownImagesApi: TypeAlias = Literal["openrouter-images"]
 ImagesApi: TypeAlias = str
 
-KnownProvider: TypeAlias = Literal[
-    "amazon-bedrock",
-    "anthropic",
-    "google",
-    "google-vertex",
-    "openai",
-    "azure-openai-responses",
-    "openai-codex",
-    "deepseek",
-    "github-copilot",
-    "xai",
-    "groq",
-    "cerebras",
-    "openrouter",
-    "vercel-ai-gateway",
-    "zai",
-    "mistral",
-    "minimax",
-    "minimax-cn",
-    "moonshotai",
-    "moonshotai-cn",
-    "huggingface",
-    "fireworks",
-    "together",
-    "opencode",
-    "opencode-go",
-    "kimi-coding",
-    "cloudflare-workers-ai",
-    "cloudflare-ai-gateway",
-    "xiaomi",
-    "xiaomi-token-plan-cn",
-    "xiaomi-token-plan-ams",
-    "xiaomi-token-plan-sgp",
-]
 Provider: TypeAlias = str
 
-KnownImagesProvider: TypeAlias = Literal["openrouter"]
 ImagesProvider: TypeAlias = str
 
 ThinkingLevel: TypeAlias = Literal["minimal", "low", "medium", "high", "xhigh"]
@@ -518,23 +471,11 @@ def validate_user_content(value: Any) -> UserContentValue:
     return USER_CONTENT_ADAPTER.validate_python(value)
 
 
-def validate_assistant_content(value: Any) -> AssistantContentValue:
-    return ASSISTANT_CONTENT_ADAPTER.validate_python(value)
-
-
 def validate_message(value: Any) -> MessageValue:
     return MESSAGE_ADAPTER.validate_python(value)
 
 
-def validate_assistant_message_event(value: Any) -> AssistantMessageEventValue:
-    return ASSISTANT_MESSAGE_EVENT_ADAPTER.validate_python(value)
-
-
 from misaka.ai.utils.event_stream import AssistantMessageEventStream
-
-StreamFunction: TypeAlias = Callable[[Model, Context, StreamOptions | None], AssistantMessageEventStream]
-ImagesFunction: TypeAlias = Callable[[ImagesModel, ImagesContext, ImagesOptions | None], Awaitable[AssistantImages]]
-
 
 __all__ = [
     "AnthropicMessagesCompat",
@@ -548,17 +489,12 @@ __all__ = [
     "ImageContent",
     "ImagesApi",
     "ImagesContext",
-    "ImagesFunction",
     "ImagesInputContent",
     "ImagesModel",
     "ImagesOptions",
     "ImagesOutputContent",
     "ImagesProvider",
     "ImagesStopReason",
-    "KnownApi",
-    "KnownImagesApi",
-    "KnownImagesProvider",
-    "KnownProvider",
     "Message",
     "Model",
     "ModelThinkingLevel",
@@ -571,7 +507,6 @@ __all__ = [
     "ProviderStreamOptions",
     "SimpleStreamOptions",
     "StopReason",
-    "StreamFunction",
     "StreamOptions",
     "TextContent",
     "TextSignatureV1",

@@ -13,7 +13,6 @@ from misaka.ai.providers.transform_messages import transform_messages
 from misaka.ai.types import Context, ImageContent, Model, StopReason, Tool
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
 
-GoogleApiType: TypeAlias = Literal["google-generative-ai", "google-vertex"]
 GoogleThinkingLevel: TypeAlias = Literal["THINKING_LEVEL_UNSPECIFIED", "MINIMAL", "LOW", "MEDIUM", "HIGH"]
 
 _BASE64_SIGNATURE_PATTERN = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
@@ -275,14 +274,6 @@ def map_stop_reason(reason: Any) -> StopReason:
         return "error"
 
     raise RuntimeError(f"Unhandled stop reason: {normalized}")
-
-
-def map_stop_reason_string(reason: str) -> StopReason:
-    if reason == "STOP":
-        return "stop"
-    if reason == "MAX_TOKENS":
-        return "length"
-    return "error"
 
 
 __all__ = [

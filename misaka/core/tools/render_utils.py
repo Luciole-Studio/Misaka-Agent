@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import builtins
 import os
-from typing import Any, Protocol, TypeVar
+from typing import Any, TypeVar
 
 from misaka.ui.tui.terminal_image import (
     getCapabilities,
@@ -15,11 +15,6 @@ from misaka.utils.ansi import strip_ansi
 from misaka.utils.shell import sanitize_binary_output
 
 TDetails = TypeVar("TDetails")
-
-
-class ToolRenderResultLike(Protocol[TDetails]):
-    content: list[Any]
-    details: TDetails
 
 
 def shorten_path(path: object) -> str:
@@ -94,6 +89,5 @@ def invalid_arg_text(theme: object) -> str:
 
 getTextOutput = get_text_output
 __all__ = [
-    "ToolRenderResultLike",
     "getTextOutput",
 ]

@@ -148,31 +148,6 @@ def agent_loop(
     return stream
 
 
-def agent_loop_continue(
-    context: AgentContext,
-    config: AgentLoopConfig,
-    signal: Any | None = None,
-    stream_fn=None,
-) -> EventStream[AgentEvent, list[AgentMessage]]:
-    if not context.messages:
-        raise RuntimeError("Cannot continue: no messages in context")
-    if getattr(context.messages[-1], "role", None) == "assistant":
-        raise RuntimeError("Cannot continue from message role: assistant")
-
-    stream = _create_agent_stream()
-
-    async def run() -> None:
-        try:
-            messages = await run_agent_loop_continue(context, config, _push_event(stream), signal, stream_fn)
-            stream.end(messages)
-        except BaseException as error:  # noqa: BLE001
-            stream.result().set_exception(error)
-            stream.end([])
-
-    asyncio.create_task(run())
-    return stream
-
-
 async def run_agent_loop(
     prompts: list[AgentMessage],
     context: AgentContext,
@@ -947,7 +922,6 @@ def _coerce_before_tool_call_result(
 __all__ = [
     "AgentEventSink",
     "agent_loop",
-    "agent_loop_continue",
     "create_tool_result_message",
     "emit_tool_result_message",
     "execute_tool_calls",

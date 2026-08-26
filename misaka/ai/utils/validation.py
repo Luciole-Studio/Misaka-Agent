@@ -256,13 +256,6 @@ def _format_received_arguments(arguments: Any) -> str:
         return repr(arguments)
 
 
-def validate_tool_call(tools: list[Tool], tool_call: ToolCall) -> Any:
-    tool = next((candidate for candidate in tools if candidate.name == tool_call.name), None)
-    if tool is None:
-        raise ValueError(f'Tool "{tool_call.name}" not found')
-    return validate_tool_arguments(tool, tool_call)
-
-
 def _validate_pydantic_tool_arguments(tool: Tool, tool_call: ToolCall) -> Any:
     assert isinstance(tool.parameters, type) and issubclass(tool.parameters, BaseModel)
     try:
@@ -309,5 +302,4 @@ def validate_tool_arguments(tool: Tool, tool_call: ToolCall) -> Any:
 
 __all__ = [
     "validate_tool_arguments",
-    "validate_tool_call",
 ]

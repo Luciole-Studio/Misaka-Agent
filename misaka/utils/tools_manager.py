@@ -315,14 +315,9 @@ def _arch() -> str:
     return machine
 
 
-def getToolPath(tool: ToolName) -> str | None:
-    return get_tool_path(tool)
-
-
 async def ensureTool(tool: ToolName, silent: bool = False) -> str | None:
     return await ensure_tool(tool, silent)
 
 __all__ = [
     "ensureTool",
-    "getToolPath",
 ]

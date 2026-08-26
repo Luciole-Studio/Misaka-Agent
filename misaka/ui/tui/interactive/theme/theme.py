@@ -370,11 +370,6 @@ def set_registered_themes(themes: list[Any]) -> None:
             _REGISTERED_THEMES[name] = item
 
 
-def set_current_theme_name(theme_name: str | None) -> None:
-    global _CURRENT_THEME_NAME
-    _CURRENT_THEME_NAME = theme_name
-
-
 def _resolve_var_refs(
     value: ColorValue | None,
     variables: dict[str, ColorValue],
@@ -961,10 +956,6 @@ initTheme = init_theme
 onThemeChange = on_theme_change
 setTheme = set_theme
 highlightCode = highlight_code
-
-def is_light_theme(theme_name: str | None = None) -> bool:
-    return theme_name == "light"
-
 
 __all__ = [
     "TerminalTheme",

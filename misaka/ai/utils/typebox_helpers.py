@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import Any
 
 TSchema = dict[str, object]
@@ -16,23 +15,5 @@ class _TypeBoxCompat:
 
 
 Type = _TypeBoxCompat()
-
-
-def string_enum(
-    values: Sequence[str],
-    options: dict[str, Any] | None = None,
-) -> TSchema:
-    schema: TSchema = {
-        "type": "string",
-        "enum": list(values),
-    }
-    if options:
-        description = options.get("description")
-        default = options.get("default")
-        if description:
-            schema["description"] = description
-        if default:
-            schema["default"] = default
-    return schema
 
 

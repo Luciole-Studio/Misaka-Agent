@@ -11,8 +11,6 @@ from pygments.lexers import TextLexer, get_lexer_by_name, guess_lexer
 from pygments.token import Comment, Keyword, Literal, Name, Operator, Token
 from pygments.util import ClassNotFound
 
-from misaka.utils.html import decode_html_entity_at
-
 HighlightFormatter = Callable[[str], str]
 HighlightTheme = dict[str, HighlightFormatter]
 
@@ -26,52 +24,6 @@ class HighlightOptions:
     ignoreIllegals: bool | None = None
     languageSubset: Sequence[str] | None = None
     theme: HighlightTheme | None = None
-
-
-def render_highlighted_html(html: str, theme: HighlightTheme | None = None) -> str:
-    resolved_theme = theme or {}
-    output = ""
-    text_buffer = ""
-    scopes: list[str | None] = []
-
-    def flush_text() -> None:
-        nonlocal output, text_buffer
-        if not text_buffer:
-            return
-        formatter = _get_active_formatter(scopes, resolved_theme)
-        output += formatter(text_buffer) if formatter else text_buffer
-        text_buffer = ""
-
-    index = 0
-    while index < len(html):
-        if _is_span_open_tag_start(html, index):
-            tag_end_index = html.find(">", index + 5)
-            if tag_end_index != -1:
-                flush_text()
-                tag = html[index : tag_end_index + 1]
-                scopes.append(_get_scope_from_span_tag(tag))
-                index = tag_end_index + 1
-                continue
-
-        if html.startswith(_SPAN_CLOSE, index):
-            flush_text()
-            if scopes:
-                scopes.pop()
-            index += len(_SPAN_CLOSE)
-            continue
-
-        if html[index] == "&":
-            decoded = decode_html_entity_at(html, index)
-            if decoded is not None:
-                text_buffer += decoded.text
-                index += decoded.length
-                continue
-
-        text_buffer += html[index]
-        index += 1
-
-    flush_text()
-    return output
 
 
 def highlight(code: str, options: HighlightOptions | dict[str, Any] | None = None) -> str:

@@ -98,9 +98,6 @@ type Tool = AgentTool
 type ToolDef = ToolDefinition[Any, Any]
 type ToolName = Literal["read", "bash", "edit", "write", "grep", "find", "ls"]
 
-all_tool_names: set[ToolName] = {"read", "bash", "edit", "write", "grep", "find", "ls"}
-
-
 class ToolsOptions(TypedDict, total=False):
     read: ReadToolOptions | Mapping[str, Any]
     bash: BashToolOptions | Mapping[str, Any]
@@ -117,78 +114,6 @@ def _get_tool_options(options: ToolsOptions | Mapping[str, Any] | None, key: Too
     return options.get(key)
 
 
-def create_tool_definition(
-    tool_name: ToolName,
-    cwd: str,
-    options: ToolsOptions | Mapping[str, Any] | None = None,
-) -> ToolDef:
-    match tool_name:
-        case "read":
-            return create_read_tool_definition(cwd, _get_tool_options(options, "read"))
-        case "bash":
-            return create_bash_tool_definition(cwd, _get_tool_options(options, "bash"))
-        case "edit":
-            return create_edit_tool_definition(cwd, _get_tool_options(options, "edit"))
-        case "write":
-            return create_write_tool_definition(cwd, _get_tool_options(options, "write"))
-        case "grep":
-            return create_grep_tool_definition(cwd, _get_tool_options(options, "grep"))
-        case "find":
-            return create_find_tool_definition(cwd, _get_tool_options(options, "find"))
-        case "ls":
-            return create_ls_tool_definition(cwd, _get_tool_options(options, "ls"))
-        case _:
-            raise RuntimeError(f"Unknown tool name: {tool_name}")
-
-
-def create_tool(
-    tool_name: ToolName,
-    cwd: str,
-    options: ToolsOptions | Mapping[str, Any] | None = None,
-) -> Tool:
-    match tool_name:
-        case "read":
-            return create_read_tool(cwd, _get_tool_options(options, "read"))
-        case "bash":
-            return create_bash_tool(cwd, _get_tool_options(options, "bash"))
-        case "edit":
-            return create_edit_tool(cwd, _get_tool_options(options, "edit"))
-        case "write":
-            return create_write_tool(cwd, _get_tool_options(options, "write"))
-        case "grep":
-            return create_grep_tool(cwd, _get_tool_options(options, "grep"))
-        case "find":
-            return create_find_tool(cwd, _get_tool_options(options, "find"))
-        case "ls":
-            return create_ls_tool(cwd, _get_tool_options(options, "ls"))
-        case _:
-            raise RuntimeError(f"Unknown tool name: {tool_name}")
-
-
-def create_coding_tool_definitions(
-    cwd: str,
-    options: ToolsOptions | Mapping[str, Any] | None = None,
-) -> list[ToolDef]:
-    return [
-        create_read_tool_definition(cwd, _get_tool_options(options, "read")),
-        create_bash_tool_definition(cwd, _get_tool_options(options, "bash")),
-        create_edit_tool_definition(cwd, _get_tool_options(options, "edit")),
-        create_write_tool_definition(cwd, _get_tool_options(options, "write")),
-    ]
-
-
-def create_read_only_tool_definitions(
-    cwd: str,
-    options: ToolsOptions | Mapping[str, Any] | None = None,
-) -> list[ToolDef]:
-    return [
-        create_read_tool_definition(cwd, _get_tool_options(options, "read")),
-        create_grep_tool_definition(cwd, _get_tool_options(options, "grep")),
-        create_find_tool_definition(cwd, _get_tool_options(options, "find")),
-        create_ls_tool_definition(cwd, _get_tool_options(options, "ls")),
-    ]
-
-
 def create_all_tool_definitions(
     cwd: str,
     options: ToolsOptions | Mapping[str, Any] | None = None,
@@ -201,45 +126,6 @@ def create_all_tool_definitions(
         "grep": create_grep_tool_definition(cwd, _get_tool_options(options, "grep")),
         "find": create_find_tool_definition(cwd, _get_tool_options(options, "find")),
         "ls": create_ls_tool_definition(cwd, _get_tool_options(options, "ls")),
-    }
-
-
-def create_coding_tools(
-    cwd: str,
-    options: ToolsOptions | Mapping[str, Any] | None = None,
-) -> list[Tool]:
-    return [
-        create_read_tool(cwd, _get_tool_options(options, "read")),
-        create_bash_tool(cwd, _get_tool_options(options, "bash")),
-        create_edit_tool(cwd, _get_tool_options(options, "edit")),
-        create_write_tool(cwd, _get_tool_options(options, "write")),
-    ]
-
-
-def create_read_only_tools(
-    cwd: str,
-    options: ToolsOptions | Mapping[str, Any] | None = None,
-) -> list[Tool]:
-    return [
-        create_read_tool(cwd, _get_tool_options(options, "read")),
-        create_grep_tool(cwd, _get_tool_options(options, "grep")),
-        create_find_tool(cwd, _get_tool_options(options, "find")),
-        create_ls_tool(cwd, _get_tool_options(options, "ls")),
-    ]
-
-
-def create_all_tools(
-    cwd: str,
-    options: ToolsOptions | Mapping[str, Any] | None = None,
-) -> dict[ToolName, Tool]:
-    return {
-        "read": create_read_tool(cwd, _get_tool_options(options, "read")),
-        "bash": create_bash_tool(cwd, _get_tool_options(options, "bash")),
-        "edit": create_edit_tool(cwd, _get_tool_options(options, "edit")),
-        "write": create_write_tool(cwd, _get_tool_options(options, "write")),
-        "grep": create_grep_tool(cwd, _get_tool_options(options, "grep")),
-        "find": create_find_tool(cwd, _get_tool_options(options, "find")),
-        "ls": create_ls_tool(cwd, _get_tool_options(options, "ls")),
     }
 
 
@@ -296,6 +182,13 @@ __all__ = [
     "createReadToolDefinition",
     "createWriteTool",
     "createWriteToolDefinition",
+    "create_bash_tool",
+    "create_edit_tool",
+    "create_find_tool",
+    "create_grep_tool",
+    "create_ls_tool",
+    "create_read_tool",
+    "create_write_tool",
     "formatSize",
     "truncateHead",
     "truncateLine",

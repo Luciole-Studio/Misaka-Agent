@@ -6,7 +6,7 @@ import os
 import re
 import unicodedata
 
-from misaka.utils.paths import normalize_path, resolve_path
+from misaka.utils.paths import resolve_path
 
 NARROW_NO_BREAK_SPACE = "\u202F"
 
@@ -25,10 +25,6 @@ def try_curly_quote_variant(file_path: str) -> str:
 
 def file_exists(file_path: str) -> bool:
     return os.path.exists(file_path)
-
-
-def expand_path(file_path: str) -> str:
-    return normalize_path(file_path, normalize_unicode_spaces=True, strip_at_prefix=True)
 
 
 def resolve_to_cwd(file_path: str, cwd: str) -> str:
@@ -58,4 +54,4 @@ def resolve_read_path(file_path: str, cwd: str) -> str:
 
     return resolved
 
-__all__ = ["expand_path", "file_exists", "resolve_read_path", "resolve_to_cwd", "try_curly_quote_variant", "try_macos_screenshot_path", "try_nfd_variant"]
+__all__ = ["file_exists", "resolve_read_path", "resolve_to_cwd", "try_curly_quote_variant", "try_macos_screenshot_path", "try_nfd_variant"]

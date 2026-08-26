@@ -25,10 +25,6 @@ def parse_frontmatter(content: str) -> ParsedFrontmatter[dict[str, Any]]:
     return ParsedFrontmatter(frontmatter=parsed, body=body)
 
 
-def strip_frontmatter(content: str) -> str:
-    return parse_frontmatter(content).body
-
-
 def _normalize_newlines(value: str) -> str:
     return value.replace("\r\n", "\n").replace("\r", "\n")
 

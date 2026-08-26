@@ -42,12 +42,6 @@ from misaka.core.session_manager import SessionEntry, build_session_context
 
 
 @dataclass(slots=True)
-class CompactionDetails:
-    readFiles: list[str]
-    modifiedFiles: list[str]
-
-
-@dataclass(slots=True)
 class CompactionResult:
     summary: str
     firstKeptEntryId: str
@@ -88,12 +82,6 @@ class CompactionPreparation:
     fileOps: FileOperations
     settings: CompactionSettings
 
-
-DEFAULT_COMPACTION_SETTINGS = CompactionSettings(
-    enabled=True,
-    reserveTokens=16384,
-    keepRecentTokens=20000,
-)
 
 _SUMMARIZATION_PROMPT = """The messages above are a conversation to summarize.
 Create a structured context checkpoint summary that another LLM will use to continue the work.
@@ -191,16 +179,6 @@ def calculate_context_tokens(usage: Usage | dict[str, Any]) -> int:
     if isinstance(total_tokens, int) and total_tokens:
         return total_tokens
     return sum(int(_usage_field(usage, name) or 0) for name in ("input", "output", "cacheRead", "cacheWrite"))
-
-
-def get_last_assistant_usage(entries: list[SessionEntry]) -> Usage | dict[str, Any] | None:
-    for entry in reversed(entries):
-        if _entry_field(entry, "type") != "message":
-            continue
-        usage = _assistant_usage(_entry_field(entry, "message"))
-        if usage is not None:
-            return usage
-    return None
 
 
 def estimate_context_tokens(messages: list[AgentMessage]) -> ContextUsageEstimate:
@@ -726,8 +704,6 @@ prepareCompaction = prepare_compaction
 shouldCompact = should_compact
 
 __all__ = [
-    "DEFAULT_COMPACTION_SETTINGS",
-    "CompactionDetails",
     "CompactionPreparation",
     "CompactionResult",
     "CompactionSettings",

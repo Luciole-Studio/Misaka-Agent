@@ -18,7 +18,6 @@ from misaka.ai.types import (
     Model,
     SimpleStreamOptions,
     StartEvent,
-    StreamOptions,
     TextContent,
     ThinkingContent,
     ThinkingDeltaEvent,
@@ -146,21 +145,6 @@ def _clean_slot(slot, *, include_enabled=False):
     if include_enabled:
         clean["enabled"] = slot.get("enabled") is not False
     return clean
-
-
-def _default_preset() -> dict[str, Any]:
-    reference_models, aggregator = _default_slots()
-    return {
-        "enabled": True,
-        "reference_models": [{**s, "enabled": True} for s in reference_models],
-        "aggregator": aggregator,
-        "reference_temperature": None,
-        "aggregator_temperature": None,
-        "reference_timeout": None,
-        "degraded_reference_policy": "loud",
-        "reference_max_tokens": None,
-        "fanout": "user_turn",
-    }
 
 
 def _normalize_preset(raw) -> dict[str, Any]:
@@ -709,11 +693,6 @@ def stream_simple_moa(model: Model, context: Context, options: SimpleStreamOptio
 
     asyncio.create_task(run())
     return outer
-
-
-def stream_moa(model: Model, context: Context, options: StreamOptions | None = None) -> AssistantMessageEventStream:
-    simple = SimpleStreamOptions(**options.model_dump()) if options is not None else None
-    return stream_simple_moa(model, context, simple)
 
 
 # Configured presets exposed as virtual registry models.

@@ -141,19 +141,6 @@ def rule_matches(spec: str, tool_name: str, tool_input: Mapping[str, Any]) -> bo
     return any(_pattern_matches(pattern, value) for pattern in body.split(","))
 
 
-def policy_denial(
-    layers: Sequence[Sequence[str]], tool_name: str, tool_input: Mapping[str, Any]
-) -> str | None:
-    """Compatibility hook: allowedTools rules are grants, never hard filters.
-
-    Base tool selection happens before child startup.  A rule such as
-    ``Bash(git status)`` grants that invocation without a prompt; it does not
-    make every other Bash invocation structurally unavailable.
-    """
-
-    return None
-
-
 def _rule_allows(
     layers: Sequence[Sequence[str]], tool_name: str, tool_input: Mapping[str, Any]
 ) -> bool:
@@ -1520,7 +1507,6 @@ __all__ = [
     "AgentPolicy",
     "classify_permission",
     "normalize_rule",
-    "policy_denial",
     "register",
     "request_permission",
     "rule_matches",

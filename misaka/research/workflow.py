@@ -33,8 +33,6 @@ from misaka.research import ledger, planner, report, runs
 POLL_SECONDS = 2.0
 MAX_PROBE_ROUNDS = 3          # ponytail: a fork opens cards at most this many times before it must judge
 ACTIVE_TASKS = ("running", "review")
-TERMINAL_TASKS = ("done", "failed", "stopped")
-
 RESEARCH_DISCIPLINE = """[Research Workflow active]
 Last Order is now in Research mode. Each node of the research tree runs the same routine: Last Order plans and assigns
 Sisters (every task starts with a preflight plan), Last Order writes the node's conclusion in one pass, the red-team Sister she

@@ -69,11 +69,6 @@ def is_recoverable_length(message: AssistantMessage, desired_max_output: int) ->
             and message.usage.output < desired_max_output)
 
 
-def get_overflow_patterns() -> list[re.Pattern[str]]:
-    return list(_OVERFLOW_PATTERNS)
-
-
 __all__ = [
-    "get_overflow_patterns",
     "is_context_overflow",
 ]

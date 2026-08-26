@@ -7,7 +7,7 @@ import os
 import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol, TypedDict
+from typing import Any, Literal, TypedDict
 
 from misaka.ai.models import models_are_equal
 from misaka.ai.types import ImageContent
@@ -81,11 +81,6 @@ class BuildSessionOptionsResult:
     options: dict[str, Any] = field(default_factory=dict)
     cliThinkingFromModel: bool = False
     diagnostics: list[RuntimeDiagnostic] = field(default_factory=list)
-
-
-class SettingsErrorLike(Protocol):
-    scope: str
-    error: Exception
 
 
 class MainOptions(TypedDict, total=False):

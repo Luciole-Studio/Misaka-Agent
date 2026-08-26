@@ -128,10 +128,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS research_tasks_local ON research_run_tasks(run
 """
 
 ACTIVE = ("active", "waiting_input", "stopping")
-TERMINAL = ("done", "failed", "stopped")
 NODE_TERMINAL = ("closed", "failed", "parked")
-NODE_STATES = ("queued", "planning", "waiting_input", "executing", "synthesizing", "critiquing",
-               "probing", "triaging", "closing", "conflict", *NODE_TERMINAL)
 # closing = triaged, waiting for its children; conflict = its branch did not merge, a human resolves it
 DEFAULT_LIMITS = {"max_depth": 3}
 RESEARCH_SCHEMA_VERSION = 10   # 10: node/probe runner identity on the row, visible to a successor driver

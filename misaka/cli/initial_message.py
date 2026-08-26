@@ -3,20 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TypedDict
 
 from misaka.ai.types import ImageContent
 from misaka.cli.args import Args
-
-
-class _InitialMessageInputRequired(TypedDict):
-    parsed: Args
-
-
-class InitialMessageInput(_InitialMessageInputRequired, total=False):
-    fileText: str
-    fileImages: list[ImageContent]
-    stdinContent: str
 
 
 @dataclass(slots=True)
@@ -46,4 +35,4 @@ def build_initial_message(
     )
 
 
-__all__ = ["InitialMessageInput", "InitialMessageResult", "build_initial_message"]
+__all__ = ["InitialMessageResult", "build_initial_message"]

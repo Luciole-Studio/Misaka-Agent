@@ -246,51 +246,6 @@ def _details_or_none(details: FindToolDetails) -> FindToolDetails | None:
     return None
 
 
-def _glob_files(pattern: str, cwd: str, *, limit: int) -> list[str]:
-    _validate_glob_pattern(pattern)
-    root = Path(cwd)
-    results: list[str] = []
-    limit_reached = False
-    spec_cache: dict[str, list[_IgnoreSpecEntry]] = {"": []}
-
-    for current_root, dirnames, filenames in os.walk(root, topdown=True):
-        rel_dir = os.path.relpath(current_root, root)
-        rel_dir_posix = "" if rel_dir in {".", ""} else _to_posix_path(rel_dir)
-        parent_rel = posixpath.dirname(rel_dir_posix) if rel_dir_posix else ""
-        active_specs = list(spec_cache[parent_rel] if rel_dir_posix else [])
-        local_spec = _load_gitignore_spec(current_root)
-        if local_spec is not None:
-            active_specs.append(_IgnoreSpecEntry(base_dir=rel_dir_posix, spec=local_spec))
-        spec_cache[rel_dir_posix] = active_specs
-
-        dirnames.sort(key=str.lower)
-        filenames.sort(key=str.lower)
-        kept_dirs: list[str] = []
-        for dirname in dirnames:
-            if dirname in {".git", "node_modules"}:
-                continue
-            child_rel = dirname if not rel_dir_posix else f"{rel_dir_posix}/{dirname}"
-            if _check_ignored(child_rel, active_specs, is_dir=True):
-                continue
-            kept_dirs.append(dirname)
-        dirnames[:] = kept_dirs
-
-        for filename in filenames:
-            child_rel = filename if not rel_dir_posix else f"{rel_dir_posix}/{filename}"
-            if _check_ignored(child_rel, active_specs):
-                continue
-            if not _matches_pattern(child_rel, pattern):
-                continue
-            if len(results) >= limit:
-                limit_reached = True
-                break
-            results.append(child_rel)
-        if limit_reached:
-            break
-
-    return results
-
-
 async def _run_fd_search(fd_path: str, args: list[str], signal: Any | None) -> tuple[bytes, bytes, int | None]:
     try:
         process = await asyncio.create_subprocess_exec(

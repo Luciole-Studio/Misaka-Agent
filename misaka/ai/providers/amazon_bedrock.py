@@ -137,18 +137,6 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
-def _coalesce_value(obj: Any, *names: str) -> Any:
-    for name in names:
-        if isinstance(obj, dict):
-            value = obj.get(name)
-            if value is not None:
-                return value
-        value = getattr(obj, name, None)
-        if value is not None:
-            return value
-    return None
-
-
 def _is_aborted(signal: Any) -> bool:
     if signal is None:
         return False

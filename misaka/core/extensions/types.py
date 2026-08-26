@@ -904,17 +904,6 @@ class SessionBeforeTreeResult(TypedDict, total=False):
     label: str
 
 
-class ExtensionRuntimeState(Protocol):
-    flagValues: dict[str, bool | str]
-    pendingProviderRegistrations: list[PendingProviderRegistration]
-    assertActive: Callable[[], None]
-    invalidate: Callable[[str | None], None]
-    # Retain an event-bus subscription until this runtime is invalidated.  (pi #7656)
-    trackEventBusSubscription: Callable[[Callable[[], None]], Callable[[], None]]
-    registerProvider: RegisterProviderHandler
-    unregisterProvider: UnregisterProviderHandler
-
-
 @dataclass(slots=True)
 class ExtensionRuntime:
     sendMessage: SendMessageHandler
@@ -938,11 +927,6 @@ class ExtensionRuntime:
     trackEventBusSubscription: Callable[[Callable[[], None]], Callable[[], None]] = lambda unsubscribe: unsubscribe
     registerProvider: RegisterProviderHandler = lambda _name, _config, _extension_path=None: None
     unregisterProvider: UnregisterProviderHandler = lambda _name, _extension_path=None: None
-
-
-@dataclass(slots=True)
-class _LoadedExtensionRuntime(ExtensionRuntime):
-    loadedModules: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -1347,7 +1331,6 @@ __all__ = [
     "ExtensionFlag",
     "ExtensionHandler",
     "ExtensionRuntime",
-    "ExtensionRuntimeState",
     "ExtensionShortcut",
     "ExtensionUIContext",
     "ExtensionUIDialogOptions",

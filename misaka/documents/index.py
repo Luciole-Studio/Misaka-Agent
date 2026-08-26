@@ -293,21 +293,6 @@ def scan(directory, task_id=None, with_tree=True):
     return ingested, skipped
 
 
-def set_task_id(doc_id, task_id, workspace=None):
-    """Associate an indexed document with a task card."""
-    ddir = resolve_doc(doc_id, workspace=workspace)
-    if not ddir:
-        return
-    with _meta_lock(ddir):
-        m = _meta(doc_id, workspace=workspace) or {}
-        m["task_id"] = task_id
-        ids = list(m.get("task_ids") or [])
-        if task_id and task_id not in ids:
-            ids.append(task_id)
-        m["task_ids"] = ids
-        atomic.write_text(os.path.join(ddir, "meta.json"), json.dumps(m, ensure_ascii=False, indent=2))
-
-
 def docs(workspace=None):
     """List indexed documents oldest first; ``workspace`` keeps only those whose source file lives under that folder."""
     root, out = corpus_root(), []

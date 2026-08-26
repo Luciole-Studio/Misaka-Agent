@@ -67,14 +67,6 @@ def register_oauth_provider(provider: OAuthProviderInterface) -> None:
     _oauth_provider_registry[provider.id] = provider
 
 
-def unregister_oauth_provider(provider_id: str) -> None:
-    built_in = next((provider for provider in _BUILT_IN_OAUTH_PROVIDERS if provider.id == provider_id), None)
-    if built_in is not None:
-        _oauth_provider_registry[provider_id] = built_in
-        return
-    _oauth_provider_registry.pop(provider_id, None)
-
-
 def reset_oauth_providers() -> None:
     _oauth_provider_registry.clear()
     for provider in _BUILT_IN_OAUTH_PROVIDERS:
@@ -83,17 +75,6 @@ def reset_oauth_providers() -> None:
 
 def get_oauth_providers() -> list[OAuthProviderInterface]:
     return list(_oauth_provider_registry.values())
-
-
-def get_oauth_provider_info_list() -> list[OAuthProviderInfo]:
-    return [OAuthProviderInfo(id=provider.id, name=provider.name, available=True) for provider in get_oauth_providers()]
-
-
-async def refresh_oauth_token(provider_id: OAuthProviderId, credentials: OAuthCredentials) -> OAuthCredentials:
-    provider = get_oauth_provider(provider_id)
-    if provider is None:
-        raise RuntimeError(f"Unknown OAuth provider: {provider_id}")
-    return await provider.refreshToken(credentials)
 
 
 async def get_oauth_api_key(

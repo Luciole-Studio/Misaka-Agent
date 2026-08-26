@@ -37,11 +37,6 @@ from misaka.extensions.sisters.subagent.runtime import (
 AGENT_TOOL_NAME = "Agent"
 TASK_OUTPUT_TOOL_NAME = "TaskOutput"
 TASK_STOP_TOOL_NAME = "TaskStop"
-SUBAGENT_TOOL_NAMES = (
-    AGENT_TOOL_NAME,
-    TASK_OUTPUT_TOOL_NAME,
-    TASK_STOP_TOOL_NAME,
-)
 _ACTIVE_MANAGERS: dict[asyncio.AbstractEventLoop, set[SubagentManager]] = {}
 _TOOL_CEILING_UNSET = object()
 
@@ -452,7 +447,6 @@ def has_background_task_records() -> bool:
 
 __all__ = [
     "AGENT_TOOL_NAME",
-    "SUBAGENT_TOOL_NAMES",
     "TASK_OUTPUT_TOOL_NAME",
     "TASK_STOP_TOOL_NAME",
     "AgentParams",

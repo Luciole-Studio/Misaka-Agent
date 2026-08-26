@@ -72,12 +72,6 @@ class BranchSummaryResult:
 
 
 @dataclass(slots=True)
-class BranchSummaryDetails:
-    readFiles: list[str]
-    modifiedFiles: list[str]
-
-
-@dataclass(slots=True)
 class BranchPreparation:
     messages: list[AgentMessage]
     fileOps: FileOperations
@@ -282,7 +276,6 @@ def _timestamp_ms() -> int:
 
 __all__ = [
     "BranchPreparation",
-    "BranchSummaryDetails",
     "BranchSummaryResult",
     "CollectEntriesResult",
     "FileOperations",

@@ -427,62 +427,6 @@ async def findInitialModel(options: dict[str, Any]) -> InitialModelResult:
     return InitialModelResult(model=None, thinkingLevel=DEFAULT_THINKING_LEVEL, fallbackMessage=None)
 
 
-async def restoreModelFromSession(
-    savedProvider: str,
-    savedModelId: str,
-    currentModel: Model | None,
-    shouldPrintMessages: bool,
-    modelRegistry: Any,
-) -> dict[str, Any]:
-    restored_model = modelRegistry.find(savedProvider, savedModelId)
-    has_configured_auth = bool(restored_model and modelRegistry.hasConfiguredAuth(restored_model))
-
-    if restored_model is not None and has_configured_auth:
-        if shouldPrintMessages:
-            print(_dim(f"Restored model: {savedProvider}/{savedModelId}"))
-        return {"model": restored_model, "fallbackMessage": None}
-
-    reason = "model no longer exists" if restored_model is None else "no auth configured"
-    if shouldPrintMessages:
-        print(_yellow(f"Warning: Could not restore model {savedProvider}/{savedModelId} ({reason})."), file=sys.stderr)
-
-    if currentModel is not None:
-        if shouldPrintMessages:
-            print(_dim(f"Falling back to: {currentModel.provider}/{currentModel.id}"))
-        return {
-            "model": currentModel,
-            "fallbackMessage": (
-                f"Could not restore model {savedProvider}/{savedModelId} ({reason}). "
-                f"Using {currentModel.provider}/{currentModel.id}."
-            ),
-        }
-
-    available_models = list(await _maybe_await(modelRegistry.getAvailable()))
-    if available_models:
-        fallback_model: Model | None = None
-        for provider, default_id in defaultModelPerProvider.items():
-            fallback_model = next(
-                (model for model in available_models if model.provider == provider and model.id == default_id),
-                None,
-            )
-            if fallback_model is not None:
-                break
-        fallback_model = fallback_model or available_models[0]
-        if shouldPrintMessages:
-            print(_dim(f"Falling back to: {fallback_model.provider}/{fallback_model.id}"))
-        return {
-            "model": fallback_model,
-            "fallbackMessage": (
-                f"Could not restore model {savedProvider}/{savedModelId} ({reason}). "
-                f"Using {fallback_model.provider}/{fallback_model.id}."
-            ),
-        }
-
-    return {
-        "model": None,
-        "fallbackMessage": None,
-    }
-
 __all__ = [
     "InitialModelResult",
     "ParsedModelResult",
@@ -494,5 +438,4 @@ __all__ = [
     "parseModelPattern",
     "resolveCliModel",
     "resolveModelScope",
-    "restoreModelFromSession",
 ]

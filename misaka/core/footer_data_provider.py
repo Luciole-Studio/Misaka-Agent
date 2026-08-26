@@ -8,7 +8,6 @@ import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
 
 from misaka.utils.fs_watch import (
     FS_WATCH_RETRY_DELAY_MS,
@@ -81,16 +80,6 @@ def _resolve_branch_with_git_sync(repo_dir: str) -> str | None:
         return None
     branch = result.stdout.strip() if result.returncode == 0 else ""
     return branch or None
-
-
-class ReadonlyFooterDataProvider(Protocol):
-    def getGitBranch(self) -> str | None: ...
-
-    def getExtensionStatuses(self) -> Mapping[str, str]: ...
-
-    def getAvailableProviderCount(self) -> int: ...
-
-    def onBranchChange(self, callback: Callable[[], None]) -> Callable[[], None]: ...
 
 
 class FooterDataProvider:
@@ -349,5 +338,4 @@ class FooterDataProvider:
 
 __all__ = [
     "FooterDataProvider",
-    "ReadonlyFooterDataProvider",
 ]

@@ -183,8 +183,6 @@ MIN_TAB_WIDTH = 8
 NEW_TAB_WIDTH = 3
 TAB_SCROLL_BUTTON_WIDTH = 3
 # src/ui/tabs.rs:16-19
-MIN_TAB_STRIP_WIDTH = MIN_TAB_WIDTH + NEW_TAB_WIDTH + TAB_SCROLL_BUTTON_WIDTH * 2
-
 TabBarView = namedtuple(
     "TabBarView",
     "scroll tab_hit_areas scroll_left_hit_area scroll_right_hit_area new_tab_hit_area")
@@ -237,26 +235,6 @@ def sidebar_section_heights(total_h, split_ratio):
     ws_h = round(total_h * ratio)
     ws_h = min(max(ws_h, 3), max(0, total_h - 3))
     return ws_h, max(0, total_h - ws_h)
-
-
-def expanded_sidebar_sections(area, split_ratio):
-    """src/ui/sidebar.rs:59-70: content width is sidebar width minus 1 (last column is the border)."""
-    content = Rect(area.x, area.y, max(0, area.width - 1), area.height)
-    if content.width == 0 or content.height == 0:
-        return RECT_DEFAULT, RECT_DEFAULT
-    ws_h, detail_h = sidebar_section_heights(content.height, split_ratio)
-    ws_area = Rect(content.x, content.y, content.width, ws_h)
-    detail_area = Rect(content.x, content.y + ws_h, content.width, detail_h)
-    return ws_area, detail_area
-
-
-def sidebar_section_divider_rect(area, split_ratio):
-    """src/ui/sidebar.rs:71-80: no divider below 6 rows."""
-    content = Rect(area.x, area.y, max(0, area.width - 1), area.height)
-    if content.width == 0 or content.height < 6:
-        return RECT_DEFAULT
-    ws_h, _ = sidebar_section_heights(content.height, split_ratio)
-    return Rect(content.x, content.y + ws_h, content.width, 1)
 
 
 WORKSPACE_SECTION_HEADER_ROWS = 2     # src/ui/sidebar.rs:20

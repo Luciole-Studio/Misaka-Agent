@@ -102,12 +102,7 @@ class AssistantMessageEventStream(EventStream[AssistantMessageEvent, AssistantMe
         )
 
 
-def create_assistant_message_event_stream() -> AssistantMessageEventStream:
-    return AssistantMessageEventStream()
-
-
 __all__ = [
     "AssistantMessageEventStream",
     "EventStream",
-    "create_assistant_message_event_stream",
 ]
