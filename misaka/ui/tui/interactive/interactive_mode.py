@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import os
 import re
 import shutil
@@ -15,7 +14,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass, is_dataclass, replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
@@ -30,7 +29,6 @@ from misaka.config import (
     APP_TITLE,
     VERSION,
     get_auth_path,
-    get_debug_log_path,
 )
 from misaka.core.agent_session import parse_skill_block
 from misaka.core.agent_session_runtime import SessionImportFileNotFoundError
@@ -71,7 +69,6 @@ from misaka.ui.tui import (
     TruncatedText,
     matchesKey,
     setKeybindings,
-    visibleWidth,
 )
 from misaka.ui.tui.interactive.components.assistant_message import (
     AssistantMessageComponent,
@@ -2778,66 +2775,6 @@ class InteractiveMode:
         self.chatContainer.addChild(DynamicBorder())
         self._request_render()
 
-    def handleDebugCommand(self) -> None:
-        width = int(getattr(self.ui.terminal, "columns", 0) or 0)
-        height = int(getattr(self.ui.terminal, "rows", 0) or 0)
-        render = _callable_attr(self.ui, "render")
-        all_lines = list(render(width) if render is not None else [])
-        messages = list(getattr(self.session, "messages", []) or [])
-
-        def _json_default(value: Any) -> Any:
-            if is_dataclass(value):
-                return asdict(value)
-            value_dict = getattr(value, "__dict__", None)
-            if isinstance(value_dict, dict):
-                return value_dict
-            slots = getattr(type(value), "__slots__", ())
-            if isinstance(slots, str):
-                slots = (slots,)
-            slot_values = {
-                slot: getattr(value, slot)
-                for slot in slots
-                if slot not in {"__dict__", "__weakref__"} and hasattr(value, slot)
-            }
-            if slot_values:
-                return slot_values
-            return str(value)
-
-        timestamp = datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-        debug_data = "\n".join(
-            [
-                f"Debug output at {timestamp}",
-                f"Terminal: {width}x{height}",
-                f"Total lines: {len(all_lines)}",
-                "",
-                "=== All rendered lines with visible widths ===",
-                *[
-                    f"[{idx}] (w={visibleWidth(line)}) {json.dumps(line)}"
-                    for idx, line in enumerate(all_lines)
-                ],
-                "",
-                "=== Agent messages (JSONL) ===",
-                *[json.dumps(message, default=_json_default) for message in messages],
-                "",
-            ]
-        )
-
-        debug_log_path = Path(get_debug_log_path())
-        debug_log_path.parent.mkdir(parents=True, exist_ok=True)
-        debug_log_path.write_text(debug_data, encoding="utf-8")
-
-        self.chatContainer.addChild(Spacer(1))
-        self.chatContainer.addChild(
-            Text(
-                f"{interactive_theme.theme.fg('accent', '✓ Debug log written')}\n"
-                f"{interactive_theme.theme.fg('muted', str(debug_log_path))}",
-                1,
-                1,
-            )
-        )
-        self._request_render()
-
     async def handleResumeSession(
         self,
         sessionPath: str,
@@ -3119,10 +3056,6 @@ class InteractiveMode:
         if text == "/reload":
             self._set_editor_text("")
             await self.handleReloadCommand()
-            return
-        if text == "/debug":
-            self._set_editor_text("")
-            self.handleDebugCommand()
             return
         if text == "/quit":
             self._set_editor_text("")
@@ -4284,9 +4217,6 @@ class InteractiveMode:
             self.defaultEditor.onAction("app.session.tree", self.showTreeSelector)
             self.defaultEditor.onAction("app.session.resume", lambda: self.showSessionSelector())
             self.defaultEditor.onAction("app.session.new", lambda: self._schedule_task(self.handleClearCommand()))
-        debug_handler = _callable_attr(self, "handleDebugCommand")
-        if debug_handler is not None:
-            self.ui.onDebug = debug_handler
         self.defaultEditor.onCtrlD = self.handleCtrlD
         self.defaultEditor.onPasteImage = lambda: self._schedule_task(self.handleClipboardImagePaste())
         self.defaultEditor.onChange = lambda text: self._on_editor_change(text)

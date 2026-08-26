@@ -139,8 +139,7 @@ def deliver(to, message=None, sender=None, model=None, timeout=600,
         flags += ["--append-system-prompt", section]
     flags += ["--append-system-prompt", protocol_file(),
               "--session-dir", sess_dir]
-    env = {"MISAKA_APP_TITLE": DM_TITLE, "MISAKA_DM_SESSION": "1",
-           "MISAKA_WHO": to, "MISAKA_MCP_ROLE": role,
+    env = {"MISAKA_APP_TITLE": DM_TITLE, "MISAKA_WHO": to, "MISAKA_MCP_ROLE": role,
            "MISAKA_PROFILE_DIR": prof, "MISAKA_WORKSPACE": home}
     from misaka.app.composition import SessionSpec, build_extensions
     factories = build_extensions(SessionSpec(

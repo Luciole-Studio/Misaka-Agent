@@ -41,8 +41,6 @@ from misaka.core.session_cwd import (
 )
 from misaka.core.session_manager import SessionManager
 from misaka.core.settings_manager import SettingsManager
-from misaka.core.timings import print_timings, reset_timings
-from misaka.core.timings import time as time_mark
 from misaka.modes import runPrintMode as run_print_mode
 from misaka.ui.tui import TUI, ProcessTerminal, setKeybindings
 from misaka.ui.tui.interactive import InteractiveMode
@@ -537,10 +535,8 @@ async def create_session_manager(
 
 
 async def main(args: list[str], options: MainOptions | None = None) -> int:
-    reset_timings()
     if "--offline" in args or is_truthy_env_flag(os.environ.get("MISAKA_OFFLINE")):
         os.environ["MISAKA_OFFLINE"] = "1"
-        os.environ["MISAKA_SKIP_VERSION_CHECK"] = "1"
 
     parsed = parse_args(args)
     for diagnostic in parsed.diagnostics:
@@ -549,7 +545,6 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
         print(_format_colored_message(f"{prefix}: {diagnostic.message}", color), file=sys.stderr)
     if any(diagnostic.type == "error" for diagnostic in parsed.diagnostics):
         return 1
-    time_mark("parseArgs")
 
     app_mode = resolve_app_mode(parsed, sys.stdin.isatty())
     took_over_stdout = app_mode != "interactive"
@@ -622,13 +617,11 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
                 file=sys.stderr,
             )
             return finish(1)
-    time_mark("createSessionManager")
 
     resolved_extension_paths = resolve_cli_paths(cwd, parsed.extensions)
     resolved_prompt_template_paths = resolve_cli_paths(cwd, parsed.promptTemplates)
     resolved_theme_paths = resolve_cli_paths(cwd, parsed.themes)
     auth_storage = AuthStorage.create()
-    time_mark("createRuntime")
     try:
         runtime = await create_agent_session_runtime(
             create_runtime_factory(
@@ -669,33 +662,19 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
         stdin_content = await read_piped_stdin()
         if stdin_content is not None and app_mode == "interactive":
             app_mode = "print"
-        time_mark("readPipedStdin")
 
         initial_message, initial_images = await prepare_initial_message(
             parsed,
             settings_manager.getImageAutoResize(),
             stdin_content,
         )
-        time_mark("prepareInitialMessage")
         init_theme(settings_manager.getTheme(), app_mode == "interactive")
-        time_mark("initTheme")
-
-        time_mark("resolveModelScope")
         report_diagnostics(list(runtime.diagnostics))
         if any(item.type == "error" for item in runtime.diagnostics):
             return 1
-        time_mark("createAgentSession")
 
         if app_mode != "interactive" and session.model is None:
             print(_format_colored_message(formatNoModelsAvailableMessage(), _RED), file=sys.stderr)
-            return 1
-
-        startup_benchmark = is_truthy_env_flag(os.environ.get("MISAKA_STARTUP_BENCHMARK"))
-        if startup_benchmark and app_mode != "interactive":
-            print(
-                _format_colored_message("Error: MISAKA_STARTUP_BENCHMARK only supports interactive mode", _RED),
-                file=sys.stderr,
-            )
             return 1
 
         if app_mode == "interactive":
@@ -709,20 +688,7 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
                     "verbose": parsed.verbose,
                 },
             )
-            if startup_benchmark:
-                await interactive_mode.init()
-                time_mark("interactiveMode.init")
-                print_timings()
-                interactive_mode.stop()
-                stop_theme_watcher()
-                await _drain_output_stream(sys.stdout)
-                await _drain_output_stream(sys.stderr)
-                return 0
-
-            print_timings()
             return await interactive_mode.run()
-
-        print_timings()
         exit_code = await run_print_mode(
             runtime,
             {

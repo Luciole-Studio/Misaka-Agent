@@ -82,10 +82,6 @@ def get_sessions_dir() -> str:
     return str(Path(get_agent_dir()) / "sessions")
 
 
-def get_debug_log_path() -> str:
-    return str(Path(get_agent_dir()) / f"{APP_NAME}-debug.log")
-
-
 __all__ = [
     "APP_NAME",
     "APP_TITLE",

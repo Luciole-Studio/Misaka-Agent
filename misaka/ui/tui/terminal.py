@@ -27,7 +27,6 @@ import signal
 import sys
 import threading
 import time
-from pathlib import Path
 from typing import Any, Protocol
 
 from misaka.ui.tui.keys import setKittyProtocolActive
@@ -146,7 +145,6 @@ class ProcessTerminal:
         self._previousTermiosSettings: list[Any] | None = None
         self._lastStdinActivityMs = self._now_ms()
         self._readerInstalled = False
-        self.writeLogPath = self._resolve_write_log_path()
 
     @property
     def kittyProtocolActive(self) -> bool:
@@ -389,13 +387,6 @@ class ProcessTerminal:
         flush = getattr(self.stdout, "flush", None)
         if callable(flush):
             flush()
-        if self.writeLogPath:
-            try:
-                Path(self.writeLogPath).parent.mkdir(parents=True, exist_ok=True)
-                with open(self.writeLogPath, "a", encoding="utf-8") as handle:
-                    handle.write(data)
-            except OSError:
-                pass
 
     # PORT-NOTE: pi's process.stdout.columns/rows are the live tty size maintained by Node; the
     # Python equivalent is an ioctl on the stdout fd. The env fallback follows JS semantics:
@@ -486,22 +477,6 @@ class ProcessTerminal:
             TERMINAL_PROGRESS_KEEPALIVE_MS / 1000.0, lambda: self._on_loop(tick))
         self.progressTimer.daemon = True
         self.progressTimer.start()
-
-    def _resolve_write_log_path(self) -> str:
-        raw = os.environ.get("MISAKA_TUI_WRITE_LOG", "")
-        if not raw:
-            return ""
-        try:
-            path = Path(raw)
-            if path.is_dir():
-                from datetime import datetime
-
-                now = datetime.now()  # noqa: DTZ005 - local wall-clock time for a debug log name
-                ts = now.strftime("%Y-%m-%d_%H-%M-%S")
-                return str(path / f"tui-{ts}-{os.getpid()}.log")
-        except OSError:
-            pass
-        return raw
 
     def _install_resize_handler(self) -> None:
         if not hasattr(signal, "SIGWINCH") or self.resizeHandler is None:

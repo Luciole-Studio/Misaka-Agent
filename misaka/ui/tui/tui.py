@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
-import secrets
 import threading
 import time
 from collections.abc import Callable
@@ -14,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypedDict
 
-from misaka.ui.tui.keys import isKeyRelease, matchesKey
+from misaka.ui.tui.keys import isKeyRelease
 from misaka.ui.tui.terminal import Terminal
 from misaka.ui.tui.terminal_colors import (
     RgbColor,
@@ -260,7 +258,6 @@ class TUI(Container):
         self.pendingOsc11BackgroundQueries: list[dict] = []
         self.terminalColorSchemeListeners: dict = {}
         self.terminalColorSchemeNotificationsEnabled = False
-        self.onDebug: Any | None = None
         self.renderRequested = False
         self.immediateRenderScheduled = False
         self.renderTimer: threading.Timer | None = None
@@ -549,10 +546,6 @@ class TUI(Container):
             data = current
 
         if self.consumeCellSizeResponse(data):
-            return
-
-        if matchesKey(data, "shift+ctrl+d") and callable(self.onDebug):
-            self.onDebug()
             return
 
         focused_overlay = next(
@@ -872,21 +865,6 @@ class TUI(Container):
         cursor_pos = self.extractCursorPosition(new_lines, height)
         new_lines = self.applyLineResets(new_lines)
 
-        debug_redraw = os.environ.get("MISAKA_DEBUG_REDRAW") == "1"
-
-        def log_redraw(reason: str) -> None:
-            if not debug_redraw:
-                return
-            from misaka.config.engine import get_debug_log_path
-            log_path = Path(get_debug_log_path())
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            message = (
-                f"[{_utc_iso_timestamp()}] fullRender: {reason} "
-                f"(prev={len(self.previousLines)}, new={len(new_lines)}, height={height})\n"
-            )
-            with log_path.open("a", encoding="utf-8") as handle:
-                handle.write(message)
-
         def full_render(clear: bool) -> None:
             self.fullRedrawCount += 1
             buffer = "\x1b[?2026h"
@@ -911,19 +889,15 @@ class TUI(Container):
             self.previousHeight = height
 
         if not self.previousLines and not width_changed and not height_changed:
-            log_redraw("first render")
             full_render(False)
             return
         if width_changed:
-            log_redraw(f"terminal width changed ({self.previousWidth} -> {width})")
             full_render(True)
             return
         if height_changed and not _is_termux_session():
-            log_redraw(f"terminal height changed ({self.previousHeight} -> {height})")
             full_render(True)
             return
         if self.clearOnShrink and len(new_lines) < self.maxLinesRendered and not self.overlayStack:
-            log_redraw(f"clearOnShrink (maxLinesRendered={self.maxLinesRendered})")
             full_render(True)
             return
 
@@ -959,7 +933,6 @@ class TUI(Container):
                 buffer += self.deleteChangedKittyImages(first_changed, last_changed)
                 target_row = max(0, len(new_lines) - 1)
                 if target_row < prev_viewport_top:
-                    log_redraw(f"deleted lines moved viewport up ({target_row} < {prev_viewport_top})")
                     full_render(True)
                     return
                 line_diff = compute_line_diff(target_row)
@@ -970,7 +943,6 @@ class TUI(Container):
                 buffer += "\r"
                 extra_lines = len(self.previousLines) - len(new_lines)
                 if extra_lines > height:
-                    log_redraw(f"extraLines > height ({extra_lines} > {height})")
                     full_render(True)
                     return
                 if extra_lines > 0:
@@ -994,7 +966,6 @@ class TUI(Container):
             return
 
         if first_changed < prev_viewport_top:
-            log_redraw(f"firstChanged < viewportTop ({first_changed} < {prev_viewport_top})")
             full_render(True)
             return
 
@@ -1067,34 +1038,6 @@ class TUI(Container):
 
         buffer += "\x1b[?2026l"
 
-        if os.environ.get("MISAKA_TUI_DEBUG") == "1":
-            from misaka.config.engine import get_agent_dir
-            debug_dir = Path(get_agent_dir()) / "debug" / "tui"    # private: a render dump carries the screen's text
-            debug_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-            debug_path = debug_dir / f"render-{int(time.time() * 1000)}-{secrets.token_hex(6)}.log"
-            debug_data = [
-                f"firstChanged: {first_changed}",
-                f"viewportTop: {viewport_top}",
-                f"cursorRow: {self.cursorRow}",
-                f"height: {height}",
-                f"lineDiff: {line_diff}",
-                f"hardwareCursorRow: {hardware_cursor_row}",
-                f"renderEnd: {render_end}",
-                f"finalCursorRow: {final_cursor_row}",
-                f"cursorPos: {json.dumps(cursor_pos, ensure_ascii=False)}",
-                f"newLines.length: {len(new_lines)}",
-                f"previousLines.length: {len(self.previousLines)}",
-                "",
-                "=== newLines ===",
-                json.dumps(new_lines, indent=2, ensure_ascii=False),
-                "",
-                "=== previousLines ===",
-                json.dumps(self.previousLines, indent=2, ensure_ascii=False),
-                "",
-                "=== buffer ===",
-                json.dumps(buffer, ensure_ascii=False),
-            ]
-            debug_path.write_text("\n".join(debug_data), encoding="utf-8")
         self.terminal.write(buffer)
         self.cursorRow = max(0, len(new_lines) - 1)
         self.hardwareCursorRow = final_cursor_row

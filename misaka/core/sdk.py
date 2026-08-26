@@ -33,7 +33,6 @@ from misaka.core.prompt_templates import PromptTemplate
 from misaka.core.resource_loader import DefaultResourceLoader, ResourceLoader
 from misaka.core.session_manager import SessionManager, get_default_session_dir
 from misaka.core.settings_manager import SettingsManager
-from misaka.core.timings import time
 from misaka.core.tools import (
     Tool,
     ToolName,
@@ -141,7 +140,6 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
             {"cwd": cwd, "agentDir": agent_dir, "settingsManager": settings_manager}
         )
         await resource_loader.reload()
-        time("resourceLoader.reload")
 
     existing_session = session_manager.buildSessionContext()
     has_existing_session = len(existing_session.messages) > 0
