@@ -27,7 +27,7 @@ def enabled(workspace):
 def commit(workspace, paths, message):
     """Commit ``paths`` (relative to ``workspace``) on the line checked out there. A path that is
     gone from disk but tracked is committed as a deletion; a path git has never seen is skipped.
-    True when a commit was made."""
+    True when the paths are committed (a commit was made, or there was nothing left to commit)."""
     if not enabled(workspace):
         return False
     paths = [p for p in paths
@@ -36,7 +36,14 @@ def commit(workspace, paths, message):
     if not paths:
         return False
     _git(workspace, "add", "-A", "--", *paths)
+    if _git(workspace, "diff", "--cached", "--quiet", "--", *paths).returncode == 0:
+        return True                                    # already committed: nothing to do is not a failure
     return _git(workspace, "commit", "-q", "-m", message, "--", *paths).returncode == 0
+
+
+def branch_merged(workspace, name, into=None):
+    """True when branch ``name`` is already contained in the line checked out at ``into``."""
+    return enabled(workspace) and _git(into or workspace, "merge-base", "--is-ancestor", name, "HEAD").returncode == 0
 
 
 def commit_card(workspace, task_id, report, message):

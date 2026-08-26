@@ -987,7 +987,8 @@ class SisterRuntime:
                     if row is None or not self._owns_running(handle, row):
                         return
                     ok, result = worker.check_report(self._workspace(handle.board_id),
-                                                     con=self.con, task_id=handle.board_id)
+                                                     con=self.con, task_id=handle.board_id,
+                                                     generation=handle.generation)
                     if not ok:
                         reason = str(result)
                         if reason.startswith("blocked:"):

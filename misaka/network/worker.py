@@ -131,10 +131,11 @@ REPORT_INSTRUCTIONS = """
 ---
 ## Submission contract
 When the task is complete, write UTF-8 JSON to `$MISAKA_TASK_DIR/report.json`:
-{"schema_version": 1, "status": "done", "summary": "Concise description of the work",
+{"schema_version": 1, "generation": __GENERATION__, "status": "done", "summary": "Concise description of the work",
  "artifacts": ["path relative to the workspace"],
  "uncertain": ["One to three specific weak points, such as a second-hand date or fragile estimate"],
  "notes": ""}
+- `generation` must be exactly __GENERATION__ (this attempt); a report for another attempt is rejected.
 - `status` must be `done` or `blocked`; explain missing input in `notes` when blocked.
 - List every deliverable in `artifacts`. Unlisted files are not accepted as deliverables.
 - Use `done` only when every listed artifact exists.
@@ -170,7 +171,7 @@ def card_prompt(task):
             f"Write every new deliverable under `{output_dir}`. In `report.json`, list each artifact "
             "using its path relative to the current workspace."
         )
-    prompt = body + REPORT_INSTRUCTIONS
+    prompt = body + REPORT_INSTRUCTIONS.replace("__GENERATION__", str(int(task.get("generation") or 1)))
     if task.get("beast"):
         from misaka.platform import budget as _b
 
@@ -189,11 +190,12 @@ def _load_profile(profile_dir):
     return (soul if os.path.exists(soul) else None), cfg
 
 
-def check_report(workspace, con=None, task_id=None):
+def check_report(workspace, con=None, task_id=None, generation=None):
     """Validate a card's report.json.
 
     Returns ``(True, report)`` or ``(False, reason)``; a blocked report yields
-    ``(False, "blocked: <notes>")``.
+    ``(False, "blocked: <notes>")``. With ``generation`` the report must name that attempt:
+    a report left behind by an earlier generation is never accepted for a later one.
     """
     try:
         root = Path(workspace).resolve(strict=True)
@@ -219,6 +221,8 @@ def check_report(workspace, con=None, task_id=None):
         return False, "report.json bad schema"
     if report.get("status") not in ("done", "blocked"):
         return False, "report.json bad schema"
+    if generation is not None and report.get("generation") != int(generation):
+        return False, "report.json is from another generation of this card"
     summary = report.get("summary")
     notes = report.get("notes", "")
     artifacts = report.get("artifacts")
@@ -481,7 +485,7 @@ def run_card(
         )
 
     skill_sandbox.cleanup(ro_root)
-    ok, result = check_report(workspace, con=con, task_id=task_id)
+    ok, result = check_report(workspace, con=con, task_id=task_id, generation=task.get("generation"))
     if ok:
         return {"ok": True, "report": result, "exit_code": 0, "timed_out": False}
     reason = result if not r["error"] else f"{result} (session error: {r['error']})"

@@ -274,7 +274,7 @@ def finish_abandoned(con, t):
     fence, block it, accept it (commit + corpus) or send it back. Returns ``"blocked"``,
     ``"submitted"``, ``"reclaimed"`` or ``None`` when someone else got there first."""
     from misaka.platform import repo
-    ok, result = worker.check_report(db.workspace_for(t), con=con, task_id=t["id"])
+    ok, result = worker.check_report(db.workspace_for(t), con=con, task_id=t["id"], generation=t["generation"])
     fence = dict(generation=t["generation"], claim_lock=t["claim_lock"], worker_pid=t["worker_pid"],
                  worker_identity=t["worker_identity"], claim_expires=t["claim_expires"])
     if not ok and str(result).startswith("blocked:"):
@@ -283,7 +283,11 @@ def finish_abandoned(con, t):
     if ok:
         if not _fence_intact(con, t):
             return None
-        repo.commit_card(db.workspace_for(t), t["id"], result, f"card {t['id']}: submit (reconciled)")
+        workspace = db.workspace_for(t)
+        if repo.enabled(workspace) and not repo.commit_card(workspace, t["id"], result, f"card {t['id']}: submit (reconciled)"):
+            return "blocked" if db.block_abandoned(
+                con, t["id"], "transient", "the submission could not be committed to git; fix the repository, then resume the card",
+                **fence) else None
     if not db.reclaim_abandoned(con, t["id"], submitted=bool(ok), **fence):
         return None
     if ok:
@@ -315,7 +319,10 @@ def accept(con, t, report, *, generation, claim_lock, workspace):
     from misaka.platform import repo
     if not _owned(con, t["id"], generation=generation, claim_lock=claim_lock):
         return False
-    repo.commit_card(workspace, t["id"], report, f"card {t['id']}: submit")
+    if repo.enabled(workspace) and not repo.commit_card(workspace, t["id"], report, f"card {t['id']}: submit"):
+        db.block_task(con, t["id"], "transient", "the submission could not be committed to git; fix the repository, then resume the card",
+                      generation=generation)
+        return False
     if not db.submit_task(con, t["id"], generation=generation, claim_lock=claim_lock):
         return False
     db.add_event(con, t["id"], "submitted", _submitted(report), generation=generation)

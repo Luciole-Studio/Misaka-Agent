@@ -80,7 +80,7 @@ def card_prompt(row):
     return CONTRACT.format(body=body).strip()
 
 
-def write_report(workspace, exit_code, output, *, assignee, task_id=None, output_dir=None):
+def write_report(workspace, exit_code, output, *, assignee, task_id=None, output_dir=None, generation=None):
     """Write report.json on the ally's behalf so the board's submit -> done
     flow works unchanged (only the verification gate marks done; allies and Sisters are treated alike).
     Returns (submitted, summary).
@@ -101,6 +101,7 @@ def write_report(workspace, exit_code, output, *, assignee, task_id=None, output
     except OSError:
         pass
     report = {"schema_version": 1, "status": "done",
+              **({"generation": int(generation)} if generation is not None else {}),
               "summary": tail[-1500:],
               "artifacts": artifacts,
               "uncertain": [f"Output was produced by ally {assignee} and has not been independently reviewed."]}
@@ -114,11 +115,11 @@ def write_report(workspace, exit_code, output, *, assignee, task_id=None, output
     return True, report["summary"]
 
 
-def finish(workspace, exit_code, output, *, assignee, task_id, output_dir=None):
+def finish(workspace, exit_code, output, *, assignee, task_id, output_dir=None, generation=None):
     """Wrap up after the ally process exits: write report.json, then mail Last Order. Returns (submitted, summary)."""
     ok, summary = write_report(
         workspace, exit_code, output, assignee=assignee,
-        task_id=task_id, output_dir=output_dir)
+        task_id=task_id, output_dir=output_dir, generation=generation)
     head = "finished and submitted" if ok else "could not submit"
     try:
         notify(task_id, f"Ally {assignee} {head} (card {task_id}):\n\n{summary}",

@@ -872,8 +872,8 @@ class Daemon:
                             pane.exit_code if pane.exit_code is not None else -1,
                             pane.buf.decode("utf-8", errors="replace"),
                             assignee=pane.ally, task_id=pane.card,
-                            output_dir=row["output_dir"])
-                    ok, report = worker.check_report(pane.cwd, con=con, task_id=pane.card)
+                            output_dir=row["output_dir"], generation=pane.generation)
+                    ok, report = worker.check_report(pane.cwd, con=con, task_id=pane.card, generation=pane.generation)
                     blocked_reason = (str(report)[len("blocked:"):].strip()
                                       if not ok and str(report).startswith("blocked:") else None)
                     if blocked_reason:
@@ -905,7 +905,7 @@ class Daemon:
                             ttl_seconds=max(1800, int(row["timeout_seconds"]) + 60),
                         ):
                             pane.last_heartbeat = time.time()
-                    ok, report = worker.check_report(pane.cwd, con=con, task_id=pane.card)
+                    ok, report = worker.check_report(pane.cwd, con=con, task_id=pane.card, generation=pane.generation)
                     if ok:
                         from misaka.network import dispatch
                         dispatch.accept(con, row, report, generation=pane.generation,
