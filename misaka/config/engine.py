@@ -51,6 +51,11 @@ def get_auth_path() -> str:
     return str(Path(get_agent_dir()) / "auth.json")
 
 
+def get_debug_log_path() -> str:
+    """Where /debug writes. Named after the app so a user can find it without reading source."""
+    return str(Path(get_agent_dir()) / f"{APP_NAME}-debug.log")
+
+
 def get_bin_dir() -> str:
     return str(Path(get_agent_dir()) / "bin")
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import re
 import shutil
@@ -14,7 +15,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
@@ -29,6 +30,7 @@ from misaka.config import (
     APP_TITLE,
     VERSION,
     get_auth_path,
+    get_debug_log_path,
 )
 from misaka.core.agent_session import parse_skill_block
 from misaka.core.agent_session_runtime import SessionImportFileNotFoundError
@@ -136,6 +138,7 @@ from misaka.ui.tui.interactive.components.user_message_selector import (
     UserMessageItem,
     UserMessageSelectorComponent,
 )
+from misaka.ui.tui.utils import visibleWidth
 from misaka.utils.clipboard import copy_to_clipboard
 from misaka.utils.clipboard_image import (
     extension_for_image_mime_type,
@@ -2783,6 +2786,75 @@ class InteractiveMode:
         self.chatContainer.addChild(DynamicBorder())
         self._request_render()
 
+    def handleDebugCommand(self) -> None:
+        """/debug: the one diagnostic exit, replacing five undocumented environment switches.
+
+        It writes the rendered screen and the conversation to a file the user is told about,
+        rather than to a path only a developer reading the source would know to look at.
+        """
+        width = int(getattr(self.ui.terminal, "columns", 0) or 0)
+        height = int(getattr(self.ui.terminal, "rows", 0) or 0)
+        render = _callable_attr(self.ui, "render")
+        all_lines = list(render(width) if render is not None else [])
+        messages = list(getattr(self.session, "messages", []) or [])
+
+        def _json_default(value: Any) -> Any:
+            if is_dataclass(value):
+                return asdict(value)
+            value_dict = getattr(value, "__dict__", None)
+            if isinstance(value_dict, dict):
+                return value_dict
+            slots = getattr(type(value), "__slots__", ())
+            if isinstance(slots, str):
+                slots = (slots,)
+            slot_values = {
+                slot: getattr(value, slot)
+                for slot in slots
+                if slot not in {"__dict__", "__weakref__"} and hasattr(value, slot)
+            }
+            if slot_values:
+                return slot_values
+            return str(value)
+
+        timestamp = datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+        debug_data = "\n".join(
+            [
+                f"Debug output at {timestamp}",
+                f"Terminal: {width}x{height}",
+                f"Total lines: {len(all_lines)}",
+                "",
+                "=== All rendered lines with visible widths ===",
+                *[
+                    f"[{idx}] (w={visibleWidth(line)}) {json.dumps(line)}"
+                    for idx, line in enumerate(all_lines)
+                ],
+                "",
+                "=== Agent messages (JSONL) ===",
+                *[json.dumps(message, default=_json_default) for message in messages],
+                "",
+            ]
+        )
+
+        # The dump carries the whole conversation, so it is written the way auth.json is.
+        debug_log_path = Path(get_debug_log_path())
+        debug_log_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        debug_log_path.write_text(debug_data, encoding="utf-8")
+        with contextlib.suppress(OSError):
+            debug_log_path.chmod(0o600)
+
+        self.chatContainer.addChild(Spacer(1))
+        self.chatContainer.addChild(
+            Text(
+                f"{interactive_theme.theme.fg('accent', '✓ Debug log written')}\n"
+                f"{interactive_theme.theme.fg('muted', str(debug_log_path))}",
+                1,
+                1,
+            )
+        )
+        self._request_render()
+
+
     async def handleResumeSession(
         self,
         sessionPath: str,
@@ -3064,6 +3136,10 @@ class InteractiveMode:
         if text == "/reload":
             self._set_editor_text("")
             await self.handleReloadCommand()
+            return
+        if text == "/debug":
+            self._set_editor_text("")
+            self.handleDebugCommand()
             return
         if text == "/quit":
             self._set_editor_text("")

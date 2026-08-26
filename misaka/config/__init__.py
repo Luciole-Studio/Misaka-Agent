@@ -13,6 +13,7 @@ from misaka.config.engine import (  # noqa: F401
     get_auth_path,
     get_bin_dir,
     get_custom_themes_dir,
+    get_debug_log_path,
     get_export_template_dir,
     get_models_path,
     get_sessions_dir,

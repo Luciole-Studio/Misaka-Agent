@@ -71,6 +71,12 @@ Environment variables override the files (all optional):
 
 A number that does not parse stops the command with the variable's name and value. Other `MISAKA_*` variables are set by MISAKA for its own child processes and are not configuration.
 
+## Diagnose
+
+`/debug` in the chat writes the rendered screen and the whole conversation to
+`~/.misaka/agent/misaka-debug.log` (mode 0600) and prints the path. That is the only
+diagnostic switch — there are no debug environment variables.
+
 ## Check
 
 ```sh
