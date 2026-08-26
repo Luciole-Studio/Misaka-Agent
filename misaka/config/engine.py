@@ -184,32 +184,6 @@ def get_export_template_dir() -> str:
     return str(_get_package_module_dir() / "core" / "export_html")
 
 
-def get_package_json_path() -> str:
-    metadata_path = _get_package_metadata_path()
-    if metadata_path is not None:
-        return str(metadata_path)
-    return str(Path(get_package_dir()) / "package.json")
-
-
-def get_readme_path() -> str:
-    # Use __file__-relative resolution so that bundled assets are found correctly
-    # both when running from source (uv run harn) and when installed as a
-    # package (uv tool install harn / pip install harn).
-    return str((_get_package_module_dir() / "README.md").resolve())
-
-
-def get_docs_path() -> str:
-    return str((_get_package_module_dir() / "docs").resolve())
-
-
-def get_examples_path() -> str:
-    return str((_get_package_module_dir() / "examples").resolve())
-
-
-def get_changelog_path() -> str:
-    return str((_get_package_module_dir() / "CHANGELOG.md").resolve())
-
-
 def get_sessions_dir() -> str:
     env_dir = os.environ.get(ENV_SESSION_DIR)
     if env_dir:
@@ -221,8 +195,6 @@ def get_debug_log_path() -> str:
     return str(Path(get_agent_dir()) / f"{APP_NAME}-debug.log")
 
 
-getChangelogPath = get_changelog_path
-
 __all__ = [
     "APP_NAME",
     "APP_TITLE",
@@ -231,5 +203,4 @@ __all__ = [
     "ENV_SESSION_DIR",
     "PACKAGE_NAME",
     "VERSION",
-    "getChangelogPath",
     ]

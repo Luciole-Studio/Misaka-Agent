@@ -189,7 +189,7 @@ def _normalize_preset(raw) -> dict[str, Any]:
 
 
 def normalize_moa_config(raw) -> dict[str, Any]:
-    """Accept named `presets` + `default_preset`; fold the legacy flat shape (slots at top level) into `default`."""
+    """Accept named `presets` + `default_preset`; a config without presets gets one default preset."""
     if not isinstance(raw, dict):
         raw = {}
     presets: dict[str, dict[str, Any]] = {}
@@ -200,7 +200,7 @@ def normalize_moa_config(raw) -> dict[str, Any]:
             if clean:
                 presets[clean] = _normalize_preset(preset)
     if not presets:
-        presets[DEFAULT_MOA_PRESET_NAME] = _normalize_preset(raw)
+        presets[DEFAULT_MOA_PRESET_NAME] = _normalize_preset({})
     default = str(raw.get("default_preset") or "").strip()
     if not default or default not in presets:
         default = next(iter(presets))

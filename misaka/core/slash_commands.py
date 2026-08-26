@@ -39,7 +39,6 @@ BUILTIN_SLASH_COMMANDS: tuple[BuiltinSlashCommand, ...] = (
     BuiltinSlashCommand("copy", "Copy last agent message to clipboard"),
     BuiltinSlashCommand("name", "Set session display name"),
     BuiltinSlashCommand("session", "Show session info and stats"),
-    BuiltinSlashCommand("changelog", "Show changelog entries"),
     BuiltinSlashCommand("hotkeys", "Show all keyboard shortcuts"),
     BuiltinSlashCommand("fork", "Create a new fork from a previous user message"),
     BuiltinSlashCommand("clone", "Duplicate the current session at the current position"),

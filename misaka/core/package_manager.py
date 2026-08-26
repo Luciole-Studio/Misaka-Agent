@@ -5,11 +5,9 @@ extensions in-process and has no package users.)"""
 
 from __future__ import annotations
 
-import json
 import os
 import stat as stat_module
 import sys
-import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,12 +31,6 @@ SourceOrigin = Literal["package", "top-level"]
 RESOURCE_TYPES: tuple[ResourceType, ...] = ("extensions", "prompts", "themes")
 IGNORE_FILE_NAMES = (".gitignore", ".ignore", ".fdignore")
 _GLOB_MATCH_FLAGS = wc_glob.GLOBSTAR | wc_glob.FORCEUNIX
-
-
-class HarnManifest(TypedDict, total=False):
-    extensions: list[str]
-    prompts: list[str]
-    themes: list[str]
 
 
 class PathMetadata(TypedDict):
@@ -66,12 +58,6 @@ class ResolvedPaths:
     extensions: list[ResolvedResource] = field(default_factory=list)
     prompts: list[ResolvedResource] = field(default_factory=list)
     themes: list[ResolvedResource] = field(default_factory=list)
-
-
-@dataclass(slots=True)
-class _ManifestFiles:
-    allFiles: list[str]
-    enabledByManifest: set[str]
 
 
 @dataclass(slots=True)
@@ -250,35 +236,6 @@ def _resource_precedence_rank(metadata: PathMetadata) -> int:
     return scope_base + (0 if metadata.get("source") == "local" else 1)
 
 
-def _read_harn_manifest(package_root: str) -> HarnManifest | None:
-    package_json_path = os.path.join(package_root, "package.json")
-    if os.path.exists(package_json_path):
-        return _read_harn_package_json_manifest(package_json_path)
-    pyproject_path = os.path.join(package_root, "pyproject.toml")
-    if os.path.exists(pyproject_path):
-        return _read_harn_pyproject_manifest(pyproject_path)
-    return None
-
-
-def _read_harn_package_json_manifest(package_json_path: str) -> HarnManifest | None:
-    try:
-        payload = json.loads(Path(package_json_path).read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
-        return None
-    manifest = payload.get("harn")
-    return cast(HarnManifest, manifest) if isinstance(manifest, dict) else None
-
-
-def _read_harn_pyproject_manifest(pyproject_path: str) -> HarnManifest | None:
-    try:
-        payload = tomllib.loads(Path(pyproject_path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    tool = payload.get("tool")
-    manifest = tool.get("harn") if isinstance(tool, dict) else None
-    return cast(HarnManifest, manifest) if isinstance(manifest, dict) else None
-
-
 def _resolve_dir_entry(entry: os.DirEntry[str]) -> tuple[bool, bool]:
     is_dir = entry.is_dir(follow_symlinks=False)
     is_file = entry.is_file(follow_symlinks=False)
@@ -380,15 +337,6 @@ def _collect_auto_theme_entries(dir_path: str) -> list[str]:
 
 
 def _resolve_extension_entries(dir_path: str) -> list[str] | None:
-    manifest = _read_harn_manifest(dir_path)
-    if manifest and manifest.get("extensions"):
-        entries = [
-            os.path.abspath(os.path.join(dir_path, candidate))
-            for candidate in manifest["extensions"]
-            if os.path.exists(os.path.join(dir_path, candidate))
-        ]
-        if entries:
-            return entries
     index_py = os.path.join(dir_path, "index.py")
     if os.path.exists(index_py):
         return [index_py]
@@ -541,18 +489,6 @@ class DefaultPackageManager:
         accumulator: _Accumulator,
         metadata: PathMetadata,
     ) -> bool:
-        manifest = _read_harn_manifest(package_root)
-        if manifest:
-            for resource_type in RESOURCE_TYPES:
-                self._add_manifest_entries(
-                    manifest.get(resource_type),
-                    package_root,
-                    resource_type,
-                    self._get_target_map(accumulator, resource_type),
-                    metadata,
-                )
-            return True
-
         has_any_dir = False
         for resource_type in RESOURCE_TYPES:
             directory = os.path.join(package_root, resource_type)
@@ -563,59 +499,6 @@ class DefaultPackageManager:
                 self._add_resource(self._get_target_map(accumulator, resource_type), file_path, metadata, True)
         return has_any_dir
 
-
-    def _collect_manifest_files(self, package_root: str, resource_type: ResourceType) -> _ManifestFiles:
-        manifest = _read_harn_manifest(package_root)
-        entries = manifest.get(resource_type) if manifest else None
-        if entries:
-            all_files = self._collect_files_from_manifest_entries(entries, package_root, resource_type)
-            manifest_patterns = [entry for entry in entries if _is_override_pattern(entry)]
-            enabled_by_manifest = (
-                _apply_patterns(all_files, manifest_patterns, package_root)
-                if manifest_patterns
-                else set(all_files)
-            )
-            return _ManifestFiles(allFiles=list(enabled_by_manifest), enabledByManifest=enabled_by_manifest)
-        convention_dir = os.path.join(package_root, resource_type)
-        if not os.path.exists(convention_dir):
-            return _ManifestFiles(allFiles=[], enabledByManifest=set())
-        all_files = _collect_resource_files(convention_dir, resource_type)
-        return _ManifestFiles(allFiles=all_files, enabledByManifest=set(all_files))
-
-    def _add_manifest_entries(
-        self,
-        entries: list[str] | None,
-        root: str,
-        resource_type: ResourceType,
-        target: dict[str, tuple[PathMetadata, bool]],
-        metadata: PathMetadata,
-    ) -> None:
-        if not entries:
-            return
-        all_files = self._collect_files_from_manifest_entries(entries, root, resource_type)
-        patterns = [entry for entry in entries if _is_override_pattern(entry)]
-        enabled_paths = _apply_patterns(all_files, patterns, root)
-        for file_path in all_files:
-            if file_path in enabled_paths:
-                self._add_resource(target, file_path, metadata, True)
-
-    def _collect_files_from_manifest_entries(
-        self,
-        entries: list[str],
-        root: str,
-        resource_type: ResourceType,
-    ) -> list[str]:
-        source_entries = [entry for entry in entries if not _is_override_pattern(entry)]
-        resolved_paths: list[str] = []
-        for entry in source_entries:
-            if _has_glob_pattern(entry):
-                resolved_paths.extend(
-                    os.path.abspath(os.path.join(root, match))
-                    for match in wc_glob.glob(entry, root_dir=root, flags=_GLOB_MATCH_FLAGS)
-                )
-            else:
-                resolved_paths.append(os.path.abspath(os.path.join(root, entry)))
-        return self._collect_files_from_paths(resolved_paths, resource_type)
 
     def _resolve_local_entries(
         self,

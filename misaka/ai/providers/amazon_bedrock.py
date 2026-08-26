@@ -496,7 +496,6 @@ async def iterate_stream_events(response_stream: Any, signal: Any = None):
             except StopAsyncIteration:
                 return
             yield item
-        return
 
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[Any] = asyncio.Queue()

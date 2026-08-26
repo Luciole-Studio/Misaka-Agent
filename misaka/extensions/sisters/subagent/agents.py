@@ -9,7 +9,7 @@ respectively.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
@@ -30,8 +30,8 @@ _MISSING = object()
 
 
 @dataclass(slots=True)
-class AgentDefinition(Mapping[str, Any]):
-    """Normalized definition with the old dict interface kept for callers."""
+class AgentDefinition:
+    """Normalized agent definition (Claude Code's frontmatter vocabulary is mapped in ``_ALIASES``)."""
 
     name: str
     description: str
@@ -55,29 +55,6 @@ class AgentDefinition(Mapping[str, Any]):
     mcp_servers: list[Any] = field(default_factory=list)
     hooks: dict[str, Any] | None = None
 
-    _KEYS = (
-        "name",
-        "description",
-        "prompt",
-        "source",
-        "path",
-        "baseDir",
-        "tools",
-        "disallowedTools",
-        "model",
-        "effort",
-        "permissionMode",
-        "maxTurns",
-        "background",
-        "isolation",
-        "skills",
-        "initialPrompt",
-        "memory",
-        "color",
-        "requiredMcpServers",
-        "mcpServers",
-        "hooks",
-    )
     _ALIASES: ClassVar[dict[str, str]] = {
         "agentType": "name",
         "whenToUse": "description",
@@ -95,64 +72,6 @@ class AgentDefinition(Mapping[str, Any]):
         "mcpServers": "mcp_servers",
         "mcp_servers": "mcp_servers",
     }
-
-    def __getitem__(self, key: str) -> Any:
-        attr = self._ALIASES.get(key, key)
-        if not hasattr(self, attr) or attr.startswith("_"):
-            raise KeyError(key)
-        return getattr(self, attr)
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(self._KEYS)
-
-    def __len__(self) -> int:
-        return len(self._KEYS)
-
-    @property
-    def agentType(self) -> str:  # Claude Code vocabulary
-        return self.name
-
-    @property
-    def whenToUse(self) -> str:
-        return self.description
-
-    @property
-    def filename(self) -> str | None:
-        return Path(self.path).stem if self.path else None
-
-    @property
-    def baseDir(self) -> str | None:
-        return self.base_dir
-
-    @property
-    def disallowedTools(self) -> list[str] | None:
-        return self.disallowed_tools
-
-    @property
-    def permissionMode(self) -> str | None:
-        return self.permission_mode
-
-    @property
-    def maxTurns(self) -> int | None:
-        return self.max_turns
-
-    @property
-    def initialPrompt(self) -> str | None:
-        return self.initial_prompt
-
-    @property
-    def requiredMcpServers(self) -> list[str]:
-        return self.required_mcp_servers
-
-    @property
-    def mcpServers(self) -> list[Any]:
-        return self.mcp_servers
-
-    def getSystemPrompt(self) -> str:
-        return self.prompt
-
-    def to_dict(self) -> dict[str, Any]:
-        return dict(self)
 
 
 def _split_frontmatter(raw: str) -> tuple[dict[str, Any], str] | None:

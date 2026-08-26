@@ -123,12 +123,6 @@ def _is_aborted(signal: Any) -> bool:
     return False
 
 
-def _has_prop(value: object, key: str) -> bool:
-    if isinstance(value, Mapping):
-        return key in value
-    return hasattr(value, key)
-
-
 def _get_prop(value: object, key: str, default: object = None) -> object:
     if isinstance(value, Mapping):
         return value.get(key, default)

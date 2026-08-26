@@ -158,7 +158,7 @@ async def _submit_tasks(con, run, cfg, worker, node, specs, *, kind, issue_id=No
             tid = card_files.create(
                 con, root, spec["title"], planner.task_body(spec, path, evidence=evidence), spec["assignee"],
                 priority=spec.get("priority", 0), timeout_seconds=runs.call_timeout(cfg, 1800),
-                after_row=lambda tid: runs.link_task(          # linked before the file exists: a failed link leaves no file
+                after_row=lambda tid, aid=aid, spec=spec: runs.link_task(   # linked before the file exists
                     con, run["id"], tid, kind=kind, node=node, preflight_artifact=aid,
                     local_id=spec["local_id"], issue_id=issue_id, dependencies=spec.get("dependencies") or []))
         local_to_task[spec["local_id"]] = tid

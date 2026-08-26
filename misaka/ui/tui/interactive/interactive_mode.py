@@ -31,9 +31,7 @@ from misaka.config import (
     APP_TITLE,
     VERSION,
     get_auth_path,
-    get_changelog_path,
     get_debug_log_path,
-    get_docs_path,
 )
 from misaka.core.agent_session import parse_skill_block
 from misaka.core.agent_session_runtime import SessionImportFileNotFoundError
@@ -143,7 +141,6 @@ from misaka.ui.tui.interactive.components.user_message_selector import (
     UserMessageItem,
     UserMessageSelectorComponent,
 )
-from misaka.utils.changelog import get_new_entries, parse_changelog
 from misaka.utils.clipboard import copy_to_clipboard
 from misaka.utils.clipboard_image import (
     extension_for_image_mime_type,
@@ -612,14 +609,12 @@ class InteractiveMode:
                 getShowTerminalProgress=lambda: False,
                 getQuietStartup=lambda: False,
                 getCollapseChangelog=lambda: True,
-                getLastChangelogVersion=lambda: None,
                 getCodeBlockIndent=lambda: "  ",
                 getHideThinkingBlock=lambda: False,
                 getEditorPaddingX=lambda: 0,
                 getAutocompleteMaxVisible=lambda: 5,
                 getClearOnShrink=lambda: False,
                 getShowHardwareCursor=lambda: False,
-                setLastChangelogVersion=lambda _version: None,
                 setHideThinkingBlock=lambda _hide: None,
             ),
         )
@@ -778,8 +773,6 @@ class InteractiveMode:
         self._toolComponentsById: dict[str, ToolExecutionComponent] = {}
         self._handleClearCount = 0
         self.lastEscapeTime = float(getattr(self, "lastEscapeTime", 0))
-        self.changelogMarkdown = getattr(self, "changelogMarkdown", None)
-        self.startupNoticesShown = bool(getattr(self, "startupNoticesShown", False))
 
         if callable(_callable_attr(self.footer, "setAutoCompactEnabled")):
             self.footer.setAutoCompactEnabled(bool(getattr(self.session, "autoCompactionEnabled", False)))
@@ -870,45 +863,6 @@ class InteractiveMode:
             if set_current is not None:
                 set_current(provider)
 
-    def showStartupNoticesIfNeeded(self) -> None:
-        if self.startupNoticesShown:
-            return
-        self.startupNoticesShown = True
-
-        if not self.changelogMarkdown:
-            return
-
-        if getattr(self.chatContainer, "children", []):
-            self.chatContainer.addChild(Spacer(1))
-        self.chatContainer.addChild(DynamicBorder())
-        if _safe_call_bool(self.settingsManager, "getCollapseChangelog", True):
-            version_match = re.search(r"##\s+\[?(\d+\.\d+\.\d+)\]?", self.changelogMarkdown)
-            latest_version = version_match.group(1) if version_match is not None else self.version
-            condensed_text = (
-                f"Updated to v{latest_version}. "
-                f"Use {interactive_theme.theme.bold('/changelog')} to view full changelog."
-            )
-            self.chatContainer.addChild(Text(condensed_text, 1, 0))
-        else:
-            self.chatContainer.addChild(
-                Text(
-                    interactive_theme.theme.bold(interactive_theme.theme.fg("accent", "What's New")),
-                    1,
-                    0,
-                )
-            )
-            self.chatContainer.addChild(Spacer(1))
-            self.chatContainer.addChild(
-                Markdown(
-                    self.changelogMarkdown.strip(),
-                    1,
-                    0,
-                    self.getMarkdownThemeWithSettings(),
-                )
-            )
-            self.chatContainer.addChild(Spacer(1))
-        self.chatContainer.addChild(DynamicBorder())
-        self._request_render()
 
     def createExtensionUIContext(self) -> _ExtensionUIContext:
         return _ExtensionUIContext(self)
@@ -2026,29 +1980,6 @@ class InteractiveMode:
                 )
                 self.chatContainer.addChild(Spacer(1))
 
-    def getChangelogForDisplay(self) -> str | None:
-        if list(_value(self.session.state, "messages", []) or []):
-            return None
-
-        get_last_changelog_version = _callable_attr(self.settingsManager, "getLastChangelogVersion")
-        set_last_changelog_version = _callable_attr(self.settingsManager, "setLastChangelogVersion")
-        last_seen_value = get_last_changelog_version() if get_last_changelog_version is not None else None
-        last_seen_version = last_seen_value.strip() if isinstance(last_seen_value, str) else None
-        entries = parse_changelog(get_changelog_path())
-
-        if not last_seen_version:
-            if set_last_changelog_version is not None:
-                set_last_changelog_version(VERSION)
-            return None
-
-        new_entries = get_new_entries(entries, last_seen_version)
-        if new_entries:
-            if set_last_changelog_version is not None:
-                set_last_changelog_version(VERSION)
-            return "\n\n".join(entry.content for entry in new_entries)
-
-        return None
-
 
     async def checkTmuxKeyboardSetup(self) -> str | None:
         if not os.environ.get("TMUX"):
@@ -2452,7 +2383,6 @@ class InteractiveMode:
     def addMessageToChat(
         self,
         message: Any,
-        pendingTools: dict[str, ToolExecutionComponent] | None = None,
         options: dict[str, Any] | None = None,
     ) -> None:
         role = _message_role(message)
@@ -2605,34 +2535,6 @@ class InteractiveMode:
         except Exception as error:  # noqa: BLE001
             self.showError(str(error))
 
-    def handleChangelogCommand(self) -> None:
-        entries = parse_changelog(get_changelog_path())
-        changelog_markdown = (
-            "\n\n".join(entry.content for entry in reversed(entries))
-            if entries
-            else "No changelog entries found."
-        )
-
-        self.chatContainer.addChild(Spacer(1))
-        self.chatContainer.addChild(DynamicBorder())
-        self.chatContainer.addChild(
-            Text(
-                interactive_theme.theme.bold(interactive_theme.theme.fg("accent", "What's New")),
-                1,
-                0,
-            )
-        )
-        self.chatContainer.addChild(Spacer(1))
-        self.chatContainer.addChild(
-            Markdown(
-                changelog_markdown,
-                1,
-                1,
-                self.getMarkdownThemeWithSettings(),
-            )
-        )
-        self.chatContainer.addChild(DynamicBorder())
-        self._request_render()
 
     async def handleShareCommand(self) -> None:
         gh_path = shutil.which("gh")
@@ -3148,10 +3050,6 @@ class InteractiveMode:
             self._set_editor_text("")
             self.showSessionSelector()
             return
-        if text == "/changelog":
-            self._set_editor_text("")
-            self.handleChangelogCommand()
-            return
         if text == "/model" or text.startswith("/model "):
             search_term = text[7:].strip() if text.startswith("/model ") else None
             self._set_editor_text("")
@@ -3662,8 +3560,6 @@ class InteractiveMode:
                 interactive_theme.theme.fg(
                     "text", "Configure an AWS profile, IAM keys, bearer token, or role-based credentials."
                 ),
-                interactive_theme.theme.fg("muted", "See:"),
-                interactive_theme.theme.fg("accent", f"  {os.path.join(get_docs_path(), 'providers.md')}"),
             ]
         )
 
@@ -4265,7 +4161,6 @@ class InteractiveMode:
         self.setupAutocompleteProvider()
         self.setupExtensionShortcuts(self.session.extensionRunner)
         self.showLoadedResources({"force": False, "showDiagnosticsWhenQuiet": True})
-        self.showStartupNoticesIfNeeded()
 
     async def rebindCurrentSession(
         self,
@@ -4720,7 +4615,6 @@ class InteractiveMode:
             return
 
         self.registerSignalHandlers()
-        self.changelogMarkdown = self.getChangelogForDisplay()
         fd_path, _rg_path = await asyncio.gather(ensureTool("fd"), ensureTool("rg"))
         self.fdPath = fd_path
         setKeybindings(self.keybindings)
@@ -5861,19 +5755,6 @@ def _extract_user_text(message: Any) -> str:
         if _value(block, "type") == "text":
             parts.append(str(_value(block, "text", "")))
     return "".join(parts)
-
-
-def _extract_custom_text(message: Any) -> str:
-    content = _value(message, "content")
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return ""
-    parts: list[str] = []
-    for block in content:
-        if _value(block, "type") == "text":
-            parts.append(str(_value(block, "text", "")))
-    return "\n".join(parts)
 
 
 def _model_argument_completions(session: Any, prefix: str) -> list[dict[str, str]] | None:

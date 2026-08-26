@@ -14,7 +14,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import Api, ImageContent, Model, TextContent
-from misaka.config import get_readme_path
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.tools.path_utils import resolve_read_path
 from misaka.core.tools.render_utils import (
@@ -198,22 +197,6 @@ def _to_posix_path(file_path: str) -> str:
     return file_path.replace(os.sep, "/")
 
 
-def _get_pi_docs_classification(absolute_path: str) -> _CompactReadClassification | None:
-    package_root = os.path.dirname(get_readme_path())
-    relative_path = os.path.relpath(os.path.abspath(absolute_path), os.path.abspath(package_root))
-    if (
-        relative_path in {"", ".."}
-        or relative_path.startswith(f"..{os.sep}")
-        or os.path.isabs(relative_path)
-    ):
-        return None
-
-    label = _to_posix_path(relative_path)
-    if label == "README.md" or label.startswith(("docs/", "examples/")):
-        return _CompactReadClassification(kind="docs", label=label)
-    return None
-
-
 def _get_compact_read_classification(args: Mapping[str, Any] | None, cwd: str) -> _CompactReadClassification | None:
     raw_path = _string_arg(_value(args, "file_path", _value(args, "path")))
     if not raw_path:
@@ -223,10 +206,6 @@ def _get_compact_read_classification(args: Mapping[str, Any] | None, cwd: str) -
     file_name = os.path.basename(absolute_path)
     if file_name == "SKILL.md":
         return _CompactReadClassification(kind="skill", label=os.path.basename(os.path.dirname(absolute_path)) or file_name)
-
-    docs_classification = _get_pi_docs_classification(absolute_path)
-    if docs_classification is not None:
-        return docs_classification
 
     if file_name in COMPACT_RESOURCE_FILE_NAMES:
         return _CompactReadClassification(

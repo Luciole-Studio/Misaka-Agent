@@ -8,7 +8,7 @@ import sys
 from misaka.config.product import CFG
 
 ROOT = CFG["profiles_root"]
-ACTIVE = ("running", "review", "ready", "todo", "held", "blocked", "triage")   # anything a Sister still owes
+ACTIVE = ("running", "review", "ready", "todo", "blocked", "triage")   # anything a Sister still owes
 MODEL_CHOICES = [
     "default (use global setting)",
     "claude-opus-5",

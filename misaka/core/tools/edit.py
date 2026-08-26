@@ -63,9 +63,6 @@ class EditToolInput(BaseModel):
     )
 
 
-type LegacyEditToolInput = EditToolInput
-
-
 @dataclass(slots=True)
 class EditToolDetails:
     diff: str
@@ -162,19 +159,7 @@ def prepare_edit_arguments(input_value: Any) -> Any:
     elif _single_edit(edits_value):
         args["edits"] = [edits_value]
 
-    legacy = args
-    old_text = legacy.get("oldText")
-    new_text = legacy.get("newText")
-    if not isinstance(old_text, str) or not isinstance(new_text, str):
-        return args
-
-    edits = list(legacy.get("edits")) if isinstance(legacy.get("edits"), list) else []
-    edits.append({"oldText": old_text, "newText": new_text})
-    rest = dict(legacy)
-    rest.pop("oldText", None)
-    rest.pop("newText", None)
-    rest["edits"] = edits
-    return rest
+    return args
 
 
 def _validate_edit_input(input_value: EditToolInput) -> tuple[str, list[Edit]]:
@@ -618,7 +603,6 @@ def create_edit_tool(cwd: str, options: EditToolOptions | Mapping[str, Any] | No
 
 createEditTool = create_edit_tool
 createEditToolDefinition = create_edit_tool_definition
-prepareEditArguments = prepare_edit_arguments
 
 __all__ = [
     "EditOperations",

@@ -409,11 +409,6 @@ class SettingsManager:
     def _nullish(value: Any, default: Any) -> Any:
         return default if value is None else value
 
-    def getLastChangelogVersion(self) -> str | None:
-        return self.settings.get("lastChangelogVersion")
-
-    def setLastChangelogVersion(self, version: str) -> None:
-        self._set_global_value("lastChangelogVersion", version)
 
     def getSessionDir(self) -> str | None:
         session_dir = self.settings.get("sessionDir")

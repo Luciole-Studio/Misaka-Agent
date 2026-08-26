@@ -54,14 +54,6 @@ _wcwidth = hui.display_width
 
 
 # Random quips shown when someone opens the panel inside a pane (herdr main.rs:13-20, MISAKA edition).
-NESTED_MESSAGES = [
-    "A panel inside a panel would recurse forever. Nice try.",
-    "Nested panel detected; keeping the current network intact.",
-    "This pane is already managed by the MISAKA panel.",
-    "The network declined to open another panel inside this one.",
-    "Recursive panels make terrible roommates.",
-    "One panel is enough for this pane.",
-]
 
 
 def render_tab_bar(tab_names, active_index, view, area, tab_scroll=0, zoomed=()):
@@ -707,7 +699,6 @@ def format_navigator(rows, selected, scroll, rect, *, query="", search_focused=F
 
 
 SECTION_WEIGHTS = (("spaces", 0.9), ("sessions", 1.3), ("agents", 1.1))
-SESSION_MODES = ("here", "all")    # the sessions header toggle: this folder's history, or every folder's
 
 
 STAMP_W = 5              # the right column of a session row; the title keeps the rest
@@ -1067,7 +1058,6 @@ def format_rename_popup(title, value, rect):
     return [(rect.y + y, rect.x, canvas.row(y)) for y in range(height)], hits
 
 
-
 _HELP_ROWS = [
     ("1-9", "Switch to tab N"), ("n / p", "Next / previous tab"),
     ("h j k l", "Focus left / down / up / right"), ("c", "New tab"),
@@ -1122,25 +1112,6 @@ def _clipboard(text):
     except (OSError, subprocess.SubprocessError):
         pass
     _write_all(b"\x1b]52;c;" + base64.b64encode(text.encode()) + b"\x07")
-
-
-def _clamp_row(line, width):
-    """ANSI-aware hard clamp of one row: truncate past ``width``, pad with spaces if short.
-    Last line of defense at the format_sidebar exit, so a missed _cut cannot break the border."""
-    out, used, i = [], 0, 0
-    while i < len(line):
-        m = _ANSI.match(line, i)
-        if m:
-            out.append(m.group())
-            i = m.end()
-            continue
-        w = _wcwidth(line[i])
-        if used + w > width:
-            break
-        out.append(line[i])
-        used += w
-        i += 1
-    return "".join(out) + "\x1b[0m" + " " * (width - used)
 
 
 def format_help_lines(width=46):

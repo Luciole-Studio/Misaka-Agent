@@ -1,9 +1,9 @@
 """Session adapter for creating, resuming, and driving engine sessions."""
 import asyncio
-import weakref
 import json
 import os
 import threading
+import weakref
 
 from misaka.agent.request_budget import install_turn_budget
 

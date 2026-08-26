@@ -11,8 +11,8 @@ import json
 import os
 from pathlib import Path
 
-from misaka.utils import atomic
 from misaka.config import CFG
+from misaka.utils import atomic
 
 
 def home():

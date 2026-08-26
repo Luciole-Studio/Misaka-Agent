@@ -126,7 +126,6 @@ class TaskOutputParams(_StrictModel):
 
 class TaskStopParams(_StrictModel):
     task_id: str | None = Field(default=None, description="The background task ID to stop")
-    shell_id: str | None = Field(default=None, description="Deprecated alias for task_id")
 
 
 def _text_result(text: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -256,7 +255,7 @@ def _register(harn: Any, context: RoleContext, permitted: bool) -> None:
     async def stop_task(_tool_call_id: str, raw: Any, _signal: Any, _on_update: Any, ctx: Any) -> dict[str, Any]:
         params = _coerce(TaskStopParams, raw)
         assert isinstance(params, TaskStopParams)
-        task_id = params.task_id or params.shell_id
+        task_id = params.task_id
         if not task_id:
             raise ValueError("Missing required parameter: task_id")
         data = await manager.stop_task(task_id, context=ctx)

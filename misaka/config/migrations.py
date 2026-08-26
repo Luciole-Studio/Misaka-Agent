@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from misaka.utils import atomic
 from misaka.config import CONFIG_DIR_NAME, get_agent_dir, get_bin_dir
 from misaka.core.keybindings import migrateKeybindingsConfig
 from misaka.core.session_manager import get_default_session_dir
+from misaka.utils import atomic
 
 _GREEN = "\x1b[32m"
 _YELLOW = "\x1b[33m"
