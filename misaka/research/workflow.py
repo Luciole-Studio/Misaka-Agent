@@ -70,20 +70,18 @@ def _scope(node):
 
 def _write(con, run, node, kind, title, name, content, **metadata):
     return runs.write_text(con, run["id"], kind, title, runs.node_prefix(node) + name, content,
-                           branch_id=_bid(node), metadata=metadata or None)
+                           branch_id=_bid(node), metadata=metadata or None,
+                           source_workspace=runs.node_root(run, node))
 
 
 def _artifact_path(con, run, node, kind):
     rows = runs.artifacts(con, run["id"], kind=kind, **_scope(node))
-    return rows[-1]["path"] if rows else None
+    return runs.artifact_path(rows[-1]) if rows else None
 
 
 def _json_artifact(con, run, node, kind):
-    path = _artifact_path(con, run, node, kind)
-    try:
-        return json.loads(Path(path).read_text(encoding="utf-8")) if path else None
-    except (OSError, ValueError):
-        return None
+    rows = runs.artifacts(con, run["id"], kind=kind, **_scope(node))
+    return json.loads(runs.artifact_text(rows[-1])) if rows else None
 
 
 def _refresh_workspace_index(con, run):
@@ -212,7 +210,7 @@ async def _drive_tasks(con, cfg, runner, run_id, *, scope, context=None,
             last_snapshot = snapshot
         active = [row["id"] for row in linked if row["status"] in ACTIVE_TASKS]
         halt = ("stopped" if runs.stop_requested(con, run_id) else
-                "budget" if budget.status(con, cfg.get("token_cap"))["mode"] != "normal" else None)
+                "budget" if budget.status(con, cfg.get("token_cap"))["mode"] == "stop" else None)
         if halt:
             await _stop_active(runner, active, context)
             for row in linked:
@@ -235,7 +233,8 @@ async def _drive_tasks(con, cfg, runner, run_id, *, scope, context=None,
             if any(row["status"] == "todo" and row["id"] in scope for row in runs.tasks(con, run_id)):
                 raise RuntimeError("Research task dependencies cannot advance; the graph may contain a cycle.")
             continue
-        return "done"
+        complete_scope = bool(scope) and {row["id"] for row in linked} == set(scope)
+        return "done" if complete_scope and all(row["status"] == "done" for row in linked) else "failed"
 
 
 def _register_task_artifacts(con, run, task):
@@ -329,13 +328,14 @@ def _close(con, run, node, status):
             run["workspace"], runs.node_branch(node["id"]), node["worktree"], into=into,
             merge=status == "closed", remove=status == "closed",
             message=f"research {run['id']}/{node['id']}: {status}")
-        if outcome == "conflict":
+        expected = "merged" if status == "closed" else "closed"
+        if outcome != expected:
             runs.set_state(con, run["id"],
-                           error=f"node {node['id']}: its line could not be finished (leftover commit or merge failed); "
+                           error=f"node {node['id']}: its line could not be safely finished or removed; "
                                  f"resolve branch {runs.node_branch(node['id'])} by hand")
             runs.set_node(con, node["id"], status="conflict")     # a state, not a string: resume cannot clear it
             return "conflict"
-        elif outcome == "merged":
+        if outcome == "merged":
             runs.relocate_node_tasks(con, node, node["worktree"], into)
     if status != "closed":
         con.execute("UPDATE research_issues SET status='parked' WHERE child_branch_id=?", (node["id"],))
@@ -378,23 +378,28 @@ async def _expand(con, cfg, runner, worker, run, node, *, spawner, context, tool
             runs.set_node(con, nid, status="planning")
 
         elif status in ("planning", "waiting_input"):
-            if runs.tasks(con, run["id"], kind="research", node_id=nid):     # resumed after the plan was applied
-                runs.set_node(con, nid, status="executing")
-                continue
+            plan = _json_artifact(con, run, node, "plan_json")
+            if plan is not None and plan.get("status") == "clarify":
+                plan = None                       # resume the same Last Order session with the user's answer
             context_path = None
-            if node["parent_id"]:
+            if plan is None and node["parent_id"]:
                 issue = con.execute("SELECT * FROM research_issues WHERE child_branch_id=?", (nid,)).fetchone()
                 _aid, context_path, _packet = context_packet.create(
                     con, run, issue=issue, node=node, parent=runs.node(con, node["parent_id"]))
-            await _progress(progress, "planning", f"Last Order is planning {_label(node)}.", run)
-            plan, _raw, session_file = await asyncio.to_thread(
-                planner.plan, con, run, cfg, worker, node, context_path=context_path)
-            _write(con, run, node, "plan_json", "Research plan (JSON)", "plan.json",
-                   json.dumps(plan, ensure_ascii=False, indent=2))
-            _write(con, run, node, "plan", "Research plan", "plan.md", plan["plan_markdown"].rstrip() + "\n")
-            runs.set_node(con, nid, session_file=session_file)
-            if node["parent_id"] is None:
-                runs.set_state(con, run["id"], root_session=session_file)
+            if plan is None:
+                await _progress(progress, "planning", f"Last Order is planning {_label(node)}.", run)
+                plan, _raw, session_file = await asyncio.to_thread(
+                    planner.plan, con, run, cfg, worker, node, context_path=context_path)
+                _write(con, run, node, "plan", "Research plan", "plan.md", plan["plan_markdown"].rstrip() + "\n")
+                runs.set_node(con, nid, session_file=session_file)
+                if node["parent_id"] is None:
+                    runs.set_state(con, run["id"], root_session=session_file)
+                # plan.json is the checkpoint: its Markdown and session lineage
+                # have both landed before this final marker.
+                _write(con, run, node, "plan_json", "Research plan (JSON)", "plan.json",
+                       json.dumps(plan, ensure_ascii=False, indent=2))
+            elif not _artifact_path(con, run, node, "plan"):
+                _write(con, run, node, "plan", "Research plan", "plan.md", plan["plan_markdown"].rstrip() + "\n")
             if plan["status"] == "clarify":
                 runs.set_node(con, nid, status="waiting_input")
                 runs.set_state(con, run["id"], phase="waiting_input", status="waiting_input")
@@ -408,6 +413,8 @@ async def _expand(con, cfg, runner, worker, run, node, *, spawner, context, tool
 
         elif status == "executing":
             outcome = await drive("research")
+            if outcome == "failed":
+                return _close(con, run, node, "failed")
             if outcome != "done":
                 return outcome
             settle_done_tasks(con, run_id=run["id"])
@@ -506,8 +513,14 @@ def _settle_conflicts(con, run):
         parent = runs.node(con, node["parent_id"])
         into = parent["worktree"] if parent and parent["worktree"] else run["workspace"]
         if repo.branch_merged(run["workspace"], runs.node_branch(node["id"]), into):
-            repo.branch_finish(run["workspace"], runs.node_branch(node["id"]), node["worktree"], into=into,
-                               merge=False, remove=True)
+            outcome = repo.branch_finish(
+                run["workspace"], runs.node_branch(node["id"]), node["worktree"], into=into,
+                merge=False, remove=True)
+            if outcome != "closed":
+                runs.set_state(con, run["id"],
+                               error=f"node {node['id']}: its merged worktree could not be safely removed; "
+                                     f"resolve branch {runs.node_branch(node['id'])} by hand")
+                continue
             runs.relocate_node_tasks(con, node, node["worktree"], into)
             runs.set_node(con, node["id"], status="closed")
 
@@ -562,7 +575,7 @@ async def _wait_probes_inner(con, cfg, spawner, run, handles, *, poll_seconds):
     while handles:
         await asyncio.sleep(poll_seconds)
         halted = (runs.stop_requested(con, run["id"])
-                  or budget.status(con, cfg.get("token_cap"))["mode"] != "normal")
+                  or budget.status(con, cfg.get("token_cap"))["mode"] == "stop")
         for iid, handle in list(handles.items()):
             if runs.issue(con, iid)["status"] != "probing":
                 handles.pop(iid)
@@ -573,7 +586,7 @@ async def _wait_probes_inner(con, cfg, spawner, run, handles, *, poll_seconds):
                     raise RuntimeError(f"The fork on issue {iid} ended without a verdict; resume the run to retry it.")
     if runs.stop_requested(con, run["id"]):
         return "stopped"
-    if budget.status(con, cfg.get("token_cap"))["mode"] != "normal":
+    if budget.status(con, cfg.get("token_cap"))["mode"] == "stop":
         return "budget"
     return "done"
 
@@ -674,7 +687,7 @@ async def _wait_level(con, cfg, spawner, run, handles, *, poll_seconds, progress
         if driver_lock:
             runs.heartbeat_driver(con, run["id"], driver_lock)
         halted = (runs.stop_requested(con, run["id"])
-                  or budget.status(con, cfg.get("token_cap"))["mode"] != "normal")
+                  or budget.status(con, cfg.get("token_cap"))["mode"] == "stop")
         for nid, handle in list(handles.items()):
             node = runs.node(con, nid)
             if node["status"] != last.get(nid):
@@ -695,7 +708,7 @@ async def _wait_level(con, cfg, spawner, run, handles, *, poll_seconds, progress
         return {"reason": "waiting_input", "questions": questions, "run": runs.summary(con, run["id"])}
     if runs.stop_requested(con, run["id"]):
         return "stopped"
-    if budget.status(con, cfg.get("token_cap"))["mode"] != "normal":
+    if budget.status(con, cfg.get("token_cap"))["mode"] == "stop":
         return "budget"
     return "done"
 
@@ -722,7 +735,7 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
         _settle_conflicts(con, run)
         if runs.stop_requested(con, run_id):
             return _partial_result(con, run, halts["stopped"])
-        if budget.status(con, cfg.get("token_cap"))["mode"] != "normal":
+        if budget.status(con, cfg.get("token_cap"))["mode"] == "stop":
             return _partial_result(con, run, halts["budget"])
         _refresh_workspace_index(con, run)
         if run["phase"] == "created":
@@ -763,4 +776,3 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
     finally:
         keeper.cancel()
         runs.release_driver(con, run_id, driver_lock)
-

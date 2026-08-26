@@ -12,8 +12,10 @@ import hashlib
 import json
 import os
 import secrets
+import sqlite3
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from misaka.platform import tasks as task_store
@@ -84,10 +86,11 @@ CREATE TABLE IF NOT EXISTS research_artifacts (
   task_id         TEXT,
   kind            TEXT NOT NULL,
   title           TEXT NOT NULL,
-  path            TEXT NOT NULL UNIQUE,
+  path            TEXT NOT NULL,
   sha256          TEXT NOT NULL,
   metadata_json   TEXT NOT NULL DEFAULT '{}',
-  created_at      INTEGER NOT NULL
+  created_at      INTEGER NOT NULL,
+  UNIQUE(run_id,path)
 );
 CREATE TABLE IF NOT EXISTS research_findings (
   id              TEXT PRIMARY KEY,
@@ -127,87 +130,200 @@ NODE_STATES = ("queued", "planning", "waiting_input", "executing", "synthesizing
                "probing", "triaging", "closing", "conflict", *NODE_TERMINAL)
 # closing = triaged, waiting for its children; conflict = its branch did not merge, a human resolves it
 DEFAULT_LIMITS = {"max_depth": 3}
-RESEARCH_SCHEMA_VERSION = 8    # 8: driver lease on runs; unique local ids per node
+RESEARCH_SCHEMA_VERSION = 9    # 9: artifact paths are unique inside a run, not across unrelated runs
 DRIVER_TTL_SECONDS = 300
+RESEARCH_TABLES = (
+    "research_claims", "research_evidence_assessments", "research_findings",
+    "research_artifacts", "research_issues", "research_run_tasks",
+    "research_branches", "research_runs",
+)
+ACTIVE_RESEARCH_TABLES = tuple(
+    table for table in RESEARCH_TABLES if table != "research_evidence_assessments"
+)
 
 
-def init(con):
-    columns = {row[1] for row in con.execute("PRAGMA table_info(research_runs)")}
-    current = con.execute(
-        "SELECT 1 FROM schema_migrations WHERE component='research' AND version=?",
+def _execute_script(con, source):
+    """Execute a static SQL script without ``executescript``'s implicit commit."""
+    statement = ""
+    for line in source.splitlines(keepends=True):
+        statement += line
+        if sqlite3.complete_statement(statement):
+            con.execute(statement)
+            statement = ""
+    if statement.strip():
+        raise RuntimeError("Incomplete research schema statement.")
+
+
+@contextmanager
+def _savepoint(con):
+    """Make migration rollback independent of a caller's surrounding transaction."""
+    name = "research_schema_init"
+    con.execute(f"SAVEPOINT {name}")
+    try:
+        yield
+    except BaseException:
+        con.execute(f"ROLLBACK TO {name}")
+        con.execute(f"RELEASE {name}")
+        raise
+    else:
+        con.execute(f"RELEASE {name}")
+
+
+def _schema_state(con):
+    """One read snapshot of the table, current marker and newest marker."""
+    row = con.execute(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_runs'),"
+        "EXISTS(SELECT 1 FROM schema_migrations WHERE component='research' AND version=?),"
+        "(SELECT MAX(version) FROM schema_migrations WHERE component='research')",
         (RESEARCH_SCHEMA_VERSION,),
     ).fetchone()
-    newest = con.execute("SELECT MAX(version) FROM schema_migrations WHERE component='research'").fetchone()[0]
+    return bool(row[0]), bool(row[1]), row[2]
+
+
+def _reject_newer(newest):
     if newest is not None and int(newest) > RESEARCH_SCHEMA_VERSION:
         raise RuntimeError(f"This board was written by a newer MISAKA (research schema v{newest}; this build knows "
                            f"v{RESEARCH_SCHEMA_VERSION}). Upgrade MISAKA rather than downgrading the data.")
-    if columns and current:
-        return                               # current schema: nothing to migrate, nothing to replay
-    if columns and not current:
-        # No in-place migration from older schemas. The prose is in files, but the workflow state
-        # (phases, waves, driver leases, task links) lives only here, so the tables cannot be rebuilt
-        # from the files: the old ones are renamed, not dropped, and carried forward column by column.
-        suffix = f"_bak_{time.strftime('%Y%m%d%H%M%S')}"
-        renamed = []
-        for table in (
-            "research_claims", "research_evidence_assessments", "research_findings",
-            "research_artifacts", "research_issues", "research_run_tasks",
-            "research_branches", "research_runs",
-        ):
-            if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
-                continue
-            for index in con.execute(f'PRAGMA index_list("{table}")').fetchall():
-                if index[3] == "c":   # named indexes stay global; free the names for the new tables
-                    con.execute(f'DROP INDEX IF EXISTS "{index[1]}"')
-            con.execute(f'ALTER TABLE "{table}" RENAME TO "{table}{suffix}"')
-            renamed.append((table, f"{table}{suffix}"))
-    else:
-        renamed = []
-    con.executescript(SCHEMA)
-    con.executescript(INDEXES)
-    if renamed:
-        copied = _carry_forward(con, renamed)
+
+
+def _matches_current_schema(con):
+    """True when every active table has the current columns and UNIQUE constraints."""
+    expected = sqlite3.connect(":memory:")
+    try:
+        _execute_script(expected, SCHEMA)
+
+        def signature(db, table):
+            columns = tuple(
+                (row[1], row[2].upper(), int(row[3]), row[4], int(row[5]))
+                for row in db.execute(f'PRAGMA table_info("{table}")')
+            )
+            unique = sorted(
+                tuple(item[2] for item in db.execute(f'PRAGMA index_info("{index[1]}")'))
+                for index in db.execute(f'PRAGMA index_list("{table}")')
+                if index[2] and index[3] == "u"
+            )
+            return columns, unique
+
+        return all(signature(con, table) == signature(expected, table)
+                   for table in ACTIVE_RESEARCH_TABLES)
+    finally:
+        expected.close()
+
+
+def _reject_interrupted_migration(con):
+    """Do not hide tables an older migration renamed before it could rebuild them."""
+    backups = []
+    for table in ACTIVE_RESEARCH_TABLES:
+        active = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        backup = con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name GLOB ? LIMIT 1",
+            (f"{table}_bak_*",),
+        ).fetchone()
+        if backup:
+            backups.append(backup[0])
+        if not active and backup:
+            raise RuntimeError(
+                f"research: interrupted schema migration left {table} in {backup[0]}; "
+                "inspect or restore that backup before retrying"
+            )
+    if backups and _matches_current_schema(con):
+        raise RuntimeError(
+            "research: interrupted schema migration left current active tables beside "
+            f"{backups[0]}; inspect the backup before retrying"
+        )
+
+
+def init(con):
+    has_runs, current, newest = _schema_state(con)
+    _reject_newer(newest)
+    if has_runs and current:
+        return                               # the normal read path takes no SQLite write lock
+    if current:
+        raise RuntimeError("The research schema marker exists but the research_runs table is missing.")
+    _reject_interrupted_migration(con)
+
+    upgraded = None
+    # DDL is transactional in SQLite, but ``executescript`` commits implicitly. Keep renames, new
+    # tables, row copies, indexes, backfill and the version marker under one explicit transaction.
+    with task_store.write_txn(con), _savepoint(con):
+        # Another process may have migrated while this one waited for BEGIN IMMEDIATE.
+        has_runs, current, newest = _schema_state(con)
+        _reject_newer(newest)
+        if has_runs and current:
+            return                           # current schema: nothing to migrate, nothing to replay
+        if current:
+            raise RuntimeError("The research schema marker exists but the research_runs table is missing.")
+        _reject_interrupted_migration(con)
+        if has_runs:
+            # No in-place migration from older schemas. The prose is in files, but the workflow state
+            # (phases, waves, driver leases, task links) lives only here, so the tables cannot be rebuilt
+            # from the files: the old ones are renamed, not dropped, and carried forward column by column.
+            suffix = f"_bak_{time.strftime('%Y%m%d%H%M%S')}"
+            renamed = []
+            for table in RESEARCH_TABLES:
+                if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                    continue
+                for index in con.execute(f'PRAGMA index_list("{table}")').fetchall():
+                    if index[3] == "c":   # named indexes stay global; free the names for the new tables
+                        con.execute(f'DROP INDEX IF EXISTS "{index[1]}"')
+                con.execute(f'ALTER TABLE "{table}" RENAME TO "{table}{suffix}"')
+                renamed.append((table, f"{table}{suffix}"))
+        else:
+            renamed = []
+        _execute_script(con, SCHEMA)
+        _execute_script(con, INDEXES)
+        if renamed:
+            upgraded = (suffix, _carry_forward(con, renamed))
+        con.execute("DROP TRIGGER IF EXISTS research_terminal_notification")  # obsolete and no longer consumed
+        _backfill_dependencies(con)
+        con.execute(
+            "INSERT INTO schema_migrations(component,version,applied_at) VALUES(?,?,?)",
+            ("research", RESEARCH_SCHEMA_VERSION, int(time.time())),
+        )
+    if upgraded:
+        suffix, copied = upgraded
         print(f"research: schema upgraded to v{RESEARCH_SCHEMA_VERSION}; previous tables kept as *{suffix}, "
               f"rows carried forward: {copied}", file=sys.stderr)
-    con.execute("DROP TRIGGER IF EXISTS research_terminal_notification")   # older boards: nothing consumes it any more
-    _backfill_dependencies(con)
-    con.execute(
-        "INSERT OR IGNORE INTO schema_migrations(component,version,applied_at) VALUES(?,?,?)",
-        ("research", RESEARCH_SCHEMA_VERSION, int(time.time())),
-    )
 
 
 def _carry_forward(con, renamed):
-    """Copy the previous schema's rows into the new tables over the columns both share. INSERT OR
-    IGNORE keeps rows that the new uniqueness rules reject from aborting the copy; a table whose
-    new NOT NULL columns cannot be filled is reported and left in its backup."""
+    """Copy every old row over the columns both schemas share.
+
+    The surrounding schema transaction is deliberately aborted if a row violates the new schema:
+    silently keeping only some rows would turn the version marker into a lie.
+    """
     copied = {}
     for table, backup in renamed:
         new_cols = [row[1] for row in con.execute(f'PRAGMA table_info("{table}")')]
         old_cols = {row[1] for row in con.execute(f'PRAGMA table_info("{backup}")')}
         shared = [col for col in new_cols if col in old_cols]
+        expected = con.execute(f'SELECT COUNT(*) FROM "{backup}"').fetchone()[0]
         if not shared:
+            if new_cols and expected:
+                raise RuntimeError(
+                    f"research: {table}: no columns can carry {expected} old row(s) forward"
+                )
             continue
         cols = ",".join(f'"{col}"' for col in shared)
-        if table == "research_run_tasks" and "local_id" in shared:
+        selected = [f'"{col}"' for col in shared]
+        if table == "research_run_tasks" and {"local_id", "task_id"} <= old_cols:
             # Before v8 a node's probes could reuse local ids; the new unique index would drop the
-            # later ones. Suffix the duplicates in the backup first so every link survives.
-            duplicates = con.execute(
-                f'SELECT rowid FROM "{backup}" WHERE local_id IS NOT NULL AND rowid NOT IN '
-                f'(SELECT MIN(rowid) FROM "{backup}" WHERE local_id IS NOT NULL GROUP BY run_id, branch_id, local_id)'
-            ).fetchall()
-            for (rowid,) in duplicates:
-                con.execute(f'UPDATE "{backup}" SET local_id = local_id || \'#\' || task_id WHERE rowid=?', (rowid,))
-        try:
-            copied[table] = con.execute(
-                f'INSERT OR IGNORE INTO "{table}" ({cols}) SELECT {cols} FROM "{backup}"').rowcount
-        except Exception as error:  # noqa: BLE001 - one table must not block the others
-            print(f"research: could not carry {table} forward from {backup}: {error}", file=sys.stderr)
-            continue
-        expected = con.execute(f'SELECT COUNT(*) FROM "{backup}"').fetchone()[0]
+            # later ones. Transform only the copy: a backup must remain an exact recovery source.
+            selected[shared.index("local_id")] = (
+                'CASE WHEN "local_id" IS NOT NULL AND rowid NOT IN '
+                f'(SELECT MIN(rowid) FROM "{backup}" WHERE "local_id" IS NOT NULL '
+                'GROUP BY "run_id","branch_id","local_id") '
+                'THEN "local_id" || \'#\' || "task_id" ELSE "local_id" END'
+            )
+        source = ",".join(selected)
+        copied[table] = con.execute(
+            f'INSERT INTO "{table}" ({cols}) SELECT {source} FROM "{backup}"').rowcount
         if copied[table] != expected:
-            print(f"research: {table}: {expected - copied[table]} row(s) could not be carried forward; "
-                  f"they remain in {backup}", file=sys.stderr)
+            raise RuntimeError(
+                f"research: {table}: copied {copied[table]} of {expected} row(s) from {backup}"
+            )
     return copied
 
 
@@ -251,6 +367,28 @@ def relocate_node_tasks(con, node, old_root, new_root):
         if (new_ws, new_out) != (workspace, output_dir):
             con.execute("UPDATE tasks SET workspace=?, output_dir=? WHERE id=?", (new_ws, new_out, row["id"]))
             moved += 1
+    # Generated and Sister artifacts record the file on the node's current line in
+    # metadata while ``path`` remains their eventual project path.  When a worktree
+    # is merged and removed, move that source pointer with it or descendants cannot
+    # read the evidence until every ancestor has reached the main line.
+    for artifact in con.execute(
+        "SELECT id,metadata_json FROM research_artifacts WHERE run_id=?", (node["run_id"],)
+    ):
+        try:
+            metadata = json.loads(artifact["metadata_json"] or "{}")
+        except ValueError:
+            continue
+        source = metadata.get("source_workspace")
+        if not source:
+            continue
+        source = os.path.realpath(source)
+        if source != old_root and not source.startswith(old_root + os.sep):
+            continue
+        metadata["source_workspace"] = new_root + source[len(old_root):]
+        con.execute(
+            "UPDATE research_artifacts SET metadata_json=? WHERE id=?",
+            (json.dumps(metadata, ensure_ascii=False), artifact["id"]),
+        )
     return moved
 
 
@@ -510,13 +648,23 @@ def link_task(con, run_id, task_id, *, kind, node, preflight_artifact=None,
     output_dir = Path(os.path.realpath(node_root(run, node)), "research", run_id, "tasks", task_id, "work")
     output_dir.mkdir(parents=True, exist_ok=True)
     con.execute("UPDATE tasks SET output_dir=? WHERE id=?", (str(output_dir), task_id))
-    for dependency in dependencies:
-        parent = con.execute(
-            "SELECT task_id FROM research_run_tasks WHERE run_id=? AND branch_id=? AND local_id=?",
-            (run_id, node["id"], dependency),
-        ).fetchone()
-        if parent:
-            task_store.link_tasks(con, parent["task_id"], task_id)
+    # ``cards.create(after_row=...)`` calls this before the child card file exists;
+    # the submitter projects the dependencies after creation.  Direct callers link
+    # already-created cards here as before.
+    task = task_store.get(con, task_id)
+    if task is not None:
+        from misaka.platform import cards as card_files
+        card_exists = os.path.isfile(card_files.card_path(task["workspace"], task_id))
+    else:
+        card_exists = False
+    if card_exists:
+        for dependency in dependencies:
+            parent = con.execute(
+                "SELECT task_id FROM research_run_tasks WHERE run_id=? AND branch_id=? AND local_id=?",
+                (run_id, node["id"], dependency),
+            ).fetchone()
+            if parent:
+                task_store.link_tasks(con, parent["task_id"], task_id)
 
 
 def tasks(con, run_id, *, kind=None, node_id=None, issue_id=None):
@@ -667,7 +815,7 @@ def set_issue(con, issue_id, status, *, child_branch_id=None, reason=None):
 # --- artifacts -------------------------------------------------------------------------
 
 def write_text(con, run_id, kind, title, relative_path, content, *,
-               branch_id=None, task_id=None, metadata=None):
+               branch_id=None, task_id=None, metadata=None, source_workspace=None):
     run = get(con, run_id)
     if not run:
         raise ValueError(f"Research run not found: {run_id}")
@@ -677,33 +825,46 @@ def write_text(con, run_id, kind, title, relative_path, content, *,
         path.relative_to(root)
     except ValueError as error:
         raise ValueError("Research artifact path is outside the run directory.") from error
-    _atomic_write(path, str(content))
-    sha = hashlib.sha256(path.read_bytes()).hexdigest()
-    old = con.execute("SELECT id FROM research_artifacts WHERE path=?", (str(path),)).fetchone()
+    source_root = Path(source_workspace or run["workspace"], "research", run_id).resolve()
+    source_path = (source_root / relative_path).resolve()
+    try:
+        source_path.relative_to(source_root)
+    except ValueError as error:
+        raise ValueError("Research artifact source path is outside the run directory.") from error
+    _atomic_write(source_path, str(content))
+    sha = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    metadata = dict(metadata or {})
+    if source_path != path:
+        metadata["source_workspace"] = str(source_path)
+    old = con.execute(
+        "SELECT id FROM research_artifacts WHERE run_id=? AND path=?", (run_id, str(path))
+    ).fetchone()
     if old:
         con.execute(
             "UPDATE research_artifacts SET sha256=?,title=?,kind=?,metadata_json=?,created_at=? "
             "WHERE id=?",
-            (sha, str(title), str(kind), json.dumps(metadata or {}, ensure_ascii=False),
+            (sha, str(title), str(kind), json.dumps(metadata, ensure_ascii=False),
              int(time.time()), old["id"]),
         )
-        return old["id"], str(path)
+        return old["id"], str(source_path)
     aid = "a_" + secrets.token_hex(5)
     con.execute(
         "INSERT INTO research_artifacts "
         "(id,run_id,branch_id,task_id,kind,title,path,sha256,metadata_json,created_at) "
         "VALUES (?,?,?,?,?,?,?,?,?,?)",
         (aid, run_id, branch_id, task_id, str(kind), str(title), str(path), sha,
-         json.dumps(metadata or {}, ensure_ascii=False), int(time.time())),
+         json.dumps(metadata, ensure_ascii=False), int(time.time())),
     )
-    return aid, str(path)
+    return aid, str(source_path)
 
 
 def register_file(con, run_id, kind, title, path, *, sha256, branch_id=None, task_id=None, metadata=None):
     """Register a file that already exists (a Sister's artifact on its card's line) without copying it.
     ``path`` is where it rests once merged; ``metadata["source_workspace"]`` is where it is now."""
     path = os.path.normpath(path)
-    old = con.execute("SELECT id FROM research_artifacts WHERE path=?", (path,)).fetchone()
+    old = con.execute(
+        "SELECT id FROM research_artifacts WHERE run_id=? AND path=?", (run_id, path)
+    ).fetchone()
     if old:
         con.execute(
             "UPDATE research_artifacts SET sha256=?,title=?,kind=?,task_id=?,metadata_json=?,created_at=? "
@@ -738,6 +899,15 @@ def artifact_text(row):
     raise FileNotFoundError(row["path"])
 
 
+def artifact_path(row):
+    """The existing location of an artifact, or its eventual project path."""
+    try:
+        source = json.loads(row["metadata_json"] or "{}").get("source_workspace")
+    except ValueError:
+        source = None
+    return next((path for path in (source, row["path"]) if path and os.path.isfile(path)), row["path"])
+
+
 def artifacts(con, run_id, *, branch_id=None, kind=None, task_id=None, root_only=False):
     q, args = "SELECT * FROM research_artifacts WHERE run_id=?", [run_id]
     if branch_id is not None:
@@ -763,7 +933,7 @@ def read_artifact(con, artifact_id):
     if not row:
         return None
     try:
-        return Path(row["path"]).read_text(encoding="utf-8")
+        return artifact_text(row)
     except OSError:
         return None
 

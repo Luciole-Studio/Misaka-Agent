@@ -83,22 +83,25 @@ def branch_start(workspace, name, worktree, base=None):
 
 def branch_finish(workspace, name, worktree, *, into=None, merge=True, message="", remove=True):
     """Close a branch: leftover work is committed, then -- when ``merge`` -- the branch is merged
-    --no-ff into the line checked out at ``into`` (default: the workspace), and only then is the
-    worktree removed. A conflict -- or leftover work that cannot be committed -- leaves both the
-    branch and its worktree in place for a human; nothing uncommitted is ever removed. The branch
-    itself always stays as the record. Returns "merged" / "conflict" / "closed" / None."""
+    --no-ff into the line checked out at ``into`` (default: the workspace), and only then is a
+    completely clean worktree removed without force. A conflict, leftover ignored/untracked work,
+    or a failed removal leaves the worktree in place for a human; nothing unknown is discarded.
+    The branch itself always stays as the record. Returns "merged" / "conflict" / "closed" / None."""
     if not enabled(workspace):
         return None
     live = os.path.exists(os.path.join(worktree, ".git"))
     if live and not commit(worktree, ["."], f"{name}: leftover changes"):
         return "conflict"                              # uncommitted work stays where it is
+    if live:
+        status = _git(worktree, "status", "--porcelain=v1", "--untracked-files=all", "--ignored")
+        if status.returncode != 0 or status.stdout.strip():
+            return "conflict"                          # ignored/untracked work is not part of the commit
     if merge:
         merged = _git(into or workspace, "merge", "--no-ff", "-q", "-m", message or f"{name}: merged", name)
         if merged.returncode != 0:
             _git(into or workspace, "merge", "--abort")
             return "conflict"                          # the branch and its worktree stay for a human
-    if live and remove:
-        _git(workspace, "worktree", "remove", "--force", worktree)
+    if live and remove and _git(workspace, "worktree", "remove", worktree).returncode != 0:
+        return "conflict"                              # merged or closed, but the worktree was not safely removed
     _git(workspace, "worktree", "prune")
     return "merged" if merge else "closed"
-

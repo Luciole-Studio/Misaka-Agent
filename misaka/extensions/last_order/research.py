@@ -5,7 +5,7 @@ import asyncio
 import os
 import shlex
 
-from misaka.config import CFG
+from misaka.config import CFG, current_config
 from misaka.platform import budget
 from misaka.platform import tasks as task_store
 from misaka.research import node as research_node
@@ -36,7 +36,7 @@ def _con():
 
 def _cfg():
     """Small seam for tests and alternate frontends; production returns the live config."""
-    return CFG
+    return current_config()
 
 
 def parse_command(raw):

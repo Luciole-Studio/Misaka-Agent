@@ -108,6 +108,7 @@ def create(con, run, *, issue, node, parent=None):
         con, run["id"], "context", f"Node {node['id']} context",
         f"branches/{node['id']}/context.md", render(packet), branch_id=node["id"],
         metadata={"issue_id": issue["id"], "parent": node["parent_id"]},
+        source_workspace=runs.node_root(run, node),
     )
     runs.set_node(con, node["id"], context_artifact=aid)
     return aid, path, packet

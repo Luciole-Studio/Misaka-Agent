@@ -14,7 +14,7 @@ import os
 import subprocess
 import time
 
-from misaka.config import CFG
+from misaka.config import CFG, current_config
 from misaka.platform import tasks as task_store
 from misaka.research import runs, workflow
 
@@ -133,7 +133,7 @@ def _run(label, routine):
     from misaka.network import worker
     con = task_store.connect(os.path.expanduser(CFG["db"]))
     runs.init(con)
-    cfg = dict(CFG)
+    cfg = current_config()
     report = Reporter()
     runner = PaneRunner(con, cfg, label, report.pane) if report.pane else HeadlessRunner(con, cfg)
 
