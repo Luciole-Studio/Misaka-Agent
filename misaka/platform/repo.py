@@ -8,12 +8,20 @@ no-op, so nothing below requires git.
 """
 import os
 import subprocess
+import time
 
 _IDENTITY = ["-c", "user.name=misaka", "-c", "user.email=misaka@local"]
 
 
 def _git(cwd, *args):
-    return subprocess.run(["git", *_IDENTITY, *args], cwd=cwd, capture_output=True, text=True, check=False)
+    """Run git; an index.lock held by another process is retried briefly (node processes and the
+    driver commit on the same project line), a stale one still fails and the caller stops."""
+    for attempt in range(5):
+        done = subprocess.run(["git", *_IDENTITY, *args], cwd=cwd, capture_output=True, text=True, check=False)
+        if done.returncode == 0 or "index.lock" not in done.stderr or attempt == 4:
+            return done
+        time.sleep(0.2 * (attempt + 1))
+    return done
 
 
 def enabled(workspace):
@@ -35,9 +43,13 @@ def commit(workspace, paths, message):
              or _git(workspace, "ls-files", "--", p).stdout.strip()]
     if not paths:
         return False
-    _git(workspace, "add", "-A", "--", *paths)
-    if _git(workspace, "diff", "--cached", "--quiet", "--", *paths).returncode == 0:
+    if _git(workspace, "add", "-A", "--", *paths).returncode != 0:
+        return False                                   # nothing staged: an empty diff below would lie
+    staged = _git(workspace, "diff", "--cached", "--quiet", "--", *paths).returncode
+    if staged == 0:
         return True                                    # already committed: nothing to do is not a failure
+    if staged != 1:
+        return False                                   # git itself failed (lock, corrupt index)
     return _git(workspace, "commit", "-q", "-m", message, "--", *paths).returncode == 0
 
 
@@ -72,13 +84,14 @@ def branch_start(workspace, name, worktree, base=None):
 def branch_finish(workspace, name, worktree, *, into=None, merge=True, message="", remove=True):
     """Close a branch: leftover work is committed, then -- when ``merge`` -- the branch is merged
     --no-ff into the line checked out at ``into`` (default: the workspace), and only then is the
-    worktree removed. A conflict leaves both the branch and its worktree in place for a human.
-    The branch itself always stays as the record. Returns "merged" / "conflict" / "closed" / None."""
+    worktree removed. A conflict -- or leftover work that cannot be committed -- leaves both the
+    branch and its worktree in place for a human; nothing uncommitted is ever removed. The branch
+    itself always stays as the record. Returns "merged" / "conflict" / "closed" / None."""
     if not enabled(workspace):
         return None
     live = os.path.exists(os.path.join(worktree, ".git"))
-    if live:
-        commit(worktree, ["."], f"{name}: leftover changes")
+    if live and not commit(worktree, ["."], f"{name}: leftover changes"):
+        return "conflict"                              # uncommitted work stays where it is
     if merge:
         merged = _git(into or workspace, "merge", "--no-ff", "-q", "-m", message or f"{name}: merged", name)
         if merged.returncode != 0:

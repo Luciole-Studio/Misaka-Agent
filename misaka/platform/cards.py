@@ -243,8 +243,10 @@ def remove(con, workspace, task_id):
         except OSError as error:
             return False, f"Card {task_id} was deleted but its attachments remain ({error}): {attachments}"
     from misaka.platform import repo
-    repo.commit(workspace, [os.path.join("cards", f"{task_id}.md"), os.path.join("cards", str(task_id))],
-                f"card {task_id}: delete")
+    if repo.enabled(workspace) and not repo.commit(
+            workspace, [os.path.join("cards", f"{task_id}.md"), os.path.join("cards", str(task_id))],
+            f"card {task_id}: delete"):
+        return False, f"Card {task_id} was deleted but the deletion could not be committed to git; commit it by hand."
     return ok, msg
 
 

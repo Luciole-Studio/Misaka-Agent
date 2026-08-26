@@ -330,7 +330,8 @@ def _close(con, run, node, status):
             message=f"research {run['id']}/{node['id']}: {status}")
         if outcome == "conflict":
             runs.set_state(con, run["id"],
-                           error=f"node {node['id']}: merge conflict; resolve branch {runs.node_branch(node['id'])} by hand")
+                           error=f"node {node['id']}: its line could not be finished (leftover commit or merge failed); "
+                                 f"resolve branch {runs.node_branch(node['id'])} by hand")
             runs.set_node(con, node["id"], status="conflict")     # a state, not a string: resume cannot clear it
             return "conflict"
         elif outcome == "merged":
