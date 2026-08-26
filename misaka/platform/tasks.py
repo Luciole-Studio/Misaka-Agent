@@ -678,22 +678,24 @@ def link_tasks(con, parent_id, child_id) -> bool:
         )
         add_event(con, child_id, "dependency_linked", {"parent_id": parent_id})
         promote_task(con, child_id)
-    _mirror_status(con, child_id)
+        _mirror_status(con, child_id)
     return True
 
 
-def _mirror_status(con, task_id):
-    """Reflect the index's at-rest status onto the card file (best effort). Every transition to
-    an at-rest status calls this, so a rebuilt index sees the card where it really is; ``running``
-    is live state owned by a claim and is deliberately never written to the file."""
+def _mirror_status(con, task_id, *, commit=False):
+    """Write the index's at-rest status onto the card file. The file is the truth: this runs inside
+    the transition's transaction and a failure (OSError) rolls the transition back, so the index
+    never claims a state the card does not have. With ``commit`` the transition is also recorded
+    in git (terminal, blocked and review states). ``running`` is live state owned by a claim and is
+    deliberately never written to the file."""
     row = get(con, task_id)
     if row is None or not row["workspace"]:
         return
-    try:
-        from misaka.platform import cards
-        cards.set_fields(row["workspace"], task_id, status=row["status"])
-    except OSError:
-        pass
+    from misaka.platform import cards, repo
+    cards.set_fields(row["workspace"], task_id, status=row["status"])
+    if commit and repo.enabled(row["workspace"]) and not repo.commit(
+            row["workspace"], [os.path.join("cards", f"{task_id}.md")], f"card {task_id}: {row['status']}"):
+        raise OSError(f"card {task_id}: status {row['status']} could not be committed to git")
 
 
 @_serialized
@@ -745,15 +747,16 @@ def promote_task(con, task_id) -> bool:
     state, parents = dependency_state(con, task_id)
     if state != "ready":
         return False
-    cur = con.execute(
-        "UPDATE tasks SET status='ready',block_kind=NULL,block_reason=NULL,blocked_at=NULL "
-        "WHERE id=? AND status='todo'",
-        (task_id,),
-    )
-    if cur.rowcount == 1:
-        add_event(con, task_id, "dependencies_satisfied", {"parents": parents})
-        _mirror_status(con, task_id)
-    return cur.rowcount == 1
+    with _write_txn(con):
+        cur = con.execute(
+            "UPDATE tasks SET status='ready',block_kind=NULL,block_reason=NULL,blocked_at=NULL "
+            "WHERE id=? AND status='todo'",
+            (task_id,),
+        )
+        if cur.rowcount == 1:
+            add_event(con, task_id, "dependencies_satisfied", {"parents": parents})
+            _mirror_status(con, task_id)
+        return cur.rowcount == 1
 
 
 @_serialized
@@ -789,16 +792,17 @@ def _invalidate_descendants(con, task_id):
     ).fetchall()
     if active:
         raise RuntimeError("Active child tasks must stop before this task can resume: " + ','.join(row[0] for row in active))
-    changed = [row[0] for row in con.execute(
-        f"UPDATE tasks SET status='todo',completed_at=NULL,claim_lock=NULL,claim_expires=NULL,"
-        "worker_pid=NULL,worker_identity=NULL,review_lock=NULL,review_expires=NULL,"
-        "review_pid=NULL,review_identity=NULL WHERE id IN (" + marks + ") "
-        "AND status<>'todo' RETURNING id",
-        descendants,
-    ).fetchall()]
-    for child_id in changed:
-        add_event(con, child_id, "dependency_invalidated", {"reopened_ancestor": task_id})
-        _mirror_status(con, child_id)
+    with _write_txn(con):
+        changed = [row[0] for row in con.execute(
+            f"UPDATE tasks SET status='todo',completed_at=NULL,claim_lock=NULL,claim_expires=NULL,"
+            "worker_pid=NULL,worker_identity=NULL,review_lock=NULL,review_expires=NULL,"
+            "review_pid=NULL,review_identity=NULL WHERE id IN (" + marks + ") "
+            "AND status<>'todo' RETURNING id",
+            descendants,
+        ).fetchall()]
+        for child_id in changed:
+            add_event(con, child_id, "dependency_invalidated", {"reopened_ancestor": task_id})
+            _mirror_status(con, child_id)
     return changed
 
 
@@ -938,7 +942,7 @@ def _terminal_transition(
                     (task_id,),
                 )
                 promote_dependents(con, task_id)
-            _mirror_status(con, task_id)
+            _mirror_status(con, task_id, commit=True)
         return cur.rowcount == 1
 
 
@@ -1041,7 +1045,7 @@ def mark_stopped(con, task_id, generation=None, claim_lock=None):
         )
         if cur.rowcount == 1:
             _finish_current_run(con, task_id, "stopped")
-            _mirror_status(con, task_id)
+            _mirror_status(con, task_id, commit=True)
         return cur.rowcount == 1
 
 
@@ -1075,7 +1079,7 @@ def submit_task(con, task_id, generation=None, claim_lock=None):
         )
         if cur.rowcount == 1:
             _settle_done(con, task_id)
-            _mirror_status(con, task_id)
+            _mirror_status(con, task_id, commit=True)
         return cur.rowcount == 1
 
 
@@ -1162,7 +1166,7 @@ def approve_review(con, task_id, lock, *, generation=None, summary=None) -> bool
             add_event(con, task_id, "review_approved",
                       {"reviewer": reviewer, "summary": summary or ""},
                       generation=generation)
-            _mirror_status(con, task_id)
+            _mirror_status(con, task_id, commit=True)
         return cur.rowcount == 1
 
 
@@ -1202,7 +1206,7 @@ def request_review_changes(
                                      f"[review] {feedback[:2000]}")
                 except OSError:
                     pass                       # a stray index row without a file: the feedback column still has it
-            _mirror_status(con, task_id)
+            _mirror_status(con, task_id, commit=True)
         return cur.rowcount == 1
 
 
@@ -1308,7 +1312,7 @@ def reclaim_abandoned(
                     add_event(con, task_id, "crash_gave_up",
                               {"reclaimed_times": crashes, "cap": RECLAIM_CAP},
                               generation=generation)
-                    _mirror_status(con, task_id)
+                    _mirror_status(con, task_id, commit=True)
                 return False
     reviewer = con.execute("SELECT reviewer FROM tasks WHERE id=?", (task_id,)).fetchone()
     status = ("review" if reviewer and reviewer["reviewer"] else "done") if submitted else "ready"
@@ -1324,7 +1328,7 @@ def reclaim_abandoned(
                 _settle_done(con, task_id)
             else:
                 _finish_current_run(con, task_id, "reclaimed", failure_kind="stale_reclaim")
-            _mirror_status(con, task_id)
+            _mirror_status(con, task_id, commit=True)
         return cur.rowcount == 1
 
 
@@ -1481,7 +1485,7 @@ def block_task(
              "recurrence": recurrence},
             generation=generation,
         )
-        _mirror_status(con, task_id)
+        _mirror_status(con, task_id, commit=True)
         return status
 
 
@@ -1491,17 +1495,18 @@ def unblock_task(con, task_id) -> bool:
     if row is None or row["status"] not in {"blocked", "triage"}:
         return False
     target = "todo" if parent_ids(con, task_id) else "ready"
-    cur = con.execute(
-        "UPDATE tasks SET status=?,block_kind=NULL,block_reason=NULL,blocked_at=NULL "
-        "WHERE id=? AND status IN ('blocked','triage')",
-        (target, task_id),
-    )
-    if cur.rowcount == 1:
-        add_event(con, task_id, "unblocked", {"target": target})
-        if target == "todo":
-            promote_task(con, task_id)
-        _mirror_status(con, task_id)
-    return cur.rowcount == 1
+    with _write_txn(con):
+        cur = con.execute(
+            "UPDATE tasks SET status=?,block_kind=NULL,block_reason=NULL,blocked_at=NULL "
+            "WHERE id=? AND status IN ('blocked','triage')",
+            (target, task_id),
+        )
+        if cur.rowcount == 1:
+            add_event(con, task_id, "unblocked", {"target": target})
+            if target == "todo":
+                promote_task(con, task_id)
+            _mirror_status(con, task_id)
+        return cur.rowcount == 1
 
 
 @_serialized
@@ -1551,7 +1556,7 @@ def block_abandoned(
              "recurrence": recurrence, "reconciled": True},
             generation=generation,
         )
-        _mirror_status(con, task_id)
+        _mirror_status(con, task_id, commit=True)
         return status
 
 
