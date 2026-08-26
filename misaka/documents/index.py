@@ -56,7 +56,8 @@ def _pdf_pages(p):
 
 
 def _text_pages(p, chars=3000):
-    s = open(p, encoding="utf-8", errors="replace").read()
+    with open(p, encoding="utf-8", errors="replace") as f:
+        s = f.read()
     if not s.strip():
         return []
     out, buf, size = [], [], 0
@@ -98,7 +99,8 @@ def _page_path(ddir, page):
 def _read_meta_at(ddir):
     """Read metadata from a known document directory."""
     try:
-        return json.load(open(os.path.join(ddir, "meta.json"), encoding="utf-8"))
+        with open(os.path.join(ddir, "meta.json"), encoding="utf-8") as f:
+            return json.load(f)
     except (OSError, ValueError):
         return None
 
@@ -116,7 +118,8 @@ def _tree(doc_id):
     if not os.path.exists(tp):
         return None
     try:
-        return json.load(open(tp, encoding="utf-8"))
+        with open(tp, encoding="utf-8") as f:
+            return json.load(f)
     except (OSError, ValueError):
         return None
 
@@ -256,7 +259,8 @@ def _iter_pages(doc_id, lo=None, hi=None):
         pg = int(m.group(1))
         if (lo is not None and pg < lo) or (hi is not None and pg > hi):
             continue
-        yield pg, open(os.path.join(pdir, fn), encoding="utf-8", errors="replace").read()
+        with open(os.path.join(pdir, fn), encoding="utf-8", errors="replace") as f:
+            yield pg, f.read()
 
 
 def read_page(doc_id, page):
@@ -264,7 +268,10 @@ def read_page(doc_id, page):
     if not ddir:
         return None
     fp = _page_path(ddir, page)
-    return open(fp, encoding="utf-8", errors="replace").read() if os.path.exists(fp) else None
+    if not os.path.exists(fp):
+        return None
+    with open(fp, encoding="utf-8", errors="replace") as f:
+        return f.read()
 
 
 def page_heads(doc_id, limit=200):

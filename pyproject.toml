@@ -6,6 +6,7 @@
 name = "misaka"
 version = "0.6.0"
 description = "MISAKA: a multi-agent research system for the humanities and social sciences, built on the pi/harn Python engine"
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     # engine/ai (formerly harn_ai)
@@ -64,6 +65,9 @@ misaka = "misaka.__main__:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=1", "ruff>=0.5"]
 
 [tool.hatch.build.targets.wheel]
 # Every importable package at the repo root (exposed by the editable install; replaces a hand-written .pth)
