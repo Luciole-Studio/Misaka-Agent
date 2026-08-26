@@ -209,16 +209,6 @@ class SettingsManager:
         if "transport" not in migrated and isinstance(migrated.get("websockets"), bool):
             migrated["transport"] = "websocket" if migrated.pop("websockets") else "sse"
 
-        skills = migrated.get("skills")
-        if isinstance(skills, dict):
-            if skills.get("enableSkillCommands") is not None and migrated.get("enableSkillCommands") is None:
-                migrated["enableSkillCommands"] = skills["enableSkillCommands"]
-            custom_directories = skills.get("customDirectories")
-            if isinstance(custom_directories, list) and custom_directories:
-                migrated["skills"] = custom_directories
-            else:
-                migrated.pop("skills", None)
-
         retry_settings = migrated.get("retry")
         if isinstance(retry_settings, dict):
             provider_settings = retry_settings.get("provider")
@@ -559,18 +549,6 @@ class SettingsManager:
 
     def setExtensionPaths(self, paths: list[str]) -> None:
         self._set_global_value("extensions", paths)
-
-    def getSkillPaths(self) -> list[str]:
-        return list(self.settings.get("skills") or [])
-
-    def setSkillPaths(self, paths: list[str]) -> None:
-        self._set_global_value("skills", paths)
-
-    def setProjectSkillPaths(self, paths: list[str]) -> None:
-        project_settings = copy.deepcopy(self.projectSettings)
-        project_settings["skills"] = paths
-        self.markProjectModified("skills")
-        self.saveProjectSettings(project_settings)
 
     def getPromptTemplatePaths(self) -> list[str]:
         return list(self.settings.get("prompts") or [])

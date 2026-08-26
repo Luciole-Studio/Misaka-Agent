@@ -87,17 +87,6 @@ from misaka.ui.tui.terminal_colors import RgbColor, rgb_luminance
 type TerminalTheme = Literal["dark", "light"]
 
 
-class TerminalThemeDetection(TypedDict):
-    theme: TerminalTheme
-    source: Literal["terminal background", "COLORFGBG", "fallback"]
-    detail: str
-    confidence: Literal["high", "low"]
-
-
-class TerminalThemeDetectionOptions(TypedDict, total=False):
-    env: dict[str, str]
-
-
 class Theme:
     def __init__(
         self,
@@ -332,25 +321,16 @@ def _get_colorfgbg_background_index(colorfgbg: str) -> int | None:
     return None
 
 
-def detect_terminal_background(
-    options: TerminalThemeDetectionOptions | None = None,
-) -> TerminalThemeDetection:
-    env = options.get("env") if isinstance(options, dict) else None
-    colorfgbg = (env or os.environ).get("COLORFGBG", "")
-    background = _get_colorfgbg_background_index(colorfgbg)
-    if background is not None:
-        return {
-            "theme": "light" if _ansi_luminance(background) >= 0.5 else "dark",
-            "source": "COLORFGBG",
-            "detail": f"background color index {background}",
-            "confidence": "high",
-        }
-    return {
-        "theme": "dark",
-        "source": "fallback",
-        "detail": "no terminal background hint found",
-        "confidence": "low",
-    }
+def detect_terminal_background() -> TerminalTheme:
+    """The variant COLORFGBG implies, else dark.
+
+    This used to return source/detail/confidence beside the answer; nothing ever read
+    them, and the env-injection parameter was never passed.
+    """
+    background = _get_colorfgbg_background_index(os.environ.get("COLORFGBG", ""))
+    if background is None:
+        return "dark"
+    return "light" if _ansi_luminance(background) >= 0.5 else "dark"
 
 
 def get_default_theme() -> str:
@@ -359,7 +339,7 @@ def get_default_theme() -> str:
     pinned = os.environ.get("MISAKA_THEME")
     if pinned in ("dark", "light"):
         return pinned
-    return detect_terminal_background()["theme"]
+    return detect_terminal_background()
 
 
 def set_registered_themes(themes: list[Any]) -> None:
@@ -959,8 +939,6 @@ highlightCode = highlight_code
 
 __all__ = [
     "TerminalTheme",
-    "TerminalThemeDetection",
-    "TerminalThemeDetectionOptions",
     "Theme",
     "ThemeBg",
     "ThemeColor",

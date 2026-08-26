@@ -17,12 +17,6 @@ class KeybindingDefinition:
     description: str | None = None
 
 
-@dataclass(slots=True)
-class KeybindingConflict:
-    key: KeyId
-    keybindings: list[str]
-
-
 TUI_KEYBINDINGS: dict[str, KeybindingDefinition] = {
     "tui.editor.cursorUp": KeybindingDefinition("up", "Move cursor up"),
     "tui.editor.cursorDown": KeybindingDefinition("down", "Move cursor down"),
@@ -89,25 +83,10 @@ class KeybindingsManager:
         self.definitions = definitions
         self.userBindings = userBindings or {}
         self.keysById: dict[Keybinding, list[KeyId]] = {}
-        self.conflicts: list[KeybindingConflict] = []
         self.rebuild()
 
     def rebuild(self) -> None:
         self.keysById.clear()
-        self.conflicts = []
-
-        user_claims: dict[KeyId, list[Keybinding]] = {}
-        for keybinding, keys in self.userBindings.items():
-            if keybinding not in self.definitions:
-                continue
-            for key in _normalize_keys(keys):
-                claimants = user_claims.setdefault(key, [])
-                if keybinding not in claimants:
-                    claimants.append(keybinding)
-
-        for key, keybindings in user_claims.items():
-            if len(keybindings) > 1:
-                self.conflicts.append(KeybindingConflict(key=key, keybindings=list(keybindings)))
 
         for keybinding, definition in self.definitions.items():
             user_keys = self.userBindings.get(keybinding)
@@ -129,12 +108,6 @@ class KeybindingsManager:
 
     def getDefinition(self, keybinding: Keybinding) -> KeybindingDefinition:
         return self.definitions[keybinding]
-
-    def getConflicts(self) -> list[KeybindingConflict]:
-        return [
-            KeybindingConflict(key=conflict.key, keybindings=list(conflict.keybindings))
-            for conflict in self.conflicts
-        ]
 
     def setUserBindings(self, userBindings: KeybindingsConfig) -> None:
         self.userBindings = userBindings
@@ -172,7 +145,6 @@ KeybindingDefinitions = dict[str, KeybindingDefinition]
 __all__ = [
     "TUI_KEYBINDINGS",
     "Keybinding",
-    "KeybindingConflict",
     "KeybindingDefinition",
     "KeybindingDefinitions",
     "Keybindings",

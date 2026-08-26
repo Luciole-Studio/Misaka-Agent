@@ -39,7 +39,6 @@ from misaka.ui.tui.fuzzy import FuzzyMatch, fuzzyFilter, fuzzyMatch
 from misaka.ui.tui.keybindings import (
     TUI_KEYBINDINGS,
     Keybinding,
-    KeybindingConflict,
     KeybindingDefinition,
     KeybindingDefinitions,
     Keybindings,
@@ -150,7 +149,6 @@ __all__ = [
     "KeyEventType",
     "KeyId",
     "Keybinding",
-    "KeybindingConflict",
     "KeybindingDefinition",
     "KeybindingDefinitions",
     "Keybindings",

@@ -102,7 +102,6 @@ class AgentParams(_StrictModel):
         default=None,
         description="Optional addressable name for SendMessage",
     )
-    team_name: str | None = Field(default=None, description="Reserved for agent teams")
     isolation: Literal["worktree"] | None = Field(
         default=None,
         description="Run in a temporary git worktree",
@@ -201,8 +200,6 @@ def _register(harn: Any, context: RoleContext, permitted: bool) -> None:
     async def launch_agent(tool_call_id: str, raw: Any, signal: Any, on_update: Any, ctx: Any) -> dict[str, Any]:
         params = _coerce(AgentParams, raw)
         assert isinstance(params, AgentParams)
-        if params.team_name:
-            raise ValueError("Agent teams are not enabled in MISAKA")
         if params.cwd and params.isolation:
             raise ValueError('cwd and isolation="worktree" are mutually exclusive')
 

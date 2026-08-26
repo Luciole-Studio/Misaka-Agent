@@ -19,7 +19,6 @@ import yaml
 ROOT = str(Path(__file__).resolve().parent / "agents")
 
 _GENERAL_NAMES = frozenset({"general", "general-purpose"})
-_COLORS = frozenset({"red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan"})
 _EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 _PERMISSION_MODES = frozenset(
     {"acceptEdits", "bypassPermissions", "default", "dontAsk", "plan", "auto", "bubble"}
@@ -49,7 +48,6 @@ class AgentDefinition:
     skills: list[str] = field(default_factory=list)
     initial_prompt: str | None = None
     memory: str | None = None
-    color: str | None = None
     required_mcp_servers: list[str] = field(default_factory=list)
     mcp_servers: list[Any] = field(default_factory=list)
     hooks: dict[str, Any] | None = None
@@ -233,7 +231,6 @@ def parse(path: str | os.PathLike[str], *, source: str = "built-in", base_dir: s
         skills=_split_specs(meta.get("skills")),
         initial_prompt=initial_prompt,
         memory=_choice(meta.get("memory"), _MEMORY_SCOPES),
-        color=_choice(meta.get("color"), _COLORS),
         required_mcp_servers=_string_list(meta.get("requiredMcpServers")),
         mcp_servers=_mcp_servers(meta.get("mcpServers")),
         hooks=meta.get("hooks") if isinstance(meta.get("hooks"), dict) else None,
