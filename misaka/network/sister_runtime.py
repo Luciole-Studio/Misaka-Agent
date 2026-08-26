@@ -144,20 +144,6 @@ def _report(task_id: str | None) -> dict[str, Any] | None:
     }
 
 
-def _previous_report(task_id: str) -> None:
-    """Set aside the previous report.json: a continuation must submit a fresh one, never reuse stale proof."""
-    root = Path(db.task_state_dir(task_id))
-    current = root / "report.json"
-    previous = root / ".previous-report.json"
-    if not current.is_file():
-        return
-    try:
-        previous.unlink(missing_ok=True)
-        current.replace(previous)
-    except OSError:
-        current.unlink(missing_ok=True)
-
-
 def _adoptable_transcript(task_id: str) -> str | None:
     """Return the card's most recent session transcript if it can be cleaned for resumption, else None."""
     found = find_most_recent_session(os.path.join(db.task_state_dir(task_id), "session"))
@@ -618,7 +604,7 @@ class SisterRuntime:
                         if not manager or not agent:
                             raise RuntimeError("The Sister session is incomplete.")
                         manager.beast = bool(prepared.get("beast"))
-                        _previous_report(task_id)
+                        worker.set_aside_report(task_id)
                         await manager.send_message(
                             agent.id,
                             prompt,
@@ -724,7 +710,7 @@ class SisterRuntime:
                         generation=generation,
                     )
                 else:
-                    _previous_report(task_id)
+                    worker.set_aside_report(task_id)
                     manager.run_background(agent, prompt, notify=False)
                 supervisor = asyncio.create_task(
                     self._supervise(handle, token, done_event)
@@ -1364,8 +1350,8 @@ class SisterRuntime:
                     raise ValueError("This card belongs to another Last Order session; send the message from its owning session.")
                 was_live = handle.agent.status in {"running", "pending"}
                 if not was_live:
-                    _previous_report(task_id)
-                    message = message + worker.REPORT_INSTRUCTIONS
+                    worker.set_aside_report(task_id)
+                    message = message + worker.report_instructions(handle.generation)
                 try:
                     await handle.manager.send_message(
                         handle.agent.id, message, context=context, notify=False
@@ -1417,8 +1403,8 @@ class SisterRuntime:
             token, done_event = self._begin_run(handle, generation, lock)
             handle.context = context
             handle.manager.beast = reading["mode"] == "beast"
-            _previous_report(task_id)
-            prompt = message + worker.REPORT_INSTRUCTIONS
+            worker.set_aside_report(task_id)
+            prompt = message + worker.report_instructions(generation)
             try:
                 await handle.manager.send_message(
                     handle.agent.id, prompt, context=context, notify=False

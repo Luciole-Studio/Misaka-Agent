@@ -456,12 +456,12 @@ def register(harn):
                              "model turn. Ask the user, then call again with confirmed=true.")
             from misaka.ui.panel import client as net
             out = await asyncio.to_thread(
-                net.request, "pane.resume_card",
+                net.request, "pane.continue_card",
                 {"task_id": params.task_id, "place": {"tab": os.environ["MISAKA_NET_PANE"]},
                  "say": params.message})
             _card_log(row["workspace"], params.task_id, "last-order", f"[message] {params.message}")
-            return _text(f"Reopened card {params.task_id}'s session in pane {out['pane_id']} "
-                         "in a tab of its own and delivered the message.")
+            return _text(f"Continued card {params.task_id} in pane {out['pane_id']} (a new attempt "
+                         "under this session's claim) and delivered the message.")
         result = await runtime.message(
             params.task_id,
             params.message,
@@ -511,7 +511,7 @@ def register(harn):
             return _text(f"Card {params.task_id} is already open in pane {live['id']}.")
         from misaka.ui.panel import client as net
         out = await asyncio.to_thread(
-            net.request, "pane.resume_card",
+            net.request, "pane.open_card_session",
             {"task_id": params.task_id, "place": {"tab": os.environ["MISAKA_NET_PANE"]}})
         return _text(f"Reopened card {params.task_id}'s session in pane {out['pane_id']} (a tab of its own).")
 

@@ -754,10 +754,8 @@ class Daemon:
             "MISAKA_TASK_OUTPUT_DIR": str(row["output_dir"] or db.workspace_for(row)),
         }
 
-    def resume_card(self, task_id, place=None, say=None) -> Pane:
-        """Reopen a card's saved session in a pane (no claim, no contract, no model turn unless
-        ``say`` is given as the first message). Last Order uses this to bring a Sister back
-        after a resumed conversation; the panel uses it for a click on a card session."""
+    def _settled_card_with_session(self, task_id):
+        """A card whose session can be reopened: not live in a pane, with a saved transcript."""
         from misaka.platform import tasks as db
         from misaka.network.sister_runtime import ACTIVE_BOARD_STATUSES
         row = db.get(self._board(), task_id)
@@ -768,17 +766,47 @@ class Daemon:
         session = os.path.join(db.task_state_dir(task_id), "session")
         if not (os.path.isdir(session) and any(n.endswith(".jsonl") for n in os.listdir(session))):
             raise ValueError(f"Card {task_id} has no saved session to reopen.")
-        workspace = self._card_workspace(row)
-        run_dir = workspace
-        argv = [*CARD_SHELL, task_id, "--resume"] + (["--say", say] if say else [])
-        pane = self.create(argv, run_dir, title=f"{row['assignee']}·{task_id}", card=task_id,
+        return row
+
+    def open_card_session(self, task_id, place=None) -> Pane:
+        """Reopen a card's saved session to look at it: no claim, no contract, no model turn.
+        The panel uses it for a click on a card session, Last Order to bring a Sister back into
+        view. A turn typed into such a pane is not an attempt: without a claim nothing settles
+        the card, and a report it writes carries a stale generation and is ignored."""
+        row = self._settled_card_with_session(task_id)
+        pane = self.create([*CARD_SHELL, task_id, "--resume"], self._card_workspace(row),
+                           title=f"{row['assignee']}·{task_id}", card=task_id,
                            env=self._card_env(row), place=place)
         self._save_snapshot()
         return pane
 
+    def continue_card(self, task_id, say, place=None) -> Pane:
+        """Continue a settled card with a new model turn: the same ``claim_resume`` as the
+        in-process Sister runtime (a new generation under our lock), after which the card
+        shell's Supervisor settles the card exactly like a first run."""
+        from misaka.platform import tasks as db, admission
+        row = self._settled_card_with_session(task_id)
+        con = self._board()
+        lock = f"net:{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(4)}"
+        host_cap, assignee_cap = admission.limits()
+        if not db.claim_resume(con, task_id, lock, os.getpid(),
+                               ttl_seconds=max(1800, int(row["timeout_seconds"]) + 60),
+                               expected_generation=int(row["generation"]),
+                               host_cap=host_cap, assignee_cap=assignee_cap):
+            raise ValueError(f"Card {task_id} could not be claimed for continuation; it changed "
+                             "underneath, or the host is at capacity.")
+        row = db.get(con, task_id)
+        generation = int(row["generation"])
+        return self._host_card(
+            con, row, lock, generation, [*CARD_SHELL, task_id, "--resume", "--say", say], place,
+            undo=lambda: db.block_task(con, task_id, "transient",
+                                       "the pane could not be started; continue the card again",
+                                       generation=generation, claim_lock=lock),
+            event="continued")
+
     def run_card(self, task_id, place=None) -> Pane:
         from misaka.platform import tasks as db
-        from misaka.platform import admission, processes as process_tree
+        from misaka.platform import admission
 
         con = self._board()
         row = db.get(con, task_id)
@@ -802,31 +830,42 @@ class Daemon:
                         generation=generation, pid=os.getpid(),
                         host_cap=host_cap, assignee_cap=assignee_cap):
             raise ValueError(f"Card {task_id} was claimed by another dispatcher.")
+        undo = lambda: db.back_to_ready(con, task_id, generation=generation, claim_lock=lock)  # noqa: E731
         try:
             workspace = self._card_workspace(row)
-            run_dir = workspace
-            env = {
-                **self._card_env(row),
-                "MISAKA_USAGE_DB": _expand(CFG["db"]),
-                "MISAKA_USAGE_TASK_ID": task_id,
-                "MISAKA_USAGE_GENERATION": str(generation),
-                "MISAKA_USAGE_CLAIM_LOCK": lock,
-                "MISAKA_USAGE_TOKEN_CAP": str(int(CFG.get("token_cap") or 0)),
-            }
+            env = None
             if executor is None:
                 argv = [*CARD_SHELL, task_id]
             else:  # ally: the card contract is the prompt, run one non-interactive turn
                 from misaka.extensions.last_order.ally import runner as ally_runner
-                task = dict(row)
                 from misaka.platform import cards
-                task["_attachments"] = cards.attachment_list(run_dir, task_id, workspace=workspace)
+                task = dict(row)
+                task["_attachments"] = cards.attachment_list(workspace, task_id, workspace=workspace)
                 argv = ally_runner.build_argv(executor, ally_runner.card_prompt(task))
-                env["MISAKA_ALLY"] = row["assignee"]
-            pane = self.create(argv, run_dir,
-                               title=f"{row['assignee']}·{task_id}", card=task_id,
-                               env=env, place=place)
+                env = {"MISAKA_ALLY": row["assignee"]}
         except BaseException:
-            db.back_to_ready(con, task_id, generation=generation, claim_lock=lock)
+            undo()
+            raise
+        return self._host_card(con, row, lock, generation, argv, place, undo=undo, env=env)
+
+    def _host_card(self, con, row, lock, generation, argv, place, *, undo, env=None, event="claimed"):
+        """Host a claimed card in a pane. The pane's environment carries the claim so the card
+        drives itself (card_shell.Supervisor); ``undo`` releases the claim when no pane starts."""
+        from misaka.platform import tasks as db, processes as process_tree
+        task_id = row["id"]
+        try:
+            workspace = self._card_workspace(row)
+            pane = self.create(argv, workspace, title=f"{row['assignee']}·{task_id}", card=task_id,
+                               env={**self._card_env(row),
+                                    "MISAKA_USAGE_DB": _expand(CFG["db"]),
+                                    "MISAKA_USAGE_TASK_ID": task_id,
+                                    "MISAKA_USAGE_GENERATION": str(generation),
+                                    "MISAKA_USAGE_CLAIM_LOCK": lock,
+                                    "MISAKA_USAGE_TOKEN_CAP": str(int(CFG.get("token_cap") or 0)),
+                                    **(env or {})},
+                               place=place)
+        except BaseException:
+            undo()
             raise
         pane.claim_lock, pane.generation = lock, generation
         pane.deadline = time.time() + int(row["timeout_seconds"])
@@ -835,7 +874,7 @@ class Daemon:
         db.set_pid(con, task_id, pane.proc.pid,
                    worker_identity=f"process-group|{identity}" if identity else None,
                    generation=generation, claim_lock=lock)
-        db.add_event(con, task_id, "claimed",
+        db.add_event(con, task_id, event,
                      {"lock": lock, "workspace": workspace, "pane": pane.id},
                      generation=generation)
         self._save_snapshot()
@@ -1103,9 +1142,11 @@ class Daemon:
         if method == "pane.run_card":
             pane = self.run_card(params["task_id"], place=params.get("place"))
             return {"pane_id": pane.id, "pid": pane.proc.pid, "card": pane.card}
-        if method == "pane.resume_card":
-            pane = self.resume_card(params["task_id"], place=params.get("place"),
-                                    say=params.get("say"))
+        if method == "pane.open_card_session":
+            pane = self.open_card_session(params["task_id"], place=params.get("place"))
+            return {"pane_id": pane.id, "pid": pane.proc.pid, "card": pane.card}
+        if method == "pane.continue_card":
+            pane = self.continue_card(params["task_id"], params["say"], place=params.get("place"))
             return {"pane_id": pane.id, "pid": pane.proc.pid, "card": pane.card}
         if method == "pane.read":
             pane = self.panes.get(params["id"])

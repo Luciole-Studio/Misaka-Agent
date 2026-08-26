@@ -131,14 +131,24 @@ def continue_flags(session_file, session_dir):
 
 
 def launch(task_id, resume_only=False, say=None):
-    """``resume_only`` reopens the saved session without resending the contract; ``say``
-    (with it) is delivered as the first turn, Last Order steering a reopened Sister."""
+    """``resume_only`` reopens the saved session without resending the contract. ``say`` (with
+    it) is delivered as the first turn of a new attempt: the daemon claimed the card
+    (``pane.continue_card``) and this process settles it like a first run. Without a claim a
+    reopened session is only for looking."""
     con = db.connect(CFG["db"])
     row = db.get(con, task_id)
     if row is None:
         sys.exit(f"Card not found: {task_id}")
     task = dict(row)
-    if resume_only and task["status"] in ACTIVE_STATUSES:
+    lock = os.environ.get("MISAKA_USAGE_CLAIM_LOCK")
+    generation = os.environ.get("MISAKA_USAGE_GENERATION")
+    if lock and generation:
+        if task["claim_lock"] != lock or int(task["generation"]) != int(generation):
+            sys.exit(f"Card {task_id} is not claimed by this pane; the daemon owns the claim.")
+    elif say:
+        # A model turn changes the card, so it only happens under a claim (pane.continue_card).
+        sys.exit(f"Card {task_id}: a message needs the daemon's claim; reopening without one is read-only.")
+    elif resume_only and task["status"] in ACTIVE_STATUSES:
         # The live session is being written by another process; do not open it twice.
         sys.exit(f"Card {task_id} is still running in another pane ({task['status']}); open that pane instead.")
     workspace = db.workspace_for(task)
@@ -163,7 +173,8 @@ def launch(task_id, resume_only=False, say=None):
             sys.exit(f"Card {task_id} has no session to resume.")
         flags += cont
         if say:
-            flags.append(say)
+            worker.set_aside_report(task_id)              # the new attempt submits fresh proof
+            flags.append(say + worker.report_instructions(generation))
     else:
         if cont:
             flags += cont
@@ -182,9 +193,7 @@ def launch(task_id, resume_only=False, say=None):
     os.chdir(run_dir)
 
     supervisor = None
-    lock = os.environ.get("MISAKA_USAGE_CLAIM_LOCK")
-    generation = os.environ.get("MISAKA_USAGE_GENERATION")
-    if not resume_only and lock and generation:
+    if lock and generation:            # claimed, first run or continuation: the card drives itself
         supervisor = Supervisor(CFG["db"], task, run_dir, lock, generation).start()
 
     from misaka.cli.engine import main as engine_main

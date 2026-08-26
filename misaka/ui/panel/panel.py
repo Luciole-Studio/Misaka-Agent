@@ -1628,7 +1628,7 @@ def launch():
 
         if hit[0] == "sess-card":
             try:
-                out = control.request("pane.resume_card", {"task_id": hit[1], "place": tab_in(folder)})
+                out = control.request("pane.open_card_session", {"task_id": hit[1], "place": tab_in(folder)})
             except RuntimeError as error:
                 show_bottom_bar(f" {error}")
                 return

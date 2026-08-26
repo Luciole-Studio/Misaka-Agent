@@ -149,6 +149,27 @@ Continue any work that remains valid, then submit through `report.json`.
 """
 
 
+def report_instructions(generation):
+    """The submission contract for one attempt: the generation stamp is what keeps a stale
+    report.json from passing as this attempt's proof."""
+    return REPORT_INSTRUCTIONS.replace("__GENERATION__", str(int(generation or 1)))
+
+
+def set_aside_report(task_id):
+    """Set aside the previous report.json: a continuation must submit fresh proof, never reuse stale."""
+    from pathlib import Path
+    from misaka.platform import tasks as db
+    root = Path(db.task_state_dir(task_id))
+    current, previous = root / "report.json", root / ".previous-report.json"
+    if not current.is_file():
+        return
+    try:
+        previous.unlink(missing_ok=True)
+        current.replace(previous)
+    except OSError:
+        current.unlink(missing_ok=True)
+
+
 def card_prompt(task):
     """Build the durable card contract shared by foreground and Sister runtimes."""
     body = task.get("body") or task.get("title") or ""
@@ -171,7 +192,7 @@ def card_prompt(task):
             f"Write every new deliverable under `{output_dir}`. In `report.json`, list each artifact "
             "using its path relative to the current workspace."
         )
-    prompt = body + REPORT_INSTRUCTIONS.replace("__GENERATION__", str(int(task.get("generation") or 1)))
+    prompt = body + report_instructions(task.get("generation"))
     if task.get("beast"):
         from misaka.platform import budget as _b
 
