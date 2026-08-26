@@ -332,14 +332,18 @@ def collapsed_text(state):
     return _dim("  " + ", ".join(names)) if names else _dim("  (none)")
 
 
+def _alive(client) -> bool:
+    """A started server that has not exited. ``client.proc`` alone stays truthy after death."""
+    return client.proc is not None and client.proc.returncode is None
+
+
 def expanded_text(state):
     """Expanded startup-screen block: one line per server, its tools listed beneath."""
     if state["pending"]:
         return _dim(f"  Probing servers… ({state['pending']} pending)")
     out = []
     for n, c in state["clients"].items():
-        alive = c.proc is not None and c.proc.returncode is None
-        out.append(_dim(f"  {n}  {len(c.tools)} tool(s){'' if alive else ' (not running)'}"))
+        out.append(_dim(f"  {n}  {len(c.tools)} tool(s){'' if _alive(c) else ' (not running)'}"))
         for t in c.tools:
             out.append(_dim(f"    {tool_name(n, t.get('name'))}  {(t.get('description') or '')[:56]}"))
     for f in state["failed"]:
@@ -422,7 +426,7 @@ def _register_bound(harn, context):
             ctx.ui.notify("No MCP servers are configured for this role.", "info")
             return
         # One line per server; selecting one lists its tools (same two-level picker as /model).
-        rows = [f"{'●' if c.proc else '○'} {n}  {len(c.tools)} tool(s)"
+        rows = [f"{'●' if _alive(c) else '○'} {n}  {len(c.tools)} tool(s)"
                 for n, c in clients.items()]
         rows += [f"✗ {f}" for f in failed]
         picked = await ctx.ui.select("MCP servers", rows)

@@ -23,6 +23,8 @@ def _hyperlink(url: str, text: str | None = None) -> str:
     return f"\x1b]8;;{url}\x07{label}\x1b]8;;\x07"
 
 
+_browser_openers: list[subprocess.Popen] = []
+
 class LoginDialogComponent(Container):
     def __init__(
         self,
@@ -130,7 +132,10 @@ class LoginDialogComponent(Container):
             else:
                 command = ["xdg-open", url]
             with open(os.devnull, "wb") as sink:
-                subprocess.Popen(command, stdout=sink, stderr=sink, stdin=sink)
+                # Fire-and-forget, but reaped: an un-waited child stays a zombie for the
+                # life of the process, and login can be retried any number of times.
+                _browser_openers[:] = [opener for opener in _browser_openers if opener.poll() is None]
+                _browser_openers.append(subprocess.Popen(command, stdout=sink, stderr=sink, stdin=sink))
         except Exception:  # noqa: BLE001
             return
 

@@ -51,7 +51,7 @@ def _canonical_role(value: str | None) -> str:
 
 
 def _is_last_order_signal(value: str | None) -> bool:
-    return _canonical_role(value) in {"last-order", "last-ordre", "lo"}
+    return _canonical_role(value) in {"last-order", "lo"}
 
 
 _ENV_UNSET = object()

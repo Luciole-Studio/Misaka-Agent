@@ -203,18 +203,22 @@ async def _enable_github_copilot_model(token: str, model_id: str, enterprise_dom
         return False
 
 
+_ENABLE_CONCURRENCY = 5    # one request per catalog model; do not open them all at once
+
+
 async def _enable_all_github_copilot_models(
     token: str,
     enterprise_domain: str | None = None,
     on_progress: Any = None,
 ) -> None:
     models = get_models("github-copilot")
-    await asyncio.gather(
-        *[
-            _enable_and_report(model.id, token, enterprise_domain, on_progress)
-            for model in models
-        ]
-    )
+    limit = asyncio.Semaphore(_ENABLE_CONCURRENCY)
+
+    async def enable(model_id: str) -> None:
+        async with limit:
+            await _enable_and_report(model_id, token, enterprise_domain, on_progress)
+
+    await asyncio.gather(*[enable(model.id) for model in models])
 
 
 async def _enable_and_report(model_id: str, token: str, enterprise_domain: str | None, on_progress: Any) -> None:

@@ -157,10 +157,8 @@ class OutputAccumulator:
         while start < len(buffer) and (buffer[start] & 0xC0) == 0x80:
             start += 1
 
-        if start == 0:
-            self.tailStartsAtLineBoundary = self.tailStartsAtLineBoundary
-        else:
-            self.tailStartsAtLineBoundary = buffer[start - 1] == 0x0A
+        # start is at least 1 here: the whole-buffer case returned above.
+        self.tailStartsAtLineBoundary = buffer[start - 1] == 0x0A
         self.tailText = buffer[start:].decode("utf-8")
         self.tailBytes = byte_length(self.tailText)
 

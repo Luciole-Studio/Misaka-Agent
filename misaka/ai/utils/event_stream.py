@@ -15,6 +15,17 @@ _END_OF_STREAM = object()
 _UNSET = object()
 
 
+_detached_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _detached_future_loop() -> asyncio.AbstractEventLoop:
+    """The one loop backing futures built outside any running loop."""
+    global _detached_loop
+    if _detached_loop is None or _detached_loop.is_closed():
+        _detached_loop = asyncio.new_event_loop()
+    return _detached_loop
+
+
 class EventStream[TEvent, TResult]:
     def __init__(
         self,
@@ -76,9 +87,9 @@ class EventStream[TEvent, TResult]:
             except RuntimeError:
                 # Streams are normally created inside an active event loop, but a few
                 # synchronous call paths construct already-complete streams for tests
-                # and lightweight wrappers. In that case, use an isolated loop-backed
-                # future rather than the deprecated implicit current-loop lookup.
-                loop = asyncio.new_event_loop()
+                # and lightweight wrappers. Those futures are resolved and read in place,
+                # so they share one detached loop instead of leaking a new one each time.
+                loop = _detached_future_loop()
             self._result_future = loop.create_future()
         return self._result_future
 
