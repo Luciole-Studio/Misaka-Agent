@@ -16,6 +16,8 @@ import asyncio
 import hashlib
 import json
 import os
+import secrets
+import socket
 import shutil
 import sys
 from pathlib import Path
@@ -132,6 +134,13 @@ async def _submit_tasks(con, run, cfg, worker, node, specs, *, kind, issue_id=No
     for spec in specs:
         if runs.stop_requested(con, run["id"]):
             break
+        existing = con.execute(
+            "SELECT task_id FROM research_run_tasks WHERE run_id=? AND branch_id=? AND local_id=?",
+            (run["id"], node["id"], spec["local_id"]),
+        ).fetchone()
+        if existing:                                   # a resume after a crash: the card already exists
+            local_to_task[spec["local_id"]] = existing["task_id"]
+            continue
         await _progress(progress, "preflight",
                         f"Sister {spec['assignee']} is planning its approach for {spec['title']!r}.", run)
         preflight, _raw, session = await asyncio.to_thread(
@@ -307,13 +316,17 @@ def _close(con, run, node, status):
         return "closing"
     if node["worktree"]:
         parent = runs.node(con, node["parent_id"])
+        into = parent["worktree"] if parent and parent["worktree"] else run["workspace"]
+        # A failed node keeps its worktree: its cards still point there and a human may want to look.
         outcome = repo.branch_finish(
-            run["workspace"], runs.node_branch(node["id"]), node["worktree"],
-            into=(parent["worktree"] if parent and parent["worktree"] else run["workspace"]),
-            merge=status == "closed", message=f"research {run['id']}/{node['id']}: {status}")
+            run["workspace"], runs.node_branch(node["id"]), node["worktree"], into=into,
+            merge=status == "closed", remove=status == "closed",
+            message=f"research {run['id']}/{node['id']}: {status}")
         if outcome == "conflict":
             runs.set_state(con, run["id"],
                            error=f"node {node['id']}: merge conflict; resolve branch {runs.node_branch(node['id'])} by hand")
+        elif outcome == "merged":
+            runs.relocate_node_tasks(con, node, node["worktree"], into)
     if status != "closed":
         con.execute("UPDATE research_issues SET status='parked' WHERE child_branch_id=?", (node["id"],))
     runs.set_node(con, node["id"], status=status)
@@ -544,14 +557,32 @@ async def probe(con, cfg, runner, worker, *, run_id, issue_id, progress=None, po
     return "inconclusive"
 
 
-async def _expand_level(con, cfg, spawner, run, level, *, poll_seconds, progress):
+async def _expand_level(con, cfg, spawner, run, level, *, poll_seconds, progress, driver_lock=None):
     """Spawn every node of the level and wait until each has left the frontier (terminal,
-    closing, or waiting for input). Returns "done", a halt, or a waiting_input result."""
+    closing, or waiting for input). Returns "done", a halt, or a waiting_input result. If one
+    node's process dies, the level's other processes are stopped before the error propagates."""
     handles = {node["id"]: spawner.spawn(_node_argv(run, node), cwd=run["workspace"],
                                          title=f"LO·{node['id']}", place="split") for node in level}
+    try:
+        return await _wait_level(con, cfg, spawner, run, handles, poll_seconds=poll_seconds, progress=progress,
+                                 driver_lock=driver_lock)
+    except BaseException:
+        for handle in handles.values():
+            stop = getattr(spawner, "stop", None)
+            if stop is not None:
+                try:
+                    stop(handle)
+                except Exception:  # noqa: BLE001 - best effort while unwinding
+                    pass
+        raise
+
+
+async def _wait_level(con, cfg, spawner, run, handles, *, poll_seconds, progress, driver_lock=None):
     last = {}
     while handles:
         await asyncio.sleep(poll_seconds)
+        if driver_lock:
+            runs.heartbeat_driver(con, run["id"], driver_lock)
         halted = (runs.stop_requested(con, run["id"])
                   or budget.status(con, cfg.get("token_cap"))["mode"] != "normal")
         for nid, handle in list(handles.items()):
@@ -588,6 +619,10 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
         raise ValueError(f"Research run not found: {run_id}")
     if not os.path.isdir(run["workspace"]):
         raise RuntimeError(f"The research run's project folder no longer exists: {run['workspace']}")
+    driver_lock = f"driver:{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(3)}"
+    if not runs.acquire_driver(con, run_id, driver_lock):
+        raise RuntimeError(f"Research run {run_id} is already being driven by another process "
+                           f"(lease {run['driver_lock']}); wait for it or stop that process.")
     runs.ensure_layout(run)
     cfg = dict(cfg)
     halts = {"stopped": "The user requested a stop.", "budget": "The shared token budget limit was reached."}
@@ -600,6 +635,7 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
         if run["phase"] == "created":
             runs.set_state(con, run_id, phase="active")
         while True:                                   # breadth-first: one level at a time, its nodes in parallel
+            runs.heartbeat_driver(con, run_id, driver_lock)
             _settle_closing(con, run)
             level = runs.next_level(con, run_id)
             if not level:
@@ -607,7 +643,8 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
             runs.set_state(con, run_id, wave=level[0]["depth"])
             await _progress(progress, "level", f"Depth {level[0]['depth']}: {len(level)} node(s) expanding.", run,
                             nodes=[n["id"] for n in level])
-            result = await _expand_level(con, cfg, spawner, run, level, poll_seconds=poll_seconds, progress=progress)
+            result = await _expand_level(con, cfg, spawner, run, level, poll_seconds=poll_seconds, progress=progress,
+                                         driver_lock=driver_lock)
             if isinstance(result, dict):
                 return result
             if result in halts:
@@ -627,6 +664,8 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
     except Exception as error:
         runs.set_state(con, run_id, status="failed", error=f"{type(error).__name__}: {error}"[:500])
         raise
+    finally:
+        runs.release_driver(con, run_id, driver_lock)
 
 
 if __name__ == "__main__":                          # self-check: a two-level tree with a fake worker, no LLM

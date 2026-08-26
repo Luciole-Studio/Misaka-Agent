@@ -62,7 +62,7 @@ def branch_start(workspace, name, worktree, base=None):
     return worktree if made.returncode == 0 else None
 
 
-def branch_finish(workspace, name, worktree, *, into=None, merge=True, message=""):
+def branch_finish(workspace, name, worktree, *, into=None, merge=True, message="", remove=True):
     """Close a branch: leftover work is committed, then -- when ``merge`` -- the branch is merged
     --no-ff into the line checked out at ``into`` (default: the workspace), and only then is the
     worktree removed. A conflict leaves both the branch and its worktree in place for a human.
@@ -77,7 +77,7 @@ def branch_finish(workspace, name, worktree, *, into=None, merge=True, message="
         if merged.returncode != 0:
             _git(into or workspace, "merge", "--abort")
             return "conflict"                          # the branch and its worktree stay for a human
-    if live:
+    if live and remove:
         _git(workspace, "worktree", "remove", "--force", worktree)
     _git(workspace, "worktree", "prune")
     return "merged" if merge else "closed"

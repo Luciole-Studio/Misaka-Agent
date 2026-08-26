@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS research_runs (
   stop_requested  INTEGER NOT NULL DEFAULT 0,
   final_artifact  TEXT,
   last_error      TEXT,
+  driver_lock     TEXT,
+  driver_expires  INTEGER,
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
 );
@@ -114,6 +116,7 @@ CREATE INDEX IF NOT EXISTS research_issues_run ON research_issues(run_id,branch_
 CREATE INDEX IF NOT EXISTS research_artifacts_run ON research_artifacts(run_id,branch_id,kind);
 CREATE INDEX IF NOT EXISTS research_findings_run ON research_findings(run_id,branch_id,task_id);
 CREATE INDEX IF NOT EXISTS research_claims_finding ON research_claims(finding_id);
+CREATE UNIQUE INDEX IF NOT EXISTS research_tasks_local ON research_run_tasks(run_id,branch_id,local_id) WHERE local_id IS NOT NULL;
 """
 
 ACTIVE = ("active", "waiting_input", "stopping")
@@ -122,7 +125,8 @@ NODE_TERMINAL = ("closed", "failed", "parked")
 NODE_STATES = ("queued", "planning", "waiting_input", "executing", "synthesizing", "critiquing",
                "probing", "triaging", "closing", *NODE_TERMINAL)   # closing = triaged, waiting for its children
 DEFAULT_LIMITS = {"max_depth": 3}
-RESEARCH_SCHEMA_VERSION = 7
+RESEARCH_SCHEMA_VERSION = 8    # 8: driver lease on runs; unique local ids per node
+DRIVER_TTL_SECONDS = 300
 
 
 def init(con):
@@ -136,6 +140,7 @@ def init(con):
         # rebuildable index -- but nothing rebuilds them yet, so the old tables are renamed, not
         # dropped, until a rebuild or an incremental migration exists.
         suffix = f"_bak_{time.strftime('%Y%m%d%H%M%S')}"
+        renamed = []
         for table in (
             "research_claims", "research_evidence_assessments", "research_findings",
             "research_artifacts", "research_issues", "research_run_tasks",
@@ -147,16 +152,84 @@ def init(con):
                 if index[3] == "c":   # named indexes stay global; free the names for the new tables
                     con.execute(f'DROP INDEX IF EXISTS "{index[1]}"')
             con.execute(f'ALTER TABLE "{table}" RENAME TO "{table}{suffix}"')
-        print(f"research: schema changed to v{RESEARCH_SCHEMA_VERSION}; the previous tables were kept "
-              f"as *{suffix} (no rebuild from files exists yet).", file=sys.stderr)
+            renamed.append((table, f"{table}{suffix}"))
+    else:
+        renamed = []
     con.executescript(SCHEMA)
     con.executescript(INDEXES)
+    if renamed:
+        copied = _carry_forward(con, renamed)
+        print(f"research: schema upgraded to v{RESEARCH_SCHEMA_VERSION}; previous tables kept as *{suffix}, "
+              f"rows carried forward: {copied}", file=sys.stderr)
     con.execute("DROP TRIGGER IF EXISTS research_terminal_notification")   # older boards: nothing consumes it any more
     _backfill_dependencies(con)
     con.execute(
         "INSERT OR IGNORE INTO schema_migrations(component,version,applied_at) VALUES(?,?,?)",
         ("research", RESEARCH_SCHEMA_VERSION, int(time.time())),
     )
+
+
+def _carry_forward(con, renamed):
+    """Copy the previous schema's rows into the new tables over the columns both share. INSERT OR
+    IGNORE keeps rows that the new uniqueness rules reject from aborting the copy; a table whose
+    new NOT NULL columns cannot be filled is reported and left in its backup."""
+    copied = {}
+    for table, backup in renamed:
+        new_cols = [row[1] for row in con.execute(f'PRAGMA table_info("{table}")')]
+        old_cols = {row[1] for row in con.execute(f'PRAGMA table_info("{backup}")')}
+        shared = [col for col in new_cols if col in old_cols]
+        if not shared:
+            continue
+        cols = ",".join(f'"{col}"' for col in shared)
+        try:
+            copied[table] = con.execute(
+                f'INSERT OR IGNORE INTO "{table}" ({cols}) SELECT {cols} FROM "{backup}"').rowcount
+        except Exception as error:  # noqa: BLE001 - one table must not block the others
+            print(f"research: could not carry {table} forward from {backup}: {error}", file=sys.stderr)
+    return copied
+
+
+def acquire_driver(con, run_id, lock, ttl_seconds=DRIVER_TTL_SECONDS):
+    """Take the run's driver lease: one process advances a run at a time. False when another
+    live lease holds it."""
+    now = int(time.time())
+    cur = con.execute(
+        "UPDATE research_runs SET driver_lock=?, driver_expires=? WHERE id=? "
+        "AND (driver_lock IS NULL OR driver_expires IS NULL OR driver_expires < ? OR driver_lock=?)",
+        (lock, now + int(ttl_seconds), run_id, now, lock),
+    )
+    return cur.rowcount == 1
+
+
+def heartbeat_driver(con, run_id, lock, ttl_seconds=DRIVER_TTL_SECONDS):
+    cur = con.execute(
+        "UPDATE research_runs SET driver_expires=? WHERE id=? AND driver_lock=?",
+        (int(time.time()) + int(ttl_seconds), run_id, lock),
+    )
+    return cur.rowcount == 1
+
+
+def release_driver(con, run_id, lock):
+    con.execute("UPDATE research_runs SET driver_lock=NULL, driver_expires=NULL WHERE id=? AND driver_lock=?",
+                (run_id, lock))
+
+
+def relocate_node_tasks(con, node, old_root, new_root):
+    """A closed node's line merged into its parent's: its cards now live there, so their
+    ``workspace`` / ``output_dir`` follow (the worktree they pointed at is gone)."""
+    old_root, new_root = os.path.realpath(old_root), os.path.realpath(new_root)
+    moved = 0
+    for row in tasks(con, node["run_id"], node_id=node["id"]):
+        workspace, output_dir = row["workspace"], row["output_dir"]
+        new_ws = new_root if workspace and os.path.realpath(workspace) == old_root else workspace
+        new_out = output_dir
+        if output_dir and (os.path.realpath(output_dir) == old_root
+                           or os.path.realpath(output_dir).startswith(old_root + os.sep)):
+            new_out = new_root + os.path.realpath(output_dir)[len(old_root):]
+        if (new_ws, new_out) != (workspace, output_dir):
+            con.execute("UPDATE tasks SET workspace=?, output_dir=? WHERE id=?", (new_ws, new_out, row["id"]))
+            moved += 1
+    return moved
 
 
 # Cards past these statuses keep their dependency history as it is: the DAG must not be rewritten
@@ -351,7 +424,13 @@ def request_stop(con, run_id):
 
 
 def resume(con, run_id):
-    """Reopen a stopped, failed, or waiting run: same card generations, nodes pick up where they were."""
+    """Reopen a stopped, failed, or waiting run: same card generations, nodes pick up where they were.
+    A finished run is not resumable: its report is final; start a new run."""
+    current = get(con, run_id)
+    if current is None:
+        raise ValueError(f"Research run not found: {run_id}")
+    if current["status"] == "done":
+        raise ValueError(f"Research run {run_id} is done; start a new run instead of resuming it.")
     for row in tasks(con, run_id):
         if row["status"] != "stopped":
             continue
@@ -524,9 +603,12 @@ def add_issue(con, run_id, *, node, kind, question, rationale, priority=0):
     question = str(question or "").strip()
     if not question:
         return None
-    # Only exact matches after case/whitespace normalization count as duplicates; semantic merging is Last Order's job.
+    # Only exact matches after case/whitespace normalization, and only inside the same node, count
+    # as duplicates: another node raising the same question keeps its own issue so its triage sees
+    # it. Semantic merging is Last Order's job.
     normalized = " ".join(question.casefold().split())
-    for row in con.execute("SELECT id,question FROM research_issues WHERE run_id=?", (run_id,)):
+    for row in con.execute("SELECT id,question FROM research_issues WHERE run_id=? AND branch_id=?",
+                           (run_id, node["id"])):
         if " ".join(row["question"].casefold().split()) == normalized:
             return row["id"]
     iid = "i_" + secrets.token_hex(5)
