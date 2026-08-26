@@ -7,6 +7,7 @@ without a copy of it.
 from __future__ import annotations
 
 import json
+import os
 
 from misaka.research import ledger, runs
 
@@ -25,8 +26,23 @@ def _branch_chain(con, branch):
     return list(reversed(chain))
 
 
-def build(con, run, *, issue, parent=None, max_findings=80):
-    artifacts = [{"id": a["id"], "kind": a["kind"], "title": a["title"], "path": a["path"]}
+def _where(run, node, row):
+    """A Sister artifact sits on its card's line until its node merges: point the child at its own
+    copy when this line has one; a sibling branch's artifact (not merged here) keeps its recorded
+    path, so the map never names a file that does not exist on this line."""
+    try:
+        rel = json.loads(row["metadata_json"] or "{}").get("source_file")
+    except ValueError:
+        rel = None
+    own = os.path.join(runs.node_root(run, node), rel) if rel else None
+    for candidate in (own, row["path"]):
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return row["path"]
+
+
+def build(con, run, *, issue, node, parent=None, max_findings=80):
+    artifacts = [{"id": a["id"], "kind": a["kind"], "title": a["title"], "path": _where(run, node, a)}
                  for a in runs.artifacts(con, run["id"])]
     findings = []
     for finding in ledger.findings(con, run["id"], limit=max_findings):
@@ -85,7 +101,7 @@ def render(packet):
 
 
 def create(con, run, *, issue, node, parent=None):
-    packet = build(con, run, issue=issue, parent=parent)
+    packet = build(con, run, issue=issue, node=node, parent=parent)
     aid, path = runs.write_text(
         con, run["id"], "context", f"Node {node['id']} context",
         f"branches/{node['id']}/context.md", render(packet), branch_id=node["id"],

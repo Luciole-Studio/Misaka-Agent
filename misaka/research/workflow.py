@@ -553,8 +553,19 @@ async def probe(con, cfg, runner, worker, *, run_id, issue_id, progress=None, po
         if outcome != "done":
             return outcome
         settle_done_tasks(con, run_id=run_id)
-    runs.set_issue(con, issue_id, "inconclusive", reason=f"No verdict after {MAX_PROBE_ROUNDS} rounds of cards.")
-    return "inconclusive"
+    # The last round's cards came back too: Last Order judges them before the fork gives up.
+    cards = [t for t in runs.tasks(con, run_id, issue_id=issue_id) if t["status"] == "done"]
+    verdict, reason = None, f"No verdict after {MAX_PROBE_ROUNDS} rounds of cards."
+    try:
+        _more, verdict = await asyncio.to_thread(
+            planner.probe_step, con, run, dict(cfg), worker, node, issue, cards,
+            synthesis_path=synthesis_path, round_no=MAX_PROBE_ROUNDS + 1, rounds=MAX_PROBE_ROUNDS, final=True)
+    except (RuntimeError, ValueError) as error:
+        reason = f"{reason[:-1]} ({error})."
+    if verdict is None:
+        verdict = {"verdict": "inconclusive", "reason": reason}
+    runs.set_issue(con, issue_id, verdict["verdict"], reason=verdict["reason"])
+    return verdict["verdict"]
 
 
 async def _expand_level(con, cfg, spawner, run, level, *, poll_seconds, progress, driver_lock=None):
@@ -748,6 +759,9 @@ if __name__ == "__main__":                          # self-check: a two-level tr
             if task.done() and task.exception():
                 raise task.exception()
             return not task.done()
+
+        def stop(self, task):
+            task.cancel()
 
     tmp = tempfile.mkdtemp(prefix="misaka-research-")
     os.environ["MISAKA_RUNS_HOME"] = os.path.join(tmp, "runs")

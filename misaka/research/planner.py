@@ -454,10 +454,13 @@ def fork_session(source_dir, target_dir):
     return branched
 
 
-def probe_step(con, run, cfg, worker, node, issue, cards, *, synthesis_path, round_no, rounds):
-    """One round of the fork on ``issue``: more cards, or the verdict. Returns (tasks, verdict)."""
+def probe_step(con, run, cfg, worker, node, issue, cards, *, synthesis_path, round_no, rounds, final=False):
+    """One round of the fork on ``issue``: more cards, or the verdict. Returns (tasks, verdict).
+    With ``final`` no more cards may be opened: the answer must be a verdict."""
     roster = _roster(cfg)
-    prompt = (PROBE_CONTRACT + f"""
+    closing = ("\n# Final judgement: every round has been used, no more cards can be opened. "
+               "Give the verdict now, from the artifacts returned so far.\n") if final else ""
+    prompt = (PROBE_CONTRACT + closing + f"""
 # Issue
 {_catalog_text({"id": issue["id"], "kind": issue["kind"], "question": issue["question"], "rationale": issue["rationale"]})}
 
@@ -485,6 +488,8 @@ def probe_step(con, run, cfg, worker, node, issue, cards, *, synthesis_path, rou
         if not isinstance(verdict, dict) or verdict.get("verdict") not in {"supports", "inconclusive", "undermines"}:
             raise ValueError(f"The fork on issue {issue['id']} returned an invalid verdict.")
         verdict = {"verdict": verdict["verdict"], "reason": str(verdict.get("reason") or "")}
+    if final and verdict is None:
+        raise ValueError(f"The fork on issue {issue['id']} did not give a verdict in its final round.")
     if not tasks and verdict is None:
         raise ValueError(f"The fork on issue {issue['id']} neither opened cards nor gave a verdict.")
     return tasks, verdict
