@@ -284,6 +284,7 @@ def finalize_messages(
         if _field(block, "type") in {"toolCall", "tool_use"}
     )
     usage = _field(_message(last), "usage", {}) or {}
+    total_tokens = sum(_usage_tokens(_field(_message(item), "usage", {}) or {}) for item in assistants)
     end = int(time.time() * 1000) if end_time_ms is None else end_time_ms
     return {
         "status": "completed",
@@ -292,7 +293,7 @@ def finalize_messages(
         "agentType": agent_type,
         "content": text_blocks,
         "totalDurationMs": max(0, end - start_time_ms),
-        "totalTokens": _usage_tokens(usage),
+        "totalTokens": total_tokens,            # accumulated over every model call, not the last one
         "totalToolUseCount": tool_uses,
         "usage": usage,
     }
@@ -1232,54 +1233,15 @@ class SubagentManager:
             except FileExistsError:
                 output.unlink()
                 output.symlink_to(transcript)
-
-            active: list[str] = []
             try:
-                for tool in self.harness.getActiveTools():
-                    if isinstance(tool, str):
-                        active.append(tool)
-                        continue
-                    definition_value = _field(tool, "definition")
-                    active.append(
-                        str(_field(tool, "name") or _field(definition_value, "name", ""))
-                    )
-            except (AttributeError, RuntimeError):
-                pass
-            task = AgentTask(
-                manager=self,
-                id=agent_id,
-                definition=definition,
-                description=description,
-                prompt=prompt,
-                model_provider=provider,
-                model_id=model_id,
-                cwd=effective_cwd,
-                transcript=transcript,
-                metadata_path=metadata,
-                output_file=output,
-                parent_session_id=self._parent_session_id,
-                background=background or definition.background,
-                name=name,
-                tool_call_id=tool_call_id,
-                can_read_output=any(tool.casefold() in {"read", "bash"} for tool in active),
-                allowed_agent_types=self._allowed_agent_types(definition),
-                on_update=on_update,
-                permission_context=context,
-            )
-            effective_isolation = isolation or definition.isolation
-            if effective_isolation == "worktree":
-                task.worktree = await self._create_worktree(task)
-                task.cwd = task.worktree.path
-            elif effective_isolation:
-                raise ValueError(f"Unsupported agent isolation mode: {effective_isolation}")
-            await task.persist()
-            async with self._lock:
-                if self._closed:
-                    raise RuntimeError("Sub-agent manager is closed")
-                self._tasks[agent_id] = task
-                if name:
-                    self._names[name] = agent_id
-            return task
+                return await self._register_task(
+                    agent_id, definition, description, prompt, provider, model_id, effective_cwd, transcript,
+                    metadata, output, background, name, tool_call_id, on_update, context, isolation,
+                )
+            except BaseException:
+                for leftover in (output, metadata):     # nothing of a task that never started stays behind
+                    leftover.unlink(missing_ok=True)
+                raise
         finally:
             async with self._lock:
                 self._reserved = max(0, self._reserved - 1)
@@ -1287,6 +1249,58 @@ class SubagentManager:
                     self._reserved_names.discard(name)
                 if not self._reserved:
                     self._reservations_done.set()
+
+    async def _register_task(
+        self, agent_id, definition, description, prompt, provider, model_id, effective_cwd, transcript,
+        metadata, output, background, name, tool_call_id, on_update, context, isolation,
+    ) -> AgentTask:
+        active: list[str] = []
+        try:
+            for tool in self.harness.getActiveTools():
+                if isinstance(tool, str):
+                    active.append(tool)
+                    continue
+                definition_value = _field(tool, "definition")
+                active.append(
+                    str(_field(tool, "name") or _field(definition_value, "name", ""))
+                )
+        except (AttributeError, RuntimeError):
+            pass
+        task = AgentTask(
+            manager=self,
+            id=agent_id,
+            definition=definition,
+            description=description,
+            prompt=prompt,
+            model_provider=provider,
+            model_id=model_id,
+            cwd=effective_cwd,
+            transcript=transcript,
+            metadata_path=metadata,
+            output_file=output,
+            parent_session_id=self._parent_session_id,
+            background=background or definition.background,
+            name=name,
+            tool_call_id=tool_call_id,
+            can_read_output=any(tool.casefold() in {"read", "bash"} for tool in active),
+            allowed_agent_types=self._allowed_agent_types(definition),
+            on_update=on_update,
+            permission_context=context,
+        )
+        effective_isolation = isolation or definition.isolation
+        if effective_isolation == "worktree":
+            task.worktree = await self._create_worktree(task)
+            task.cwd = task.worktree.path
+        elif effective_isolation:
+            raise ValueError(f"Unsupported agent isolation mode: {effective_isolation}")
+        await task.persist()
+        async with self._lock:
+            if self._closed:
+                raise RuntimeError("Sub-agent manager is closed")
+            self._tasks[agent_id] = task
+            if name:
+                self._names[name] = agent_id
+        return task
 
     def run_background(self, task: AgentTask, prompt: str, *, notify: bool = True) -> None:
         """Run a detached turn.
@@ -2102,9 +2116,14 @@ class SubagentManager:
             if inspect.isawaitable(value):
                 job = asyncio.create_task(value)
                 self._progress_jobs.add(job)   # Hold a reference so the job is not garbage-collected mid-flight; it removes itself when done.
-                job.add_done_callback(self._progress_jobs.discard)
-        except Exception:  # noqa: BLE001 - display callbacks never fail a task
-            pass
+                job.add_done_callback(self._progress_job_done)
+        except Exception as error:  # noqa: BLE001 - display callbacks never fail a task, but they do get logged
+            _log_warning(f"progress callback for agent {task.id} failed: {error!r}")
+
+    def _progress_job_done(self, job: "asyncio.Task[Any]") -> None:
+        self._progress_jobs.discard(job)
+        if not job.cancelled() and job.exception() is not None:
+            _log_warning(f"progress callback job failed: {job.exception()!r}")
 
     async def _resolve_permission_request(
         self, task: AgentTask, event: Mapping[str, Any]
@@ -2952,6 +2971,7 @@ class SubagentManager:
         # already-terminal tasks and own bounded command timeouts.
         await drain(self._async_hook_jobs)
         await drain(self._async_cleanup_jobs)
+        await drain(self._progress_jobs)        # display callbacks still in flight finish before the manager is gone
 
 
 __all__ = [
