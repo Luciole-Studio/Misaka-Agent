@@ -8,6 +8,8 @@ import subprocess
 import threading
 import time
 
+from misaka.utils import atomic
+
 SCAN_SUFFIXES = {".pdf", ".md", ".markdown", ".txt"}
 
 
@@ -156,8 +158,7 @@ def _link(ddir, p, task_id):
         if p not in paths:
             paths.append(p); m["paths"] = paths; changed = True
         if changed:
-            with open(os.path.join(ddir, "meta.json"), "w", encoding="utf-8") as f:
-                json.dump(m, f, ensure_ascii=False, indent=2)
+            atomic.write_text(os.path.join(ddir, "meta.json"), json.dumps(m, ensure_ascii=False, indent=2))
     return int(m.get("pages", 0))
 
 
@@ -245,8 +246,7 @@ def set_task_id(doc_id, task_id):
         if task_id and task_id not in ids:
             ids.append(task_id)
         m["task_ids"] = ids
-        with open(os.path.join(ddir, "meta.json"), "w", encoding="utf-8") as f:
-            json.dump(m, f, ensure_ascii=False, indent=2)
+        atomic.write_text(os.path.join(ddir, "meta.json"), json.dumps(m, ensure_ascii=False, indent=2))
 
 
 def docs(workspace=None):

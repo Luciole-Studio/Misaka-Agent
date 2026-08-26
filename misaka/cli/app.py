@@ -4,6 +4,7 @@ import os
 import signal
 import sys
 
+from misaka.utils import atomic
 from misaka.config import CFG
 from misaka.documents import index as corpus
 from misaka.observability import board as tail
@@ -416,8 +417,7 @@ def _cmd_moa(args, con):
         del presets[args.name]
         if raw.get("default_preset") == args.name:
             raw["default_preset"] = next(iter(presets))
-        with open(path, "w", encoding="utf-8") as f:
-            _json.dump(raw, f, ensure_ascii=False, indent=2)
+        atomic.write_text(path, _json.dumps(raw, ensure_ascii=False, indent=2))
         print(f"Deleted preset '{args.name}'; default: {raw.get('default_preset')}")
     else:
         print(f"MoA presets in {path}")

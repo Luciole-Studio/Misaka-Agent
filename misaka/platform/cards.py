@@ -18,6 +18,7 @@ from pathlib import Path
 from ruamel.yaml import YAML
 
 from misaka.platform import repo, tasks
+from misaka.utils import atomic
 from misaka.utils.frontmatter import parse_frontmatter
 
 LOG_HEADING = "## log"
@@ -45,11 +46,7 @@ def _dump(fields, body):
 
 
 def _write_file(path, text):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-    os.replace(tmp, path)
+    atomic.write_text(path, text)
 
 
 def read(path):
@@ -90,10 +87,14 @@ def create(con, workspace, title, body, assignee, *, reviewer=None, model=None,
 
 
 def _rewrite(workspace, task_id, mutate):
+    """Read-modify-write under a per-card lock: two processes (a pane and Last Order) editing
+    one card never lose each other's change."""
+    from filelock import FileLock
     path = card_path(workspace, task_id)
-    card = read(path)
-    fields, body = mutate(card["fields"], card["body"])
-    _write_file(path, _dump(fields, body))
+    with FileLock(os.path.join(tasks.task_state_dir(task_id), "card.lock")):   # outside the tracked tree
+        card = read(path)
+        fields, body = mutate(card["fields"], card["body"])
+        _write_file(path, _dump(fields, body))
 
 
 def append_log(workspace, task_id, author, text):

@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 from misaka.platform import tasks as task_store
+from misaka.utils import atomic
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS research_runs (
@@ -339,11 +340,7 @@ def ensure_layout(run):
 
 
 def _atomic_write(path, content):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
-    tmp.write_text(content, encoding="utf-8")
-    os.replace(tmp, path)
+    atomic.write_text(path, content)
 
 
 def _commit(run, node, message):

@@ -23,6 +23,7 @@ from misaka.ai.utils.oauth import (
 )
 from misaka.config import get_auth_path
 from misaka.core.resolve_config_value import resolveConfigValue
+from misaka.utils import atomic
 from misaka.utils.paths import normalize_path
 
 type ApiKeyCredential = dict[str, str]
@@ -76,9 +77,7 @@ class FileAuthStorageBackend(AuthStorageBackend):
     def ensureFileExists(self) -> None:
         if os.path.exists(self.authPath):
             return
-        with open(self.authPath, "w", encoding="utf-8") as handle:
-            handle.write("{}")
-        os.chmod(self.authPath, 0o600)
+        atomic.write_text(self.authPath, "{}", mode=0o600)
 
     def _create_lock(self) -> FileLock:
         return FileLock(self._lock_path(), timeout=0)
@@ -149,9 +148,7 @@ class FileAuthStorageBackend(AuthStorageBackend):
                     current = handle.read()
             outcome = fn(current)
             if outcome.next is not None:
-                with open(self.authPath, "w", encoding="utf-8") as handle:
-                    handle.write(outcome.next)
-                os.chmod(self.authPath, 0o600)
+                atomic.write_text(self.authPath, outcome.next, mode=0o600)
             return outcome.result
         finally:
             lock.release()
@@ -171,9 +168,7 @@ class FileAuthStorageBackend(AuthStorageBackend):
             outcome = await fn(current)
             self._assert_lock_uncompromised(expected_signature)
             if outcome.next is not None:
-                with open(self.authPath, "w", encoding="utf-8") as handle:  # noqa: ASYNC230 - a small JSON file under the credential lock
-                    handle.write(outcome.next)
-                os.chmod(self.authPath, 0o600)
+                atomic.write_text(self.authPath, outcome.next, mode=0o600)
             self._assert_lock_uncompromised(expected_signature)
             return outcome.result
         finally:

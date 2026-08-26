@@ -43,6 +43,7 @@ def _log_warning(message: str) -> None:
 
 from misaka.extensions.sisters.subagent import agents as agent_roster
 from misaka.platform import processes as process_tree
+from misaka.utils import atomic
 
 TERMINAL_STATUSES = frozenset({"completed", "failed", "killed"})
 MANAGEMENT_TOOLS = ("Agent", "TaskOutput", "SendMessage", "TaskStop")
@@ -566,23 +567,11 @@ def _safe_component(value: str) -> str:
 
 
 def _atomic_json(path: Path, data: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
-    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    try:
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    atomic.write_text(path, json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def _atomic_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
-    temporary.write_text(text, encoding="utf-8")
-    try:
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    atomic.write_text(path, text)
 
 
 def _open_sidecar_directory(directory: Path) -> int:

@@ -7,6 +7,8 @@ import time
 import uuid
 from pathlib import Path
 
+from misaka.utils import atomic
+
 WRITE_MODES = ("off", "forbid", "ask", "allow")
 DEFAULT_WRITE_MODE = "forbid"
 
@@ -188,10 +190,7 @@ def stage(payload, *, summary):
     }
     d = _pending_dir()
     d.mkdir(parents=True, exist_ok=True)
-    path = d / f"{record_id}.json"
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(item, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    atomic.write_text(d / f"{record_id}.json", json.dumps(item, ensure_ascii=False, indent=2))
     return item
 
 

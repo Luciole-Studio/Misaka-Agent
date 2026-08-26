@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from misaka.utils import atomic
 from misaka.config import CONFIG_DIR_NAME, get_agent_dir, get_bin_dir
 from misaka.core.keybindings import migrateKeybindingsConfig
 from misaka.core.session_manager import get_default_session_dir
@@ -57,7 +58,7 @@ def migrate_auth_to_auth_json() -> list[str]:
         oauth_path.rename(oauth_path.with_suffix(".json.migrated"))
     if settings is not None and isinstance(settings, dict) and "apiKeys" in settings:
         settings.pop("apiKeys", None)
-        settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        atomic.write_text(settings_path, json.dumps(settings, indent=2))
     return list(migrated)
 
 
@@ -110,7 +111,7 @@ def migrate_keybindings_config_file() -> None:
     migration = migrateKeybindingsConfig(parsed)
     if not migration["migrated"]:
         return
-    config_path.write_text(json.dumps(migration["config"], indent=2) + "\n", encoding="utf-8")
+    atomic.write_text(config_path, json.dumps(migration["config"], indent=2) + "\n")
 
 
 def migrate_tools_to_bin() -> None:

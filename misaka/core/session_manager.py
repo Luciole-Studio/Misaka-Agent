@@ -25,6 +25,7 @@ from misaka.agent.harness.types import SessionContext
 from misaka.agent.types import AgentMessage
 from misaka.ai.types import ImageContent, MessageValue, TextContent
 from misaka.config import get_agent_dir, get_sessions_dir
+from misaka.utils import atomic
 from misaka.utils.paths import normalize_path, resolve_path
 
 CURRENT_SESSION_VERSION = 3
@@ -485,7 +486,7 @@ class SessionManager:
     def _rewriteFile(self) -> None:
         if not self.persist or not self.sessionFile:
             return
-        Path(self.sessionFile).write_text(_dump_jsonl(self.fileEntries), encoding="utf-8")
+        atomic.write_text(self.sessionFile, _dump_jsonl(self.fileEntries))
 
     def isPersisted(self) -> bool:
         return self.persist
@@ -897,16 +898,7 @@ class SessionManager:
         # interrupted halfway (Ctrl-C, crash, disk full) leaves a truncated JSONL under the
         # real name that loads as a valid session next time. Write a temp file in the same
         # directory, then os.replace, which is atomic on one filesystem.
-        temp_file = f"{new_session_file}.{os.getpid()}.tmp"
-        try:
-            Path(temp_file).write_text(_dump_jsonl([header, *copied_entries]), encoding="utf-8")
-            os.replace(temp_file, new_session_file)
-        except BaseException:
-            try:
-                os.unlink(temp_file)
-            except OSError:
-                pass
-            raise
+        atomic.write_text(new_session_file, _dump_jsonl([header, *copied_entries]))
         return cls(resolved_target_cwd, directory, new_session_file, True)
 
     @classmethod

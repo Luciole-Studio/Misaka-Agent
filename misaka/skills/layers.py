@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 
+from misaka.utils import atomic
 from misaka.config import CFG
 
 
@@ -42,10 +43,7 @@ def disabled_skill_names():
 
 
 def write_skills_config(cfg):
-    path = config_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    atomic.write_text(config_path(), json.dumps(cfg, ensure_ascii=False, indent=2))
 
 
 EXCLUDED_SKILL_DIRS = frozenset((

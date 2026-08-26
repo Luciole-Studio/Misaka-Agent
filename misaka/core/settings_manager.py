@@ -19,6 +19,7 @@ from misaka.core.http_dispatcher import (
     DEFAULT_HTTP_IDLE_TIMEOUT_MS,
     parseHttpIdleTimeoutMs,
 )
+from misaka.utils import atomic
 from misaka.utils.paths import normalize_path, resolve_path
 
 type CompactionSettings = dict[str, Any]
@@ -98,24 +99,17 @@ class FileSettingsStorage(SettingsStorage):
         release_lock: Any = None
 
         try:
-            file_exists = os.path.exists(path)
+            os.makedirs(directory, exist_ok=True)
+            release_lock = self.acquireLockSyncWithRetry(path)   # before reading: a first write races too
             current: str | None = None
-
-            if file_exists:
-                release_lock = self.acquireLockSyncWithRetry(path)
+            if os.path.exists(path):
                 with open(path, encoding="utf-8") as handle:
                     current = handle.read()
 
             next_value = fn(current)
             if next_value is None:
                 return
-
-            if not os.path.exists(directory):
-                os.makedirs(directory, exist_ok=True)
-            if release_lock is None:
-                release_lock = self.acquireLockSyncWithRetry(path)
-            with open(path, "w", encoding="utf-8") as handle:
-                handle.write(next_value)
+            atomic.write_text(path, next_value)
         finally:
             if release_lock is not None:
                 release_lock()

@@ -5,6 +5,7 @@ import shutil
 from pathlib import Path
 
 from misaka.skills import write as skill_write
+from misaka.utils import atomic
 
 MAX_SKILL_CONTENT_CHARS = 40_000
 MAX_DESCRIPTION_LENGTH = 1024
@@ -181,10 +182,7 @@ def _create(profile_dir, name, content):
 
     skill_dir.mkdir(parents=True, exist_ok=True)
     md = skill_dir / "SKILL.md"
-    tmp = md.with_suffix(".md.tmp")
-    tmp.write_text(content, encoding="utf-8")
-    os.replace(tmp, md)
-    os.chmod(md, 0o644)
+    atomic.write_text(md, content, mode=0o644)
 
     scan_error = _security_scan(skill_dir)
     if scan_error:
@@ -235,9 +233,7 @@ def _require_skill(profile_dir, name):
 
 
 def _atomic_write(target, text):
-    tmp = target.with_suffix(target.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, target)
+    atomic.write_text(target, text)
 
 
 def _write_file(profile_dir, name, file_path, file_content):
