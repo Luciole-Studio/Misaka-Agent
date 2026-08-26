@@ -17,15 +17,13 @@ from misaka.ai.types import Tool, ToolCall
 
 type JsonSchemaObject = dict[str, Any]
 
-_validator_cache: dict[int, Draft202012Validator] = {}
-
-
-def _is_record(value: Any) -> bool:
-    return isinstance(value, Mapping)
+# Keyed by content, and bounded: see _get_validator.
+_VALIDATOR_CACHE_LIMIT = 512
+_validator_cache: dict[str, Draft202012Validator] = {}
 
 
 def _is_json_schema_object(value: Any) -> bool:
-    return _is_record(value)
+    return isinstance(value, Mapping)
 
 
 def _get_schema_types(schema: JsonSchemaObject) -> list[str]:
@@ -62,9 +60,20 @@ def _matches_json_type(value: Any, schema_type: str) -> bool:
 
 
 def _get_validator(schema: JsonSchemaObject) -> Draft202012Validator:
-    key = id(schema)
+    """Cache by content, never by ``id``.
+
+    The union-arm coercion below hands this freshly built ``dict(item)`` copies, so an
+    address-keyed cache grew on every tool call *and* could return another schema's
+    validator once CPython reused a freed address.
+    """
+    try:
+        key = json.dumps(schema, sort_keys=True, default=repr)
+    except (TypeError, ValueError):
+        return Draft202012Validator(schema)          # not serialisable: build it, cache nothing
     validator = _validator_cache.get(key)
     if validator is None:
+        if len(_validator_cache) >= _VALIDATOR_CACHE_LIMIT:
+            _validator_cache.clear()
         validator = Draft202012Validator(schema)
         _validator_cache[key] = validator
     return validator
