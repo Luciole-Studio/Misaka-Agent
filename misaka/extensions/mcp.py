@@ -33,6 +33,7 @@ from pydantic import BaseModel
 
 from misaka.core.extensions import startup_sections
 from misaka.core.extensions.types import ToolDefinition
+from misaka.platform.prompt_guard import untrusted
 
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -408,7 +409,8 @@ def _register_bound(harn, context):
             args = raw if isinstance(raw, dict) else (
                 raw.model_dump() if isinstance(raw, BaseModel) else dict(raw or {}))
             text = await _c.call(_t, args)
-            return {"content": [{"type": "text", "text": text}],
+            fenced = untrusted(f"mcp:{_c.name}/{_t}", text)
+            return {"content": [{"type": "text", "text": fenced}],
                     "details": {"server": _c.name, "tool": _t}}
 
         harn_.registerTool(ToolDefinition(

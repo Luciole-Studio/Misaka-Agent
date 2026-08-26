@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from misaka.core.extensions.types import ToolDefinition
 from misaka.documents import index as corpus
+from misaka.platform.prompt_guard import untrusted
 
 
 def _text(s):
@@ -76,13 +77,13 @@ def register(harn):
         if _aborted(signal):
             return _text("Cancelled.")
         if o:
-            return _text(o + "\n\nUse doc_read(doc_id, node=<node-id>) to read a section.")
+            return _text(untrusted(params.doc_id, o)
+                         + "Use doc_read(doc_id, node=<node-id>) to read a section.\n")
         st = await _off_loop(corpus.structure, params.doc_id, workspace=workspace)
         if not st:
             return _text("Document not found. Use doc_list to find its document ID.")
         heads = "\n".join(f"  p{p['page']}  {p['head']}" for p in st.get("pages", [])[:80])
-        return _text(f"""# {st['title']} (no structure tree; navigate by page)
-{heads}""")
+        return _text(untrusted(params.doc_id, f"# {st['title']} (no structure tree; navigate by page)\n{heads}"))
 
     class ReadParams(BaseModel):
         doc_id: str = Field(description="Document ID.")
@@ -115,7 +116,9 @@ def register(harn):
                               offset=params.offset, workspace=workspace)
         if _aborted(signal):
             return _text("Cancelled.")
-        return _text(txt or f"No text was extracted from p{start}-{end}; the pages may contain only images.")
+        if not txt:
+            return _text(f"No text was extracted from p{start}-{end}; the pages may contain only images.")
+        return _text(untrusted(f"{params.doc_id} p{start}-{end}", txt))
 
     class FindParams(BaseModel):
         query: str = Field(description="Exact text to find.")
@@ -133,7 +136,8 @@ def register(harn):
             return _text("Cancelled.")
         if not hits:
             return _text("No matches.")
-        return _text("\n".join(f"{h['doc_id']} p{h['page']}  {h['s'][:100]}" for h in hits))
+        found = "\n".join(f"{h['doc_id']} p{h['page']}  {h['s'][:100]}" for h in hits)
+        return _text(untrusted(f"doc-search:{params.query}", found))
 
     class AddParams(BaseModel):
         path: str = Field(description="File or folder to index (PDF, Markdown, text), relative to the workspace or absolute; must stay inside the workspace.")

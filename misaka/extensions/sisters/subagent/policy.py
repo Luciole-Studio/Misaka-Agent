@@ -21,6 +21,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from misaka.platform.prompt_guard import untrusted
 from misaka.utils.values import read_field
 
 MANAGEMENT_TOOLS = frozenset({"agent", "taskoutput", "sendmessage", "taskstop"})
@@ -1249,7 +1250,7 @@ class AgentPolicy:
             "message": {
                 "role": "custom",
                 "customType": "hook_additional_context",
-                "content": [{"type": "text", "text": "\n".join(context)}],
+                "content": [{"type": "text", "text": untrusted("hook", "\n".join(context))}],
                 "display": False,
                 "timestamp": now,
             }

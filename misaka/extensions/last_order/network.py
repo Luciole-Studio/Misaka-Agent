@@ -16,6 +16,7 @@ from misaka.network import validate
 from misaka.network.sister_runtime import ACTIVE_BOARD_STATUSES, SisterRuntime
 from misaka.platform import budget
 from misaka.platform import tasks as db
+from misaka.platform.prompt_guard import untrusted
 
 _CON = None
 TaskId = Annotated[str, Field(pattern=r"^t_[0-9a-f]{6}$")]
@@ -652,7 +653,10 @@ def register(harn):
         except OSError:
             lines = []
         entries = [(index, line) for index, line in enumerate(lines, 1) if index > params.after_id][-params.limit:]
-        return _text("\n".join(f"{index}: {line}" for index, line in entries) or "(no log entries)")
+        log = "\n".join(f"{index}: {line}" for index, line in entries)
+        if not log:
+            return _text("(no log entries)")
+        return _text(untrusted(f"card-log:{params.task_id}", log))
 
 
     class CardAttachParams(StrictParams):
