@@ -310,7 +310,7 @@ async def _run_rpc_mode(runtime_host: Any, *, input_stream: Any | None = None) -
             response["command"] = command
         return response
 
-    async def rebind_session() -> None:
+    async def rebind_session(_session=None) -> None:   # the runtime passes the new session; we read runtime_host.session
         nonlocal session, unsubscribe
         session = runtime_host.session
 

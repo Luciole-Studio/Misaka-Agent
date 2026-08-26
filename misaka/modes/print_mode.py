@@ -67,7 +67,7 @@ async def run_print_mode(runtime_host: Any, options: PrintModeOptions | dict[str
             unsubscribe = None
         await runtime_host.dispose()
 
-    async def rebind_session() -> None:
+    async def rebind_session(_session=None) -> None:   # the runtime passes the new session; we read runtime_host.session
         nonlocal session, unsubscribe
         session = runtime_host.session
 
