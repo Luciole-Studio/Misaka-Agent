@@ -140,21 +140,6 @@ def getCapabilities() -> TerminalCapabilities:
     return _cached_capabilities
 
 
-def resetCapabilitiesCache() -> None:
-    global _cached_capabilities
-    _cached_capabilities = None
-
-
-def setCapabilities(caps: TerminalCapabilities | dict[str, object]) -> None:
-    global _cached_capabilities
-    if isinstance(caps, dict):
-        _cached_capabilities = TerminalCapabilities(
-            images=caps.get("images"), trueColor=bool(caps.get("trueColor")), hyperlinks=bool(caps.get("hyperlinks"))
-        )
-        return
-    _cached_capabilities = caps
-
-
 def isImageLine(line: str) -> bool:
     return (
         line.startswith((KITTY_PREFIX, ITERM2_PREFIX)) or KITTY_PREFIX in line or ITERM2_PREFIX in line
@@ -206,10 +191,6 @@ def deleteKittyImage(image_id: int) -> str:
     return f"\x1b_Ga=d,d=I,i={image_id},q=2\x1b\\"
 
 
-def deleteAllKittyImages() -> str:
-    return "\x1b_Ga=d,d=A,q=2\x1b\\"
-
-
 def encodeITerm2(
     base64_data: str,
     options: dict[str, int | str | bool | None] | None = None,
@@ -251,15 +232,6 @@ def calculateImageCellSize(
     if max_height is not None:
         rows = min(rows, max_height)
     return ImageCellSize(columns=columns, rows=max(1, rows))
-
-
-def calculateImageRows(
-    image_dimensions: ImageDimensions,
-    target_width_cells: int,
-    cell_dimensions: CellDimensions | None = None,
-) -> int:
-    dims = cell_dimensions or CellDimensions(widthPx=9, heightPx=18)
-    return calculateImageCellSize(image_dimensions, target_width_cells, None, dims).rows
 
 
 def getPngDimensions(base64_data: str) -> ImageDimensions | None:
@@ -432,8 +404,6 @@ __all__ = [
     "TerminalCapabilities",
     "allocateImageId",
     "calculateImageCellSize",
-    "calculateImageRows",
-    "deleteAllKittyImages",
     "deleteKittyImage",
     "detectCapabilities",
     "encodeITerm2",
@@ -449,7 +419,5 @@ __all__ = [
     "imageFallback",
     "isImageLine",
     "renderImage",
-    "resetCapabilitiesCache",
-    "setCapabilities",
     "setCellDimensions",
 ]

@@ -294,11 +294,6 @@ class StdinBuffer:
             listener(*args)
 
 
-StdinBufferOptions = dict[str, Any]
-StdinBufferEventMap = dict[str, tuple[str]]
-
 __all__ = [
     "StdinBuffer",
-    "StdinBufferEventMap",
-    "StdinBufferOptions",
 ]

@@ -17,10 +17,6 @@ def setKittyProtocolActive(active: bool) -> None:
     _kitty_protocol_active = active
 
 
-def isKittyProtocolActive() -> bool:
-    return _kitty_protocol_active
-
-
 class _KeyHelper:
     escape = "escape"
     esc = "esc"
@@ -311,67 +307,6 @@ LEGACY_CTRL_SEQUENCES = {
     "end": ["\x1b[8^"],
 }
 
-LEGACY_SEQUENCE_KEY_IDS: dict[str, KeyId] = {
-    "\x1bOA": "up",
-    "\x1bOB": "down",
-    "\x1bOC": "right",
-    "\x1bOD": "left",
-    "\x1bOH": "home",
-    "\x1bOF": "end",
-    "\x1b[E": "clear",
-    "\x1bOE": "clear",
-    "\x1bOe": "ctrl+clear",
-    "\x1b[e": "shift+clear",
-    "\x1b[2~": "insert",
-    "\x1b[2$": "shift+insert",
-    "\x1b[2^": "ctrl+insert",
-    "\x1b[3$": "shift+delete",
-    "\x1b[3^": "ctrl+delete",
-    "\x1b[[5~": "pageUp",
-    "\x1b[[6~": "pageDown",
-    "\x1b[a": "shift+up",
-    "\x1b[b": "shift+down",
-    "\x1b[c": "shift+right",
-    "\x1b[d": "shift+left",
-    "\x1bOa": "ctrl+up",
-    "\x1bOb": "ctrl+down",
-    "\x1bOc": "ctrl+right",
-    "\x1bOd": "ctrl+left",
-    "\x1b[5$": "shift+pageUp",
-    "\x1b[6$": "shift+pageDown",
-    "\x1b[7$": "shift+home",
-    "\x1b[8$": "shift+end",
-    "\x1b[5^": "ctrl+pageUp",
-    "\x1b[6^": "ctrl+pageDown",
-    "\x1b[7^": "ctrl+home",
-    "\x1b[8^": "ctrl+end",
-    "\x1bOP": "f1",
-    "\x1bOQ": "f2",
-    "\x1bOR": "f3",
-    "\x1bOS": "f4",
-    "\x1b[11~": "f1",
-    "\x1b[12~": "f2",
-    "\x1b[13~": "f3",
-    "\x1b[14~": "f4",
-    "\x1b[[A": "f1",
-    "\x1b[[B": "f2",
-    "\x1b[[C": "f3",
-    "\x1b[[D": "f4",
-    "\x1b[[E": "f5",
-    "\x1b[15~": "f5",
-    "\x1b[17~": "f6",
-    "\x1b[18~": "f7",
-    "\x1b[19~": "f8",
-    "\x1b[20~": "f9",
-    "\x1b[21~": "f10",
-    "\x1b[23~": "f11",
-    "\x1b[24~": "f12",
-    "\x1bb": "alt+left",
-    "\x1bf": "alt+right",
-    "\x1bp": "alt+up",
-    "\x1bn": "alt+down",
-}
-
 KITTY_CSI_U_REGEX = re.compile(r"^\x1b\[(\d+)(?::(\d*))?(?::(\d+))?(?:;(\d+))?(?::(\d+))?u$")
 KITTY_PRINTABLE_ALLOWED_MODIFIERS = MODIFIERS["shift"] | LOCK_MASK
 
@@ -418,12 +353,6 @@ def isKeyRelease(data: str) -> bool:
     if "\x1b[200~" in data:
         return False
     return any(token in data for token in (":3u", ":3~", ":3A", ":3B", ":3C", ":3D", ":3H", ":3F"))
-
-
-def isKeyRepeat(data: str) -> bool:
-    if "\x1b[200~" in data:
-        return False
-    return any(token in data for token in (":2u", ":2~", ":2A", ":2B", ":2C", ":2D", ":2H", ":2F"))
 
 
 def parse_event_type(event_type_str: str | None) -> KeyEventType:
@@ -588,23 +517,6 @@ def matches_printable_modify_other_keys(data: str, expected_keycode: int, expect
     return normalize_shifted_letter_identity_codepoint(parsed.codepoint, parsed.modifier) == (
         normalize_shifted_letter_identity_codepoint(expected_keycode, expected_modifier)
     )
-
-
-def format_key_name_with_modifiers(key_name: str, modifier: int) -> str | None:
-    mods: list[str] = []
-    effective_mod = modifier & ~LOCK_MASK
-    supported_modifier_mask = MODIFIERS["shift"] | MODIFIERS["ctrl"] | MODIFIERS["alt"] | MODIFIERS["super"]
-    if (effective_mod & ~supported_modifier_mask) != 0:
-        return None
-    if effective_mod & MODIFIERS["shift"]:
-        mods.append("shift")
-    if effective_mod & MODIFIERS["ctrl"]:
-        mods.append("ctrl")
-    if effective_mod & MODIFIERS["alt"]:
-        mods.append("alt")
-    if effective_mod & MODIFIERS["super"]:
-        mods.append("super")
-    return f"{'+'.join(mods)}+{key_name}" if mods else key_name
 
 
 def parse_key_id(key_id: str) -> dict[str, bool | str] | None:
@@ -857,148 +769,6 @@ def matchesKey(data: str, key_id: KeyId) -> bool:
     return False
 
 
-def format_parsed_key(codepoint: int, modifier: int, base_layout_key: int | None = None) -> str | None:
-    normalized_codepoint = normalize_kitty_functional_codepoint(codepoint)
-    identity_codepoint = normalize_shifted_letter_identity_codepoint(normalized_codepoint, modifier)
-    is_latin_letter = 97 <= identity_codepoint <= 122
-    is_digit = 48 <= identity_codepoint <= 57
-    is_known_symbol = chr(identity_codepoint) in SYMBOL_KEYS if identity_codepoint >= 0 else False
-    effective_codepoint = (
-        identity_codepoint
-        if (is_latin_letter or is_digit or is_known_symbol)
-        else (base_layout_key if base_layout_key is not None else identity_codepoint)
-    )
-
-    key_name: str | None = None
-    if effective_codepoint == CODEPOINTS["escape"]:
-        key_name = "escape"
-    elif effective_codepoint == CODEPOINTS["tab"]:
-        key_name = "tab"
-    elif effective_codepoint in {CODEPOINTS["enter"], CODEPOINTS["kpEnter"]}:
-        key_name = "enter"
-    elif effective_codepoint == CODEPOINTS["space"]:
-        key_name = "space"
-    elif effective_codepoint == CODEPOINTS["backspace"]:
-        key_name = "backspace"
-    elif effective_codepoint == FUNCTIONAL_CODEPOINTS["delete"]:
-        key_name = "delete"
-    elif effective_codepoint == FUNCTIONAL_CODEPOINTS["insert"]:
-        key_name = "insert"
-    elif effective_codepoint == FUNCTIONAL_CODEPOINTS["home"]:
-        key_name = "home"
-    elif effective_codepoint == FUNCTIONAL_CODEPOINTS["end"]:
-        key_name = "end"
-    elif effective_codepoint == FUNCTIONAL_CODEPOINTS["pageUp"]:
-        key_name = "pageUp"
-    elif effective_codepoint == FUNCTIONAL_CODEPOINTS["pageDown"]:
-        key_name = "pageDown"
-    elif effective_codepoint == ARROW_CODEPOINTS["up"]:
-        key_name = "up"
-    elif effective_codepoint == ARROW_CODEPOINTS["down"]:
-        key_name = "down"
-    elif effective_codepoint == ARROW_CODEPOINTS["left"]:
-        key_name = "left"
-    elif effective_codepoint == ARROW_CODEPOINTS["right"]:
-        key_name = "right"
-    elif 48 <= effective_codepoint <= 57 or 97 <= effective_codepoint <= 122 or effective_codepoint >= 0 and chr(effective_codepoint) in SYMBOL_KEYS:
-        key_name = chr(effective_codepoint)
-
-    if key_name is None:
-        return None
-    return format_key_name_with_modifiers(key_name, modifier)
-
-
-def parseKey(data: str) -> str | None:
-    kitty = parse_kitty_sequence(data)
-    if kitty is not None:
-        return format_parsed_key(kitty.codepoint, kitty.modifier, kitty.baseLayoutKey)
-
-    modify_other_keys = parse_modify_other_keys_sequence(data)
-    if modify_other_keys is not None:
-        return format_parsed_key(modify_other_keys.codepoint, modify_other_keys.modifier)
-
-    if _kitty_protocol_active and data in {"\x1b\r", "\n"}:
-        return "shift+enter"
-
-    legacy_key_id = LEGACY_SEQUENCE_KEY_IDS.get(data)
-    if legacy_key_id is not None:
-        return legacy_key_id
-
-    if data == "\x1b":
-        return "escape"
-    if data == "\x1c":
-        return "ctrl+\\"
-    if data == "\x1d":
-        return "ctrl+]"
-    if data == "\x1f":
-        return "ctrl+-"
-    if data == "\x1b\x1b":
-        return "ctrl+alt+["
-    if data == "\x1b\x1c":
-        return "ctrl+alt+\\"
-    if data == "\x1b\x1d":
-        return "ctrl+alt+]"
-    if data == "\x1b\x1f":
-        return "ctrl+alt+-"
-    if data == "\t":
-        return "tab"
-    if data == "\r" or (not _kitty_protocol_active and data == "\n") or data == "\x1bOM":
-        return "enter"
-    if data == "\x00":
-        return "ctrl+space"
-    if data == " ":
-        return "space"
-    if data == "\x7f":
-        return "backspace"
-    if data == "\x08":
-        return "ctrl+backspace" if is_windows_terminal_session() else "backspace"
-    if data == "\x1b[Z":
-        return "shift+tab"
-    if not _kitty_protocol_active and data == "\x1b\r":
-        return "alt+enter"
-    if not _kitty_protocol_active and data == "\x1b ":
-        return "alt+space"
-    if data in {"\x1b\x7f", "\x1b\b"}:
-        return "alt+backspace"
-    if not _kitty_protocol_active and data == "\x1bB":
-        return "alt+left"
-    if not _kitty_protocol_active and data == "\x1bF":
-        return "alt+right"
-    if not _kitty_protocol_active and len(data) == 2 and data[0] == "\x1b":
-        code = ord(data[1])
-        if 1 <= code <= 26:
-            return f"ctrl+alt+{chr(code + 96)}"
-        if 97 <= code <= 122 or 48 <= code <= 57 or chr(code) in SYMBOL_KEYS:
-            return f"alt+{chr(code)}"
-    if data == "\x1b[A":
-        return "up"
-    if data == "\x1b[B":
-        return "down"
-    if data == "\x1b[C":
-        return "right"
-    if data == "\x1b[D":
-        return "left"
-    if data in {"\x1b[H", "\x1bOH"}:
-        return "home"
-    if data in {"\x1b[F", "\x1bOF"}:
-        return "end"
-    if data == "\x1b[3~":
-        return "delete"
-    if data == "\x1b[5~":
-        return "pageUp"
-    if data == "\x1b[6~":
-        return "pageDown"
-
-    if len(data) == 1:
-        code = ord(data)
-        if 1 <= code <= 26:
-            return f"ctrl+{chr(code + 96)}"
-        if 32 <= code <= 126:
-            return data
-
-    return None
-
-
 def decodeKittyPrintable(data: str) -> str | None:
     match = KITTY_CSI_U_REGEX.match(data)
     if match is None:
@@ -1049,9 +819,6 @@ __all__ = [
     "decodeKittyPrintable",
     "decodePrintableKey",
     "isKeyRelease",
-    "isKeyRepeat",
-    "isKittyProtocolActive",
     "matchesKey",
-    "parseKey",
     "setKittyProtocolActive",
 ]

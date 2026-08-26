@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from misaka.ui.tui.keys import KeyId, matchesKey
 
@@ -139,7 +138,6 @@ def getKeybindings() -> KeybindingsManager:
     return _global_keybindings
 
 
-Keybindings = dict[str, Any]
 KeybindingDefinitions = dict[str, KeybindingDefinition]
 
 __all__ = [
@@ -147,7 +145,6 @@ __all__ = [
     "Keybinding",
     "KeybindingDefinition",
     "KeybindingDefinitions",
-    "Keybindings",
     "KeybindingsConfig",
     "KeybindingsManager",
     "getKeybindings",
