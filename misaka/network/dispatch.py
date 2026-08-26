@@ -259,13 +259,6 @@ def _owned(con, task_id, *, generation, claim_lock):
             and row["claim_expires"] is not None and int(row["claim_expires"]) >= int(_now()))
 
 
-def _fence_intact(con, t):
-    """True while the abandoned card still carries the exact ownership ``reclaim_abandoned`` matches."""
-    row = db.get(con, t["id"])
-    return row is not None and row["status"] == "running" and all(
-        row[key] == t[key] for key in ("generation", "claim_lock", "worker_pid", "worker_identity", "claim_expires"))
-
-
 def _now():
     import time
     return int(time.time())
@@ -284,20 +277,20 @@ def finish_abandoned(con, t):
         return "blocked" if db.block_abandoned(
             con, t["id"], "needs_input", str(result)[len("blocked:"):].strip(), **fence) else None
     if ok:
-        if not _fence_intact(con, t):
-            return None
         workspace = db.workspace_for(t)
-        if repo.enabled(workspace) and not repo.commit_card(workspace, t["id"], result, f"card {t['id']}: submit (reconciled)"):
-            return "blocked" if db.block_abandoned(
-                con, t["id"], "transient", "the submission could not be committed to git; fix the repository, then resume the card",
-                **fence) else None
-    if not db.reclaim_abandoned(con, t["id"], submitted=bool(ok), **fence):
-        return None
-    if ok:
-        db.add_event(con, t["id"], "submitted", {**_submitted(result), "reconciled": True},
-                     generation=t["generation"])
+        with db.write_txn(con):               # acceptance and its submitted payload land together
+            if not db.reclaim_abandoned(con, t["id"], submitted=True, **fence):
+                return None
+            db.add_event(con, t["id"], "submitted", {**_submitted(result), "reconciled": True},
+                         generation=t["generation"])
+        if repo.enabled(workspace) and not repo.commit_card(
+                workspace, t["id"], result, f"card {t['id']}: submit (reconciled)"):
+            db.add_event(con, t["id"], "git_commit_pending", {"reason": "submit-reconciled"},
+                         generation=t["generation"])
         index_artifacts(con, t["id"], result.get("artifacts", []), t["generation"])
         return "submitted"
+    if not db.reclaim_abandoned(con, t["id"], submitted=False, **fence):
+        return None
     db.add_event(con, t["id"], "reclaimed", {"reason": str(result)[:500]}, generation=t["generation"])
     return "reclaimed"
 
@@ -305,8 +298,9 @@ def finish_abandoned(con, t):
 def index_after_review(con, task_id, generation):
     """A reviewer's approval finishes the card: its last submitted artifacts join the corpus now."""
     row = con.execute(
-        "SELECT payload FROM events WHERE task_id=? AND kind='submitted' ORDER BY id DESC LIMIT 1",
-        (task_id,),
+        "SELECT payload FROM events WHERE task_id=? AND kind='submitted' AND generation=? "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id, generation),
     ).fetchone()
     try:
         artifacts = json.loads(row["payload"] or "{}").get("artifacts") or [] if row else []
@@ -316,20 +310,19 @@ def index_after_review(con, task_id, generation):
 
 
 def accept(con, t, report, *, generation, claim_lock, workspace):
-    """Submission is acceptance: commit the report's artifacts on the card's line; the card is
-    done (or waits for the reviewer it names) and its artifacts join the corpus. The commit
-    happens only for the card's current owner; the CAS in ``submit_task`` is the final word."""
+    """Submission is acceptance: the ownership CAS in ``submit_task`` is the final word, and done
+    lands with its submitted payload in one transaction. Git records the acceptance afterwards --
+    only the CAS winner commits, so a losing owner can no longer leave a stale commit; a failed
+    commit leaves a ``git_commit_pending`` event (the cards model: git is history, not a veto)."""
     from misaka.platform import repo
     if not _owned(con, t["id"], generation=generation, claim_lock=claim_lock):
-        return False
-    if repo.enabled(workspace) and not repo.commit_card(workspace, t["id"], report, f"card {t['id']}: submit"):
-        db.block_task(con, t["id"], "transient", "the submission could not be committed to git; fix the repository, then resume the card",
-                      generation=generation)
         return False
     with db.write_txn(con):                                # done and its submitted payload land together
         if not db.submit_task(con, t["id"], generation=generation, claim_lock=claim_lock):
             return False
         db.add_event(con, t["id"], "submitted", _submitted(report), generation=generation)
+    if repo.enabled(workspace) and not repo.commit_card(workspace, t["id"], report, f"card {t['id']}: submit"):
+        db.add_event(con, t["id"], "git_commit_pending", {"reason": "submit"}, generation=generation)
     index_artifacts(con, t["id"], report.get("artifacts", []), generation)
     return True
 
@@ -337,8 +330,8 @@ def accept(con, t, report, *, generation, claim_lock, workspace):
 def index_artifacts(con, task_id, artifacts, generation):
     """A done card's artifacts join the corpus (PageIndex); an index failure never blocks the card."""
     row = db.get(con, task_id)
-    if row is None or row["status"] != "done":
-        return
+    if row is None or row["status"] != "done" or int(row["generation"]) != int(generation):
+        return                                # a newer generation owns the card: nothing of ours to index
     try:
         got = ws_index.ingest_artifacts(con, row, artifacts=artifacts)
     except Exception as error:  # noqa: BLE001 - a derived index must not undo an acceptance
