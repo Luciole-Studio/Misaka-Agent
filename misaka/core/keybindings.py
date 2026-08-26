@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import os
 import sys
-from typing import Any
-from typing import Literal
+from typing import Any, Literal
 
+from misaka.config import get_agent_dir
 from misaka.ui.tui import (
     TUI_KEYBINDINGS,
     Keybinding,
@@ -19,8 +19,6 @@ from misaka.ui.tui import (
 from misaka.ui.tui import (
     KeybindingsManager as TuiKeybindingsManager,
 )
-
-from misaka.config import get_agent_dir
 
 type AppKeybinding = Literal[
     "app.interrupt",
@@ -271,11 +269,11 @@ class KeybindingsManager(TuiKeybindingsManager):
         return _to_keybindings_config(migrated)
 
 __all__ = [
+    "KEYBINDINGS",
     "AppKeybinding",
     "AppKeybindings",
-    "KEYBINDINGS",
-    "Keybinding",
     "KeyId",
+    "Keybinding",
     "KeybindingsConfig",
     "KeybindingsManager",
     "migrateKeybindingsConfig",

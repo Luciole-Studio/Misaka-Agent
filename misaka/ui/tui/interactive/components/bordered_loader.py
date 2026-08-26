@@ -4,13 +4,12 @@ from __future__ import annotations
 
 from misaka.ui.tui import CancellableLoader, Container, Loader, Spacer, Text
 from misaka.ui.tui.components import AbortController
-
 from misaka.ui.tui.interactive.components.dynamic_border import DynamicBorder
 from misaka.ui.tui.interactive.components.keybinding_hints import key_hint
 
 
 class BorderedLoader(Container):
-    def __init__(self, tui, theme, message: str, options: dict[str, bool] | None = None) -> None:  # noqa: ANN001
+    def __init__(self, tui, theme, message: str, options: dict[str, bool] | None = None) -> None:
         super().__init__()
         self.cancellable = bool((options or {}).get("cancellable", True))
         def border_color(text: str) -> str:
@@ -40,17 +39,17 @@ class BorderedLoader(Container):
         self.addChild(DynamicBorder(border_color))
 
     @property
-    def signal(self):  # noqa: ANN201
+    def signal(self):
         if self.cancellable:
             return self.loader.signal
         return self.signalController.signal if self.signalController is not None else AbortController().signal
 
     @property
-    def onAbort(self):  # noqa: ANN201
+    def onAbort(self):
         return getattr(self.loader, "onAbort", None)
 
     @onAbort.setter
-    def onAbort(self, fn) -> None:  # noqa: ANN001
+    def onAbort(self, fn) -> None:
         if self.cancellable:
             self.loader.onAbort = fn
 

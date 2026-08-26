@@ -10,7 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from misaka.utils.fs_watch import FS_WATCH_RETRY_DELAY_MS, FSWatcher, close_watcher, watch_with_error_handler
+from misaka.utils.fs_watch import (
+    FS_WATCH_RETRY_DELAY_MS,
+    FSWatcher,
+    close_watcher,
+    watch_with_error_handler,
+)
 
 _TABLES_LIST_POLL_INTERVAL_SECONDS = 0.25
 _UNSET = object()

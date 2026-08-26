@@ -82,8 +82,8 @@ async def _abortable_sleep(ms: int, signal: Any, cancel_message: str) -> None:
 async def poll_oauth_device_code_flow(
     options: OAuthDeviceCodePollOptions | None = None,
     *,
-    intervalSeconds: int | float | None = None,
-    expiresInSeconds: int | float | None = None,
+    intervalSeconds: float | None = None,
+    expiresInSeconds: float | None = None,
     poll: Callable[[], Awaitable[OAuthDeviceCodePollResult]] | None = None,
     signal: Any | None = None,
 ) -> str:

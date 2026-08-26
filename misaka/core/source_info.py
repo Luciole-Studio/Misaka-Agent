@@ -54,8 +54,8 @@ def create_synthetic_source_info(
 createSyntheticSourceInfo = create_synthetic_source_info
 
 __all__ = [
-    "SourceScope",
-    "SourceOrigin",
     "SourceInfo",
+    "SourceOrigin",
+    "SourceScope",
     "createSyntheticSourceInfo",
 ]

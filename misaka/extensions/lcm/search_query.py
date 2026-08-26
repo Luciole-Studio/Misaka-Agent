@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Callable, List
+from collections.abc import Callable
 
 _CJK_RE = re.compile(
     r"["
@@ -209,7 +209,7 @@ def requires_like_fallback(query: str, sanitized: str | None = None) -> bool:
     return contains_risky_fts_ascii(safe)
 
 
-def _token_variants(token: str) -> List[str]:
+def _token_variants(token: str) -> list[str]:
     cleaned = (token or "").strip().strip(_STRIP_EDGE_PUNCT)
     if not cleaned:
         return []
@@ -231,7 +231,7 @@ def _token_variants(token: str) -> List[str]:
     return deduped
 
 
-def extract_search_terms(query: str) -> List[str]:
+def extract_search_terms(query: str) -> list[str]:
     text = (query or "").strip()
     if not text:
         return []
@@ -260,7 +260,7 @@ def extract_search_terms(query: str) -> List[str]:
     return deduped
 
 
-def extract_quoted_phrases(query: str) -> List[str]:
+def extract_quoted_phrases(query: str) -> list[str]:
     return [phrase.strip() for phrase in _QUOTED_PHRASE_RE.findall(query or "") if phrase.strip()]
 
 
@@ -276,7 +276,7 @@ def count_term_matches(text: str, term: str) -> int:
     return haystack.lower().count(needle.lower())
 
 
-def compute_directness_score(text: str, terms: List[str], phrases: List[str] | None = None) -> float:
+def compute_directness_score(text: str, terms: list[str], phrases: list[str] | None = None) -> float:
     content = text or ""
     if not content:
         return 0.0
@@ -337,32 +337,32 @@ def compute_directness_score(text: str, terms: List[str], phrases: List[str] | N
     return score
 
 
-def _is_precise_query_shape(terms: List[str], phrases: List[str] | None = None) -> bool:
+def _is_precise_query_shape(terms: list[str], phrases: list[str] | None = None) -> bool:
     if len(terms) == 1:
         return True
     return len(phrases or []) == 1 and len(terms) <= 2
 
 
-def should_widen_candidate_fetch(terms: List[str], phrases: List[str] | None = None) -> bool:
+def should_widen_candidate_fetch(terms: list[str], phrases: list[str] | None = None) -> bool:
     return _is_precise_query_shape(terms, phrases)
 
 
-def should_apply_directness_rank_adjustment(terms: List[str], phrases: List[str] | None = None) -> bool:
+def should_apply_directness_rank_adjustment(terms: list[str], phrases: list[str] | None = None) -> bool:
     return _is_precise_query_shape(terms, phrases)
 
 
-def compute_directness_rank_bonus_upper_bound(terms: List[str], phrases: List[str] | None = None) -> float:
+def compute_directness_rank_bonus_upper_bound(terms: list[str], phrases: list[str] | None = None) -> float:
     return float((len(terms) * 5) + (len(phrases or []) * 8))
 
 
-def compute_search_fetch_limit(limit: int, terms: List[str], phrases: List[str] | None = None) -> int:
+def compute_search_fetch_limit(limit: int, terms: list[str], phrases: list[str] | None = None) -> int:
     base = max(limit * 5, limit, 20)
     if should_widen_candidate_fetch(terms, phrases):
         return max(base, limit * 10, 50)
     return base
 
 
-def compute_like_fallback_fetch_limit(limit: int, terms: List[str], phrases: List[str] | None = None) -> int:
+def compute_like_fallback_fetch_limit(limit: int, terms: list[str], phrases: list[str] | None = None) -> int:
     """Bound LIKE fallback candidate rows before Python-side scoring/sorting."""
     return compute_search_fetch_limit(limit, terms, phrases)
 
@@ -381,7 +381,7 @@ def normalize_search_sort(sort: str | None) -> str:
     return normalized if normalized in {"recency", "relevance", "hybrid"} else "recency"
 
 
-def build_snippet(text: str, terms: List[str], width: int = 80) -> str:
+def build_snippet(text: str, terms: list[str], width: int = 80) -> str:
     content = (text or "")
     if not content:
         return ""

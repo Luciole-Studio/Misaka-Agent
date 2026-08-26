@@ -15,7 +15,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from misaka.ai.api_registry import ApiProvider, register_api_provider
 from misaka.ai.models import get_models, get_providers
-from misaka.ai.oauth import OAuthProviderInterface, registerOAuthProvider, resetOAuthProviders
+from misaka.ai.oauth import (
+    OAuthProviderInterface,
+    registerOAuthProvider,
+    resetOAuthProviders,
+)
 from misaka.ai.providers.register_builtins import resetApiProviders
 from misaka.ai.types import (
     AnthropicMessagesCompat,
@@ -29,7 +33,6 @@ from misaka.ai.types import (
     SimpleStreamOptions,
 )
 from misaka.ai.utils.oauth.types import OAuthCredentials
-
 from misaka.config import get_agent_dir
 
 logger = logging.getLogger(__name__)
@@ -230,7 +233,7 @@ class _ProviderModelInput(TypedDict):
     baseUrl: NotRequired[str]
     thinkingLevelMap: NotRequired[dict[str, str | None]]
     headers: NotRequired[dict[str, str]]
-    compat: NotRequired[Model.model_fields["compat"].annotation]  # type: ignore[index]
+    compat: NotRequired[Model.model_fields[compat].annotation]  # type: ignore[index]
 
 
 class ProviderConfigInput(TypedDict, total=False):

@@ -24,10 +24,13 @@ except ImportError:  # optional extra: misaka[bedrock]
     class ClientError(Exception):  # keeps `except ClientError` valid; never raised without boto3
         pass
 
-from misaka.ai.providers.sdk import require
-
 from misaka.ai.models import calculate_cost
-from misaka.ai.providers.simple_options import adjust_max_tokens_for_thinking, build_base_options, clamp_reasoning
+from misaka.ai.providers.sdk import require
+from misaka.ai.providers.simple_options import (
+    adjust_max_tokens_for_thinking,
+    build_base_options,
+    clamp_reasoning,
+)
 from misaka.ai.providers.transform_messages import transform_messages
 from misaka.ai.types import (
     AssistantMessage,

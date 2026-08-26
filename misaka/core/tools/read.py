@@ -10,10 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from misaka.agent.types import AgentTool, AgentToolResult
-from misaka.ai.types import Api, ImageContent, Model, TextContent
 from pydantic import BaseModel, ConfigDict, Field
 
+from misaka.agent.types import AgentTool, AgentToolResult
+from misaka.ai.types import Api, ImageContent, Model, TextContent
 from misaka.config import get_readme_path
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.tools.path_utils import resolve_read_path
@@ -30,11 +30,11 @@ from misaka.core.tools.truncate import (
     format_size,
     truncate_head,
 )
+from misaka.ui.tui import Text
 from misaka.ui.tui.interactive.theme.theme import get_language_from_path, highlight_code
 from misaka.utils.image_resize import format_dimension_note, resize_image
 from misaka.utils.mime import detect_supported_image_mime_type_from_file
 from misaka.utils.paths import format_path_relative_to_cwd_or_absolute
-from misaka.ui.tui import Text
 
 
 class ReadToolInput(BaseModel):
@@ -79,7 +79,7 @@ class _DefaultReadOperations:
     async def access(self, absolute_path: str) -> None:
         def _check() -> None:
             with open(absolute_path, "rb"):
-                return None
+                return
 
         await asyncio.to_thread(_check)
 

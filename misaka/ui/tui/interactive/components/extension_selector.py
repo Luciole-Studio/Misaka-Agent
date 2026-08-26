@@ -6,7 +6,6 @@ from collections.abc import Callable
 from typing import Any
 
 from misaka.ui.tui import Container, Spacer, Text, getKeybindings
-
 from misaka.ui.tui.interactive.theme.theme import theme
 
 from .countdown_timer import CountdownTimer

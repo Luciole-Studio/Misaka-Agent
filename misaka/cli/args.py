@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from typing import Literal, TextIO
 
 from misaka.ai.types import ModelThinkingLevel
-
 from misaka.config import APP_NAME, CONFIG_DIR_NAME, ENV_AGENT_DIR, ENV_SESSION_DIR
 from misaka.core.extensions.types import ExtensionFlag
 

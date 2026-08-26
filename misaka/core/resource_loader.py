@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import stat as stat_module
 import sys
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, TypedDict
@@ -19,11 +18,15 @@ from misaka.core.extensions.loader import (
 )
 from misaka.core.extensions.types import (
     Extension,
-    InlineExtension,
     ExtensionRuntime,
+    InlineExtension,
     LoadExtensionsResult,
 )
-from misaka.core.package_manager import DefaultPackageManager, PathMetadata, ResolvedResource
+from misaka.core.package_manager import (
+    DefaultPackageManager,
+    PathMetadata,
+    ResolvedResource,
+)
 from misaka.core.prompt_templates import PromptTemplate, load_prompt_templates
 from misaka.core.settings_manager import SettingsManager
 from misaka.core.source_info import SourceInfo, create_source_info

@@ -10,12 +10,12 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
-from misaka.agent.types import AgentTool, AgentToolResult
-from misaka.ai.types import TextContent
 from pathspec import GitIgnoreSpec
 from pydantic import BaseModel, ConfigDict, Field
 from wcmatch import glob
 
+from misaka.agent.types import AgentTool, AgentToolResult
+from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.tools.path_utils import resolve_to_cwd
 from misaka.core.tools.render_utils import (
@@ -32,8 +32,8 @@ from misaka.core.tools.truncate import (
     format_size,
     truncate_head,
 )
-from misaka.utils.tools_manager import ensure_tool
 from misaka.ui.tui import Text
+from misaka.utils.tools_manager import ensure_tool
 
 T = TypeVar("T")
 
@@ -156,7 +156,7 @@ def _create_abort_wait_task(signal: Any | None) -> tuple[asyncio.Task[None] | No
 def _format_find_call(args: Mapping[str, Any] | None, theme_obj: Any) -> str:
     pattern = str_value(_value(args, "pattern"))
     raw_path = str_value(_value(args, "path"))
-    path_value = shorten_path((raw_path or ".")) if raw_path is not None else None
+    path_value = shorten_path(raw_path or ".") if raw_path is not None else None
     limit = _value(args, "limit")
     invalid_arg = invalid_arg_text(theme_obj)
 

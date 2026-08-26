@@ -137,8 +137,7 @@ def _prefix_ignore_pattern(line: str, prefix: str) -> str | None:
     elif pattern.startswith("\\!"):
         pattern = pattern[1:]
 
-    if pattern.startswith("/"):
-        pattern = pattern[1:]
+    pattern = pattern.removeprefix("/")
 
     prefixed = f"{prefix}{pattern}" if prefix else pattern
     return f"!{prefixed}" if negated else prefixed
@@ -799,8 +798,8 @@ class DefaultPackageManager:
 
 
 __all__ = [
-    "PathMetadata",
-    "ResolvedResource",
-    "ResolvedPaths",
     "DefaultPackageManager",
+    "PathMetadata",
+    "ResolvedPaths",
+    "ResolvedResource",
 ]

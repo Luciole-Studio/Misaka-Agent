@@ -6,9 +6,9 @@ import asyncio
 import difflib
 import errno as errno_module
 import unicodedata
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
 
 from misaka.core.tools.path_utils import resolve_to_cwd
 
@@ -404,7 +404,7 @@ def _format_access_error(error: BaseException) -> str:
 
 def _check_readable_file(absolute_path: str) -> None:
     with open(absolute_path, "rb"):
-        return None
+        return
 
 
 async def compute_edits_diff(path: str, edits: list[Edit | dict[str, str]], cwd: str) -> EditDiffResult | EditDiffError:

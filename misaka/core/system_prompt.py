@@ -6,7 +6,6 @@ import datetime as _datetime
 from typing import NotRequired, TypedDict
 
 
-
 class BuildSystemPromptOptions(TypedDict):
     cwd: str
     customPrompt: NotRequired[str]

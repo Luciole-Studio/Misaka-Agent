@@ -803,7 +803,7 @@ def _invalidate_descendants(con, task_id):
         raise RuntimeError("Active child tasks must stop before this task can resume: " + ','.join(row[0] for row in active))
     with _write_txn(con):
         changed = [row[0] for row in con.execute(
-            f"UPDATE tasks SET status='todo',completed_at=NULL,claim_lock=NULL,claim_expires=NULL,"
+            "UPDATE tasks SET status='todo',completed_at=NULL,claim_lock=NULL,claim_expires=NULL,"
             "worker_pid=NULL,worker_identity=NULL,review_lock=NULL,review_expires=NULL,"
             "review_pid=NULL,review_identity=NULL WHERE id IN (" + marks + ") "
             "AND status<>'todo' RETURNING id",

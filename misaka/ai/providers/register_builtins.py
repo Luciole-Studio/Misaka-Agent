@@ -9,8 +9,19 @@ from collections.abc import AsyncIterable, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from misaka.ai.api_registry import ApiProvider, clear_api_providers, register_api_provider
-from misaka.ai.types import AssistantMessage, Context, ErrorEvent, Model, SimpleStreamOptions, StreamOptions
+from misaka.ai.api_registry import (
+    ApiProvider,
+    clear_api_providers,
+    register_api_provider,
+)
+from misaka.ai.types import (
+    AssistantMessage,
+    Context,
+    ErrorEvent,
+    Model,
+    SimpleStreamOptions,
+    StreamOptions,
+)
 from misaka.ai.utils.event_stream import AssistantMessageEventStream
 
 ProviderStreamCallable = Callable[[Model, Context, StreamOptions | None], AsyncIterable[Any]]
@@ -144,8 +155,8 @@ async def _load_provider_module(
 
 def set_bedrock_provider_module(module: Any) -> None:
     global _bedrock_provider_module_override
-    stream = getattr(module, "streamBedrock")
-    stream_simple = getattr(module, "streamSimpleBedrock")
+    stream = module.streamBedrock
+    stream_simple = module.streamSimpleBedrock
     _bedrock_provider_module_override = LazyProviderModule(stream=stream, streamSimple=stream_simple)
 
 
@@ -312,21 +323,21 @@ streamOpenAIResponses = stream_openai_responses
 streamSimpleOpenAIResponses = stream_simple_openai_responses
 
 __all__ = [
-    "streamAnthropic",
-    "streamSimpleAnthropic",
-    "streamAzureOpenAIResponses",
-    "streamSimpleAzureOpenAIResponses",
-    "streamGoogle",
-    "streamSimpleGoogle",
-    "streamGoogleVertex",
-    "streamSimpleGoogleVertex",
-    "streamMistral",
-    "streamSimpleMistral",
-    "streamOpenAICodexResponses",
-    "streamSimpleOpenAICodexResponses",
-    "streamOpenAICompletions",
-    "streamSimpleOpenAICompletions",
-    "streamOpenAIResponses",
-    "streamSimpleOpenAIResponses",
     "resetApiProviders",
+    "streamAnthropic",
+    "streamAzureOpenAIResponses",
+    "streamGoogle",
+    "streamGoogleVertex",
+    "streamMistral",
+    "streamOpenAICodexResponses",
+    "streamOpenAICompletions",
+    "streamOpenAIResponses",
+    "streamSimpleAnthropic",
+    "streamSimpleAzureOpenAIResponses",
+    "streamSimpleGoogle",
+    "streamSimpleGoogleVertex",
+    "streamSimpleMistral",
+    "streamSimpleOpenAICodexResponses",
+    "streamSimpleOpenAICompletions",
+    "streamSimpleOpenAIResponses",
 ]

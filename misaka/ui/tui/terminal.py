@@ -35,7 +35,7 @@ from misaka.ui.tui.stdin_buffer import StdinBuffer
 
 try:
     import termios
-    import tty  # noqa: F401  (kept for parity; raw mode is hand-rolled below)
+    import tty
 except ImportError:  # pragma: no cover - Windows import path.
     termios = None  # type: ignore[assignment]
     tty = None  # type: ignore[assignment]

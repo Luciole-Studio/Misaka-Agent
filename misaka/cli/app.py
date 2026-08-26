@@ -4,11 +4,11 @@ import os
 import signal
 import sys
 
-from misaka.platform import tasks as db
-from misaka.platform import budget
-from misaka.documents import index as corpus
 from misaka.config import CFG
+from misaka.documents import index as corpus
 from misaka.observability import board as tail
+from misaka.platform import budget
+from misaka.platform import tasks as db
 
 
 def _parser():
@@ -269,7 +269,8 @@ def main():
         import asyncio as _asyncio
 
         from misaka.network import worker as worker_mod
-        from misaka.research import node as research_node, planner, runs, workflow
+        from misaka.research import node as research_node
+        from misaka.research import planner, runs, workflow
         if args.node:
             sys.exit(research_node.main(*args.node))
         if args.probe:
@@ -366,7 +367,11 @@ def main():
         import json as _json
         import os as _os
 
-        from misaka.extensions.moa.provider import MOA_CONFIG_PATH, load_moa_config, slot_label
+        from misaka.extensions.moa.provider import (
+            MOA_CONFIG_PATH,
+            load_moa_config,
+            slot_label,
+        )
 
         path = _os.path.expanduser(MOA_CONFIG_PATH)
         cfg = load_moa_config()

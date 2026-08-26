@@ -126,7 +126,10 @@ def _security_scan(skill_dir):
     that cannot run blocks too: a change nobody scanned is not a scanned change."""
     try:
         from misaka.skills.guard import (
-            format_scan_report, scan_skill, should_allow_install)
+            format_scan_report,
+            scan_skill,
+            should_allow_install,
+        )
         result = scan_skill(Path(skill_dir), source="agent-created")
         allowed, reason = should_allow_install(result)
     except Exception as error:  # noqa: BLE001 - whatever failed inside the scanner, the answer is "not scanned"
@@ -149,7 +152,10 @@ def _lint_findings(skill_md):
 
 def _description_preview(content):
     """Return the description exactly as the prompt index will display it."""
-    from misaka.skills.index import is_skill_description_truncated, truncate_skill_description
+    from misaka.skills.index import (
+        is_skill_description_truncated,
+        truncate_skill_description,
+    )
     from misaka.utils.frontmatter import parse_frontmatter
     desc = str((parse_frontmatter(content).frontmatter or {}).get("description") or "")
     if not is_skill_description_truncated(desc):
@@ -237,7 +243,9 @@ def _atomic_write(target, text):
 def _write_file(profile_dir, name, file_path, file_content):
     if file_content is None:
         return {"success": False, "error": "write_file requires file_content; pass an empty string for an empty file"}
-    from misaka.skills.guard import MAX_SINGLE_FILE_KB     # one limit for support files: the scanner's
+    from misaka.skills.guard import (
+        MAX_SINGLE_FILE_KB,  # one limit for support files: the scanner's
+    )
     if len(file_content.encode("utf-8")) > MAX_SINGLE_FILE_KB * 1024:
         return {"success": False,
                 "error": f"Support file exceeds {MAX_SINGLE_FILE_KB} KB, the security scanner's single-file limit."}

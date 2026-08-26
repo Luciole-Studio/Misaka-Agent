@@ -9,10 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from misaka.agent.types import AgentTool, AgentToolResult
-from misaka.ai.types import TextContent
 from pydantic import BaseModel, ConfigDict, Field
 
+from misaka.agent.types import AgentTool, AgentToolResult
+from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.tools.file_mutation_queue import with_file_mutation_queue
 from misaka.core.tools.path_utils import resolve_to_cwd
@@ -24,8 +24,8 @@ from misaka.core.tools.render_utils import (
     str_value,
 )
 from misaka.core.tools.tool_definition_wrapper import wrap_tool_definition
-from misaka.ui.tui.interactive.theme.theme import get_language_from_path, highlight_code
 from misaka.ui.tui import Container, Text
+from misaka.ui.tui.interactive.theme.theme import get_language_from_path, highlight_code
 
 
 class WriteToolInput(BaseModel):

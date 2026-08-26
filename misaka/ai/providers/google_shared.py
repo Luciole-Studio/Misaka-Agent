@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import base64
-
 import copy
 import re
 from typing import Any, Literal, TypeAlias
 
 from misaka.ai.providers.transform_messages import transform_messages
-from misaka.ai.types import Context, ImageContent, Model, StopReason, TextContent, Tool
+from misaka.ai.types import Context, ImageContent, Model, StopReason, Tool
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
 
 GoogleApiType: TypeAlias = Literal["google-generative-ai", "google-vertex"]
@@ -293,6 +292,6 @@ __all__ = [
     "GoogleThinkingLevel",
     "convertMessages",
     "convertTools",
-    "mapToolChoice",
     "mapStopReason",
+    "mapToolChoice",
     ]

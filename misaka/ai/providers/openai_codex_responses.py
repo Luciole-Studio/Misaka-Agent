@@ -517,7 +517,7 @@ async def parse_sse(response: httpx.Response, signal: Any = None) -> AsyncIterat
                 continue
             try:
                 parsed = json.loads(data)
-            except Exception as error:  # noqa: BLE001
+            except Exception as error:
                 raise CodexProtocolError(
                     f"Invalid Codex SSE JSON: {format_thrown_value(error)}",
                     payload=data,
@@ -851,7 +851,7 @@ async def parse_websocket(socket: Any, signal: Any = None) -> AsyncIterator[dict
                     await asyncio.gather(recv_task, return_exceptions=True)
                     raise RuntimeError("Request was aborted")
             raw_message = await recv_task
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             if hasattr(error, "code") or error.__class__.__name__.startswith("ConnectionClosed"):
                 raise _extract_websocket_close_error(error) from error
             raise _extract_websocket_error(error) from error
@@ -866,7 +866,7 @@ async def parse_websocket(socket: Any, signal: Any = None) -> AsyncIterator[dict
 
         try:
             parsed = json.loads(text)
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             raise CodexProtocolError(
                 f"Invalid Codex WebSocket JSON: {format_thrown_value(error)}",
                 payload=text,
@@ -1119,7 +1119,7 @@ def stream_openai_codex_responses(
                     stream.push(DoneEvent(reason=output.stopReason, message=output))
                     stream.end()
                     return
-                except Exception as error:  # noqa: BLE001
+                except Exception as error:
                     aborted = _is_aborted(_option(options, "signal"))
                     if aborted or is_codex_non_transport_error(error):
                         raise
@@ -1247,9 +1247,6 @@ __all__ = [
     "OpenAICodexResponsesOptions",
     "OpenAICodexWebSocketDebugStats",
     "applyServiceTierPricing",
-    "getServiceTierCostMultiplier",
-    "streamOpenAICodexResponses",
-    "streamSimpleOpenAICodexResponses",
     "apply_service_tier_pricing",
     "build_request_body",
     "build_sse_headers",
@@ -1257,6 +1254,7 @@ __all__ = [
     "close_openai_codex_websocket_sessions",
     "create_codex_request_id",
     "extract_account_id",
+    "getServiceTierCostMultiplier",
     "get_openai_codex_websocket_debug_stats",
     "get_service_tier_cost_multiplier",
     "is_codex_non_transport_error",
@@ -1270,6 +1268,8 @@ __all__ = [
     "resolve_codex_service_tier",
     "resolve_codex_url",
     "resolve_codex_websocket_url",
+    "streamOpenAICodexResponses",
+    "streamSimpleOpenAICodexResponses",
     "stream_openai_codex_responses",
     "stream_simple_openai_codex_responses",
 ]

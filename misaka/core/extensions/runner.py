@@ -11,9 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from misaka.ai.types import ImageContent, Model
-
 from misaka.core.diagnostics import ResourceDiagnostic
-from misaka.core.extensions.loader import create_extension_runtime
 from misaka.core.extensions.types import (
     Extension,
     ExtensionError,

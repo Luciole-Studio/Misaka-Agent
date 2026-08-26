@@ -7,7 +7,9 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from misaka.core.extensions.types import ToolDefinition
-from misaka.ui.tui.interactive.components.ask_user_question import AskUserQuestionComponent
+from misaka.ui.tui.interactive.components.ask_user_question import (
+    AskUserQuestionComponent,
+)
 
 ASK_USER_QUESTION_TOOL_NAME = "AskUserQuestion"
 
@@ -36,7 +38,7 @@ class Question(_StrictModel):
     multiSelect: bool = Field(default=False, description="Allow the user to pick more than one option")
 
     @model_validator(mode="after")
-    def unique_labels(self) -> "Question":
+    def unique_labels(self) -> Question:
         labels = [option.label for option in self.options]
         if len(labels) != len(set(labels)):
             raise ValueError("option labels must be unique within a question")
@@ -47,7 +49,7 @@ class AskUserQuestionParams(_StrictModel):
     questions: list[Question] = Field(min_length=1, max_length=4)
 
     @model_validator(mode="after")
-    def unique_questions(self) -> "AskUserQuestionParams":
+    def unique_questions(self) -> AskUserQuestionParams:
         texts = [question.question for question in self.questions]
         if len(texts) != len(set(texts)):
             raise ValueError("question texts must be unique")

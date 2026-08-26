@@ -6,9 +6,8 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-from misaka.ui.tui import fuzzyMatch
-
 from misaka.core.session_manager import SessionInfo
+from misaka.ui.tui import fuzzyMatch
 
 type SortMode = Literal["threaded", "recent", "relevance"]
 type NameFilter = Literal["all", "named"]

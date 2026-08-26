@@ -16,7 +16,6 @@ from typing import Any
 
 import yaml
 
-
 ROOT = str(Path(__file__).resolve().parent / "agents")
 
 _GENERAL_NAMES = frozenset({"general", "general-purpose"})

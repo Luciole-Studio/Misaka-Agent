@@ -3,8 +3,15 @@
 from __future__ import annotations
 
 from misaka.ai.images_api_registry import get_images_api_provider
-from misaka.ai.providers.images import register_builtins as _register_builtins  # noqa: F401
-from misaka.ai.types import AssistantImages, ImagesContext, ImagesModel, ProviderImagesOptions
+from misaka.ai.providers.images import (
+    register_builtins as _register_builtins,  # noqa: F401
+)
+from misaka.ai.types import (
+    AssistantImages,
+    ImagesContext,
+    ImagesModel,
+    ProviderImagesOptions,
+)
 
 
 def _resolve_images_api_provider(api: str):

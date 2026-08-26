@@ -17,9 +17,9 @@ import re
 import secrets
 import shlex
 import time
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
-
+from typing import Any
 
 MANAGEMENT_TOOLS = frozenset({"agent", "taskoutput", "sendmessage", "taskstop"})
 ALIASES = {"glob": "find"}

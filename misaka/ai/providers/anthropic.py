@@ -6,7 +6,7 @@ import asyncio
 import json
 import os
 import time
-from collections.abc import AsyncIterable, AsyncIterator, Iterable, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
 from typing import Any, Literal, TypedDict
 
 try:
@@ -14,13 +14,18 @@ try:
 except ImportError:  # optional extra: misaka[anthropic]
     AsyncAnthropic = omit = None
 
-from misaka.ai.providers.sdk import require
-
 from misaka.ai.env_api_keys import get_env_api_key
 from misaka.ai.models import calculate_cost
 from misaka.ai.providers.cloudflare import resolve_cloudflare_base_url
-from misaka.ai.providers.github_copilot_headers import build_copilot_dynamic_headers, has_copilot_vision_input
-from misaka.ai.providers.simple_options import adjust_max_tokens_for_thinking, build_base_options
+from misaka.ai.providers.github_copilot_headers import (
+    build_copilot_dynamic_headers,
+    has_copilot_vision_input,
+)
+from misaka.ai.providers.sdk import require
+from misaka.ai.providers.simple_options import (
+    adjust_max_tokens_for_thinking,
+    build_base_options,
+)
 from misaka.ai.providers.transform_messages import transform_messages
 from misaka.ai.types import (
     AssistantMessage,
@@ -32,16 +37,16 @@ from misaka.ai.types import (
     Model,
     SimpleStreamOptions,
     StartEvent,
-    TextDeltaEvent,
-    TextEndEvent,
-    TextStartEvent,
     StopReason,
     StreamOptions,
     TextContent,
+    TextDeltaEvent,
+    TextEndEvent,
+    TextStartEvent,
+    ThinkingContent,
     ThinkingDeltaEvent,
     ThinkingEndEvent,
     ThinkingStartEvent,
-    ThinkingContent,
     Tool,
     ToolCall,
     ToolCallDeltaEvent,
@@ -710,8 +715,7 @@ def _decode_sse_line(line: str, state: dict[str, Any]) -> ServerSentEvent | None
     delimiter_index = line.find(":")
     field_name = line if delimiter_index == -1 else line[:delimiter_index]
     value = "" if delimiter_index == -1 else line[delimiter_index + 1 :]
-    if value.startswith(" "):
-        value = value[1:]
+    value = value.removeprefix(" ")
 
     if field_name == "event":
         state["event"] = value
@@ -843,7 +847,7 @@ async def iterate_anthropic_events(source: Any, signal: Any = None) -> AsyncIter
 
         try:
             event = parse_json_with_repair(sse["data"])
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             raw_text = "\\n".join(sse["raw"])
             raise RuntimeError(
                 f"Could not parse Anthropic SSE event {event_name}: {error}; "
@@ -924,7 +928,7 @@ async def _iter_event_objects(stream_like: Any, signal: Any = None) -> AsyncIter
             continue
         try:
             yield json.loads(json.dumps(event, default=lambda value: value.__dict__))
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             raise RuntimeError(f"Could not serialize Anthropic stream event: {error}") from error
 
 def _update_usage_from_anthropic_usage(output: AssistantMessage, usage: Mapping[str, Any], model: Model) -> None:

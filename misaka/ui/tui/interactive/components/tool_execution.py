@@ -8,10 +8,18 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from misaka.ui.tui import Box, Container, Image, ImageOptions, ImageTheme, Spacer, Text, getCapabilities
-
 from misaka.core.tools import create_all_tool_definitions
 from misaka.core.tools.render_utils import get_text_output
+from misaka.ui.tui import (
+    Box,
+    Container,
+    Image,
+    ImageOptions,
+    ImageTheme,
+    Spacer,
+    Text,
+    getCapabilities,
+)
 from misaka.ui.tui.interactive.theme.theme import theme
 from misaka.utils.image_convert import convert_to_png
 

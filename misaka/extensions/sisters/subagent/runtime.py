@@ -20,9 +20,10 @@ import stat
 import sys
 import time
 from collections import deque
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 from xml.sax.saxutils import escape
 
 
@@ -40,9 +41,8 @@ def _log_warning(message: str) -> None:
     except Exception:  # noqa: BLE001 - diagnostics must never break a turn
         pass
 
-from misaka.platform import processes as process_tree
 from misaka.extensions.sisters.subagent import agents as agent_roster
-
+from misaka.platform import processes as process_tree
 
 TERMINAL_STATUSES = frozenset({"completed", "failed", "killed"})
 MANAGEMENT_TOOLS = ("Agent", "TaskOutput", "SendMessage", "TaskStop")
@@ -63,13 +63,13 @@ async def _reap_process_tree(
     if process.returncode is None and graceful_timeout:
         try:
             await asyncio.wait_for(process.wait(), graceful_timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
     await asyncio.to_thread(process_tree.terminate, process.pid, captured)
     if process.returncode is None:
         try:
             await asyncio.wait_for(process.wait(), 2)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             process.kill()
             await process.wait()
 
@@ -108,7 +108,7 @@ class RoleContext:
         workspace: str | None = None,
         mcp_role: str | None = None,
         tool_ceiling: Sequence[str] | None | object = _TOOL_CEILING_UNSET,
-    ) -> "RoleContext":
+    ) -> RoleContext:
         resolved_role = role or os.environ.get("MISAKA_WHO") or ""
         resolved_profile = profile_dir or os.environ.get("MISAKA_PROFILE_DIR") or ""
         resolved_workspace = os.path.abspath(
@@ -299,7 +299,7 @@ def finalize_messages(
     }
 
 
-def _usage_ledger_messages(task: "AgentTask") -> list[dict[str, Any]]:
+def _usage_ledger_messages(task: AgentTask) -> list[dict[str, Any]]:
     """Normalize every model call in one agent turn for the shared budget."""
     out: list[dict[str, Any]] = []
     for item in task.messages:
@@ -334,7 +334,7 @@ def _usage_ledger_messages(task: "AgentTask") -> list[dict[str, Any]]:
     return out
 
 
-def _write_usage_sink(context: RoleContext, task: "AgentTask") -> bool:
+def _write_usage_sink(context: RoleContext, task: AgentTask) -> bool:
     messages = _usage_ledger_messages(task)
     if (
         not context.usage_db
@@ -824,7 +824,7 @@ class Worktree:
 
 @dataclass(slots=True)
 class AgentTask:
-    manager: "SubagentManager"
+    manager: SubagentManager
     id: str
     definition: agent_roster.AgentDefinition
     description: str
@@ -914,7 +914,7 @@ class AgentTask:
             await asyncio.to_thread(_atomic_json, self.metadata_path, data)
 
     @classmethod
-    def load(cls, manager: "SubagentManager", path: Path) -> "AgentTask":
+    def load(cls, manager: SubagentManager, path: Path) -> AgentTask:
         data = json.loads(path.read_text(encoding="utf-8"))
         definition_data = data.get("definition") or {}
         allowed = {item.name for item in fields(agent_roster.AgentDefinition)}
@@ -997,7 +997,7 @@ class AgentTask:
         try:
             await self.send("abort")
             await asyncio.wait_for(self._done.wait(), 5)
-        except (asyncio.TimeoutError, BrokenPipeError, ConnectionError, RuntimeError):
+        except (TimeoutError, BrokenPipeError, ConnectionError, RuntimeError):
             if self.process.returncode is None:
                 await _reap_process_tree(self.process)
 
@@ -1928,7 +1928,7 @@ class SubagentManager:
                 else:
                     try:
                         line = await asyncio.wait_for(process.stdout.readline(), handshake)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         raise RuntimeError(   # An empty message would leave task.error blank; be explicit.
                             f"sub-agent child produced no output within {int(handshake)}s handshake window"
                         ) from None
@@ -2120,7 +2120,7 @@ class SubagentManager:
         except Exception as error:  # noqa: BLE001 - display callbacks never fail a task, but they do get logged
             _log_warning(f"progress callback for agent {task.id} failed: {error!r}")
 
-    def _progress_job_done(self, job: "asyncio.Task[Any]") -> None:
+    def _progress_job_done(self, job: asyncio.Task[Any]) -> None:
         self._progress_jobs.discard(job)
         if not job.cancelled() and job.exception() is not None:
             _log_warning(f"progress callback job failed: {job.exception()!r}")
@@ -2221,7 +2221,7 @@ class SubagentManager:
             if process.stdin is not None:
                 process.stdin.write(b'{"type":"shutdown","message":""}\n')
                 await process.stdin.drain()
-        except (asyncio.TimeoutError, BrokenPipeError, ConnectionError):
+        except (TimeoutError, BrokenPipeError, ConnectionError):
             pass
         await _reap_process_tree(process, captured=captured_tree)
         task.process = None
@@ -2417,7 +2417,8 @@ class SubagentManager:
         """Point the child at the skills its definition names. It loads them on demand like any
         session -- ``skill_view`` for one in its index, ``read`` for a definition-local path --
         instead of every SKILL.md being inlined into its first message."""
-        from misaka.skills import index as skill_index, layers as skill_layers
+        from misaka.skills import index as skill_index
+        from misaka.skills import layers as skill_layers
         indexed = {Path(p).name for p in skill_layers.skills_stack(
             self.role_context.profile_dir or None, cwd=self.role_context.workspace or None)}
         lines: list[str] = []

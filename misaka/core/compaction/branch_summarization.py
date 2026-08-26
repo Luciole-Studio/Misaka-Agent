@@ -9,7 +9,6 @@ from typing import Any
 from misaka.agent.types import AgentMessage
 from misaka.ai.stream import complete_simple
 from misaka.ai.types import Model, SimpleStreamOptions, UserMessage
-
 from misaka.core.compaction.compaction import estimate_tokens
 from misaka.core.compaction.utils import (
     SUMMARIZATION_SYSTEM_PROMPT,

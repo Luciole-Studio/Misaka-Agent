@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
 import importlib.util
 import inspect
 import json
@@ -11,6 +9,7 @@ import os
 import sys
 import tomllib
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any

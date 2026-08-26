@@ -5,10 +5,9 @@ import stat
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from misaka.config import profiles
-
-from misaka.skills import sandbox as skill_sandbox
-from misaka.platform.session import run_coro, run_session
 from misaka.platform import tasks as task_store
+from misaka.platform.session import run_coro, run_session
+from misaka.skills import sandbox as skill_sandbox
 
 SUBAGENT_TOOLS = ("Agent", "TaskOutput", "SendMessage", "TaskStop")
 MAX_REPORT_BYTES = 256 * 1024
@@ -158,6 +157,7 @@ def report_instructions(generation):
 def set_aside_report(task_id):
     """Set aside the previous report.json: a continuation must submit fresh proof, never reuse stale."""
     from pathlib import Path
+
     from misaka.platform import tasks as db
     root = Path(db.task_state_dir(task_id))
     current, previous = root / "report.json", root / ".previous-report.json"

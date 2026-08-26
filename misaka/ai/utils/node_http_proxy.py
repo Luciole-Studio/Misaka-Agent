@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
-import json
 from dataclasses import dataclass
 from urllib.parse import ParseResult, urlparse
 
@@ -64,7 +64,7 @@ def _should_proxy_hostname(hostname: str, port: int) -> bool:
                 return False
             continue
 
-        normalized = proxy_hostname[1:] if proxy_hostname.startswith("*") else proxy_hostname
+        normalized = proxy_hostname.removeprefix("*")
         if hostname.endswith(normalized):
             return False
 
@@ -110,6 +110,6 @@ def create_http_proxy_agents_for_target(target_url: str | ParseResult) -> NodeHt
 
 
 __all__ = [
-    "NodeHttpProxyAgents",
     "UNSUPPORTED_PROXY_PROTOCOL_MESSAGE",
+    "NodeHttpProxyAgents",
     ]

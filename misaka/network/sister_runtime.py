@@ -14,24 +14,16 @@ import os
 import secrets
 import socket
 import time
-
-import psutil
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 from xml.sax.saxutils import escape
 
-from misaka.platform import admission, budget
-
-from misaka.platform import processes as process_tree
+import psutil
 
 from misaka.config import profiles
-
-from misaka.skills import sandbox as skill_sandbox
-
 from misaka.core.session_manager import find_most_recent_session
-from misaka.network import worker
-from misaka.platform import tasks as db
 from misaka.extensions.sisters.subagent.agents import AgentDefinition
 from misaka.extensions.sisters.subagent.runtime import (
     AgentTask,
@@ -39,10 +31,18 @@ from misaka.extensions.sisters.subagent.runtime import (
     SubagentManager,
     clean_resume_transcript,
 )
+from misaka.network import worker
+from misaka.platform import admission, budget
+from misaka.platform import processes as process_tree
+from misaka.platform import tasks as db
+from misaka.skills import sandbox as skill_sandbox
 
 TERMINAL_BOARD_STATUSES = frozenset({"done", "failed", "stopped", "blocked", "triage"})
 ACTIVE_BOARD_STATUSES = frozenset({"running", "review"})
-from misaka.extensions.sisters.subagent.child import PROCESS_GROUP_IDENTITY  # single source of truth for the wire constant
+from misaka.extensions.sisters.subagent.child import (
+    PROCESS_GROUP_IDENTITY,  # single source of truth for the wire constant
+)
+
 STATUS_MAP = {
     "ready": "pending",
     "todo": "pending",
@@ -97,8 +97,7 @@ def _owner_alive(row: Mapping[str, Any]) -> bool:
     stored = row["worker_identity"]
     if stored:
         stored = str(stored)
-        if stored.startswith(PROCESS_GROUP_IDENTITY):
-            stored = stored[len(PROCESS_GROUP_IDENTITY) :]
+        stored = stored.removeprefix(PROCESS_GROUP_IDENTITY)
         prefix = f"{socket.gethostname()}:{pid}:"
         if not str(stored).startswith(prefix):
             # A PID on another host cannot safely be probed from this process.
@@ -347,7 +346,7 @@ class _CountingSemaphore(asyncio.Semaphore):
 
     @property
     def available(self) -> int:
-        return max(0, self._value)  # noqa: SLF001 - the one place that touches the internal counter
+        return max(0, self._value)
 
 class SisterRuntime:
     """Session-local supervisor backed by durable board rows and transcripts."""
@@ -807,7 +806,7 @@ class SisterRuntime:
             try:
                 await asyncio.wait_for(asyncio.shield(runner), timeout=min(60, remaining))
                 return False
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 if loop.time() < deadline and handle.claim_lock:
                     db.heartbeat(
                         self.con, handle.board_id, handle.claim_lock,
@@ -1501,6 +1500,6 @@ class SisterRuntime:
 __all__ = [
     "ACTIVE_BOARD_STATUSES",
     "STATUS_MAP",
-    "SisterRuntime",
     "TERMINAL_BOARD_STATUSES",
+    "SisterRuntime",
 ]

@@ -9,7 +9,6 @@ from typing import Any, Literal, NotRequired, TypedDict
 
 from misaka.agent.types import ThinkingLevel
 from misaka.ai.types import Model
-
 from misaka.config import get_agent_dir
 from misaka.core.auth_storage import AuthStorage
 from misaka.core.extensions.types import ToolDefinition

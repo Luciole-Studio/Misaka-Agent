@@ -31,9 +31,7 @@ def _trim_bare_url(url: str) -> str:
     """GFM-style trailing trim: strip trailing punctuation; strip a closing paren only when unbalanced (so wiki links ending in (x) survive)."""
     while url:
         ch = url[-1]
-        if ch in ".,!?:;\"'*_~]":
-            url = url[:-1]
-        elif ch == ")" and url.count("(") < url.count(")"):
+        if ch in ".,!?:;\"'*_~]" or ch == ")" and url.count("(") < url.count(")"):
             url = url[:-1]
         else:
             break
@@ -303,7 +301,7 @@ class Markdown(Component):
             case "fence" | "code_block":
                 indent = self.theme.codeBlockIndent or "  "
                 lines.append(self.theme.codeBlockBorder(f"```{node.info or ''}"))
-                code_content = node.content[:-1] if node.content.endswith("\n") else node.content
+                code_content = node.content.removesuffix("\n")
                 if self.theme.highlightCode is not None:
                     highlighted_lines = self.theme.highlightCode(code_content, node.info or None)
                     for highlighted in highlighted_lines:
@@ -482,7 +480,7 @@ class Markdown(Component):
         if getCapabilities().hyperlinks:
             return hyperlink(styled_link, href) + stylePrefix
 
-        href_for_comparison = href[7:] if href.startswith("mailto:") else href
+        href_for_comparison = href.removeprefix("mailto:")
         candidates = {href, href_for_comparison}
         try:  # markdown-it percent-encodes href, so decode before comparing with the plain-text label
             from urllib.parse import unquote

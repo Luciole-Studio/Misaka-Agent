@@ -16,7 +16,6 @@ The layout mirrors the stable parts of hermes' system prompt:
 
 import os
 
-
 # Fallback identity for roles without a default of their own.
 DEFAULT_IDENTITY = (
     "You are an agent of the MISAKA Network, a multi-agent research system for the "

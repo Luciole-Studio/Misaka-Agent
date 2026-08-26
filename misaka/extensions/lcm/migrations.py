@@ -1,6 +1,5 @@
 """LCM SQLite schema and small, idempotent migrations."""
 
-import sqlite3
 import time
 
 LATEST_SCHEMA_VERSION = 4

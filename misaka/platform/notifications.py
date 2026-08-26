@@ -7,7 +7,6 @@ import secrets
 import time
 from contextlib import contextmanager, nullcontext
 
-
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS notification_events (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,

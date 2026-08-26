@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from filelock import FileLock, Timeout
+
 from misaka.ai.env_api_keys import find_env_keys, get_env_api_key
 from misaka.ai.utils.oauth import (
     OAuthCredentials,
@@ -20,7 +21,6 @@ from misaka.ai.utils.oauth import (
     getOAuthProvider,
     getOAuthProviders,
 )
-
 from misaka.config import get_auth_path
 from misaka.core.resolve_config_value import resolveConfigValue
 from misaka.utils.paths import normalize_path

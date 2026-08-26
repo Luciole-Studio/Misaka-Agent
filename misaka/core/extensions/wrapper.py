@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from misaka.agent.types import AgentTool
-
 from misaka.core.extensions.runner import ExtensionRunner
 from misaka.core.extensions.types import RegisteredTool
-from misaka.core.tools.tool_definition_wrapper import wrap_tool_definition, wrap_tool_definitions
+from misaka.core.tools.tool_definition_wrapper import (
+    wrap_tool_definition,
+    wrap_tool_definitions,
+)
 
 
 def wrap_registered_tool(registered_tool: RegisteredTool, runner: ExtensionRunner) -> AgentTool:

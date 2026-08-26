@@ -18,7 +18,6 @@ import secrets
 from collections.abc import Mapping
 from typing import Any
 
-
 CONTEXT_FRAMING_TOKENS = 4096
 
 
@@ -252,7 +251,7 @@ def install_turn_budget(session: Any, limit: int | None = None) -> TurnBudgetLim
             if inspect.isawaitable(response):
                 response = await response
             return _BudgetedStream(response, limiter, token)
-        except BaseException:  # noqa: BLE001 - unknown provider spend stays reserved
+        except BaseException:
             limiter.settle(token, failed=True)
             raise
 

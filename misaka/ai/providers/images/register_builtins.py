@@ -7,7 +7,10 @@ import time
 from types import ModuleType
 from typing import Any
 
-from misaka.ai.images_api_registry import ImagesApiProvider, register_images_api_provider
+from misaka.ai.images_api_registry import (
+    ImagesApiProvider,
+    register_images_api_provider,
+)
 from misaka.ai.types import AssistantImages, ImagesContext, ImagesModel, ImagesOptions
 
 _openrouter_images_provider_module: ModuleType | Exception | None = None
@@ -30,7 +33,7 @@ def _load_openrouter_images_provider_module() -> ModuleType:
     if _openrouter_images_provider_module is None:
         try:
             _openrouter_images_provider_module = importlib.import_module("misaka.ai.providers.images.openrouter")
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             _openrouter_images_provider_module = error
             raise
     if isinstance(_openrouter_images_provider_module, Exception):

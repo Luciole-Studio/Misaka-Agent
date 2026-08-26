@@ -900,9 +900,7 @@ def format_parsed_key(codepoint: int, modifier: int, base_layout_key: int | None
         key_name = "left"
     elif effective_codepoint == ARROW_CODEPOINTS["right"]:
         key_name = "right"
-    elif 48 <= effective_codepoint <= 57 or 97 <= effective_codepoint <= 122:
-        key_name = chr(effective_codepoint)
-    elif effective_codepoint >= 0 and chr(effective_codepoint) in SYMBOL_KEYS:
+    elif 48 <= effective_codepoint <= 57 or 97 <= effective_codepoint <= 122 or effective_codepoint >= 0 and chr(effective_codepoint) in SYMBOL_KEYS:
         key_name = chr(effective_codepoint)
 
     if key_name is None:

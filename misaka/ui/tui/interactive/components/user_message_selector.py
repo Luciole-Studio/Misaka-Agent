@@ -7,7 +7,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from misaka.ui.tui import Container, Spacer, Text, getKeybindings, truncateToWidth
-
 from misaka.ui.tui.interactive.components.dynamic_border import DynamicBorder
 from misaka.ui.tui.interactive.theme.theme import theme
 

@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from misaka.ui.tui import TUI, Editor, EditorOptions, EditorTheme
-
 from misaka.core.keybindings import AppKeybinding, KeybindingsManager
+from misaka.ui.tui import TUI, Editor, EditorOptions, EditorTheme
 
 
 class CustomEditor(Editor):

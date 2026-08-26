@@ -18,15 +18,17 @@ import json
 import os
 import re
 import secrets
-import socket
 import shutil
+import socket
 import sys
 from pathlib import Path
 
-from misaka.platform import budget, cards as card_files, repo, tasks as task_store
+from misaka import workspace as workspace_index
+from misaka.platform import budget, repo
+from misaka.platform import cards as card_files
+from misaka.platform import tasks as task_store
 from misaka.research import context as context_packet
 from misaka.research import ledger, planner, report, runs
-from misaka import workspace as workspace_index
 
 POLL_SECONDS = 2.0
 MAX_PROBE_ROUNDS = 3          # ponytail: a fork opens cards at most this many times before it must judge

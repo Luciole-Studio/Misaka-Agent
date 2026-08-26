@@ -6,7 +6,6 @@ from typing import Any, Literal, NotRequired, TypedDict
 
 from misaka.agent.types import AgentMessage, ThinkingLevel
 from misaka.ai.types import ImageContent, Model
-
 from misaka.core.agent_session import SessionStats
 from misaka.core.bash_executor import BashResult
 from misaka.core.compaction import CompactionResult

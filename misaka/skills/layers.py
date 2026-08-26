@@ -13,6 +13,7 @@ from pathlib import Path
 
 from misaka.config import CFG
 
+
 def home():
     """``~/.misaka`` at call time (tests move HOME)."""
     return os.path.expanduser("~/.misaka")

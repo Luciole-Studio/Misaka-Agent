@@ -29,8 +29,10 @@ import unicodedata
 import psutil
 import pyte
 
-from misaka.ui.panel import geometry as hui      # layout.rs port: split_at / remove_pane / pane_ids
 from misaka.config import CFG
+from misaka.ui.panel import (
+    geometry as hui,  # layout.rs port: split_at / remove_pane / pane_ids
+)
 
 # Wire protocol version (strict equality, as in herdr). Bump it whenever *server
 # behaviour* changes, not only method/event shapes: an unbumped behaviour change
@@ -272,7 +274,7 @@ _ALLY_BLOCKERS = (                                         # codex live_strong_b
     "do you want to proceed?", "waiting for permission",   # claude 850-300
     "do you want to allow this connection?", "tab to amend", "ctrl+e to explain")
 _ALLY_WEAK_BLOCKERS = ("do you want to", "would you like to")   # only when a yes/pointer is offered
-_ALLY_WORKING_LINE = re.compile(r"^[•◦]\s+working \([^)]*esc to interrupt\)", re.M)   # codex (500)
+_ALLY_WORKING_LINE = re.compile(r"^[•◦]\s+working \([^)]*esc to interrupt\)", re.MULTILINE)   # codex (500)
 _ALLY_TAIL_ROWS = 8      # herdr reads its bottom_non_empty_lines(3..5) region; a few rows more here
 
 
@@ -420,11 +422,34 @@ def _seated_pane_ids(spaces):
 
 
 class Pane:
-    __slots__ = ("id", "title", "argv", "cwd", "card", "claim_lock", "generation",
-                 "deadline", "proc", "fd", "buf", "started_at", "exit_code", "submitted",
-                 "seen_status", "screen", "stream", "carry", "alt_screen",
-                 "last_output", "last_heartbeat", "theme", "ally", "flush", "sent_cursor",
-                 "reported")
+    __slots__ = (
+        "ally",
+        "alt_screen",
+        "argv",
+        "buf",
+        "card",
+        "carry",
+        "claim_lock",
+        "cwd",
+        "deadline",
+        "exit_code",
+        "fd",
+        "flush",
+        "generation",
+        "id",
+        "last_heartbeat",
+        "last_output",
+        "proc",
+        "reported",
+        "screen",
+        "seen_status",
+        "sent_cursor",
+        "started_at",
+        "stream",
+        "submitted",
+        "theme",
+        "title",
+    )
 
     def __init__(self, pane_id, title, argv, cwd, card=None):
         self.id, self.title, self.argv, self.cwd, self.card = pane_id, title, argv, cwd, card
@@ -756,8 +781,8 @@ class Daemon:
 
     def _settled_card_with_session(self, task_id):
         """A card whose session can be reopened: not live in a pane, with a saved transcript."""
-        from misaka.platform import tasks as db
         from misaka.network.sister_runtime import ACTIVE_BOARD_STATUSES
+        from misaka.platform import tasks as db
         row = db.get(self._board(), task_id)
         if row is None:
             raise ValueError(f"Card not found: {task_id}")
@@ -784,7 +809,8 @@ class Daemon:
         """Continue a settled card with a new model turn: the same ``claim_resume`` as the
         in-process Sister runtime (a new generation under our lock), after which the card
         shell's Supervisor settles the card exactly like a first run."""
-        from misaka.platform import tasks as db, admission
+        from misaka.platform import admission
+        from misaka.platform import tasks as db
         row = self._settled_card_with_session(task_id)
         con = self._board()
         lock = f"net:{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(4)}"
@@ -805,8 +831,8 @@ class Daemon:
             event="continued")
 
     def run_card(self, task_id, place=None) -> Pane:
-        from misaka.platform import tasks as db
         from misaka.platform import admission
+        from misaka.platform import tasks as db
 
         con = self._board()
         row = db.get(con, task_id)
@@ -830,7 +856,7 @@ class Daemon:
                         generation=generation, pid=os.getpid(),
                         host_cap=host_cap, assignee_cap=assignee_cap):
             raise ValueError(f"Card {task_id} was claimed by another dispatcher.")
-        undo = lambda: db.back_to_ready(con, task_id, generation=generation, claim_lock=lock)  # noqa: E731
+        undo = lambda: db.back_to_ready(con, task_id, generation=generation, claim_lock=lock)
         try:
             workspace = self._card_workspace(row)
             env = None
@@ -851,7 +877,8 @@ class Daemon:
     def _host_card(self, con, row, lock, generation, argv, place, *, undo, env=None, event="claimed"):
         """Host a claimed card in a pane. The pane's environment carries the claim so the card
         drives itself (card_shell.Supervisor); ``undo`` releases the claim when no pane starts."""
-        from misaka.platform import tasks as db, processes as process_tree
+        from misaka.platform import processes as process_tree
+        from misaka.platform import tasks as db
         task_id = row["id"]
         try:
             workspace = self._card_workspace(row)
@@ -905,7 +932,9 @@ class Daemon:
                         # An ally neither submits nor reports; do both on its behalf at
                         # exit so the artifact reconciliation below is identical for
                         # both kinds of executor (the board is the single bus).
-                        from misaka.extensions.last_order.ally import runner as ally_runner
+                        from misaka.extensions.last_order.ally import (
+                            runner as ally_runner,
+                        )
                         ally_runner.finish(
                             pane.cwd,
                             pane.exit_code if pane.exit_code is not None else -1,
@@ -973,7 +1002,7 @@ class Daemon:
                             pass
             try:
                 await asyncio.wait_for(self._stopping.wait(), CARD_POLL_SECONDS)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
 
     # ── Snapshot (shape only: argv, cwd, card -- never process state) ──

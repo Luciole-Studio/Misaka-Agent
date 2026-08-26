@@ -10,7 +10,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypedDict
 
@@ -23,7 +23,12 @@ from misaka.ui.tui.terminal_colors import (
     parse_osc11_background_color,
     parse_terminal_color_scheme_report,
 )
-from misaka.ui.tui.terminal_image import deleteKittyImage, getCapabilities, isImageLine, setCellDimensions
+from misaka.ui.tui.terminal_image import (
+    deleteKittyImage,
+    getCapabilities,
+    isImageLine,
+    setCellDimensions,
+)
 from misaka.ui.tui.utils import (
     extractSegments,
     normalizeTerminalOutput,
@@ -37,7 +42,7 @@ CURSOR_MARKER = "\x1b_misaka:c\x07"
 
 
 def _utc_iso_timestamp() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _extract_kitty_image_ids(line: str) -> list[int]:
@@ -1122,16 +1127,16 @@ class TUI(Container):
 
 
 __all__ = [
+    "CURSOR_MARKER",
+    "TUI",
     "Component",
     "Container",
-    "CURSOR_MARKER",
     "Focusable",
-    "isFocusable",
     "OverlayAnchor",
     "OverlayHandle",
     "OverlayMargin",
     "OverlayOptions",
     "SizeValue",
-    "TUI",
+    "isFocusable",
     "visibleWidth",
 ]

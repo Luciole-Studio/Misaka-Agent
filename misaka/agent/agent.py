@@ -9,19 +9,6 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, overload
 
-from misaka.ai.stream import stream_simple
-from misaka.ai.types import (
-    AssistantMessage,
-    ImageContent,
-    MessageValue,
-    Model,
-    ProviderResponse,
-    TextContent,
-    ThinkingBudgets,
-    Transport,
-    Usage,
-    validate_message,
-)
 from pydantic import BaseModel
 
 from misaka.agent.agent_loop import run_agent_loop, run_agent_loop_continue
@@ -45,13 +32,24 @@ from misaka.agent.types import (
     ToolExecutionMode,
     TurnEndEvent,
 )
+from misaka.ai.stream import stream_simple
+from misaka.ai.types import (
+    AssistantMessage,
+    ImageContent,
+    MessageValue,
+    Model,
+    ProviderResponse,
+    TextContent,
+    ThinkingBudgets,
+    Transport,
+    Usage,
+    validate_message,
+)
 
 
 class MutableAgentState(AgentState):
     def __setattr__(self, name: str, value: Any) -> None:
-        if name == "tools" and value is not None:
-            value = list(value)
-        elif name == "messages" and value is not None:
+        if name == "tools" and value is not None or name == "messages" and value is not None:
             value = list(value)
         elif name == "pendingToolCalls" and value is not None:
             value = set(value)
@@ -609,13 +607,13 @@ async def _maybe_await(value: Any) -> Any:
 
 
 __all__ = [
+    "DEFAULT_MODEL",
+    "EMPTY_USAGE",
     "AbortController",
     "AbortSignal",
     "Agent",
     "AgentListener",
     "AgentOptions",
-    "DEFAULT_MODEL",
-    "EMPTY_USAGE",
     "MutableAgentState",
     "PendingMessageQueue",
     "QueueMode",

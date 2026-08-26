@@ -6,16 +6,16 @@ import asyncio
 import json
 import os
 import secrets
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Literal
 
-from misaka.core.extensions.types import ToolDefinition
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from misaka.platform import tasks as db
-from misaka.network import validate
-from misaka.platform import budget, notifications
 from misaka.config import CFG, sisters
+from misaka.core.extensions.types import ToolDefinition
+from misaka.network import validate
 from misaka.network.sister_runtime import ACTIVE_BOARD_STATUSES, SisterRuntime
+from misaka.platform import budget, notifications
+from misaka.platform import tasks as db
 
 _CON = None
 TaskId = Annotated[str, Field(pattern=r"^t_[0-9a-f]{6}$")]
@@ -122,7 +122,7 @@ def register(harn):
         model_config = ConfigDict(extra="forbid")
 
     class BoardParams(BaseModel):
-        status: Optional[str] = Field(None, description=(
+        status: str | None = Field(None, description=(
             "Optional task status: todo, ready, running, blocked, triage, review, "
             "done, failed, or stopped."
         ))
@@ -166,7 +166,7 @@ def register(harn):
         title: str = Field(description="Short task-card title.")
         body: str = Field(description="Task contract: `## goal`, `## boundaries`, and a required, testable `## acceptance criteria` section.")
         assignee: str = Field(description="Sister ID from the `misaka_board` roster.")
-        reviewer: Optional[str] = Field(
+        reviewer: str | None = Field(
             None, description="Optional independent reviewer; must be a different Sister from the assignee."
         )
         priority: int = Field(0, description="Relative priority; higher values run first.")
@@ -208,7 +208,7 @@ def register(harn):
 
     class ReviewConfigParams(StrictParams):
         task_id: TaskId
-        reviewer: Optional[str] = Field(
+        reviewer: str | None = Field(
             None, description="Independent reviewer Sister ID; use null to remove review from an unstarted card."
         )
 
@@ -295,7 +295,7 @@ def register(harn):
 
     class DispatchParams(StrictParams):
         confirmed: bool = Field(description="True only when the user explicitly approved starting model work.")
-        task_ids: Optional[list[TaskId]] = Field(
+        task_ids: list[TaskId] | None = Field(
             None, description="Optional list of ready task IDs; omit to start every ready task."
         )
 

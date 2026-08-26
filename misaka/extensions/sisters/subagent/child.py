@@ -18,7 +18,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-
 PROTOCOL_VERSION = 2
 PROCESS_GROUP_IDENTITY = "process-group|"
 MANAGEMENT_TOOLS = ("Agent", "TaskOutput", "SendMessage", "TaskStop")
@@ -313,11 +312,11 @@ async def amain() -> int:
         await asyncio.gather(parent_watch, return_exceptions=True)
         return 2
 
-    from misaka.platform import session as engine_session
     from misaka.agent.request_budget import install_turn_budget
     from misaka.extensions.sisters.subagent import extension as subagent
     from misaka.extensions.sisters.subagent import hooks as subagent_hooks
     from misaka.extensions.sisters.subagent import policy as subagent_policy
+    from misaka.platform import session as engine_session
 
     permission_waiters: dict[str, asyncio.Future[bool]] = {}
 
@@ -444,7 +443,10 @@ async def amain() -> int:
 
         from misaka.agent.agent import Agent, AgentOptions
         from misaka.agent.types import BeforeToolCallResult
-        from misaka.extensions.sisters.subagent.runtime import RoleContext, resolve_model_spec
+        from misaka.extensions.sisters.subagent.runtime import (
+            RoleContext,
+            resolve_model_spec,
+        )
 
         parent_model = session.model
         available = session.modelRegistry.getAvailable()
@@ -481,7 +483,7 @@ async def amain() -> int:
                 call_input,
             ):
                 return None
-            action, reason = subagent_policy._permission_action(  # noqa: SLF001
+            action, reason = subagent_policy._permission_action(
                 "dontAsk",
                 role_context.tool_rule_layers,
                 call_name,

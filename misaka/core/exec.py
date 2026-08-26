@@ -82,7 +82,7 @@ async def _wait_for_streams(
             asyncio.gather(stdout_task, stderr_task),
             timeout=_EXIT_STDIO_GRACE_SECONDS,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         _destroy_stream(stdout)
         _destroy_stream(stderr)
         stdout_task.cancel()

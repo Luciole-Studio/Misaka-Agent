@@ -8,10 +8,10 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from misaka.ai.models import models_are_equal
-from misaka.ai.types import Model
 from wcmatch import glob
 
+from misaka.ai.models import models_are_equal
+from misaka.ai.types import Model
 from misaka.cli.args import isValidThinkingLevel as _isValidThinkingLevel
 from misaka.core.defaults import DEFAULT_THINKING_LEVEL
 

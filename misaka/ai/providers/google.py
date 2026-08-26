@@ -15,20 +15,19 @@ try:
 except ImportError:  # optional extra: misaka[google]
     GoogleGenAI = None
 
-from misaka.ai.providers.sdk import require
-
 from misaka.ai.env_api_keys import get_env_api_key
 from misaka.ai.models import calculate_cost, clamp_thinking_level
 from misaka.ai.providers.google_shared import (
     GoogleThinkingLevel,
+    coerce_thought_signature,
     convert_messages,
     convert_tools,
     is_thinking_part,
     map_stop_reason,
     map_tool_choice,
-    coerce_thought_signature,
     retain_thought_signature,
 )
+from misaka.ai.providers.sdk import require
 from misaka.ai.providers.simple_options import build_base_options
 from misaka.ai.types import (
     AssistantMessage,
@@ -47,7 +46,6 @@ from misaka.ai.types import (
     ThinkingContent,
     ThinkingDeltaEvent,
     ThinkingEndEvent,
-    ThinkingLevel,
     ThinkingStartEvent,
     ToolCall,
     ToolCallDeltaEvent,

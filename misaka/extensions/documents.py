@@ -2,10 +2,11 @@
 import asyncio
 import os
 
-from misaka.core.extensions.types import ToolDefinition
 from pydantic import BaseModel, Field
 
+from misaka.core.extensions.types import ToolDefinition
 from misaka.documents import index as corpus
+
 
 def _text(s):
     return {"content": [{"type": "text", "text": s}], "details": {}}

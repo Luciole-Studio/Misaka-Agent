@@ -12,7 +12,6 @@ from typing import Any
 from misaka.ai.utils.oauth import OAuthDeviceCodeInfo, getOAuthProviders
 from misaka.ui.tui import Container, Input, Spacer, Text, getKeybindings
 from misaka.ui.tui.components import AbortController
-
 from misaka.ui.tui.interactive.theme.theme import theme
 
 from .dynamic_border import DynamicBorder
@@ -68,7 +67,7 @@ class LoginDialogComponent(Container):
         self.input.focused = value
 
     @property
-    def signal(self):  # noqa: ANN201
+    def signal(self):
         return self.abortController.signal
 
     def _request_render(self) -> None:
@@ -131,11 +130,11 @@ class LoginDialogComponent(Container):
             else:
                 command = ["xdg-open", url]
             with open(os.devnull, "wb") as sink:
-                subprocess.Popen(command, stdout=sink, stderr=sink, stdin=sink)  # noqa: S603
+                subprocess.Popen(command, stdout=sink, stderr=sink, stdin=sink)
         except Exception:  # noqa: BLE001
             return
 
-    def showManualInput(self, prompt: str):  # noqa: ANN201
+    def showManualInput(self, prompt: str):
         self.contentContainer.addChild(Spacer(1))
         self.contentContainer.addChild(Text(theme.fg("dim", prompt), 1, 0))
         self.contentContainer.addChild(self.input)
@@ -143,7 +142,7 @@ class LoginDialogComponent(Container):
         self._request_render()
         return self._set_future()
 
-    def showPrompt(self, message: str, placeholder: str | None = None):  # noqa: ANN201
+    def showPrompt(self, message: str, placeholder: str | None = None):
         self.contentContainer.addChild(Spacer(1))
         self.contentContainer.addChild(Text(theme.fg("text", message), 1, 0))
         if placeholder:

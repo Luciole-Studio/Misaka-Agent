@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import base64
 import os
-import subprocess
-import sys
 import random
 import struct
+import subprocess
+import sys
 from dataclasses import dataclass
 
 type ImageProtocol = str | None
@@ -424,32 +424,32 @@ def imageFallback(mime_type: str, dimensions: ImageDimensions | None = None, fil
     return f"[Image: {' '.join(parts)}]"
 
 __all__ = [
-    "ImageProtocol",
-    "TerminalCapabilities",
     "CellDimensions",
-    "ImageDimensions",
-    "ImageRenderOptions",
-    "getCellDimensions",
-    "setCellDimensions",
-    "detectCapabilities",
-    "getCapabilities",
-    "resetCapabilitiesCache",
-    "setCapabilities",
-    "isImageLine",
-    "allocateImageId",
-    "encodeKitty",
-    "deleteKittyImage",
-    "deleteAllKittyImages",
-    "encodeITerm2",
     "ImageCellSize",
+    "ImageDimensions",
+    "ImageProtocol",
+    "ImageRenderOptions",
+    "TerminalCapabilities",
+    "allocateImageId",
     "calculateImageCellSize",
     "calculateImageRows",
-    "getPngDimensions",
-    "getJpegDimensions",
+    "deleteAllKittyImages",
+    "deleteKittyImage",
+    "detectCapabilities",
+    "encodeITerm2",
+    "encodeKitty",
+    "getCapabilities",
+    "getCellDimensions",
     "getGifDimensions",
-    "getWebpDimensions",
     "getImageDimensions",
-    "renderImage",
+    "getJpegDimensions",
+    "getPngDimensions",
+    "getWebpDimensions",
     "hyperlink",
     "imageFallback",
+    "isImageLine",
+    "renderImage",
+    "resetCapabilitiesCache",
+    "setCapabilities",
+    "setCellDimensions",
 ]

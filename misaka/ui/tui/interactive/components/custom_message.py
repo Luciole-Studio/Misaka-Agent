@@ -4,18 +4,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from misaka.ui.tui import Box, Container, DefaultTextStyle, Markdown, Spacer, Text
-
 from misaka.core.extensions.types import MessageRenderer
 from misaka.core.messages import CustomMessage
+from misaka.ui.tui import Box, Container, DefaultTextStyle, Markdown, Spacer, Text
 from misaka.ui.tui.interactive.theme.theme import get_markdown_theme, theme
+
 
 class CustomMessageComponent(Container):
     def __init__(
         self,
         message: CustomMessage[object],
         customRenderer: MessageRenderer[Any] | None = None,
-        markdownTheme=None,  # noqa: ANN001
+        markdownTheme=None,
     ) -> None:
         super().__init__()
         self.message = message

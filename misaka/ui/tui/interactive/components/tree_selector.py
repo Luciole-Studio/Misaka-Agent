@@ -6,9 +6,10 @@ import json
 import os
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Literal
 
+from misaka.core.session_manager import SessionTreeNode
 from misaka.ui.tui import (
     Component,
     Container,
@@ -20,8 +21,6 @@ from misaka.ui.tui import (
     getKeybindings,
     truncateToWidth,
 )
-
-from misaka.core.session_manager import SessionTreeNode
 from misaka.ui.tui.interactive.theme.theme import theme
 
 from .dynamic_border import DynamicBorder
@@ -208,9 +207,7 @@ class TreeList(Component):
                 *[child for child in children if not contains_active.get(id(child), False)],
             ]
 
-            if multiple_children:
-                child_indent = indent + 1
-            elif just_branched and indent > 0:
+            if multiple_children or just_branched and indent > 0:
                 child_indent = indent + 1
             else:
                 child_indent = indent
@@ -413,9 +410,7 @@ class TreeList(Component):
 
             children = visible_children.get(node_id, [])
             multiple_children = len(children) > 1
-            if multiple_children:
-                child_indent = indent + 1
-            elif just_branched and indent > 0:
+            if multiple_children or just_branched and indent > 0:
                 child_indent = indent + 1
             else:
                 child_indent = indent
@@ -521,7 +516,7 @@ class TreeList(Component):
                 )
                 if label and labelTimestamp is None:
                     flat_node.node.labelTimestamp = (
-                        datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+                        datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
                     )
                 break
 
@@ -962,7 +957,6 @@ class SearchLine(Component):
 
     def handleInput(self, keyData: str) -> None:
         del keyData
-        return None
 
 
 class LabelInput(Component, Focusable):

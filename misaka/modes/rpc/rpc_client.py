@@ -11,9 +11,13 @@ from dataclasses import dataclass, field
 from typing import Any, TypedDict
 
 from misaka.ai.types import ImageContent
-
 from misaka.modes.rpc.jsonl import JsonlLineBuffer, serialize_json_line
-from misaka.modes.rpc.rpc_types import RpcCommand, RpcResponse, RpcSessionState, RpcSlashCommand
+from misaka.modes.rpc.rpc_types import (
+    RpcCommand,
+    RpcResponse,
+    RpcSessionState,
+    RpcSlashCommand,
+)
 
 type RpcEventListener = Callable[[Any], None]
 

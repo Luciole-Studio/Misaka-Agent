@@ -7,7 +7,7 @@ from typing import Any, Protocol
 
 from pydantic import ConfigDict
 
-from misaka.ai.types import Api, Model, SchemaModel
+from misaka.ai.types import Model, SchemaModel
 
 
 class OAuthCredentials(SchemaModel):

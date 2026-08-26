@@ -10,10 +10,10 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
-from misaka.agent.types import AgentTool, AgentToolResult
-from misaka.ai.types import TextContent
 from pydantic import BaseModel, ConfigDict, Field
 
+from misaka.agent.types import AgentTool, AgentToolResult
+from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.tools.path_utils import resolve_to_cwd
 from misaka.core.tools.render_utils import (
@@ -32,8 +32,8 @@ from misaka.core.tools.truncate import (
     truncate_head,
     truncate_line,
 )
-from misaka.utils.tools_manager import ensure_tool
 from misaka.ui.tui import Text
+from misaka.utils.tools_manager import ensure_tool
 
 T = TypeVar("T")
 

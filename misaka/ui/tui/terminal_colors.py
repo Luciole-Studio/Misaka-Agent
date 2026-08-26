@@ -16,17 +16,17 @@ class RgbColor:
     b: int
 
 
-OSC11_BACKGROUND_COLOR_RESPONSE_PATTERN = re.compile(r"^\x1b\]11;([^\x07\x1b]*)(?:\x07|\x1b\\)$", re.I)
+OSC11_BACKGROUND_COLOR_RESPONSE_PATTERN = re.compile(r"^\x1b\]11;([^\x07\x1b]*)(?:\x07|\x1b\\)$", re.IGNORECASE)
 COLOR_SCHEME_REPORT_PATTERN = re.compile(r"^(?:\x1b\[\?997;(1|2)n)+$")
 
-_HEX_RE = re.compile(r"^[0-9a-f]+$", re.I)
-_HEX6_RE = re.compile(r"^[0-9a-f]{6}$", re.I)
-_HEX12_RE = re.compile(r"^[0-9a-f]{12}$", re.I)
-_RGB_PREFIX_RE = re.compile(r"^rgba?:", re.I)
+_HEX_RE = re.compile(r"^[0-9a-f]+$", re.IGNORECASE)
+_HEX6_RE = re.compile(r"^[0-9a-f]{6}$", re.IGNORECASE)
+_HEX12_RE = re.compile(r"^[0-9a-f]{12}$", re.IGNORECASE)
+_RGB_PREFIX_RE = re.compile(r"^rgba?:", re.IGNORECASE)
 
 
 def _hex_to_rgb(hex_value: str) -> RgbColor:
-    normalized = hex_value[1:] if hex_value.startswith("#") else hex_value
+    normalized = hex_value.removeprefix("#")
     return RgbColor(
         r=int(normalized[0:2], 16),
         g=int(normalized[2:4], 16),
@@ -94,7 +94,7 @@ __all__ = [
     "TerminalColorScheme",
     "is_osc11_background_color_response",
     "parseOsc11BackgroundColor",
-    "parse_osc11_background_color",
     "parseTerminalColorSchemeReport",
+    "parse_osc11_background_color",
     "parse_terminal_color_scheme_report",
 ]

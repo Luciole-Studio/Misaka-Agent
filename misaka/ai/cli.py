@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
 from typing import Any
 
 from misaka.ai.utils.oauth import get_oauth_provider, get_oauth_providers
 from misaka.config import get_auth_path
-from misaka.core.auth_storage import AuthStorage   # the one credential store: 0600, locked, never clobbers
+from misaka.core.auth_storage import (
+    AuthStorage,  # the one credential store: 0600, locked, never clobbers
+)
 
 PROVIDERS = get_oauth_providers()
 

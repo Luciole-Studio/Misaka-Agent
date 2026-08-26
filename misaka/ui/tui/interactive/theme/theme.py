@@ -5,15 +5,19 @@ from __future__ import annotations
 import json
 import os
 import re
-import sys
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Literal, TypedDict, cast
-
-from misaka.ui.tui import MarkdownTheme, SelectListTheme, SettingsListTheme, getCapabilities
+from typing import Any, Literal, TypedDict, cast
 
 from misaka.config import get_custom_themes_dir, get_themes_dir
+from misaka.ui.tui import (
+    MarkdownTheme,
+    SelectListTheme,
+    SettingsListTheme,
+    getCapabilities,
+)
 from misaka.utils.syntax_highlight import highlight, supports_language
 
 type ColorValue = str | int
@@ -527,7 +531,7 @@ def _parse_theme_json(label: str, json_data: Any) -> ThemeJson:
 def _parse_theme_json_content(label: str, content: str) -> ThemeJson:
     try:
         payload = json.loads(content)
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
         raise ValueError(f"Failed to parse theme {label}: {error}") from error
     return _parse_theme_json(label, payload)
 
@@ -1032,19 +1036,19 @@ def is_light_theme(theme_name: str | None = None) -> bool:
 isLightTheme = is_light_theme
 
 __all__ = [
+    "RgbColor",
+    "TerminalTheme",
+    "TerminalThemeDetection",
+    "TerminalThemeDetectionOptions",
     "Theme",
     "ThemeBg",
     "ThemeColor",
     "ThemeInfo",
-    "TerminalTheme",
-    "RgbColor",
-    "TerminalThemeDetection",
-    "TerminalThemeDetectionOptions",
-    "parseOsc11BackgroundColor",
-    "theme",
-    "initTheme",
-    "setTheme",
-    "onThemeChange",
-    "isLightTheme",
     "highlightCode",
+    "initTheme",
+    "isLightTheme",
+    "onThemeChange",
+    "parseOsc11BackgroundColor",
+    "setTheme",
+    "theme",
     ]

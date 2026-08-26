@@ -14,6 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from misaka.core.keybindings import KeybindingsManager
+from misaka.core.session_manager import SessionInfo, SessionListProgress
 from misaka.ui.tui import (
     Component,
     Container,
@@ -25,9 +27,6 @@ from misaka.ui.tui import (
     truncateToWidth,
     visibleWidth,
 )
-
-from misaka.core.keybindings import KeybindingsManager
-from misaka.core.session_manager import SessionInfo, SessionListProgress
 from misaka.ui.tui.interactive.theme.theme import theme
 from misaka.utils.paths import canonicalize_path
 
@@ -241,7 +240,6 @@ class SessionSelectorHeader(Component):
 
     def handleInput(self, data: str) -> None:
         del data
-        return None
 
     def render(self, width: int) -> list[str]:
         title = "Resume Session (Current Folder)" if self.scope == "current" else "Resume Session (All)"

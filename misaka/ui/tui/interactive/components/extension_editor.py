@@ -11,9 +11,8 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from misaka.ui.tui import Container, Editor, Spacer, Text, getKeybindings
-
 from misaka.core.keybindings import KeybindingsManager
+from misaka.ui.tui import Container, Editor, Spacer, Text, getKeybindings
 from misaka.ui.tui.interactive.theme.theme import get_editor_theme, theme
 
 from .dynamic_border import DynamicBorder

@@ -323,6 +323,6 @@ async def ensureTool(tool: ToolName, silent: bool = False) -> str | None:
     return await ensure_tool(tool, silent)
 
 __all__ = [
-    "getToolPath",
     "ensureTool",
+    "getToolPath",
 ]

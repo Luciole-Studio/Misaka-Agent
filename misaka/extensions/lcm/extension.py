@@ -232,9 +232,9 @@ def _parse_time(value):
 
 
 def register(harn):
-    from typing import Optional
 
     from pydantic import BaseModel, Field
+
     from misaka.core.extensions.types import ToolDefinition
 
     def add_tool(name, label, description, params_model, execute,
@@ -250,11 +250,11 @@ def register(harn):
     class GrepParams(BaseModel):
         query: str = Field(description="Search terms; quote exact phrases")
         scope: str = Field("current", description="current or all")
-        session_id: Optional[str] = None
-        source: Optional[str] = None
-        role: Optional[str] = None
-        time_from: Optional[str] = None
-        time_to: Optional[str] = None
+        session_id: str | None = None
+        source: str | None = None
+        role: str | None = None
+        time_from: str | None = None
+        time_to: str | None = None
         limit: int = Field(10, ge=1, le=50)
 
     async def lcm_grep(params, ctx):
@@ -302,8 +302,8 @@ def register(harn):
     )
 
     class ExpandParams(BaseModel):
-        store_id: Optional[int] = None
-        node_id: Optional[int] = None
+        store_id: int | None = None
+        node_id: int | None = None
         source_offset: int = Field(0, ge=0)
         source_limit: int = Field(10, ge=1, le=50)
         content_offset: int = Field(0, ge=0)
@@ -363,11 +363,11 @@ def register(harn):
     )
 
     class LoadParams(BaseModel):
-        session_id: Optional[str] = None
+        session_id: str | None = None
         after_store_id: int = Field(0, ge=0)
-        source: Optional[str] = None
-        time_from: Optional[str] = None
-        time_to: Optional[str] = None
+        source: str | None = None
+        time_from: str | None = None
+        time_to: str | None = None
         limit: int = Field(20, ge=1, le=100)
 
     async def lcm_load(params, ctx):
@@ -392,11 +392,11 @@ def register(harn):
 
     class RecentParams(BaseModel):
         scope: str = Field("current", description="current or all")
-        session_id: Optional[str] = None
-        source: Optional[str] = None
+        session_id: str | None = None
+        source: str | None = None
         hours: float = Field(24.0, gt=0, le=24 * 3650)
-        time_from: Optional[str] = None
-        time_to: Optional[str] = None
+        time_from: str | None = None
+        time_to: str | None = None
         limit: int = Field(20, ge=1, le=100)
 
     async def lcm_recent(params, ctx):
@@ -422,7 +422,7 @@ def register(harn):
     )
 
     class StatusParams(BaseModel):
-        session_id: Optional[str] = None
+        session_id: str | None = None
 
     async def lcm_status(params, ctx):
         current = _sync_ctx(ctx)

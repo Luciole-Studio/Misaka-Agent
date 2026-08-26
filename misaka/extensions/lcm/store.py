@@ -8,7 +8,7 @@ import re
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from misaka.extensions.lcm.migrations import migrate
@@ -95,7 +95,7 @@ def _normalize_observed_at(value):
     if not math.isfinite(observed) or observed <= 0:
         return None
     try:
-        datetime.fromtimestamp(observed, tz=timezone.utc)
+        datetime.fromtimestamp(observed, tz=UTC)
     except (OSError, OverflowError, ValueError):
         return None
     return observed
@@ -139,7 +139,7 @@ class MessageStore:
                 observed = _normalize_observed_at(msg.get("timestamp"))
                 safe_content = normalize_content_value(storage_safe_content(msg.get("content")))
                 cur = self._conn.execute(
-                    f"""INSERT OR IGNORE INTO messages
+                    """INSERT OR IGNORE INTO messages
                         (session_id, source, role, content, tool_call_id, tool_calls,
                          tool_name, timestamp, token_estimate, pinned, ingested_at,
                          observed_at, observed_at_source, host_entry_id)

@@ -52,7 +52,9 @@ def _query_terminal_background(in_fd=0, out_fd=1, timeout=0.25):
     if not match:
         return None
     from misaka.ui.tui.interactive.theme.theme import (
-        get_theme_for_rgb_color, parse_osc11_background_color)
+        get_theme_for_rgb_color,
+        parse_osc11_background_color,
+    )
     rgb = parse_osc11_background_color(match.group(0).decode("ascii", "replace"))
     return get_theme_for_rgb_color(rgb) if rgb else None
 

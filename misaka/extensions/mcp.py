@@ -23,15 +23,16 @@ Tools are registered as `mcp__<server>__<tool>`, matching Claude Code's naming s
 never collide with built-in tools.
 """
 import asyncio
-from dataclasses import dataclass
-import re
 import json
 import os
+import re
 import shutil
+from dataclasses import dataclass
+
+from pydantic import BaseModel
 
 from misaka.core.extensions import startup_sections
 from misaka.core.extensions.types import ToolDefinition
-from pydantic import BaseModel
 
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -261,7 +262,7 @@ class McpClient:
         await self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
         try:
             msg = await asyncio.wait_for(fut, timeout or INIT_TIMEOUT)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._pending.pop(rid, None)
             raise RuntimeError(f"MCP server {self.name} timed out during {method}.")
         if msg.get("error"):
@@ -301,7 +302,7 @@ class McpClient:
                 pass
             try:
                 await asyncio.wait_for(self.proc.wait(), 5)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self.proc.kill()
 
 

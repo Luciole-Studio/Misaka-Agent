@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import math
 import os
 import re
 import time
@@ -15,27 +14,44 @@ from typing import Any
 
 from misaka.agent.agent import AbortController, Agent
 from misaka.agent.types import AgentMessage, AgentState, AgentTool, ThinkingLevel
-from misaka.ai.models import clamp_thinking_level, get_supported_thinking_levels, models_are_equal
+from misaka.ai.models import (
+    clamp_thinking_level,
+    get_supported_thinking_levels,
+    models_are_equal,
+)
 from misaka.ai.providers.register_builtins import reset_api_providers
 from misaka.ai.session_resources import cleanup_session_resources
 from misaka.ai.stream import stream_simple
-from misaka.ai.types import AssistantMessage, ImageContent, Model, TextContent, validate_message
+from misaka.ai.types import (
+    AssistantMessage,
+    ImageContent,
+    Model,
+    TextContent,
+    validate_message,
+)
 from misaka.ai.utils.overflow import is_context_overflow, is_recoverable_length
-
 from misaka.core.auth_guidance import (
     format_no_api_key_found_message,
     format_no_model_selected_message,
 )
 from misaka.core.bash_executor import BashResult, execute_bash_with_operations
-from misaka.core.compaction import compact as run_compaction
 from misaka.core.compaction import (
     CompactionResult as SessionCompactionResult,
 )
 from misaka.core.compaction import (
     CompactionSettings,
+)
+from misaka.core.compaction import (
     calculateContextTokens as calculate_compaction_context_tokens,
+)
+from misaka.core.compaction import compact as run_compaction
+from misaka.core.compaction import (
     estimateContextTokens as estimate_compaction_context_tokens,
+)
+from misaka.core.compaction import (
     prepareCompaction as prepare_compaction,
+)
+from misaka.core.compaction import (
     shouldCompact as should_compact,
 )
 from misaka.core.compaction.branch_summarization import (
@@ -77,7 +93,6 @@ from misaka.core.tools.tool_definition_wrapper import (
 )
 from misaka.ui.tui.interactive.theme.theme import theme
 from misaka.utils.paths import resolve_path
-from misaka.utils.sleep import sleep
 
 _SKILL_BLOCK_PATTERN = re.compile(
     r'^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n</skill>(?:\n\n([\s\S]+))?$'
@@ -577,7 +592,7 @@ class AgentSession:
         self.agent.followUp(self._build_user_message(text, images))
 
     def _throw_if_extension_command(self, text: str) -> None:
-        command_text = text[1:] if text.startswith("/") else text
+        command_text = text.removeprefix("/")
         command_name = command_text.split(" ", 1)[0]
         if self._extensionRunner.get_command(command_name) is not None:
             raise RuntimeError(
@@ -683,7 +698,7 @@ class AgentSession:
             (index for index, item in enumerate(scoped_models) if models_are_equal(item["model"], current_model)),
             -1,
         )
-        current_index = 0 if current_index < 0 else current_index
+        current_index = max(current_index, 0)
         next_index = (current_index + (1 if direction != "backward" else -1)) % len(scoped_models)
         next_model = scoped_models[next_index]["model"]
         thinking_level = self._get_thinking_level_for_model_switch(scoped_models[next_index].get("thinkingLevel"))
@@ -710,7 +725,7 @@ class AgentSession:
             (index for index, model in enumerate(available_models) if models_are_equal(model, current_model)),
             -1,
         )
-        current_index = 0 if current_index < 0 else current_index
+        current_index = max(current_index, 0)
         next_index = (current_index + (1 if direction != "backward" else -1)) % len(available_models)
         next_model = available_models[next_index]
         thinking_level = self._get_thinking_level_for_model_switch()
@@ -874,8 +889,8 @@ class AgentSession:
         context = self._extensionRunner.create_command_context()
         replaced_context = object.__new__(type(context))
         replaced_context.__dict__.update(context.__dict__)
-        setattr(replaced_context, "sendMessage", self.sendMessage)
-        setattr(replaced_context, "sendUserMessage", self.sendUserMessage)
+        replaced_context.sendMessage = self.sendMessage
+        replaced_context.sendUserMessage = self.sendUserMessage
         return replaced_context
 
     def hasExtensionHandlers(self, eventType: str) -> bool:

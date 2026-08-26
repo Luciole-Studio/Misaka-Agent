@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from typing import TypedDict
 
 from misaka.ai.types import ImageContent
-
 from misaka.cli.args import Args
 
 

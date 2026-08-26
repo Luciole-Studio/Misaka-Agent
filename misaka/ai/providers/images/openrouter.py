@@ -13,10 +13,17 @@ try:
 except ImportError:  # optional extra: misaka[openai]
     AsyncOpenAI = None
 
-from misaka.ai.providers.sdk import require
-
 from misaka.ai.env_api_keys import get_env_api_key
-from misaka.ai.types import AssistantImages, ImageContent, ImagesContext, ImagesModel, ImagesOptions, TextContent, Usage
+from misaka.ai.providers.sdk import require
+from misaka.ai.types import (
+    AssistantImages,
+    ImageContent,
+    ImagesContext,
+    ImagesModel,
+    ImagesOptions,
+    TextContent,
+    Usage,
+)
 from misaka.ai.utils.headers import headers_to_record
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
 

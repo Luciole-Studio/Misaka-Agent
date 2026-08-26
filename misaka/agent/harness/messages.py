@@ -6,9 +6,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, TypeVar
 
-from misaka.ai.types import ImageContent, MessageValue, TextContent, UserMessage, validate_message
-
 from misaka.agent.types import AgentMessage
+from misaka.ai.types import (
+    ImageContent,
+    MessageValue,
+    TextContent,
+    UserMessage,
+    validate_message,
+)
 
 COMPACTION_SUMMARY_PREFIX = """The conversation history before this point was compacted into the following summary:
 
@@ -210,10 +215,10 @@ convertToLlm = convert_to_llm
 __all__ = [
     "BRANCH_SUMMARY_PREFIX",
     "BRANCH_SUMMARY_SUFFIX",
-    "BashExecutionMessage",
-    "BranchSummaryMessage",
     "COMPACTION_SUMMARY_PREFIX",
     "COMPACTION_SUMMARY_SUFFIX",
+    "BashExecutionMessage",
+    "BranchSummaryMessage",
     "CompactionSummaryMessage",
     "CustomMessage",
     "bashExecutionToText",

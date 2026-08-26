@@ -8,7 +8,6 @@ import os
 from misaka.core.session_manager import find_most_recent_session
 from misaka.research import runs
 
-
 FINAL_CONTRACT = """You are Last Order at the final adjudication stage of a research run. The planning-stage rule against answering is now lifted.
 Every node's conclusion is quoted below in full (the root, then each node that re-researched an undermined point). Read the
 red-team critiques at their paths, and whichever source-task artifacts the conclusions cite, then answer the original question.

@@ -1,5 +1,4 @@
 """Structural and editorial checks for SKILL.md files."""
-import os
 import re
 from pathlib import Path
 
@@ -18,7 +17,7 @@ _REF_RE = re.compile(r"(references|templates|assets)/[\w./\-\u4e00-\u9fff]+")
 
 
 class Finding:
-    __slots__ = ("rule", "severity", "message")
+    __slots__ = ("message", "rule", "severity")
 
     def __init__(self, rule, severity, message):
         self.rule, self.severity, self.message = rule, severity, message
@@ -30,7 +29,10 @@ class Finding:
 
 def lint_content(content, skill_dir=None):
     """Check one SKILL.md document and its optional support directory."""
-    from misaka.skills.index import SKILL_PROMPT_DESC_LIMIT, is_skill_description_truncated
+    from misaka.skills.index import (
+        SKILL_PROMPT_DESC_LIMIT,
+        is_skill_description_truncated,
+    )
     from misaka.utils.frontmatter import FrontmatterError, parse_frontmatter
 
     findings = []

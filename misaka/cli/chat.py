@@ -7,8 +7,7 @@ import asyncio
 import os
 import sys
 
-from misaka.config import profiles
-from misaka.config import CFG, sisters
+from misaka.config import CFG, profiles, sisters
 
 
 def assembly(who):

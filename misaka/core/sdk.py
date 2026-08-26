@@ -10,7 +10,6 @@ from misaka.agent.types import AgentMessage, ThinkingLevel
 from misaka.ai.models import clamp_thinking_level
 from misaka.ai.stream import stream_simple
 from misaka.ai.types import Model, SimpleStreamOptions, TextContent, validate_message
-
 from misaka.config import get_agent_dir
 from misaka.core.agent_session import AgentSession
 from misaka.core.auth_guidance import format_no_models_available_message
@@ -446,16 +445,16 @@ __all__ = [
     "AgentSessionRuntime",
     "AgentSessionRuntimeDiagnostic",
     "AgentSessionServices",
-    "CreateAgentSessionOptions",
     "CreateAgentSessionFromServicesOptions",
+    "CreateAgentSessionOptions",
+    "CreateAgentSessionResult",
     "CreateAgentSessionRuntimeFactory",
     "CreateAgentSessionRuntimeResult",
-    "CreateAgentSessionResult",
     "CreateAgentSessionServicesOptions",
     "ExtensionAPI",
     "ExtensionCommandContext",
-    "ExtensionFactory",
     "ExtensionContext",
+    "ExtensionFactory",
     "PromptTemplate",
     "SessionImportFileNotFoundError",
     "SlashCommandInfo",

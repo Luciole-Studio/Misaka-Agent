@@ -37,7 +37,7 @@ def sha256_file(p):
 
 
 def claim_hash(doc_id, page, offset, quote):
-    return hashlib.sha256(f"{doc_id}:{page}:{offset}:{quote}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(f"{doc_id}:{page}:{offset}:{quote}".encode()).hexdigest()
 
 
 def _pdf_pages(p):
@@ -328,7 +328,7 @@ def search_literal(q, limit=10, doc_id=None, workspace=None):
 
 def verify_quote(doc_id, quote, page=None):
     """Verify an exact quotation, optionally on one page, ignoring whitespace differences."""
-    norm = lambda s: re.sub(r"\s+", "", s)  # noqa: E731
+    norm = lambda s: re.sub(r"\s+", "", s)
     nq = norm(quote)
     if not nq:
         return None

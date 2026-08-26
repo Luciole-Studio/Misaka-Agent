@@ -24,7 +24,6 @@ from misaka.agent.harness.session.uuid import uuidv7
 from misaka.agent.harness.types import SessionContext
 from misaka.agent.types import AgentMessage
 from misaka.ai.types import ImageContent, MessageValue, TextContent
-
 from misaka.config import get_agent_dir, get_sessions_dir
 from misaka.utils.paths import normalize_path, resolve_path
 
@@ -1245,25 +1244,25 @@ buildSessionContext = build_session_context
 
 __all__ = [
     "CURRENT_SESSION_VERSION",
-    "SessionHeader",
-    "NewSessionOptions",
-    "SessionEntryBase",
-    "SessionMessageEntry",
-    "ThinkingLevelChangeEntry",
-    "ModelChangeEntry",
-    "CompactionEntry",
     "BranchSummaryEntry",
+    "CompactionEntry",
     "CustomEntry",
-    "LabelEntry",
-    "SessionInfoEntry",
     "CustomMessageEntry",
-    "SessionEntry",
     "FileEntry",
-    "SessionTreeNode",
-    "SessionContext",
-    "SessionInfo",
-    "SessionListProgress",
+    "LabelEntry",
+    "ModelChangeEntry",
+    "NewSessionOptions",
     "ReadonlySessionManager",
-    "buildSessionContext",
+    "SessionContext",
+    "SessionEntry",
+    "SessionEntryBase",
+    "SessionHeader",
+    "SessionInfo",
+    "SessionInfoEntry",
+    "SessionListProgress",
     "SessionManager",
+    "SessionMessageEntry",
+    "SessionTreeNode",
+    "ThinkingLevelChangeEntry",
+    "buildSessionContext",
 ]

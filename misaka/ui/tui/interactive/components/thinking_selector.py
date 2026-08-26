@@ -6,7 +6,6 @@ from collections.abc import Callable
 
 from misaka.agent.types import ThinkingLevel
 from misaka.ui.tui import Container, SelectItem, SelectList, SelectListLayoutOptions
-
 from misaka.ui.tui.interactive.components.dynamic_border import DynamicBorder
 from misaka.ui.tui.interactive.theme.theme import get_select_list_theme
 

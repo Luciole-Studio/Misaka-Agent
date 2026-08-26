@@ -8,10 +8,15 @@ import json
 import math
 import random
 import time
+from collections.abc import Awaitable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Literal, Protocol, TypeAlias, TypedDict
+from typing import Any, Literal, Protocol, TypeAlias, TypedDict
 
-from misaka.ai.api_registry import ApiProvider, register_api_provider, unregister_api_providers
+from misaka.ai.api_registry import (
+    ApiProvider,
+    register_api_provider,
+    unregister_api_providers,
+)
 from misaka.ai.types import (
     AssistantMessage,
     Context,
@@ -22,7 +27,6 @@ from misaka.ai.types import (
     Model,
     SimpleStreamOptions,
     StartEvent,
-    StopReason,
     StreamOptions,
     TextContent,
     TextDeltaEvent,
@@ -39,7 +43,10 @@ from misaka.ai.types import (
     ToolResultMessage,
     Usage,
 )
-from misaka.ai.utils.event_stream import AssistantMessageEventStream, create_assistant_message_event_stream
+from misaka.ai.utils.event_stream import (
+    AssistantMessageEventStream,
+    create_assistant_message_event_stream,
+)
 
 DEFAULT_API = "faux"
 DEFAULT_PROVIDER = "faux"
@@ -617,10 +624,10 @@ def register_faux_provider(options: RegisterFauxProviderOptions | dict[str, Any]
 
 
 __all__ = [
-    "FauxModelDefinition",
     "FauxContentBlock",
+    "FauxModelDefinition",
+    "FauxProviderRegistration",
     "FauxResponseFactory",
     "FauxResponseStep",
     "RegisterFauxProviderOptions",
-    "FauxProviderRegistration",
     ]

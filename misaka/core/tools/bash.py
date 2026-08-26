@@ -10,15 +10,25 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, TypedDict
 
-from misaka.agent.types import AgentTool, AgentToolResult
-from misaka.ai.types import TextContent
 from pydantic import BaseModel, ConfigDict, Field
 
+from misaka.agent.types import AgentTool, AgentToolResult
+from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
-from misaka.core.tools.output_accumulator import OutputAccumulator, OutputAccumulatorOptions, OutputSnapshot
+from misaka.core.tools.output_accumulator import (
+    OutputAccumulator,
+    OutputAccumulatorOptions,
+    OutputSnapshot,
+)
 from misaka.core.tools.render_utils import get_text_output, invalid_arg_text
 from misaka.core.tools.tool_definition_wrapper import wrap_tool_definition
-from misaka.core.tools.truncate import DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, TruncationResult, format_size
+from misaka.core.tools.truncate import (
+    DEFAULT_MAX_BYTES,
+    DEFAULT_MAX_LINES,
+    TruncationResult,
+    format_size,
+)
+from misaka.ui.tui import Container, Text, truncateToWidth
 from misaka.ui.tui.interactive.theme.theme import theme
 from misaka.utils.child_process import wait_for_child_process
 from misaka.utils.shell import (
@@ -28,7 +38,6 @@ from misaka.utils.shell import (
     track_detached_child_pid,
     untrack_detached_child_pid,
 )
-from misaka.ui.tui import Container, Text, truncateToWidth
 
 _BASH_PREVIEW_LINES = 5
 _BASH_UPDATE_THROTTLE_SECONDS = 0.1
@@ -103,7 +112,9 @@ class _CollapsedBashPreview:
 
     def render(self, width: int) -> list[str]:
         from misaka.ui.tui.interactive.components.keybinding_hints import key_hint
-        from misaka.ui.tui.interactive.components.visual_truncate import truncate_to_visual_lines
+        from misaka.ui.tui.interactive.components.visual_truncate import (
+            truncate_to_visual_lines,
+        )
 
         if self._state.cachedLines is None or self._state.cachedWidth != width:
             preview = truncate_to_visual_lines(self._styled_output, _BASH_PREVIEW_LINES, width)

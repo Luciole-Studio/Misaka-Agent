@@ -8,10 +8,9 @@ from typing import Any, Literal
 
 from misaka.ai.models import modelsAreEqual
 from misaka.ai.types import Model
-from misaka.ui.tui import Container, Input, Spacer, Text, fuzzyFilter, getKeybindings
-
 from misaka.core.model_registry import ModelRegistry
 from misaka.core.settings_manager import SettingsManager
+from misaka.ui.tui import Container, Input, Spacer, Text, fuzzyFilter, getKeybindings
 from misaka.ui.tui.interactive.theme.theme import theme
 
 from .dynamic_border import DynamicBorder
@@ -179,7 +178,7 @@ class ModelSelectorComponent(Container):
             (index for index, item in enumerate(self.activeModels) if modelsAreEqual(self.currentModel, item.model)),
             -1,
         )
-        self.selectedIndex = current_index if current_index >= 0 else 0
+        self.selectedIndex = max(current_index, 0)
         self.filterModels(self.searchInput.getValue())
         if self.scopeText is not None:
             self.scopeText.setText(self.getScopeText())

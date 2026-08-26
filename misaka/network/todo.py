@@ -114,7 +114,7 @@ def tools_for(task_id, sender):
     """Return a registrar that adds the ``misaka_todo`` tools and reminder hooks for one task card."""
 
     def register(harn):
-        from typing import Literal, Optional
+        from typing import Literal
 
         from pydantic import BaseModel, Field
 
@@ -135,14 +135,14 @@ def tools_for(task_id, sender):
 
         class AddOp(BaseModel):
             text: str = Field(description="Concise, actionable to-do item.")
-            parent_id: Optional[str] = Field(None, description="Optional parent to-do ID; omit for a top-level item.")
-            owner: Optional[str] = Field(None, description="Optional agent or subagent responsible for this item.")
+            parent_id: str | None = Field(None, description="Optional parent to-do ID; omit for a top-level item.")
+            owner: str | None = Field(None, description="Optional agent or subagent responsible for this item.")
 
         class MarkOp(BaseModel):
             id: str = Field(description="To-do item ID.")
             status: Literal["open", "doing", "done", "blocked"] = Field(description="New item status.")
-            note: Optional[str] = Field(None, description="Required for blocked items: state the concrete blocker.")
-            owner: Optional[str] = Field(None, description="Optional new owner.")
+            note: str | None = Field(None, description="Required for blocked items: state the concrete blocker.")
+            owner: str | None = Field(None, description="Optional new owner.")
 
         class TodoParams(BaseModel):
             add: list[AddOp] = Field(default_factory=list, description="Items to add")

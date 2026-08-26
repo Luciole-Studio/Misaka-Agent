@@ -13,7 +13,7 @@ def get_provider_login_help() -> str:
             "Use /login to log into a provider via OAuth or API key, or set the provider's API key",
             "in the environment. Credentials are kept in:",
             f"  {get_auth_path()}",
-            f"Custom providers and models are defined in:",
+            "Custom providers and models are defined in:",
             f"  {get_models_path()}",
             "`misaka auth check` reports what is configured.",
         ]

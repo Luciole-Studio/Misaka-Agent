@@ -8,8 +8,16 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from misaka.ai.types import Model
-from misaka.ui.tui import Container, Input, Key, Spacer, Text, fuzzyFilter, getKeybindings, matchesKey
-
+from misaka.ui.tui import (
+    Container,
+    Input,
+    Key,
+    Spacer,
+    Text,
+    fuzzyFilter,
+    getKeybindings,
+    matchesKey,
+)
 from misaka.ui.tui.interactive.theme.theme import theme
 
 from .dynamic_border import DynamicBorder

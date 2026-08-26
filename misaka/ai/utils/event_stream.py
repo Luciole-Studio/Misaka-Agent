@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import AsyncIterator, Callable, Generic, TypeVar, cast
+from collections.abc import AsyncIterator, Callable
+from typing import Generic, TypeVar, cast
 
 from misaka.ai.types import AssistantMessage, AssistantMessageEvent
 

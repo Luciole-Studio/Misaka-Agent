@@ -14,8 +14,8 @@ import threading
 import time
 
 from misaka.config import CFG
-from misaka.platform import tasks as db
 from misaka.network import worker
+from misaka.platform import tasks as db
 
 ACTIVE_STATUSES = ("running", "review")
 

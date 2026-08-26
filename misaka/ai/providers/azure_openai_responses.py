@@ -15,8 +15,6 @@ try:
 except ImportError:  # optional extra: misaka[openai]
     AsyncAzureOpenAI = None
 
-from misaka.ai.providers.sdk import require
-
 from misaka.ai.env_api_keys import get_env_api_key
 from misaka.ai.models import clamp_thinking_level
 from misaka.ai.providers.openai_prompt_cache import clamp_openai_prompt_cache_key
@@ -25,6 +23,7 @@ from misaka.ai.providers.openai_responses_shared import (
     convert_responses_tools,
     process_responses_stream,
 )
+from misaka.ai.providers.sdk import require
 from misaka.ai.providers.simple_options import build_base_options
 from misaka.ai.types import (
     AssistantMessage,

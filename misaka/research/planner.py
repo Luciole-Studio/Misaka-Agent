@@ -12,10 +12,10 @@ from pathlib import Path
 
 from misaka.config import CFG
 from misaka.core.session_manager import find_most_recent_session
-from misaka.platform import prompt_guard, tasks as task_store
-from misaka.skills import layers as skill_layers
+from misaka.platform import prompt_guard
+from misaka.platform import tasks as task_store
 from misaka.research import ledger, runs
-
+from misaka.skills import layers as skill_layers
 
 PROJECT_INTAKE_CONTRACT = """You are Last Order in Research mode. Draft the project brief (PROJECT.md) for the user's research question.
 Do not answer the original question, and do not break it into research tasks yet.

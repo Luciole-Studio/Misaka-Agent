@@ -5,7 +5,11 @@ from __future__ import annotations
 import time
 from typing import TypedDict
 
-from misaka.ai.utils.oauth.anthropic import anthropicOAuthProvider, loginAnthropic, refreshAnthropicToken
+from misaka.ai.utils.oauth.anthropic import (
+    anthropicOAuthProvider,
+    loginAnthropic,
+    refreshAnthropicToken,
+)
 from misaka.ai.utils.oauth.device_code import (
     OAuthDeviceCodeCompleteResult,
     OAuthDeviceCodeFailedResult,
@@ -134,6 +138,10 @@ __all__ = [
     "OAuthPrompt",
     "OAuthProvider",
     "OAuthProviderId",
+    "OAuthProviderInfo",
+    "OAuthProviderInterface",
+    "OAuthSelectOption",
+    "OAuthSelectPrompt",
     "anthropicOAuthProvider",
     "getGitHubCopilotBaseUrl",
     "getOAuthApiKey",
@@ -144,10 +152,6 @@ __all__ = [
     "loginGitHubCopilot",
     "loginOpenAICodex",
     "normalizeDomain",
-    "OAuthProviderInfo",
-    "OAuthProviderInterface",
-    "OAuthSelectOption",
-    "OAuthSelectPrompt",
     "openaiCodexOAuthProvider",
     "pollOAuthDeviceCodeFlow",
     "refreshAnthropicToken",

@@ -8,8 +8,10 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from typing import Any
 
-from jsonschema import Draft202012Validator, ValidationError as JsonSchemaValidationError
-from pydantic import BaseModel, ValidationError as PydanticValidationError
+from jsonschema import Draft202012Validator
+from jsonschema import ValidationError as JsonSchemaValidationError
+from pydantic import BaseModel
+from pydantic import ValidationError as PydanticValidationError
 
 from misaka.ai.types import Tool, ToolCall
 

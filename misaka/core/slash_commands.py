@@ -76,8 +76,8 @@ def _make_slash_command_info(
 
 
 __all__ = [
-    "SlashCommandSource",
-    "SlashCommandInfo",
-    "BuiltinSlashCommand",
     "BUILTIN_SLASH_COMMANDS",
+    "BuiltinSlashCommand",
+    "SlashCommandInfo",
+    "SlashCommandSource",
 ]

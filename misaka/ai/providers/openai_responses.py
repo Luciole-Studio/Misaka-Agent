@@ -6,7 +6,7 @@ import asyncio
 import json
 import os
 import time
-from collections.abc import AsyncIterable, AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping
 from typing import Any, Literal, TypedDict
 
 try:
@@ -14,10 +14,18 @@ try:
 except ImportError:  # optional extra: misaka[openai]
     AsyncOpenAI = None
 
-from misaka.ai.providers.sdk import require
-
+import misaka.ai.providers.cloudflare as _cloudflare
+import misaka.ai.providers.github_copilot_headers as _copilot_headers
 from misaka.ai.env_api_keys import get_env_api_key
 from misaka.ai.models import clamp_thinking_level
+from misaka.ai.providers.openai_prompt_cache import clamp_openai_prompt_cache_key
+from misaka.ai.providers.openai_responses_shared import (
+    convert_responses_messages,
+    convert_responses_tools,
+    process_responses_stream,
+)
+from misaka.ai.providers.sdk import require
+from misaka.ai.providers.simple_options import build_base_options
 from misaka.ai.types import (
     AssistantMessage,
     CacheRetention,
@@ -32,16 +40,6 @@ from misaka.ai.types import (
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream
 from misaka.ai.utils.headers import headers_to_record
-
-import misaka.ai.providers.cloudflare as _cloudflare
-import misaka.ai.providers.github_copilot_headers as _copilot_headers
-from misaka.ai.providers.openai_prompt_cache import clamp_openai_prompt_cache_key
-from misaka.ai.providers.openai_responses_shared import (
-    convert_responses_messages,
-    convert_responses_tools,
-    process_responses_stream,
-)
-from misaka.ai.providers.simple_options import build_base_options
 
 OPENAI_TOOL_CALL_PROVIDERS = {"openai", "openai-codex", "opencode"}
 is_cloudflare_provider = getattr(_cloudflare, "is_cloudflare_provider", lambda _provider: False)

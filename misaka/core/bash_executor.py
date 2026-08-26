@@ -59,8 +59,7 @@ async def execute_bash_with_operations(
             return
         temp_file_path = os.path.join(tempfile.gettempdir(), f"misaka-bash-{secrets.token_hex(8)}.log")
         temp_file_handle = open(temp_file_path, "w", encoding="utf-8")
-        for chunk in output_chunks:
-            temp_file_handle.write(chunk)
+        temp_file_handle.writelines(output_chunks)
 
     def append_text(text: str) -> None:
         nonlocal output_bytes

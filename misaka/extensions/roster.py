@@ -3,7 +3,6 @@ import os
 import sys
 
 
-
 def _roster():
     from misaka.config import sisters
     return ["last-order"] + sorted(sisters())

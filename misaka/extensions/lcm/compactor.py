@@ -1,5 +1,5 @@
 """LCM context compaction and summary-chain construction."""
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from misaka.extensions.lcm.dag import SummaryDAG, SummaryNode
 from misaka.extensions.lcm.escalation import (

@@ -7,7 +7,6 @@ import re
 from typing import Any
 
 from misaka.ui.tui import truncateToWidth, visibleWidth
-
 from misaka.ui.tui.interactive.theme.theme import theme
 
 

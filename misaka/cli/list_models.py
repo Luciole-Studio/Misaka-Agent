@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import sys
 
-from misaka.ui.tui import fuzzyFilter
-
 from misaka.core.auth_guidance import format_no_models_available_message
+from misaka.ui.tui import fuzzyFilter
 
 _YELLOW = "\x1b[33m"
 _RESET = "\x1b[0m"

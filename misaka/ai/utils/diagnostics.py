@@ -74,10 +74,10 @@ def append_assistant_message_diagnostic(message: Any, diagnostic: AssistantMessa
 
     diagnostics = list(getattr(message, "diagnostics", None) or [])
     diagnostics.append(diagnostic)
-    setattr(message, "diagnostics", diagnostics)
+    message.diagnostics = diagnostics
 
 
 __all__ = [
-    "DiagnosticErrorInfo",
     "AssistantMessageDiagnostic",
+    "DiagnosticErrorInfo",
     ]

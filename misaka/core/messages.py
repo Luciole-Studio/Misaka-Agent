@@ -19,10 +19,10 @@ from misaka.agent.harness.messages import (
 __all__ = [
     "BRANCH_SUMMARY_PREFIX",
     "BRANCH_SUMMARY_SUFFIX",
-    "BashExecutionMessage",
-    "BranchSummaryMessage",
     "COMPACTION_SUMMARY_PREFIX",
     "COMPACTION_SUMMARY_SUFFIX",
+    "BashExecutionMessage",
+    "BranchSummaryMessage",
     "CompactionSummaryMessage",
     "CustomMessage",
     "bashExecutionToText",

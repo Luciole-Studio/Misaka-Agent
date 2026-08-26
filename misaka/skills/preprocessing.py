@@ -2,7 +2,6 @@
 import logging
 import re
 import subprocess
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 

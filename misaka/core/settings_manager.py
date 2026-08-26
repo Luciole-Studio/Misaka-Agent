@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from filelock import FileLock, Timeout
-from misaka.ai.types import Transport
 
+from misaka.ai.types import Transport
 from misaka.config import CONFIG_DIR_NAME, get_agent_dir
 from misaka.core.http_dispatcher import (
     DEFAULT_HTTP_IDLE_TIMEOUT_MS,
@@ -197,7 +197,6 @@ class SettingsManager:
         def capture(current: str | None) -> None:
             nonlocal content
             content = current
-            return None
 
         storage.withLock(scope, capture)
         if not content:
@@ -752,21 +751,21 @@ class SettingsManager:
         self._set_global_value("warnings", {**warnings})
 
 __all__ = [
-    "CompactionSettings",
     "BranchSummarySettings",
+    "CompactionSettings",
+    "FileSettingsStorage",
+    "ImageSettings",
+    "InMemorySettingsStorage",
+    "MarkdownSettings",
     "ProviderRetrySettings",
     "RetrySettings",
-    "TerminalSettings",
-    "ImageSettings",
-    "ThinkingBudgetsSettings",
-    "MarkdownSettings",
-    "WarningSettings",
-    "TransportSetting",
     "Settings",
+    "SettingsError",
+    "SettingsManager",
     "SettingsScope",
     "SettingsStorage",
-    "SettingsError",
-    "FileSettingsStorage",
-    "InMemorySettingsStorage",
-    "SettingsManager",
+    "TerminalSettings",
+    "ThinkingBudgetsSettings",
+    "TransportSetting",
+    "WarningSettings",
 ]

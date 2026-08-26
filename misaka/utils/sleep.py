@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 
-async def sleep(ms: int | float, signal: Any = None) -> None:
+async def sleep(ms: float, signal: Any = None) -> None:
     if _is_aborted(signal):
         raise RuntimeError("Aborted")
 

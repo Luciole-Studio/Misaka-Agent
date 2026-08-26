@@ -180,7 +180,7 @@ def register(harn, *, sender, route=None, receive=False):
                             [int(r["id"]) for r in mine])
                 try:
                     await asyncio.wait_for(stop.wait(), POLL_SECONDS)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
         finally:
             con.close()

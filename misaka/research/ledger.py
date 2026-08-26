@@ -8,10 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
 
 from misaka.research import runs
-
 
 CLAIM_TYPES = {"fact", "inference", "interpretation", "normative"}
 MAX_FINDINGS = 32
@@ -24,7 +22,7 @@ def _norm(value):
 
 
 def _id(run_id, task_id, text):
-    key = f"{run_id}\0{task_id}\0{_norm(text).casefold()}".encode("utf-8")
+    key = f"{run_id}\0{task_id}\0{_norm(text).casefold()}".encode()
     return "f_" + hashlib.sha256(key).hexdigest()[:16]
 
 

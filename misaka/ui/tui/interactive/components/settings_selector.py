@@ -8,6 +8,11 @@ from typing import Literal
 
 from misaka.agent.types import ThinkingLevel
 from misaka.ai.types import Transport
+from misaka.core.http_dispatcher import (
+    HTTP_IDLE_TIMEOUT_CHOICES,
+    formatHttpIdleTimeoutMs,
+)
+from misaka.core.settings_manager import WarningSettings
 from misaka.ui.tui import (
     Container,
     SelectItem,
@@ -20,9 +25,6 @@ from misaka.ui.tui import (
     getCapabilities,
 )
 from misaka.ui.tui.components import SettingsListOptions
-
-from misaka.core.http_dispatcher import HTTP_IDLE_TIMEOUT_CHOICES, formatHttpIdleTimeoutMs
-from misaka.core.settings_manager import WarningSettings
 from misaka.ui.tui.interactive.theme.theme import (
     get_select_list_theme,
     get_settings_list_theme,

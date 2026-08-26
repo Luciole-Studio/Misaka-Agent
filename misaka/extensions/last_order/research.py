@@ -2,14 +2,18 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import shlex
 
 from misaka.config import CFG
-from misaka.ui.tui.interactive.components.ask_user_question import AskUserQuestionComponent
-from misaka.platform import budget, tasks as task_store
-from misaka.research import node as research_node, planner, runs, tools as research_tools, workflow
+from misaka.platform import budget
+from misaka.platform import tasks as task_store
+from misaka.research import node as research_node
+from misaka.research import planner, runs, workflow
+from misaka.research import tools as research_tools
+from misaka.ui.tui.interactive.components.ask_user_question import (
+    AskUserQuestionComponent,
+)
 
 _CON = None
 _DEPTH_QUESTION = "How deep should this research run go?"

@@ -1,10 +1,10 @@
 """Interactive component barrel matching the upstream TS index.ts surface."""
 
-from misaka.ui.tui.interactive.components.assistant_message import (
-    AssistantMessageComponent,
-)
 from misaka.ui.tui.interactive.components.ask_user_question import (
     AskUserQuestionComponent,
+)
+from misaka.ui.tui.interactive.components.assistant_message import (
+    AssistantMessageComponent,
 )
 from misaka.ui.tui.interactive.components.bash_execution import (
     BashExecutionComponent,
@@ -93,29 +93,25 @@ from misaka.ui.tui.interactive.components.visual_truncate import (
 )
 
 __all__ = [
-    "AssistantMessageComponent",
     "AskUserQuestionComponent",
+    "AssistantMessageComponent",
     "BashExecutionComponent",
     "BorderedLoader",
     "BranchSummaryMessageComponent",
     "CompactionSummaryMessageComponent",
     "CustomEditor",
     "CustomMessageComponent",
-    "RenderDiffOptions",
-    "renderDiff",
     "DynamicBorder",
     "ExtensionEditorComponent",
     "ExtensionInputComponent",
     "ExtensionSelectorComponent",
     "FooterComponent",
-    "keyHint",
-    "keyText",
-    "rawKeyHint",
     "LoginDialogComponent",
     "ModelSelectorComponent",
-    "OAuthSelectorComponent",
     "ModelsCallbacks",
     "ModelsConfig",
+    "OAuthSelectorComponent",
+    "RenderDiffOptions",
     "ScopedModelsSelectorComponent",
     "SessionSelectorComponent",
     "SettingsCallbacks",
@@ -130,6 +126,10 @@ __all__ = [
     "TreeSelectorComponent",
     "UserMessageComponent",
     "UserMessageSelectorComponent",
-    "truncateToVisualLines",
     "VisualTruncateResult",
+    "keyHint",
+    "keyText",
+    "rawKeyHint",
+    "renderDiff",
+    "truncateToVisualLines",
 ]

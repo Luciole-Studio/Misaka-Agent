@@ -27,10 +27,10 @@ import struct
 import sys
 import termios
 import time
-import unicodedata
 
-from misaka.ui.panel import geometry as hui
 from misaka.ui.panel import client as net
+from misaka.ui.panel import geometry as hui
+
 
 def _prefix_key():
     """Prefix key, default ctrl+b. Inside tmux that key is taken, so set

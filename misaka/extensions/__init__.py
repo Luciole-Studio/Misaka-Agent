@@ -58,4 +58,4 @@ def discover(spec) -> list[dict[str, Any]]:
     return out
 
 
-__all__ = ["KINDS", "DEFAULT_KINDS", "delegates", "discover", "inline"]
+__all__ = ["DEFAULT_KINDS", "KINDS", "delegates", "discover", "inline"]

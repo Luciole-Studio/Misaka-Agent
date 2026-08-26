@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from misaka.ai.types import Model, SimpleStreamOptions, StreamOptions, ThinkingBudgets, ThinkingLevel
+from misaka.ai.types import (
+    Model,
+    SimpleStreamOptions,
+    StreamOptions,
+    ThinkingBudgets,
+    ThinkingLevel,
+)
 
 
 def build_base_options(_model: Model, options: SimpleStreamOptions | None = None, api_key: str | None = None) -> StreamOptions:

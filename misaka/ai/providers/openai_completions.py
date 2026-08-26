@@ -6,7 +6,7 @@ import asyncio
 import json
 import os
 import time
-from collections.abc import AsyncIterable, AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping
 from typing import Any, Literal, TypedDict
 
 try:
@@ -14,13 +14,18 @@ try:
 except ImportError:  # optional extra: misaka[openai]
     AsyncOpenAI = None
 
-from misaka.ai.providers.sdk import require
-
 from misaka.ai.env_api_keys import get_env_api_key
 from misaka.ai.models import calculate_cost, clamp_thinking_level
-from misaka.ai.providers.cloudflare import is_cloudflare_provider, resolve_cloudflare_base_url
-from misaka.ai.providers.github_copilot_headers import build_copilot_dynamic_headers, has_copilot_vision_input
+from misaka.ai.providers.cloudflare import (
+    is_cloudflare_provider,
+    resolve_cloudflare_base_url,
+)
+from misaka.ai.providers.github_copilot_headers import (
+    build_copilot_dynamic_headers,
+    has_copilot_vision_input,
+)
 from misaka.ai.providers.openai_prompt_cache import clamp_openai_prompt_cache_key
+from misaka.ai.providers.sdk import require
 from misaka.ai.providers.simple_options import build_base_options
 from misaka.ai.providers.transform_messages import transform_messages
 from misaka.ai.types import (
@@ -32,7 +37,6 @@ from misaka.ai.types import (
     Model,
     SimpleStreamOptions,
     StartEvent,
-    StopReason,
     StreamOptions,
     TextContent,
     TextDeltaEvent,
@@ -1108,27 +1112,27 @@ resolveCacheRetention = resolve_cache_retention
 
 __all__ = [
     "OpenAICompletionsOptions",
+    "apply_anthropic_cache_control",
     "buildParams",
+    "build_params",
     "convertMessages",
     "convertTools",
-    "createClient",
-    "getCompat",
-    "mapStopReason",
-    "resolveCacheRetention",
-    "streamOpenAICompletions",
-    "streamSimpleOpenAICompletions",
-    "apply_anthropic_cache_control",
-    "build_params",
     "convert_messages",
     "convert_tools",
+    "createClient",
     "create_client",
     "detect_compat",
+    "getCompat",
     "get_compat",
     "get_compat_cache_control",
     "has_tool_history",
+    "mapStopReason",
     "map_stop_reason",
     "parse_chunk_usage",
+    "resolveCacheRetention",
     "resolve_cache_retention",
+    "streamOpenAICompletions",
+    "streamSimpleOpenAICompletions",
     "stream_openai_completions",
     "stream_simple_openai_completions",
 ]

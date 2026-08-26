@@ -6,7 +6,6 @@ from collections.abc import Callable
 from typing import Any
 
 from misaka.agent.types import AgentTool
-
 from misaka.core.extensions.types import ExtensionContext, ToolDefinition
 
 

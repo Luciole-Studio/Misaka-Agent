@@ -10,8 +10,6 @@ import uuid
 from typing import Any
 
 from misaka.core.output_guard import restoreStdout, takeOverStdout, writeRawStdout
-from misaka.utils.shell import killTrackedDetachedChildren
-from misaka.ui.tui.interactive.theme.theme import theme
 from misaka.modes.rpc.jsonl import JsonlLineBuffer, serialize_json_line
 from misaka.modes.rpc.rpc_types import (
     RpcCommand,
@@ -21,6 +19,8 @@ from misaka.modes.rpc.rpc_types import (
     RpcSessionState,
     RpcSlashCommand,
 )
+from misaka.ui.tui.interactive.theme.theme import theme
+from misaka.utils.shell import killTrackedDetachedChildren
 
 _UNSET = object()
 

@@ -12,15 +12,24 @@ from typing import Any
 
 from misaka.agent.types import AgentMessage, StreamFn, ThinkingLevel
 from misaka.ai.stream import complete_simple
-from misaka.ai.types import AssistantMessage, Model, SimpleStreamOptions, Usage, UserMessage
-
+from misaka.ai.types import (
+    AssistantMessage,
+    Model,
+    SimpleStreamOptions,
+    Usage,
+    UserMessage,
+)
 from misaka.core.compaction.utils import (
     SUMMARIZATION_SYSTEM_PROMPT as _SUMMARIZATION_SYSTEM_PROMPT,
+)
+from misaka.core.compaction.utils import (
     FileOperations,
     compute_file_lists,
     create_file_ops,
     extract_file_ops_from_message,
     format_file_operations,
+)
+from misaka.core.compaction.utils import (
     serialize_conversation as _serialize_conversation,
 )
 from misaka.core.messages import (
@@ -717,13 +726,13 @@ prepareCompaction = prepare_compaction
 shouldCompact = should_compact
 
 __all__ = [
+    "DEFAULT_COMPACTION_SETTINGS",
     "CompactionDetails",
     "CompactionPreparation",
     "CompactionResult",
     "CompactionSettings",
     "ContextUsageEstimate",
     "CutPointResult",
-    "DEFAULT_COMPACTION_SETTINGS",
     "calculateContextTokens",
     "compact",
     "estimateContextTokens",

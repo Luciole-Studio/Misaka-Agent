@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, TypedDict
+from typing import TypedDict
 
 from misaka.core.source_info import SourceInfo, create_synthetic_source_info
 from misaka.utils.frontmatter import parse_frontmatter

@@ -3,8 +3,8 @@
 import json
 import os
 
-from misaka.documents import index as corpus
 from misaka.config import CFG
+from misaka.documents import index as corpus
 
 
 def ingest_artifacts(con, task, artifacts=None):

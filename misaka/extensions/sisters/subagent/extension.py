@@ -355,7 +355,7 @@ async def wait_for_background_tasks() -> None:
         runners = [
             task.runner
             for manager in managers
-            for task in manager._tasks.values()  # noqa: SLF001 - same subsystem supervisor
+            for task in manager._tasks.values()
             if task.background and task.runner is not None and not task.runner.done()
         ]
         if not runners:
@@ -373,8 +373,8 @@ async def wait_for_async_hooks() -> None:
             job
             for manager in managers
             for job in (
-                *manager._async_hook_jobs,  # noqa: SLF001 - subsystem supervisor
-                *manager._async_cleanup_jobs,  # noqa: SLF001
+                *manager._async_hook_jobs,
+                *manager._async_cleanup_jobs,
             )
         ]
         if not jobs:
@@ -391,8 +391,8 @@ def has_async_hooks() -> bool:
         True
         for manager in managers
         for job in (
-            *manager._async_hook_jobs,  # noqa: SLF001 - subsystem supervisor
-            *manager._async_cleanup_jobs,  # noqa: SLF001
+            *manager._async_hook_jobs,
+            *manager._async_cleanup_jobs,
         )
     )
 
@@ -405,7 +405,7 @@ def has_background_tasks() -> bool:
     return any(
         task.background and task.runner is not None and not task.runner.done()
         for manager in managers
-        for task in manager._tasks.values()  # noqa: SLF001 - same subsystem supervisor
+        for task in manager._tasks.values()
     )
 
 
@@ -414,14 +414,14 @@ async def route_to_children(to: str, message: str, _summary: str, ctx: Any):
 
     managers = _ACTIVE_MANAGERS.get(asyncio.get_running_loop(), set())
     for manager in tuple(managers):
-        if manager._closed:  # noqa: SLF001 - left over from an abnormal shutdown; drop it from the roster
+        if manager._closed:
             managers.discard(manager)
             continue
         try:
             # No ctx here on purpose: route only looks for live tasks (in memory or already bound).
             # Passing ctx would bind a blank manager to the caller's session and poison
             # concurrent sessions in the same process (review 2026-08-20).
-            if manager._find_task(to) is None:  # noqa: SLF001
+            if manager._find_task(to) is None:
                 continue
         except RuntimeError:  # Another session's manager: the ownership check raised, so skip it rather than fail the tool.
             continue
@@ -439,24 +439,24 @@ def has_background_task_records() -> bool:
     return any(
         task.background
         for manager in managers
-        for task in manager._tasks.values()  # noqa: SLF001 - same subsystem supervisor
+        for task in manager._tasks.values()
     )
 
 
 __all__ = [
     "AGENT_TOOL_NAME",
+    "SUBAGENT_TOOL_NAMES",
     "TASK_OUTPUT_TOOL_NAME",
     "TASK_STOP_TOOL_NAME",
-    "SUBAGENT_TOOL_NAMES",
     "AgentParams",
     "TaskOutputParams",
     "TaskStopParams",
     "allows_subagents",
     "bind",
+    "has_async_hooks",
+    "has_background_task_records",
+    "has_background_tasks",
     "route_to_children",
     "wait_for_async_hooks",
     "wait_for_background_tasks",
-    "has_async_hooks",
-    "has_background_tasks",
-    "has_background_task_records",
 ]

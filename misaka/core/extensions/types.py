@@ -4,10 +4,26 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, NotRequired, Protocol, TypedDict, TypeGuard, TypeVar, overload
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+    NotRequired,
+    Protocol,
+    TypedDict,
+    TypeGuard,
+    TypeVar,
+    overload,
+)
 
 from misaka.agent.harness.messages import CustomMessage
-from misaka.agent.types import AgentMessage, AgentToolResult, AgentToolUpdateCallback, ThinkingLevel, ToolExecutionMode
+from misaka.agent.types import (
+    AgentMessage,
+    AgentToolResult,
+    AgentToolUpdateCallback,
+    ThinkingLevel,
+    ToolExecutionMode,
+)
 from misaka.ai.types import (
     Api,
     AssistantMessageEvent,
@@ -19,24 +35,12 @@ from misaka.ai.types import (
     TextContent,
     ToolResultMessage,
 )
-from misaka.ai.utils.typebox_helpers import Static, TSchema
 from misaka.ai.utils.oauth.types import OAuthCredentials, OAuthLoginCallbacks
-from misaka.ui.tui import (
-    AutocompleteItem,
-    AutocompleteProvider,
-    Component,
-    EditorComponent,
-    EditorTheme,
-    KeyId,
-    OverlayHandle,
-    OverlayOptions,
-    TUI,
-)
-
-from misaka.core.compaction import CompactionPreparation, CompactionResult as SessionCompactionResult
+from misaka.ai.utils.typebox_helpers import Static, TSchema
+from misaka.core.compaction import CompactionPreparation
+from misaka.core.compaction import CompactionResult as SessionCompactionResult
 from misaka.core.event_bus import EventBus
 from misaka.core.exec import ExecOptions, ExecResult
-from misaka.core.footer_data_provider import ReadonlyFooterDataProvider
 from misaka.core.keybindings import KeybindingsManager
 from misaka.core.model_registry import ModelRegistry
 from misaka.core.session_manager import (
@@ -47,6 +51,16 @@ from misaka.core.session_manager import (
 from misaka.core.slash_commands import SlashCommandInfo
 from misaka.core.source_info import SourceInfo
 from misaka.core.system_prompt import BuildSystemPromptOptions
+from misaka.ui.tui import (
+    TUI,
+    AutocompleteProvider,
+    Component,
+    EditorComponent,
+    EditorTheme,
+    KeyId,
+    OverlayHandle,
+    OverlayOptions,
+)
 from misaka.ui.tui.interactive.theme.theme import Theme
 
 if TYPE_CHECKING:
@@ -220,12 +234,12 @@ class _SendUserMessageOptions(TypedDict, total=False):
 class _NewSessionOptions(TypedDict, total=False):
     parentSession: str
     setup: Callable[[SessionManager], Awaitable[None]]
-    withSession: Callable[["ReplacedSessionContext"], Awaitable[None]]
+    withSession: Callable[[ReplacedSessionContext], Awaitable[None]]
 
 
 class _ForkOptions(TypedDict, total=False):
     position: Literal["before", "at"]
-    withSession: Callable[["ReplacedSessionContext"], Awaitable[None]]
+    withSession: Callable[[ReplacedSessionContext], Awaitable[None]]
 
 
 class _NavigateTreeOptions(TypedDict, total=False):
@@ -236,7 +250,7 @@ class _NavigateTreeOptions(TypedDict, total=False):
 
 
 class _SwitchSessionOptions(TypedDict, total=False):
-    withSession: Callable[["ReplacedSessionContext"], Awaitable[None]]
+    withSession: Callable[[ReplacedSessionContext], Awaitable[None]]
 
 
 @dataclass(slots=True)
@@ -246,7 +260,7 @@ class ToolDefinition[TArgs, TDetails]:
     description: str
     parameters: TSchema
     execute: Callable[
-        [str, TArgs, AbortSignal | None, AgentToolUpdateCallback | None, "ExtensionContext"],
+        [str, TArgs, AbortSignal | None, AgentToolUpdateCallback | None, ExtensionContext],
         Awaitable[AgentToolResult],
     ]
     prepareArguments: Callable[[Any], Static] | None = None
@@ -1294,12 +1308,12 @@ isToolCallEventType = is_tool_call_event_type
 
 __all__ = [
     "AfterProviderResponseEvent",
-    "AgentToolResult",
-    "AgentToolUpdateCallback",
     "AgentEndEvent",
     "AgentEndEventResult",
-    "AppKeybinding",
     "AgentStartEvent",
+    "AgentToolResult",
+    "AgentToolUpdateCallback",
+    "AppKeybinding",
     "AppendEntryHandler",
     "AutocompleteProviderFactory",
     "BashToolCallEvent",
@@ -1310,12 +1324,11 @@ __all__ = [
     "BeforeProviderRequestEventResult",
     "BuildSystemPromptOptions",
     "CompactOptions",
-    "ContextUsage",
     "ContextEvent",
     "ContextEventResult",
+    "ContextUsage",
     "CustomToolCallEvent",
     "CustomToolResultEvent",
-    "defineTool",
     "EditToolCallEvent",
     "EditToolResultEvent",
     "EditorFactory",
@@ -1336,9 +1349,8 @@ __all__ = [
     "ExtensionRuntime",
     "ExtensionRuntimeState",
     "ExtensionShortcut",
-    "InlineExtension",
-    "ExtensionUIDialogOptions",
     "ExtensionUIContext",
+    "ExtensionUIDialogOptions",
     "ExtensionWidgetOptions",
     "FindToolCallEvent",
     "FindToolResultEvent",
@@ -1349,17 +1361,10 @@ __all__ = [
     "GetThinkingLevelHandler",
     "GrepToolCallEvent",
     "GrepToolResultEvent",
+    "InlineExtension",
     "InputEvent",
     "InputEventResult",
     "InputSource",
-    "isBashToolResult",
-    "isEditToolResult",
-    "isFindToolResult",
-    "isGrepToolResult",
-    "isLsToolResult",
-    "isReadToolResult",
-    "isToolCallEventType",
-    "isWriteToolResult",
     "KeybindingsManager",
     "LoadExtensionsResult",
     "LsToolCallEvent",
@@ -1376,13 +1381,15 @@ __all__ = [
     "ProviderModelConfig",
     "ReadToolCallEvent",
     "ReadToolResultEvent",
+    "RefreshToolsHandler",
     "RegisteredCommand",
     "RegisteredTool",
     "ReplacedSessionContext",
+    "ResolvedCommand",
     "ResourcesDiscoverEvent",
     "ResourcesDiscoverResult",
-    "ResolvedCommand",
-    "RefreshToolsHandler",
+    "SendMessageHandler",
+    "SendUserMessageHandler",
     "SessionBeforeCompactEvent",
     "SessionBeforeCompactResult",
     "SessionBeforeForkEvent",
@@ -1396,8 +1403,6 @@ __all__ = [
     "SessionShutdownEvent",
     "SessionStartEvent",
     "SessionTreeEvent",
-    "SendMessageHandler",
-    "SendUserMessageHandler",
     "SetActiveToolsHandler",
     "SetLabelHandler",
     "SetModelHandler",
@@ -1409,10 +1414,10 @@ __all__ = [
     "ToolCallEventResult",
     "ToolDefinition",
     "ToolExecutionEndEvent",
+    "ToolExecutionMode",
     "ToolExecutionStartEvent",
     "ToolExecutionUpdateEvent",
     "ToolInfo",
-    "ToolExecutionMode",
     "ToolRenderContext",
     "ToolRenderResultOptions",
     "ToolResultEvent",
@@ -1426,4 +1431,13 @@ __all__ = [
     "WorkingIndicatorOptions",
     "WriteToolCallEvent",
     "WriteToolResultEvent",
+    "defineTool",
+    "isBashToolResult",
+    "isEditToolResult",
+    "isFindToolResult",
+    "isGrepToolResult",
+    "isLsToolResult",
+    "isReadToolResult",
+    "isToolCallEventType",
+    "isWriteToolResult",
 ]

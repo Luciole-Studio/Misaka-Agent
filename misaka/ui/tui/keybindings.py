@@ -170,6 +170,7 @@ Keybindings = dict[str, Any]
 KeybindingDefinitions = dict[str, KeybindingDefinition]
 
 __all__ = [
+    "TUI_KEYBINDINGS",
     "Keybinding",
     "KeybindingConflict",
     "KeybindingDefinition",
@@ -177,7 +178,6 @@ __all__ = [
     "Keybindings",
     "KeybindingsConfig",
     "KeybindingsManager",
-    "TUI_KEYBINDINGS",
     "getKeybindings",
     "setKeybindings",
 ]

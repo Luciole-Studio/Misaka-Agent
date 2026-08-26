@@ -37,7 +37,7 @@ class JsonlLineBuffer:
                 break
             line = self._buffer[:newline_index]
             self._buffer = self._buffer[newline_index + 1 :]
-            lines.append(line[:-1] if line.endswith("\r") else line)
+            lines.append(line.removesuffix("\r"))
         return lines
 
     def end(self) -> list[str]:
@@ -46,7 +46,7 @@ class JsonlLineBuffer:
             self._buffer += trailing
         if not self._buffer:
             return []
-        line = self._buffer[:-1] if self._buffer.endswith("\r") else self._buffer
+        line = self._buffer.removesuffix("\r")
         self._buffer = ""
         return [line]
 

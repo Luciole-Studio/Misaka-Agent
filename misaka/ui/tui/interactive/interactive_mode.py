@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-
-from misaka.core.extensions import startup_sections
 import contextlib
 import inspect
 import json
@@ -26,8 +24,41 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
-from misaka.ai.types import ImageContent
 from misaka.ai.models import getProviders
+from misaka.ai.types import ImageContent
+from misaka.config import (
+    APP_NAME,
+    APP_TITLE,
+    VERSION,
+    get_auth_path,
+    get_changelog_path,
+    get_debug_log_path,
+    get_docs_path,
+)
+from misaka.core.agent_session import parse_skill_block
+from misaka.core.agent_session_runtime import SessionImportFileNotFoundError
+from misaka.core.bash_executor import BashResult
+from misaka.core.extensions import startup_sections
+from misaka.core.footer_data_provider import FooterDataProvider
+from misaka.core.http_dispatcher import configureHttpDispatcher
+from misaka.core.keybindings import KeybindingsManager
+from misaka.core.messages import createCompactionSummaryMessage
+from misaka.core.model_resolver import (
+    defaultModelPerProvider,
+    findExactModelReferenceMatch,
+    resolveModelScope,
+)
+from misaka.core.provider_display_names import BUILT_IN_PROVIDER_DISPLAY_NAMES
+from misaka.core.session_cwd import (
+    MissingSessionCwdError,
+    format_missing_session_cwd_prompt,
+)
+from misaka.core.session_manager import SessionManager
+from misaka.core.slash_commands import (
+    _LOCAL_ALIAS_SLASH_COMMANDS,
+    BUILTIN_SLASH_COMMANDS,
+)
+from misaka.core.tools.truncate import TruncationResult
 from misaka.ui.tui import (
     TUI,
     AutocompleteProvider,
@@ -46,34 +77,9 @@ from misaka.ui.tui import (
     setKeybindings,
     visibleWidth,
 )
-
-from misaka.config import (
-    APP_NAME,
-    APP_TITLE,
-    VERSION,
-    get_auth_path,
-    get_changelog_path,
-    get_debug_log_path,
-    get_docs_path,
+from misaka.ui.tui.interactive.components.assistant_message import (
+    AssistantMessageComponent,
 )
-from misaka.core.bash_executor import BashResult
-from misaka.core.agent_session import parse_skill_block
-from misaka.core.agent_session_runtime import SessionImportFileNotFoundError
-from misaka.core.footer_data_provider import FooterDataProvider
-from misaka.core.http_dispatcher import configureHttpDispatcher
-from misaka.core.keybindings import KeybindingsManager
-from misaka.core.messages import createCompactionSummaryMessage
-from misaka.core.model_resolver import (
-    defaultModelPerProvider,
-    findExactModelReferenceMatch,
-    resolveModelScope,
-)
-from misaka.core.provider_display_names import BUILT_IN_PROVIDER_DISPLAY_NAMES
-from misaka.core.session_cwd import MissingSessionCwdError, format_missing_session_cwd_prompt
-from misaka.core.session_manager import SessionManager
-from misaka.core.slash_commands import BUILTIN_SLASH_COMMANDS, _LOCAL_ALIAS_SLASH_COMMANDS
-from misaka.core.tools.truncate import TruncationResult
-from misaka.ui.tui.interactive.components.assistant_message import AssistantMessageComponent
 from misaka.ui.tui.interactive.components.bash_execution import BashExecutionComponent
 from misaka.ui.tui.interactive.components.branch_summary_message import (
     BranchSummaryMessageComponent,
@@ -85,7 +91,9 @@ from misaka.ui.tui.interactive.components.countdown_timer import CountdownTimer
 from misaka.ui.tui.interactive.components.custom_editor import CustomEditor
 from misaka.ui.tui.interactive.components.custom_message import CustomMessageComponent
 from misaka.ui.tui.interactive.components.dynamic_border import DynamicBorder
-from misaka.ui.tui.interactive.components.extension_editor import ExtensionEditorComponent
+from misaka.ui.tui.interactive.components.extension_editor import (
+    ExtensionEditorComponent,
+)
 from misaka.ui.tui.interactive.components.extension_input import ExtensionInputComponent
 from misaka.ui.tui.interactive.components.extension_selector import (
     ExtensionSelectorComponent,
@@ -113,10 +121,8 @@ from misaka.ui.tui.interactive.components.scoped_models_selector import (
     ModelsConfig,
     ScopedModelsSelectorComponent,
 )
-from misaka.ui.tui.interactive.components.session_selector import SessionSelectorComponent
-from misaka.ui.tui.interactive.components.thinking_selector import (
-    ADAPTIVE_LEVEL_DESCRIPTIONS,
-    ThinkingSelectorComponent,
+from misaka.ui.tui.interactive.components.session_selector import (
+    SessionSelectorComponent,
 )
 from misaka.ui.tui.interactive.components.settings_selector import (
     SettingsCallbacks,
@@ -125,6 +131,10 @@ from misaka.ui.tui.interactive.components.settings_selector import (
 )
 from misaka.ui.tui.interactive.components.skill_invocation_message import (
     SkillInvocationMessageComponent,
+)
+from misaka.ui.tui.interactive.components.thinking_selector import (
+    ADAPTIVE_LEVEL_DESCRIPTIONS,
+    ThinkingSelectorComponent,
 )
 from misaka.ui.tui.interactive.components.tool_execution import ToolExecutionComponent
 from misaka.ui.tui.interactive.components.tree_selector import TreeSelectorComponent
@@ -552,14 +562,14 @@ class InteractiveMode:
                 isStreaming=False,
                 isCompacting=False,
                 extensionRunner=SimpleNamespace(
-                    get_registered_commands=lambda: [],
+                    get_registered_commands=list,
                     get_message_renderer=lambda _custom_type: None,
                 ),
                 resourceLoader=SimpleNamespace(getThemes=lambda: {"themes": []}),
                 modelRegistry=SimpleNamespace(
                     authStorage=SimpleNamespace(get=lambda *_args, **_kwargs: None),
                     getApiKeyForProvider=_noop_async,
-                    getAvailable=lambda: [],
+                    getAvailable=list,
                     isUsingOAuth=lambda _model: False,
                 ),
                 state=SimpleNamespace(messages=[], model=None, thinkingLevel="off"),
@@ -586,8 +596,8 @@ class InteractiveMode:
                 getSessionDir=lambda: None,
                 getSessionName=lambda: None,
                 buildSessionContext=lambda: SimpleNamespace(messages=[]),
-                getEntries=lambda: [],
-                getTree=lambda: [],
+                getEntries=list,
+                getTree=list,
                 appendLabelChange=lambda _entry_id, _label: None,
             ),
         )
@@ -597,7 +607,7 @@ class InteractiveMode:
             SimpleNamespace(
                 getTheme=lambda: None,
                 setTheme=lambda _theme: None,
-                getWarnings=lambda: {},
+                getWarnings=dict,
                 getEnableSkillCommands=lambda: True,
                 getShowTerminalProgress=lambda: False,
                 getQuietStartup=lambda: False,
@@ -3982,7 +3992,7 @@ class InteractiveMode:
                     if isinstance(message, dict):
                         message["errorMessage"] = error_message
                     else:
-                        setattr(message, "errorMessage", error_message)
+                        message.errorMessage = error_message
                 self.streamingComponent.updateContent(message)
 
                 if _value(message, "stopReason") in {"aborted", "error"}:
@@ -5398,7 +5408,7 @@ class InteractiveMode:
                 set_transport(transport)
             agent = getattr(self.session, "agent", None)
             if agent is not None:
-                setattr(agent, "transport", transport)
+                agent.transport = transport
 
         self.showSelector(
             lambda done: {

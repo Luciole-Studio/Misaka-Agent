@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 from misaka.ai.api_registry import get_api_provider
-from misaka.ai.providers import register_builtins as _register_builtins  # noqa: F401
-from misaka.ai.types import AssistantMessage, Context, Model, ProviderStreamOptions, SimpleStreamOptions
-from misaka.ai.utils.event_stream import AssistantMessageEventStream
-
 from misaka.ai.env_api_keys import get_env_api_key
+from misaka.ai.providers import register_builtins as _register_builtins  # noqa: F401
+from misaka.ai.types import (
+    AssistantMessage,
+    Context,
+    Model,
+    ProviderStreamOptions,
+    SimpleStreamOptions,
+)
+from misaka.ai.utils.event_stream import AssistantMessageEventStream
 
 
 def _resolve_api_provider(api: str):
@@ -49,8 +54,8 @@ streamSimple = stream_simple
 getEnvApiKey = get_env_api_key
 
 __all__ = [
+    "complete",
     "getEnvApiKey",
     "stream",
-    "complete",
     "streamSimple",
     ]

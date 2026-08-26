@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
-
+from typing import Any
 
 type _WriteCallback = Callable[[Exception | None], None]
 type _WriteMethod = Callable[..., Any]
@@ -24,7 +24,7 @@ _stdoutTakeoverState: _StdoutTakeoverState | None = None
 def _invoke_write(write: _WriteMethod, chunk: Any, callback: _WriteCallback | None = None) -> Any:
     try:
         result = write(str(chunk))
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
         if callback is not None:
             callback(error if isinstance(error, Exception) else Exception(str(error)))
         raise

@@ -293,8 +293,8 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
             "description": "List skills, or invoke one with `/skill <name> [instruction]` in the current session."})
 
         async def learn_cmd(args, ctx):
-            from misaka.skills.learn_prompt import build_learn_prompt
             from misaka.skills import write as skill_write
+            from misaka.skills.learn_prompt import build_learn_prompt
             target = os.path.join(profile_dir, "skills")
             os.makedirs(target, exist_ok=True)
             prompt = build_learn_prompt(args or "", target_dir=target)
@@ -317,7 +317,8 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
 
         async def skill_mode_cmd(args, ctx):
             # Slash commands originate from user input, so this is the user-only write-mode entry point.
-            from misaka.skills import layers as skill_layers, write as skill_write
+            from misaka.skills import layers as skill_layers
+            from misaka.skills import write as skill_write
             value = (args or "").strip().lower()
             if not value:
                 mode = skill_write.write_mode()

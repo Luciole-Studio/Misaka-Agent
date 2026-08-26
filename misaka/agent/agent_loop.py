@@ -10,18 +10,6 @@ from dataclasses import dataclass, fields, is_dataclass, replace
 from types import SimpleNamespace
 from typing import Any
 
-from misaka.ai.stream import stream_simple
-from misaka.ai.types import (
-    AssistantMessage,
-    Context,
-    TextContent,
-    ToolResultMessage,
-    validate_message,
-    validate_user_content,
-)
-from misaka.ai.utils.event_stream import EventStream
-from misaka.ai.utils.validation import validate_tool_arguments
-
 from misaka.agent.types import (
     AfterToolCallContext,
     AfterToolCallResult,
@@ -46,6 +34,17 @@ from misaka.agent.types import (
     TurnEndEvent,
     TurnStartEvent,
 )
+from misaka.ai.stream import stream_simple
+from misaka.ai.types import (
+    AssistantMessage,
+    Context,
+    TextContent,
+    ToolResultMessage,
+    validate_message,
+    validate_user_content,
+)
+from misaka.ai.utils.event_stream import EventStream
+from misaka.ai.utils.validation import validate_tool_arguments
 
 type AgentEventSink = Callable[[AgentEvent], Awaitable[None] | None]
 

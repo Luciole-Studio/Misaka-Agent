@@ -129,7 +129,8 @@ def register(harn):
         snippet="Create a card for a third-party agent",
         parameters=PeerCardParams)
     async def misaka_ally_card(tool_call_id, params, signal, on_update, ctx):
-        from misaka.platform import cards as card_files, tasks as db
+        from misaka.platform import cards as card_files
+        from misaka.platform import tasks as db
         workspace = db.canonical_workspace(getattr(ctx, "cwd", None) or os.getcwd())
         tid = card_files.create(                      # the one front door: index row + cards/<id>.md
             _board(), workspace, params.title, params.body, params.assignee,

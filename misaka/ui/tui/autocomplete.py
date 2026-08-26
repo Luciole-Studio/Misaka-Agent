@@ -538,14 +538,7 @@ class CombinedAutocompleteProvider:
             expanded_prefix = self.expandHomePath(raw_prefix) if raw_prefix.startswith("~") else raw_prefix
 
             is_root_prefix = raw_prefix in {"", "./", "../", "~", "~/", "/"} or (parsed.isAtPrefix and raw_prefix == "")
-            if is_root_prefix:
-                search_dir = (
-                    expanded_prefix
-                    if raw_prefix.startswith("~") or expanded_prefix.startswith("/")
-                    else os.path.join(self.basePath, expanded_prefix)
-                )
-                search_prefix = ""
-            elif raw_prefix.endswith("/"):
+            if is_root_prefix or raw_prefix.endswith("/"):
                 search_dir = (
                     expanded_prefix
                     if raw_prefix.startswith("~") or expanded_prefix.startswith("/")

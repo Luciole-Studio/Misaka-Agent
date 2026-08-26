@@ -10,12 +10,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from misaka.ai.types import ImageContent
-
 from misaka.core.output_guard import (
     flushRawStdout,
     writeRawStdout,
 )
-from misaka.modes.rpc.jsonl import to_jsonable
 from misaka.utils.shell import killTrackedDetachedChildren
 
 

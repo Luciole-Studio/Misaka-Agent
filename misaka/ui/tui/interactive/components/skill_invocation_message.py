@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-from misaka.ui.tui import Box, DefaultTextStyle, Markdown, Text
-
 from misaka.core.agent_session import ParsedSkillBlock
+from misaka.ui.tui import Box, DefaultTextStyle, Markdown, Text
 from misaka.ui.tui.interactive.components.keybinding_hints import key_text
 from misaka.ui.tui.interactive.theme.theme import get_markdown_theme, theme
 
 
 class SkillInvocationMessageComponent(Box):
-    def __init__(self, skillBlock: ParsedSkillBlock, markdownTheme=None) -> None:  # noqa: ANN001
+    def __init__(self, skillBlock: ParsedSkillBlock, markdownTheme=None) -> None:
         super().__init__(1, 1, lambda content: theme.bg("customMessageBg", content))
         self.expanded = False
         self.skillBlock = skillBlock

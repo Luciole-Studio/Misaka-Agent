@@ -8,8 +8,9 @@ import math
 from dataclasses import dataclass
 from io import BytesIO
 
-from misaka.ai.types import ImageContent
 from PIL import Image, ImageOps, UnidentifiedImageError
+
+from misaka.ai.types import ImageContent
 
 DEFAULT_MAX_BYTES = int(4.5 * 1024 * 1024)
 

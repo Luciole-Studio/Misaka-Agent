@@ -9,7 +9,6 @@ import sys
 from dataclasses import dataclass
 
 from misaka.ai.types import ImageContent
-
 from misaka.core.tools.path_utils import resolve_read_path
 from misaka.utils.image_resize import format_dimension_note, resize_image
 from misaka.utils.mime import detect_supported_image_mime_type_from_file

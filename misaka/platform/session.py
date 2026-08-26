@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import threading
+
 from misaka.agent.request_budget import install_turn_budget
 
 
@@ -31,11 +32,11 @@ def run_coro(coro):
 async def open_session(flags, cwd, extension_factories=None):
     """Open a session and return ``(runtime, session, error)``."""
     from misaka.cli.args import parse_args
+    from misaka.cli.engine import create_runtime_factory, resolve_cli_paths
     from misaka.config import get_agent_dir
     from misaka.core.agent_session_runtime import create_agent_session_runtime
     from misaka.core.auth_storage import AuthStorage
     from misaka.core.session_manager import SessionManager
-    from misaka.cli.engine import create_runtime_factory, resolve_cli_paths
     from misaka.utils.paths import normalize_path
 
     # Every headless MISAKA session runs with the engine's own skill loading off: the skills
@@ -140,7 +141,7 @@ async def run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
 
         try:
             await asyncio.wait_for(prompt_and_drain_subagents(), timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             timed_out = True
             try:
                 await asyncio.wait_for(session.abort(), 10)

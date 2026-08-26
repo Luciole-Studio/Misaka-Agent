@@ -5,14 +5,23 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import unicodedata
 import re
+import unicodedata
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
-from misaka.ui.tui.autocomplete import AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions
-from misaka.ui.tui.components.select_list import SelectItem, SelectList, SelectListLayoutOptions, SelectListTheme
+from misaka.ui.tui.autocomplete import (
+    AutocompleteItem,
+    AutocompleteProvider,
+    AutocompleteSuggestions,
+)
+from misaka.ui.tui.components.select_list import (
+    SelectItem,
+    SelectList,
+    SelectListLayoutOptions,
+    SelectListTheme,
+)
 from misaka.ui.tui.keybindings import getKeybindings
 from misaka.ui.tui.keys import decodePrintableKey, matchesKey
 from misaka.ui.tui.kill_ring import KillRing
@@ -313,10 +322,10 @@ class Editor:
     def segment(self, text: str) -> list[SegmentData]:
         return segment_with_markers(text, self.validPasteIds())
 
-    def _normalizePadding(self, padding: int | float) -> int:
+    def _normalizePadding(self, padding: float) -> int:
         return max(0, int(padding)) if isinstance(padding, (int, float)) else 0
 
-    def _normalizeAutocompleteMaxVisible(self, max_visible: int | float) -> int:
+    def _normalizeAutocompleteMaxVisible(self, max_visible: float) -> int:
         return max(3, min(20, int(max_visible))) if isinstance(max_visible, (int, float)) else 5
 
     def getPaddingX(self) -> int:
@@ -862,9 +871,7 @@ class Editor:
             elif re.fullmatch(r"[A-Za-z0-9._-]", char):
                 current_line = self.state.lines[self.state.cursorLine]
                 text_before_cursor = current_line[: self.state.cursorCol]
-                if self.isInSlashCommandContext(text_before_cursor):
-                    self.tryTriggerAutocomplete()
-                elif re.search(r"(?:^|[\s])[@#][^\s]*$", text_before_cursor):
+                if self.isInSlashCommandContext(text_before_cursor) or re.search(r"(?:^|[\s])[@#][^\s]*$", text_before_cursor):
                     self.tryTriggerAutocomplete()
         else:
             self.updateAutocomplete()
@@ -1002,9 +1009,7 @@ class Editor:
         else:
             current_line = self.state.lines[self.state.cursorLine]
             text_before_cursor = current_line[: self.state.cursorCol]
-            if self.isInSlashCommandContext(text_before_cursor):
-                self.tryTriggerAutocomplete()
-            elif re.search(r"(?:^|[\s])[@#][^\s]*$", text_before_cursor):
+            if self.isInSlashCommandContext(text_before_cursor) or re.search(r"(?:^|[\s])[@#][^\s]*$", text_before_cursor):
                 self.tryTriggerAutocomplete()
 
     def setCursorCol(self, col: int) -> None:
@@ -1240,9 +1245,7 @@ class Editor:
         else:
             current_line = self.state.lines[self.state.cursorLine]
             text_before_cursor = current_line[: self.state.cursorCol]
-            if self.isInSlashCommandContext(text_before_cursor):
-                self.tryTriggerAutocomplete()
-            elif re.search(r"(?:^|[\s])[@#][^\s]*$", text_before_cursor):
+            if self.isInSlashCommandContext(text_before_cursor) or re.search(r"(?:^|[\s])[@#][^\s]*$", text_before_cursor):
                 self.tryTriggerAutocomplete()
 
     def buildVisualLineMap(self, width: int) -> list[dict[str, int]]:

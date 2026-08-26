@@ -22,7 +22,6 @@ from urllib.parse import urlsplit
 
 import httpx
 
-
 HookResult = dict[str, Any]
 HookEvaluator = Callable[..., Awaitable[Any] | Any]
 
@@ -448,8 +447,8 @@ run_hook = execute_hook
 __all__ = [
     "HookEvaluator",
     "HookResult",
-    "execute_hook",
     "execute_async_command_hook",
+    "execute_hook",
     "json_payload",
     "parse_hook_output",
     "run_hook",
