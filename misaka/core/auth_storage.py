@@ -468,8 +468,7 @@ class AuthStorage:
                     refreshed = await self.refreshOAuthTokenWithLock(providerId)
                     if refreshed is not None:
                         return refreshed["apiKey"]
-                except Exception as error:  # noqa: BLE001
-                    self._record_error(error)
+                except Exception:  # noqa: BLE001 - another process may have refreshed it meanwhile
                     self.reload()
                     updated = _coerce_storage_object(self.data).get(providerId)
                     if isinstance(updated, dict) and updated.get("type") == "oauth":
