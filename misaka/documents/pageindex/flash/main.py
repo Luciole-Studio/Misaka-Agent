@@ -8,27 +8,37 @@ into the JSON shape that ``run_pageindex.py`` writes.
 from __future__ import annotations
 
 import json
-import re
 import unicodedata
 from io import BytesIO
 from pathlib import Path
-from typing import Optional, Union
 
 # (re is used by the title-reject regex below)
-
-from .blocks import cluster_lines_into_blocks, BlockClusterContext
-from .classification import is_body_paragraph, detect_header_footer, HeaderFooterContext, mark_watermarks, mark_toc_and_boilerplate
-from .labels import detect_captions, build_caption_regions, CaptionContext
-from .model import Rect, numbering_kind, block_text, deaccented_text, Block
+from .blocks import BlockClusterContext, cluster_lines_into_blocks
+from .classification import (
+    HeaderFooterContext,
+    detect_header_footer,
+    is_body_paragraph,
+    mark_toc_and_boilerplate,
+    mark_watermarks,
+)
+from .labels import CaptionContext, build_caption_regions, detect_captions
+from .model import Block, Rect, block_text, deaccented_text
 from .outline_assembly import (
-    build_heading_from_block, is_landscape_or_empty, is_outline_valid, is_chapter_outline_valid, mark_outline_block_types, assemble_outline, compute_max_heading_gap, has_table_or_prominent, OutlineNode, outline_to_dict_tree,
+    assemble_outline,
+    compute_max_heading_gap,
+    has_table_or_prominent,
+    is_chapter_outline_valid,
+    is_landscape_or_empty,
+    is_outline_valid,
+    mark_outline_block_types,
+    outline_to_dict_tree,
 )
 from .parser_pdfium_parallel import parse_charlevel_meta_parallel
-from .phases import assign_reading_order, PageView, process_page
+from .phases import PageView, assign_reading_order, process_page
+
 PageView = PageView  # re-export for type hints
 from .stats import compute_doc_stats
 from .title import detect_title
-
 
 # --------------------------------------------------------------------------- #
 # References-section dictionary (load once) #
@@ -67,7 +77,7 @@ class DocumentState:
 # --------------------------------------------------------------------------- #
 
 
-def find_references(doc: DocumentState) -> Optional[tuple[int, Block]]:
+def find_references(doc: DocumentState) -> tuple[int, Block] | None:
     """Return ``(page_num, block)`` for the first references heading in reading order."""
     for page in doc.primary_slot:
         for block in (page.secondary_slot or []):
@@ -85,7 +95,7 @@ def find_references(doc: DocumentState) -> Optional[tuple[int, Block]]:
     return None
 
 
-def mark_references(doc: DocumentState, ref: Optional[tuple[int, Block]]) -> None:
+def mark_references(doc: DocumentState, ref: tuple[int, Block] | None) -> None:
     """Tag the references heading itself + everything after as type=3."""
     if ref is None:
         return
@@ -108,7 +118,7 @@ def mark_references(doc: DocumentState, ref: Optional[tuple[int, Block]]) -> Non
 # --------------------------------------------------------------------------- #
 
 
-def page_by_block_lookup(pages, block) -> Optional[PageView]:
+def page_by_block_lookup(pages, block) -> PageView | None:
     """Find which page owns ``block``. Used for wrapping labeled blocks."""
     for page in pages:
         if block in (page.secondary_slot or []):
@@ -122,8 +132,8 @@ def page_by_block_lookup(pages, block) -> Optional[PageView]:
 
 
 def extract_toc(
-    doc_handle: Union[str, Path, BytesIO],
-    workers: Optional[int] = None,
+    doc_handle: str | Path | BytesIO,
+    workers: int | None = None,
     use_embedded_toc: bool = True,
 ) -> dict:
     """Run the full pipeline. Returns a dict shaped like:: { "doc_name": "...", "doc_title": "...", "structure": [ {"title": "...", "start_index": 1, "end_index": 3, "nodes": [...]}, ... ], "has_abstract_or_references_section": False } ``has_abstract_or_references_section`` is True when any TOP-LEVEL outline entry is an abstract-keyword heading or carries the prominent-heading flag (a references-keyword heading, plain or numbered). The near-empty bail and the valid-outline branch both report False. ``workers`` sets the process count for the per-page parallel parser: None = auto (CPU count - 1), 1 forces the sequential path; output is identical either way. ``use_embedded_toc`` consumes the PDF's embedded bookmarks when trustworthy: deep bookmarks become the frame with the detected sections they lack grafted back in, coarse ones become the chapter frame with detected nodes re-hung under them, garbage ones are ignored; adds ``toc_source`` to the result. On by default; pass False for the pure detected structure. """
@@ -208,8 +218,8 @@ def extract_toc(
     # ----- 7) Title selection ------------------------------------------
     # Title selection and title-echo marking must run before labeled-section
     # detection and heading collection so title blocks are excluded from both.
-    from .classification import bounded_edit_distance, _normalize_text_key
-    doc_title: Optional[str] = None
+    from .classification import _normalize_text_key, bounded_edit_distance
+    doc_title: str | None = None
     title_winner = detect_title(doc)
     if title_winner is not None:
         # Emit the full joined title string, preserving inter-block spaces.
@@ -330,4 +340,4 @@ def extract_toc(
     return result
 
 
-__all__ = ["extract_toc", "DocumentState", "find_references", "mark_references"]
+__all__ = ["DocumentState", "extract_toc", "find_references", "mark_references"]

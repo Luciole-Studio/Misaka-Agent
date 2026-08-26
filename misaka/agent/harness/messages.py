@@ -14,6 +14,7 @@ from misaka.ai.types import (
     UserMessage,
     validate_message,
 )
+from misaka.utils.values import read_field
 
 COMPACTION_SUMMARY_PREFIX = """The conversation history before this point was compacted into the following summary:
 
@@ -119,34 +120,34 @@ def create_custom_message(
 def convert_to_llm(messages: list[AgentMessage]) -> list[MessageValue]:
     converted: list[MessageValue] = []
     for message in messages:
-        role = _message_field(message, "role")
+        role = read_field(message, "role")
         if role == "bashExecution":
-            if _message_field(message, "excludeFromContext"):
+            if read_field(message, "excludeFromContext"):
                 continue
             payload = {
                 "role": "user",
                 "content": [{"type": "text", "text": bash_execution_to_text(_coerce_bash_execution(message))}],
-                "timestamp": int(_message_field(message, "timestamp")),
+                "timestamp": int(read_field(message, "timestamp")),
             }
             converted.append(validate_message(payload))
             continue
         if role == "custom":
-            content = _message_field(message, "content")
+            content = read_field(message, "content")
             if isinstance(content, str):
                 content = [TextContent(text=content)]
             converted.append(
                 UserMessage(
                     content=content,
-                    timestamp=int(_message_field(message, "timestamp")),
+                    timestamp=int(read_field(message, "timestamp")),
                 )
             )
             continue
         if role == "branchSummary":
-            summary_text = BRANCH_SUMMARY_PREFIX + str(_message_field(message, "summary")) + BRANCH_SUMMARY_SUFFIX
+            summary_text = BRANCH_SUMMARY_PREFIX + str(read_field(message, "summary")) + BRANCH_SUMMARY_SUFFIX
             converted.append(
                 UserMessage(
                     content=[TextContent(text=summary_text)],
-                    timestamp=int(_message_field(message, "timestamp")),
+                    timestamp=int(read_field(message, "timestamp")),
                 )
             )
             continue
@@ -156,23 +157,17 @@ def convert_to_llm(messages: list[AgentMessage]) -> list[MessageValue]:
                     content=[
                         TextContent(
                             text=COMPACTION_SUMMARY_PREFIX
-                            + str(_message_field(message, "summary"))
+                            + str(read_field(message, "summary"))
                             + COMPACTION_SUMMARY_SUFFIX
                         )
                     ],
-                    timestamp=int(_message_field(message, "timestamp")),
+                    timestamp=int(read_field(message, "timestamp")),
                 )
             )
             continue
         if role in {"user", "assistant", "toolResult"}:
             converted.append(validate_message(_message_dump(message)))
     return converted
-
-
-def _message_field(message: Any, name: str) -> Any:
-    if isinstance(message, dict):
-        return message.get(name)
-    return getattr(message, name, None)
 
 
 def _message_dump(message: Any) -> Any:
@@ -187,13 +182,13 @@ def _coerce_bash_execution(message: Any) -> BashExecutionMessage:
     if isinstance(message, BashExecutionMessage):
         return message
     return BashExecutionMessage(
-        command=str(_message_field(message, "command")),
-        output=str(_message_field(message, "output") or ""),
-        exitCode=_message_field(message, "exitCode"),
-        cancelled=bool(_message_field(message, "cancelled")),
-        truncated=bool(_message_field(message, "truncated")),
-        fullOutputPath=_message_field(message, "fullOutputPath"),
-        timestamp=int(_message_field(message, "timestamp")),
+        command=str(read_field(message, "command")),
+        output=str(read_field(message, "output") or ""),
+        exitCode=read_field(message, "exitCode"),
+        cancelled=bool(read_field(message, "cancelled")),
+        truncated=bool(read_field(message, "truncated")),
+        fullOutputPath=read_field(message, "fullOutputPath"),
+        timestamp=int(read_field(message, "timestamp")),
     )
 
 

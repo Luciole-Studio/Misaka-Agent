@@ -3,38 +3,27 @@
 from __future__ import annotations
 
 import unicodedata
-from typing import Any, Iterable, Iterator, Optional
 
 from ..model import (
-    _strip_diacritics,
-    avg_char_width2,
-    intervals_overlap,
-    to_number,
-    rect_union,
-    EMPTY_RECT,
-    avg_char_width,
-    Line,
-    char_category,
-    is_word_category,
-    is_punct_category,
-    letter_count,
-    punct_count,
-    info_weight,
     Block,
+    Line,
+    avg_char_width,
+    avg_char_width2,
+    char_category,
+    intervals_overlap,
+    is_word_category,
 )
-
 from .token_types import (
-    SCRIPT_FAMILY_MAP,
     GAP_TOLERANCE_GRID,
-    can_extend_token,
-    TokenAnchor,
-    last_token_anchor,
-    first_anchor_span,
+    SCRIPT_FAMILY_MAP,
     Token,
+    TokenAnchor,
     TokenView,
+    can_extend_token,
+    first_anchor_span,
+    last_token_anchor,
     wrap_tokens,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Line tokenizer state machine #
@@ -44,12 +33,12 @@ from .token_types import (
 class LineTokenizer:
     """Line-tokenizer state machine with line/span anchors for reconstruction."""
 
-    __slots__ = ("tertiary_slot", "secondary_slot", "cache_slot", "auxiliary_slot", "option_slot", "marker_slot", "primary_slot", "previous_slot", "state_slot", "style_slot", "measure_slot")
+    __slots__ = ("auxiliary_slot", "cache_slot", "marker_slot", "measure_slot", "option_slot", "previous_slot", "primary_slot", "secondary_slot", "state_slot", "style_slot", "tertiary_slot")
 
     def __init__(self):
         self.tertiary_slot: list[Token] = []
         self.secondary_slot = None       # last anchor span
-        self.cache_slot: Optional[Line] = None
+        self.cache_slot: Line | None = None
         self.auxiliary_slot = -1
         self.option_slot = -1
         self.marker_slot: list[TokenAnchor] = []
@@ -151,7 +140,7 @@ class LineTokenizer:
 
     # --- public API -------------------------------------------------------
 
-    def add_line(self, other_line: Line) -> "LineTokenizer":
+    def add_line(self, other_line: Line) -> LineTokenizer:
         """Walk one line and append its token contribution."""
         line = self.tertiary_slot[-1] if self.tertiary_slot else None
         if self.primary_slot:
@@ -255,8 +244,8 @@ def tokenize_block(block: Block) -> TokenView:
 
 def clamp_value(value: float, lower_bound: float, upper_bound: float) -> float:
     """Clamp a value between lower and upper bounds. The lower bound wins when the bounds are inverted, and NaN propagates."""
-    measure_item = upper_bound if upper_bound < value else value
-    return lower_bound if lower_bound > measure_item else measure_item
+    measure_item = min(value, upper_bound)
+    return max(measure_item, lower_bound)
 
 
 def is_superscript_adjacent(token: Token, other_token: Token) -> bool:

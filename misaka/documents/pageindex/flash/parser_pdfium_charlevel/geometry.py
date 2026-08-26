@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import math
+
 import pypdfium2.raw as pdfium_c
 
 _get_font_name = getattr(pdfium_c, "FPDFFont_GetBaseFontName", None) or pdfium_c.FPDFFont_GetFontName

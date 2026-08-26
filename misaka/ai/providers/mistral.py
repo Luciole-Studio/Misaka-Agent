@@ -50,11 +50,11 @@ except ImportError:  # optional extra: misaka[mistral]
 from misaka.ai.providers._common import (
     _empty_usage,
     _is_aborted,
-    _maybe_await,
     _option,
     safe_json_stringify,
 )
 from misaka.ai.providers.sdk import require
+from misaka.utils.values import maybe_await
 
 MISTRAL_TOOL_CALL_ID_LENGTH = 9
 MAX_MISTRAL_ERROR_BODY_CHARS = 4000
@@ -196,7 +196,7 @@ def stream_mistral(
             payload = build_chat_payload(model, context, transformed_messages, options)
             on_payload = _option(options, "onPayload")
             if callable(on_payload):
-                next_payload = await _maybe_await(on_payload(payload, model))
+                next_payload = await maybe_await(on_payload(payload, model))
                 if next_payload is not None:
                     payload = next_payload
 
@@ -204,7 +204,7 @@ def stream_mistral(
             sdk_payload = _prepare_sdk_chat_payload(payload)
             sdk_request_kwargs = _prepare_sdk_request_kwargs(request_options)
             mistral_stream = await _await_with_abort(
-                lambda: _maybe_await(mistral.chat.stream_async(**sdk_payload, **sdk_request_kwargs)),
+                lambda: maybe_await(mistral.chat.stream_async(**sdk_payload, **sdk_request_kwargs)),
                 _option(options, "signal"),
             )
             stream.push(StartEvent(partial=output))

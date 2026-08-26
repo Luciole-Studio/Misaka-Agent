@@ -13,7 +13,7 @@ change whose whole point is that nothing about them should differ.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Mapping
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -59,24 +59,12 @@ async def abort_race(signal: Any | None) -> AsyncIterator[asyncio.Task[None] | N
             await asyncio.gather(task, return_exceptions=True)
 
 
-def _value(obj: Any, name: str, default: Any = None) -> Any:
-    if isinstance(obj, Mapping):
-        return obj.get(name, default)
-    return getattr(obj, name, default)
-
-
 def _string_arg(value: object) -> str | None:
     if isinstance(value, str):
         return value
     if value is None:
         return ""
     return None
-
-
-async def _maybe_await[T](value: Awaitable[T] | T) -> T:
-    if asyncio.isfuture(value) or hasattr(value, "__await__"):
-        return await value
-    return value
 
 
 def _ignore_background_task_result(task: asyncio.Task[Any]) -> None:

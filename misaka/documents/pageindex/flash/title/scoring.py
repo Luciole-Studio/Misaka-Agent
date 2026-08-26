@@ -5,33 +5,37 @@ from __future__ import annotations
 import math
 
 from ..model import (
-    _trim_unicode_ws,
-    left_aligned,
-    right_aligned,
-    center_aligned,
-    Rect,
-    last_span,
-    heading_score,
-    Line,
-    last_line_of,
-    first_span_of,
-    block_text,
-    deaccented_text,
-    letter_count,
-    dominant_style_of,
-    info_weight,
-    is_upper_dominant,
-    alignment_code,
     Block,
+    _trim_unicode_ws,
+    alignment_code,
+    block_text,
+    center_aligned,
+    deaccented_text,
+    dominant_style_of,
+    heading_score,
+    left_aligned,
+    letter_count,
+    right_aligned,
 )
-from ..stats import DocStats, column_index_of, tally_scripts, dominant_script_family, ScriptHistogram
-from ..tokens import is_superscript_adjacent, clamp_value, enumerate_tokens, jenkins_hash, trie_prefix_match, set_case_fold, TrieConfig, build_trie, tokenize_block, _de_norm, BuiltTrie, is_word_token
-
+from ..stats import (
+    ScriptHistogram,
+    dominant_script_family,
+    tally_scripts,
+)
+from ..tokens import (
+    _de_norm,
+    clamp_value,
+    enumerate_tokens,
+    is_superscript_adjacent,
+    is_word_token,
+    jenkins_hash,
+    tokenize_block,
+    trie_prefix_match,
+)
 from .dicts import (
     INSTITUTION_WORDS,
     TITLE_LABEL_TRIE,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Title candidate state container #
@@ -41,7 +45,7 @@ from .dicts import (
 class TitleCandidate:
     """Best title candidate so far: page, contributing blocks, and score."""
 
-    __slots__ = ("page", "output_slot", "score")
+    __slots__ = ("output_slot", "page", "score")
 
     def __init__(self, page, blocks: list[Block], score_value: float):
         self.page = page

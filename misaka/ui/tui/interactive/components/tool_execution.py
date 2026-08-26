@@ -22,12 +22,7 @@ from misaka.ui.tui import (
 )
 from misaka.ui.tui.interactive.theme.theme import theme
 from misaka.utils.image_convert import convert_to_png
-
-
-def _value(obj: Any, name: str, default: Any = None) -> Any:
-    if isinstance(obj, dict):
-        return obj.get(name, default)
-    return getattr(obj, name, default)
+from misaka.utils.values import read_field
 
 
 @dataclass(slots=True)
@@ -192,9 +187,9 @@ class ToolExecutionComponent(Container):
             self.result = result
         else:
             self.result = _ToolResultPayload(
-                content=list(_value(result, "content", []) or []),
-                details=_value(result, "details"),
-                isError=bool(_value(result, "isError", False)),
+                content=list(read_field(result, "content", []) or []),
+                details=read_field(result, "details"),
+                isError=bool(read_field(result, "isError", False)),
             )
         self.isPartial = isPartial
         self.updateDisplay()
@@ -239,7 +234,7 @@ class ToolExecutionComponent(Container):
         image_blocks = [
             block
             for block in self.result.content
-            if _value(block, "type") == "image"
+            if read_field(block, "type") == "image"
         ]
         try:
             loop = asyncio.get_running_loop()
@@ -247,8 +242,8 @@ class ToolExecutionComponent(Container):
             return
 
         for index, block in enumerate(image_blocks):
-            data = _value(block, "data")
-            mime_type = _value(block, "mimeType")
+            data = read_field(block, "data")
+            mime_type = read_field(block, "mimeType")
             if not isinstance(data, str) or not isinstance(mime_type, str):
                 continue
             if mime_type == "image/png":
@@ -351,10 +346,10 @@ class ToolExecutionComponent(Container):
             caps = getCapabilities()
             image_index = 0
             for block in self.result.content:
-                if _value(block, "type") != "image":
+                if read_field(block, "type") != "image":
                     continue
-                data = _value(block, "data")
-                mime_type = _value(block, "mimeType")
+                data = read_field(block, "data")
+                mime_type = read_field(block, "mimeType")
                 converted = self._converted_images.get(image_index)
                 if converted is not None:
                     data, mime_type = converted

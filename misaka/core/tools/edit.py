@@ -19,7 +19,6 @@ from misaka.core.tools._common import (
     _drain_worker,
     _is_aborted,
     _string_arg,
-    _value,
     abort_race,
 )
 from misaka.core.tools.edit_diff import (
@@ -41,6 +40,7 @@ from misaka.core.tools.render_utils import invalid_arg_text, shorten_path
 from misaka.core.tools.tool_definition_wrapper import wrap_tool_definition
 from misaka.ui.tui import Box, Container, Spacer, Text
 from misaka.utils import atomic
+from misaka.utils.values import read_field
 
 type EditPreview = EditDiffResult | EditDiffError
 
@@ -202,25 +202,25 @@ def _get_renderable_preview_input(args: RenderableEditArgs | None) -> tuple[str,
     if not args:
         return None
 
-    raw_path = _value(args, "path")
+    raw_path = read_field(args, "path")
     if not isinstance(raw_path, str):
-        raw_path = _value(args, "file_path")
+        raw_path = read_field(args, "file_path")
     if not isinstance(raw_path, str) or not raw_path:
         return None
 
-    edits_value = _value(args, "edits")
+    edits_value = read_field(args, "edits")
     if isinstance(edits_value, list) and edits_value:
         edits: list[Edit] = []
         for edit in edits_value:
-            old_text = _value(edit, "oldText")
-            new_text = _value(edit, "newText")
+            old_text = read_field(edit, "oldText")
+            new_text = read_field(edit, "newText")
             if not isinstance(old_text, str) or not isinstance(new_text, str):
                 return None
             edits.append(Edit(oldText=old_text, newText=new_text))
         return raw_path, edits
 
-    old_text = _value(args, "oldText")
-    new_text = _value(args, "newText")
+    old_text = read_field(args, "oldText")
+    new_text = read_field(args, "newText")
     if isinstance(old_text, str) and isinstance(new_text, str):
         return raw_path, [Edit(oldText=old_text, newText=new_text)]
 
@@ -237,7 +237,7 @@ def _preview_args_key(path: str, edits: list[Edit]) -> str:
 
 def _format_edit_call(args: RenderableEditArgs | None, theme_obj: Any) -> str:
     invalid_arg = invalid_arg_text(theme_obj)
-    raw_path = _string_arg(_value(args, "file_path", _value(args, "path")))
+    raw_path = _string_arg(read_field(args, "file_path", read_field(args, "path")))
     shortened = shorten_path(raw_path) if raw_path is not None else None
     if shortened is None:
         path_display = invalid_arg
@@ -257,22 +257,22 @@ def _format_edit_result(
 ) -> str | None:
     from misaka.ui.tui.interactive.components.diff import render_diff
 
-    raw_path = _string_arg(_value(args, "file_path", _value(args, "path")))
+    raw_path = _string_arg(read_field(args, "file_path", read_field(args, "path")))
     preview_diff = preview.diff if isinstance(preview, EditDiffResult) else None
     preview_error = preview.error if isinstance(preview, EditDiffError) else None
 
     if is_error:
         error_text = "\n".join(
-            _value(block, "text") or ""
-            for block in (_value(result, "content", []) or [])
-            if _value(block, "type") == "text"
+            read_field(block, "text") or ""
+            for block in (read_field(result, "content", []) or [])
+            if read_field(block, "type") == "text"
         )
         if not error_text or error_text == preview_error:
             return None
         return theme_obj.fg("error", error_text)
 
-    details = _value(result, "details")
-    result_diff = _value(details, "diff")
+    details = read_field(result, "details")
+    result_diff = read_field(details, "diff")
     if isinstance(result_diff, str) and result_diff != preview_diff:
         return render_diff(result_diff, {"filePath": raw_path if raw_path is not None else None})
     return None
@@ -483,14 +483,14 @@ def create_edit_tool_definition(
         call_component = _ensure_edit_call_render_component(raw_call_component) if isinstance(raw_call_component, Box) else None
         preview_input = _get_renderable_preview_input(context.args)
         args_key = _preview_args_key(*preview_input) if preview_input is not None else None
-        result_diff = _value(_value(result, "details"), "diff") if not context.isError else None
+        result_diff = read_field(read_field(result, "details"), "diff") if not context.isError else None
 
         changed = False
         if call_component is not None:
             if isinstance(result_diff, str):
                 changed = _set_edit_preview(
                     call_component,
-                    EditDiffResult(diff=result_diff, firstChangedLine=_value(_value(result, "details"), "firstChangedLine")),
+                    EditDiffResult(diff=result_diff, firstChangedLine=read_field(read_field(result, "details"), "firstChangedLine")),
                     args_key,
                 ) or changed
             if call_component.settledError != context.isError:

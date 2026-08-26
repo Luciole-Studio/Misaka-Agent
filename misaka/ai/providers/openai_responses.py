@@ -21,10 +21,8 @@ from misaka.ai.providers._common import (
     _await_maybe_with_signal,
     _await_with_signal,
     _close_stream,
-    _compat_value,
     _empty_usage,
     _is_aborted,
-    _maybe_await,
     _option,
     apply_service_tier_pricing,
     resolve_cache_retention,
@@ -50,6 +48,7 @@ from misaka.ai.types import (
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
+from misaka.utils.values import maybe_await, read_field
 
 OPENAI_TOOL_CALL_PROVIDERS = {"openai", "openai-codex", "opencode"}
 is_cloudflare_provider = getattr(_cloudflare, "is_cloudflare_provider", lambda _provider: False)
@@ -78,8 +77,8 @@ class OpenAIResponsesOptions(TypedDict, total=False):
 def get_compat(model: Model) -> dict[str, bool]:
     compat = model.compat if getattr(model, "compat", None) is not None else None
     return {
-        "sendSessionIdHeader": _compat_value(compat, "sendSessionIdHeader", True),
-        "supportsLongCacheRetention": _compat_value(compat, "supportsLongCacheRetention", True),
+        "sendSessionIdHeader": read_field(compat, "sendSessionIdHeader", True),
+        "supportsLongCacheRetention": read_field(compat, "supportsLongCacheRetention", True),
     }
 
 
@@ -236,7 +235,7 @@ async def _create_responses_stream(client: Any, params: dict[str, Any], options:
         raw_response = await _await_maybe_with_signal(with_raw_response.create(**params), signal)
         on_response = _option(options, "onResponse")
         if callable(on_response):
-            await _maybe_await(
+            await maybe_await(
                 on_response(
                     {
                         "status": raw_response.http_response.status_code,
@@ -282,7 +281,7 @@ def stream_openai_responses(
             params = build_params(model, context, options)
             on_payload = _option(options, "onPayload")
             if callable(on_payload):
-                next_params = await _maybe_await(on_payload(params, model))
+                next_params = await maybe_await(on_payload(params, model))
                 if next_params is not None:
                     params = next_params
             openai_stream = await _create_responses_stream(client, params, options, model)

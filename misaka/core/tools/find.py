@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
-from misaka.core.tools._common import _is_aborted, _maybe_await, _value, abort_race
+from misaka.core.tools._common import _is_aborted, abort_race
 from misaka.core.tools.path_utils import resolve_to_cwd
 from misaka.core.tools.render_utils import (
     get_text_output,
@@ -31,6 +31,7 @@ from misaka.core.tools.truncate import (
 )
 from misaka.ui.tui import Text
 from misaka.utils.tools_manager import ensure_tool
+from misaka.utils.values import maybe_await, read_field
 
 T = TypeVar("T")
 
@@ -91,10 +92,10 @@ def _coerce_options(options: FindToolOptions | Mapping[str, Any] | None) -> Find
 
 
 def _format_find_call(args: Mapping[str, Any] | None, theme_obj: Any) -> str:
-    pattern = str_value(_value(args, "pattern"))
-    raw_path = str_value(_value(args, "path"))
+    pattern = str_value(read_field(args, "pattern"))
+    raw_path = str_value(read_field(args, "path"))
     path_value = shorten_path(raw_path or ".") if raw_path is not None else None
-    limit = _value(args, "limit")
+    limit = read_field(args, "limit")
     invalid_arg = invalid_arg_text(theme_obj)
 
     text = (
@@ -115,7 +116,7 @@ def _format_find_result(result: Any, options: Any, theme_obj: Any, show_images: 
     text = ""
     if output:
         lines = output.split("\n")
-        max_lines = len(lines) if bool(_value(options, "expanded")) else 20
+        max_lines = len(lines) if bool(read_field(options, "expanded")) else 20
         display_lines = lines[:max_lines]
         remaining = len(lines) - max_lines
         text += "\n" + "\n".join(theme_obj.fg("toolOutput", line) for line in display_lines)
@@ -125,15 +126,15 @@ def _format_find_result(result: Any, options: Any, theme_obj: Any, show_images: 
                 f"{more_lines_text} {key_hint('app.tools.expand', 'to expand')})"
             )
 
-    details = _value(result, "details")
-    result_limit = _value(details, "resultLimitReached")
-    truncation = _value(details, "truncation")
-    if result_limit or bool(_value(truncation, "truncated")):
+    details = read_field(result, "details")
+    result_limit = read_field(details, "resultLimitReached")
+    truncation = read_field(details, "truncation")
+    if result_limit or bool(read_field(truncation, "truncated")):
         warnings: list[str] = []
         if result_limit:
             warnings.append(f"{result_limit} results limit")
-        if bool(_value(truncation, "truncated")):
-            warnings.append(f"{format_size(_value(truncation, 'maxBytes') or DEFAULT_MAX_BYTES)} limit")
+        if bool(read_field(truncation, "truncated")):
+            warnings.append(f"{format_size(read_field(truncation, 'maxBytes') or DEFAULT_MAX_BYTES)} limit")
         warning_text = f"[Truncated: {', '.join(warnings)}]"
         text += "\n" + theme_obj.fg("warning", warning_text)
     return text
@@ -194,12 +195,12 @@ def create_find_tool_definition(
         effective_limit = parsed.limit if parsed.limit is not None else DEFAULT_LIMIT
 
         if custom_ops is not None and callable(getattr(custom_ops, "glob", None)):
-            if not await _maybe_await(custom_ops.exists(search_path)):
+            if not await maybe_await(custom_ops.exists(search_path)):
                 raise RuntimeError(f"Path not found: {search_path}")
             if _is_aborted(signal):
                 raise RuntimeError("Operation aborted")
 
-            results = await _maybe_await(
+            results = await maybe_await(
                 custom_ops.glob(
                     parsed.pattern,
                     search_path,

@@ -20,7 +20,6 @@ from misaka.ai.providers._common import (
     _empty_usage,
     _is_aborted,
     _iterate_async_iterable,
-    _maybe_await,
     _option,
     resolve_cache_retention,
 )
@@ -66,6 +65,7 @@ from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stre
 from misaka.ai.utils.headers import headers_to_record
 from misaka.ai.utils.json_parse import parse_json_with_repair, parse_streaming_json
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
+from misaka.utils.values import maybe_await
 
 AnthropicEffort = Literal["low", "medium", "high", "xhigh", "max"]
 AnthropicThinkingDisplay = Literal["summarized", "omitted"]
@@ -796,7 +796,7 @@ async def _emit_response_metadata(response: Any, options: Any, model: Model) -> 
 
     if hasattr(response, "http_response"):
         http_response = response.http_response
-        await _maybe_await(
+        await maybe_await(
             on_response(
                 {"status": http_response.status_code, "headers": headers_to_record(http_response.headers)},
                 model,
@@ -809,7 +809,7 @@ async def _emit_response_metadata(response: Any, options: Any, model: Model) -> 
         status = getattr(response, "status", None)
     headers = getattr(response, "headers", None)
     if isinstance(status, int) and headers is not None:
-        await _maybe_await(on_response({"status": status, "headers": headers_to_record(headers)}, model))
+        await maybe_await(on_response({"status": status, "headers": headers_to_record(headers)}, model))
 
 
 async def _iter_event_objects(stream_like: Any, signal: Any = None) -> AsyncIterator[dict[str, Any]]:
@@ -894,7 +894,7 @@ def stream_anthropic(
             params = build_params(model, context, is_oauth, options)
             on_payload = _option(options, "onPayload")
             if callable(on_payload):
-                next_params = await _maybe_await(on_payload(params, model))
+                next_params = await maybe_await(on_payload(params, model))
                 if next_params is not None:
                     params = next_params
 

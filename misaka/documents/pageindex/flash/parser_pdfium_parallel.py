@@ -30,18 +30,17 @@ from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
-from typing import Union
 
-import pypdfium2 as pdfium
 import PyPDF2 as _pypdf2  # declared dependency (also imported by pageindex.utils/client)
+import pypdfium2 as pdfium
 
 from .model import Span
 from .parser_pdfium_charlevel import (
-    parse_charlevel_meta,
-    _PdfDoc,
     _page_pass1,
     _page_pass2,
     _page_spans,
+    _PdfDoc,
+    parse_charlevel_meta,
 )
 
 _MIN_PARALLEL_PAGES = 64
@@ -131,7 +130,7 @@ def _run_page(page_idx: int):
 
 
 def parse_charlevel_meta_parallel(
-    doc_handle: Union[str, Path, BytesIO],
+    doc_handle: str | Path | BytesIO,
     workers: int | None = None,
     min_pages: int = _MIN_PARALLEL_PAGES,
 ) -> tuple[list[list[Span]], list]:

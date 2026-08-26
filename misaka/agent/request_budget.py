@@ -18,21 +18,19 @@ import secrets
 from collections.abc import Mapping
 from typing import Any
 
+from misaka.utils.values import read_field
+
 CONTEXT_FRAMING_TOKENS = 4096
 
 
-def _field(value: Any, name: str, default: Any = None) -> Any:
-    return value.get(name, default) if isinstance(value, Mapping) else getattr(value, name, default)
-
-
 def usage_tokens(usage: Any) -> int:
-    total = _field(usage, "totalTokens")
+    total = read_field(usage, "totalTokens")
     if total is not None:
         return max(0, int(total or 0))
     return max(
         0,
         sum(
-            int(_field(usage, key, 0) or 0)
+            int(read_field(usage, key, 0) or 0)
             for key in (
                 "input",
                 "output",
@@ -65,22 +63,22 @@ def context_token_upper_bound(context: Any) -> int:
         return value
 
     tools = []
-    for tool in _field(context, "tools", []) or []:
-        parameters = _field(tool, "parameters", {})
+    for tool in read_field(context, "tools", []) or []:
+        parameters = read_field(tool, "parameters", {})
         if hasattr(tool, "parameters_json_schema"):
             parameters = tool.parameters_json_schema()
         elif isinstance(parameters, type) and hasattr(parameters, "model_json_schema"):
             parameters = parameters.model_json_schema()
         tools.append(
             {
-                "name": str(_field(tool, "name", "")),
-                "description": str(_field(tool, "description", "")),
+                "name": str(read_field(tool, "name", "")),
+                "description": str(read_field(tool, "description", "")),
                 "parameters": jsonable(parameters),
             }
         )
     payload = {
-        "systemPrompt": _field(context, "systemPrompt"),
-        "messages": jsonable(_field(context, "messages", []) or []),
+        "systemPrompt": read_field(context, "systemPrompt"),
+        "messages": jsonable(read_field(context, "messages", []) or []),
         "tools": tools,
     }
     encoded = json.dumps(
@@ -106,7 +104,7 @@ def _limited_options(options: Any, maximum: int) -> Any:
     else:
         limited = copy.copy(options)
 
-    configured = _field(options, "maxTokens") if options is not None else None
+    configured = read_field(options, "maxTokens") if options is not None else None
     if configured is not None:
         try:
             configured_int = int(configured)
@@ -142,11 +140,11 @@ class TurnBudgetLimiter:
         self.in_flight: dict[str, int] = {}
 
     def observe(self, event: Any) -> None:
-        if str(_field(event, "type", "")) != "message_end":
+        if str(read_field(event, "type", "")) != "message_end":
             return
-        message = _field(event, "message")
-        if str(_field(message, "role", "")) == "assistant":
-            self.used += usage_tokens(_field(message, "usage", {}) or {})
+        message = read_field(event, "message")
+        if str(read_field(message, "role", "")) == "assistant":
+            self.used += usage_tokens(read_field(message, "usage", {}) or {})
 
     @property
     def accounted(self) -> int:
@@ -179,7 +177,7 @@ class TurnBudgetLimiter:
         reserved = self.in_flight.pop(token, 0)
         if not reserved:
             return
-        actual = usage_tokens(_field(message, "usage", {}) or {}) if message is not None else 0
+        actual = usage_tokens(read_field(message, "usage", {}) or {}) if message is not None else 0
         # Missing/error usage is not evidence that the provider spent nothing.
         # Retain the worst-case reservation so a failed transparent request can
         # never make the slice available a second time.
@@ -213,7 +211,7 @@ class _BudgetedStream:
         except BaseException:  # noqa: BLE001 - charge the reservation on uncertainty
             self._limiter.settle(token, failed=True)
         else:
-            failed = str(_field(message, "stopReason", "")) in {"error", "aborted"}
+            failed = str(read_field(message, "stopReason", "")) in {"error", "aborted"}
             self._limiter.settle(token, message, failed=failed)
 
     def result(self) -> Any:
@@ -245,7 +243,7 @@ def install_turn_budget(session: Any, limit: int | None = None) -> TurnBudgetLim
     original = session.agent.streamFn
 
     async def limited_stream(model: Any, context: Any, options: Any = None) -> Any:
-        token, maximum = limiter.reserve(context, _field(options, "maxTokens"))
+        token, maximum = limiter.reserve(context, read_field(options, "maxTokens"))
         try:
             response = original(model, context, _limited_options(options, maximum))
             if inspect.isawaitable(response):

@@ -3,72 +3,34 @@
 from __future__ import annotations
 
 import math
-from typing import Optional
 
 from ..model import (
-    _UNICODE_WHITESPACE_CLASS,
-    _strip_diacritics,
-    _round_half_up_to_int,
-    magnitude_ratio,
-    intervals_overlap,
-    y_overlaps,
-    center_aligned,
-    to_number,
-    last_span,
-    heading_score,
-    text_of_line,
-    Line,
-    last_line_of,
-    first_span_of,
-    is_word_category,
-    block_text,
-    deaccented_text,
-    letter_count,
-    dominant_style_of,
-    punct_count,
-    info_weight,
-    is_upper_dominant,
-    is_caps_heavy,
-    alignment_code,
     Block,
+    heading_score,
+    info_weight,
+    letter_count,
+    text_of_line,
+    to_number,
 )
 from ..tokens import (
-    is_trimmable_token,
-    token_numeric_value,
-    Token,
-    TokenView,
-    wrap_tokens,
-    enumerate_tokens,
-    jenkins_hash,
-    trie_prefix_match,
-    strip_trie_match,
-    strip_leading_if_in,
-    COMMA_CHARS,
-    strip_trailing_comma,
-    trim_trailing_punct,
-    set_case_fold,
     TrieConfig,
     build_trie,
-    LineTokenizer,
+    set_case_fold,
     tokenize_block,
-    BuiltTrie,
     trie_full_match,
-    is_char_token,
-    is_word_token,
-)
-
-from .keyword_tables import (
-    _DICTS,
-    _dict_trie,
-    TOC_TITLES_TRIE,
-    DOT_LEADER_ROW_RE,
-    _search_trie,
+    trie_prefix_match,
 )
 from .body_text import (
     is_body_paragraph,
     normalized_block_text,
 )
-
+from .keyword_tables import (
+    _DICTS,
+    DOT_LEADER_ROW_RE,
+    TOC_TITLES_TRIE,
+    _dict_trie,
+    _search_trie,
+)
 
 # --------------------------------------------------------------------------- #
 # Side-rail watermark detector #
@@ -143,7 +105,7 @@ def is_boilerplate_block(block: Block) -> bool:
 class NumberColumnCluster:
     """numeric-leading-token cluster."""
 
-    __slots__ = ("anchor_x", "width", "secondary_slot", "primary_slot", "length", "tertiary_slot")
+    __slots__ = ("anchor_x", "length", "primary_slot", "secondary_slot", "tertiary_slot", "width")
 
     def __init__(self, anchor_x_value: float, width: float, reference_number: int, next_number: int, length: int, limit_flag: bool):
         self.anchor_x = anchor_x_value        # anchor x-position
@@ -154,7 +116,7 @@ class NumberColumnCluster:
         self.tertiary_slot = limit_flag          # is increasing
 
 
-def extract_number_column(block) -> Optional[NumberColumnCluster]:
+def extract_number_column(block) -> NumberColumnCluster | None:
     """Extract a numeric-leading cluster if block lines form an increasing page-number sequence."""
     column = 0
     last_number = 0
@@ -172,7 +134,7 @@ def extract_number_column(block) -> Optional[NumberColumnCluster]:
     return NumberColumnCluster(block.center_x(), block.bbox_width(), column, last_number, sequence_length, True)
 
 
-def pick_nearer_cluster(cluster: NumberColumnCluster, other_cluster: Optional[NumberColumnCluster], other: Optional[NumberColumnCluster]) -> Optional[NumberColumnCluster]:
+def pick_nearer_cluster(cluster: NumberColumnCluster, other_cluster: NumberColumnCluster | None, other: NumberColumnCluster | None) -> NumberColumnCluster | None:
     """Pick the closer neighbor cluster within the current cluster width."""
     distance = (cluster.anchor_x - other_cluster.anchor_x) if other_cluster is not None else math.inf
     candidate_distance = (other.anchor_x - cluster.anchor_x) if other is not None else math.inf
@@ -181,7 +143,7 @@ def pick_nearer_cluster(cluster: NumberColumnCluster, other_cluster: Optional[Nu
     return other_cluster if distance < candidate_distance else other
 
 
-def detect_toc_range(doc, page, index) -> Optional[dict]:
+def detect_toc_range(doc, page, index) -> dict | None:
     """Detect a TOC-like block range within ``page``. The detector combines dot-leader rows, blocks ending in dot-leader page numbers, contents-like titles, and same-x-range numeric clusters. Returns a ``{start_index, end_index}`` range or ``None``."""
     blocks = page.output_slot
     lines = 0
@@ -205,14 +167,14 @@ def detect_toc_range(doc, page, index) -> Optional[dict]:
             return
         clusters.insert(insert_index, cluster)
 
-    def _next_number_column_cluster(cluster: NumberColumnCluster) -> Optional[NumberColumnCluster]:
+    def _next_number_column_cluster(cluster: NumberColumnCluster) -> NumberColumnCluster | None:
         # Non-strict successor: an equal anchor_x entry is returned.
         import bisect
         keys = [column.anchor_x for column in clusters]
         cluster_index = bisect.bisect_left(keys, cluster.anchor_x)
         return clusters[cluster_index] if cluster_index < len(clusters) else None
 
-    def _prev_number_column_cluster(cluster: NumberColumnCluster) -> Optional[NumberColumnCluster]:
+    def _prev_number_column_cluster(cluster: NumberColumnCluster) -> NumberColumnCluster | None:
         # Non-strict predecessor: an equal anchor_x entry is returned.
         import bisect
         keys = [column.anchor_x for column in clusters]

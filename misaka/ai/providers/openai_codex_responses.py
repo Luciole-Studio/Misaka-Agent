@@ -24,7 +24,6 @@ from misaka.ai.models import clamp_thinking_level
 from misaka.ai.providers._common import (
     _create_abort_wait_task,
     _is_aborted,
-    _maybe_await,
     _option,
     apply_service_tier_pricing,
     get_service_tier_cost_multiplier,
@@ -54,6 +53,7 @@ from misaka.ai.utils.diagnostics import (
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
+from misaka.utils.values import maybe_await
 
 DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api"
 JWT_CLAIM_PATH = "https://api.openai.com/auth"
@@ -181,7 +181,7 @@ async def _await_with_abort(awaitable: Any, signal: Any, *, on_abort: Any = None
             if callable(close):
                 close()
         if on_abort is not None:
-            await _maybe_await(on_abort())
+            await maybe_await(on_abort())
         raise RuntimeError("Request was aborted")
 
     task = asyncio.ensure_future(awaitable)
@@ -193,7 +193,7 @@ async def _await_with_abort(awaitable: Any, signal: Any, *, on_abort: Any = None
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
                 if on_abort is not None:
-                    await _maybe_await(on_abort())
+                    await maybe_await(on_abort())
                 raise RuntimeError("Request was aborted")
         return await task
     finally:
@@ -641,7 +641,7 @@ async def _connect_websocket(
         max_size=None,
         open_timeout=(timeout_ms / 1000) if timeout_ms is not None else None,
     )
-    connect_task = asyncio.create_task(_maybe_await(connectable))
+    connect_task = asyncio.create_task(maybe_await(connectable))
     abort_task = _create_abort_wait_task(signal)
     try:
         if abort_task is not None:
@@ -735,7 +735,7 @@ async def parse_websocket(socket: Any, signal: Any = None) -> AsyncIterator[dict
         if _is_aborted(signal):
             raise RuntimeError("Request was aborted")
 
-        recv_task = asyncio.create_task(_maybe_await(socket.recv()))
+        recv_task = asyncio.create_task(maybe_await(socket.recv()))
         abort_task = _create_abort_wait_task(signal)
         try:
             if abort_task is not None:
@@ -873,7 +873,7 @@ async def process_websocket_stream(
     full_body = body
     request_body = _build_cached_websocket_request_body(entry, full_body) if use_cached_context and entry else full_body
     try:
-        await _maybe_await(socket.send(json.dumps({"type": "response.create", **request_body})))
+        await maybe_await(socket.send(json.dumps({"type": "response.create", **request_body})))
         await process_responses_stream(
             map_codex_events(
                 _start_websocket_output_on_first_event(
@@ -954,7 +954,7 @@ def stream_openai_codex_responses(
             body = build_request_body(model, context, options)
             next_body = _option(options, "onPayload")
             if callable(next_body):
-                updated = await _maybe_await(next_body(body, model))
+                updated = await maybe_await(next_body(body, model))
                 if updated is not None:
                     body = updated
 
@@ -1028,7 +1028,7 @@ def stream_openai_codex_responses(
                         response = await _await_with_abort(client.send(request, stream=True), signal)
                         on_response = _option(options, "onResponse")
                         if callable(on_response):
-                            await _maybe_await(
+                            await maybe_await(
                                 on_response(
                                     {"status": response.status_code, "headers": headers_to_record(response.headers)},
                                     model,

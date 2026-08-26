@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import json
 import math
 import time
 from dataclasses import dataclass
@@ -24,6 +23,8 @@ from misaka.core.compaction.utils import (
 )
 from misaka.core.compaction.utils import (
     FileOperations,
+    _assistant_text,
+    _safe_json_stringify,
     compute_file_lists,
     create_file_ops,
     extract_file_ops_from_message,
@@ -39,6 +40,7 @@ from misaka.core.messages import (
     createCustomMessage,
 )
 from misaka.core.session_manager import SessionEntry, build_session_context
+from misaka.utils.values import read_field
 
 
 @dataclass(slots=True)
@@ -207,47 +209,47 @@ def should_compact(context_tokens: int, context_window: int, settings: Compactio
 
 
 def estimate_tokens(message: AgentMessage) -> int:
-    role = _message_field(message, "role")
+    role = read_field(message, "role")
     chars = 0
 
     if role == "user":
-        content = _message_field(message, "content")
+        content = read_field(message, "content")
         if isinstance(content, str):
             chars = len(content)
         elif isinstance(content, list):
             for block in content:
-                if _block_field(block, "type") == "text":
-                    text = _block_field(block, "text")
+                if read_field(block, "type") == "text":
+                    text = read_field(block, "text")
                     if isinstance(text, str):
                         chars += len(text)
         return max(0, math.ceil(chars / 4))
 
     if role == "assistant":
-        for block in _message_field(message, "content") or []:
-            block_type = _block_field(block, "type")
+        for block in read_field(message, "content") or []:
+            block_type = read_field(block, "type")
             if block_type == "text":
-                text = _block_field(block, "text")
+                text = read_field(block, "text")
                 if isinstance(text, str):
                     chars += len(text)
             elif block_type == "thinking":
-                thinking = _block_field(block, "thinking")
+                thinking = read_field(block, "thinking")
                 if isinstance(thinking, str):
                     chars += len(thinking)
             elif block_type == "toolCall":
-                name = _block_field(block, "name")
+                name = read_field(block, "name")
                 chars += len(name) if isinstance(name, str) else 0
-                chars += len(_safe_json_stringify(_block_field(block, "arguments")))
+                chars += len(_safe_json_stringify(read_field(block, "arguments")))
         return max(0, math.ceil(chars / 4))
 
     if role in {"custom", "toolResult"}:
-        content = _message_field(message, "content")
+        content = read_field(message, "content")
         if isinstance(content, str):
             chars = len(content)
         elif isinstance(content, list):
             for block in content:
-                block_type = _block_field(block, "type")
+                block_type = read_field(block, "type")
                 if block_type == "text":
-                    text = _block_field(block, "text")
+                    text = read_field(block, "text")
                     if isinstance(text, str):
                         chars += len(text)
                 elif block_type == "image":
@@ -255,14 +257,14 @@ def estimate_tokens(message: AgentMessage) -> int:
         return max(0, math.ceil(chars / 4))
 
     if role == "bashExecution":
-        command = _message_field(message, "command")
-        output = _message_field(message, "output")
+        command = read_field(message, "command")
+        output = read_field(message, "output")
         chars = len(command) if isinstance(command, str) else 0
         chars += len(output) if isinstance(output, str) else 0
         return max(0, math.ceil(chars / 4))
 
     if role in {"branchSummary", "compactionSummary"}:
-        summary = _message_field(message, "summary")
+        summary = read_field(message, "summary")
         return max(0, math.ceil((len(summary) if isinstance(summary, str) else 0) / 4))
 
     return 0
@@ -275,7 +277,7 @@ def find_turn_start_index(entries: list[SessionEntry], entry_index: int, start_i
         if entry_type in {"branch_summary", "custom_message"}:
             return index
         if entry_type == "message":
-            role = _message_field(_entry_field(entry, "message"), "role")
+            role = read_field(_entry_field(entry, "message"), "role")
             if role in {"user", "bashExecution"}:
                 return index
     return -1
@@ -317,7 +319,7 @@ def find_cut_point(
 
     cut_entry = entries[cut_index]
     cut_message = _entry_field(cut_entry, "message")
-    is_user_message = _entry_field(cut_entry, "type") == "message" and _message_field(cut_message, "role") == "user"
+    is_user_message = _entry_field(cut_entry, "type") == "message" and read_field(cut_message, "role") == "user"
     turn_start_index = -1 if is_user_message else find_turn_start_index(entries, cut_index, start_index)
     return CutPointResult(
         firstKeptEntryIndex=cut_index,
@@ -593,7 +595,7 @@ def _find_valid_cut_points(entries: list[SessionEntry], start_index: int, end_in
         entry = entries[index]
         entry_type = entry.get("type")
         if entry_type == "message":
-            role = _message_field(entry.get("message"), "role")
+            role = read_field(entry.get("message"), "role")
             if role in {"bashExecution", "custom", "branchSummary", "compactionSummary", "user", "assistant"}:
                 cut_points.append(index)
         if entry_type in {"branch_summary", "custom_message"}:
@@ -632,11 +634,11 @@ async def _generate_turn_prefix_summary(
 
 
 def _assistant_usage(message: Any) -> Usage | dict[str, Any] | None:
-    if _message_field(message, "role") != "assistant":
+    if read_field(message, "role") != "assistant":
         return None
-    if _message_field(message, "stopReason") in {"aborted", "error"}:
+    if read_field(message, "stopReason") in {"aborted", "error"}:
         return None
-    usage = _message_field(message, "usage")
+    usage = read_field(message, "usage")
     return usage if usage is not None else None
 
 
@@ -646,24 +648,6 @@ def _last_assistant_usage_info(messages: list[AgentMessage]) -> dict[str, Any] |
         if usage is not None:
             return {"usage": usage, "index": index}
     return None
-
-
-def _assistant_text(message: Any) -> str:
-    parts: list[str] = []
-    for block in _message_field(message, "content") or []:
-        if _block_field(block, "type") == "text":
-            text = _block_field(block, "text")
-            if isinstance(text, str):
-                parts.append(text)
-    return "\n".join(parts)
-
-
-def _safe_json_stringify(value: Any) -> str:
-    try:
-        serialized = json.dumps(value)
-    except (TypeError, ValueError):
-        return "[unserializable]"
-    return serialized if serialized is not None else "undefined"
 
 
 def _usage_field(usage: Usage | dict[str, Any], name: str) -> Any:
@@ -676,18 +660,6 @@ def _entry_field(entry: Any, name: str) -> Any:
     if isinstance(entry, dict):
         return entry.get(name)
     return getattr(entry, name, None)
-
-
-def _message_field(message: Any, name: str) -> Any:
-    if isinstance(message, dict):
-        return message.get(name)
-    return getattr(message, name, None)
-
-
-def _block_field(block: Any, name: str) -> Any:
-    if isinstance(block, dict):
-        return block.get(name)
-    return getattr(block, name, None)
 
 
 def _timestamp_ms() -> int:

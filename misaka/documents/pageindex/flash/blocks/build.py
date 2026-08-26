@@ -5,37 +5,20 @@ from __future__ import annotations
 from sortedcontainers import SortedKeyList
 
 from ..model import (
-    style_key,
-    magnitude_ratio,
-    left_aligned,
-    right_aligned,
-    center_aligned,
-    x_centers_close,
-    Rect,
+    Block,
+    first_span_of,
+    last_line_of,
     last_span,
-    avg_char_width,
-    EMPTY_RECT,
     left_edge_key,
     reading_order_key,
-    numbering_kind,
-    Line,
-    case_signal,
-    last_line_of,
-    first_span_of,
-    letter_count,
-    dominant_style_of,
-    is_upper_dominant,
-    Block,
-    _max_nan_propagating,
+    style_key,
 )
-from ..tokens import set_case_fold, TrieConfig, build_trie, tokenize_block
-
+from ..tokens import tokenize_block
 from .join_rules import (
     SECTION_HEADING_TRIE,
     BlockClusterContext,
     should_join_line_to_block,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Two-line block split post-process #
@@ -44,7 +27,7 @@ from .join_rules import (
 
 def split_heading_body_blocks(input_blocks: list[Block]) -> list[Block]:
     """Split blocks whose first line is a section heading followed by body text."""
-    from ..labels import trie_matches_all, advance_past_line
+    from ..labels import advance_past_line, trie_matches_all
     split_output_blocks: list[Block] = []
     for input_block in input_blocks:
         first_line = input_block.line()                            # first line

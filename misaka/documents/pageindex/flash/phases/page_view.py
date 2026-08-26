@@ -2,27 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
-from ..clustering import LinesContainer, cluster_lines, build_initial_lines
-from ..columns import detect_columns, ColumnDetectionContext, columns_to_x_bounds
+from ..clustering import LinesContainer, build_initial_lines, cluster_lines
+from ..columns import ColumnDetectionContext, columns_to_x_bounds, detect_columns
 from ..model import (
+    Rect,
     Span,
+    center_aligned,
     left_aligned,
     right_aligned,
-    center_aligned,
     x_centers_close,
-    to_number,
-    Rect,
-    append_span,
-    avg_char_width,
-    Line,
-    info_weight,
 )
-from ..stats import column_index_of, PageStats, compute_page_stats
-
+from ..stats import PageStats, column_index_of, compute_page_stats
 from .line_numbers import strip_line_numbers
-
 
 # --------------------------------------------------------------------------- #
 # Per-page reading order and paragraph-break flagging #
@@ -33,9 +24,24 @@ class PageView:
     """Per-page mutable state carried through layout classification."""
 
     __slots__ = (
-        "bounds", "output_slot", "secondary_slot", "measure_slot", "page_index", "primary_slot", "tertiary_slot", "lines", "blocks",
-        "text", "previous_slot", "annotations",
-        "auxiliary_slot", "state_slot", "style_slot", "option_slot", "viewport_box", "rot",
+        "annotations",
+        "auxiliary_slot",
+        "blocks",
+        "bounds",
+        "lines",
+        "measure_slot",
+        "option_slot",
+        "output_slot",
+        "page_index",
+        "previous_slot",
+        "primary_slot",
+        "rot",
+        "secondary_slot",
+        "state_slot",
+        "style_slot",
+        "tertiary_slot",
+        "text",
+        "viewport_box",
     )
 
     def __init__(self, page_num: int, page_bbox: Rect):
@@ -44,11 +50,11 @@ class PageView:
         self.secondary_slot: list = []
         self.measure_slot: bool = False           # set when a labeled section appears
         self.page_index: int = page_num
-        self.primary_slot: Optional[PageStats] = None
+        self.primary_slot: PageStats | None = None
         self.tertiary_slot: list = []          # column rects
         self.lines: list = []
         self.blocks: list = []
-        self.text: Optional[list] = None    # raw text items reconstructed by parser
+        self.text: list | None = None    # raw text items reconstructed by parser
         self.previous_slot = 0.0
         self.annotations = []
         # per-page fields used by heading detection and outline assembly:
@@ -58,7 +64,7 @@ class PageView:
         self.option_slot = None                       # reserved, unused here
         # Page viewport for heading coordinates: unrotated view box + /Rotate.
         # None -> fallback to the origin-0 upright shortcut.
-        self.viewport_box: Optional[tuple] = None
+        self.viewport_box: tuple | None = None
         self.rot: int = 0
 
 
@@ -66,7 +72,7 @@ def assign_reading_order(primary_item: PageView, other_items: list) -> None:
     """Assign reading order and paragraph-break flags for a page. The column-aware path expects blocks, not raw lines, because the sort key reads the first child line's column index. Passing raw lines would read a different flag from the first span."""
     primary_item.output_slot = other_items
     for candidate_item in range(len(other_items)):
-        setattr(other_items[candidate_item], "orig_index", candidate_item)
+        other_items[candidate_item].orig_index = candidate_item
 
     primary_item.secondary_slot = list(other_items)
     primary_item.secondary_slot.sort(key=lambda sort_block: (column_index_of(sort_block), -sort_block.top_edge(), -sort_block.bottom_edge(), sort_block.left_edge(), sort_block.right_edge()))

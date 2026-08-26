@@ -6,9 +6,9 @@ import math
 import re
 
 from .pdf_objects import (
-    _PDF_WHITESPACE_BYTES,
     _PDF_DELIMITER_BYTES,
     _PDF_STRING_ESCAPE_BYTES,
+    _PDF_WHITESPACE_BYTES,
 )
 from .text_normalize import _WHITESPACE_CODEPOINTS
 

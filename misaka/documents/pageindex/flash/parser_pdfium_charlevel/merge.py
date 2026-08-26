@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
+from .char_extract import _off_page
 from .text_normalize import (
-    TRACKING_SPACE_FACTOR,
-    NON_SPACE_GAP_FACTOR,
     NEGATIVE_SPACE_FACTOR,
-    SPACE_IN_FLOW_MIN_FACTOR,
+    NON_SPACE_GAP_FACTOR,
     SPACE_IN_FLOW_MAX_FACTOR,
-    _rtl_sign,
+    SPACE_IN_FLOW_MIN_FACTOR,
+    TRACKING_SPACE_FACTOR,
     _read_end,
     _read_gap,
+    _rtl_sign,
 )
-from .char_extract import _off_page
 
 
 def _merge_text_items(chars: list[dict], view_box=None) -> list[dict]:

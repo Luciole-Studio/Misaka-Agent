@@ -44,6 +44,7 @@ def _log_warning(message: str) -> None:
 from misaka.extensions.sisters.subagent import agents as agent_roster
 from misaka.platform import processes as process_tree
 from misaka.utils import atomic
+from misaka.utils.values import read_field
 
 TERMINAL_STATUSES = frozenset({"completed", "failed", "killed"})
 BUDGET_HEARTBEAT_SECONDS = 60
@@ -219,31 +220,25 @@ class RoleContext:
         )
 
 
-def _field(value: Any, name: str, default: Any = None) -> Any:
-    if isinstance(value, Mapping):
-        return value.get(name, default)
-    return getattr(value, name, default)
-
-
 def _message(value: Any) -> Any:
     """Accept both MISAKA messages and Claude's ``{type, message}`` wrapper."""
 
-    if _field(value, "type") == "assistant" and _field(value, "message") is not None:
-        return _field(value, "message")
+    if read_field(value, "type") == "assistant" and read_field(value, "message") is not None:
+        return read_field(value, "message")
     return value
 
 
 def _content(value: Any) -> list[Any]:
-    content = _field(_message(value), "content", [])
+    content = read_field(_message(value), "content", [])
     return list(content) if isinstance(content, Sequence) and not isinstance(content, (str, bytes)) else []
 
 
 def _is_assistant(value: Any) -> bool:
-    return _field(value, "type") == "assistant" or _field(_message(value), "role") == "assistant"
+    return read_field(value, "type") == "assistant" or read_field(_message(value), "role") == "assistant"
 
 
 def _usage_tokens(usage: Any) -> int:
-    direct = _field(usage, "totalTokens")
+    direct = read_field(usage, "totalTokens")
     if direct is not None:
         return int(direct or 0)
     values = (
@@ -256,7 +251,7 @@ def _usage_tokens(usage: Any) -> int:
         "cache_read_input_tokens",
         "cache_creation_input_tokens",
     )
-    return sum(int(_field(usage, key, 0) or 0) for key in values)
+    return sum(int(read_field(usage, key, 0) or 0) for key in values)
 
 
 def finalize_messages(
@@ -276,16 +271,16 @@ def finalize_messages(
 
     last = assistants[-1]
     text_blocks = [
-        {"type": "text", "text": str(_field(block, "text", ""))}
+        {"type": "text", "text": str(read_field(block, "text", ""))}
         for block in _content(last)
-        if _field(block, "type") == "text"
+        if read_field(block, "type") == "text"
     ]
     if not text_blocks:
         for item in reversed(assistants):
             candidate = [
-                {"type": "text", "text": str(_field(block, "text", ""))}
+                {"type": "text", "text": str(read_field(block, "text", ""))}
                 for block in _content(item)
-                if _field(block, "type") == "text"
+                if read_field(block, "type") == "text"
             ]
             if candidate:
                 text_blocks = candidate
@@ -295,10 +290,10 @@ def finalize_messages(
         1
         for item in assistants
         for block in _content(item)
-        if _field(block, "type") in {"toolCall", "tool_use"}
+        if read_field(block, "type") in {"toolCall", "tool_use"}
     )
-    usage = _field(_message(last), "usage", {}) or {}
-    total_tokens = sum(_usage_tokens(_field(_message(item), "usage", {}) or {}) for item in assistants)
+    usage = read_field(_message(last), "usage", {}) or {}
+    total_tokens = sum(_usage_tokens(read_field(_message(item), "usage", {}) or {}) for item in assistants)
     end = int(time.time() * 1000) if end_time_ms is None else end_time_ms
     return {
         "status": "completed",
@@ -319,11 +314,11 @@ def _usage_ledger_messages(task: AgentTask) -> list[dict[str, Any]]:
     for item in task.messages:
         if not _is_assistant(item):
             continue
-        usage = _field(_message(item), "usage")
+        usage = read_field(_message(item), "usage")
         if usage is None:
             continue
         normalized = dict(usage) if isinstance(usage, Mapping) else {
-            key: _field(usage, key)
+            key: read_field(usage, key)
             for key in (
                 "input",
                 "output",
@@ -335,7 +330,7 @@ def _usage_ledger_messages(task: AgentTask) -> list[dict[str, Any]]:
                 "cache_creation_input_tokens",
                 "totalTokens",
             )
-            if _field(usage, key) is not None
+            if read_field(usage, key) is not None
         }
         normalized["totalTokens"] = _usage_tokens(usage)
         out.append({"role": "assistant", "usage": normalized})
@@ -384,7 +379,7 @@ def _write_usage_sink(context: RoleContext, task: AgentTask) -> bool:
 
 
 def _model_pair(model: Any) -> tuple[str, str] | None:
-    provider, model_id = _field(model, "provider"), _field(model, "id")
+    provider, model_id = read_field(model, "provider"), read_field(model, "id")
     if provider and model_id:
         return str(provider), str(model_id)
     return None
@@ -438,9 +433,9 @@ def _result_text(content: Any) -> str:
     if not isinstance(content, Sequence):
         return ""
     return "\n".join(
-        str(_field(block, "text", ""))
+        str(read_field(block, "text", ""))
         for block in content
-        if _field(block, "type") == "text" and _field(block, "text", "")
+        if read_field(block, "type") == "text" and read_field(block, "text", "")
     )
 
 
@@ -645,7 +640,7 @@ def _metadata_name_exists(directory: Path, name: str, parent_session_id: str) ->
 
 
 def _message_role(message: Any) -> str:
-    return str(_field(message, "role", ""))
+    return str(read_field(message, "role", ""))
 
 
 def _transcript_has_user_message(path: Path | str) -> bool:
@@ -677,10 +672,10 @@ def _transcript_has_user_message(path: Path | str) -> bool:
 
 def _block_id(block: Any) -> str | None:
     value = (
-        _field(block, "id")
-        or _field(block, "toolCallId")
-        or _field(block, "tool_call_id")
-        or _field(block, "tool_use_id")
+        read_field(block, "id")
+        or read_field(block, "toolCallId")
+        or read_field(block, "tool_call_id")
+        or read_field(block, "tool_use_id")
     )
     return str(value) if value else None
 
@@ -725,16 +720,16 @@ def clean_resume_transcript(path: Path | str) -> list[dict[str, Any]]:
         message = entry.get("message")
         role = _message_role(message)
         direct = (
-            _field(message, "toolCallId")
-            or _field(message, "tool_call_id")
-            or _field(message, "tool_use_id")
+            read_field(message, "toolCallId")
+            or read_field(message, "tool_call_id")
+            or read_field(message, "tool_use_id")
         )
         if role in {"tool", "toolResult", "tool_result"} and direct:
             resolved_calls.add(str(direct))
-        content = _field(message, "content", [])
+        content = read_field(message, "content", [])
         if isinstance(content, Sequence) and not isinstance(content, (str, bytes)):
             for block in content:
-                if _field(block, "type") in {"toolResult", "tool_result"} and (block_id := _block_id(block)):
+                if read_field(block, "type") in {"toolResult", "tool_result"} and (block_id := _block_id(block)):
                     resolved_calls.add(block_id)
 
     removed_parent: dict[str, str | None] = {}
@@ -745,11 +740,11 @@ def clean_resume_transcript(path: Path | str) -> list[dict[str, Any]]:
         if entry.get("type") == "message":
             message = entry.get("message")
             if _message_role(message) == "assistant":
-                content = _field(message, "content", [])
+                content = read_field(message, "content", [])
                 blocks = list(content) if isinstance(content, Sequence) and not isinstance(content, (str, bytes)) else []
                 filtered: list[Any] = []
                 for block in blocks:
-                    block_type = _field(block, "type")
+                    block_type = read_field(block, "type")
                     if block_type in {"toolCall", "tool_use"}:
                         call_id = _block_id(block)
                         if call_id and call_id not in resolved_calls:
@@ -757,8 +752,8 @@ def clean_resume_transcript(path: Path | str) -> list[dict[str, Any]]:
                             continue
                     filtered.append(block)
                 meaningful = any(
-                    (_field(block, "type") == "text" and str(_field(block, "text", "")).strip())
-                    or _field(block, "type") not in {"text", "thinking", "redacted_thinking"}
+                    (read_field(block, "type") == "text" and str(read_field(block, "text", "")).strip())
+                    or read_field(block, "type") not in {"text", "thinking", "redacted_thinking"}
                     for block in filtered
                 )
                 if not meaningful:
@@ -1112,7 +1107,7 @@ class SubagentManager:
 
     @staticmethod
     def field(definition: Any, name: str, default: Any = None) -> Any:
-        return _field(definition, name, default)
+        return read_field(definition, name, default)
 
     def resolve_definition(self, requested: str | None, cwd: str) -> agent_roster.AgentDefinition:
         definitions = agent_roster.discover(cwd=cwd)
@@ -1279,9 +1274,9 @@ class SubagentManager:
                 if isinstance(tool, str):
                     active.append(tool)
                     continue
-                definition_value = _field(tool, "definition")
+                definition_value = read_field(tool, "definition")
                 active.append(
-                    str(_field(tool, "name") or _field(definition_value, "name", ""))
+                    str(read_field(tool, "name") or read_field(definition_value, "name", ""))
                 )
         except (AttributeError, RuntimeError):
             pass
@@ -2104,9 +2099,9 @@ class SubagentManager:
             start_time_ms=task.start_time_ms,
         )
         last = next((item for item in reversed(task.messages) if _is_assistant(item)), None)
-        stop_reason = str(_field(_message(last), "stopReason", "")) if last is not None else ""
+        stop_reason = str(read_field(_message(last), "stopReason", "")) if last is not None else ""
         error_message = (
-            str(_field(_message(last), "errorMessage", ""))
+            str(read_field(_message(last), "errorMessage", ""))
             if last is not None
             else ""
         )

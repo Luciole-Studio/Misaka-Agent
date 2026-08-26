@@ -8,47 +8,52 @@ from collections import defaultdict
 from typing import Optional
 
 from ..labels import extract_structural_number
-from ..model import numbering_text, numbering_kind, block_text, is_caps_heavy, Block
+from ..model import Block, block_text, is_caps_heavy, numbering_kind, numbering_text
 from ..stats import column_index_of
-from ..tokens import set_case_fold, TrieConfig, build_trie, tokenize_block, trie_full_match
-
+from ..tokens import (
+    TrieConfig,
+    build_trie,
+    set_case_fold,
+    tokenize_block,
+    trie_full_match,
+)
 from .filtering import (
-    SECTION_KEYWORD_TRIE,
-    heading_order_key,
-    _NON_HEADING_TYPES,
-    _DOT_LEADER_RE,
-    _CAPTION_LABEL_RE,
-    _EQUATION_LABEL_RE,
-    _PAREN_FRAGMENT_RE,
-    _looks_like_pseudo_code,
-    is_heading_candidate,
-    _style_key,
-    _numbering_depth,
-    collect_headings,
-    _heading_signature,
-    _matches_section_keywords,
-    _PSEUDO_CODE_PATTERNS,
     _AUTHOR_PATTERNS,
     _BULLET_LIST_RE,
+    _CAPTION_LABEL_RE,
+    _DOT_LEADER_RE,
+    _EQUATION_LABEL_RE,
+    _NON_HEADING_TYPES,
+    _PAREN_FRAGMENT_RE,
+    _PSEUDO_CODE_PATTERNS,
+    SECTION_KEYWORD_TRIE,
+    _heading_signature,
+    _looks_like_pseudo_code,
+    _matches_section_keywords,
+    _numbering_depth,
+    _style_key,
+    collect_headings,
     filter_by_clique,
+    heading_order_key,
+    is_heading_candidate,
 )
 from .tree import (
-    extract_top_level_headings,
-    assign_levels,
-    _heading_title,
     _heading_page_num,
+    _heading_title,
+    assign_levels,
     build_tree,
+    extract_top_level_headings,
     validate,
 )
 
 __all__ = [
-    "is_heading_candidate",
-    "collect_headings",
-    "filter_by_clique",
+    "SECTION_KEYWORD_TRIE",
     "assign_levels",
     "build_tree",
-    "validate",
+    "collect_headings",
     "extract_top_level_headings",
-    "SECTION_KEYWORD_TRIE",
+    "filter_by_clique",
     "heading_order_key",
+    "is_heading_candidate",
+    "validate",
 ]

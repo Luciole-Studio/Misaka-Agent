@@ -4,19 +4,18 @@ from __future__ import annotations
 
 import re
 import unicodedata
+
 from PyPDF2.generic import (
-    IndirectObject as PdfIndirectRef, NameObject as PdfName, NumberObject as PdfNumber,
-    FloatObject as PdfFloat, BooleanObject as PdfBoolean,
-    DictionaryObject as PdfDictionary, ArrayObject as PdfArray,
+    IndirectObject as PdfIndirectRef,
 )
 
+from .content_stream import _tokenize_show_operators
 from .pdf_objects import _decode_pdf_name
 from .text_normalize import (
-    _normalize_unicodes,
     _WHITESPACE_CODEPOINTS,
     _is_whitespace,
+    _normalize_unicodes,
 )
-from .content_stream import _tokenize_show_operators
 
 
 def _resource_dict_xrefs(pdf_doc, owner_xref: int, sub: str) -> dict[bytes, int]:

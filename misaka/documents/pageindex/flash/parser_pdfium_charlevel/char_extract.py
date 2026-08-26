@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import ctypes
+
 import pypdfium2.raw as pdfium_c
 
+from .geometry import (
+    _build_obj_index,
+    _collect_text_objs,
+    _find_obj_for_char,
+)
 from .text_normalize import (
+    _is_invisible_format_mark,
     _is_whitespace,
     _is_zero_width_diacritic,
-    _is_invisible_format_mark,
-)
-from .geometry import (
-    _collect_text_objs,
-    _build_obj_index,
-    _find_obj_for_char,
 )
 
 
@@ -223,10 +224,8 @@ def _accumulate_type3_extents(raw_chars: list[dict], acc: dict) -> None:
         if entry_item is None:
             acc[_xref_key] = [top, bot]
         else:
-            if top > entry_item[0]:
-                entry_item[0] = top
-            if bot < entry_item[1]:
-                entry_item[1] = bot
+            entry_item[0] = max(entry_item[0], top)
+            entry_item[1] = min(entry_item[1], bot)
 
 
 def _type3_size_by_font(acc: dict) -> dict:

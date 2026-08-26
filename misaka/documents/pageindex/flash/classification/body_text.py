@@ -3,67 +3,31 @@
 from __future__ import annotations
 
 import math
-from typing import Optional
 
 from ..model import (
-    _UNICODE_WHITESPACE_CLASS,
-    _strip_diacritics,
-    _round_half_up_to_int,
-    magnitude_ratio,
-    intervals_overlap,
-    y_overlaps,
-    center_aligned,
-    to_number,
-    last_span,
-    heading_score,
-    text_of_line,
-    Line,
-    last_line_of,
-    first_span_of,
-    is_word_category,
-    block_text,
-    deaccented_text,
-    letter_count,
-    dominant_style_of,
-    punct_count,
-    info_weight,
-    is_upper_dominant,
-    is_caps_heavy,
-    alignment_code,
     Block,
+    _round_half_up_to_int,
+    alignment_code,
+    first_span_of,
+    info_weight,
+    last_line_of,
+    last_span,
+    letter_count,
+    to_number,
 )
-from ..stats import style_key, DocStats, weighted_percentile, column_index_of, char_script_bucket
+from ..stats import (
+    DocStats,
+)
 from ..tokens import (
-    is_trimmable_token,
-    token_numeric_value,
-    Token,
-    TokenView,
-    wrap_tokens,
-    enumerate_tokens,
     jenkins_hash,
-    trie_prefix_match,
-    strip_trie_match,
-    strip_leading_if_in,
-    COMMA_CHARS,
-    strip_trailing_comma,
-    trim_trailing_punct,
-    set_case_fold,
-    TrieConfig,
-    build_trie,
-    LineTokenizer,
     tokenize_block,
-    BuiltTrie,
-    trie_full_match,
-    is_char_token,
-    is_word_token,
+    trie_prefix_match,
 )
-
 from .keyword_tables import (
     BOILERPLATE_TRIE,
     PAGE_NUMBER_ONLY_RE,
     _normalize_text_key,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Recurring-text histogram updater #
@@ -178,7 +142,7 @@ _ROMAN_NUMERALS = {
 }
 
 
-def span_page_number(span) -> Optional[int]:
+def span_page_number(span) -> int | None:
     """Extract a page number from a span using a digit gate, then Roman numeral lookup."""
     text = span.text
     match = PAGE_NUMBER_ONLY_RE.match(text)
@@ -192,8 +156,8 @@ def span_page_number(span) -> Optional[int]:
 
 def longest_word_and_number(block: Block) -> list[str]:
     """extract longest letter-word and longest digit-string. Returns a list of 0-2 strings: lowercased longest word (if >3 chars), then the longest digit-string (raw). """
-    longest_word: Optional[str] = None
-    longest_number: Optional[str] = None
+    longest_word: str | None = None
+    longest_number: str | None = None
     for tok in tokenize_block(block):
         if tok.type == 2:
             if longest_word is None or len(tok.str) > len(longest_word):

@@ -27,12 +27,12 @@ from misaka.ai.providers.google import (
     _empty_usage,
     _finish_current_block,
     _is_aborted,
-    _maybe_await,
     _nested_option,
     _option,
     get_google_budget,
     is_gemini3_flash_model,
     is_gemini3_pro_model,
+    maybe_await,
 )
 from misaka.ai.providers.google_shared import (
     GoogleThinkingLevel,
@@ -137,7 +137,7 @@ def stream_google_vertex(
             params = build_params(model, context, options)
             on_payload = _option(options, "onPayload")
             if callable(on_payload):
-                next_params = await _maybe_await(on_payload(params, model))
+                next_params = await maybe_await(on_payload(params, model))
                 if next_params is not None:
                     params = next_params
 
@@ -292,7 +292,7 @@ def stream_google_vertex(
             close = getattr(aio_client, "aclose", None) if aio_client is not None else None
             if callable(close):
                 try:
-                    await _maybe_await(close())
+                    await maybe_await(close())
                 except Exception:  # noqa: BLE001, S110 - closing the SDK client is best-effort after the stream ended
                     pass
             stream.end()

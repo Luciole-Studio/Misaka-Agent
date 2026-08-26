@@ -3,25 +3,24 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Callable, Optional
 
 from sortedcontainers import SortedKeyList
-from ..model import (
-    style_key, left_aligned, right_aligned, center_aligned, x_aligned, rect_union,
-    Rect, last_span, avg_char_width, raw_text_of_line, heading_score, numbering_text, numbering_value, numbering_kind,
-    reading_order_key, left_edge_key, _trim_unicode_ws, _round_half_up_to_int, Line, last_line_of, first_span_of, block_text, deaccented_text, letter_count, dominant_style_of, info_weight, dominant_font_size, is_upper_dominant, is_caps_heavy, alignment_code, Block,
-)
 
+from ..model import (
+    first_span_of,
+    heading_score,
+    is_caps_heavy,
+    style_key,
+)
 from .candidates import (
     HeadingCandidate,
-    compare_heading_order,
-    heading_order_key,
-    parent_signature,
     cached_signature,
-    is_in_oo_range,
+    compare_heading_order,
     has_style_neighbor,
+    heading_order_key,
+    is_in_oo_range,
+    parent_signature,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Font/style-clustered heading group #
@@ -31,7 +30,7 @@ from .candidates import (
 class StyleCluster:
     """Group of headings sharing a font/style signature."""
 
-    __slots__ = ("auxiliary_slot", "state_slot", "secondary_slot", "primary_slot", "tertiary_slot")
+    __slots__ = ("auxiliary_slot", "primary_slot", "secondary_slot", "state_slot", "tertiary_slot")
 
     def __init__(self):
         self.auxiliary_slot: dict[HeadingCandidate, str] = {}                               # candidate -> signature
@@ -39,8 +38,8 @@ class StyleCluster:
         self.secondary_slot: SortedKeyList = SortedKeyList(
             key=lambda sort_node: (heading_score(sort_node.group_slot), heading_order_key(sort_node))
         )
-        self.primary_slot: Optional[HeadingCandidate] = None                              # min by heading order
-        self.tertiary_slot: Optional[HeadingCandidate] = None                              # max by heading order
+        self.primary_slot: HeadingCandidate | None = None                              # min by heading order
+        self.tertiary_slot: HeadingCandidate | None = None                              # max by heading order
 
     def size(self) -> int:
         return len(self.secondary_slot)
@@ -74,7 +73,7 @@ class StyleCluster:
 # --------------------------------------------------------------------------- #
 
 
-def pick_style_bucket(outline_context: "OutlineContext", other_heading_candidate: HeadingCandidate) -> StyleCluster:
+def pick_style_bucket(outline_context: OutlineContext, other_heading_candidate: HeadingCandidate) -> StyleCluster:
     """Pick the right style bucket for a candidate."""
     if other_heading_candidate.type == 10:
         return outline_context.secondary_slot
@@ -85,7 +84,7 @@ def pick_style_bucket(outline_context: "OutlineContext", other_heading_candidate
     return outline_context.tertiary_slot
 
 
-def has_conflict_in_context(outline_context: "OutlineContext", other_heading_candidate: HeadingCandidate) -> bool:
+def has_conflict_in_context(outline_context: OutlineContext, other_heading_candidate: HeadingCandidate) -> bool:
     """Return True if a candidate conflicts with the existing outline context."""
     if other_heading_candidate.type != 10 and is_in_oo_range(outline_context.secondary_slot, other_heading_candidate):
         return True
@@ -98,12 +97,12 @@ def has_conflict_in_context(outline_context: "OutlineContext", other_heading_can
     return False
 
 
-def is_compatible_with_context(outline_context: "OutlineContext", other_heading_candidate: HeadingCandidate) -> bool:
+def is_compatible_with_context(outline_context: OutlineContext, other_heading_candidate: HeadingCandidate) -> bool:
     """Return True iff a candidate can be added to the outline context."""
     if has_conflict_in_context(outline_context, other_heading_candidate):
         return False
     # Find the nearest predecessor by heading order.
-    text: Optional[HeadingCandidate] = None
+    text: HeadingCandidate | None = None
     for item in outline_context.state_slot:
         if compare_heading_order(item, other_heading_candidate) <= 0:
             if text is None or compare_heading_order(item, text) > 0:
@@ -135,7 +134,7 @@ def is_compatible_with_context(outline_context: "OutlineContext", other_heading_
 class OutlineContext:
     """Bundles style clusters for chapter, appendix, numbered, and general headings."""
 
-    __slots__ = ("secondary_slot", "primary_slot", "auxiliary_slot", "tertiary_slot", "state_slot")
+    __slots__ = ("auxiliary_slot", "primary_slot", "secondary_slot", "state_slot", "tertiary_slot")
 
     def __init__(self, headings: list[HeadingCandidate]):
         self.secondary_slot = StyleCluster()         # type == 10
@@ -174,7 +173,7 @@ class NumberingTrie:
     __slots__ = ("primary_slot", "secondary_slot")
 
     def __init__(self):
-        self.primary_slot: dict[int, "NumberingTrie"] = {}
+        self.primary_slot: dict[int, NumberingTrie] = {}
         self.secondary_slot = 0
 
 
@@ -212,7 +211,7 @@ def count_sibling_numberings(primary_item: NumberingTrie, other_heading_candidat
 class OutlineState:
     """Global state for outline assembly walks."""
 
-    __slots__ = ("state_slot", "cache_slot", "marker_slot", "previous_slot", "option_slot", "measure_slot", "style_slot", "secondary_slot", "auxiliary_slot", "tertiary_slot", "primary_slot")
+    __slots__ = ("auxiliary_slot", "cache_slot", "marker_slot", "measure_slot", "option_slot", "previous_slot", "primary_slot", "secondary_slot", "state_slot", "style_slot", "tertiary_slot")
 
     def __init__(self, clusters: list[dict]):
         self.state_slot: dict = {}
@@ -252,11 +251,11 @@ class OutlineState:
             if best.size() <= 2:
                 continue
             self.marker_slot[key] = best
-        self.style_slot: list[Optional[HeadingCandidate]] = []
+        self.style_slot: list[HeadingCandidate | None] = []
         self.secondary_slot = 0
-        self.auxiliary_slot: Optional[HeadingCandidate] = None
+        self.auxiliary_slot: HeadingCandidate | None = None
         self.tertiary_slot = 0
-        self.primary_slot: Optional[HeadingCandidate] = None
+        self.primary_slot: HeadingCandidate | None = None
 
 
 def _apply_heading_to_state(state: OutlineState, other_heading_candidate: HeadingCandidate) -> None:
@@ -305,7 +304,7 @@ def _apply_heading_to_state(state: OutlineState, other_heading_candidate: Headin
 # --------------------------------------------------------------------------- #
 
 
-def compare_heading_depth(heading_candidate: HeadingCandidate, other_heading_candidate: HeadingCandidate, clique: Optional[StyleCluster] = None) -> int:
+def compare_heading_depth(heading_candidate: HeadingCandidate, other_heading_candidate: HeadingCandidate, clique: StyleCluster | None = None) -> int:
     """Compare two heading candidates for relative nesting depth. Returns ``-1`` when the first candidate should be shallower, ``1`` when it should be deeper, and ``0`` when both candidates should share a level. The decision combines special heading types, numbering depth, structural numbering, style prominence, centered layout, clique membership, and bold weight. """
     special = heading_candidate.type in (8, 9, 10)
     other_special = other_heading_candidate.type in (8, 9, 10)

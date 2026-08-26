@@ -3,29 +3,32 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Optional
-from ..outline_assembly import HeadingCandidate, OutlineNode
-from ..labels import is_uppercase_dominant, trie_matches_all, advance_past_line, skip_bracketed_word, token_case_signal, format_caption_label, CaptionEntry, extract_structural_number
+
+from ..labels import (
+    extract_structural_number,
+)
 from ..model import (
-    _UNICODE_WHITESPACE_CLASS,
-    _strip_diacritics,
-    _trim_unicode_ws,
-    style_key, magnitude_ratio, same_x_extent, same_y_extent, y_overlaps, left_aligned, right_aligned, center_aligned, x_aligned, x_centers_close, to_number,
-    last_span, avg_char_width, raw_text_of_line, heading_score, numbering_text, numbering_value, numbering_kind, Line, last_line_of, first_span_of, is_word_category, block_text, is_punct_category, deaccented_text, letter_count, punct_count, dominant_style_of,
-    info_weight, dominant_font_size, is_upper_dominant, is_caps_heavy, CharStats, alignment_code, Block,
+    Block,
+    avg_char_width,
+    last_line_of,
 )
+from ..outline_assembly import HeadingCandidate
 from ..tokens import (
-    is_trimmable_token, token_numeric_value, Token, TokenView, wrap_tokens, enumerate_tokens, last_token, trie_prefix_match, strip_trie_match, strip_leading_if_in, COMMA_CHARS, strip_trailing_comma, first_token, trim_trailing_punct, set_case_fold, TrieConfig, build_trie, tokenize_block,
-    trie_full_match, last_token_anchor, first_anchor_span, is_char_token, is_word_token,
+    TokenView,
+    first_anchor_span,
+    first_token,
+    is_trimmable_token,
+    last_token,
+    token_numeric_value,
+    tokenize_block,
+    trim_trailing_punct,
 )
-
-from .text_checks import matches_references
 from .neighbors import (
-    neighbor_right,
-    closest_body_neighbor_above,
     PageNeighborMap,
+    closest_body_neighbor_above,
+    neighbor_right,
 )
-
+from .text_checks import matches_references
 
 # --------------------------------------------------------------------------- #
 # Main per-page heading state #
@@ -35,7 +38,7 @@ from .neighbors import (
 class PageScanState:
     """Per-page heading scan state."""
 
-    __slots__ = ("secondary_slot", "primary_slot", "state_slot", "auxiliary_slot", "tertiary_slot", "option_slot", "measure_slot")
+    __slots__ = ("auxiliary_slot", "measure_slot", "option_slot", "primary_slot", "secondary_slot", "state_slot", "tertiary_slot")
 
     def __init__(self, doc, page):
         self.secondary_slot = doc                  # document state
@@ -64,7 +67,7 @@ def push_candidate(page_scan: PageScanState, candidate: HeadingCandidate) -> Non
 
 
 def make_heading_candidate(page_scan: PageScanState, type_: int, block: Block, item_list: list[int],
-       tokens: Optional[TokenView], title_tokens: Optional[TokenView], has_numbering_flag: bool = False) -> HeadingCandidate:
+       tokens: TokenView | None, title_tokens: TokenView | None, has_numbering_flag: bool = False) -> HeadingCandidate:
     """Build a heading candidate and apply the spatial promotion rule."""
     neighbor = page_scan.tertiary_slot
     right_neighbor = neighbor_right(neighbor, block)
@@ -121,9 +124,8 @@ def make_body_heading_candidate(page_scan: PageScanState, type_: int, block: Blo
 # --------------------------------------------------------------------------- #
 
 
-def make_numbered_candidate(page_scan: PageScanState, block: Block, item_list: list[int], tokens: TokenView, title_tokens: TokenView) -> Optional[HeadingCandidate]:
+def make_numbered_candidate(page_scan: PageScanState, block: Block, item_list: list[int], tokens: TokenView, title_tokens: TokenView) -> HeadingCandidate | None:
     """Build a numbered-heading candidate after the full reject-guard chain. The guard rejects empty numbering, weak single-token numbering, unsupported top-of-page continuations, alignment failures, and trailing-number continuation conflicts."""
-    from ..labels import extract_structural_number  # numbering-prefix detector
 
     # Basic reject branch for empty, weak, or top-of-page continuation markers.
     if title_tokens.length <= 0:

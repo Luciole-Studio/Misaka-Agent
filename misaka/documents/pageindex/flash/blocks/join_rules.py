@@ -2,38 +2,33 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 import json
 from pathlib import Path
 
 from ..model import (
-    style_key,
-    magnitude_ratio,
-    left_aligned,
-    right_aligned,
-    center_aligned,
-    x_centers_close,
-    Rect,
-    last_span,
-    avg_char_width,
     EMPTY_RECT,
-    left_edge_key,
-    reading_order_key,
-    numbering_kind,
-    Line,
-    case_signal,
-    last_line_of,
-    first_span_of,
-    letter_count,
-    dominant_style_of,
-    is_upper_dominant,
     Block,
+    Line,
+    Rect,
     _max_nan_propagating,
+    avg_char_width,
+    case_signal,
+    center_aligned,
+    dominant_style_of,
+    first_span_of,
+    is_upper_dominant,
+    last_line_of,
+    last_span,
+    left_aligned,
+    letter_count,
+    magnitude_ratio,
+    numbering_kind,
+    right_aligned,
+    style_key,
+    x_centers_close,
 )
 from ..stats import DocStats, PageStats
-from ..tokens import set_case_fold, TrieConfig, build_trie, tokenize_block
-
+from ..tokens import TrieConfig, build_trie, set_case_fold
 
 # Combined heading trie used to detect "first line is a section header" patterns
 # when splitting two-line blocks.
@@ -55,7 +50,7 @@ SECTION_HEADING_TRIE = build_trie(
 class BlockClusterContext:
     """Block-clustering context. Fields: j document statistics o page bbox g page statistics h lines to cluster v column rectangles """
 
-    __slots__ = ("tertiary_slot", "auxiliary_slot", "primary_slot", "secondary_slot", "state_slot")
+    __slots__ = ("auxiliary_slot", "primary_slot", "secondary_slot", "state_slot", "tertiary_slot")
 
     def __init__(self, doc_stats: DocStats, page_bbox: Rect, page_stats: PageStats, lines: list, columns: list):
         self.tertiary_slot = doc_stats
@@ -76,7 +71,7 @@ def should_join_line_to_block(
 
     candidate_line: Line,
 
-    previous_line: Optional[Line],
+    previous_line: Line | None,
 
     first_candidate_block: Block,
 
@@ -279,15 +274,9 @@ def should_join_line_to_block(
     elif (
         (block_starts_with_digit and (bold_mismatch or font_size_delta <= -0.5))
         or (line_starts_with_digit and (bold_mismatch or font_size_delta >= 0.5))
-    ):
+    ) or block_starts_with_digit and candidate_line.left_edge() >= other_block.left_edge() and 0.9 * candidate_line.bbox_width() > other_block.bbox_width():
         join_tolerance /= 1.5
-    elif block_starts_with_digit and candidate_line.left_edge() >= other_block.left_edge() and 0.9 * candidate_line.bbox_width() > other_block.bbox_width():
-        join_tolerance /= 1.5
-    elif block_has_numbering and candidate_line.left_edge() >= other_block.left_edge() and 0.9 * candidate_line.bbox_width() > other_block.bbox_width():
-        join_tolerance /= 1.3
-    elif (block_starts_with_digit and candidate_line.char_stats.secondary_slot != 3 or line_starts_with_digit) and font_mismatch:
-        join_tolerance /= 1.3
-    elif block_starts_with_digit and left_edges_aligned and candidate_line.char_stats.secondary_slot == 2:
+    elif block_has_numbering and candidate_line.left_edge() >= other_block.left_edge() and 0.9 * candidate_line.bbox_width() > other_block.bbox_width() or (block_starts_with_digit and candidate_line.char_stats.secondary_slot != 3 or line_starts_with_digit) and font_mismatch or block_starts_with_digit and left_edges_aligned and candidate_line.char_stats.secondary_slot == 2:
         join_tolerance /= 1.3
     elif (
         (block_has_numbering and (font_mismatch or bold_mismatch or font_size_delta <= -0.5 or (left_edges_aligned and candidate_line.char_stats.secondary_slot == 2)))

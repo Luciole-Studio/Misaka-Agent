@@ -3,12 +3,6 @@
 from __future__ import annotations
 
 import math
-from typing import Optional
-
-from ..model import (
-    Rect, rect_union, EMPTY_RECT, Line, info_weight, text_of_line, numbering_kind, numbering_value, _UNICODE_WHITESPACE_CLASS, _max_nan_propagating, _min_nan_propagating,
-)
-
 
 # Detect TOC dot leaders ("... 5", "....3"). Gutter scoring rejects a split
 # candidate when too many dot-leader lines straddle the gap, because a TOC page
@@ -16,6 +10,17 @@ from ..model import (
 # The regular expression is end-anchored only; use re.search rather than re.match.
 import re as re_module
 
+from ..model import (
+    _UNICODE_WHITESPACE_CLASS,
+    Line,
+    Rect,
+    _max_nan_propagating,
+    _min_nan_propagating,
+    info_weight,
+    numbering_kind,
+    numbering_value,
+    text_of_line,
+)
 
 # --------------------------------------------------------------------------- #
 # Sweep event. ``is_start=True`` means "line enters" at a start edge; False means
@@ -24,7 +29,7 @@ import re as re_module
 
 
 class SweepEvent:
-    __slots__ = ("line", "position", "is_start")
+    __slots__ = ("is_start", "line", "position")
 
     def __init__(self, line: Line, position: float, is_start_flag: bool):
         self.line = line
@@ -39,7 +44,7 @@ class SweepEvent:
 
 
 class SplitCandidate:
-    __slots__ = ("start", "end", "direction", "score")
+    __slots__ = ("direction", "end", "score", "start")
 
     def __init__(self, start: float, end: float, direction_value: int, score: float):
         self.start = start
@@ -56,7 +61,7 @@ class SplitCandidate:
 class ColumnDetectionContext:
     """Page-level thresholds used while recursively scoring gutter candidates."""
 
-    __slots__ = ("secondary_slot", "primary_slot", "tertiary_slot", "state_slot", "auxiliary_slot", "option_slot", "measure_slot")
+    __slots__ = ("auxiliary_slot", "measure_slot", "option_slot", "primary_slot", "secondary_slot", "state_slot", "tertiary_slot")
 
     def __init__(self, primary_item, secondary_item, candidate_item):
         self.secondary_slot = secondary_item
@@ -112,7 +117,7 @@ def _score_gutter_gap(
     extent: float,                # extent
     min_gap: float,               # min gutter
     limit_number: int,                         # current event index
-) -> Optional[float]:
+) -> float | None:
     """Score one candidate gap at adjacent sweep events, or return None when it is not viable."""
     key_value = reference_items[limit_number].position
     score_value = reference_items[limit_number + 1].position

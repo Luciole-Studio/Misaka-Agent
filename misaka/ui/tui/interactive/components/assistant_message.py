@@ -13,25 +13,20 @@ from misaka.ui.tui import (
     Text,
 )
 from misaka.ui.tui.interactive.theme.theme import get_markdown_theme, theme
+from misaka.utils.values import read_field
 
 OSC133_ZONE_START = "\x1b]133;A\x07"
 OSC133_ZONE_END = "\x1b]133;B\x07"
 OSC133_ZONE_FINAL = "\x1b]133;C\x07"
 
 
-def _value(obj: Any, name: str, default: Any = None) -> Any:
-    if isinstance(obj, dict):
-        return obj.get(name, default)
-    return getattr(obj, name, default)
-
-
 def _visible_content(block: Any) -> bool:
-    block_type = _value(block, "type")
+    block_type = read_field(block, "type")
     if block_type == "text":
-        text = _value(block, "text", "")
+        text = read_field(block, "text", "")
         return bool(text.strip()) if isinstance(text, str) else False
     if block_type == "thinking":
-        thinking = _value(block, "thinking", "")
+        thinking = read_field(block, "thinking", "")
         return bool(thinking.strip()) if isinstance(thinking, str) else False
     return False
 
@@ -81,7 +76,7 @@ class AssistantMessageComponent(Container):
     def updateContent(self, message: Any) -> None:
         self.lastMessage = message
 
-        content = list(_value(message, "content", []) or [])
+        content = list(read_field(message, "content", []) or [])
 
         # Fast path: if the content is a single text block (the common
         # streaming case), update the existing Markdown via setText() instead
@@ -92,10 +87,10 @@ class AssistantMessageComponent(Container):
         # differential renderer.
         if (
             len(content) == 1
-            and _value(content[0], "type") == "text"
+            and read_field(content[0], "type") == "text"
             and not self.hasToolCalls
         ):
-            text_value = _value(content[0], "text", "")
+            text_value = read_field(content[0], "text", "")
             text = text_value.strip() if isinstance(text_value, str) else ""
             if text:
                 if (
@@ -124,14 +119,14 @@ class AssistantMessageComponent(Container):
             self.contentContainer.addChild(Spacer(1))
 
         for index, block in enumerate(content):
-            block_type = _value(block, "type")
+            block_type = read_field(block, "type")
             if block_type == "text":
-                text_value = _value(block, "text", "")
+                text_value = read_field(block, "text", "")
                 text = text_value.strip() if isinstance(text_value, str) else ""
                 if text:
                     self.contentContainer.addChild(Markdown(text, 1, 0, self.markdownTheme))
             elif block_type == "thinking":
-                thinking_value = _value(block, "thinking", "")
+                thinking_value = read_field(block, "thinking", "")
                 thinking = thinking_value.strip() if isinstance(thinking_value, str) else ""
                 if thinking:
                     has_visible_after = any(_visible_content(item) for item in content[index + 1 :])
@@ -155,12 +150,12 @@ class AssistantMessageComponent(Container):
                     if has_visible_after:
                         self.contentContainer.addChild(Spacer(1))
 
-        self.hasToolCalls = any(_value(block, "type") == "toolCall" for block in content)
+        self.hasToolCalls = any(read_field(block, "type") == "toolCall" for block in content)
         if self.hasToolCalls:
             return
 
-        stop_reason = _value(message, "stopReason")
-        error_message = _value(message, "errorMessage")
+        stop_reason = read_field(message, "stopReason")
+        error_message = read_field(message, "errorMessage")
         if stop_reason == "aborted":
             abort_message = (
                 str(error_message)

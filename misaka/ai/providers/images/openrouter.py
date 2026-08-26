@@ -26,6 +26,7 @@ from misaka.ai.types import (
 )
 from misaka.ai.utils.headers import headers_to_record
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
+from misaka.utils.values import maybe_await
 
 
 async def generate_images_openrouter(
@@ -56,7 +57,7 @@ async def generate_images_openrouter(
         )
         params = _build_params(model, context)
         if options and options.onPayload is not None:
-            next_params = await _maybe_await(options.onPayload(params, model))
+            next_params = await maybe_await(options.onPayload(params, model))
             if next_params is not None:
                 params = next_params
 
@@ -69,7 +70,7 @@ async def generate_images_openrouter(
         )
         response = raw_response.parse()
         if options and options.onResponse is not None:
-            await _maybe_await(
+            await maybe_await(
                 options.onResponse(
                     {
                         "status": raw_response.http_response.status_code,
@@ -105,12 +106,6 @@ async def generate_images_openrouter(
         output.stopReason = "aborted" if _signal_aborted(options.signal if options else None) else "error"
         output.errorMessage = _format_openrouter_error(error)
         return output
-
-
-async def _maybe_await(value: Any) -> Any:
-    if hasattr(value, "__await__"):
-        return await value
-    return value
 
 
 async def _await_with_signal(request_factory: Callable[[], Any], signal: Any) -> Any:

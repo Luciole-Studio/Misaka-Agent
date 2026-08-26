@@ -2,25 +2,35 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
-from ..classification import FIGURE_KEYWORDS_TRIE, TABLE_KEYWORDS_TRIE, CHART_KEYWORDS_TRIE
+from ..classification import (
+    CHART_KEYWORDS_TRIE,
+    FIGURE_KEYWORDS_TRIE,
+    TABLE_KEYWORDS_TRIE,
+)
 from ..model import (
-    Rect, rect_union, extend_top_to, extend_bottom_to, EMPTY_RECT, Bounded,
-    _trim_unicode_ws,
-    center_aligned, last_span, heading_score, reading_order_key, numbering_text, Line, last_line_of, first_span_of, dominant_style_of, info_weight, Block,
+    Block,
+    Bounded,
+    Rect,
+    extend_bottom_to,
+    extend_top_to,
+    heading_score,
+    numbering_text,
+    rect_union,
 )
 from ..stats import column_index_of
-from ..tokens import Token, TokenView, wrap_tokens, enumerate_tokens, last_token, trie_prefix_match, strip_leading_if_in, first_token, set_case_fold, TrieConfig, build_trie, tokenize_block, BuiltTrie, is_word_token
-
+from ..tokens import (
+    TokenView,
+    strip_leading_if_in,
+    tokenize_block,
+    trie_prefix_match,
+)
 from .caption_text import (
     PERIOD_CHARS,
-    extract_structural_number,
-    format_caption_label,
     REFERENCE_PHRASE_TRIE,
     caption_outranks,
+    extract_structural_number,
+    format_caption_label,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Captioned/labeled region wrapper #
@@ -30,7 +40,7 @@ from .caption_text import (
 class CaptionedRegion(Bounded):
     """Captioned or labeled region plus its body blocks. The region stores the document context, page, heading block, body blocks, neighboring block reference, label flag, label type, and an area-weighted score used to choose forward vs backward extension."""
 
-    __slots__ = ("weighted_ratio_primary", "page", "primary_slot", "output_slot", "state_slot", "alignment_slot", "type", "score")
+    __slots__ = ("alignment_slot", "output_slot", "page", "primary_slot", "score", "state_slot", "type", "weighted_ratio_primary")
 
     def __init__(self, primary_item, secondary_item, candidate_item, bbox: Rect, blocks, next_item, flag):
         super().__init__(bbox)
@@ -77,7 +87,7 @@ class CaptionedRegion(Bounded):
 # --------------------------------------------------------------------------- #
 
 
-def dedupe_caption_entries(caption_context: "CaptionContext") -> list["CaptionEntry"]:
+def dedupe_caption_entries(caption_context: CaptionContext) -> list[CaptionEntry]:
     """Deduplicate structural-number entries by label while preserving page order."""
     if not caption_context.state_slot:
         return caption_context.auxiliary_slot
@@ -99,12 +109,12 @@ def dedupe_caption_entries(caption_context: "CaptionContext") -> list["CaptionEn
 
 
 def extend_caption_region(
-    caption_context: "CaptionContext",
-    entry: "CaptionEntry",
+    caption_context: CaptionContext,
+    entry: CaptionEntry,
     prior_regions: list,
-    page_set: Optional[set],
+    page_set: set | None,
     direction: int,
-) -> Optional[CaptionedRegion]:
+) -> CaptionedRegion | None:
     """Walk page blocks forward or backward from a labeled entry, accumulating a region until an already-classified block, claimed block, deep body block, fresh top-level heading, or size/gap boundary is reached."""
     page = caption_context.primary_slot.primary_slot[entry.page_index - 1]
     origin = entry.group_slot
@@ -240,7 +250,7 @@ def extend_caption_region(
 # --------------------------------------------------------------------------- #
 
 
-def build_caption_regions(caption_context: "CaptionContext") -> list[CaptionedRegion]:
+def build_caption_regions(caption_context: CaptionContext) -> list[CaptionedRegion]:
     """Build caption regions by extending each labeled entry in both directions."""
     caption_context.tertiary_slot.clear()
     caption_context.secondary_slot.clear()
@@ -284,7 +294,7 @@ def build_caption_regions(caption_context: "CaptionContext") -> list[CaptionedRe
 class CaptionEntry:
     """One labeled-section entry with label, type, page, block, and remainder tokens."""
 
-    __slots__ = ("primary_slot", "type", "page_index", "group_slot", "secondary_slot")
+    __slots__ = ("group_slot", "page_index", "primary_slot", "secondary_slot", "type")
 
     def __init__(self, label: str, type_: int, page: int, block: Block, remainder: TokenView):
         self.primary_slot = label
@@ -302,7 +312,7 @@ class CaptionEntry:
 class CaptionContext:
     """Document-level state for labeled-section detection."""
 
-    __slots__ = ("primary_slot", "auxiliary_slot", "state_slot", "tertiary_slot", "secondary_slot")
+    __slots__ = ("auxiliary_slot", "primary_slot", "secondary_slot", "state_slot", "tertiary_slot")
 
     def __init__(self, doc):
         self.primary_slot = doc
@@ -337,7 +347,7 @@ def detect_captions(caption_context: CaptionContext) -> None:
         if block.type != 0:
             continue
         tokens = tokenize_block(block)
-        type_value: Optional[int] = None
+        type_value: int | None = None
         prefix = trie_prefix_match(FIGURE_KEYWORDS_TRIE, tokens)
         if prefix is not None:
             type_value = 4

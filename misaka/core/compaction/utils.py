@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from misaka.ai.types import MessageValue
+from misaka.utils.values import read_field
 
 _TOOL_RESULT_MAX_CHARS = 2000
 
@@ -30,23 +31,23 @@ def create_file_ops() -> FileOperations:
 
 
 def extract_file_ops_from_message(message: Any, file_ops: FileOperations) -> None:
-    if _message_field(message, "role") != "assistant":
+    if read_field(message, "role") != "assistant":
         return
-    content = _message_field(message, "content")
+    content = read_field(message, "content")
     if not isinstance(content, list):
         return
 
     for block in content:
-        if _block_field(block, "type") != "toolCall":
+        if read_field(block, "type") != "toolCall":
             continue
-        arguments = _block_field(block, "arguments")
+        arguments = read_field(block, "arguments")
         if not isinstance(arguments, dict):
             continue
         path = arguments.get("path")
         if not isinstance(path, str) or not path:
             continue
 
-        name = _block_field(block, "name")
+        name = read_field(block, "name")
         if name == "read":
             file_ops.read.add(path)
         elif name == "write":
@@ -79,9 +80,9 @@ def serialize_conversation(messages: list[MessageValue]) -> str:
     parts: list[str] = []
 
     for message in messages:
-        role = _message_field(message, "role")
+        role = read_field(message, "role")
         if role == "user":
-            content = _serialize_user_content(_message_field(message, "content"))
+            content = _serialize_user_content(read_field(message, "content"))
             if content:
                 parts.append(f"[User]: {content}")
             continue
@@ -90,21 +91,21 @@ def serialize_conversation(messages: list[MessageValue]) -> str:
             text_parts: list[str] = []
             thinking_parts: list[str] = []
             tool_calls: list[str] = []
-            for block in _message_field(message, "content") or []:
-                block_type = _block_field(block, "type")
+            for block in read_field(message, "content") or []:
+                block_type = read_field(block, "type")
                 if block_type == "text":
-                    text = _block_field(block, "text")
+                    text = read_field(block, "text")
                     if isinstance(text, str):
                         text_parts.append(text)
                 elif block_type == "thinking":
-                    thinking = _block_field(block, "thinking")
+                    thinking = read_field(block, "thinking")
                     if isinstance(thinking, str):
                         thinking_parts.append(thinking)
                 elif block_type == "toolCall":
-                    arguments = _block_field(block, "arguments")
+                    arguments = read_field(block, "arguments")
                     items = arguments.items() if isinstance(arguments, dict) else []
                     args_str = ", ".join(f"{key}={_safe_json_stringify(value)}" for key, value in items)
-                    tool_calls.append(f"{_block_field(block, 'name')}({args_str})")
+                    tool_calls.append(f"{read_field(block, 'name')}({args_str})")
             if thinking_parts:
                 parts.append(f"[Assistant thinking]: {'\n'.join(thinking_parts)}")
             if text_parts:
@@ -114,7 +115,7 @@ def serialize_conversation(messages: list[MessageValue]) -> str:
             continue
 
         if role == "toolResult":
-            content = _serialize_tool_result_content(_message_field(message, "content"))
+            content = _serialize_tool_result_content(read_field(message, "content"))
             if content:
                 parts.append(f"[Tool result]: {_truncate_for_summary(content, _TOOL_RESULT_MAX_CHARS)}")
 
@@ -128,8 +129,8 @@ def _serialize_user_content(content: Any) -> str:
         return ""
     parts: list[str] = []
     for block in content:
-        if _block_field(block, "type") == "text":
-            text = _block_field(block, "text")
+        if read_field(block, "type") == "text":
+            text = read_field(block, "text")
             if isinstance(text, str):
                 parts.append(text)
     return "".join(parts)
@@ -140,8 +141,8 @@ def _serialize_tool_result_content(content: Any) -> str:
         return ""
     parts: list[str] = []
     for block in content:
-        if _block_field(block, "type") == "text":
-            text = _block_field(block, "text")
+        if read_field(block, "type") == "text":
+            text = read_field(block, "text")
             if isinstance(text, str):
                 parts.append(text)
     return "".join(parts)
@@ -162,19 +163,17 @@ def _safe_json_stringify(value: Any) -> str:
     return serialized if serialized is not None else "undefined"
 
 
-def _message_field(message: Any, name: str) -> Any:
-    if isinstance(message, dict):
-        return message.get(name)
-    return getattr(message, name, None)
-
-
-def _block_field(block: Any, name: str) -> Any:
-    if isinstance(block, dict):
-        return block.get(name)
-    return getattr(block, name, None)
-
-
 __all__ = [
     "SUMMARIZATION_SYSTEM_PROMPT",
     "FileOperations",
     ]
+
+
+def _assistant_text(message: Any) -> str:
+    parts: list[str] = []
+    for block in read_field(message, "content") or []:
+        if read_field(block, "type") == "text":
+            text = read_field(block, "text")
+            if isinstance(text, str):
+                parts.append(text)
+    return "\n".join(parts)

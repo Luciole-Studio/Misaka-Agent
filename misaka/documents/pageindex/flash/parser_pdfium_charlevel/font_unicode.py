@@ -4,17 +4,16 @@ from __future__ import annotations
 
 import re
 
-from .glyph_tables import (
-    _load_glyph_tables,
-    _get_unicode_for_glyph,
-    _from_char_code,
-)
 from .cmap_parse import (
-    _to_number,
     _parse_int,
     _parse_tounicode_cmap,
+    _to_number,
 )
-
+from .glyph_tables import (
+    _from_char_code,
+    _get_unicode_for_glyph,
+    _load_glyph_tables,
+)
 
 _TYPE1_SPECIAL_BYTES = b"/[]{}()"
 # content stream tokenizer tokenises with PDF parser whitespace = {SP, TAB, CR, LF}

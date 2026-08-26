@@ -6,40 +6,43 @@ then uses each block's first line to find the column index; doing that on raw
 lines would read an unrelated first-span flag.
 """
 
+import json
+from pathlib import Path
 from typing import Optional
 
 from sortedcontainers import SortedKeyList
 
-import json
-from pathlib import Path
-
 from ..model import (
-    style_key,
-    magnitude_ratio,
-    left_aligned,
-    right_aligned,
-    center_aligned,
-    x_centers_close,
-    Rect,
-    last_span,
-    avg_char_width,
     EMPTY_RECT,
-    left_edge_key,
-    reading_order_key,
-    numbering_kind,
-    Line,
-    case_signal,
-    last_line_of,
-    first_span_of,
-    letter_count,
-    dominant_style_of,
-    is_upper_dominant,
     Block,
+    Line,
+    Rect,
     _max_nan_propagating,
+    avg_char_width,
+    case_signal,
+    center_aligned,
+    dominant_style_of,
+    first_span_of,
+    is_upper_dominant,
+    last_line_of,
+    last_span,
+    left_aligned,
+    left_edge_key,
+    letter_count,
+    magnitude_ratio,
+    numbering_kind,
+    reading_order_key,
+    right_aligned,
+    style_key,
+    x_centers_close,
 )
 from ..stats import DocStats, PageStats
-from ..tokens import set_case_fold, TrieConfig, build_trie, tokenize_block
-
+from ..tokens import TrieConfig, build_trie, set_case_fold, tokenize_block
+from .build import (
+    _set_add,
+    cluster_lines_into_blocks,
+    split_heading_body_blocks,
+)
 from .join_rules import (
     _DICT_PATH,
     _DICTS,
@@ -47,10 +50,5 @@ from .join_rules import (
     BlockClusterContext,
     should_join_line_to_block,
 )
-from .build import (
-    split_heading_body_blocks,
-    _set_add,
-    cluster_lines_into_blocks,
-)
 
-__all__ = ["BlockClusterContext", "should_join_line_to_block", "cluster_lines_into_blocks", "split_heading_body_blocks", "SECTION_HEADING_TRIE"]
+__all__ = ["SECTION_HEADING_TRIE", "BlockClusterContext", "cluster_lines_into_blocks", "should_join_line_to_block", "split_heading_body_blocks"]

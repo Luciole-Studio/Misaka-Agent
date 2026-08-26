@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
-from misaka.core.tools._common import _drain_worker, _is_aborted, _value, abort_race
+from misaka.core.tools._common import _drain_worker, _is_aborted, abort_race
 from misaka.core.tools.file_mutation_queue import with_file_mutation_queue
 from misaka.core.tools.path_utils import resolve_to_cwd
 from misaka.core.tools.render_utils import (
@@ -27,6 +27,7 @@ from misaka.core.tools.tool_definition_wrapper import wrap_tool_definition
 from misaka.ui.tui import Container, Text
 from misaka.ui.tui.interactive.theme.theme import get_language_from_path, highlight_code
 from misaka.utils import atomic
+from misaka.utils.values import read_field
 
 
 class WriteToolInput(BaseModel):
@@ -173,8 +174,8 @@ def _format_write_call(
 ) -> str:
     from misaka.ui.tui.interactive.components.keybinding_hints import key_hint
 
-    raw_path = str_value(_value(args, "file_path", _value(args, "path")))
-    file_content = str_value(_value(args, "content"))
+    raw_path = str_value(read_field(args, "file_path", read_field(args, "path")))
+    file_content = str_value(read_field(args, "content"))
     path = shorten_path(raw_path) if raw_path is not None else None
     invalid_arg = invalid_arg_text(theme_obj)
     if path is None:
@@ -214,12 +215,12 @@ def _format_write_call(
 
 
 def _format_write_result(result: Any, theme_obj: Any) -> str | None:
-    if not _value(result, "isError"):
+    if not read_field(result, "isError"):
         return None
-    content = _value(result, "content", [])
+    content = read_field(result, "content", [])
     if not isinstance(content, list):
         return None
-    output = "\n".join((_value(block, "text") or "") for block in content if _value(block, "type") == "text")
+    output = "\n".join((read_field(block, "text") or "") for block in content if read_field(block, "type") == "text")
     if not output:
         return None
     return f"\n{theme_obj.fg('error', output)}"
@@ -299,8 +300,8 @@ def create_write_tool_definition(
         return await with_file_mutation_queue(absolute_path, mutate)
 
     def render_call(args: Any, theme_obj: Any, context: Any) -> WriteCallRenderComponent:
-        raw_path = str_value(_value(args, "file_path", _value(args, "path")))
-        file_content = str_value(_value(args, "content"))
+        raw_path = str_value(read_field(args, "file_path", read_field(args, "path")))
+        file_content = str_value(read_field(args, "content"))
         component = (
             _ensure_write_call_render_component(context.lastComponent)
             if context.lastComponent is not None
@@ -325,7 +326,7 @@ def create_write_tool_definition(
         return component
 
     def render_result(result: Any, _options: Any, theme_obj: Any, context: Any) -> Any:
-        output = _format_write_result({"content": _value(result, "content", []), "isError": context.isError}, theme_obj)
+        output = _format_write_result({"content": read_field(result, "content", []), "isError": context.isError}, theme_obj)
         if not output:
             component = context.lastComponent if context.lastComponent is not None else Container()
             component.clear()

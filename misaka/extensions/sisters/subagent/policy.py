@@ -21,6 +21,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from misaka.utils.values import read_field
+
 MANAGEMENT_TOOLS = frozenset({"agent", "taskoutput", "sendmessage", "taskstop"})
 ALIASES = {"glob": "find"}
 PLAN_READ_COMMANDS = frozenset(
@@ -84,10 +86,6 @@ async def classify_permission(payload: Mapping[str, Any]) -> bool:
     if not callable(_permission_classifier):
         return False
     return bool(await _permission_classifier(dict(payload)))
-
-
-def _field(value: Any, name: str, default: Any = None) -> Any:
-    return value.get(name, default) if isinstance(value, Mapping) else getattr(value, name, default)
 
 
 def _tool_name(value: str) -> str:
@@ -1227,7 +1225,7 @@ class AgentPolicy:
         return {key: value for key, value in payload.items() if value is not None}
 
     async def before_agent(self, event: Any) -> Any:
-        payload = self._payload("SubagentStart", prompt=str(_field(event, "prompt", "")))
+        payload = self._payload("SubagentStart", prompt=str(read_field(event, "prompt", "")))
         context: list[str] = []
         results = await self._execute_hooks(
             "SubagentStart",
@@ -1258,8 +1256,8 @@ class AgentPolicy:
         }
 
     async def before_tool(self, event: Any) -> Any:
-        name = str(_field(event, "toolName", ""))
-        tool_input = _field(event, "input", {})
+        name = str(read_field(event, "toolName", ""))
+        tool_input = read_field(event, "input", {})
         tool_input = tool_input if isinstance(tool_input, Mapping) else {}
         original_input = dict(tool_input)
         workspace = str(getattr(self.context, "workspace", "") or os.getcwd())
@@ -1267,7 +1265,7 @@ class AgentPolicy:
             "PreToolUse",
             tool_name=name,
             tool_input=dict(tool_input),
-            tool_use_id=_field(event, "toolCallId"),
+            tool_use_id=read_field(event, "toolCallId"),
         )
         hook_results = await self._execute_hooks(
             "PreToolUse", name, payload, name, tool_input
@@ -1309,7 +1307,7 @@ class AgentPolicy:
                     {
                         "toolName": name,
                         "toolInput": dict(tool_input),
-                        "toolCallId": _field(event, "toolCallId"),
+                        "toolCallId": read_field(event, "toolCallId"),
                         "mode": "auto",
                     }
                 )
@@ -1331,7 +1329,7 @@ class AgentPolicy:
                 "PermissionRequest",
                 tool_name=name,
                 tool_input=dict(tool_input),
-                tool_use_id=_field(event, "toolCallId"),
+                tool_use_id=read_field(event, "toolCallId"),
                 permission_suggestions=[],
             )
             permission_results = await self._execute_hooks(
@@ -1372,7 +1370,7 @@ class AgentPolicy:
                             {
                                 "toolName": name,
                                 "toolInput": dict(tool_input),
-                                "toolCallId": _field(event, "toolCallId"),
+                                "toolCallId": read_field(event, "toolCallId"),
                                 "mode": "auto",
                             }
                         )
@@ -1403,7 +1401,7 @@ class AgentPolicy:
                         {
                             "toolName": name,
                             "toolInput": dict(tool_input),
-                            "toolCallId": _field(event, "toolCallId"),
+                            "toolCallId": read_field(event, "toolCallId"),
                             "mode": self.permission_mode or "default",
                             "reason": reason,
                         }
@@ -1421,48 +1419,48 @@ class AgentPolicy:
         return {"updatedInput": tool_input} if tool_input != original_input else None
 
     async def after_tool(self, event: Any) -> None:
-        name = str(_field(event, "toolName", ""))
-        tool_input = _field(event, "input", {})
+        name = str(read_field(event, "toolName", ""))
+        tool_input = read_field(event, "input", {})
         tool_input = tool_input if isinstance(tool_input, Mapping) else {}
-        event_name = "PostToolUseFailure" if bool(_field(event, "isError", False)) else "PostToolUse"
+        event_name = "PostToolUseFailure" if bool(read_field(event, "isError", False)) else "PostToolUse"
         payload = self._payload(
             event_name,
             tool_name=name,
             tool_input=dict(tool_input),
-            tool_use_id=_field(event, "toolCallId"),
+            tool_use_id=read_field(event, "toolCallId"),
             tool_response={
-                "content": _field(event, "content"),
-                "details": _field(event, "details"),
-                "is_error": bool(_field(event, "isError", False)),
+                "content": read_field(event, "content"),
+                "details": read_field(event, "details"),
+                "is_error": bool(read_field(event, "isError", False)),
             },
         )
         await self._execute_hooks(event_name, name, payload, name, tool_input)
 
     async def on_event(self, event: Any, _context: Any = None) -> Any:
-        if _field(event, "type") != "agent_end":
+        if read_field(event, "type") != "agent_end":
             return
-        messages = _field(event, "messages", [])
+        messages = read_field(event, "messages", [])
         if isinstance(messages, Sequence):
             for message in reversed(messages):
-                if str(_field(message, "role", "")) != "assistant":
+                if str(read_field(message, "role", "")) != "assistant":
                     continue
-                if str(_field(message, "stopReason", "")) in {"error", "aborted"}:
+                if str(read_field(message, "stopReason", "")) in {"error", "aborted"}:
                     self.stop_hook_active = False
                     return None
                 break
         last_assistant_message = None
         if isinstance(messages, Sequence):
             for message in reversed(messages):
-                if str(_field(message, "role", "")) != "assistant":
+                if str(read_field(message, "role", "")) != "assistant":
                     continue
-                content = _field(message, "content", [])
+                content = read_field(message, "content", [])
                 if isinstance(content, str):
                     last_assistant_message = content.strip() or None
                 elif isinstance(content, Sequence):
                     text = "\n".join(
-                        str(_field(block, "text", ""))
+                        str(read_field(block, "text", ""))
                         for block in content
-                        if _field(block, "type") == "text" and _field(block, "text")
+                        if read_field(block, "type") == "text" and read_field(block, "text")
                     ).strip()
                     last_assistant_message = text or None
                 break

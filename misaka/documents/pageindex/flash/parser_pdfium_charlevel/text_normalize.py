@@ -6,7 +6,6 @@ import json
 import unicodedata
 from pathlib import Path
 
-
 _DROP_CHARS = str.maketrans({
     # U+FFFE is PDFium's "no unicode mapping" textpage sentinel. The
     # patch pipeline (_apply_font_unicode) replaces it with decoded text
@@ -89,33 +88,10 @@ def _is_invisible_format_mark(number: int) -> bool:
 # U+0000..U+00FF; Arabic bidi type table covers U+0600..U+06FF indexed by the low byte
 # (the "" at 0x1D follows the extraction rule placeholder for nonexistent U+061D).
 
-_BIDI_BASE_TYPES = (
-    "BN BN BN BN BN BN BN BN BN S B S WS B BN BN BN BN BN BN BN BN BN BN BN BN "
-    "BN BN B B B S WS ON ON ET ET ET ON ON ON ON ON ES CS ES CS CS EN EN EN EN "
-    "EN EN EN EN EN EN CS ON ON ON ON ON ON L L L L L L L L L L L L L L L L L L "
-    "L L L L L L L L ON ON ON ON ON ON L L L L L L L L L L L L L L L L L L L L "
-    "L L L L L L ON ON ON ON BN BN BN BN BN BN B BN BN BN BN BN BN BN BN BN BN "
-    "BN BN BN BN BN BN BN BN BN BN BN BN BN BN BN BN CS ON ET ET ET ET ON ON ON "
-    "ON L ON ON BN ON ON ET ET EN EN ON L ON ON ON EN L ON ON ON ON ON L L L L "
-    "L L L L L L L L L L L L L L L L L L L ON L L L L L L L L L L L L L L L L L "
-    "L L L L L L L L L L L L L L ON L L L L L L L L "
-).split()
+_BIDI_BASE_TYPES = ["BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "S", "B", "S", "WS", "B", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "B", "B", "B", "S", "WS", "ON", "ON", "ET", "ET", "ET", "ON", "ON", "ON", "ON", "ON", "ES", "CS", "ES", "CS", "CS", "EN", "EN", "EN", "EN", "EN", "EN", "EN", "EN", "EN", "EN", "CS", "ON", "ON", "ON", "ON", "ON", "ON", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "ON", "ON", "ON", "ON", "ON", "ON", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "ON", "ON", "ON", "ON", "BN", "BN", "BN", "BN", "BN", "BN", "B", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "CS", "ON", "ET", "ET", "ET", "ET", "ON", "ON", "ON", "ON", "L", "ON", "ON", "BN", "ON", "ON", "ET", "ET", "EN", "EN", "ON", "L", "ON", "ON", "ON", "EN", "L", "ON", "ON", "ON", "ON", "ON", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "ON", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "ON", "L", "L", "L", "L", "L", "L", "L", "L"]
 assert len(_BIDI_BASE_TYPES) == 256
 _BIDI_ARABIC_TYPES = [
-    "" if bidi_type == "~" else bidi_type for bidi_type in (
-        "AN AN AN AN AN AN ON ON AL ET ET AL CS AL ON ON NSM NSM NSM NSM NSM NSM "
-        "NSM NSM NSM NSM NSM AL AL ~ AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL "
-        "AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL "
-        "AL AL AL AL AL NSM NSM NSM NSM NSM NSM NSM NSM NSM NSM NSM NSM NSM NSM NSM "
-        "NSM NSM NSM NSM NSM NSM AN AN AN AN AN AN AN AN AN AN ET AN AN AL AL AL "
-        "NSM AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL "
-        "AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL "
-        "AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL "
-        "AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL "
-        "AL AL AL NSM NSM NSM NSM NSM NSM NSM AN ON NSM NSM NSM NSM NSM NSM AL AL "
-        "NSM NSM ON NSM NSM NSM NSM AL AL EN EN EN EN EN EN EN EN EN EN AL AL AL AL "
-        "AL AL "
-    ).split()
+    "" if bidi_type == "~" else bidi_type for bidi_type in ["AN", "AN", "AN", "AN", "AN", "AN", "ON", "ON", "AL", "ET", "ET", "AL", "CS", "AL", "ON", "ON", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "AL", "AL", "~", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "AN", "AN", "AN", "AN", "AN", "AN", "AN", "AN", "AN", "AN", "ET", "AN", "AN", "AL", "AL", "AL", "NSM", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "AN", "ON", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "AL", "AL", "NSM", "NSM", "ON", "NSM", "NSM", "NSM", "NSM", "AL", "AL", "EN", "EN", "EN", "EN", "EN", "EN", "EN", "EN", "EN", "EN", "AL", "AL", "AL", "AL", "AL", "AL"]
 ]
 assert len(_BIDI_ARABIC_TYPES) == 256
 
@@ -240,8 +216,7 @@ def _apply_bidi_reordering(text: str, start_level: int = -1, vertical: bool = Fa
     highest = -1
     lowest_odd = 99
     for layout_value in levels:
-        if layout_value > highest:
-            highest = layout_value
+        highest = max(highest, layout_value)
         if layout_value < lowest_odd and (layout_value & 1):
             lowest_odd = layout_value
     for level in range(highest, lowest_odd - 1, -1):

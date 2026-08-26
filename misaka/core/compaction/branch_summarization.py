@@ -13,6 +13,7 @@ from misaka.core.compaction.compaction import estimate_tokens
 from misaka.core.compaction.utils import (
     SUMMARIZATION_SYSTEM_PROMPT,
     FileOperations,
+    _assistant_text,
     compute_file_lists,
     create_file_ops,
     extract_file_ops_from_message,
@@ -26,6 +27,7 @@ from misaka.core.messages import (
     createCustomMessage,
 )
 from misaka.core.session_manager import ReadonlySessionManager, SessionEntry
+from misaka.utils.values import read_field
 
 _BRANCH_SUMMARY_PREAMBLE = """The user explored a different conversation branch before returning here.
 Summary of that exploration:
@@ -222,7 +224,7 @@ def _get_message_from_entry(entry: SessionEntry) -> AgentMessage | None:
     entry_type = entry.get("type")
     if entry_type == "message":
         message = entry.get("message")
-        if _message_field(message, "role") == "toolResult":
+        if read_field(message, "role") == "toolResult":
             return None
         return message
     if entry_type == "custom_message":
@@ -246,28 +248,6 @@ def _get_message_from_entry(entry: SessionEntry) -> AgentMessage | None:
             entry.get("timestamp"),
         )
     return None
-
-
-def _assistant_text(message: Any) -> str:
-    parts: list[str] = []
-    for block in _message_field(message, "content") or []:
-        if _block_field(block, "type") == "text":
-            text = _block_field(block, "text")
-            if isinstance(text, str):
-                parts.append(text)
-    return "\n".join(parts)
-
-
-def _message_field(message: Any, name: str) -> Any:
-    if isinstance(message, dict):
-        return message.get(name)
-    return getattr(message, name, None)
-
-
-def _block_field(block: Any, name: str) -> Any:
-    if isinstance(block, dict):
-        return block.get(name)
-    return getattr(block, name, None)
 
 
 def _timestamp_ms() -> int:

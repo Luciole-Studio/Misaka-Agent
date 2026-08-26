@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 from ..model import (
-    style_key, left_aligned, right_aligned, center_aligned, x_aligned, rect_union,
-    Rect, last_span, avg_char_width, raw_text_of_line, heading_score, numbering_text, numbering_value, numbering_kind,
-    reading_order_key, left_edge_key, _trim_unicode_ws, _round_half_up_to_int, Line, last_line_of, first_span_of, block_text, deaccented_text, letter_count, dominant_style_of, info_weight, dominant_font_size, is_upper_dominant, is_caps_heavy, alignment_code, Block,
+    Block,
+    block_text,
+    dominant_font_size,
+    dominant_style_of,
+    first_span_of,
+    heading_score,
 )
-from ..stats import style_key as style_key_fn, column_index_of, tally_scripts, dominant_script_family, ScriptHistogram
+from ..stats import (
+    ScriptHistogram,
+    dominant_script_family,
+    tally_scripts,
+)
 from ..tokens import (
-    Token, TokenView, wrap_tokens, enumerate_tokens, last_token, trie_prefix_match, first_token, set_case_fold, TrieConfig, build_trie, tokenize_block, avg_char_width as avg_char_width_fn, trie_full_match, first_anchor_span, is_char_token, is_word_token,
+    is_char_token,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Heading candidate wrapper #
@@ -53,7 +59,7 @@ def _viewport_y_fraction(viewport_box, rot: int, user_x: float, user_y: float) -
 class HeadingCandidate:
     """One heading candidate. It stores the candidate type, page, underlying block, optional anchor block, numbering array, optional prefix tokens, title tokens, structural-numbering flag, prominence flag, dominant script family, and vertical page position."""
 
-    __slots__ = ("type", "page", "group_slot", "tertiary_slot", "numbering", "secondary_slot", "primary_slot", "has_numbering", "is_prominent", "state_slot", "auxiliary_slot")
+    __slots__ = ("auxiliary_slot", "group_slot", "has_numbering", "is_prominent", "numbering", "page", "primary_slot", "secondary_slot", "state_slot", "tertiary_slot", "type")
 
     def __init__(self, type_, page, group_value, anchor, numbering_value, tokens, title_tokens, has_numbering_flag, prominent_flag):
         self.type = type_
@@ -96,11 +102,11 @@ class HeadingCandidate:
 class OutlineNode:
     """Heading plus child outline nodes."""
 
-    __slots__ = ("heading", "child_nodes")
+    __slots__ = ("child_nodes", "heading")
 
     def __init__(self, heading: HeadingCandidate):
         self.heading = heading
-        self.child_nodes: list["OutlineNode"] = []
+        self.child_nodes: list[OutlineNode] = []
 
 
 # --------------------------------------------------------------------------- #
@@ -184,7 +190,7 @@ def parent_signature(heading_candidate: HeadingCandidate) -> str:
     return secondary_item
 
 
-def cached_signature(primary_item: "StyleCluster", other_heading_candidate: HeadingCandidate) -> str:
+def cached_signature(primary_item: StyleCluster, other_heading_candidate: HeadingCandidate) -> str:
     """Cached heading-signature lookup. Keyed by the candidate object itself, not by object id, because addresses can be reused after a discarded object is collected."""
     candidate_item = primary_item.auxiliary_slot.get(other_heading_candidate)
     if candidate_item is not None:
@@ -194,14 +200,14 @@ def cached_signature(primary_item: "StyleCluster", other_heading_candidate: Head
     return candidate_item
 
 
-def is_in_oo_range(primary_item: "StyleCluster", other_heading_candidate: HeadingCandidate) -> bool:
+def is_in_oo_range(primary_item: StyleCluster, other_heading_candidate: HeadingCandidate) -> bool:
     """Return True if the candidate lies within a style cluster's order range."""
     if primary_item.primary_slot is None or primary_item.tertiary_slot is None:
         return False
     return compare_heading_order(other_heading_candidate, primary_item.primary_slot) >= 0 and compare_heading_order(other_heading_candidate, primary_item.tertiary_slot) <= 0
 
 
-def has_style_neighbor(style: "StyleCluster", other_heading_candidate: HeadingCandidate, candidate_item: float) -> bool:
+def has_style_neighbor(style: StyleCluster, other_heading_candidate: HeadingCandidate, candidate_item: float) -> bool:
     """Return True if a candidate is close to a compatible style neighbor."""
     candidate_score = heading_score(other_heading_candidate.group_slot)
 

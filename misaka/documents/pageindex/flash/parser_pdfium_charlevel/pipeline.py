@@ -4,49 +4,46 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
-from typing import Union
-
-import pypdfium2 as pdfium
 
 # Raw PDF object access (ToUnicode CMaps, content streams, font dicts, /WMode)
 # that PDFium does not expose, read via PyPDF2 -- already a project dependency and
 # permissively licensed. A thin adapter exposes the small raw-object API the
 # helpers below need, so their calibrated logic stays unchanged.
 import PyPDF2 as _pypdf2  # declared dependency (also imported by pageindex.utils/client)
+import pypdfium2 as pdfium
 
-from ..model import Span, Rect
-
+from ..model import Rect, Span
+from .char_extract import (
+    _accumulate_type3_extents,
+    _apply_type3_sizes,
+    _extract_raw_chars,
+    _finalize_chars,
+    _inherited_box,
+    _page_view_rect,
+    _type3_size_by_font,
+)
+from .cmap_parse import _compute_skew
+from .code_walk import _page_show_codes
+from .content_stream import (
+    _assign_show_tz,
+    _assign_vertical_tags,
+    _page_vertical_resource_names,
+    _tokenize_show_operators,
+)
+from .merge import _merge_text_items
 from .pdf_objects import _PdfDoc
+from .remerge import (
+    _remerge_oblique,
+    _remerge_rotated,
+    _remerge_vertical,
+)
 from .text_normalize import (
     _DROP_CHARS,
     _NORMALIZED_UNICODES,
     _apply_bidi_reordering,
     _reverse_if_rtl,
 )
-from .content_stream import (
-    _tokenize_show_operators,
-    _assign_vertical_tags,
-    _assign_show_tz,
-    _page_vertical_resource_names,
-)
-from .cmap_parse import _compute_skew
-from .code_walk import _page_show_codes
 from .unicode_apply import _apply_font_unicode
-from .char_extract import (
-    _extract_raw_chars,
-    _accumulate_type3_extents,
-    _type3_size_by_font,
-    _apply_type3_sizes,
-    _finalize_chars,
-    _inherited_box,
-    _page_view_rect,
-)
-from .merge import _merge_text_items
-from .remerge import (
-    _remerge_rotated,
-    _remerge_oblique,
-    _remerge_vertical,
-)
 
 
 def _page_pass1(pdf, pdf_doc, page_idx: int, type3_ext: dict, font_map_cache: dict):
@@ -207,7 +204,7 @@ def _page_spans(raw: list[dict]) -> list[Span]:
     return spans
 
 
-def parse_charlevel_meta(doc_handle: Union[str, Path, BytesIO]) -> tuple[list[list[Span]], list]:
+def parse_charlevel_meta(doc_handle: str | Path | BytesIO) -> tuple[list[list[Span]], list]:
     if isinstance(doc_handle, (str, Path)):
         pdf = pdfium.PdfDocument(str(doc_handle))
     elif isinstance(doc_handle, BytesIO):
@@ -290,6 +287,6 @@ def parse_charlevel_meta(doc_handle: Union[str, Path, BytesIO]) -> tuple[list[li
     return out, list(zip(page_view_boxes, page_rotations))
 
 
-def parse_charlevel(doc_handle: Union[str, Path, BytesIO]) -> list[list[Span]]:
+def parse_charlevel(doc_handle: str | Path | BytesIO) -> list[list[Span]]:
     """Per-page span entry: per-page spans only (drops viewport meta). the high-level TOC pipeline uses ``parse_charlevel_meta`` to also get the per-page (view box, /Rotate) for heading coordinates; every other caller just wants the spans. """
     return parse_charlevel_meta(doc_handle)[0]

@@ -34,7 +34,7 @@ def _validate_stream(stream: BinaryIO) -> BinaryIO:
         pos = stream.tell()
         head = stream.read(5)
         stream.seek(pos)
-    except Exception as exc:  # noqa: BLE001 - normalize stream capability errors
+    except Exception as exc:
         raise TypeError("PDF stream must be seekable and readable") from exc
     if head != b"%PDF-":
         raise ValueError("Input stream does not look like a PDF")

@@ -3,28 +3,22 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
 
 from ..model import (
     _UNICODE_WHITESPACE_CLASS,
-    avg_char_width2,
-    Span,
-    magnitude_ratio,
-    same_x_extent,
-    same_y_extent,
-    append_span,
-    last_span,
-    avg_char_width,
-    raw_text_of_line,
-    text_of_line,
-    reading_order_key,
-    left_edge_key,
-    numbering_kind,
     Line,
-    letter_count,
+    Span,
+    avg_char_width,
+    avg_char_width2,
     is_upper_dominant,
+    last_span,
+    letter_count,
+    magnitude_ratio,
+    numbering_kind,
+    raw_text_of_line,
+    same_y_extent,
+    text_of_line,
 )
-
 
 # Matches "...." dot-leader trails used in TOC entries: "Chapter 1 ........"
 TRAILING_DOT_LEADER_RE = re.compile(r"([.][" + _UNICODE_WHITESPACE_CLASS + r"]*){4,}\Z")
@@ -75,11 +69,11 @@ def vertical_distance_in_line_heights(line: Line, other_line: Line) -> float:
 
 
 def pick_closer_neighbor(
-    line: Optional[Line],
-    other_line: Optional[Line],
+    line: Line | None,
+    other_line: Line | None,
     candidate_line: Line,
     reference_item: float,
-) -> Optional[Line]:
+) -> Line | None:
     """Pick the closer neighboring line to the current line when it falls within the merge tolerance. Returns the closer candidate when the distance is below the threshold, else ``None``. Either or both candidates may be ``None`` (e.g. c is at the top of the tree -> no predecessor). """
     if line is None and other_line is None:
         return None
@@ -177,9 +171,7 @@ def should_merge_lines(line: Line, other_line: Line, candidate_items: list) -> b
     # Bracketed short line or uppercase sentence-period inside a column.
     if line.char_count() <= 10:
         text = text_of_line(line)
-        if text.startswith("[") and text.endswith("]"):
-            gap_factor *= 2.0
-        elif inside_col and line.char_stats.secondary_slot == 2 and text.endswith("."):
+        if text.startswith("[") and text.endswith("]") or inside_col and line.char_stats.secondary_slot == 2 and text.endswith("."):
             gap_factor *= 2.0
 
     # Both lines are uppercase-dominant inside the same column.

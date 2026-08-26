@@ -3,62 +3,21 @@
 from __future__ import annotations
 
 import json
-import regex as regex_module  # Unicode \p{...} property classes
 from pathlib import Path
-from typing import Optional
+
+import regex as regex_module  # Unicode \p{...} property classes
 
 from ..model import (
     _UNICODE_WHITESPACE_CLASS,
     _strip_diacritics,
-    _round_half_up_to_int,
-    magnitude_ratio,
-    intervals_overlap,
-    y_overlaps,
-    center_aligned,
-    to_number,
-    last_span,
-    heading_score,
-    text_of_line,
-    Line,
-    last_line_of,
-    first_span_of,
-    is_word_category,
-    block_text,
-    deaccented_text,
-    letter_count,
-    dominant_style_of,
-    punct_count,
-    info_weight,
-    is_upper_dominant,
-    is_caps_heavy,
-    alignment_code,
-    Block,
 )
 from ..tokens import (
-    is_trimmable_token,
-    token_numeric_value,
-    Token,
+    BuiltTrie,
     TokenView,
-    wrap_tokens,
-    enumerate_tokens,
-    jenkins_hash,
-    trie_prefix_match,
-    strip_trie_match,
-    strip_leading_if_in,
-    COMMA_CHARS,
-    strip_trailing_comma,
-    trim_trailing_punct,
-    set_case_fold,
     TrieConfig,
     build_trie,
-    LineTokenizer,
-    tokenize_block,
-    BuiltTrie,
-    trie_full_match,
-    is_char_token,
-    is_word_token,
+    set_case_fold,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Load dictionaries (built into tries on first use) #
@@ -102,7 +61,7 @@ DOT_LEADER_ROW_RE = regex_module.compile(r"([.][" + _UNICODE_WHITESPACE_CLASS + 
 PAGE_NUMBER_ONLY_RE = regex_module.compile(r"^[ |]*([1-9１-９]\p{Number}*)[ |]*\Z")
 
 
-def _search_trie(trie: BuiltTrie, tokens) -> Optional[TokenView]:
+def _search_trie(trie: BuiltTrie, tokens) -> TokenView | None:
     """Return the shortest earliest Aho-Corasick trie match for ``tokens``."""
     from ..tokens import aho_corasick_tokens as _real_bh
     return _real_bh(trie, tokens)

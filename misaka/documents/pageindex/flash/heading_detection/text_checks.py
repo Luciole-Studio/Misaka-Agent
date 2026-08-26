@@ -3,33 +3,48 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Optional
-from ..labels import is_uppercase_dominant, trie_matches_all, advance_past_line, skip_bracketed_word, token_case_signal, format_caption_label, CaptionEntry, extract_structural_number
+
+from ..labels import (
+    extract_structural_number,
+    trie_matches_all,
+)
 from ..model import (
-    _UNICODE_WHITESPACE_CLASS,
-    _strip_diacritics,
+    Block,
+    Line,
     _trim_unicode_ws,
-    style_key, magnitude_ratio, same_x_extent, same_y_extent, y_overlaps, left_aligned, right_aligned, center_aligned, x_aligned, x_centers_close, to_number,
-    last_span, avg_char_width, raw_text_of_line, heading_score, numbering_text, numbering_value, numbering_kind, Line, last_line_of, first_span_of, is_word_category, block_text, is_punct_category, deaccented_text, letter_count, punct_count, dominant_style_of,
-    info_weight, dominant_font_size, is_upper_dominant, is_caps_heavy, CharStats, alignment_code, Block,
+    block_text,
+    center_aligned,
+    is_upper_dominant,
+    left_aligned,
+    right_aligned,
+    to_number,
+    x_aligned,
+    y_overlaps,
 )
 from ..tokens import (
-    is_trimmable_token, token_numeric_value, Token, TokenView, wrap_tokens, enumerate_tokens, last_token, trie_prefix_match, strip_trie_match, strip_leading_if_in, COMMA_CHARS, strip_trailing_comma, first_token, trim_trailing_punct, set_case_fold, TrieConfig, build_trie, tokenize_block,
-    trie_full_match, last_token_anchor, first_anchor_span, is_char_token, is_word_token,
+    Token,
+    TokenView,
+    first_anchor_span,
+    first_token,
+    is_word_token,
+    last_token,
+    strip_trie_match,
+    token_numeric_value,
+    tokenize_block,
+    trie_prefix_match,
 )
-
 from .keyword_tables import (
-    ABSTRACT_KEYWORDS_TRIE,
-    REFERENCES_TRIE,
-    _normalize_text_key,
     ABSTRACT_KEYWORDS_SET,
-    REFERENCES_SET,
-    NUMBERED_PREFIX_RE,
+    ABSTRACT_KEYWORDS_TRIE,
     DEAD_DIGIT_RE,
-    EQUATION_KEYWORDS_TRIE,
     ENGLISH_WORD_TO_NUMBER,
-    ROMAN_NUMERAL_MAP,
+    EQUATION_KEYWORDS_TRIE,
     FORMULA_CHAR_WEIGHTS,
+    NUMBERED_PREFIX_RE,
+    REFERENCES_SET,
+    REFERENCES_TRIE,
+    ROMAN_NUMERAL_MAP,
+    _normalize_text_key,
 )
 
 
@@ -108,7 +123,7 @@ def matches_references(tokens: TokenView) -> bool:
     return trie_matches_all(REFERENCES_TRIE, rest)
 
 
-def vertically_close(block: Optional[Block], other_block: Block) -> bool:
+def vertically_close(block: Block | None, other_block: Block) -> bool:
     """a is vertically very close to b."""
     if block is None:
         return False
@@ -116,9 +131,8 @@ def vertically_close(block: Optional[Block], other_block: Block) -> bool:
     return candidate_item < 2 * other_block.avg_font_size() or (x_aligned(block, other_block, 1) and candidate_item < 5 * other_block.avg_font_size())
 
 
-def is_equation_adjacent_line(line: Optional[Line], block: Block) -> bool:
+def is_equation_adjacent_line(line: Line | None, block: Block) -> bool:
     """Return whether a line is adjacent to an equation block: it overlaps and follows the block, matches the equation-separator pattern, or consists entirely of equation-keyword tokens after trimming wrapper punctuation."""
-    from ..labels import extract_structural_number
     if line is None or line.line_count() != 1:
         return False
     if line.left_edge() < block.right_edge() or not y_overlaps(block, line):
@@ -138,7 +152,7 @@ def is_equation_adjacent_line(line: Optional[Line], block: Block) -> bool:
     return yi_match is not None and yi_match.length == tokens.length
 
 
-def has_substantive_content(block: Block, other_block: Optional[Block], candidate_block: Optional[Block]) -> bool:
+def has_substantive_content(block: Block, other_block: Block | None, candidate_block: Block | None) -> bool:
     """heuristic "this block has substantive content?" score >= 5."""
     entry_item = 0
     for token in tokenize_block(block):
@@ -190,11 +204,11 @@ def is_cover_page(doc, page) -> bool:
 
 def clamp(value: float, lower_bound: float, upper_bound: float) -> float:
     """``max(lo, min(hi, v))``. NaN propagates."""
-    measure_item = upper_bound if upper_bound < value else value
-    return lower_bound if lower_bound > measure_item else measure_item
+    measure_item = min(value, upper_bound)
+    return max(measure_item, lower_bound)
 
 
-def token_to_number(tok: Optional[Token]) -> Optional[int | float]:
+def token_to_number(tok: Token | None) -> int | float | None:
     """extract numeric value from a token (digit, Roman, or English)."""
     if tok is None:
         return None
@@ -206,7 +220,7 @@ def token_to_number(tok: Optional[Token]) -> Optional[int | float]:
     return ROMAN_NUMERAL_MAP.get(tok.str) or ENGLISH_WORD_TO_NUMBER.get(tok.str.lower())
 
 
-def letter_to_ordinal(tok_str: str) -> Optional[int]:
+def letter_to_ordinal(tok_str: str) -> int | None:
     """'a'/'A' -> 1, 'b' -> 2, ..., 'h' -> 8. None otherwise."""
     if len(tok_str) != 1:
         return None

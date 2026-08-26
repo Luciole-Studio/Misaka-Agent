@@ -3,36 +3,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 from sortedcontainers import SortedKeyList
 
 from ..model import (
-    _UNICODE_WHITESPACE_CLASS,
-    avg_char_width2,
+    Line,
     Span,
-    magnitude_ratio,
-    same_x_extent,
-    same_y_extent,
     append_span,
     last_span,
-    avg_char_width,
-    raw_text_of_line,
-    text_of_line,
-    reading_order_key,
     left_edge_key,
-    numbering_kind,
-    Line,
-    letter_count,
-    is_upper_dominant,
+    reading_order_key,
+    same_x_extent,
+    same_y_extent,
 )
-
 from .merge_rules import (
-    span_continues_line,
     pick_closer_neighbor,
     should_merge_lines,
+    span_continues_line,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Initial line builder.
@@ -48,7 +36,7 @@ def build_initial_lines(spans: list[Span], page_bbox) -> list[Line]:
     """Build initial lines from flat spans. Returns the list of initial lines. """
     line: list[Line] = []
     pending_line = Line()
-    pending_span: Optional[Span] = None
+    pending_span: Span | None = None
     page_area = page_bbox.area()
 
     for span in spans:

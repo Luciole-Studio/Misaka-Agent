@@ -3,54 +3,71 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Optional
-from ..outline_assembly import HeadingCandidate, OutlineNode
-from ..labels import is_uppercase_dominant, trie_matches_all, advance_past_line, skip_bracketed_word, token_case_signal, format_caption_label, CaptionEntry, extract_structural_number
-from ..model import (
-    _UNICODE_WHITESPACE_CLASS,
-    _strip_diacritics,
-    _trim_unicode_ws,
-    style_key, magnitude_ratio, same_x_extent, same_y_extent, y_overlaps, left_aligned, right_aligned, center_aligned, x_aligned, x_centers_close, to_number,
-    last_span, avg_char_width, raw_text_of_line, heading_score, numbering_text, numbering_value, numbering_kind, Line, last_line_of, first_span_of, is_word_category, block_text, is_punct_category, deaccented_text, letter_count, punct_count, dominant_style_of,
-    info_weight, dominant_font_size, is_upper_dominant, is_caps_heavy, CharStats, alignment_code, Block,
-)
-from ..tokens import (
-    is_trimmable_token, token_numeric_value, Token, TokenView, wrap_tokens, enumerate_tokens, last_token, trie_prefix_match, strip_trie_match, strip_leading_if_in, COMMA_CHARS, strip_trailing_comma, first_token, trim_trailing_punct, set_case_fold, TrieConfig, build_trie, tokenize_block,
-    trie_full_match, last_token_anchor, first_anchor_span, is_char_token, is_word_token,
-)
 
+from ..labels import (
+    is_uppercase_dominant,
+    trie_matches_all,
+)
+from ..model import (
+    Block,
+    CharStats,
+    alignment_code,
+    avg_char_width,
+    dominant_style_of,
+    first_span_of,
+    info_weight,
+    is_caps_heavy,
+    is_upper_dominant,
+    last_line_of,
+    last_span,
+    letter_count,
+    punct_count,
+    x_aligned,
+)
+from ..outline_assembly import HeadingCandidate
+from ..tokens import (
+    enumerate_tokens,
+    first_anchor_span,
+    is_trimmable_token,
+    is_word_token,
+    last_token,
+    last_token_anchor,
+    tokenize_block,
+    trie_prefix_match,
+    trim_trailing_punct,
+)
+from .candidates import (
+    PageScanState,
+    make_body_heading_candidate,
+    make_heading_candidate,
+    make_plain_candidate,
+)
+from .detectors import (
+    detect_labeled_heading,
+    detect_numbered_heading,
+    is_bibliography_entry,
+)
 from .keyword_tables import (
-    SECTION_KEYWORDS_TRIE,
     INTRODUCTION_SECTION_TRIE,
     KEYWORDS_SECTION_TRIE,
+    SECTION_KEYWORDS_TRIE,
+)
+from .neighbors import (
+    body_neighbor_above,
+    closest_body_neighbor_above,
+    neighbor_above,
+    neighbor_right,
 )
 from .text_checks import (
     matches_abstract,
     vertically_close,
 )
-from .neighbors import (
-    neighbor_above,
-    body_neighbor_above,
-    neighbor_right,
-    closest_body_neighbor_above,
-)
-from .candidates import (
-    PageScanState,
-    make_heading_candidate,
-    make_plain_candidate,
-    make_body_heading_candidate,
-)
-from .detectors import (
-    detect_numbered_heading,
-    detect_labeled_heading,
-    is_bibliography_entry,
-)
 
 
-def detect_font_heading(page_scan: PageScanState, other_block: Block) -> Optional[HeadingCandidate]:
+def detect_font_heading(page_scan: PageScanState, other_block: Block) -> HeadingCandidate | None:
     """Detailed font/position-based fallback heading classifier."""
-    from ..model import x_aligned, last_span, last_line_of, first_span_of, letter_count, punct_count, dominant_style_of, is_upper_dominant, is_caps_heavy, is_sentence_like, alignment_code
-    from ..tokens import last_token, is_comma_token
+    from ..model import is_sentence_like, is_upper_dominant, last_line_of, last_span
+    from ..tokens import is_comma_token, last_token
 
     above = neighbor_above(page_scan.tertiary_slot, other_block)
     top_gap = above.bottom_edge() - other_block.top_edge() if above is not None else math.inf
@@ -236,7 +253,7 @@ def detect_font_heading(page_scan: PageScanState, other_block: Block) -> Optiona
     return None
 
 
-def detect_heading_with_body(page_scan: PageScanState, other_block: Block) -> Optional[HeadingCandidate]:
+def detect_heading_with_body(page_scan: PageScanState, other_block: Block) -> HeadingCandidate | None:
     """. Detect heading-with-body 2-line patterns."""
     if other_block.line_count() < 2:
         return None

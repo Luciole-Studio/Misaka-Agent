@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from typing import Optional
 
 from ..labels import extract_structural_number
-from ..model import numbering_text, numbering_kind, block_text, is_caps_heavy, Block
+from ..model import Block, block_text, is_caps_heavy, numbering_kind, numbering_text
 from ..stats import column_index_of
-from ..tokens import set_case_fold, TrieConfig, build_trie, tokenize_block, trie_full_match
-
+from ..tokens import (
+    TrieConfig,
+    build_trie,
+    set_case_fold,
+    tokenize_block,
+    trie_full_match,
+)
 
 # English section keywords loaded into a case-folded trie matching tokenized
 # block text exactly.
@@ -132,7 +136,7 @@ def _style_key(block: Block) -> tuple[str, float, bool]:
     return (font, round(block.avg_font_size(), 1), block.bold_frac() > 0.5)
 
 
-def _numbering_depth(block: Block) -> Optional[int]:
+def _numbering_depth(block: Block) -> int | None:
     """Return the section-numbering depth, e.g. ``1.2.3-> 3. None if the block doesn't start with a digit-style number (only digit chains use ``.``-separated depth; Roman / letter labels return 1). """
     if numbering_kind(block.line()) != 1:
         return None

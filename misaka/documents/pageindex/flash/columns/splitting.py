@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 import math
-from typing import Optional
 
 from ..model import (
-    Rect, rect_union, EMPTY_RECT, Line, info_weight, text_of_line, numbering_kind, numbering_value, _UNICODE_WHITESPACE_CLASS, _max_nan_propagating, _min_nan_propagating,
+    EMPTY_RECT,
+    Rect,
+    info_weight,
+    rect_union,
 )
-
 from .gutters import (
-    SweepEvent,
-    SplitCandidate,
     ColumnDetectionContext,
+    SplitCandidate,
+    SweepEvent,
     collect_gutter_candidates,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Assign column indexes to lines whose event is a start edge.
@@ -108,7 +108,7 @@ def recursive_split(
         return out
 
     # Pick best candidate split
-    best: Optional[SplitCandidate] = None
+    best: SplitCandidate | None = None
     for count_item in split_candidates:
         if best is None or best.score < count_item.score:
             best = count_item

@@ -9,41 +9,49 @@ breaks.
 """
 
 import math
-from typing import Optional
-
-from ..model import (
-    Rect, rect_union, EMPTY_RECT, Line, info_weight, text_of_line, numbering_kind, numbering_value, _UNICODE_WHITESPACE_CLASS, _max_nan_propagating, _min_nan_propagating,
-)
-
 
 # Detect TOC dot leaders ("... 5", "....3"). Gutter scoring rejects a split
 # candidate when too many dot-leader lines straddle the gap, because a TOC page
 # should remain in one reading region.
 # The regular expression is end-anchored only; use re.search rather than re.match.
 import re as re_module
+from typing import Optional
 
+from ..model import (
+    _UNICODE_WHITESPACE_CLASS,
+    EMPTY_RECT,
+    Line,
+    Rect,
+    _max_nan_propagating,
+    _min_nan_propagating,
+    info_weight,
+    numbering_kind,
+    numbering_value,
+    rect_union,
+    text_of_line,
+)
 from .gutters import (
-    SweepEvent,
-    SplitCandidate,
-    ColumnDetectionContext,
     DOT_LEADER_RE,
-    collect_gutter_candidates,
+    ColumnDetectionContext,
+    SplitCandidate,
+    SweepEvent,
     _score_gutter_gap,
+    collect_gutter_candidates,
 )
 from .splitting import (
     assign_column_index,
-    recursive_split,
-    detect_columns,
     columns_to_x_bounds,
+    detect_columns,
+    recursive_split,
 )
 
 __all__ = [
-    "SweepEvent",
-    "SplitCandidate",
     "ColumnDetectionContext",
-    "collect_gutter_candidates",
+    "SplitCandidate",
+    "SweepEvent",
     "assign_column_index",
-    "recursive_split",
-    "detect_columns",
+    "collect_gutter_candidates",
     "columns_to_x_bounds",
+    "detect_columns",
+    "recursive_split",
 ]

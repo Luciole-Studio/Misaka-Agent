@@ -2,38 +2,39 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
 from ..model import (
-    style_key, left_aligned, right_aligned, center_aligned, x_aligned, rect_union,
-    Rect, last_span, avg_char_width, raw_text_of_line, heading_score, numbering_text, numbering_value, numbering_kind,
-    reading_order_key, left_edge_key, _trim_unicode_ws, _round_half_up_to_int, Line, last_line_of, first_span_of, block_text, deaccented_text, letter_count, dominant_style_of, info_weight, dominant_font_size, is_upper_dominant, is_caps_heavy, alignment_code, Block,
+    Block,
+    _trim_unicode_ws,
+    is_caps_heavy,
+    numbering_kind,
+    numbering_text,
 )
 from ..tokens import (
-    Token, TokenView, wrap_tokens, enumerate_tokens, last_token, trie_prefix_match, first_token, set_case_fold, TrieConfig, build_trie, tokenize_block, avg_char_width as avg_char_width_fn, trie_full_match, first_anchor_span, is_char_token, is_word_token,
+    TokenView,
+    tokenize_block,
 )
-
 from .candidates import (
     HeadingCandidate,
     OutlineNode,
     heading_order_key,
 )
+from .cliques import (
+    CliqueFilterContext,
+    detect_body_headings,
+    find_keyword_clique,
+    interleave_clusters,
+    partition_candidates,
+)
+from .selection import (
+    HierarchyStack,
+    extract_sub_headings,
+    find_parent_heading,
+    push_heading_to_state,
+    should_reject_heading,
+)
 from .style_context import (
     OutlineState,
     compare_heading_depth,
-)
-from .cliques import (
-    find_keyword_clique,
-    CliqueFilterContext,
-    detect_body_headings,
-    partition_candidates,
-    interleave_clusters,
-)
-from .selection import (
-    should_reject_heading,
-    push_heading_to_state,
-    HierarchyStack,
-    find_parent_heading,
-    extract_sub_headings,
 )
 
 
@@ -83,13 +84,13 @@ def is_landscape_or_empty(doc) -> bool:
 # --------------------------------------------------------------------------- #
 
 
-def build_heading_from_block(block: Block, page, anchor: Optional[Block] = None) -> HeadingCandidate:
+def build_heading_from_block(block: Block, page, anchor: Block | None = None) -> HeadingCandidate:
     """Build a heading candidate wrapper for a heading block."""
     tokens = tokenize_block(block)
     # Extract structural numbering from the leading line.
     item_list: list[int] = []
     has_numbering = False
-    prefix: Optional[TokenView] = None
+    prefix: TokenView | None = None
     title: TokenView = tokens
     if numbering_kind(block.line()) == 1:
         num_str = numbering_text(block.line())
@@ -322,7 +323,7 @@ def outline_to_dict_tree(outline_node_list: list[OutlineNode], total_pages: int)
             boundary = total_pages
         outline_entry["end_index"] = max(
             outline_entry["start_index"],
-            boundary if boundary > outline_entry["start_index"] else outline_entry["start_index"],
+            max(outline_entry["start_index"], boundary),
         )
     if flat:
         flat[-1]["end_index"] = max(flat[-1]["start_index"], total_pages)

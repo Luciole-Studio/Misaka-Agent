@@ -21,7 +21,6 @@ from misaka.ai.providers._common import (
     _empty_usage,
     _is_aborted,
     _iterate_async_iterable,
-    _maybe_await,
     _option,
     _prepare_sdk_params,
 )
@@ -64,6 +63,7 @@ from misaka.ai.types import (
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
+from misaka.utils.values import maybe_await
 
 ClampedThinkingLevel = Literal["minimal", "low", "medium", "high"]
 
@@ -252,7 +252,7 @@ def stream_google(
             params = build_params(model, context, options)
             on_payload = _option(options, "onPayload")
             if callable(on_payload):
-                next_params = await _maybe_await(on_payload(params, model))
+                next_params = await maybe_await(on_payload(params, model))
                 if next_params is not None:
                     params = next_params
 
@@ -407,7 +407,7 @@ def stream_google(
             close = getattr(aio_client, "aclose", None) if aio_client is not None else None
             if callable(close):
                 try:
-                    await _maybe_await(close())
+                    await maybe_await(close())
                 except Exception:  # noqa: BLE001, S110 - closing the SDK client is best-effort after the stream ended
                     pass
             stream.end()

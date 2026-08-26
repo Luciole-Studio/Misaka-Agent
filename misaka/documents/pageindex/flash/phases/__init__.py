@@ -8,43 +8,42 @@ from typing import Optional
 
 from sortedcontainers import SortedKeyList
 
-from ..clustering import LinesContainer, cluster_lines, build_initial_lines
-from ..columns import detect_columns, ColumnDetectionContext, columns_to_x_bounds
+from ..clustering import LinesContainer, build_initial_lines, cluster_lines
+from ..columns import ColumnDetectionContext, columns_to_x_bounds, detect_columns
 from ..model import (
-    Span,
-    left_aligned,
-    right_aligned,
-    center_aligned,
-    x_centers_close,
-    to_number,
+    Line,
     Rect,
+    Span,
     append_span,
     avg_char_width,
-    Line,
+    center_aligned,
     info_weight,
+    left_aligned,
+    right_aligned,
+    to_number,
+    x_centers_close,
 )
-from ..stats import column_index_of, PageStats, compute_page_stats
-
+from ..stats import PageStats, column_index_of, compute_page_stats
+from .line_numbers import (
+    LineNumberCluster,
+    init_line_number_cluster,
+    nearest_cluster,
+    strip_line_numbers,
+    validate_line_number_cluster,
+)
 from .page_view import (
     PageView,
     assign_reading_order,
     process_page,
 )
-from .line_numbers import (
-    LineNumberCluster,
-    init_line_number_cluster,
-    nearest_cluster,
-    validate_line_number_cluster,
-    strip_line_numbers,
-)
 
 __all__ = [
-    "assign_reading_order",
     "LineNumberCluster",
+    "PageView",
+    "assign_reading_order",
     "init_line_number_cluster",
     "nearest_cluster",
-    "validate_line_number_cluster",
-    "strip_line_numbers",
-    "PageView",
     "process_page",
+    "strip_line_numbers",
+    "validate_line_number_cluster",
 ]

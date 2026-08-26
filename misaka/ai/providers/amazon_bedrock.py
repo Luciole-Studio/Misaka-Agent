@@ -30,7 +30,6 @@ from misaka.ai.providers._common import (
     _close_stream,
     _empty_usage,
     _is_aborted,
-    _maybe_await,
     _option,
     resolve_cache_retention,
     safe_json_stringify,
@@ -75,6 +74,7 @@ from misaka.ai.utils.headers import headers_to_record
 from misaka.ai.utils.json_parse import parse_streaming_json
 from misaka.ai.utils.node_http_proxy import create_http_proxy_agents_for_target
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
+from misaka.utils.values import maybe_await
 
 BedrockThinkingDisplay = Literal["summarized", "omitted"]
 
@@ -244,7 +244,7 @@ def stream_bedrock(
 
             on_payload = _option(options, "onPayload")
             if callable(on_payload):
-                next_input = await _maybe_await(on_payload(command_input, model))
+                next_input = await maybe_await(on_payload(command_input, model))
                 if next_input is not None:
                     command_input = next_input
 
@@ -259,7 +259,7 @@ def stream_bedrock(
                 headers: dict[str, str] = {}
                 if response_metadata.get("RequestId"):
                     headers["x-amzn-requestid"] = str(response_metadata["RequestId"])
-                await _maybe_await(
+                await maybe_await(
                     on_response({"status": int(response_metadata["HTTPStatusCode"]), "headers": headers}, model)
                 )
 

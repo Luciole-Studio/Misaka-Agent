@@ -11,34 +11,56 @@ from pathlib import Path
 from typing import Optional
 
 from ..model import (
-    _trim_unicode_ws,
-    left_aligned,
-    right_aligned,
-    center_aligned,
-    Rect,
-    last_span,
-    heading_score,
+    Block,
     Line,
-    last_line_of,
-    first_span_of,
+    Rect,
+    _trim_unicode_ws,
+    alignment_code,
     block_text,
+    center_aligned,
     deaccented_text,
-    letter_count,
     dominant_style_of,
+    first_span_of,
+    heading_score,
     info_weight,
     is_upper_dominant,
-    alignment_code,
-    Block,
+    last_line_of,
+    last_span,
+    left_aligned,
+    letter_count,
+    right_aligned,
 )
-from ..stats import DocStats, column_index_of, tally_scripts, dominant_script_family, ScriptHistogram
-from ..tokens import is_superscript_adjacent, clamp_value, enumerate_tokens, jenkins_hash, trie_prefix_match, set_case_fold, TrieConfig, build_trie, tokenize_block, _de_norm, BuiltTrie, is_word_token
-
+from ..stats import (
+    DocStats,
+    ScriptHistogram,
+    column_index_of,
+    dominant_script_family,
+    tally_scripts,
+)
+from ..tokens import (
+    BuiltTrie,
+    TrieConfig,
+    _de_norm,
+    build_trie,
+    clamp_value,
+    enumerate_tokens,
+    is_superscript_adjacent,
+    is_word_token,
+    jenkins_hash,
+    set_case_fold,
+    tokenize_block,
+    trie_prefix_match,
+)
+from .detect import (
+    TitleSearchState,
+    detect_title,
+)
 from .dicts import (
     _DICT_PATH,
-    _normalize_text_key,
-    _load_dicts,
     INSTITUTION_WORDS,
     TITLE_LABEL_TRIE,
+    _load_dicts,
+    _normalize_text_key,
 )
 from .scoring import (
     TitleCandidate,
@@ -46,9 +68,5 @@ from .scoring import (
     is_title_candidate_block,
     score_title_candidate,
 )
-from .detect import (
-    TitleSearchState,
-    detect_title,
-)
 
-__all__ = ["is_title_candidate_block", "score_title_candidate", "TitleSearchState", "TitleCandidate", "detect_title", "is_cover_like_page", "TITLE_LABEL_TRIE", "INSTITUTION_WORDS"]
+__all__ = ["INSTITUTION_WORDS", "TITLE_LABEL_TRIE", "TitleCandidate", "TitleSearchState", "detect_title", "is_cover_like_page", "is_title_candidate_block", "score_title_candidate"]

@@ -3,18 +3,11 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Optional
+
 from ..model import (
-    _UNICODE_WHITESPACE_CLASS,
-    _strip_diacritics,
-    _trim_unicode_ws,
-    style_key, magnitude_ratio, same_x_extent, same_y_extent, y_overlaps, left_aligned, right_aligned, center_aligned, x_aligned, x_centers_close, to_number,
-    last_span, avg_char_width, raw_text_of_line, heading_score, numbering_text, numbering_value, numbering_kind, Line, last_line_of, first_span_of, is_word_category, block_text, is_punct_category, deaccented_text, letter_count, punct_count, dominant_style_of,
-    info_weight, dominant_font_size, is_upper_dominant, is_caps_heavy, CharStats, alignment_code, Block,
+    Block,
 )
-
 from .text_checks import clamp
-
 
 # --------------------------------------------------------------------------- #
 # Per-page neighbor map.
@@ -24,7 +17,7 @@ from .text_checks import clamp
 class BlockNeighborCache:
     """Per-block neighbor cache populated by the page neighbor map."""
 
-    __slots__ = ("state_slot", "tertiary_slot", "measure_slot", "auxiliary_slot", "primary_slot", "secondary_slot", "option_slot")
+    __slots__ = ("auxiliary_slot", "measure_slot", "option_slot", "primary_slot", "secondary_slot", "state_slot", "tertiary_slot")
 
     def __init__(self):
         self.state_slot = False   # initialized flag
@@ -43,19 +36,19 @@ def compute_bucket_span(neighbor_map, block) -> dict:
     return {"start_bucket": start_bucket, "end_bucket": end_bucket}
 
 
-def neighbor_above(neighbor_map, other_block: Block) -> Optional[Block]:
+def neighbor_above(neighbor_map, other_block: Block) -> Block | None:
     """closest 'j' neighbor (block above)."""
     width_value = neighbor_map.primary_slot[other_block.orig_index] if other_block.orig_index < len(neighbor_map.primary_slot) else None
     return width_value.tertiary_slot if width_value is not None else None
 
 
-def body_neighbor_above(neighbor_map, other_block: Block) -> Optional[Block]:
+def body_neighbor_above(neighbor_map, other_block: Block) -> Block | None:
     """closest 'g' neighbor."""
     width_value = neighbor_map.primary_slot[other_block.orig_index] if other_block.orig_index < len(neighbor_map.primary_slot) else None
     return width_value.primary_slot if width_value is not None else None
 
 
-def neighbor_right(neighbor_map, other_block: Block) -> Optional[Block]:
+def neighbor_right(neighbor_map, other_block: Block) -> Block | None:
     """Closest right-side peer neighbor."""
     width_value = neighbor_map.primary_slot[other_block.orig_index] if other_block.orig_index < len(neighbor_map.primary_slot) else None
     return width_value.auxiliary_slot if width_value is not None else None
@@ -65,7 +58,7 @@ def neighbor_right_peer(neighbor_map, secondary_item):
     return neighbor_right(neighbor_map, secondary_item)
 
 
-def closest_body_neighbor_above(neighbor_map, other_block: Block) -> Optional[Block]:
+def closest_body_neighbor_above(neighbor_map, other_block: Block) -> Block | None:
     """Closest stored neighbor above."""
     width_value = neighbor_map.primary_slot[other_block.orig_index] if other_block.orig_index < len(neighbor_map.primary_slot) else None
     return width_value.secondary_slot if width_value is not None else None
@@ -74,13 +67,13 @@ def closest_body_neighbor_above(neighbor_map, other_block: Block) -> Optional[Bl
 class PageNeighborMap:
     """Per-page horizontal-bucket neighbor map for constant-time nearby-block queries."""
 
-    __slots__ = ("tertiary_slot", "secondary_slot", "primary_slot")
+    __slots__ = ("primary_slot", "secondary_slot", "tertiary_slot")
 
     def __init__(self, page):
         blocks = page.output_slot
         self.tertiary_slot = max(5, page.bounds.bbox_width() / 300)                  # bucket width
         self.secondary_slot = int(math.floor(page.bounds.bbox_width() / self.tertiary_slot))      # bucket count
-        self.primary_slot: list[Optional[BlockNeighborCache]] = [None] * (max(len(blocks), 1) + 1)
+        self.primary_slot: list[BlockNeighborCache | None] = [None] * (max(len(blocks), 1) + 1)
         # mark buckets crossed by body-marked blocks
         marked = [False] * self.secondary_slot
         for candidate_item in blocks:
@@ -96,7 +89,7 @@ class PageNeighborMap:
         # write to it extends the list. On a degenerate page with zero buckets
         # every clamped index is 0, so one slot reproduces that growth.
         recent_block_index: list[int] = [-1] * max(self.secondary_slot, 1)  # most-recent block V (j-direction)
-        recent: list[Optional[Block]] = [None] * self.secondary_slot    # most-recent block at bucket
+        recent: list[Block | None] = [None] * self.secondary_slot    # most-recent block at bucket
         pending: list[list[int]] = [[] for _ in range(self.secondary_slot)]   # pending V's per bucket
 
         for block_index, current_block in enumerate(blocks):

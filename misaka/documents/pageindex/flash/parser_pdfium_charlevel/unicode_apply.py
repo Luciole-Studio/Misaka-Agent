@@ -7,12 +7,12 @@ import difflib
 import re
 from collections import Counter
 
-from .text_normalize import _is_whitespace
-from .font_unicode import _font_unicode_map
 from .code_walk import (
     _char_category,
     _walk_codes,
 )
+from .font_unicode import _font_unicode_map
+from .text_normalize import _is_whitespace
 
 _SURROGATES = re.compile("[\ud800-\udfff]")
 
@@ -102,7 +102,7 @@ def _apply_font_unicode(
         # merger's font/fs identity and the Type-3 sizing alike.
         def _rewalk_window(window: list[int]) -> bool:
             char_value = sorted(
-                (pair for state_item in window for pair in chars_by_obj.get(id(objects[state_item]), [])))
+                pair for state_item in window for pair in chars_by_obj.get(id(objects[state_item]), []))
             text_transform: list[str] = []
             owner: list[int] = []
             for state_item in window:

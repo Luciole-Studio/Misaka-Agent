@@ -4,21 +4,19 @@ from __future__ import annotations
 
 import json
 import re
-import regex as regex_module  # Unicode \p{...} property classes.
 from pathlib import Path
+
+import regex as regex_module  # Unicode \p{...} property classes.
+
 from ..model import (
     _UNICODE_WHITESPACE_CLASS,
     _strip_diacritics,
-    _trim_unicode_ws,
-    style_key, magnitude_ratio, same_x_extent, same_y_extent, y_overlaps, left_aligned, right_aligned, center_aligned, x_aligned, x_centers_close, to_number,
-    last_span, avg_char_width, raw_text_of_line, heading_score, numbering_text, numbering_value, numbering_kind, Line, last_line_of, first_span_of, is_word_category, block_text, is_punct_category, deaccented_text, letter_count, punct_count, dominant_style_of,
-    info_weight, dominant_font_size, is_upper_dominant, is_caps_heavy, CharStats, alignment_code, Block,
 )
 from ..tokens import (
-    is_trimmable_token, token_numeric_value, Token, TokenView, wrap_tokens, enumerate_tokens, last_token, trie_prefix_match, strip_trie_match, strip_leading_if_in, COMMA_CHARS, strip_trailing_comma, first_token, trim_trailing_punct, set_case_fold, TrieConfig, build_trie, tokenize_block,
-    trie_full_match, last_token_anchor, first_anchor_span, is_char_token, is_word_token,
+    TrieConfig,
+    build_trie,
+    set_case_fold,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Dictionary tries (case-folded) #

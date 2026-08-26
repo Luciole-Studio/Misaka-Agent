@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -45,6 +44,7 @@ from misaka.ai.types import (
     Usage,
     validate_message,
 )
+from misaka.utils.values import maybe_await
 
 
 class MutableAgentState(AgentState):
@@ -474,7 +474,7 @@ class Agent:
         async def prepare_next_turn(_next_turn_context: Any) -> AgentLoopTurnUpdate | None:
             if self.prepareNextTurn is None:
                 return None
-            return await _maybe_await(self.prepareNextTurn(self.signal))
+            return await maybe_await(self.prepareNextTurn(self.signal))
 
         return AgentLoopConfig(
             model=self._state.model,
@@ -555,7 +555,7 @@ class Agent:
         if signal is None:
             raise RuntimeError("Agent listener invoked outside active run")
         for listener in tuple(self._listeners):
-            await _maybe_await(listener(event, signal))
+            await maybe_await(listener(event, signal))
 
     def _reduce_state(self, event: AgentEvent) -> None:
         if event.type == "message_start":
@@ -601,12 +601,6 @@ class Agent:
         if isinstance(message, dict):
             return dict(message)
         return message
-
-
-async def _maybe_await(value: Any) -> Any:
-    if inspect.isawaitable(value):
-        return await value
-    return value
 
 
 __all__ = [

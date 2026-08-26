@@ -3,31 +3,33 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Callable, Optional
+
 from ..model import (
-    style_key, left_aligned, right_aligned, center_aligned, x_aligned, rect_union,
-    Rect, last_span, avg_char_width, raw_text_of_line, heading_score, numbering_text, numbering_value, numbering_kind,
-    reading_order_key, left_edge_key, _trim_unicode_ws, _round_half_up_to_int, Line, last_line_of, first_span_of, block_text, deaccented_text, letter_count, dominant_style_of, info_weight, dominant_font_size, is_upper_dominant, is_caps_heavy, alignment_code, Block,
+    _round_half_up_to_int,
+    dominant_font_size,
+    is_caps_heavy,
+    style_key,
 )
 from ..tokens import (
-    Token, TokenView, wrap_tokens, enumerate_tokens, last_token, trie_prefix_match, first_token, set_case_fold, TrieConfig, build_trie, tokenize_block, avg_char_width as avg_char_width_fn, trie_full_match, first_anchor_span, is_char_token, is_word_token,
+    first_anchor_span,
+    first_token,
+    is_word_token,
+    tokenize_block,
 )
-
 from .candidates import (
     HeadingCandidate,
     OutlineNode,
-    heading_signature,
-    parent_signature,
-    is_in_oo_range,
     has_style_neighbor,
+    heading_signature,
+    is_in_oo_range,
+    parent_signature,
 )
 from .style_context import (
-    StyleCluster,
-    count_sibling_numberings,
     OutlineState,
+    StyleCluster,
     compare_heading_depth,
+    count_sibling_numberings,
 )
-
 
 # --------------------------------------------------------------------------- #
 # cp / bp -- state mutators (,) #
@@ -55,8 +57,7 @@ def min_font_distance(state: OutlineState, other_heading_candidate: HeadingCandi
                     if entry["heading"] is other_heading_candidate:
                         continue
                     diff = abs(span.font_size - entry["size"])
-                    if diff < min_value:
-                        min_value = diff
+                    min_value = min(min_value, diff)
                     if diff <= 0:
                         return 0
     return min_value
@@ -177,7 +178,7 @@ class HierarchyStack:
         self.secondary_slot = False
         self.tertiary_slot = False
 
-    def pop(self) -> Optional[OutlineNode]:
+    def pop(self) -> OutlineNode | None:
         return self.primary_slot.pop() if self.primary_slot else None
 
     def push(self, other_outline_node: OutlineNode) -> None:
@@ -186,9 +187,9 @@ class HierarchyStack:
         self.tertiary_slot = self.tertiary_slot or other_outline_node.heading.is_prominent
 
 
-def find_parent_heading(stack: HierarchyStack, other_heading_candidate: HeadingCandidate) -> Optional[OutlineNode]:
+def find_parent_heading(stack: HierarchyStack, other_heading_candidate: HeadingCandidate) -> OutlineNode | None:
     """Pop entries from the stack until a parent for the candidate is found."""
-    heading: Optional[HeadingCandidate] = None
+    heading: HeadingCandidate | None = None
     while stack.primary_slot:
         stack_outline_node = stack.primary_slot[-1]
         state_candidate = stack_outline_node.heading
@@ -222,7 +223,7 @@ def find_parent_heading(stack: HierarchyStack, other_heading_candidate: HeadingC
     return None
 
 
-def is_appendix_nesting_ok(stack: HierarchyStack, other_heading_candidate: HeadingCandidate, candidate_heading_candidate: Optional[HeadingCandidate]) -> bool:
+def is_appendix_nesting_ok(stack: HierarchyStack, other_heading_candidate: HeadingCandidate, candidate_heading_candidate: HeadingCandidate | None) -> bool:
     """Return whether an appendix candidate may be nested under the current stack state. Non-appendix headings always pass; appendix headings pass when the stack is already in appendix mode, has no numbering context, or starts at appendix depth 1..3."""
     if other_heading_candidate.type != 4:
         return True
@@ -242,7 +243,7 @@ def is_appendix_nesting_ok(stack: HierarchyStack, other_heading_candidate: Headi
 # --------------------------------------------------------------------------- #
 
 
-def extract_sub_headings(doc, state: OutlineState, parent_node: Optional[OutlineNode], cluster_candidates: list[HeadingCandidate]) -> list[OutlineNode]:
+def extract_sub_headings(doc, state: OutlineState, parent_node: OutlineNode | None, cluster_candidates: list[HeadingCandidate]) -> list[OutlineNode]:
     """Walk a cluster's candidate list and emit subheadings. The input list is consumed in place so later passes do not reprocess headings already assigned to this cluster."""
     if not cluster_candidates:
         return []

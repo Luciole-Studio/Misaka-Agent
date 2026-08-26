@@ -3,9 +3,25 @@
 from __future__ import annotations
 
 from PyPDF2.generic import (
-    IndirectObject as PdfIndirectRef, NameObject as PdfName, NumberObject as PdfNumber,
-    FloatObject as PdfFloat, BooleanObject as PdfBoolean,
-    DictionaryObject as PdfDictionary, ArrayObject as PdfArray,
+    ArrayObject as PdfArray,
+)
+from PyPDF2.generic import (
+    BooleanObject as PdfBoolean,
+)
+from PyPDF2.generic import (
+    DictionaryObject as PdfDictionary,
+)
+from PyPDF2.generic import (
+    FloatObject as PdfFloat,
+)
+from PyPDF2.generic import (
+    IndirectObject as PdfIndirectRef,
+)
+from PyPDF2.generic import (
+    NameObject as PdfName,
+)
+from PyPDF2.generic import (
+    NumberObject as PdfNumber,
 )
 
 

@@ -15,6 +15,7 @@ from misaka.core.output_guard import (
     writeRawStdout,
 )
 from misaka.utils.shell import killTrackedDetachedChildren
+from misaka.utils.values import read_field
 
 
 @dataclass(slots=True)
@@ -25,23 +26,17 @@ class PrintModeOptions:
     initialImages: list[ImageContent] | None = None
 
 
-def _value(obj: Any, name: str, default: Any = None) -> Any:
-    if isinstance(obj, dict):
-        return obj.get(name, default)
-    return getattr(obj, name, default)
-
-
 def _message_role(message: Any) -> str | None:
-    role = _value(message, "role")
+    role = read_field(message, "role")
     return role if isinstance(role, str) else None
 
 
 def _message_content(message: Any) -> Any:
-    return _value(message, "content")
+    return read_field(message, "content")
 
 
 def _content_type(block: Any) -> str | None:
-    block_type = _value(block, "type")
+    block_type = read_field(block, "type")
     return block_type if isinstance(block_type, str) else None
 
 
@@ -73,19 +68,19 @@ async def run_print_mode(runtime_host: Any, options: PrintModeOptions | dict[str
 
         async def _fork(entry_id: str, fork_options: Any = None) -> dict[str, Any]:
             result = await runtime_host.fork(entry_id, fork_options)
-            return {"cancelled": _value(result, "cancelled")}
+            return {"cancelled": read_field(result, "cancelled")}
 
         async def _navigate_tree(target_id: str, navigate_options: Any = None) -> dict[str, Any]:
             result = await session.navigateTree(
                 target_id,
                 {
-                    "summarize": _value(navigate_options, "summarize"),
-                    "customInstructions": _value(navigate_options, "customInstructions"),
-                    "replaceInstructions": _value(navigate_options, "replaceInstructions"),
-                    "label": _value(navigate_options, "label"),
+                    "summarize": read_field(navigate_options, "summarize"),
+                    "customInstructions": read_field(navigate_options, "customInstructions"),
+                    "replaceInstructions": read_field(navigate_options, "replaceInstructions"),
+                    "label": read_field(navigate_options, "label"),
                 },
             )
-            return {"cancelled": _value(result, "cancelled")}
+            return {"cancelled": read_field(result, "cancelled")}
 
         async def _reload() -> None:
             await session.reload()
@@ -104,8 +99,8 @@ async def run_print_mode(runtime_host: Any, options: PrintModeOptions | dict[str
                     "reload": _reload,
                 },
                 "onError": lambda error: print(
-                    f"Extension error ({_value(error, 'extensionPath', '<unknown>')}): "
-                    f"{_value(error, 'error', error)}",
+                    f"Extension error ({read_field(error, 'extensionPath', '<unknown>')}): "
+                    f"{read_field(error, 'error', error)}",
                     file=sys.stderr,
                 ),
             }
@@ -160,13 +155,13 @@ async def run_print_mode(runtime_host: Any, options: PrintModeOptions | dict[str
         if resolved.mode == "text":
             last_message = session.state.messages[-1] if session.state.messages else None
             if _message_role(last_message) == "assistant":
-                stop_reason = _value(last_message, "stopReason")
+                stop_reason = read_field(last_message, "stopReason")
                 if stop_reason in {"error", "aborted"}:
-                    print(_value(last_message, "errorMessage") or f"Request {stop_reason}", file=sys.stderr)
+                    print(read_field(last_message, "errorMessage") or f"Request {stop_reason}", file=sys.stderr)
                     return 1
                 for content in _message_content(last_message) or []:
                     if _content_type(content) == "text":
-                        writeRawStdout(f"{_value(content, 'text', '')}\n")
+                        writeRawStdout(f"{read_field(content, 'text', '')}\n")
 
         return 0
     except Exception as error:  # noqa: BLE001

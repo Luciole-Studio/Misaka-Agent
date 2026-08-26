@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-
 # --------------------------------------------------------------------------- #
 # Script-family detector and bucket table.
 # --------------------------------------------------------------------------- #
@@ -54,7 +53,7 @@ SCRIPT_FAMILY_WEIGHTS: dict[int, list[tuple[int, int]]] = {
 class ScriptHistogram:
     """Script-bucket accumulator with total character count and per-bucket histogram."""
 
-    __slots__ = ("secondary_slot", "primary_slot")
+    __slots__ = ("primary_slot", "secondary_slot")
 
     def __init__(self):
         self.secondary_slot: int = 0

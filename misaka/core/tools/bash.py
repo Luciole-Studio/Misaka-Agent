@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
-from misaka.core.tools._common import _is_aborted, _string_arg, _value, abort_race
+from misaka.core.tools._common import _is_aborted, _string_arg, abort_race
 from misaka.core.tools.output_accumulator import (
     OutputAccumulator,
     OutputAccumulatorOptions,
@@ -39,6 +39,7 @@ from misaka.utils.shell import (
     track_detached_child_pid,
     untrack_detached_child_pid,
 )
+from misaka.utils.values import read_field
 
 _BASH_PREVIEW_LINES = 5
 _BASH_UPDATE_THROTTLE_SECONDS = 0.1
@@ -300,8 +301,8 @@ def _create_render_interval(invalidate: Callable[[], None]) -> asyncio.Task[None
 
 
 def _format_bash_call(args: dict[str, Any] | None) -> str:
-    command = _string_arg(_value(args, "command"))
-    timeout = _value(args, "timeout")
+    command = _string_arg(read_field(args, "command"))
+    timeout = read_field(args, "timeout")
     timeout_suffix = theme.fg("muted", f" (timeout {timeout}s)") if timeout else ""
     if command is None:
         command_display = invalid_arg_text(theme)
@@ -324,12 +325,12 @@ def _rebuild_bash_result_render_component(
     component.clear()
 
     output = get_text_output(result, show_images).strip()
-    details = _value(result, "details")
-    truncation = _value(details, "truncation")
-    full_output_path = _value(details, "fullOutputPath")
+    details = read_field(result, "details")
+    truncation = read_field(details, "truncation")
+    full_output_path = read_field(details, "fullOutputPath")
     if (
-        not bool(_value(options, "isPartial"))
-        and bool(_value(truncation, "truncated"))
+        not bool(read_field(options, "isPartial"))
+        and bool(read_field(truncation, "truncated"))
         and full_output_path
         and output.endswith("]")
     ):
@@ -339,31 +340,31 @@ def _rebuild_bash_result_render_component(
 
     if output:
         styled_output = "\n".join(theme.fg("toolOutput", line) for line in output.split("\n"))
-        if bool(_value(options, "expanded")):
+        if bool(read_field(options, "expanded")):
             component.addChild(Text(f"\n{styled_output}", 0, 0))
         else:
             component.addChild(_CollapsedBashPreview(styled_output, state))
 
-    if bool(_value(truncation, "truncated")) or full_output_path:
+    if bool(read_field(truncation, "truncated")) or full_output_path:
         warnings: list[str] = []
         if full_output_path:
             warnings.append(f"Full output: {full_output_path}")
-        if bool(_value(truncation, "truncated")):
-            if _value(truncation, "truncatedBy") == "lines":
+        if bool(read_field(truncation, "truncated")):
+            if read_field(truncation, "truncatedBy") == "lines":
                 warnings.append(
-                    f"Truncated: showing {_value(truncation, 'outputLines')} of {_value(truncation, 'totalLines')} lines"
+                    f"Truncated: showing {read_field(truncation, 'outputLines')} of {read_field(truncation, 'totalLines')} lines"
                 )
             else:
                 warnings.append(
                     "Truncated: "
-                    f"{_value(truncation, 'outputLines')} lines shown "
-                    f"({format_size(_value(truncation, 'maxBytes') or DEFAULT_MAX_BYTES)} limit)"
+                    f"{read_field(truncation, 'outputLines')} lines shown "
+                    f"({format_size(read_field(truncation, 'maxBytes') or DEFAULT_MAX_BYTES)} limit)"
                 )
         warning_text = f"[{'. '.join(warnings)}]"
         component.addChild(Text(f"\n{theme.fg('warning', warning_text)}", 0, 0))
 
     if started_at is not None:
-        label = "Elapsed" if bool(_value(options, "isPartial")) else "Took"
+        label = "Elapsed" if bool(read_field(options, "isPartial")) else "Took"
         end_time = ended_at if ended_at is not None else _now_ms()
         component.addChild(Text(f"\n{theme.fg('muted', f'{label} {_format_duration(end_time - started_at)}')}", 0, 0))
 
@@ -384,9 +385,9 @@ def _render_result(
     context: Any,
 ) -> _BashResultRenderComponent:
     state = _get_render_state(context.state)
-    if state.startedAt is not None and bool(_value(options, "isPartial")) and state.interval is None:
+    if state.startedAt is not None and bool(read_field(options, "isPartial")) and state.interval is None:
         state.interval = _create_render_interval(context.invalidate)
-    if not bool(_value(options, "isPartial")) or context.isError:
+    if not bool(read_field(options, "isPartial")) or context.isError:
         if state.endedAt is None:
             state.endedAt = _now_ms()
         if state.interval is not None:

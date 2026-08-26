@@ -17,8 +17,6 @@ from misaka.core.extensions.types import ToolDefinition
 from misaka.core.tools._common import (
     _ignore_background_task_result,
     _is_aborted,
-    _maybe_await,
-    _value,
     abort_race,
 )
 from misaka.core.tools.path_utils import resolve_to_cwd
@@ -37,6 +35,7 @@ from misaka.core.tools.truncate import (
     truncate_head,
 )
 from misaka.ui.tui import Text
+from misaka.utils.values import maybe_await, read_field
 
 T = TypeVar("T")
 
@@ -89,9 +88,9 @@ def _coerce_options(options: LsToolOptions | Mapping[str, Any] | None) -> LsTool
 
 
 def _format_ls_call(args: Mapping[str, Any] | None, theme_obj: Any) -> str:
-    raw_path = str_value(_value(args, "path"))
+    raw_path = str_value(read_field(args, "path"))
     path_value = shorten_path(raw_path or ".") if raw_path is not None else None
-    limit = _value(args, "limit")
+    limit = read_field(args, "limit")
     invalid_arg = invalid_arg_text(theme_obj)
     text = f"{theme_obj.fg('toolTitle', theme_obj.bold('ls'))} {invalid_arg if path_value is None else theme_obj.fg('accent', path_value)}"
     if limit is not None:
@@ -106,7 +105,7 @@ def _format_ls_result(result: Any, options: Any, theme_obj: Any, show_images: bo
     text = ""
     if output:
         lines = output.split("\n")
-        max_lines = len(lines) if bool(_value(options, "expanded")) else 20
+        max_lines = len(lines) if bool(read_field(options, "expanded")) else 20
         display_lines = lines[:max_lines]
         remaining = len(lines) - max_lines
         text += "\n" + "\n".join(theme_obj.fg("toolOutput", line) for line in display_lines)
@@ -114,15 +113,15 @@ def _format_ls_result(result: Any, options: Any, theme_obj: Any, show_images: bo
             more_lines_text = theme_obj.fg("muted", f"\n... ({remaining} more lines,")
             text += f"{more_lines_text} {key_hint('app.tools.expand', 'to expand')})"
 
-    details = _value(result, "details")
-    entry_limit = _value(details, "entryLimitReached")
-    truncation = _value(details, "truncation")
-    if entry_limit or bool(_value(truncation, "truncated")):
+    details = read_field(result, "details")
+    entry_limit = read_field(details, "entryLimitReached")
+    truncation = read_field(details, "truncation")
+    if entry_limit or bool(read_field(truncation, "truncated")):
         warnings: list[str] = []
         if entry_limit:
             warnings.append(f"{entry_limit} entries limit")
-        if bool(_value(truncation, "truncated")):
-            warnings.append(f"{format_size(_value(truncation, 'maxBytes') or DEFAULT_MAX_BYTES)} limit")
+        if bool(read_field(truncation, "truncated")):
+            warnings.append(f"{format_size(read_field(truncation, 'maxBytes') or DEFAULT_MAX_BYTES)} limit")
         warning_text = f"[Truncated: {', '.join(warnings)}]"
         text += "\n" + theme_obj.fg("warning", warning_text)
     return text
@@ -166,15 +165,15 @@ def create_ls_tool_definition(
         effective_limit = parsed.limit if parsed.limit is not None else DEFAULT_LIMIT
 
         async def worker() -> AgentToolResult:
-            if not await _maybe_await(operations.exists(dir_path)):
+            if not await maybe_await(operations.exists(dir_path)):
                 raise RuntimeError(f"Path not found: {dir_path}")
 
-            stat_result = await _maybe_await(operations.stat(dir_path))
+            stat_result = await maybe_await(operations.stat(dir_path))
             if not _is_directory(stat_result):
                 raise RuntimeError(f"Not a directory: {dir_path}")
 
             try:
-                entries = await _maybe_await(operations.readdir(dir_path))
+                entries = await maybe_await(operations.readdir(dir_path))
             except Exception as error:  # noqa: BLE001 - any readdir failure becomes the user-facing error
                 raise RuntimeError(f"Cannot read directory: {error}") from None
 
@@ -187,7 +186,7 @@ def create_ls_tool_definition(
                     break
                 full_path = os.path.join(dir_path, entry)
                 try:
-                    entry_stat = await _maybe_await(operations.stat(full_path))
+                    entry_stat = await maybe_await(operations.stat(full_path))
                 except Exception:  # noqa: BLE001, S112 - an entry that vanished or cannot be read is left out
                     continue
                 results.append(f"{entry}/" if _is_directory(entry_stat) else entry)

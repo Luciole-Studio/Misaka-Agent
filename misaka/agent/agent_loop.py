@@ -45,6 +45,7 @@ from misaka.ai.types import (
 )
 from misaka.ai.utils.event_stream import EventStream
 from misaka.ai.utils.validation import validate_tool_arguments
+from misaka.utils.values import maybe_await
 
 type AgentEventSink = Callable[[AgentEvent], Awaitable[None] | None]
 
@@ -209,7 +210,7 @@ async def _run_loop(
     current_context = initial_context
     config = initial_config
     first_turn = True
-    pending_messages = list(await _maybe_await(config.getSteeringMessages()) if config.getSteeringMessages else [])
+    pending_messages = list(await maybe_await(config.getSteeringMessages()) if config.getSteeringMessages else [])
 
     while True:
         has_more_tool_calls = True
@@ -258,7 +259,7 @@ async def _run_loop(
                 newMessages=new_messages,
             )
             next_turn_snapshot = (
-                await _maybe_await(config.prepareNextTurn(next_turn_context))
+                await maybe_await(config.prepareNextTurn(next_turn_context))
                 if config.prepareNextTurn
                 else None
             )
@@ -277,7 +278,7 @@ async def _run_loop(
                 )
 
             should_stop = (
-                await _maybe_await(
+                await maybe_await(
                     config.shouldStopAfterTurn(
                         ShouldStopAfterTurnContext(
                             message=message,
@@ -295,11 +296,11 @@ async def _run_loop(
                 return
 
             pending_messages = list(
-                await _maybe_await(config.getSteeringMessages()) if config.getSteeringMessages else []
+                await maybe_await(config.getSteeringMessages()) if config.getSteeringMessages else []
             )
 
         follow_up_messages = list(
-            await _maybe_await(config.getFollowUpMessages()) if config.getFollowUpMessages else []
+            await maybe_await(config.getFollowUpMessages()) if config.getFollowUpMessages else []
         )
         if follow_up_messages:
             pending_messages = follow_up_messages
@@ -319,9 +320,9 @@ async def stream_assistant_response(
 ) -> AssistantMessage:
     messages = context.messages
     if config.transformContext:
-        messages = list(await _maybe_await(config.transformContext(messages, signal)))
+        messages = list(await maybe_await(config.transformContext(messages, signal)))
 
-    llm_messages = list(await _maybe_await(config.convertToLlm(messages)))
+    llm_messages = list(await maybe_await(config.convertToLlm(messages)))
     validated_messages = [validate_message(_model_dump(message)) for message in llm_messages]
     llm_context = Context(
         systemPrompt=context.systemPrompt or None,
@@ -330,7 +331,7 @@ async def stream_assistant_response(
     )
     stream_function = stream_fn or stream_simple
     resolved_api_key = (
-        await _maybe_await(config.getApiKey(config.model.provider))
+        await maybe_await(config.getApiKey(config.model.provider))
         if config.getApiKey
         else None
     ) or config.apiKey
@@ -338,7 +339,7 @@ async def stream_assistant_response(
     response_options_payload["apiKey"] = resolved_api_key
     response_options_payload["signal"] = signal
     response_options = StreamOptionsNamespace(**response_options_payload)
-    response = await _maybe_await(stream_function(config.model, llm_context, response_options))
+    response = await maybe_await(stream_function(config.model, llm_context, response_options))
 
     partial_message: AssistantMessage | None = None
     added_partial = False
@@ -623,7 +624,7 @@ async def prepare_tool_call(
         prepared_tool_call = prepare_tool_call_arguments(tool, tool_call)
         validated_args = validate_tool_arguments(tool, prepared_tool_call)
         if config.beforeToolCall:
-            before_result = await _maybe_await(
+            before_result = await maybe_await(
                 config.beforeToolCall(
                     BeforeToolCallContext(
                         assistantMessage=assistant_message,
@@ -693,7 +694,7 @@ async def execute_prepared_tool_call(
         update_tasks.append(asyncio.create_task(emit_update()))
 
     try:
-        result = await _maybe_await(
+        result = await maybe_await(
             prepared.tool.execute(prepared.toolCall.id, prepared.args, signal, on_update)
         )
         if update_tasks:
@@ -722,7 +723,7 @@ async def finalize_executed_tool_call(
 
     if config.afterToolCall:
         try:
-            after_result = await _maybe_await(
+            after_result = await maybe_await(
                 config.afterToolCall(
                     AfterToolCallContext(
                         assistantMessage=assistant_message,
@@ -817,13 +818,7 @@ def _push_event(stream: EventStream[AgentEvent, list[AgentMessage]]) -> AgentEve
 
 
 async def _emit(emit: AgentEventSink, event: AgentEvent) -> None:
-    await _maybe_await(emit(event))
-
-
-async def _maybe_await(value: Any) -> Any:
-    if inspect.isawaitable(value):
-        return await value
-    return value
+    await maybe_await(emit(event))
 
 
 async def _return_value(value: FinalizedToolCallOutcome) -> FinalizedToolCallOutcome:

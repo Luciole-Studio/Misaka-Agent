@@ -2,37 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 from ..model import (
-    _trim_unicode_ws,
-    left_aligned,
-    right_aligned,
-    center_aligned,
-    Rect,
-    last_span,
-    heading_score,
-    Line,
-    last_line_of,
-    first_span_of,
-    block_text,
-    deaccented_text,
-    letter_count,
-    dominant_style_of,
-    info_weight,
-    is_upper_dominant,
     alignment_code,
-    Block,
+    heading_score,
 )
-from ..tokens import is_superscript_adjacent, clamp_value, enumerate_tokens, jenkins_hash, trie_prefix_match, set_case_fold, TrieConfig, build_trie, tokenize_block, _de_norm, BuiltTrie, is_word_token
-
+from ..tokens import (
+    is_word_token,
+    tokenize_block,
+)
 from .scoring import (
     TitleCandidate,
     is_cover_like_page,
     is_title_candidate_block,
     score_title_candidate,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Title detection state.
@@ -42,12 +25,12 @@ from .scoring import (
 class TitleSearchState:
     """Title-detection state: document, visited blocks, and current best candidate."""
 
-    __slots__ = ("tertiary_slot", "primary_slot", "secondary_slot")
+    __slots__ = ("primary_slot", "secondary_slot", "tertiary_slot")
 
     def __init__(self, doc):
         self.tertiary_slot = doc
         self.primary_slot: set = set()
-        self.secondary_slot: Optional[TitleCandidate] = None
+        self.secondary_slot: TitleCandidate | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -55,7 +38,7 @@ class TitleSearchState:
 # --------------------------------------------------------------------------- #
 
 
-def detect_title(doc) -> Optional[TitleCandidate]:
+def detect_title(doc) -> TitleCandidate | None:
     """Iterate early pages, score title-like block groups, and return the best candidate."""
     state = TitleSearchState(doc)
     has_seen_da = False                                  # "broke into body" flag

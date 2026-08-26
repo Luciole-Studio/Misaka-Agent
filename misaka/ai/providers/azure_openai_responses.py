@@ -21,7 +21,6 @@ from misaka.ai.providers._common import (
     _close_stream,
     _empty_usage,
     _is_aborted,
-    _maybe_await,
     _option,
 )
 from misaka.ai.providers.openai_prompt_cache import clamp_openai_prompt_cache_key
@@ -44,6 +43,7 @@ from misaka.ai.types import (
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
+from misaka.utils.values import maybe_await
 
 DEFAULT_AZURE_API_VERSION = "v1"
 AZURE_TOOL_CALL_PROVIDERS = {"openai", "openai-codex", "opencode", "azure-openai-responses"}
@@ -233,7 +233,7 @@ async def _create_responses_stream(client: Any, params: dict[str, Any], options:
         raw_response = await _await_with_signal(with_raw_response.create(**params, **request_call_options), signal)
         on_response = _option(options, "onResponse")
         if callable(on_response):
-            await _maybe_await(
+            await maybe_await(
                 on_response(
                     {
                         "status": raw_response.http_response.status_code,
@@ -283,7 +283,7 @@ def stream_azure_openai_responses(
             params = build_params(model, context, options, deployment_name)
             on_payload = _option(options, "onPayload")
             if callable(on_payload):
-                next_params = await _maybe_await(on_payload(params, model))
+                next_params = await maybe_await(on_payload(params, model))
                 if next_params is not None:
                     params = next_params
             openai_stream = await _create_responses_stream(client, params, options, model)

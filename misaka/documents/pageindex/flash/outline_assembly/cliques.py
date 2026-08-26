@@ -2,41 +2,44 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
 from ..model import (
-    style_key, left_aligned, right_aligned, center_aligned, x_aligned, rect_union,
-    Rect, last_span, avg_char_width, raw_text_of_line, heading_score, numbering_text, numbering_value, numbering_kind,
-    reading_order_key, left_edge_key, _trim_unicode_ws, _round_half_up_to_int, Line, last_line_of, first_span_of, block_text, deaccented_text, letter_count, dominant_style_of, info_weight, dominant_font_size, is_upper_dominant, is_caps_heavy, alignment_code, Block,
+    dominant_style_of,
+    first_span_of,
+    is_caps_heavy,
+    last_line_of,
+    last_span,
+    style_key,
 )
-from ..stats import style_key as style_key_fn, column_index_of, tally_scripts, dominant_script_family, ScriptHistogram
-from ..tokens import (
-    Token, TokenView, wrap_tokens, enumerate_tokens, last_token, trie_prefix_match, first_token, set_case_fold, TrieConfig, build_trie, tokenize_block, avg_char_width as avg_char_width_fn, trie_full_match, first_anchor_span, is_char_token, is_word_token,
-)
-
 
 # --------------------------------------------------------------------------- #
 # Numbering-pattern clique selection.
 # --------------------------------------------------------------------------- #
-
-
 # Section-keyword trie shared with outline filtering.
 from ..outline import SECTION_KEYWORD_TRIE
-
+from ..stats import (
+    column_index_of,
+)
+from ..tokens import (
+    first_anchor_span,
+    first_token,
+    tokenize_block,
+    trie_full_match,
+)
 from .candidates import (
     HeadingCandidate,
     OutlineNode,
     compare_heading_order,
-    heading_order_key,
     has_style_neighbor,
+    heading_order_key,
 )
 from .style_context import (
+    OutlineContext,
     StyleCluster,
     is_compatible_with_context,
-    OutlineContext,
 )
 
 
-def find_keyword_clique(heading_candidates: list[HeadingCandidate]) -> Optional[StyleCluster]:
+def find_keyword_clique(heading_candidates: list[HeadingCandidate]) -> StyleCluster | None:
     """Find the largest clique of section-keyword headings sharing a font signature."""
     buckets: dict[str, StyleCluster] = {}
     for candidate_item in heading_candidates:
@@ -58,7 +61,7 @@ def find_keyword_clique(heading_candidates: list[HeadingCandidate]) -> Optional[
             style_cluster = StyleCluster()
             buckets[font_size] = style_cluster
             style_cluster.add(candidate_item)
-    winner: Optional[StyleCluster] = None
+    winner: StyleCluster | None = None
     max_size = 0
     for style_cluster in buckets.values():
         if style_cluster.size() > max_size:
@@ -127,7 +130,7 @@ def append_tree_child(ao_tree, parent_node: CliqueTreeNode, heading) -> None:
 class CliqueTreeBuilder:
     """(class at table entry). Builds a clique-tree from a heading list using a comparator. Each heading is placed by walking the cursor up/down based on comparator result. Depth capped at 8. """
 
-    __slots__ = ("root", "primary_slot")
+    __slots__ = ("primary_slot", "root")
 
     def __init__(self, headings: list[HeadingCandidate], compare):
         self.root = CliqueTreeNode(None, None)
@@ -154,7 +157,6 @@ class CliqueTreeBuilder:
 
 def block_style_signature(block) -> str:
     """Return a block-style signature combining dominant style and caps-heavy state."""
-    from ..model import dominant_style_of, is_caps_heavy
     # The boolean portion is lower-case because the signature is used as an
     # opaque stable key.
     return f"{dominant_style_of(block)} {'true' if is_caps_heavy(block) else 'false'}"
@@ -181,8 +183,8 @@ def is_member_of_tree(doc, block, target_sig: str, sentence_like: bool, node: Cl
 
 def can_share_heading_style(heading, other_heading, neighbor_map) -> bool:
     """Return whether two blocks can share a heading-style assignment after checking overlap, style signature, neighboring ambiguity, and predecessor consistency."""
-    from ..model import y_overlaps, dominant_style_of
-    from ..heading_detection import neighbor_right, neighbor_above
+    from ..heading_detection import neighbor_above, neighbor_right
+    from ..model import y_overlaps
     if other_heading is None or not y_overlaps(heading, other_heading) or dominant_style_of(heading) != dominant_style_of(other_heading):
         return False
     heading_above = neighbor_above(neighbor_map, heading)
@@ -204,7 +206,6 @@ def can_share_heading_style(heading, other_heading, neighbor_map) -> bool:
 def compare_block_order(left_value, right_value) -> float:
     """Compare blocks or lines by column index first, then reading position."""
     from ..model import cmp_reading_order
-    from ..stats import column_index_of
     left_column_index = column_index_of(left_value)
     right_column_index = column_index_of(right_value)
     if left_column_index != right_column_index:
@@ -224,7 +225,7 @@ def heading_precedes_line(line_heading_candidate: HeadingCandidate, page, line) 
 class CliqueFilterContext:
     """State for clique-based body-heading discovery."""
 
-    __slots__ = ("auxiliary_slot", "state_slot", "tertiary_slot", "measure_slot", "secondary_slot", "option_slot", "primary_slot", "candidates", "compare")
+    __slots__ = ("auxiliary_slot", "candidates", "compare", "measure_slot", "option_slot", "primary_slot", "secondary_slot", "state_slot", "tertiary_slot")
 
     def __init__(self, doc, candidates: list[HeadingCandidate], compare):
         self.auxiliary_slot = doc
@@ -248,9 +249,14 @@ class CliqueFilterContext:
 
 def detect_body_headings(filter_context: CliqueFilterContext) -> list[HeadingCandidate]:
     """Discover body headings by comparing unvisited blocks against clique trees."""
-    from ..model import style_key, dominant_style_of, last_span, last_line_of, first_span_of
-    from ..heading_detection import neighbor_right, neighbor_above, closest_body_neighbor_above, PageNeighborMap as _bo_class, is_cover_page
-    from ..tokens import first_token, tokenize_block
+    from ..heading_detection import PageNeighborMap as _bo_class
+    from ..heading_detection import (
+        closest_body_neighbor_above,
+        is_cover_page,
+        neighbor_above,
+        neighbor_right,
+    )
+    from ..tokens import first_token
 
     out: list[HeadingCandidate] = []
     if not filter_context.candidates:
@@ -385,7 +391,7 @@ def interleave_clusters(heading_candidates: list[HeadingCandidate], other_outlin
     """Interleave general candidates between successive labeled headings. Returns clusters with the labeled heading and intervening candidates. """
     out: list[dict] = []
     index = 0
-    previous: Optional[OutlineNode] = None
+    previous: OutlineNode | None = None
     acc: list[HeadingCandidate] = []
     for labeled_outline_node in other_outline_nodes:
         boundary_candidate = labeled_outline_node.heading

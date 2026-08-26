@@ -2,26 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Iterator, Optional
+from collections.abc import Iterator
 
 from ..model import (
-    _strip_diacritics,
-    avg_char_width2,
-    intervals_overlap,
-    to_number,
-    rect_union,
-    EMPTY_RECT,
-    avg_char_width,
     Line,
-    char_category,
-    is_word_category,
     is_punct_category,
-    letter_count,
-    punct_count,
-    info_weight,
-    Block,
+    is_word_category,
+    to_number,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Character-category transition table #
@@ -70,7 +58,7 @@ def can_extend_token(number: int, other_number: int, candidate_text: str) -> boo
 class TokenAnchor:
     """Cross-line anchor range attached to a token."""
 
-    __slots__ = ("line", "anchor_span", "start_offset", "primary_slot")
+    __slots__ = ("anchor_span", "line", "primary_slot", "start_offset")
 
     def __init__(self, line: Line, anchor_span_value, start_offset_value: int, next_number: int):
         self.line = line
@@ -79,12 +67,12 @@ class TokenAnchor:
         self.primary_slot = next_number
 
 
-def last_token_anchor(token: "Token") -> TokenAnchor:
+def last_token_anchor(token: Token) -> TokenAnchor:
     """Return the token's last cross-line anchor entry."""
     return token.anchor_ranges[-1]
 
 
-def first_anchor_span(token: "Token"):
+def first_anchor_span(token: Token):
     """Return the anchor span from the token's first cross-line entry."""
     return token.anchor_ranges[0].anchor_span
 
@@ -94,22 +82,22 @@ def first_anchor_span(token: "Token"):
 # --------------------------------------------------------------------------- #
 
 
-def is_char_token(token: "Token") -> bool:
+def is_char_token(token: Token) -> bool:
     """Return True for digit or letter tokens."""
     return token.type == 1 or token.type == 2
 
 
-def is_word_token(token: "Token") -> bool:
+def is_word_token(token: Token) -> bool:
     """Return True for merged word-like tokens: word, number-word, or symbolic token kinds."""
     return token.type in (3, 4, 5)
 
 
-def is_trimmable_token(token: "Token") -> bool:
+def is_trimmable_token(token: Token) -> bool:
     """Return True for word, number-word, or colon tokens that can be trimmed from phrase edges."""
     return token.type == 3 or token.type == 4 or token.str == ":"
 
 
-def token_numeric_value(token: "Token") -> float:
+def token_numeric_value(token: Token) -> float:
     """numeric value of token, NaN if non-numeric."""
     return to_number(token.str)
 
@@ -122,7 +110,7 @@ def token_numeric_value(token: "Token") -> float:
 class Token:
     """One token. It stores the token kind, raw text, contributing line/span anchors, bracket attachment flag, and first/last character categories."""
 
-    __slots__ = ("type", "str", "anchor_ranges", "boundary_slot", "primary_slot", "secondary_slot")
+    __slots__ = ("anchor_ranges", "boundary_slot", "primary_slot", "secondary_slot", "str", "type")
 
     def __init__(self, type_: int, candidate_text: str, anchor_ranges_value: list[TokenAnchor], boundary_flag: bool, previous_number: int, limit_number: int):
         self.type = type_
@@ -148,7 +136,7 @@ class Token:
 class TokenView:
     """Sliceable, directional view over a token array. Supports forward / reverse iteration via ``dir`` = +1 / -1. ``slice`` and ``reverse`` produce new views without copying. """
 
-    __slots__ = ("primary_slot", "start", "end", "dir", "length")
+    __slots__ = ("dir", "end", "length", "primary_slot", "start")
 
     def __init__(self, other_tokens: list[Token], start: int, end: int, dir_: int):
         self.primary_slot = other_tokens
@@ -163,12 +151,12 @@ class TokenView:
             yield self.primary_slot[secondary_item]
             secondary_item += self.dir
 
-    def token_at(self, other_number: int) -> Optional[Token]:
+    def token_at(self, other_number: int) -> Token | None:
         if other_number < 0 or other_number >= self.length:
             return None
         return self.primary_slot[self.start + other_number * self.dir]
 
-    def __getitem__(self, other_number: int) -> Optional[Token]:
+    def __getitem__(self, other_number: int) -> Token | None:
         return self.token_at(other_number)
 
     def __len__(self) -> int:
@@ -185,7 +173,7 @@ class TokenView:
                 parts.append(" ")
         return "".join(parts)
 
-    def slice(self, other_number: int = 0, candidate_number: int = 0) -> "TokenView":
+    def slice(self, other_number: int = 0, candidate_number: int = 0) -> TokenView:
         """Bounds-clamped directional slice. Args follow Unicode-compatible semantics: a > 0 -> from index a a < 0 -> from end-relative a = 0 -> from start b > 0 -> to index b b < 0 -> end-relative b = 0 -> to end """
         if other_number > 0:
             slice_start = self.start + other_number * self.dir
@@ -209,7 +197,7 @@ class TokenView:
             slice_end = self.end
         return TokenView(self.primary_slot, slice_start, slice_end, self.dir)
 
-    def reverse(self) -> "TokenView":
+    def reverse(self) -> TokenView:
         return TokenView(self.primary_slot, self.end - self.dir, self.start - self.dir, -self.dir)
 
     def to_string(self) -> str:
@@ -233,11 +221,11 @@ def enumerate_tokens(tokens: TokenView) -> Iterator[dict]:
         cursor += step
 
 
-def first_token(tokens: TokenView) -> Optional[Token]:
+def first_token(tokens: TokenView) -> Token | None:
     """Return the first token, or None."""
     return tokens.primary_slot[tokens.start] if tokens.length > 0 else None
 
 
-def last_token(tokens: TokenView) -> Optional[Token]:
+def last_token(tokens: TokenView) -> Token | None:
     """Return the last token, or None."""
     return tokens.primary_slot[tokens.end - tokens.dir] if tokens.length > 0 else None

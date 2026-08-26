@@ -19,10 +19,8 @@ from misaka.ai.providers._common import (
     _await_maybe_with_signal,
     _await_with_signal,
     _close_stream,
-    _compat_value,
     _empty_usage,
     _is_aborted,
-    _maybe_await,
     _option,
     resolve_cache_retention,
 )
@@ -69,6 +67,7 @@ from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stre
 from misaka.ai.utils.headers import headers_to_record
 from misaka.ai.utils.json_parse import parse_streaming_json
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
+from misaka.utils.values import maybe_await, read_field
 
 
 def _set_extra(params: dict[str, Any], key: str, value: Any) -> None:
@@ -157,7 +156,7 @@ def stream_openai_completions(
             params = build_params(model, context, options, compat)
             on_payload = _option(options, "onPayload")
             if callable(on_payload):
-                next_params = await _maybe_await(on_payload(params, model))
+                next_params = await maybe_await(on_payload(params, model))
                 if next_params is not None:
                     params = next_params
 
@@ -554,10 +553,10 @@ def build_params(
         if isinstance(off_value, str):
             params["reasoning_effort"] = off_value
 
-    if "openrouter.ai" in model.baseUrl and _compat_value(model.compat, "openRouterRouting"):
-        _set_extra(params, "provider", _dump_model(_compat_value(model.compat, "openRouterRouting")))
-    if "ai-gateway.vercel.sh" in model.baseUrl and _compat_value(model.compat, "vercelGatewayRouting"):
-        routing = _dump_model(_compat_value(model.compat, "vercelGatewayRouting"))
+    if "openrouter.ai" in model.baseUrl and read_field(model.compat, "openRouterRouting"):
+        _set_extra(params, "provider", _dump_model(read_field(model.compat, "openRouterRouting")))
+    if "ai-gateway.vercel.sh" in model.baseUrl and read_field(model.compat, "vercelGatewayRouting"):
+        routing = _dump_model(read_field(model.compat, "vercelGatewayRouting"))
         gateway_options: dict[str, list[str]] = {}
         if routing.get("only"):
             gateway_options["only"] = routing["only"]
@@ -909,31 +908,31 @@ def get_compat(model: Model) -> dict[str, Any]:
         return detected
 
     return {
-        "supportsStore": _compat_value(compat, "supportsStore", detected["supportsStore"]),
-        "supportsDeveloperRole": _compat_value(compat, "supportsDeveloperRole", detected["supportsDeveloperRole"]),
-        "supportsReasoningEffort": _compat_value(compat, "supportsReasoningEffort", detected["supportsReasoningEffort"]),
-        "supportsUsageInStreaming": _compat_value(compat, "supportsUsageInStreaming", detected["supportsUsageInStreaming"]),
-        "maxTokensField": _compat_value(compat, "maxTokensField", detected["maxTokensField"]),
-        "requiresToolResultName": _compat_value(compat, "requiresToolResultName", detected["requiresToolResultName"]),
-        "requiresAssistantAfterToolResult": _compat_value(
+        "supportsStore": read_field(compat, "supportsStore", detected["supportsStore"]),
+        "supportsDeveloperRole": read_field(compat, "supportsDeveloperRole", detected["supportsDeveloperRole"]),
+        "supportsReasoningEffort": read_field(compat, "supportsReasoningEffort", detected["supportsReasoningEffort"]),
+        "supportsUsageInStreaming": read_field(compat, "supportsUsageInStreaming", detected["supportsUsageInStreaming"]),
+        "maxTokensField": read_field(compat, "maxTokensField", detected["maxTokensField"]),
+        "requiresToolResultName": read_field(compat, "requiresToolResultName", detected["requiresToolResultName"]),
+        "requiresAssistantAfterToolResult": read_field(
             compat, "requiresAssistantAfterToolResult", detected["requiresAssistantAfterToolResult"]
         ),
-        "requiresThinkingAsText": _compat_value(compat, "requiresThinkingAsText", detected["requiresThinkingAsText"]),
-        "requiresReasoningContentOnAssistantMessages": _compat_value(
+        "requiresThinkingAsText": read_field(compat, "requiresThinkingAsText", detected["requiresThinkingAsText"]),
+        "requiresReasoningContentOnAssistantMessages": read_field(
             compat,
             "requiresReasoningContentOnAssistantMessages",
             detected["requiresReasoningContentOnAssistantMessages"],
         ),
-        "thinkingFormat": _compat_value(compat, "thinkingFormat", detected["thinkingFormat"]),
-        "openRouterRouting": _compat_value(compat, "openRouterRouting", {}),
-        "vercelGatewayRouting": _compat_value(compat, "vercelGatewayRouting", detected["vercelGatewayRouting"]),
-        "zaiToolStream": _compat_value(compat, "zaiToolStream", detected["zaiToolStream"]),
-        "supportsStrictMode": _compat_value(compat, "supportsStrictMode", detected["supportsStrictMode"]),
-        "cacheControlFormat": _compat_value(compat, "cacheControlFormat", detected["cacheControlFormat"]),
-        "sendSessionAffinityHeaders": _compat_value(
+        "thinkingFormat": read_field(compat, "thinkingFormat", detected["thinkingFormat"]),
+        "openRouterRouting": read_field(compat, "openRouterRouting", {}),
+        "vercelGatewayRouting": read_field(compat, "vercelGatewayRouting", detected["vercelGatewayRouting"]),
+        "zaiToolStream": read_field(compat, "zaiToolStream", detected["zaiToolStream"]),
+        "supportsStrictMode": read_field(compat, "supportsStrictMode", detected["supportsStrictMode"]),
+        "cacheControlFormat": read_field(compat, "cacheControlFormat", detected["cacheControlFormat"]),
+        "sendSessionAffinityHeaders": read_field(
             compat, "sendSessionAffinityHeaders", detected["sendSessionAffinityHeaders"]
         ),
-        "supportsLongCacheRetention": _compat_value(
+        "supportsLongCacheRetention": read_field(
             compat, "supportsLongCacheRetention", detected["supportsLongCacheRetention"]
         ),
     }
@@ -959,7 +958,7 @@ async def _create_completion_stream(client: Any, params: dict[str, Any], options
         )
         on_response = _option(options, "onResponse")
         if callable(on_response):
-            await _maybe_await(
+            await maybe_await(
                 on_response(
                     {
                         "status": raw_response.http_response.status_code,
@@ -975,7 +974,7 @@ async def _create_completion_stream(client: Any, params: dict[str, Any], options
         wrapped = await _await_maybe_with_signal(created.withResponse(), signal)
         on_response = _option(options, "onResponse")
         if callable(on_response):
-            await _maybe_await(
+            await maybe_await(
                 on_response(
                     {"status": wrapped["response"].status, "headers": headers_to_record(wrapped["response"].headers)},
                     model,

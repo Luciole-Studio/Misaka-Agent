@@ -8,12 +8,7 @@ from typing import Any
 
 from misaka.ui.tui import truncateToWidth, visibleWidth
 from misaka.ui.tui.interactive.theme.theme import theme
-
-
-def _value(obj: Any, name: str, default: Any = None) -> Any:
-    if isinstance(obj, dict):
-        return obj.get(name, default)
-    return getattr(obj, name, default)
+from misaka.utils.values import read_field
 
 
 def sanitize_status_text(text: str) -> str:
@@ -59,24 +54,24 @@ class FooterComponent:
         total_cost = 0.0
 
         for entry in self.session.sessionManager.getEntries():
-            if _value(entry, "type") != "message":
+            if read_field(entry, "type") != "message":
                 continue
-            message = _value(entry, "message")
-            if _value(message, "role") != "assistant":
+            message = read_field(entry, "message")
+            if read_field(message, "role") != "assistant":
                 continue
-            usage = _value(message, "usage") or {}
-            cost = _value(usage, "cost") or {}
-            total_input += int(_value(usage, "input", 0) or 0)
-            total_output += int(_value(usage, "output", 0) or 0)
-            total_cache_read += int(_value(usage, "cacheRead", 0) or 0)
-            total_cache_write += int(_value(usage, "cacheWrite", 0) or 0)
-            total_cost += float(_value(cost, "total", 0) or 0)
+            usage = read_field(message, "usage") or {}
+            cost = read_field(usage, "cost") or {}
+            total_input += int(read_field(usage, "input", 0) or 0)
+            total_output += int(read_field(usage, "output", 0) or 0)
+            total_cache_read += int(read_field(usage, "cacheRead", 0) or 0)
+            total_cache_write += int(read_field(usage, "cacheWrite", 0) or 0)
+            total_cost += float(read_field(cost, "total", 0) or 0)
 
         context_usage = self.session.getContextUsage()
-        model = _value(state, "model")
-        context_window = int(_value(context_usage, "contextWindow", _value(model, "contextWindow", 0)) or 0)
-        context_percent_value = float(_value(context_usage, "percent", 0) or 0)
-        context_percent = f"{context_percent_value:.1f}" if _value(context_usage, "percent") is not None else "?"
+        model = read_field(state, "model")
+        context_window = int(read_field(context_usage, "contextWindow", read_field(model, "contextWindow", 0)) or 0)
+        context_percent_value = float(read_field(context_usage, "percent", 0) or 0)
+        context_percent = f"{context_percent_value:.1f}" if read_field(context_usage, "percent") is not None else "?"
 
         pwd = self.session.sessionManager.getCwd()
         home = os.path.expanduser("~")
@@ -119,7 +114,7 @@ class FooterComponent:
         stats_parts.append(context_percent_str)
 
         stats_left = " ".join(stats_parts)
-        model_name = _value(model, "id", "no-model") or "no-model"
+        model_name = read_field(model, "id", "no-model") or "no-model"
         stats_left_width = visibleWidth(stats_left)
         if stats_left_width > width:
             stats_left = truncateToWidth(stats_left, width, "...")
@@ -127,8 +122,8 @@ class FooterComponent:
 
         min_padding = 2
         right_side_without_provider = model_name
-        if bool(_value(model, "reasoning", False)):
-            thinking_level = _value(state, "thinkingLevel", "off") or "off"
+        if bool(read_field(model, "reasoning", False)):
+            thinking_level = read_field(state, "thinkingLevel", "off") or "off"
             if thinking_level == "off":
                 right_side_without_provider = f"{model_name} • thinking off"
             else:
@@ -136,7 +131,7 @@ class FooterComponent:
 
         right_side = right_side_without_provider
         if self.footerData.getAvailableProviderCount() > 1 and model is not None:
-            right_side = f"({_value(model, 'provider')}) {right_side_without_provider}"
+            right_side = f"({read_field(model, 'provider')}) {right_side_without_provider}"
             if stats_left_width + min_padding + visibleWidth(right_side) > width:
                 right_side = right_side_without_provider
 

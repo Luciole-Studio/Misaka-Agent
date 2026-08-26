@@ -3,14 +3,24 @@
 from __future__ import annotations
 
 import regex as regex_module  # Unicode \p{...} property classes.
-from typing import Optional
-from ..model import (
-    Rect, rect_union, extend_top_to, extend_bottom_to, EMPTY_RECT, Bounded,
-    _trim_unicode_ws,
-    center_aligned, last_span, heading_score, reading_order_key, numbering_text, Line, last_line_of, first_span_of, dominant_style_of, info_weight, Block,
-)
-from ..tokens import Token, TokenView, wrap_tokens, enumerate_tokens, last_token, trie_prefix_match, strip_leading_if_in, first_token, set_case_fold, TrieConfig, build_trie, tokenize_block, BuiltTrie, is_word_token
 
+from ..model import (
+    Line,
+    _trim_unicode_ws,
+)
+from ..tokens import (
+    BuiltTrie,
+    Token,
+    TokenView,
+    TrieConfig,
+    build_trie,
+    first_token,
+    is_word_token,
+    last_token,
+    set_case_fold,
+    tokenize_block,
+    trie_prefix_match,
+)
 
 # --------------------------------------------------------------------------- #
 # Helpers #
@@ -28,7 +38,7 @@ STRUCTURAL_NUMBER_RE = regex_module.compile(
 )
 
 
-def is_number_separator(token: Optional[Token], other_flag: bool = True) -> bool:
+def is_number_separator(token: Token | None, other_flag: bool = True) -> bool:
     """Return whether the token is a structural-number separator candidate."""
     if token is None:
         return False
@@ -41,7 +51,7 @@ def is_number_separator(token: Optional[Token], other_flag: bool = True) -> bool
     return False
 
 
-def extract_structural_number(tokens: TokenView, other_flag: bool = True) -> Optional[TokenView]:
+def extract_structural_number(tokens: TokenView, other_flag: bool = True) -> TokenView | None:
     """extract a leading structural-number prefix from tokens. Returns the matched prefix as a token-view slice, or None. """
     if tokens.length < 1:
         return None
@@ -66,7 +76,7 @@ def extract_structural_number(tokens: TokenView, other_flag: bool = True) -> Opt
 
 
 # - format code label
-def format_caption_label(type_: int, num: Optional[TokenView]) -> str:
+def format_caption_label(type_: int, num: TokenView | None) -> str:
     """format the section-type letter prefix + number. type_ 4 -> "F", 5 -> "T", 11 -> "Q". Append the number string if any. """
     if type_ == 4:
         letter = "F"
@@ -140,7 +150,7 @@ def skip_bracketed_word(tokens: TokenView, index: int) -> int:
     return index
 
 
-def token_case_signal(token: Optional[Token]) -> int:
+def token_case_signal(token: Token | None) -> int:
     """per-token "direction signal". Returns 2 if g==7/6 (sentence end), 1 if g==2 (uppercase), -1 if g==3 (lowercase), 0 otherwise. """
     if token is None:
         return 0
@@ -154,7 +164,7 @@ def token_case_signal(token: Optional[Token]) -> int:
     return 0
 
 
-def caption_outranks(caption_entry: "CaptionEntry", other_caption_entry: "CaptionEntry") -> bool:
+def caption_outranks(caption_entry: CaptionEntry, other_caption_entry: CaptionEntry) -> bool:
     """Return True when the first caption entry ranks better than the second."""
     caption = is_uppercase_dominant(tokenize_block(caption_entry.group_slot))
     other_is_uppercase = is_uppercase_dominant(tokenize_block(other_caption_entry.group_slot))

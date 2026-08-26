@@ -47,6 +47,7 @@ from misaka.core.tools import (
     with_file_mutation_queue,
 )
 from misaka.utils.paths import resolve_path
+from misaka.utils.values import read_field
 
 if TYPE_CHECKING:
     from misaka.core.agent_session_runtime import (
@@ -211,8 +212,8 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
 
         filtered_messages: list[Any] = []
         for message in converted:
-            role = _message_field(message, "role")
-            content = _message_field(message, "content")
+            role = read_field(message, "role")
+            content = read_field(message, "content")
             if role not in {"user", "toolResult"} or not isinstance(content, list):
                 filtered_messages.append(message)
                 continue
@@ -279,8 +280,8 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
         await runner.emit(
             {
                 "type": "after_provider_response",
-                "status": _message_field(response, "status"),
-                "headers": _message_field(response, "headers"),
+                "status": read_field(response, "status"),
+                "headers": read_field(response, "headers"),
             }
         )
 
@@ -393,12 +394,6 @@ def _unknown_model() -> Model[Any]:
     )
 
 
-def _message_field(value: Any, name: str) -> Any:
-    if isinstance(value, dict):
-        return value.get(name)
-    return getattr(value, name, None)
-
-
 def _message_dump(value: Any) -> Any:
     if hasattr(value, "model_dump"):
         return value.model_dump()
@@ -410,12 +405,12 @@ def _message_dump(value: Any) -> Any:
 
 
 def _content_type(block: Any) -> str | None:
-    value = _message_field(block, "type")
+    value = read_field(block, "type")
     return value if isinstance(value, str) else None
 
 
 def _content_text(block: Any) -> str | None:
-    value = _message_field(block, "text")
+    value = read_field(block, "text")
     return value if isinstance(value, str) else None
 
 

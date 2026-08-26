@@ -3,76 +3,36 @@
 from __future__ import annotations
 
 import math
-from typing import Optional
 
 from ..model import (
-    _UNICODE_WHITESPACE_CLASS,
-    _strip_diacritics,
-    _round_half_up_to_int,
-    magnitude_ratio,
-    intervals_overlap,
-    y_overlaps,
-    center_aligned,
-    to_number,
-    last_span,
-    heading_score,
-    text_of_line,
-    Line,
-    last_line_of,
-    first_span_of,
-    is_word_category,
-    block_text,
-    deaccented_text,
-    letter_count,
-    dominant_style_of,
-    punct_count,
-    info_weight,
-    is_upper_dominant,
-    is_caps_heavy,
-    alignment_code,
     Block,
+    deaccented_text,
+    heading_score,
+    info_weight,
+    letter_count,
 )
-from ..stats import style_key, DocStats, weighted_percentile, column_index_of, char_script_bucket
+from ..stats import (
+    weighted_percentile,
+)
 from ..tokens import (
-    is_trimmable_token,
-    token_numeric_value,
-    Token,
-    TokenView,
-    wrap_tokens,
-    enumerate_tokens,
-    jenkins_hash,
-    trie_prefix_match,
-    strip_trie_match,
-    strip_leading_if_in,
-    COMMA_CHARS,
-    strip_trailing_comma,
-    trim_trailing_punct,
-    set_case_fold,
-    TrieConfig,
-    build_trie,
-    LineTokenizer,
     tokenize_block,
-    BuiltTrie,
-    trie_full_match,
-    is_char_token,
-    is_word_token,
-)
-
-from .keyword_tables import (
-    COPYRIGHT_TRIE,
-    VOLUME_WORDS_TRIE,
-    FIGURE_KEYWORDS_TRIE,
-    TABLE_KEYWORDS_TRIE,
-    CHART_KEYWORDS_TRIE,
-    _search_trie,
+    trie_prefix_match,
 )
 from .body_text import (
-    record_recurring_text,
     is_body_paragraph,
-    span_style_text_key,
-    normalized_block_text,
-    span_page_number,
     longest_word_and_number,
+    normalized_block_text,
+    record_recurring_text,
+    span_page_number,
+    span_style_text_key,
+)
+from .keyword_tables import (
+    CHART_KEYWORDS_TRIE,
+    COPYRIGHT_TRIE,
+    FIGURE_KEYWORDS_TRIE,
+    TABLE_KEYWORDS_TRIE,
+    VOLUME_WORDS_TRIE,
+    _search_trie,
 )
 
 
@@ -94,7 +54,7 @@ def record_marked_block(state: PageMarkState, idx: int, block: Block) -> None:
     state.tertiary_slot += block.char_count()
 
 
-def is_header_positioned(ctx, other_block: Block, candidate_block: Optional[Block]) -> bool:
+def is_header_positioned(ctx, other_block: Block, candidate_block: Block | None) -> bool:
     """Return whether a block is header-positioned relative to the reference block, with content-density gates."""
     if candidate_block is None:
         cond = True
@@ -150,7 +110,7 @@ def walk_from_page_edge(ctx, blocks: list[Block], callback) -> None:
             block_index -= 1
 
 
-def find_cross_page_match(ctx, page, block: Block, text_key: str, ref: Block) -> Optional[Block]:
+def find_cross_page_match(ctx, page, block: Block, text_key: str, ref: Block) -> Block | None:
     """Find a matching block on a nearby page by exact normalized text, then by longest word/number pieces."""
     entries = ctx.auxiliary_slot.get(text_key) or []
     for entry in entries:
@@ -209,7 +169,7 @@ def find_cross_page_match(ctx, page, block: Block, text_key: str, ref: Block) ->
 class HeaderFooterContext:
     """Per-pass header/footer state."""
 
-    __slots__ = ("secondary_slot", "primary_slot", "previous_slot", "option_slot", "tertiary_slot", "auxiliary_slot", "measure_slot", "state_slot")
+    __slots__ = ("auxiliary_slot", "measure_slot", "option_slot", "previous_slot", "primary_slot", "secondary_slot", "state_slot", "tertiary_slot")
 
     def __init__(self, doc, candidate_number: int):
         self.secondary_slot = doc
@@ -285,7 +245,7 @@ def detect_header_footer(ctx: HeaderFooterContext) -> None:
         ctx.tertiary_slot.append(page_numbers)
         page_candidates: list[Block] = []
         ctx.state_slot.append(page_candidates)
-        first_substantive_ref: list[Optional[Block]] = [None]   # closure-friendly
+        first_substantive_ref: list[Block | None] = [None]   # closure-friendly
 
         def walk_cb(block: Block) -> bool:
             if block.skew_frac() >= 1 or block.area() <= 0:
@@ -356,7 +316,7 @@ def detect_header_footer(ctx: HeaderFooterContext) -> None:
         candidates = ctx.state_slot[page.page_index - 1]
         state = PageMarkState()
         seen_page_number = False
-        first_substantive: list[Optional[Block]] = [None]
+        first_substantive: list[Block | None] = [None]
         for candidate_index in range(len(candidates)):
             candidate_block = candidates[candidate_index]
             if candidate_block.char_count() <= 0:

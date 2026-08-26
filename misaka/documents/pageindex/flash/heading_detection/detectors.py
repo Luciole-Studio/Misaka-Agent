@@ -3,53 +3,65 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Optional
-from ..outline_assembly import HeadingCandidate, OutlineNode
-from ..labels import is_uppercase_dominant, trie_matches_all, advance_past_line, skip_bracketed_word, token_case_signal, format_caption_label, CaptionEntry, extract_structural_number
-from ..model import (
-    _UNICODE_WHITESPACE_CLASS,
-    _strip_diacritics,
-    _trim_unicode_ws,
-    style_key, magnitude_ratio, same_x_extent, same_y_extent, y_overlaps, left_aligned, right_aligned, center_aligned, x_aligned, x_centers_close, to_number,
-    last_span, avg_char_width, raw_text_of_line, heading_score, numbering_text, numbering_value, numbering_kind, Line, last_line_of, first_span_of, is_word_category, block_text, is_punct_category, deaccented_text, letter_count, punct_count, dominant_style_of,
-    info_weight, dominant_font_size, is_upper_dominant, is_caps_heavy, CharStats, alignment_code, Block,
-)
-from ..tokens import (
-    is_trimmable_token, token_numeric_value, Token, TokenView, wrap_tokens, enumerate_tokens, last_token, trie_prefix_match, strip_trie_match, strip_leading_if_in, COMMA_CHARS, strip_trailing_comma, first_token, trim_trailing_punct, set_case_fold, TrieConfig, build_trie, tokenize_block,
-    trie_full_match, last_token_anchor, first_anchor_span, is_char_token, is_word_token,
-)
 
-from .keyword_tables import (
-    APPENDIX_SECTION_TRIE,
-    BOX_KEYWORD_TRIE,
-    CHAPTER_WORDS_TRIE,
-    APPENDIX_KEYWORDS_TRIE,
-    ROMAN_NUMERAL_MAP,
+from ..labels import (
+    skip_bracketed_word,
 )
-from .text_checks import (
-    similar_style,
-    matches_abstract,
-    matches_references,
-    has_substantive_content,
-    clamp,
-    token_to_number,
-    letter_to_ordinal,
+from ..model import (
+    Block,
+    avg_char_width,
+    heading_score,
+    info_weight,
+    is_punct_category,
+    is_upper_dominant,
+    letter_count,
+    numbering_value,
+    to_number,
+    x_aligned,
+    y_overlaps,
 )
-from .neighbors import (
-    neighbor_above,
-    body_neighbor_above,
-    neighbor_right,
-    closest_body_neighbor_above,
+from ..outline_assembly import HeadingCandidate
+from ..tokens import (
+    TokenView,
+    enumerate_tokens,
+    first_anchor_span,
+    first_token,
+    is_word_token,
+    token_numeric_value,
+    tokenize_block,
+    trie_prefix_match,
 )
 from .candidates import (
     PageScanState,
     make_heading_candidate,
-    make_plain_candidate,
     make_numbered_candidate,
+    make_plain_candidate,
+)
+from .keyword_tables import (
+    APPENDIX_KEYWORDS_TRIE,
+    APPENDIX_SECTION_TRIE,
+    BOX_KEYWORD_TRIE,
+    CHAPTER_WORDS_TRIE,
+    ROMAN_NUMERAL_MAP,
+)
+from .neighbors import (
+    body_neighbor_above,
+    closest_body_neighbor_above,
+    neighbor_above,
+    neighbor_right,
+)
+from .text_checks import (
+    clamp,
+    has_substantive_content,
+    letter_to_ordinal,
+    matches_abstract,
+    matches_references,
+    similar_style,
+    token_to_number,
 )
 
 
-def detect_numbered_heading(page_scan: PageScanState, block: Block, tokens: TokenView) -> Optional[HeadingCandidate]:
+def detect_numbered_heading(page_scan: PageScanState, block: Block, tokens: TokenView) -> HeadingCandidate | None:
     """Identify "1.2.3" / "[1]" style numbered heading prefixes."""
     item_list: list[int] = []
     at_value = None
@@ -126,7 +138,7 @@ def detect_numbered_heading(page_scan: PageScanState, block: Block, tokens: Toke
 # --------------------------------------------------------------------------- #
 
 
-def detect_labeled_heading(page_scan: PageScanState, block: Block, tokens: TokenView) -> Optional[HeadingCandidate]:
+def detect_labeled_heading(page_scan: PageScanState, block: Block, tokens: TokenView) -> HeadingCandidate | None:
     """Detect Roman, letter, CJK, and mixed-numbering headings."""
     if tokens.length <= 1:
         return None
@@ -192,7 +204,7 @@ def detect_labeled_heading(page_scan: PageScanState, block: Block, tokens: Token
 # --------------------------------------------------------------------------- #
 
 
-def detect_chapter_appendix(page_scan: PageScanState, other_block: Block) -> Optional[HeadingCandidate]:
+def detect_chapter_appendix(page_scan: PageScanState, other_block: Block) -> HeadingCandidate | None:
     """. Match "Chapter X" / "Appendix X" / box-N / etc."""
     candidate_item = heading_score(other_block)
     if candidate_item <= page_scan.primary_slot.primary_slot.primary_slot + 0.1:
@@ -233,7 +245,7 @@ def detect_chapter_appendix(page_scan: PageScanState, other_block: Block) -> Opt
 # --------------------------------------------------------------------------- #
 
 
-def detect_box_heading(page_scan: PageScanState, other_block: Block) -> Optional[HeadingCandidate]:
+def detect_box_heading(page_scan: PageScanState, other_block: Block) -> HeadingCandidate | None:
     """match "Box N" pattern."""
     tokens = tokenize_block(other_block)
     match = trie_prefix_match(BOX_KEYWORD_TRIE, tokens)
@@ -366,7 +378,7 @@ def safe_column_index(block) -> int:
 # --------------------------------------------------------------------------- #
 
 
-def try_classify_heading(page_scan: PageScanState, other_block: Block) -> Optional[HeadingCandidate]:
+def try_classify_heading(page_scan: PageScanState, other_block: Block) -> HeadingCandidate | None:
     """Try to build a candidate for a block, then apply rejection gates."""
     candidate = classify_heading(page_scan, other_block)
     if len(candidate.numbering) > 1:

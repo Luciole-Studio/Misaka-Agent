@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import re
 import sys
 from dataclasses import dataclass
@@ -14,6 +13,7 @@ from misaka.ai.models import models_are_equal
 from misaka.ai.types import Model
 from misaka.cli.args import isValidThinkingLevel as _isValidThinkingLevel
 from misaka.core.defaults import DEFAULT_THINKING_LEVEL
+from misaka.utils.values import maybe_await
 
 type ResolvedThinkingLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh"]
 _MINIMATCH_FLAGS = glob.IGNORECASE | glob.GLOBSTAR | glob.BRACE | glob.EXTMATCH | glob.FORCEUNIX
@@ -80,12 +80,6 @@ class InitialModelResult:
     model: Model | None
     thinkingLevel: ResolvedThinkingLevel
     fallbackMessage: str | None
-
-
-async def _maybe_await(value: Any) -> Any:
-    if inspect.isawaitable(value):
-        return await value
-    return value
 
 
 def _color(message: str, code: str) -> str:
@@ -224,7 +218,7 @@ def parseModelPattern(
 
 
 async def resolveModelScope(patterns: list[str], modelRegistry: Any) -> list[ScopedModel]:
-    available_models = list(await _maybe_await(modelRegistry.getAvailable()))
+    available_models = list(await maybe_await(modelRegistry.getAvailable()))
     scoped_models: list[ScopedModel] = []
 
     for pattern in patterns:
@@ -413,7 +407,7 @@ async def findInitialModel(options: dict[str, Any]) -> InitialModelResult:
                 fallbackMessage=None,
             )
 
-    available_models = list(await _maybe_await(model_registry.getAvailable()))
+    available_models = list(await maybe_await(model_registry.getAvailable()))
     if available_models:
         for provider, default_id in defaultModelPerProvider.items():
             match = next(

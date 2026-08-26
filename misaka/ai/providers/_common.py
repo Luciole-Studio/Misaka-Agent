@@ -17,12 +17,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from misaka.ai.types import CacheRetention, Model, Usage, UsageCost
-
-
-async def _maybe_await(value: Any) -> Any:
-    if hasattr(value, "__await__"):
-        return await value
-    return value
+from misaka.utils.values import maybe_await
 
 
 def _is_aborted(signal: Any) -> bool:
@@ -48,7 +43,7 @@ async def _await_with_signal(awaitable: Any, signal: Any, *, on_abort: Any = Non
             if callable(close):
                 close()
         if on_abort is not None:
-            await _maybe_await(on_abort())
+            await maybe_await(on_abort())
         raise RuntimeError("Request was aborted")
 
     task = asyncio.ensure_future(awaitable)
@@ -60,7 +55,7 @@ async def _await_with_signal(awaitable: Any, signal: Any, *, on_abort: Any = Non
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
                 if on_abort is not None:
-                    await _maybe_await(on_abort())
+                    await maybe_await(on_abort())
                 raise RuntimeError("Request was aborted")
         return await task
     finally:
@@ -74,7 +69,7 @@ async def _await_maybe_with_signal(value: Any, signal: Any, *, on_abort: Any = N
         return await _await_with_signal(value, signal, on_abort=on_abort)
     if _is_aborted(signal):
         if on_abort is not None:
-            await _maybe_await(on_abort())
+            await maybe_await(on_abort())
         raise RuntimeError("Request was aborted")
     return value
 
@@ -86,7 +81,7 @@ async def _close_stream(stream_obj: Any) -> None:
         close = getattr(stream_obj, close_name, None)
         if callable(close):
             try:
-                await _maybe_await(close())
+                await maybe_await(close())
             except Exception:  # noqa: BLE001
                 return
             return
@@ -121,14 +116,6 @@ def _option(options: Any, name: str, default: Any = None) -> Any:
     else:
         value = getattr(options, name, default)
     return default if value is None else value
-
-
-def _compat_value(compat: Any, name: str, default: Any = None) -> Any:
-    if compat is None:
-        return default
-    if isinstance(compat, Mapping):
-        return compat.get(name, default)
-    return getattr(compat, name, default)
 
 
 def _prepare_sdk_params(params: Mapping[str, Any]) -> dict[str, Any]:

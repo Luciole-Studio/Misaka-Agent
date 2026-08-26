@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from ..model import numbering_text, numbering_kind, block_text, is_caps_heavy, Block
 
+from ..model import Block, block_text
 from .filtering import (
-    _style_key,
     _numbering_depth,
+    _style_key,
 )
 
 

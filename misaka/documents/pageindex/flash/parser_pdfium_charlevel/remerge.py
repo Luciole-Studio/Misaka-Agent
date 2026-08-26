@@ -5,10 +5,10 @@ from __future__ import annotations
 import math
 
 from .text_normalize import (
-    TRACKING_SPACE_FACTOR,
     NEGATIVE_SPACE_FACTOR,
-    SPACE_IN_FLOW_MIN_FACTOR,
     SPACE_IN_FLOW_MAX_FACTOR,
+    SPACE_IN_FLOW_MIN_FACTOR,
+    TRACKING_SPACE_FACTOR,
 )
 
 

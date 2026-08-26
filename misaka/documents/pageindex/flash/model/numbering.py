@@ -9,14 +9,13 @@ import unicodedata
 import regex as regex_module  # supports Unicode \p{...} property classes
 
 from .char_stats import (
-    _trim_unicode_ws,
     _UNICODE_WHITESPACE_CLASS,
+    _trim_unicode_ws,
 )
 from .span_line import (
     Line,
     raw_text_of_line,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Numbering detection #

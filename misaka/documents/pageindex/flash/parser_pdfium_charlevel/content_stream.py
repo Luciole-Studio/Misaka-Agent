@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from .pdf_objects import (
-    _PDF_WHITESPACE_BYTES,
     _PDF_DELIMITER_BYTES,
     _PDF_STRING_ESCAPE_BYTES,
+    _PDF_WHITESPACE_BYTES,
     _decode_pdf_name,
 )
-
 
 # Text items start at font/size changes, positional line breaks or gaps, and
 # content-stream flush operators (q/Q, Do, gs-/Font, marked content). PDFium's

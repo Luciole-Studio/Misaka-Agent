@@ -93,6 +93,7 @@ from misaka.core.tools.tool_definition_wrapper import (
 )
 from misaka.ui.tui.interactive.theme.theme import theme
 from misaka.utils.paths import resolve_path
+from misaka.utils.values import read_field
 
 _SKILL_BLOCK_PATTERN = re.compile(
     r'^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n</skill>(?:\n\n([\s\S]+))?$'
@@ -540,10 +541,10 @@ class AgentSession:
                         messages.append(
                             {
                                 "role": "custom",
-                                "customType": _message_field(normalized_message, "customType"),
+                                "customType": read_field(normalized_message, "customType"),
                                 "content": _message_content(normalized_message),
-                                "display": bool(_message_field(normalized_message, "display")),
-                                "details": _message_field(normalized_message, "details"),
+                                "display": bool(read_field(normalized_message, "display")),
+                                "details": read_field(normalized_message, "details"),
                                 "timestamp": int(time.time() * 1000),
                             }
                         )
@@ -779,19 +780,19 @@ class AgentSession:
     def getSlashCommands(self) -> list[SlashCommandInfo]:
         commands: list[SlashCommandInfo] = []
         for command in self._extensionRunner.get_registered_commands():
-            invocation_name = str(_value(command, "invocationName", _value(command, "name", ""))).strip()
+            invocation_name = str(read_field(command, "invocationName", read_field(command, "name", ""))).strip()
             if not invocation_name:
                 continue
             commands.append(
                 _make_slash_command_info(
                     invocation_name,
                     "extension",
-                    _value(command, "sourceInfo")
+                    read_field(command, "sourceInfo")
                     or create_synthetic_source_info(
                         f"<extension-command:{invocation_name}>",
                         {"source": "inline", "scope": "temporary", "origin": "extension"},
                     ),
-                    _value(command, "description"),
+                    read_field(command, "description"),
                 )
             )
 
@@ -905,10 +906,10 @@ class AgentSession:
         normalized = _message_dict(message)
         app_message = {
             "role": "custom",
-            "customType": _message_field(normalized, "customType"),
+            "customType": read_field(normalized, "customType"),
             "content": _message_content(normalized),
-            "display": bool(_message_field(normalized, "display")),
-            "details": _message_field(normalized, "details"),
+            "display": bool(read_field(normalized, "display")),
+            "details": read_field(normalized, "details"),
             "timestamp": int(time.time() * 1000),
         }
         deliver_as = resolved_options.get("deliverAs")
@@ -950,7 +951,7 @@ class AgentSession:
             images = []
             for item in content:
                 if _content_type(item) == "text":
-                    text_parts.append(str(_message_field(item, "text", "")))
+                    text_parts.append(str(read_field(item, "text", "")))
                 else:
                     images.append(item if isinstance(item, ImageContent) else ImageContent.model_validate(item))
             text = "\n".join(text_parts)
@@ -1297,7 +1298,7 @@ class AgentSession:
                     editor_text = custom_content
                 elif isinstance(custom_content, list):
                     editor_text = "".join(
-                        str(_message_field(block, "text", ""))
+                        str(read_field(block, "text", ""))
                         for block in custom_content
                         if _content_type(block) == "text"
                     )
@@ -1369,7 +1370,7 @@ class AgentSession:
         for message in state.messages:
             if _message_role(message) != "assistant":
                 continue
-            usage = _message_field(message, "usage") or {}
+            usage = read_field(message, "usage") or {}
             content = _message_content(message)
             if isinstance(content, list):
                 tool_calls += sum(1 for block in content if _content_type(block) == "toolCall")
@@ -1457,13 +1458,13 @@ class AgentSession:
         for message in reversed(self.messages):
             if _message_role(message) != "assistant":
                 continue
-            if _message_field(message, "stopReason") == "aborted" and not _message_content(message):
+            if read_field(message, "stopReason") == "aborted" and not _message_content(message):
                 continue
             content = _message_content(message)
             if not isinstance(content, list):
                 continue
             text = "".join(
-                str(_message_field(block, "text", ""))
+                str(read_field(block, "text", ""))
                 for block in content
                 if _content_type(block) == "text"
             )
@@ -1494,9 +1495,9 @@ class AgentSession:
                 message = entry.get("message")
                 if _message_role(message) != "assistant":
                     continue
-                if _message_field(message, "stopReason") in {"aborted", "error"}:
+                if read_field(message, "stopReason") in {"aborted", "error"}:
                     continue
-                if _calculate_context_tokens(_message_field(message, "usage") or {}) > 0:
+                if _calculate_context_tokens(read_field(message, "usage") or {}) > 0:
                     has_post_compaction_usage = True
                 break
             if not has_post_compaction_usage:
@@ -1583,10 +1584,10 @@ class AgentSession:
         role = _message_role(message)
         if role == "custom":
             self.sessionManager.appendCustomMessageEntry(
-                str(_message_field(message, "customType")),
+                str(read_field(message, "customType")),
                 _message_content(message),
-                bool(_message_field(message, "display")),
-                _message_field(message, "details"),
+                bool(read_field(message, "display")),
+                read_field(message, "details"),
             )
         elif role in {"user", "assistant", "toolResult"}:
             self.sessionManager.appendMessage(_message_dict(message))
@@ -2073,11 +2074,11 @@ class AgentSession:
         from misaka.ai.types import ImageContent
         from misaka.utils.image_resize import resize_image
         for index, block in enumerate(list(content)):
-            if _message_field(block, "type") != "image":
+            if read_field(block, "type") != "image":
                 continue
             img = block if isinstance(block, ImageContent) else ImageContent(
-                data=str(_message_field(block, "data") or ""),
-                mimeType=str(_message_field(block, "mimeType") or ""))
+                data=str(read_field(block, "data") or ""),
+                mimeType=str(read_field(block, "mimeType") or ""))
             try:
                 resized = await resize_image(img)
             except Exception:  # noqa: BLE001, S112 - keep the original block if the image backend is unavailable (matches upstream)
@@ -2099,8 +2100,8 @@ class AgentSession:
             return await runner.emit_tool_call(  # type: ignore[attr-defined]
                 {
                     "type": "tool_call",
-                    "toolName": _message_field(tool_call, "name"),
-                    "toolCallId": _message_field(tool_call, "id"),
+                    "toolName": read_field(tool_call, "name"),
+                    "toolCallId": read_field(tool_call, "id"),
                     "input": args,
                 }
             )
@@ -2119,8 +2120,8 @@ class AgentSession:
             hook_result = await runner.emit_tool_result(  # type: ignore[attr-defined]
                 {
                     "type": "tool_result",
-                    "toolName": _message_field(tool_call, "name"),
-                    "toolCallId": _message_field(tool_call, "id"),
+                    "toolName": read_field(tool_call, "name"),
+                    "toolCallId": read_field(tool_call, "id"),
                     "input": _event_field(payload, "args"),
                     "content": _event_field(result, "content"),
                     "details": _event_field(result, "details"),
@@ -2340,7 +2341,7 @@ class AgentSession:
             # right after one finished.
             if estimate.lastUsageIndex is not None:
                 usage_message = self.agent.state.messages[estimate.lastUsageIndex]
-                usage_timestamp = _event_timestamp_ms(_message_field(usage_message, "timestamp"))
+                usage_timestamp = _event_timestamp_ms(read_field(usage_message, "timestamp"))
                 if (
                     latest_compaction is not None
                     and _message_role(usage_message) == "assistant"
@@ -2512,7 +2513,7 @@ class AgentSession:
                 messages = self.agent.state.messages
                 last_message = messages[-1] if messages else None
                 if (_message_role(last_message) == "assistant"
-                        and _message_field(last_message, "stopReason") in ("error", "length")):
+                        and read_field(last_message, "stopReason") in ("error", "length")):
                     self.agent.state.messages = messages[:-1]   # drop the truncated tail too (#7540)
                 return True
 
@@ -2585,25 +2586,13 @@ def _result_flag(result: Any, name: str, default: Any = None) -> Any:
     return getattr(result, name, default)
 
 
-def _value(obj: Any, name: str, default: Any = None) -> Any:
-    if isinstance(obj, dict):
-        return obj.get(name, default)
-    return getattr(obj, name, default)
-
-
 def _message_role(message: Any) -> str | None:
-    role = _message_field(message, "role")
+    role = read_field(message, "role")
     return role if isinstance(role, str) else None
 
 
 def _message_content(message: Any) -> Any:
-    return _message_field(message, "content")
-
-
-def _message_field(message: Any, name: str, default: Any = None) -> Any:
-    if isinstance(message, dict):
-        return message.get(name, default)
-    return getattr(message, name, default)
+    return read_field(message, "content")
 
 
 def _content_type(block: Any) -> str | None:

@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import functools
 import math
-from typing import Optional
 
-from ..model import Span, _format_half_up_one_decimal, Line, info_weight, _max_nan_propagating
-
+from ..model import (
+    Line,
+    Span,
+    _format_half_up_one_decimal,
+    _max_nan_propagating,
+    info_weight,
+)
 from .scripts import (
     ScriptHistogram,
-    tally_scripts,
     dominant_script_family,
+    tally_scripts,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Weighted percentile.
@@ -35,7 +38,7 @@ def weighted_percentile(values: list[tuple[float, float]], other_item: float) ->
     total = sum(page_value[1] for page_value in samples)
     target = total * other_item / 100.0
     candidate_item = 0.0
-    reference_item: Optional[float] = None
+    reference_item: float | None = None
     for value, weight in samples:
         if candidate_item == target:
             return value if reference_item is None else (reference_item + value) / 2.0
@@ -64,7 +67,7 @@ def style_key(span: Span) -> str:
 class PageStats:
     """Per-page layout statistics used by column detection and classification."""
 
-    __slots__ = ("line_count", "secondary_slot", "tertiary_slot", "previous_slot", "style_slot", "cache_slot", "option_slot", "primary_slot", "measure_slot", "state_slot", "auxiliary_slot")
+    __slots__ = ("auxiliary_slot", "cache_slot", "line_count", "measure_slot", "option_slot", "previous_slot", "primary_slot", "secondary_slot", "state_slot", "style_slot", "tertiary_slot")
 
     def __init__(
         self,
@@ -115,7 +118,7 @@ def compute_page_stats(page, other_lines: list[Line]) -> PageStats:
     valid = 0                          # valid line count
 
     bucket_size = page.bbox_width() / 20.0           # page width / 20 buckets
-    buckets: list[Optional[Line]] = [None] * 21   # 20 buckets, +1 guard
+    buckets: list[Line | None] = [None] * 21   # 20 buckets, +1 guard
 
     for line in other_lines:
         if line.skew_frac() > 1:                   # rotated/skewed line: skip
@@ -153,7 +156,7 @@ def compute_page_stats(page, other_lines: list[Line]) -> PageStats:
         bucket_left = 0 if left == float("-inf") else max(0, int(left / bucket_size))
         bucket_right = 20 if right == float("inf") else min(20, math.ceil(right / bucket_size))
         best_gap = float("inf")
-        best_prev: Optional[Line] = None
+        best_prev: Line | None = None
         idx = bucket_left
         while idx < bucket_right:
             prev_in_bucket = buckets[idx]
@@ -209,7 +212,7 @@ def compute_page_stats(page, other_lines: list[Line]) -> PageStats:
 class DocStats:
     """Document-level layout statistics: dominant script family, landscape-page count, total valid lines, total line weight, max page line weight, median page total weight, width/height percentiles, center statistic, and median body font size."""
 
-    __slots__ = ("tertiary_slot", "style_slot", "cache_slot", "state_slot", "previous_slot", "secondary_slot", "option_slot", "auxiliary_slot", "measure_slot", "primary_slot")
+    __slots__ = ("auxiliary_slot", "cache_slot", "measure_slot", "option_slot", "previous_slot", "primary_slot", "secondary_slot", "state_slot", "style_slot", "tertiary_slot")
 
     def __init__(
         self,

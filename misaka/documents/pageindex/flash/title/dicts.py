@@ -5,8 +5,13 @@ from __future__ import annotations
 import json
 import unicodedata
 from pathlib import Path
-from ..tokens import is_superscript_adjacent, clamp_value, enumerate_tokens, jenkins_hash, trie_prefix_match, set_case_fold, TrieConfig, build_trie, tokenize_block, _de_norm, BuiltTrie, is_word_token
 
+from ..tokens import (
+    BuiltTrie,
+    TrieConfig,
+    build_trie,
+    set_case_fold,
+)
 
 # --------------------------------------------------------------------------- #
 # Load title-label and institution dictionaries #

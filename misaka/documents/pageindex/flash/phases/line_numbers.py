@@ -3,23 +3,17 @@
 from __future__ import annotations
 
 import math
-from typing import Optional
 
 from sortedcontainers import SortedKeyList
+
 from ..model import (
-    Span,
-    left_aligned,
-    right_aligned,
-    center_aligned,
-    x_centers_close,
-    to_number,
+    Line,
     Rect,
     append_span,
     avg_char_width,
-    Line,
     info_weight,
+    to_number,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Line-number stripper #
@@ -29,7 +23,7 @@ from ..model import (
 class LineNumberCluster:
     """Drop-cap or line-number cluster used to detect removable line numbers."""
 
-    __slots__ = ("lines", "left", "secondary_slot", "primary_slot", "is_valid_sequence")
+    __slots__ = ("is_valid_sequence", "left", "lines", "primary_slot", "secondary_slot")
 
     def __init__(self, line: Line, candidate_item: float, valid_sequence_flag: bool):
         self.lines: list = [line]
@@ -46,7 +40,7 @@ def init_line_number_cluster(line: Line) -> LineNumberCluster:
     return LineNumberCluster(line, line_number, is_valid_integer)
 
 
-def nearest_cluster(line: LineNumberCluster, other_line: Optional[LineNumberCluster], candidate_line: Optional[LineNumberCluster]) -> Optional[LineNumberCluster]:
+def nearest_cluster(line: LineNumberCluster, other_line: LineNumberCluster | None, candidate_line: LineNumberCluster | None) -> LineNumberCluster | None:
     """Pick the nearer left or right cluster within two character heights."""
     distance = (line.left - other_line.left) if other_line is not None else math.inf
     candidate_distance = (candidate_line.left - line.left) if candidate_line is not None else math.inf
@@ -68,7 +62,7 @@ def validate_line_number_cluster(rect: Rect, other_lines: list[Line], candidate_
     bot = math.inf
     min_gap = math.inf
     max_gap = -math.inf
-    prev: Optional[Line] = None
+    prev: Line | None = None
     for cluster_line in candidate_line.lines:
         if cluster_line.char_count() - cluster_line.char_stats.primary_slot[1] <= 0:
             empty_line_count += 1
@@ -118,11 +112,11 @@ def strip_line_numbers(rect: Rect, other_lines: list[Line]) -> list[Line]:
         # inclusive: successor = first left >= current, predecessor = last left <=
         # current. Strict bisect would fragment a fixed-x line-number column.
         idx_succ = cluster_tree.bisect_left(candidate_cluster)
-        successor_cluster: Optional[LineNumberCluster] = (
+        successor_cluster: LineNumberCluster | None = (
             cluster_tree[idx_succ] if idx_succ < len(cluster_tree) else None
         )  # type: ignore[assignment]
         idx_pred = cluster_tree.bisect_right(candidate_cluster)
-        neighbor: Optional[LineNumberCluster] = (
+        neighbor: LineNumberCluster | None = (
             cluster_tree[idx_pred - 1] if idx_pred > 0 else None
         )  # type: ignore[assignment]
         match = nearest_cluster(candidate_cluster, neighbor, successor_cluster)
@@ -135,7 +129,7 @@ def strip_line_numbers(rect: Rect, other_lines: list[Line]) -> list[Line]:
             cluster_tree.add(candidate_cluster)
 
     # Find largest valid (Ua) cluster
-    best: Optional[LineNumberCluster] = None
+    best: LineNumberCluster | None = None
     for cluster in cluster_tree:
         if cluster.is_valid_sequence and (best is None or len(cluster.lines) > len(best.lines)):
             best = cluster

@@ -5,7 +5,6 @@ from __future__ import annotations
 import math
 import unicodedata
 
-
 # --------------------------------------------------------------------------- #
 # Character classifier #
 # --------------------------------------------------------------------------- #
@@ -32,14 +31,14 @@ def _max_nan_propagating(value: float, other_item: float) -> float:
     """propagates NaN (Python ``max`` swallows it)."""
     if math.isnan(value) or math.isnan(other_item):
         return math.nan
-    return value if value >= other_item else other_item
+    return max(value, other_item)
 
 
 def _min_nan_propagating(value: float, other_item: float) -> float:
     """propagates NaN (Python ``min`` swallows it)."""
     if math.isnan(value) or math.isnan(other_item):
         return math.nan
-    return value if value <= other_item else other_item
+    return min(value, other_item)
 
 
 def char_category(char_value: str) -> int:
@@ -135,7 +134,7 @@ def _round_half_up_to_int(value: float) -> int:
 class CharStats:
     """Collect first/last character category, per-category counts, and total character count."""
 
-    __slots__ = ("secondary_slot", "tertiary_slot", "primary_slot", "auxiliary_slot")
+    __slots__ = ("auxiliary_slot", "primary_slot", "secondary_slot", "tertiary_slot")
 
     def __init__(self, other_text: str):
         self.secondary_slot = 0

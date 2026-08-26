@@ -28,6 +28,7 @@ from misaka.ai.types import ImageContent, MessageValue, TextContent
 from misaka.config import get_agent_dir, get_sessions_dir
 from misaka.utils import atomic
 from misaka.utils.paths import canonicalize_path, normalize_path, resolve_path
+from misaka.utils.values import read_field
 
 CURRENT_SESSION_VERSION = 3
 
@@ -245,8 +246,8 @@ def build_session_context(
             if isinstance(provider, str) and isinstance(model_id, str):
                 model = {"provider": provider, "modelId": model_id}
         elif entry_type == "message" and _message_role(entry.get("message")) == "assistant":
-            provider = _message_field(entry.get("message"), "provider")
-            model_id = _message_field(entry.get("message"), "model")
+            provider = read_field(entry.get("message"), "provider")
+            model_id = read_field(entry.get("message"), "model")
             if isinstance(provider, str) and isinstance(model_id, str):
                 model = {"provider": provider, "modelId": model_id}
         elif entry_type == "compaction":
@@ -1018,14 +1019,8 @@ def _is_valid_session_file(file_path: str) -> bool:
     return isinstance(header, dict) and header.get("type") == "session" and isinstance(header.get("id"), str)
 
 
-def _message_field(message: Any, name: str) -> Any:
-    if isinstance(message, dict):
-        return message.get(name)
-    return getattr(message, name, None)
-
-
 def _message_role(message: Any) -> str | None:
-    role = _message_field(message, "role")
+    role = read_field(message, "role")
     return role if isinstance(role, str) else None
 
 
@@ -1045,7 +1040,7 @@ def _set_message_role(message: Any, role: str) -> None:
 
 
 def _text_content(message: Any) -> str:
-    content = _message_field(message, "content")
+    content = read_field(message, "content")
     if isinstance(content, str):
         return content
     if not isinstance(content, list):
@@ -1072,7 +1067,7 @@ def _last_activity_time(entries: list[FileEntry]) -> int | None:
         if _message_role(message) not in {"user", "assistant"}:
             continue
 
-        message_timestamp = _message_field(message, "timestamp")
+        message_timestamp = read_field(message, "timestamp")
         if isinstance(message_timestamp, (int, float)) and not isinstance(message_timestamp, bool):
             current = int(message_timestamp)
         else:

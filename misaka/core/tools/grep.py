@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
-from misaka.core.tools._common import _is_aborted, _maybe_await, _value, abort_race
+from misaka.core.tools._common import _is_aborted, abort_race
 from misaka.core.tools.path_utils import resolve_to_cwd
 from misaka.core.tools.render_utils import (
     get_text_output,
@@ -35,6 +35,7 @@ from misaka.core.tools.truncate import (
 )
 from misaka.ui.tui import Text
 from misaka.utils.tools_manager import ensure_tool
+from misaka.utils.values import maybe_await, read_field
 
 T = TypeVar("T")
 
@@ -100,11 +101,11 @@ def _coerce_options(options: GrepToolOptions | Mapping[str, Any] | None) -> Grep
 
 
 def _format_grep_call(args: Mapping[str, Any] | None, theme_obj: Any) -> str:
-    pattern = str_value(_value(args, "pattern"))
-    raw_path = str_value(_value(args, "path"))
+    pattern = str_value(read_field(args, "pattern"))
+    raw_path = str_value(read_field(args, "path"))
     path_value = shorten_path(raw_path or ".") if raw_path is not None else None
-    glob_value = str_value(_value(args, "glob"))
-    limit = _value(args, "limit")
+    glob_value = str_value(read_field(args, "glob"))
+    limit = read_field(args, "limit")
     invalid_arg = invalid_arg_text(theme_obj)
 
     text = (
@@ -127,7 +128,7 @@ def _format_grep_result(result: Any, options: Any, theme_obj: Any, show_images: 
     text = ""
     if output:
         lines = output.split("\n")
-        max_lines = len(lines) if bool(_value(options, "expanded")) else 15
+        max_lines = len(lines) if bool(read_field(options, "expanded")) else 15
         display_lines = lines[:max_lines]
         remaining = len(lines) - max_lines
         text += "\n" + "\n".join(theme_obj.fg("toolOutput", line) for line in display_lines)
@@ -135,16 +136,16 @@ def _format_grep_result(result: Any, options: Any, theme_obj: Any, show_images: 
             more_lines_text = theme_obj.fg("muted", f"\n... ({remaining} more lines,")
             text += f"{more_lines_text} {key_hint('app.tools.expand', 'to expand')})"
 
-    details = _value(result, "details")
-    match_limit = _value(details, "matchLimitReached")
-    truncation = _value(details, "truncation")
-    lines_truncated = _value(details, "linesTruncated")
-    if match_limit or bool(_value(truncation, "truncated")) or lines_truncated:
+    details = read_field(result, "details")
+    match_limit = read_field(details, "matchLimitReached")
+    truncation = read_field(details, "truncation")
+    lines_truncated = read_field(details, "linesTruncated")
+    if match_limit or bool(read_field(truncation, "truncated")) or lines_truncated:
         warnings: list[str] = []
         if match_limit:
             warnings.append(f"{match_limit} matches limit")
-        if bool(_value(truncation, "truncated")):
-            warnings.append(f"{format_size(_value(truncation, 'maxBytes') or DEFAULT_MAX_BYTES)} limit")
+        if bool(read_field(truncation, "truncated")):
+            warnings.append(f"{format_size(read_field(truncation, 'maxBytes') or DEFAULT_MAX_BYTES)} limit")
         if lines_truncated:
             warnings.append("some lines truncated")
         warning_text = f"[Truncated: {', '.join(warnings)}]"
@@ -201,7 +202,7 @@ def create_grep_tool_definition(
 
         search_path = resolve_to_cwd(parsed.path or ".", cwd)
         try:
-            is_directory = await _maybe_await(operations.isDirectory(search_path))
+            is_directory = await maybe_await(operations.isDirectory(search_path))
         except Exception:  # noqa: BLE001 - any lookup failure reads as 'path not found'
             raise RuntimeError(f"Path not found: {search_path}") from None
 
@@ -219,7 +220,7 @@ def create_grep_tool_definition(
             if cached is not None:
                 return cached
             try:
-                content = await _maybe_await(operations.readFile(file_path))
+                content = await maybe_await(operations.readFile(file_path))
                 lines = str(content).replace("\r\n", "\n").replace("\r", "\n").split("\n")
             except Exception:  # noqa: BLE001 - an unreadable file searches as empty
                 lines = []

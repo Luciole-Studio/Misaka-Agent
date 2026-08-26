@@ -18,6 +18,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from misaka.utils.values import read_field
+
 PROTOCOL_VERSION = 2
 PROCESS_GROUP_IDENTITY = "process-group|"
 MANAGEMENT_TOOLS = ("Agent", "TaskOutput", "SendMessage", "TaskStop")
@@ -85,10 +87,6 @@ def _runtime_flags(argv: list[str]) -> tuple[list[str], int | None]:
     return flags, max_turns
 
 
-def _field(value: Any, name: str, default: Any = None) -> Any:
-    return value.get(name, default) if isinstance(value, dict) else getattr(value, name, default)
-
-
 def _hook_tools(kind: str, tools: list[Any]) -> list[Any]:
     """Prompt hooks are tool-free; agent hooks cannot spawn descendants."""
 
@@ -98,21 +96,21 @@ def _hook_tools(kind: str, tools: list[Any]) -> list[Any]:
     return [
         tool
         for tool in tools
-        if str(_field(tool, "name", "")).casefold() not in management
+        if str(read_field(tool, "name", "")).casefold() not in management
     ]
 
 
 def _small_fast_hook_model(parent: Any, available: list[Any]) -> Any:
     """Resolve the configured small-fast tier within the active provider."""
 
-    parent_provider = str(_field(parent, "provider", ""))
+    parent_provider = str(read_field(parent, "provider", ""))
     provider_models = [
         model
         for model in available
-        if str(_field(model, "provider", "")) == parent_provider
+        if str(read_field(model, "provider", "")) == parent_provider
     ]
     by_id = {
-        str(_field(model, "id", "")).casefold(): model
+        str(read_field(model, "id", "")).casefold(): model
         for model in provider_models
     }
 
@@ -138,13 +136,13 @@ def _small_fast_hook_model(parent: Any, available: list[Any]) -> Any:
         candidates = [
             model
             for model in provider_models
-            if keyword in str(_field(model, "id", "")).casefold()
+            if keyword in str(read_field(model, "id", "")).casefold()
         ]
         if not candidates:
             continue
 
         def freshness(model: Any) -> tuple[int, tuple[int, ...], str]:
-            model_id = str(_field(model, "id", "")).casefold()
+            model_id = str(read_field(model, "id", "")).casefold()
             numbers = tuple(int(value) for value in re.findall(r"\d+", model_id))
             return (1 if "latest" in model_id else 0, numbers, model_id)
 
@@ -180,15 +178,15 @@ def _agent_hook_can_read_transcript(
 def _message_text(message: Any) -> str:
     """Return the exact text carried by a user message event."""
 
-    content = _field(message, "content", "")
+    content = read_field(message, "content", "")
     if isinstance(content, str):
         return content
     if not isinstance(content, list):
         return str(content or "")
     return "".join(
-        str(_field(block, "text", "") or "")
+        str(read_field(block, "text", "") or "")
         for block in content
-        if str(_field(block, "type", "")) == "text"
+        if str(read_field(block, "type", "")) == "text"
     )
 
 
@@ -235,10 +233,10 @@ def _terminal_error(messages: list[dict[str, Any]]) -> str | None:
     if not messages:
         return None
     last = messages[-1]
-    reason = str(_field(last, "stopReason", "") or "").casefold()
+    reason = str(read_field(last, "stopReason", "") or "").casefold()
     if reason not in {"error", "aborted"}:
         return None
-    detail = _field(last, "errorMessage")
+    detail = read_field(last, "errorMessage")
     return str(detail or f"request {reason}")
 
 
@@ -481,8 +479,8 @@ async def amain() -> int:
         turns = 0
 
         async def before_tool(call: Any, _signal: Any = None) -> BeforeToolCallResult | None:
-            call_name = str(_field(_field(call, "toolCall"), "name", ""))
-            call_input = _field(call, "args", {}) or {}
+            call_name = str(read_field(read_field(call, "toolCall"), "name", ""))
+            call_input = read_field(call, "args", {}) or {}
             if _agent_hook_can_read_transcript(
                 kind,
                 transcript_path,
@@ -541,14 +539,14 @@ async def amain() -> int:
         )
         await verifier.prompt(prompt)
         for message in reversed(verifier.state.messages):
-            if str(_field(message, "role", "")) != "assistant":
+            if str(read_field(message, "role", "")) != "assistant":
                 continue
-            if str(_field(message, "stopReason", "")) in {"error", "aborted"}:
-                raise RuntimeError(str(_field(message, "errorMessage", "hook model failed")))
+            if str(read_field(message, "stopReason", "")) in {"error", "aborted"}:
+                raise RuntimeError(str(read_field(message, "errorMessage", "hook model failed")))
             return "".join(
-                str(_field(block, "text", ""))
-                for block in (_field(message, "content", []) or [])
-                if str(_field(block, "type", "")) == "text"
+                str(read_field(block, "text", ""))
+                for block in (read_field(message, "content", []) or [])
+                if str(read_field(block, "type", "")) == "text"
             )
         raise RuntimeError("Hook model returned no assistant message")
 
@@ -598,15 +596,15 @@ async def amain() -> int:
         """Collect assistant completions and expose only bounded progress data."""
 
         nonlocal model_turn_count, max_turn_abort_requested
-        event_type = str(_field(event, "type", ""))
+        event_type = str(read_field(event, "type", ""))
 
         # A SendMessage acknowledgement means the running agent actually
         # consumed the queued steering message, not merely that stdin accepted
         # it.  This closes the final-poll window where a turn could finish
         # immediately after queueing and silently drop an acknowledged message.
         if event_type == "message_start":
-            message = _field(event, "message")
-            if str(_field(message, "role", "")) == "user":
+            message = read_field(event, "message")
+            if str(read_field(message, "role", "")) == "user":
                 consumed = _message_text(message)
                 for index, pending in enumerate(pending_steers):
                     if (
@@ -624,8 +622,8 @@ async def amain() -> int:
                         break
 
         if event_type == "message_end" and active_messages is not None:
-            message = _field(event, "message")
-            if str(_field(message, "role", "")) == "assistant":
+            message = read_field(event, "message")
+            if str(read_field(message, "role", "")) == "assistant":
                 try:
                     active_messages.append(jsonable(message))
                 except (TypeError, ValueError):
@@ -659,19 +657,19 @@ async def amain() -> int:
                     "type": "child_progress",
                     "turnId": active_turn_id,
                     "event": event_type,
-                    "toolCallId": _field(event, "toolCallId", _field(event, "toolUseID")),
-                    "toolName": _field(event, "toolName"),
+                    "toolCallId": read_field(event, "toolCallId", read_field(event, "toolUseID")),
+                    "toolName": read_field(event, "toolName"),
                 }
             )
         elif event_type == "message_end":
-            message = _field(event, "message")
+            message = read_field(event, "message")
             _emit(
                 {
                     "type": "child_progress",
                     "turnId": active_turn_id,
                     "event": event_type,
-                    "role": _field(message, "role"),
-                    "stopReason": _field(message, "stopReason"),
+                    "role": read_field(message, "role"),
+                    "stopReason": read_field(message, "stopReason"),
                 }
             )
 
@@ -784,7 +782,7 @@ async def amain() -> int:
                 dict.fromkeys(
                     name.split("__", 2)[1]
                     for tool in registered
-                    if (name := str(_field(_field(tool, "definition"), "name", "")))
+                    if (name := str(read_field(read_field(tool, "definition"), "name", "")))
                     if name.startswith("mcp__") and name.count("__") >= 2
                 )
             )

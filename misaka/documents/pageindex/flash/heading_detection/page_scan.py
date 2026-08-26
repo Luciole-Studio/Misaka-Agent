@@ -3,57 +3,68 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Optional
-from ..outline_assembly import HeadingCandidate, OutlineNode
-from ..labels import is_uppercase_dominant, trie_matches_all, advance_past_line, skip_bracketed_word, token_case_signal, format_caption_label, CaptionEntry, extract_structural_number
-from ..model import (
-    _UNICODE_WHITESPACE_CLASS,
-    _strip_diacritics,
-    _trim_unicode_ws,
-    style_key, magnitude_ratio, same_x_extent, same_y_extent, y_overlaps, left_aligned, right_aligned, center_aligned, x_aligned, x_centers_close, to_number,
-    last_span, avg_char_width, raw_text_of_line, heading_score, numbering_text, numbering_value, numbering_kind, Line, last_line_of, first_span_of, is_word_category, block_text, is_punct_category, deaccented_text, letter_count, punct_count, dominant_style_of,
-    info_weight, dominant_font_size, is_upper_dominant, is_caps_heavy, CharStats, alignment_code, Block,
-)
-from ..tokens import (
-    is_trimmable_token, token_numeric_value, Token, TokenView, wrap_tokens, enumerate_tokens, last_token, trie_prefix_match, strip_trie_match, strip_leading_if_in, COMMA_CHARS, strip_trailing_comma, first_token, trim_trailing_punct, set_case_fold, TrieConfig, build_trie, tokenize_block,
-    trie_full_match, last_token_anchor, first_anchor_span, is_char_token, is_word_token,
-)
 
-from .keyword_tables import (
-    SECTION_KEYWORDS_TRIE,
-    INTRODUCTION_SECTION_TRIE,
+from ..labels import (
+    advance_past_line,
+    trie_matches_all,
 )
-from .text_checks import (
-    is_heading_continuation,
-    matches_abstract,
-    matches_references,
-    has_substantive_content,
-    is_cover_page,
+from ..model import (
+    Block,
+    center_aligned,
+    first_span_of,
+    heading_score,
+    info_weight,
+    is_caps_heavy,
+    is_upper_dominant,
+    last_line_of,
+    last_span,
+    letter_count,
+    style_key,
+    x_aligned,
 )
-from .neighbors import (
-    neighbor_above,
-    neighbor_right,
-    closest_body_neighbor_above,
+from ..outline_assembly import HeadingCandidate, OutlineNode
+from ..tokens import (
+    first_token,
+    is_char_token,
+    is_word_token,
+    token_numeric_value,
+    tokenize_block,
+    trie_full_match,
 )
 from .candidates import (
     PageScanState,
-    push_candidate,
-    make_plain_candidate,
     make_body_heading_candidate,
+    make_plain_candidate,
+    push_candidate,
 )
 from .detectors import (
-    detect_numbered_heading,
-    detect_labeled_heading,
     detect_chapter_appendix,
-    try_classify_heading,
-    passes_neighbor_check,
+    detect_labeled_heading,
+    detect_numbered_heading,
     has_competing_labeled_heading,
+    passes_neighbor_check,
+    try_classify_heading,
+)
+from .keyword_tables import (
+    INTRODUCTION_SECTION_TRIE,
+    SECTION_KEYWORDS_TRIE,
+)
+from .neighbors import (
+    closest_body_neighbor_above,
+    neighbor_above,
+    neighbor_right,
 )
 from .style_detectors import (
     detect_font_heading,
     detect_heading_with_body,
 )
-
+from .text_checks import (
+    has_substantive_content,
+    is_cover_page,
+    is_heading_continuation,
+    matches_abstract,
+    matches_references,
+)
 
 # --------------------------------------------------------------------------- #
 # Main per-page heading scan #
@@ -280,7 +291,7 @@ def scan_page_headings(page_scan: PageScanState) -> list[HeadingCandidate]:
 class DocCandidateCollector:
     """Document-level state aggregating per-page heading candidates."""
 
-    __slots__ = ("previous_slot", "measure_slot", "option_slot", "auxiliary_slot", "primary_slot", "tertiary_slot", "secondary_slot", "state_slot")
+    __slots__ = ("auxiliary_slot", "measure_slot", "option_slot", "previous_slot", "primary_slot", "secondary_slot", "state_slot", "tertiary_slot")
 
     def __init__(self, doc, labeled):
         self.previous_slot = doc
@@ -295,9 +306,8 @@ class DocCandidateCollector:
 
 def filter_page_candidates(doc_collector: DocCandidateCollector, page, page_candidates: list[HeadingCandidate]) -> None:
     """Per-page candidate filter for noisy pages, title overlap, page headers, and numbering continuity."""
+    from ..model import intervals_overlap
     from ..outline_assembly import is_script_compatible
-    from ..model import intervals_overlap, is_caps_heavy
-    from ..stats import column_index_of
 
     # Advance document-level numbering state through outline entries up to this page.
     while doc_collector.option_slot < len(doc_collector.measure_slot):
@@ -327,7 +337,7 @@ def filter_page_candidates(doc_collector: DocCandidateCollector, page, page_cand
     page_candidates.sort(key=_ih_key)
 
     accepted: list[HeadingCandidate] = []
-    title: Optional[Block] = None
+    title: Block | None = None
     if not doc_collector.auxiliary_slot and getattr(page, "auxiliary_slot", False):
         for block in page.output_slot:
             if block.type == 3:
@@ -410,7 +420,7 @@ def filter_page_candidates(doc_collector: DocCandidateCollector, page, page_cand
 # --------------------------------------------------------------------------- #
 
 
-def build_doc_heading_candidates(doc, labeled: Optional[list] = None) -> list[HeadingCandidate]:
+def build_doc_heading_candidates(doc, labeled: list | None = None) -> list[HeadingCandidate]:
     """Run per-page heading detection across the document."""
     doc_collector = DocCandidateCollector(doc, labeled if labeled is not None else [])
     saw_body = False
@@ -428,13 +438,17 @@ def build_doc_heading_candidates(doc, labeled: Optional[list] = None) -> list[He
 
 def find_section_openers(doc, start_page_idx: int) -> list:
     """Find the first valid heading on each page, then clique-filter the result."""
-    from ..outline_assembly import is_script_compatible, has_conflict_in_context, OutlineContext, OutlineNode
+    from ..outline_assembly import (
+        OutlineContext,
+        has_conflict_in_context,
+        is_script_compatible,
+    )
 
     item_list: list[HeadingCandidate] = []
     index = start_page_idx
     while index < len(doc.primary_slot):
         page = doc.primary_slot[index]
-        current_candidate: Optional[HeadingCandidate] = None
+        current_candidate: HeadingCandidate | None = None
         page_scan_state = PageScanState(doc, page)
         if not page_scan_state.primary_slot.auxiliary_slot:
             for block in page_scan_state.auxiliary_slot:

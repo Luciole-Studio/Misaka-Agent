@@ -43,7 +43,6 @@ import re
 from collections import Counter
 from io import BytesIO
 from pathlib import Path
-from typing import Optional, Union
 
 import pypdfium2 as pdfium
 
@@ -108,7 +107,7 @@ def _title_template(title: str) -> str:
     )
 
 
-def read_bookmarks(doc_handle: Union[str, Path, BytesIO]) -> list[dict]:
+def read_bookmarks(doc_handle: str | Path | BytesIO) -> list[dict]:
     """Extract raw bookmark entries as {title, level, page}, all 1-based.
 
     Returns [] when the document has no outline, the handle is not one
@@ -327,11 +326,11 @@ def _repair_titles(structure: list[dict], entries: list[dict]) -> None:
         visit(node)
 
 
-def _find_entry_node(root: dict, entry: dict) -> Optional[dict]:
+def _find_entry_node(root: dict, entry: dict) -> dict | None:
     """Locate a node in ``root``'s subtree that already represents ``entry``."""
     entry_norm = _normalize_title(entry["title"])
 
-    def visit(node: dict) -> Optional[dict]:
+    def visit(node: dict) -> dict | None:
         if abs(node["start_index"] - entry["page"]) <= 1:
             node_norm = _normalize_title(node["title"])
             if entry_norm and node_norm and (
@@ -350,7 +349,7 @@ def _find_entry_node(root: dict, entry: dict) -> Optional[dict]:
 
 def merge_bookmark_skeleton(
     structure: list[dict], entries: list[dict], n_pages: int,
-    page_texts: Optional[list[str]] = None,
+    page_texts: list[str] | None = None,
 ) -> list[dict]:
     """Re-hang the detected tree under the bookmark chapter frame (SKELETON tier).
 
@@ -586,8 +585,8 @@ def merge_bookmark_tree(
 
 
 def apply_embedded_toc(
-    structure: list[dict], doc_handle: Union[str, Path, BytesIO], n_pages: int,
-    page_texts: Optional[list[str]] = None,
+    structure: list[dict], doc_handle: str | Path | BytesIO, n_pages: int,
+    page_texts: list[str] | None = None,
 ) -> tuple[list[dict], str]:
     """Classify the document's bookmarks and apply the matching tier.
 
@@ -608,8 +607,14 @@ def apply_embedded_toc(
 
 
 __all__ = [
-    "IGNORE", "SKELETON", "FULL",
-    "read_bookmarks", "validate_bookmarks", "classify_bookmarks",
-    "bookmarks_to_structure", "merge_bookmark_skeleton", "merge_bookmark_tree",
+    "FULL",
+    "IGNORE",
+    "SKELETON",
     "apply_embedded_toc",
+    "bookmarks_to_structure",
+    "classify_bookmarks",
+    "merge_bookmark_skeleton",
+    "merge_bookmark_tree",
+    "read_bookmarks",
+    "validate_bookmarks",
 ]

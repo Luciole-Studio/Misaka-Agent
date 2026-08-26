@@ -19,7 +19,6 @@ from misaka.core.tools._common import (
     _ignore_background_task_result,
     _is_aborted,
     _string_arg,
-    _value,
     abort_race,
 )
 from misaka.core.tools.path_utils import resolve_read_path
@@ -42,6 +41,7 @@ from misaka.ui.tui.interactive.theme.theme import get_language_from_path, highli
 from misaka.utils.image_resize import format_dimension_note, resize_image
 from misaka.utils.mime import detect_supported_image_mime_type_from_file
 from misaka.utils.paths import format_path_relative_to_cwd_or_absolute
+from misaka.utils.values import read_field
 
 
 class ReadToolInput(BaseModel):
@@ -106,16 +106,16 @@ def _coerce_options(options: ReadToolOptions | Mapping[str, Any] | None) -> Read
 
 
 def _format_read_line_range(args: Mapping[str, Any] | None, theme_obj: Any) -> str:
-    if _value(args, "offset") is None and _value(args, "limit") is None:
+    if read_field(args, "offset") is None and read_field(args, "limit") is None:
         return ""
-    start_line = _value(args, "offset") or 1
-    limit = _value(args, "limit")
+    start_line = read_field(args, "offset") or 1
+    limit = read_field(args, "limit")
     end_line = start_line + limit - 1 if limit is not None else ""
     return theme_obj.fg("warning", f":{start_line}{f'-{end_line}' if end_line else ''}")
 
 
 def _format_read_call(args: Mapping[str, Any] | None, theme_obj: Any) -> str:
-    raw_path = _string_arg(_value(args, "file_path", _value(args, "path")))
+    raw_path = _string_arg(read_field(args, "file_path", read_field(args, "path")))
     path_value = shorten_path(raw_path) if raw_path is not None else None
     invalid_arg = invalid_arg_text(theme_obj)
     path_display = invalid_arg if path_value is None else (theme_obj.fg("accent", path_value) if path_value else theme_obj.fg("toolOutput", "..."))
@@ -140,7 +140,7 @@ def _to_posix_path(file_path: str) -> str:
 
 
 def _get_compact_read_classification(args: Mapping[str, Any] | None, cwd: str) -> _CompactReadClassification | None:
-    raw_path = _string_arg(_value(args, "file_path", _value(args, "path")))
+    raw_path = _string_arg(read_field(args, "file_path", read_field(args, "path")))
     if not raw_path:
         return None
 
@@ -193,15 +193,15 @@ def _format_read_result(
 ) -> str:
     from misaka.ui.tui.interactive.components.keybinding_hints import key_hint
 
-    if not bool(_value(options, "expanded")) and not is_error and _get_compact_read_classification(args, cwd):
+    if not bool(read_field(options, "expanded")) and not is_error and _get_compact_read_classification(args, cwd):
         return ""
 
-    raw_path = _string_arg(_value(args, "file_path", _value(args, "path")))
+    raw_path = _string_arg(read_field(args, "file_path", read_field(args, "path")))
     output = get_text_output(result, show_images)
     lang = get_language_from_path(raw_path) if raw_path else None
     rendered_lines = highlight_code(replace_tabs(output), lang) if lang else output.split("\n")
     lines = _trim_trailing_empty_lines(rendered_lines)
-    max_lines = len(lines) if bool(_value(options, "expanded")) else 10
+    max_lines = len(lines) if bool(read_field(options, "expanded")) else 10
     display_lines = lines[:max_lines]
     remaining = len(lines) - max_lines
     text = "\n" + "\n".join(replace_tabs(line) if lang else theme_obj.fg("toolOutput", replace_tabs(line)) for line in display_lines)
@@ -209,20 +209,20 @@ def _format_read_result(
         more_lines_text = theme_obj.fg("muted", f"\n... ({remaining} more lines,")
         text += f"{more_lines_text} {key_hint('app.tools.expand', 'to expand')})"
 
-    details = _value(result, "details")
-    truncation = _value(details, "truncation")
-    if bool(_value(truncation, "truncated")):
-        if _value(truncation, "firstLineExceedsLimit"):
-            warning = f"[First line exceeds {format_size(_value(truncation, 'maxBytes') or DEFAULT_MAX_BYTES)} limit]"
-        elif _value(truncation, "truncatedBy") == "lines":
+    details = read_field(result, "details")
+    truncation = read_field(details, "truncation")
+    if bool(read_field(truncation, "truncated")):
+        if read_field(truncation, "firstLineExceedsLimit"):
+            warning = f"[First line exceeds {format_size(read_field(truncation, 'maxBytes') or DEFAULT_MAX_BYTES)} limit]"
+        elif read_field(truncation, "truncatedBy") == "lines":
             warning = (
-                f"[Truncated: showing {_value(truncation, 'outputLines')} of {_value(truncation, 'totalLines')} lines "
-                f"({_value(truncation, 'maxLines') or DEFAULT_MAX_LINES} line limit)]"
+                f"[Truncated: showing {read_field(truncation, 'outputLines')} of {read_field(truncation, 'totalLines')} lines "
+                f"({read_field(truncation, 'maxLines') or DEFAULT_MAX_LINES} line limit)]"
             )
         else:
             warning = (
-                f"[Truncated: {_value(truncation, 'outputLines')} lines shown "
-                f"({format_size(_value(truncation, 'maxBytes') or DEFAULT_MAX_BYTES)} limit)]"
+                f"[Truncated: {read_field(truncation, 'outputLines')} lines shown "
+                f"({format_size(read_field(truncation, 'maxBytes') or DEFAULT_MAX_BYTES)} limit)]"
             )
         text += "\n" + theme_obj.fg("warning", warning)
     return text
