@@ -1242,7 +1242,9 @@ def launch():
             tail = "(output unavailable)"
         title = next((p["title"] for p in listing if p["id"] == pane_id), pane_id)
         try:
-            with open(os.path.expanduser("~/.misaka/panel-crash.log"), "a", encoding="utf-8") as f:
+            crash_fd = os.open(os.path.expanduser("~/.misaka/panel-crash.log"),
+                               os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+            with os.fdopen(crash_fd, "a", encoding="utf-8") as f:
                 f.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} pane exited: {title} "
                         f"(exit code {exit_code}) ===\n{tail}\n")
         except OSError:
@@ -3141,7 +3143,8 @@ def launch():
         import traceback
         log = os.path.expanduser("~/.misaka/panel-crash.log")
         try:
-            with open(log, "a", encoding="utf-8") as f:
+            crash_fd = os.open(log, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+            with os.fdopen(crash_fd, "a", encoding="utf-8") as f:
                 f.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n{traceback.format_exc()}")
         except OSError:
             log = "(could not write the crash log)"

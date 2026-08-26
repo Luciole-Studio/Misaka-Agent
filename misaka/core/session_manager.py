@@ -343,7 +343,11 @@ def get_session_dir_for_cwd(cwd: str, sessions_root: str) -> str:
     root = resolve_path(sessions_root)
     canonical_cwd = _canonical_cwd(cwd)
     session_dir = os.path.join(root, encode_cwd(canonical_cwd))
-    os.makedirs(session_dir, exist_ok=True)
+    os.makedirs(session_dir, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(session_dir, 0o700)              # buckets from before privacy was enforced
+    except OSError:
+        pass
 
     legacy_dirs = {
         os.path.join(root, _legacy_encode_cwd(cwd)),
@@ -497,7 +501,7 @@ class SessionManager:
         self.leafId: str | None = None
 
         if self.persist and self.sessionDir and not os.path.exists(self.sessionDir):
-            os.makedirs(self.sessionDir, exist_ok=True)
+            os.makedirs(self.sessionDir, mode=0o700, exist_ok=True)
 
         if sessionFile:
             self.setSessionFile(sessionFile)
@@ -580,7 +584,7 @@ class SessionManager:
     def _rewriteFile(self) -> None:
         if not self.persist or not self.sessionFile:
             return
-        atomic.write_text(self.sessionFile, _dump_jsonl(self.fileEntries))
+        atomic.write_text(self.sessionFile, _dump_jsonl(self.fileEntries), mode=0o600)
 
     def isPersisted(self) -> bool:
         return self.persist
@@ -614,6 +618,8 @@ class SessionManager:
             self.flushed = True
             return
 
+        if not os.path.exists(self.sessionFile):
+            atomic.write_text(self.sessionFile, "", mode=0o600)   # the transcript is born private
         with Path(self.sessionFile).open("a", encoding="utf-8") as handle:
             handle.write(f"{_dump_json(entry)}\n")
 
