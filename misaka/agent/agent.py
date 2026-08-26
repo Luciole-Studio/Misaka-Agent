@@ -515,7 +515,10 @@ class Agent:
 
         try:
             await executor(self._active_run.abort_controller.signal)
-        except BaseException as error:  # noqa: BLE001
+        except BaseException as error:
+            aborted = self.signal is not None and self.signal.aborted
+            if isinstance(error, asyncio.CancelledError) and not aborted:
+                raise                      # the caller cancelled us: do not answer for them
             await self._handle_run_failure(error)
         finally:
             self._finish_run()

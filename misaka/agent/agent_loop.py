@@ -487,6 +487,12 @@ async def execute_tool_calls_sequential(
         if _signal_aborted(signal):
             break
 
+    for finalized in await _answer_unreached_tool_calls(tool_calls, len(finalized_calls), emit):
+        tool_result_message = create_tool_result_message(finalized)
+        await emit_tool_result_message(tool_result_message, emit)
+        finalized_calls.append(finalized)
+        messages.append(tool_result_message)
+
     return ExecutedToolCallBatch(
         messages=messages,
         terminate=should_terminate_tool_batch(finalized_calls),
@@ -543,6 +549,10 @@ async def execute_tool_calls_parallel(
         if _signal_aborted(signal):
             break
 
+    finalized_entries.extend(
+        await _answer_unreached_tool_calls(tool_calls, len(finalized_entries), emit)
+    )
+
     ordered_finalized_calls = await asyncio.gather(
         *[
             entry if inspect.isawaitable(entry) else _return_value(entry)
@@ -559,6 +569,51 @@ async def execute_tool_calls_parallel(
         messages=messages,
         terminate=should_terminate_tool_batch(ordered_finalized_calls),
     )
+
+
+def _reraise_if_caller_cancelled(error: BaseException, signal: Any | None) -> None:
+    """Let a caller's cancellation through; keep our own abort in band.
+
+    These handlers turn any exception into an error tool result, which is right for a
+    tool that failed but wrong for ``CancelledError``: swallowing it means the caller's
+    ``task.cancel()`` never arrives and the loop keeps running. When our own abort
+    signal is set the cancellation is ours, and the aborted result is the honest answer.
+    """
+    if isinstance(error, asyncio.CancelledError) and not _signal_aborted(signal):
+        raise error
+
+
+def _aborted_outcome(tool_call: AgentToolCall) -> FinalizedToolCallOutcome:
+    return FinalizedToolCallOutcome(
+        toolCall=tool_call,
+        result=create_error_tool_result("Operation aborted"),
+        isError=True,
+    )
+
+
+async def _answer_unreached_tool_calls(
+    tool_calls: list[AgentToolCall],
+    done: int,
+    emit: AgentEventSink,
+) -> list[FinalizedToolCallOutcome]:
+    """Every tool call in the assistant message needs a result, abort or not.
+
+    Breaking out of the batch used to leave the tail unanswered, and a conversation whose
+    assistant message has tool calls without matching results is rejected by the provider
+    on the next request -- the abort would surface as a broken session one turn later.
+    """
+    answered: list[FinalizedToolCallOutcome] = []
+    for tool_call in tool_calls[done:]:
+        await _emit(
+            emit,
+            ToolExecutionStartEvent(
+                toolCallId=tool_call.id, toolName=tool_call.name, args=tool_call.arguments
+            ),
+        )
+        finalized = _aborted_outcome(tool_call)
+        await emit_tool_execution_end(finalized, emit)
+        answered.append(finalized)
+    return answered
 
 
 def should_terminate_tool_batch(finalized_calls: list[FinalizedToolCallOutcome]) -> bool:
@@ -633,6 +688,7 @@ async def prepare_tool_call(
             )
         return PreparedToolCall(kind="prepared", toolCall=tool_call, tool=tool, args=validated_args)
     except BaseException as error:  # noqa: BLE001
+        _reraise_if_caller_cancelled(error, signal)
         return ImmediateToolCallOutcome(
             kind="immediate",
             result=create_error_tool_result(str(error)),
@@ -670,7 +726,8 @@ async def execute_prepared_tool_call(
         return ExecutedToolCallOutcome(result=_coerce_agent_tool_result(result), isError=False)
     except BaseException as error:  # noqa: BLE001
         if update_tasks:
-            await asyncio.gather(*update_tasks)
+            await asyncio.gather(*update_tasks, return_exceptions=True)
+        _reraise_if_caller_cancelled(error, signal)
         return ExecutedToolCallOutcome(
             result=create_error_tool_result(str(error)),
             isError=True,
@@ -724,6 +781,7 @@ async def finalize_executed_tool_call(
                 )
                 is_error = normalized_after_result.isError if normalized_after_result.isError is not None else is_error
         except BaseException as error:  # noqa: BLE001
+            _reraise_if_caller_cancelled(error, signal)
             result = create_error_tool_result(str(error))
             is_error = True
 
