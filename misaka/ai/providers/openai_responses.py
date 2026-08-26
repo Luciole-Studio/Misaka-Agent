@@ -38,7 +38,7 @@ from misaka.ai.types import (
     StreamOptions,
     Usage,
 )
-from misaka.ai.utils.event_stream import AssistantMessageEventStream
+from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
 
 OPENAI_TOOL_CALL_PROVIDERS = {"openai", "openai-codex", "opencode"}
@@ -429,7 +429,7 @@ def stream_openai_responses(
         finally:
             stream.end()
 
-    asyncio.create_task(run())
+    spawn_stream_task(run())
     return stream
 
 

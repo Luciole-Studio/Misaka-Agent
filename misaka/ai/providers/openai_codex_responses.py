@@ -45,7 +45,7 @@ from misaka.ai.utils.diagnostics import (
     create_assistant_message_diagnostic,
     format_thrown_value,
 )
-from misaka.ai.utils.event_stream import AssistantMessageEventStream
+from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
 
 DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api"
@@ -1124,7 +1124,7 @@ def stream_openai_codex_responses(
             if response is not None:
                 await response.aclose()
 
-    asyncio.create_task(run())
+    spawn_stream_task(run())
     return stream
 
 

@@ -35,7 +35,7 @@ from misaka.ai.types import (
     StartEvent,
     StreamOptions,
 )
-from misaka.ai.utils.event_stream import AssistantMessageEventStream
+from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
 
 DEFAULT_AZURE_API_VERSION = "v1"
@@ -379,7 +379,7 @@ def stream_azure_openai_responses(
         finally:
             stream.end()
 
-    asyncio.create_task(run())
+    spawn_stream_task(run())
     return stream
 
 

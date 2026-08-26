@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
-from typing import TypeVar, cast
+from typing import Any, TypeVar, cast
 
 from misaka.ai.types import AssistantMessage, AssistantMessageEvent
 
@@ -106,3 +106,19 @@ __all__ = [
     "AssistantMessageEventStream",
     "EventStream",
 ]
+
+
+_live_stream_tasks: set[asyncio.Task[Any]] = set()
+
+
+def spawn_stream_task(coro: Any) -> asyncio.Task[Any]:
+    """Run a provider's streaming body, holding the task until it finishes.
+
+    The event loop keeps only a weak reference to a task, so a bare
+    ``asyncio.create_task(run())`` -- which is how every provider used to start its stream --
+    can be collected mid-response. The reference lives here until the task completes.
+    """
+    task = asyncio.create_task(coro)
+    _live_stream_tasks.add(task)
+    task.add_done_callback(_live_stream_tasks.discard)
+    return task

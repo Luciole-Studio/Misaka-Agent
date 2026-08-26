@@ -62,7 +62,7 @@ from misaka.ai.types import (
     Usage,
     UsageCost,
 )
-from misaka.ai.utils.event_stream import AssistantMessageEventStream
+from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
 from misaka.ai.utils.json_parse import parse_streaming_json
 from misaka.ai.utils.node_http_proxy import create_http_proxy_agents_for_target
@@ -407,7 +407,7 @@ def stream_bedrock(
             await _close_stream(response_stream)
             stream.end()
 
-    asyncio.create_task(run())
+    spawn_stream_task(run())
     return stream
 
 

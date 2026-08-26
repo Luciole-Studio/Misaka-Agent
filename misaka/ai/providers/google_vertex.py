@@ -62,7 +62,7 @@ from misaka.ai.types import (
     Usage,
     UsageCost,
 )
-from misaka.ai.utils.event_stream import AssistantMessageEventStream
+from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
 
 ClampedThinkingLevel = Literal["minimal", "low", "medium", "high"]
@@ -352,7 +352,7 @@ def stream_google_vertex(
                     pass
             stream.end()
 
-    asyncio.create_task(run())
+    spawn_stream_task(run())
     return stream
 
 

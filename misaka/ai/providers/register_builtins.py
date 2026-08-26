@@ -22,7 +22,7 @@ from misaka.ai.types import (
     SimpleStreamOptions,
     StreamOptions,
 )
-from misaka.ai.utils.event_stream import AssistantMessageEventStream
+from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 
 ProviderStreamCallable = Callable[[Model, Context, StreamOptions | None], AsyncIterable[Any]]
 ProviderSimpleStreamCallable = Callable[[Model, Context, SimpleStreamOptions | None], AsyncIterable[Any]]
@@ -49,7 +49,7 @@ def _forward_stream(target: AssistantMessageEventStream, source: AsyncIterable[A
             target.push(event)
         target.end()
 
-    asyncio.create_task(run())
+    spawn_stream_task(run())
 
 
 def _create_lazy_load_error_message(model: Model, error: Any) -> AssistantMessage:
@@ -96,7 +96,7 @@ def _create_lazy_stream(load_module: Callable[[], Awaitable[LazyProviderModule]]
 
             _forward_stream(outer, inner)
 
-        asyncio.create_task(load_and_forward())
+        spawn_stream_task(load_and_forward())
         return outer
 
     return stream
@@ -125,7 +125,7 @@ def _create_lazy_simple_stream(load_module: Callable[[], Awaitable[LazyProviderM
 
             _forward_stream(outer, inner)
 
-        asyncio.create_task(load_and_forward())
+        spawn_stream_task(load_and_forward())
         return outer
 
     return stream

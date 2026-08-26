@@ -56,7 +56,7 @@ from misaka.ai.types import (
     Usage,
     UsageCost,
 )
-from misaka.ai.utils.event_stream import AssistantMessageEventStream
+from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
 from misaka.ai.utils.json_parse import parse_json_with_repair, parse_streaming_json
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
@@ -1137,7 +1137,7 @@ def stream_anthropic(
             await _close_stream(raw_response)
             stream.end()
 
-    asyncio.create_task(run())
+    spawn_stream_task(run())
     return stream
 
 
