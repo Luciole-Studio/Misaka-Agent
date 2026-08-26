@@ -553,7 +553,7 @@ def main():
             structure = "with PageIndex structure" if has else "page navigation only"
             print(f"Added {os.path.basename(args.arg)} as {did}: {n} pages, {structure}.")
         elif args.action == "scan":
-            ingested, skipped = corpus.scan(args.arg or os.getcwd())
+            ingested, skipped = corpus.scan(args.arg or os.getcwd(), with_tree=not args.no_tree)
             for did, path in ingested:
                 print(f"  {did}  {path}")
             for path, reason in skipped:

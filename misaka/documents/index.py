@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 
 SCAN_SUFFIXES = {".pdf", ".md", ".markdown", ".txt"}
@@ -44,7 +45,10 @@ def _pdf_pages(p):
         out = subprocess.run(["pdftotext", "-layout", p, "-"], capture_output=True,
                              text=True, timeout=300)
         if out.returncode == 0 and out.stdout.strip():
-            return [t for t in out.stdout.split("\f")]
+            pages = out.stdout.split("\f")
+            if len(pages) > 1 and not pages[-1].strip():   # pdftotext ends every page with \f: the tail is no page
+                pages.pop()
+            return pages
     except (OSError, subprocess.SubprocessError):
         pass
     try:
@@ -127,7 +131,34 @@ def _tree(doc_id):
         return None
 
 
-STAGE_SUFFIX = ".part-"     # an in-progress document: "<doc_id>.part-<pid>", never listed
+STAGE_SUFFIX = ".part-"     # an in-progress document: "<doc_id>.part-<pid>-<thread>", never listed
+
+
+def _meta_lock(ddir):
+    """One lock per document for meta.json read-modify-write: two ingests of the same content
+    (two cards, two panes) must not lose each other's task or path link."""
+    from filelock import FileLock
+    locks = os.path.join(os.path.dirname(ddir), ".locks")
+    os.makedirs(locks, exist_ok=True)
+    return FileLock(os.path.join(locks, os.path.basename(ddir) + ".lock"))
+
+
+def _link(ddir, p, task_id):
+    """Known content: link ``task_id`` and remember this path too, so the same book used by
+    two project folders belongs to both. Returns the page count."""
+    with _meta_lock(ddir):
+        m = _read_meta_at(ddir) or {}
+        ids = list(m.get("task_ids") or ([m["task_id"]] if m.get("task_id") else []))
+        paths = list(m.get("paths") or ([m["orig_path"]] if m.get("orig_path") else []))
+        changed = False
+        if task_id and task_id not in ids:
+            ids.append(task_id); m["task_ids"] = ids; changed = True
+        if p not in paths:
+            paths.append(p); m["paths"] = paths; changed = True
+        if changed:
+            with open(os.path.join(ddir, "meta.json"), "w", encoding="utf-8") as f:
+                json.dump(m, f, ensure_ascii=False, indent=2)
+    return int(m.get("pages", 0))
 
 
 def ingest(p, title=None, with_tree=True, task_id=None):
@@ -140,20 +171,7 @@ def ingest(p, title=None, with_tree=True, task_id=None):
     doc_id = sha[:12]
     ddir = os.path.join(corpus_root(), doc_id)
     if os.path.isdir(ddir):
-        # Known content: link the new task and remember this path too, so the same book
-        # used by two project folders belongs to both.
-        m = _read_meta_at(ddir) or {}
-        ids = list(m.get("task_ids") or ([m["task_id"]] if m.get("task_id") else []))
-        paths = list(m.get("paths") or ([m["orig_path"]] if m.get("orig_path") else []))
-        changed = False
-        if task_id and task_id not in ids:
-            ids.append(task_id); m["task_ids"] = ids; changed = True
-        if p not in paths:
-            paths.append(p); m["paths"] = paths; changed = True
-        if changed:
-            with open(os.path.join(ddir, "meta.json"), "w", encoding="utf-8") as f:
-                json.dump(m, f, ensure_ascii=False, indent=2)
-        return doc_id, int(m.get("pages", 0))
+        return doc_id, _link(ddir, p, task_id)
     pages = extract_pages(p)
     solid = sum(1 for t in pages if len(t.strip()) > 20)
     if not pages or not solid:
@@ -167,7 +185,7 @@ def ingest(p, title=None, with_tree=True, task_id=None):
     tree = build_tree(p) if (with_tree and len(pages) >= 20) else None
     # Build the document beside its final place and move it in with one rename: the corpus holds
     # a complete document or none, never a half-written directory that reads as "already indexed".
-    stage = f"{ddir}{STAGE_SUFFIX}{os.getpid()}"
+    stage = f"{ddir}{STAGE_SUFFIX}{os.getpid()}-{threading.get_ident()}"
     shutil.rmtree(stage, ignore_errors=True)
     try:
         os.makedirs(os.path.join(stage, "pages"))
@@ -188,6 +206,7 @@ def ingest(p, title=None, with_tree=True, task_id=None):
         except OSError:
             if not os.path.isdir(ddir):          # not a concurrent ingest of the same content
                 raise
+            _link(ddir, p, task_id)              # the loser still owns this task's link to the document
     except BaseException:
         shutil.rmtree(stage, ignore_errors=True)
         raise
@@ -195,7 +214,7 @@ def ingest(p, title=None, with_tree=True, task_id=None):
     return doc_id, len(pages)
 
 
-def scan(directory, task_id=None):
+def scan(directory, task_id=None, with_tree=True):
     """Ingest every PDF / Markdown / text file under ``directory``, skipping hidden entries.
 
     Returns ``(ingested, skipped)`` as ``[(doc_id, path)]`` and ``[(path, reason)]``.
@@ -208,7 +227,7 @@ def scan(directory, task_id=None):
                 continue
             p = os.path.join(base, fn)
             try:
-                ingested.append((ingest(p, task_id=task_id)[0], p))
+                ingested.append((ingest(p, task_id=task_id, with_tree=with_tree)[0], p))
             except (ValueError, OSError) as e:
                 skipped.append((p, str(e)))
     return ingested, skipped
@@ -219,14 +238,15 @@ def set_task_id(doc_id, task_id):
     ddir = doc_dir(doc_id)
     if not ddir:
         return
-    m = _meta(doc_id) or {}
-    m["task_id"] = task_id
-    ids = list(m.get("task_ids") or [])
-    if task_id and task_id not in ids:
-        ids.append(task_id)
-    m["task_ids"] = ids
-    with open(os.path.join(ddir, "meta.json"), "w", encoding="utf-8") as f:
-        json.dump(m, f, ensure_ascii=False, indent=2)
+    with _meta_lock(ddir):
+        m = _meta(doc_id) or {}
+        m["task_id"] = task_id
+        ids = list(m.get("task_ids") or [])
+        if task_id and task_id not in ids:
+            ids.append(task_id)
+        m["task_ids"] = ids
+        with open(os.path.join(ddir, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump(m, f, ensure_ascii=False, indent=2)
 
 
 def docs(workspace=None):
@@ -368,18 +388,17 @@ def node_pages(doc_id, node_id):
     return found[0] if found and found[0][0] else None
 
 
-def read_pages(doc_id, start, end, max_chars=12000):
-    buf, n = [], 0
-    for page, text in _iter_pages(doc_id, lo=start, hi=end):
-        chunk = f"\n--- p{page} ---\n{text}"
-        if n + len(chunk) > max_chars:
-            buf.append(
-                f"\n… (section truncated; use doc:{doc_id}#pN to read remaining pages)"
-            )
-            break
-        buf.append(chunk)
-        n += len(chunk)
-    return "".join(buf)
+def read_pages(doc_id, start, end, max_chars=12000, offset=0):
+    """The pages' text as one window: ``offset`` characters in, ``max_chars`` long, with a note
+    on how to continue when there is more -- so a single page longer than the window is read
+    in successive calls rather than never."""
+    text = "".join(f"\n--- p{page} ---\n{t}" for page, t in _iter_pages(doc_id, lo=start, hi=end))
+    offset = max(0, int(offset or 0))
+    window = text[offset:offset + max_chars]
+    if offset + max_chars < len(text):
+        window += (f"\n… ({len(text) - offset - max_chars:,} more characters; call again with "
+                   f"offset={offset + max_chars} to continue)")
+    return window
 
 
 def structure(doc_id):

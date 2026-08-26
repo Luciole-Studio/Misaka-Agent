@@ -1,4 +1,5 @@
 """Document navigation, reading, search, and quotation-verification tools."""
+import asyncio
 import os
 
 from misaka.core.extensions.types import ToolDefinition
@@ -8,6 +9,15 @@ from misaka.documents import index as corpus
 
 def _text(s):
     return {"content": [{"type": "text", "text": s}], "details": {}}
+
+
+def _aborted(signal):
+    return bool(getattr(signal, "aborted", False))
+
+
+async def _off_loop(fn, *args, **kwargs):
+    """Corpus calls block on disk (and on pdftotext, for doc_add): never on the event loop."""
+    return await asyncio.to_thread(fn, *args, **kwargs)
 
 
 def _workspace(ctx):
@@ -39,7 +49,9 @@ def register(harn):
         guidelines=["Check doc_list before fetching or re-reading material: indexed sources and other cards' artifacts are already there."],
         parameters=ListParams)
     async def doc_list(tool_call_id, params, signal, on_update, ctx):
-        rows = corpus.docs(workspace=_workspace(ctx))
+        rows = await _off_loop(corpus.docs, workspace=_workspace(ctx))
+        if _aborted(signal):
+            return _text("Cancelled.")
         if params.query:
             rows = [r for r in rows if params.query.lower() in (r["title"] or "").lower()]
         if not rows:
@@ -58,10 +70,12 @@ def register(harn):
         ],
         parameters=OutlineParams)
     async def doc_outline(tool_call_id, params, signal, on_update, ctx):
-        o = corpus.tree_outline(params.doc_id)
+        o = await _off_loop(corpus.tree_outline, params.doc_id)
+        if _aborted(signal):
+            return _text("Cancelled.")
         if o:
             return _text(o + "\n\nUse doc_read(doc_id, node=<node-id>) to read a section.")
-        st = corpus.structure(params.doc_id)
+        st = await _off_loop(corpus.structure, params.doc_id)
         if not st:
             return _text("Document not found. Use doc_list to find its document ID.")
         heads = "\n".join(f"  p{p['page']}  {p['head']}" for p in st.get("pages", [])[:80])
@@ -72,6 +86,7 @@ def register(harn):
         doc_id: str = Field(description="Document ID.")
         node: str = Field("", description="Outline node ID, such as 0013; preferred for structured documents.")
         pages: str = Field("", description="Page or range, such as 32 or 32-40; used when node is omitted.")
+        offset: int = Field(0, description="Characters to skip; the previous call's continuation note gives the value.")
 
     @_register(
         harn, name="doc_read", label="Read document section",
@@ -80,7 +95,7 @@ def register(harn):
         parameters=ReadParams)
     async def doc_read(tool_call_id, params, signal, on_update, ctx):
         if params.node:
-            span = corpus.node_pages(params.doc_id, params.node)
+            span = await _off_loop(corpus.node_pages, params.doc_id, params.node)
             if not span:
                 return _text(f"Node {params.node} was not found. Use doc_outline first.")
             start, end = span
@@ -92,7 +107,9 @@ def register(harn):
                 return _text("pages must be a single page such as '32' or a range such as '32-40'.")
         else:
             return _text("Provide either node or pages.")
-        txt = corpus.read_pages(params.doc_id, start, end)
+        txt = await _off_loop(corpus.read_pages, params.doc_id, start, end, offset=params.offset)
+        if _aborted(signal):
+            return _text("Cancelled.")
         return _text(txt or f"No text was extracted from p{start}-{end}; the pages may contain only images.")
 
     class FindParams(BaseModel):
@@ -105,8 +122,10 @@ def register(harn):
         snippet="Locate exact text in indexed documents",
         parameters=FindParams)
     async def doc_find(tool_call_id, params, signal, on_update, ctx):
-        hits = corpus.search_literal(params.query, doc_id=params.doc_id or None,
-                                     workspace=_workspace(ctx))
+        hits = await _off_loop(corpus.search_literal, params.query, doc_id=params.doc_id or None,
+                               workspace=_workspace(ctx))
+        if _aborted(signal):
+            return _text("Cancelled.")
         if not hits:
             return _text("No matches.")
         return _text("\n".join(f"{h['doc_id']} p{h['page']}  {h['s'][:100]}" for h in hits))
@@ -126,14 +145,16 @@ def register(harn):
         if path != ws and not path.startswith(ws + os.sep):
             return _text(f"Refused: {params.path} resolves outside the workspace {ws}.")
         if os.path.isdir(path):
-            added, skipped = corpus.scan(path)
+            added, skipped = await _off_loop(corpus.scan, path)
         elif os.path.isfile(path):
             try:
-                added, skipped = [(corpus.ingest(path)[0], path)], []
+                added, skipped = [((await _off_loop(corpus.ingest, path))[0], path)], []
             except ValueError as e:
                 added, skipped = [], [(path, str(e))]
         else:
             return _text(f"Not found: {params.path}")
+        if _aborted(signal):
+            return _text("Cancelled (the indexing itself completed).")
         lines = [f"  {did}  {os.path.relpath(p, ws)}" for did, p in added]
         lines += [f"  skipped  {os.path.relpath(p, ws)}: {why}" for p, why in skipped]
         return _text("\n".join(lines) or "Nothing to index: no PDF, Markdown, or text files found.")
@@ -151,7 +172,9 @@ def register(harn):
         ],
         parameters=VerifyParams)
     async def doc_verify(tool_call_id, params, signal, on_update, ctx):
-        v = corpus.verify_quote(params.doc_id, params.quote)
+        v = await _off_loop(corpus.verify_quote, params.doc_id, params.quote)
+        if _aborted(signal):
+            return _text("Cancelled.")
         if not v:
             return _text("❌ The quotation was not found. Do not cite it as a verified quotation.")
         return _text(
