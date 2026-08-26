@@ -256,9 +256,8 @@ def build_params(
     options: StreamOptions | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     signal = _option(options, "signal")
-    if signal is not None:
-        if _is_aborted(signal):
-            raise RuntimeError("Request aborted")
+    if signal is not None and _is_aborted(signal):
+        raise RuntimeError("Request aborted")
 
     contents = convert_messages(model, context)
 

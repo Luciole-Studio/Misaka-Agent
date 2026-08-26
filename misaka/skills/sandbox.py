@@ -39,6 +39,7 @@ def readonly_copies(skill_dirs, dest_root):
     os.makedirs(dest_root, exist_ok=True)
     copies = []
     used = set()
+    skip = shutil.ignore_patterns(".git", "__pycache__")
     for d in skill_dirs:
         base = os.path.basename(d.rstrip("/")) or "skill"
         name, n = base, 2
@@ -48,9 +49,9 @@ def readonly_copies(skill_dirs, dest_root):
         dst = os.path.join(dest_root, name)
         if os.path.exists(dst):
             cleanup(dst)
-        def _ignore(src, names, _pat=shutil.ignore_patterns(".git", "__pycache__")):
+        def _ignore(src, names):
             # Exclude symlinks so copies cannot escape the size check or sandbox.
-            return set(_pat(src, names)) | {
+            return set(skip(src, names)) | {
                 n for n in names if os.path.islink(os.path.join(src, n))}
         shutil.copytree(d, dst, symlinks=False, ignore=_ignore)
         _strip_write(dst)

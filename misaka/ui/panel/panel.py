@@ -292,7 +292,7 @@ def git_info(folder, active_cards=()):
     def git(*args):
         try:
             done = subprocess.run(["git", "-C", folder, *args],
-                                  capture_output=True, text=True, timeout=2)
+                                  capture_output=True, text=True, timeout=2, check=False)
         except (OSError, subprocess.SubprocessError):
             return None
         return done.stdout if done.returncode == 0 else None
@@ -1863,7 +1863,7 @@ def launch():
                 nav = {"h": "left", "l": "right", "k": "up", "j": "down"}.get(key)
             if nav is None:
                 continue
-            tab_index, tree = current_tree()
+            _tab_index, tree = current_tree()
             if tree is None or zoom:
                 continue
             new_tree = hui.resize_focused(tree, focused, nav, 0.05, chrome_state["area"])   # actions.rs:1858: 5% steps

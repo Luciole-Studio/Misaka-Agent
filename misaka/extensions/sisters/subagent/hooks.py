@@ -370,7 +370,7 @@ async def _http_hook(
         headers: dict[str, str] = {"Content-Type": "application/json"}
         configured = hook.get("headers", {})
         if not isinstance(configured, Mapping):
-            raise ValueError("HTTP hook headers must be an object")
+            raise ValueError("HTTP hook headers must be an object")  # noqa: TRY004 - callers treat bad input as ValueError
         for raw_name, raw_value in configured.items():
             name = str(raw_name)
             if not _HEADER_NAME.fullmatch(name) or name.casefold() in _FORBIDDEN_HEADERS:

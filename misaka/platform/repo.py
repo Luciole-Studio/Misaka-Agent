@@ -13,7 +13,7 @@ _IDENTITY = ["-c", "user.name=misaka", "-c", "user.email=misaka@local"]
 
 
 def _git(cwd, *args):
-    return subprocess.run(["git", *_IDENTITY, *args], cwd=cwd, capture_output=True, text=True)
+    return subprocess.run(["git", *_IDENTITY, *args], cwd=cwd, capture_output=True, text=True, check=False)
 
 
 def enabled(workspace):

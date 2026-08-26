@@ -166,12 +166,12 @@ class FileAuthStorageBackend(AuthStorageBackend):
             self._assert_lock_uncompromised(expected_signature)
             current = None
             if os.path.exists(self.authPath):
-                with open(self.authPath, encoding="utf-8-sig") as handle:
+                with open(self.authPath, encoding="utf-8-sig") as handle:  # noqa: ASYNC230 - a small JSON file under the credential lock
                     current = handle.read()
             outcome = await fn(current)
             self._assert_lock_uncompromised(expected_signature)
             if outcome.next is not None:
-                with open(self.authPath, "w", encoding="utf-8") as handle:
+                with open(self.authPath, "w", encoding="utf-8") as handle:  # noqa: ASYNC230 - a small JSON file under the credential lock
                     handle.write(outcome.next)
                 os.chmod(self.authPath, 0o600)
             self._assert_lock_uncompromised(expected_signature)
@@ -317,9 +317,7 @@ class AuthStorage:
             return True
         if get_env_api_key(provider):
             return True
-        if self.fallbackResolver and self.fallbackResolver(provider):
-            return True
-        return False
+        return bool(self.fallbackResolver and self.fallbackResolver(provider))
 
     def getAuthStatus(self, provider: str) -> AuthStatus:
         if _coerce_storage_object(self.data).get(provider):

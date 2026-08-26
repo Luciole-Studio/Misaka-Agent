@@ -34,7 +34,8 @@ def luminance(h):
 
 
 def audit(path):
-    d = json.load(open(path, encoding="utf-8"))
+    with open(path, encoding="utf-8") as f:
+        d = json.load(f)
     vars_, cols = d.get("vars", {}), d["colors"]
     unresolved = [k for k, v in cols.items()
                   if isinstance(v, str) and v and not v.startswith("#")

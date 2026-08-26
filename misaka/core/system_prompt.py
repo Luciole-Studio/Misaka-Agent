@@ -26,7 +26,7 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
     context_files = options.get("contextFiles") or []
 
     prompt_cwd = cwd.replace("\\", "/")
-    date = _datetime.date.today().isoformat()
+    date = _datetime.date.today().isoformat()  # noqa: DTZ011 - the model is told the user's local date
     append_section = f"\n\n{append_system_prompt}" if append_system_prompt else ""
 
     if custom_prompt:

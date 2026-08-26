@@ -82,7 +82,7 @@ def _normalize_observed_at(value):
             observed = float(raw)
         except ValueError:
             try:
-                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                parsed = datetime.fromisoformat(raw)
             except ValueError:
                 return None
             if parsed.tzinfo is None or parsed.utcoffset() is None:

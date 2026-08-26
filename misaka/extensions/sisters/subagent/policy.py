@@ -927,7 +927,7 @@ class AgentPolicy:
         except (TypeError, ValueError) as error:
             raise ValueError(f"Invalid agent hooks JSON: {error}") from error
         if not isinstance(hooks, dict):
-            raise ValueError("Agent hooks must be an event mapping")
+            raise ValueError("Agent hooks must be an event mapping")  # noqa: TRY004 - callers treat bad input as ValueError
         self.hooks: dict[str, Any] = hooks
         self.harness: Any = None
         raw_once_path = os.environ.get("MISAKA_SUBAGENT_HOOK_ONCE_FILE")
@@ -1003,14 +1003,14 @@ class AgentPolicy:
     def _validate_hooks(self) -> None:
         for event, matchers in self.hooks.items():
             if not isinstance(matchers, list):
-                raise ValueError(f"Agent hooks.{event} must be a list")
+                raise ValueError(f"Agent hooks.{event} must be a list")  # noqa: TRY004 - callers treat bad input as ValueError
             for matcher in matchers:
                 commands = matcher.get("hooks") if isinstance(matcher, dict) else None
                 if not isinstance(commands, list):
-                    raise ValueError(f"Agent hooks.{event} entries need a hooks list")
+                    raise ValueError(f"Agent hooks.{event} entries need a hooks list")  # noqa: TRY004 - callers treat bad input as ValueError
                 for hook in commands:
                     if not isinstance(hook, dict):
-                        raise ValueError(f"Agent hooks.{event} entries must be objects")
+                        raise ValueError(f"Agent hooks.{event} entries must be objects")  # noqa: TRY004 - callers treat bad input as ValueError
                     kind = str(hook.get("type") or "command")
                     if kind not in {"command", "prompt", "agent", "http"}:
                         raise ValueError(f"Agent hooks.{event} has unsupported type {kind!r}")

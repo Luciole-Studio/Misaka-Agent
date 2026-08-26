@@ -791,7 +791,6 @@ def _load_context_file_from_dir(dir_path: str) -> dict[str, str] | None:
     return None
 
 
-DefaultResourceLoaderOptions = DefaultResourceLoaderOptions
 ResourceLoaderLike = ResourceLoader
 
 __all__ = [

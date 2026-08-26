@@ -13,7 +13,7 @@ import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, NotRequired, TypedDict, TypeVar, cast
+from typing import Any, Literal, NotRequired, TypedDict, cast
 
 from pathspec import GitIgnoreSpec
 from wcmatch import glob as wc_glob
@@ -29,7 +29,6 @@ from misaka.utils.paths import (
 
 ResourceType = Literal["extensions", "prompts", "themes"]
 SourceOrigin = Literal["package", "top-level"]
-_T = TypeVar("_T")
 
 RESOURCE_TYPES: tuple[ResourceType, ...] = ("extensions", "prompts", "themes")
 IGNORE_FILE_NAMES = (".gitignore", ".ignore", ".fdignore")
@@ -196,7 +195,7 @@ def _matches_any_pattern(file_path: str, patterns: list[str], base_dir: str) -> 
 
 
 def _normalize_exact_pattern(pattern: str) -> str:
-    if pattern.startswith("./") or pattern.startswith(".\\"):
+    if pattern.startswith(("./", ".\\")):
         pattern = pattern[2:]
     return _to_posix_path(pattern)
 

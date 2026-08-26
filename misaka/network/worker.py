@@ -313,7 +313,7 @@ def run_llm_json(profile_dir, prompt, provider, default_model,
     the first JSON object from its output. Returns ``(obj, raw_text, error)``."""
     from misaka.network import validate
 
-    soul_path, cfg = _load_profile(profile_dir)
+    _soul_path, cfg = _load_profile(profile_dir)
     model = os.environ.get("MISAKA_FORCE_MODEL") or model or cfg.get("model") or default_model
     flags = ["--provider", provider, "--model", model, "--thinking", thinking]
     if session_dir:
@@ -386,7 +386,7 @@ def run_llm_json(profile_dir, prompt, provider, default_model,
 
 def card_session_setup(task, workspace, profile_dir, provider, default_model):
     """Build the shared session configuration for headless and interactive cards."""
-    soul, cfg = _load_profile(profile_dir)
+    _soul, cfg = _load_profile(profile_dir)
     model = os.environ.get("MISAKA_FORCE_MODEL") or task["model"] or cfg.get("model") or default_model
     os.makedirs(workspace, exist_ok=True)
     state_dir = task_store.task_state_dir(task["id"])

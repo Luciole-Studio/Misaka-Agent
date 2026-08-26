@@ -120,16 +120,15 @@ def get_env_api_key(provider: str) -> str | None:
         if _has_vertex_adc_credentials() and has_project and has_location:
             return "<authenticated>"
 
-    if provider == "amazon-bedrock":
-        if (
-            _get_env_value("AWS_PROFILE")
-            or (_get_env_value("AWS_ACCESS_KEY_ID") and _get_env_value("AWS_SECRET_ACCESS_KEY"))
-            or _get_env_value("AWS_BEARER_TOKEN_BEDROCK")
-            or _get_env_value("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI")
-            or _get_env_value("AWS_CONTAINER_CREDENTIALS_FULL_URI")
-            or _get_env_value("AWS_WEB_IDENTITY_TOKEN_FILE")
-        ):
-            return "<authenticated>"
+    if provider == "amazon-bedrock" and (
+        _get_env_value("AWS_PROFILE")
+        or (_get_env_value("AWS_ACCESS_KEY_ID") and _get_env_value("AWS_SECRET_ACCESS_KEY"))
+        or _get_env_value("AWS_BEARER_TOKEN_BEDROCK")
+        or _get_env_value("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI")
+        or _get_env_value("AWS_CONTAINER_CREDENTIALS_FULL_URI")
+        or _get_env_value("AWS_WEB_IDENTITY_TOKEN_FILE")
+    ):
+        return "<authenticated>"
 
     return None
 

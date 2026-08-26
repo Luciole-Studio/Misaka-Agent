@@ -102,7 +102,7 @@ def _coerce_options(options: FindToolOptions | Mapping[str, Any] | None) -> Find
     return FindToolOptions(operations=options.get("operations"))
 
 
-async def _maybe_await(value: Awaitable[T] | T) -> T:
+async def _maybe_await[T](value: Awaitable[T] | T) -> T:
     if asyncio.isfuture(value) or hasattr(value, "__await__"):
         return await value
     return value
@@ -426,7 +426,7 @@ def create_find_tool_definition(
             line = raw_line.rstrip("\r").strip()
             if not line:
                 continue
-            had_trailing_slash = line.endswith("/") or line.endswith("\\")
+            had_trailing_slash = line.endswith(("/", "\\"))
             posix_value = _relativize_find_result(line, search_path)
             if had_trailing_slash and not posix_value.endswith("/"):
                 posix_value += "/"

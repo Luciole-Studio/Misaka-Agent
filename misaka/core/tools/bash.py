@@ -149,7 +149,7 @@ class _LocalBashOperations:
         timeout = options.get("timeout")
         on_data = options["onData"]
 
-        process = subprocess.Popen(
+        process = subprocess.Popen(  # noqa: ASYNC220 - the child is driven through pipes by reader threads; Popen is the intended API
             [shell_config.shell, *shell_config.args, command],
             cwd=cwd,
             env=dict(env),

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-import warnings
 
 from misaka.config import APP_NAME
 

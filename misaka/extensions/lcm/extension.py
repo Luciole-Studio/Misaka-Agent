@@ -228,7 +228,7 @@ def _parse_time(value):
     try:
         return float(raw)
     except ValueError:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+        return datetime.fromisoformat(raw).timestamp()
 
 
 def register(harn):

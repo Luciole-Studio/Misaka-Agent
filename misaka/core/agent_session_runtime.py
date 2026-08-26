@@ -455,10 +455,6 @@ def _result_flag(result: Any, name: str, default: Any = None) -> Any:
     return getattr(result, name, default)
 
 
-AgentSessionRuntimeDiagnostic = AgentSessionRuntimeDiagnostic
-AgentSessionServices = AgentSessionServices
-CreateAgentSessionFromServicesOptions = CreateAgentSessionFromServicesOptions
-CreateAgentSessionServicesOptions = CreateAgentSessionServicesOptions
 createAgentSessionFromServices = create_agent_session_from_services
 createAgentSessionServices = create_agent_session_services
 createAgentSessionRuntime = create_agent_session_runtime

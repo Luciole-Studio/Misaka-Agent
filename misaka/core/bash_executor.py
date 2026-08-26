@@ -58,7 +58,7 @@ async def execute_bash_with_operations(
         if temp_file_path is not None:
             return
         temp_file_path = os.path.join(tempfile.gettempdir(), f"misaka-bash-{secrets.token_hex(8)}.log")
-        temp_file_handle = open(temp_file_path, "w", encoding="utf-8")
+        temp_file_handle = open(temp_file_path, "w", encoding="utf-8")  # noqa: SIM115 - kept open for streaming, closed by the caller
         temp_file_handle.writelines(output_chunks)
 
     def append_text(text: str) -> None:

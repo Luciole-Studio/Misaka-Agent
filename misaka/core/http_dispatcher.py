@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 DEFAULT_HTTP_IDLE_TIMEOUT_MS = 300_000
@@ -31,7 +32,7 @@ def parseHttpIdleTimeoutMs(value: Any) -> int | None:
 
     if not isinstance(value, int | float) or isinstance(value, bool):
         return None
-    if value < 0 or value != value or value in {float("inf"), float("-inf")}:
+    if value < 0 or not math.isfinite(value):
         return None
     return int(value)
 

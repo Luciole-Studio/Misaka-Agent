@@ -524,9 +524,9 @@ def link_task(con, run_id, task_id, *, kind, node, preflight_artifact=None,
 
 def tasks(con, run_id, *, kind=None, node_id=None, issue_id=None):
     q, args = (
-        "SELECT t.*,rt.branch_id,rt.kind AS research_kind,rt.wave,rt.preflight_artifact,"
+        ("SELECT t.*,rt.branch_id,rt.kind AS research_kind,rt.wave,rt.preflight_artifact,"
         "rt.local_id,rt.issue_id,rt.depends_json "
-        "FROM research_run_tasks rt JOIN tasks t ON t.id=rt.task_id WHERE rt.run_id=?",
+        "FROM research_run_tasks rt JOIN tasks t ON t.id=rt.task_id WHERE rt.run_id=?"),
         [run_id],
     )
     if kind:

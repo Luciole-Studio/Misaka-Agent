@@ -47,12 +47,11 @@ class CustomEditor(Editor):
             super().handleInput(data)
             return
 
-        if self.keybindings.matches(data, "app.exit"):
-            if len(self.getText()) == 0:
-                handler = self.onCtrlD or self.actionHandlers.get("app.exit")
-                if handler is not None:
-                    handler()
-                return
+        if self.keybindings.matches(data, "app.exit") and len(self.getText()) == 0:
+            handler = self.onCtrlD or self.actionHandlers.get("app.exit")
+            if handler is not None:
+                handler()
+            return
 
         # Explicit history bindings take precedence over app actions while the editor is focused.
         # This lets users bind Ctrl+P even though it cycles models by default.  (pi 16ad96a)

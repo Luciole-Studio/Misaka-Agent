@@ -5,6 +5,8 @@ Each function cites its source as ``file:line``. Semantics are copied as-is:
 saturating arithmetic becomes ``max(0, ...)``. Nothing here is invented; to
 change a layout rule, change the cited source first.
 """
+import itertools
+import math
 import os
 import unicodedata
 from collections import namedtuple
@@ -428,7 +430,7 @@ def fit_tokens(tokens, max_width):
     def minimum(active):
         idx = [i for i, on in enumerate(active) if on]
         return (sum(fixed[i] + (1 if flex[i] > 0 else 0) for i in idx)
-                + sum(display_width(sep(a, b)) for a, b in zip(idx, idx[1:])))
+                + sum(display_width(sep(a, b)) for a, b in itertools.pairwise(idx)))
 
     active = [True] * len(tokens)
     if minimum(active) > max_width:
@@ -442,7 +444,7 @@ def fit_tokens(tokens, max_width):
             if minimum(active) > max_width:
                 active[i] = False
     idx = [i for i, on in enumerate(active) if on]
-    sep_w = sum(display_width(sep(a, b)) for a, b in zip(idx, idx[1:]))
+    sep_w = sum(display_width(sep(a, b)) for a, b in itertools.pairwise(idx))
     fixed_w = sum(fixed[i] for i in idx)
     budgets = [1 if (active[i] and flex[i] > 0) else 0 for i in range(len(tokens))]
     remaining = max(0, max(0, max_width - (sep_w + fixed_w)) - sum(budgets))
@@ -646,7 +648,7 @@ def split_at(node, target, direction, new_id, ratio):
 
 def valid_split_ratio(ratio):
     """src/layout.rs:619-625."""
-    if ratio != ratio or ratio in (float("inf"), float("-inf")):   # NaN/inf
+    if not math.isfinite(ratio):                                   # NaN/inf
         return 0.5
     return min(0.9, max(0.1, ratio))
 

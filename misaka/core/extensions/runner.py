@@ -411,7 +411,7 @@ class ExtensionRunner:
                 elif callable(fallback_register):
                     fallback_register(registration.name, registration.config)
                 else:
-                    raise RuntimeError("No provider registration handler bound")
+                    raise RuntimeError("No provider registration handler bound")  # noqa: TRY004 - callers treat bad input as ValueError
             except Exception as error:
                 self._emit_extension_exception(registration.extensionPath, "register_provider", error)
         self.runtime.pendingProviderRegistrations.clear()

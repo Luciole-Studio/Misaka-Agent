@@ -1,3 +1,5 @@
+# ruff: noqa: UP040 - these aliases are read at runtime (pydantic fields, isinstance); PEP 695 aliases are lazy
+
 """Shared Google Generative AI and Vertex request helpers."""
 
 from __future__ import annotations
@@ -66,7 +68,7 @@ def _resolve_thought_signature(is_same_provider_and_model: bool, signature: str 
 
 
 def requires_tool_call_id(model_id: str) -> bool:
-    return model_id.startswith("claude-") or model_id.startswith("gpt-oss-")
+    return model_id.startswith(("claude-", "gpt-oss-"))
 
 
 def _get_gemini_major_version(model_id: str) -> int | None:

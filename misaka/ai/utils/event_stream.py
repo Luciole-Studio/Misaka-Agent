@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
-from typing import Generic, TypeVar, cast
+from typing import TypeVar, cast
 
 from misaka.ai.types import AssistantMessage, AssistantMessageEvent
 
@@ -15,7 +15,7 @@ _END_OF_STREAM = object()
 _UNSET = object()
 
 
-class EventStream(Generic[TEvent, TResult]):
+class EventStream[TEvent, TResult]:
     def __init__(
         self,
         is_complete: Callable[[TEvent], bool],

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Static security scanner and trust-aware install policy for external skills."""
 
 import fnmatch

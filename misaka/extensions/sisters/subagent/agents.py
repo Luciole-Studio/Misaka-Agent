@@ -12,7 +12,7 @@ import os
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import yaml
 
@@ -78,7 +78,7 @@ class AgentDefinition(Mapping[str, Any]):
         "mcpServers",
         "hooks",
     )
-    _ALIASES = {
+    _ALIASES: ClassVar[dict[str, str]] = {
         "agentType": "name",
         "whenToUse": "description",
         "baseDir": "base_dir",

@@ -197,15 +197,15 @@ def _catalog_text(items):
 def _call(worker, cfg, prompt, *, cwd, session_dir, continue_session=False,
           profile="last_order", tools=("read",), raw=False, task_id=None,
           timeout=None, thinking="high", model=None):
-    kwargs = dict(
-        cwd=cwd, tools=list(tools),
-        timeout=runs.call_timeout(
-            cfg, timeout or max(600, int(cfg.get("judge_timeout", 600)))), soul=False,
-        raw=raw, usage_db=cfg.get("db"), usage_task_id=task_id,
-        usage_generation=1, usage_token_cap=cfg.get("token_cap"),
-        session_dir=session_dir, continue_session=continue_session,
-        thinking=thinking,
-    )
+    kwargs = {
+        "cwd": cwd, "tools": list(tools),
+        "timeout": runs.call_timeout(
+            cfg, timeout or max(600, int(cfg.get("judge_timeout", 600)))), "soul": False,
+        "raw": raw, "usage_db": cfg.get("db"), "usage_task_id": task_id,
+        "usage_generation": 1, "usage_token_cap": cfg.get("token_cap"),
+        "session_dir": session_dir, "continue_session": continue_session,
+        "thinking": thinking,
+    }
     if model:
         kwargs["model"] = model
     return worker.run_llm_json(
@@ -248,7 +248,7 @@ def ensure_project_brief(cfg, worker, question, workspace):
 
 def _validate_task(raw, roster, index):
     if not isinstance(raw, dict):
-        raise ValueError(f"Task {index} is not an object.")
+        raise ValueError(f"Task {index} is not an object.")  # noqa: TRY004 - callers treat bad input as ValueError
     required = ("local_id", "title", "question", "rationale", "deliverable", "assignee")
     task = {k: raw.get(k) for k in raw}
     for key in required:
@@ -302,7 +302,7 @@ def _validate_tasks(raw_tasks, roster_ids):
 
 def validate_plan(obj, roster):
     if not isinstance(obj, dict):
-        raise ValueError("Last Order planning output is not an object.")
+        raise ValueError("Last Order planning output is not an object.")  # noqa: TRY004 - callers treat bad input as ValueError
     status = obj.get("status")
     if status not in {"ready", "clarify"}:
         raise ValueError("Last Order returned an invalid planning status.")

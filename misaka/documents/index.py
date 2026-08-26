@@ -43,7 +43,7 @@ def claim_hash(doc_id, page, offset, quote):
 def _pdf_pages(p):
     try:
         out = subprocess.run(["pdftotext", "-layout", p, "-"], capture_output=True,
-                             text=True, timeout=300)
+                             text=True, timeout=300, check=False)
         if out.returncode == 0 and out.stdout.strip():
             pages = out.stdout.split("\f")
             if len(pages) > 1 and not pages[-1].strip():   # pdftotext ends every page with \f: the tail is no page

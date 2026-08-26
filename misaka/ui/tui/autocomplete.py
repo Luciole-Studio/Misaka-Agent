@@ -419,7 +419,7 @@ class CombinedAutocompleteProvider:
         current_line = lines[cursorLine] if cursorLine < len(lines) else ""
         before_prefix = current_line[: cursorCol - len(prefix)]
         after_cursor = current_line[cursorCol:]
-        is_quoted_prefix = prefix.startswith('"') or prefix.startswith('@"')
+        is_quoted_prefix = prefix.startswith(('"', '@"'))
         has_leading_quote_after_cursor = after_cursor.startswith('"')
         has_trailing_quote_in_item = item.value.endswith('"')
         adjusted_after_cursor = (
@@ -488,7 +488,7 @@ class CombinedAutocompleteProvider:
 
         if forceExtract:
             return path_prefix
-        if "/" in path_prefix or path_prefix.startswith(".") or path_prefix.startswith("~/"):
+        if "/" in path_prefix or path_prefix.startswith((".", "~/")):
             return path_prefix
         if path_prefix == "" and text.endswith(" "):
             return path_prefix

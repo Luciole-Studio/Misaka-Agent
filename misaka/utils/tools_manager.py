@@ -282,7 +282,7 @@ async def _fetch_json(url: str, *, user_agent: str, timeout_ms: int) -> dict[str
             payload = response.read()
         data = json.loads(payload.decode("utf-8"))
         if not isinstance(data, dict):
-            raise RuntimeError("Expected JSON object")
+            raise RuntimeError("Expected JSON object")  # noqa: TRY004 - callers treat bad input as ValueError
         return data
 
     return await asyncio.to_thread(_load)

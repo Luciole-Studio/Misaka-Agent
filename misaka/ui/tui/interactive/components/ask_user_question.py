@@ -268,9 +268,9 @@ class AskUserQuestionComponent:
         maximum = len(self.questions) - 1 if hide_submit else len(self.questions)
         self.current = max(0, min(maximum, self.current + delta))
         self.warning = None
-        if self.current < len(self.questions):
-            if self.focuses[self.current] == self._other_index() and not self._has_preview():
-                self._begin_input("other")
+        if (self.current < len(self.questions) and self.focuses[self.current] == self._other_index()
+                and not self._has_preview()):
+            self._begin_input("other")
 
     def _matches_app(self, data: str, action: str) -> bool:
         matcher = getattr(self.keybindings, "matches", None)

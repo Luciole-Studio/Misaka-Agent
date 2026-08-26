@@ -278,8 +278,8 @@ def finish_abandoned(con, t):
     ``"submitted"``, ``"reclaimed"`` or ``None`` when someone else got there first."""
     from misaka.platform import repo
     ok, result = worker.check_report(db.workspace_for(t), con=con, task_id=t["id"], generation=t["generation"])
-    fence = dict(generation=t["generation"], claim_lock=t["claim_lock"], worker_pid=t["worker_pid"],
-                 worker_identity=t["worker_identity"], claim_expires=t["claim_expires"])
+    fence = {"generation": t["generation"], "claim_lock": t["claim_lock"], "worker_pid": t["worker_pid"],
+                 "worker_identity": t["worker_identity"], "claim_expires": t["claim_expires"]}
     if not ok and str(result).startswith("blocked:"):
         return "blocked" if db.block_abandoned(
             con, t["id"], "needs_input", str(result)[len("blocked:"):].strip(), **fence) else None

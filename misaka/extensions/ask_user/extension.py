@@ -104,7 +104,7 @@ def register(harn: Any) -> None:
             )
         )
         if not isinstance(result, dict):
-            raise RuntimeError("AskUserQuestion dialog closed without a result")
+            raise RuntimeError("AskUserQuestion dialog closed without a result")  # noqa: TRY004 - callers treat bad input as ValueError
 
         action = str(result.get("action", "cancel"))
         answers = dict(result.get("answers") or {})

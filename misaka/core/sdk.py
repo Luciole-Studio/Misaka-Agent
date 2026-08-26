@@ -119,7 +119,7 @@ def _get_default_agent_dir() -> str:
 async def create_agent_session(options: CreateAgentSessionOptions | None = None) -> CreateAgentSessionResult:
     resolved_options = dict(options or {})
     explicit_session_manager = resolved_options.get("sessionManager")
-    cwd_option = resolved_options["cwd"] if "cwd" in resolved_options else None
+    cwd_option = resolved_options.get("cwd", None)
     cwd = resolve_path(cwd_option if cwd_option is not None else (
         explicit_session_manager.getCwd() if explicit_session_manager else os.getcwd()
     ))
@@ -245,7 +245,7 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
     async def stream_fn(model_value: Model[Any], context: Any, stream_options: Any = None) -> Any:
         auth = await model_registry.getApiKeyAndHeaders(model_value)
         if not auth.get("ok"):
-            raise Exception(auth["error"])
+            raise RuntimeError(auth["error"])
 
         provider_retry_settings = settings_manager.getProviderRetrySettings()
         resolved_stream_options = _to_dict(stream_options)

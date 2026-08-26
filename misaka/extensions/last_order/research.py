@@ -348,8 +348,8 @@ User clarification: {spec['clarification']}""", run["id"]))
         intake_tasks = list(intakes)
         for task in intake_tasks:
             task.cancel()
-        drivers = list(drivers.items())
-        for run_id, _task in drivers:       # node processes see the stop and drain; the daemon takes their panes down with the panel
+        live = list(drivers.items())
+        for run_id, _task in live:       # node processes see the stop and drain; the daemon takes their panes down with the panel
             runs.request_stop(con, run_id)
             for row in runs.tasks(con, run_id):
                 if task_store.mark_stopped(con, row["id"]):

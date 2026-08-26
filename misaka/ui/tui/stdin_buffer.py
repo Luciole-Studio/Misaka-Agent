@@ -75,7 +75,7 @@ def _is_complete_csi_sequence(data: str) -> SequenceStatus:
 def _is_complete_osc_sequence(data: str) -> SequenceStatus:
     if not data.startswith(f"{_ESC}]"):
         return "complete"
-    return "complete" if data.endswith(f"{_ESC}\\") or data.endswith("\x07") else "incomplete"
+    return "complete" if data.endswith((f"{_ESC}\\", "\x07")) else "incomplete"
 
 
 def _is_complete_dcs_sequence(data: str) -> SequenceStatus:

@@ -130,7 +130,7 @@ async def _await_with_signal(request_factory: Callable[[], Any], signal: Any) ->
     abort_task = asyncio.create_task(abort_waiter)
 
     try:
-        done, pending = await asyncio.wait({request_task, abort_task}, return_when=asyncio.FIRST_COMPLETED)
+        done, _pending = await asyncio.wait({request_task, abort_task}, return_when=asyncio.FIRST_COMPLETED)
         if request_task in done:
             return await request_task
 

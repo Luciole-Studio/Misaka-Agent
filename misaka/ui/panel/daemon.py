@@ -511,7 +511,7 @@ class Daemon:
                     struct.pack("HHHH", DEFAULT_ROWS, DEFAULT_COLS, 0, 0))
         pane.proc = subprocess.Popen(
             pane.argv, cwd=pane.cwd, stdin=slave, stdout=slave, stderr=slave,
-            preexec_fn=_become_session_leader,
+            preexec_fn=_become_session_leader,  # noqa: PLW1509 - panes are spawned from the daemon's main thread only; setsid must run in the child
             env={**os.environ, **(env or {}), "TERM": "xterm-256color",
                  # The pane's terminal is OUR pyte relay, which passes 24-bit SGR through
                  # untouched -- without this hint the engine pre-bakes every theme colour
@@ -966,13 +966,12 @@ class Daemon:
                                      generation=pane.generation)
                     pane.claim_lock = None
                 elif not pane.submitted:
-                    if time.time() - pane.last_heartbeat >= 60:
-                        if db.heartbeat(
-                            con, pane.card, pane.claim_lock,
-                            generation=pane.generation,
-                            ttl_seconds=max(1800, int(row["timeout_seconds"]) + 60),
-                        ):
-                            pane.last_heartbeat = time.time()
+                    if time.time() - pane.last_heartbeat >= 60 and db.heartbeat(
+                        con, pane.card, pane.claim_lock,
+                        generation=pane.generation,
+                        ttl_seconds=max(1800, int(row["timeout_seconds"]) + 60),
+                    ):
+                        pane.last_heartbeat = time.time()
                     ok, report = worker.check_report(pane.cwd, con=con, task_id=pane.card, generation=pane.generation)
                     if ok:
                         from misaka.network import dispatch

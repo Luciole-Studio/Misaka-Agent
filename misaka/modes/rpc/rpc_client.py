@@ -371,6 +371,4 @@ class RpcClient:
     promptAndWait = prompt_and_wait
 
 
-RpcClientOptions = RpcClientOptions
-
 __all__ = ["ModelInfo", "RpcClient", "RpcClientOptions", "RpcEventListener"]

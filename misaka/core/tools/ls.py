@@ -81,7 +81,7 @@ def _coerce_options(options: LsToolOptions | Mapping[str, Any] | None) -> LsTool
     return LsToolOptions(operations=options.get("operations"))
 
 
-async def _maybe_await(value: Awaitable[T] | T) -> T:
+async def _maybe_await[T](value: Awaitable[T] | T) -> T:
     if asyncio.isfuture(value) or hasattr(value, "__await__"):
         return await value
     return value

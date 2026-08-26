@@ -24,7 +24,7 @@ def decode_html_entity(entity: str) -> str | None:
         return "'"
     if entity.startswith(("#x", "#X")):
         try:
-            return _decode_code_point(int(entity[2:], 16))
+            return _decode_code_point(int(entity, 0))
         except ValueError:
             return None
     if entity.startswith("#"):

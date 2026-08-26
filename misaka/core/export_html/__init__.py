@@ -11,19 +11,8 @@ from pathlib import Path
 from typing import Any, Protocol, TypedDict, cast
 
 from misaka.config import APP_NAME, get_export_template_dir
-from misaka.core.export_html.ansi_to_html import (
-    ansi_lines_to_html,
-    ansi_to_html,
-)
 from misaka.core.export_html.tool_renderer import (
     ToolHtmlRenderer,
-    ToolHtmlRendererDeps,
-    ToolHtmlResult,
-    ToolRenderContext,
-    create_tool_html_renderer,
-    createToolHtmlRenderer,
-    is_blank_rendered_line,
-    trim_rendered_result_lines,
 )
 from misaka.core.session_manager import SessionManager
 from misaka.ui.tui.interactive.theme.theme import (

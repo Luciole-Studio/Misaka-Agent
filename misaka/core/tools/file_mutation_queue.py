@@ -28,7 +28,7 @@ def _get_mutation_queue_key(file_path: str) -> str:
         return resolved_path
 
 
-async def with_file_mutation_queue(file_path: str, fn: Callable[[], Awaitable[T]]) -> T:
+async def with_file_mutation_queue[T](file_path: str, fn: Callable[[], Awaitable[T]]) -> T:
     key = _get_mutation_queue_key(file_path)
     entry = _file_mutation_queues.get(key)
     if entry is None:

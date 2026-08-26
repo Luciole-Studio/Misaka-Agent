@@ -200,7 +200,7 @@ class McpClient:
             log_dir = os.path.join(get_agent_dir(), "mcp")
             os.makedirs(log_dir, exist_ok=True)
             safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(self.name)) or "server"
-            stderr_log = open(os.path.join(log_dir, f"{safe_name}.stderr.log"), "ab")  # noqa: SIM115 - handed to the child
+            stderr_log = open(os.path.join(log_dir, f"{safe_name}.stderr.log"), "ab")  # noqa: SIM115, ASYNC230 - handed to the child
             stderr_target = stderr_log
         except OSError:
             pass

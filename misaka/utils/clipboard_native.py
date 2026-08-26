@@ -71,7 +71,7 @@ def _load_clipboard(
     try:
         pyperclip = pyperclip_module
         if pyperclip is None:
-            import pyperclip as pyperclip  # type: ignore[no-redef]
+            import pyperclip  # type: ignore[no-redef]
 
         image_grab = image_grab_module
         if image_grab is None:

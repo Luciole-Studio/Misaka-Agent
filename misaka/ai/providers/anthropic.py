@@ -855,7 +855,7 @@ async def iterate_anthropic_events(source: Any, signal: Any = None) -> AsyncIter
             ) from error
 
         if not isinstance(event, dict):
-            raise RuntimeError(f"Could not parse Anthropic SSE event {event_name}: parsed payload was not an object")
+            raise RuntimeError(f"Could not parse Anthropic SSE event {event_name}: parsed payload was not an object")  # noqa: TRY004 - callers treat bad input as ValueError
 
         if event.get("type") == "message_start":
             saw_message_start = True
@@ -1129,7 +1129,7 @@ def stream_anthropic(
             if output.stopReason in {"aborted", "error"}:
                 raise RuntimeError("An unknown error occurred")
             stream.push(DoneEvent(reason=output.stopReason, message=output))
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             output.stopReason = "aborted" if _is_aborted(_option(options, "signal")) else "error"
             output.errorMessage = _format_anthropic_error(error)
             stream.push(ErrorEvent(reason=output.stopReason, error=output))

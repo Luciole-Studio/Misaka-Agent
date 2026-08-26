@@ -181,7 +181,7 @@ class OutputAccumulator:
         if self.tempFilePath is not None:
             return
         self.tempFilePath = default_temp_file_path(self.tempFilePrefix)
-        self.tempFileHandle = open(self.tempFilePath, "wb")
+        self.tempFileHandle = open(self.tempFilePath, "wb")  # noqa: SIM115 - the accumulator owns it and closes it in finalize
         for chunk in self.rawChunks:
             self.tempFileHandle.write(chunk)
         self.tempFileHandle.flush()

@@ -97,8 +97,8 @@ def resolve_config_value_or_throw(config: str, description: str) -> str:
         return resolved
 
     if config.startswith("!"):
-        raise Exception(f"Failed to resolve {description} from shell command: {config[1:]}")
-    raise Exception(f"Failed to resolve {description}")
+        raise RuntimeError(f"Failed to resolve {description} from shell command: {config[1:]}")
+    raise RuntimeError(f"Failed to resolve {description}")
 
 
 def resolve_headers(headers: dict[str, str] | None) -> dict[str, str] | None:

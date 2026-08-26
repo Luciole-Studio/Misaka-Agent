@@ -84,7 +84,7 @@ class FileSettingsStorage(SettingsStorage):
                 return lock.release
             except Timeout as error:
                 if attempt == max_attempts:
-                    raise error
+                    raise
                 last_error = error
                 start = time.perf_counter()
                 while (time.perf_counter() - start) * 1000 < delay_ms:
@@ -534,12 +534,12 @@ class SettingsManager:
         if timeout_ms is not None:
             return timeout_ms
         if value is not None:
-            raise Exception(f"Invalid httpIdleTimeoutMs setting: {value}")
+            raise ValueError(f"Invalid httpIdleTimeoutMs setting: {value}")
         return DEFAULT_HTTP_IDLE_TIMEOUT_MS
 
     def setHttpIdleTimeoutMs(self, timeoutMs: int) -> None:
         if not isinstance(timeoutMs, (int, float)) or isinstance(timeoutMs, bool) or timeoutMs < 0 or not float(timeoutMs) < float("inf"):
-            raise Exception(f"Invalid httpIdleTimeoutMs setting: {timeoutMs}")
+            raise ValueError(f"Invalid httpIdleTimeoutMs setting: {timeoutMs}")
         self._set_global_value("httpIdleTimeoutMs", int(timeoutMs // 1))
 
     def getProviderRetrySettings(self) -> dict[str, Any]:
@@ -639,7 +639,7 @@ class SettingsManager:
 
     def getThinkingBudgets(self) -> dict[str, Any] | None:
         budgets = self.settings.get("thinkingBudgets")
-        return budgets if isinstance(budgets, dict) else budgets
+        return budgets if isinstance(budgets, dict) else None
 
     def getShowImages(self) -> bool:
         return self._nullish(self._settings_object("terminal").get("showImages"), True)

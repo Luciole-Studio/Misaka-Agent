@@ -131,8 +131,7 @@ def convert_responses_messages(
             }
         )
 
-    msg_index = 0
-    for message in transformed_messages:
+    for msg_index, message in enumerate(transformed_messages):
         if message.role == "user":
             if isinstance(message.content, str):
                 messages.append(
@@ -227,7 +226,6 @@ def convert_responses_messages(
                 output_value = sanitize_surrogates(text_result if has_text else "(see attached image)")
 
             messages.append({"type": "function_call_output", "call_id": call_id, "output": output_value})
-        msg_index += 1
 
     return messages
 

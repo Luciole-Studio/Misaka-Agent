@@ -657,7 +657,7 @@ class SessionManager:
 
     def appendLabelChange(self, targetId: str, label: str | None) -> str:
         if targetId not in self.byId:
-            raise Exception(f"Entry {targetId} not found")
+            raise ValueError(f"Entry {targetId} not found")
         entry: SessionEntry = {
             "type": "label",
             "id": generate_id(self.byId),
@@ -735,7 +735,7 @@ class SessionManager:
 
     def branch(self, branchFromId: str) -> None:
         if branchFromId not in self.byId:
-            raise Exception(f"Entry {branchFromId} not found")
+            raise ValueError(f"Entry {branchFromId} not found")
         self.leafId = branchFromId
 
     def resetLeaf(self) -> None:
@@ -749,7 +749,7 @@ class SessionManager:
         fromHook: bool | None | object = _UNSET,
     ) -> str:
         if branchFromId is not None and branchFromId not in self.byId:
-            raise Exception(f"Entry {branchFromId} not found")
+            raise ValueError(f"Entry {branchFromId} not found")
         self.leafId = branchFromId
         entry: SessionEntry = {
             "type": "branch_summary",
@@ -770,7 +770,7 @@ class SessionManager:
         previous_session_file = self.sessionFile
         path = self.getBranch(leafId)
         if not path:
-            raise Exception(f"Entry {leafId} not found")
+            raise ValueError(f"Entry {leafId} not found")
 
         path_without_labels = [entry for entry in path if entry.get("type") != "label"]
         new_session_id = create_session_id()
@@ -872,11 +872,11 @@ class SessionManager:
         resolved_target_cwd = resolve_path(targetCwd)
         source_entries = load_entries_from_file(resolved_source_path)
         if not source_entries:
-            raise Exception(f"Cannot fork: source session file is empty or invalid: {resolved_source_path}")
+            raise RuntimeError(f"Cannot fork: source session file is empty or invalid: {resolved_source_path}")
 
         source_header = next((entry for entry in source_entries if entry.get("type") == "session"), None)
         if source_header is None:
-            raise Exception(f"Cannot fork: source session has no header: {resolved_source_path}")
+            raise RuntimeError(f"Cannot fork: source session has no header: {resolved_source_path}")
 
         directory = normalize_path(sessionDir) if sessionDir else get_default_session_dir(resolved_target_cwd)
         os.makedirs(directory, exist_ok=True)
@@ -1206,7 +1206,7 @@ def _datetime_from_iso(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return datetime.fromisoformat(str(value))
     except ValueError:
         return None
 

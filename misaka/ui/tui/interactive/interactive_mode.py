@@ -2065,7 +2065,7 @@ class InteractiveMode:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 - detection failed; keep the dark default
                 return None
 
             try:
@@ -2457,7 +2457,6 @@ class InteractiveMode:
     ) -> None:
         role = _message_role(message)
         markdown_theme = self.getMarkdownThemeWithSettings()
-        pending_tools = pendingTools if pendingTools is not None else self._toolComponentsById
 
         if role == "user":
             text = _extract_user_text(message)
@@ -4891,7 +4890,7 @@ class InteractiveMode:
                 return
             try:
                 rgb = await query(timeoutMs=1000)
-            except Exception:  # noqa: BLE001 - detection failed; keep the dark default
+            except Exception:
                 return
             if rgb is None:
                 return

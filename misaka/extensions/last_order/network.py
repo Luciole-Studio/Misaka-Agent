@@ -562,7 +562,7 @@ def register(harn):
         try:
             from misaka.network import dispatch
             await asyncio.to_thread(dispatch.reconcile, _con(), _cfg())
-        except Exception:  # noqa: BLE001 - reconciliation is a safety net, never a startup blocker
+        except Exception:
             pass
 
     harn.on("session_start", settle_orphans)
@@ -761,7 +761,7 @@ def register(harn):
         desc, body = roster_mod.describe(sid, root=root)
         model = None
         try:
-            with open(os.path.join(root, sid, "config.json"), encoding="utf-8") as f:
+            with open(os.path.join(root, sid, "config.json"), encoding="utf-8") as f:  # noqa: ASYNC230 - one small config.json per Sister
                 model = json.load(f).get("model")
         except (OSError, ValueError):
             pass

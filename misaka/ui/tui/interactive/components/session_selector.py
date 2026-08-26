@@ -567,7 +567,7 @@ async def delete_session_file(sessionPath: str) -> dict[str, str | bool]:
     trash_binary = shutil.which("trash")
     if trash_binary is not None:
         trash_args = [trash_binary, "--", sessionPath] if sessionPath.startswith("-") else [trash_binary, sessionPath]
-        result = subprocess.run(
+        result = subprocess.run(  # noqa: ASYNC221 - one bounded git call while the picker is open
             trash_args,
             check=False,
             capture_output=True,

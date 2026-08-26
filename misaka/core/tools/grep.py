@@ -98,7 +98,7 @@ def _coerce_options(options: GrepToolOptions | Mapping[str, Any] | None) -> Grep
     return GrepToolOptions(operations=options.get("operations"))
 
 
-async def _maybe_await(value: Awaitable[T] | T) -> T:
+async def _maybe_await[T](value: Awaitable[T] | T) -> T:
     if asyncio.isfuture(value) or hasattr(value, "__await__"):
         return await value
     return value

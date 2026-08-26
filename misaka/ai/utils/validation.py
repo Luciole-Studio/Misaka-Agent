@@ -208,12 +208,11 @@ def _coerce_with_json_schema(value: Any, schema: JsonSchemaObject) -> Any:
                 next_value = candidate
                 break
 
-    if "enum" in schema and isinstance(schema["enum"], list):
-        if next_value not in schema["enum"]:
-            for candidate in schema["enum"]:
-                if type(candidate) is type(next_value) or str(candidate) == str(next_value):
-                    next_value = candidate
-                    break
+    if "enum" in schema and isinstance(schema["enum"], list) and next_value not in schema["enum"]:
+        for candidate in schema["enum"]:
+            if type(candidate) is type(next_value) or str(candidate) == str(next_value):
+                next_value = candidate
+                break
 
     if "const" in schema and next_value != schema["const"] and str(next_value) == str(schema["const"]):
         next_value = schema["const"]

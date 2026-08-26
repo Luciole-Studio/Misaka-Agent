@@ -27,6 +27,7 @@ from misaka.ai.types import (
     AssistantMessageEventStream,
     Context,
     Model,
+    ModelCompat,
     ModelCost,
     OpenAICompletionsCompat,
     OpenAIResponsesCompat,
@@ -233,7 +234,7 @@ class _ProviderModelInput(TypedDict):
     baseUrl: NotRequired[str]
     thinkingLevelMap: NotRequired[dict[str, str | None]]
     headers: NotRequired[dict[str, str]]
-    compat: NotRequired[Model.model_fields[compat].annotation]  # type: ignore[index]
+    compat: NotRequired[ModelCompat | None]
 
 
 class ProviderConfigInput(TypedDict, total=False):

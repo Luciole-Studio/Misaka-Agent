@@ -398,7 +398,7 @@ async def _run_reference(slot, view, *, preset, options) -> tuple[str, str, Usag
 
 def _is_failed(text: str) -> bool:
     s = text.lstrip().lower()
-    return s.startswith("[failed:") or s.startswith("[skipped:")
+    return s.startswith(("[failed:", "[skipped:"))
 
 
 def build_guidance(preset_name, preset, outputs) -> str | None:
@@ -634,10 +634,8 @@ def stream_simple_moa(model: Model, context: Context, options: SimpleStreamOptio
                 # Stream each advisor response as it arrives.
                 push_thinking(f"MoA·{preset_name}: dispatching {len(refs)} advisors…")
                 slot_results: dict[int, tuple[str, str, Usage | None]] = {}
-                done_n = 0
-                for fut in asyncio.as_completed([guarded(i, s) for i, s in enumerate(refs)]):
+                for done_n, fut in enumerate(asyncio.as_completed([guarded(i, s) for i, s in enumerate(refs)]), 1):
                     idx, (label, text, usage, sent) = await fut
-                    done_n += 1
                     slot_results[idx] = (label, text, usage)
                     advisor_traces.append({
                         "label": label, "input_messages": sent, "output": text,

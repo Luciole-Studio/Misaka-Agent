@@ -12,9 +12,9 @@ def infer_copilot_initiator(messages: list[MessageValue]) -> str:
 
 def has_copilot_vision_input(messages: list[MessageValue]) -> bool:
     for message in messages:
-        if message.role in {"user", "toolResult"} and isinstance(message.content, list):
-            if any(block.type == "image" for block in message.content):
-                return True
+        if (message.role in {"user", "toolResult"} and isinstance(message.content, list)
+                and any(block.type == "image" for block in message.content)):
+            return True
     return False
 
 

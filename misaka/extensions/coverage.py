@@ -60,8 +60,8 @@ def register(harn):
                     "so a research design can be checked for fields it forgot.",
         parameters=ScanParams.model_json_schema(), execute=execute,
         promptSnippet="See which fields of the literature discuss a question",
-        promptGuidelines=["Scan a question in two or three phrasings before dividing it into tasks; a neighbouring "
-                          "field with many works is a dimension the plan may be missing."]))
+        promptGuidelines=[("Scan a question in two or three phrasings before dividing it into tasks; a neighbouring "
+                          "field with many works is a dimension the plan may be missing.")]))
 
 
 def activate(spec):

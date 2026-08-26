@@ -496,7 +496,7 @@ class ProcessTerminal:
             if path.is_dir():
                 from datetime import datetime
 
-                now = datetime.now()
+                now = datetime.now()  # noqa: DTZ005 - local wall-clock time for a debug log name
                 ts = now.strftime("%Y-%m-%d_%H-%M-%S")
                 return str(path / f"tui-{ts}-{os.getpid()}.log")
         except OSError:

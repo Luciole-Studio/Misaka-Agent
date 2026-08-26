@@ -1,3 +1,5 @@
+# ruff: noqa: UP040 - these aliases are read at runtime (pydantic fields, isinstance); PEP 695 aliases are lazy
+
 """Pydantic schema surface for the harn AI runtime."""
 
 from __future__ import annotations

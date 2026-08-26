@@ -908,10 +908,10 @@ def extract_account_id(token: str) -> str:
     except Exception as error:
         raise RuntimeError("Failed to extract accountId from token") from error
     if not isinstance(data, Mapping):
-        raise RuntimeError("Failed to extract accountId from token")
+        raise RuntimeError("Failed to extract accountId from token")  # noqa: TRY004 - callers treat bad input as ValueError
     auth_claim = data.get(JWT_CLAIM_PATH)
     if not isinstance(auth_claim, Mapping):
-        raise RuntimeError("Failed to extract accountId from token")
+        raise RuntimeError("Failed to extract accountId from token")  # noqa: TRY004 - callers treat bad input as ValueError
     account_id = auth_claim.get("chatgpt_account_id")
     if not isinstance(account_id, str) or not account_id:
         raise RuntimeError("Failed to extract accountId from token")
@@ -1196,7 +1196,7 @@ def stream_openai_codex_responses(
                     raise RuntimeError("Request was aborted")
                 stream.push(DoneEvent(reason=output.stopReason, message=output))
             stream.end()
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             for block in output.content:
                 if isinstance(block, dict):
                     block.pop("partialJson", None)

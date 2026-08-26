@@ -53,10 +53,10 @@ class Supervisor:
         row = db.get(con, tid)
         if row is None or row["claim_lock"] != self.lock                 or int(row["generation"]) != self.generation:
             return False                       # ownership changed: observe only, never touch state
-        if time.time() - self._beat >= 60:
-            if db.heartbeat(con, tid, self.lock, generation=self.generation,
-                            ttl_seconds=max(1800, int(self.task["timeout_seconds"]) + 60)):
-                self._beat = time.time()
+        if time.time() - self._beat >= 60 and db.heartbeat(
+                con, tid, self.lock, generation=self.generation,
+                ttl_seconds=max(1800, int(self.task["timeout_seconds"]) + 60)):
+            self._beat = time.time()
         ok, report = worker.check_report(self.run_dir, con=con, task_id=tid, generation=self.generation)
         if ok:
             self._submit(con, report)

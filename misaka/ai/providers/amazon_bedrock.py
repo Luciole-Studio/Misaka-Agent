@@ -726,9 +726,7 @@ def supports_prompt_caching(model: Model) -> bool:
         return True
     if any("claude-3-7-sonnet" in value for value in candidates):
         return True
-    if any("claude-3-5-haiku" in value for value in candidates):
-        return True
-    return False
+    return bool(any("claude-3-5-haiku" in value for value in candidates))
 
 
 def supports_thinking_signature(model: Model) -> bool:
@@ -950,7 +948,7 @@ def is_govcloud_bedrock_target(model: Model, options: StreamOptions | dict[str, 
     if region and region.lower().startswith("us-gov-"):
         return True
     model_id = model.id.lower()
-    return model_id.startswith("us-gov.") or model_id.startswith("arn:aws-us-gov:")
+    return model_id.startswith(("us-gov.", "arn:aws-us-gov:"))
 
 
 def build_additional_model_request_fields(

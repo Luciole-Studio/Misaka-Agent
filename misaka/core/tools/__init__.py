@@ -8,7 +8,6 @@ from typing import Any, Literal, TypedDict
 from misaka.agent.types import AgentTool
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.tools.bash import (
-    BashExecOptions,
     BashOperations,
     BashSpawnContext,
     BashSpawnHook,
@@ -17,7 +16,6 @@ from misaka.core.tools.bash import (
     BashToolOptions,
     create_bash_tool,
     create_bash_tool_definition,
-    create_local_bash_operations,
     createBashTool,
     createBashToolDefinition,
     createLocalBashOperations,
@@ -27,42 +25,10 @@ from misaka.core.tools.edit import (
     EditToolDetails,
     EditToolInput,
     EditToolOptions,
-    ReplaceEditInput,
     create_edit_tool,
     create_edit_tool_definition,
     createEditTool,
     createEditToolDefinition,
-    prepare_edit_arguments,
-    prepareEditArguments,
-)
-from misaka.core.tools.edit_diff import (
-    AppliedEditsResult,
-    Edit,
-    EditDiffError,
-    EditDiffResult,
-    FuzzyMatchResult,
-    apply_edits_to_normalized_content,
-    applyEditsToNormalizedContent,
-    compute_edit_diff,
-    compute_edits_diff,
-    computeEditDiff,
-    computeEditsDiff,
-    detect_line_ending,
-    detectLineEnding,
-    fuzzy_find_text,
-    fuzzyFindText,
-    generate_diff_string,
-    generate_unified_patch,
-    generateDiffString,
-    generateUnifiedPatch,
-    normalize_for_fuzzy_match,
-    normalize_to_lf,
-    normalizeForFuzzyMatch,
-    normalizeToLF,
-    restore_line_endings,
-    restoreLineEndings,
-    strip_bom,
-    stripBom,
 )
 from misaka.core.tools.file_mutation_queue import (
     with_file_mutation_queue,
@@ -98,23 +64,6 @@ from misaka.core.tools.ls import (
     createLsTool,
     createLsToolDefinition,
 )
-from misaka.core.tools.output_accumulator import (
-    OutputAccumulator,
-    OutputAccumulatorOptions,
-    OutputSnapshot,
-    byte_length,
-    byteLength,
-    default_temp_file_path,
-    defaultTempFilePath,
-)
-from misaka.core.tools.path_utils import (
-    expand_path,
-    expandPath,
-    resolve_read_path,
-    resolve_to_cwd,
-    resolveReadPath,
-    resolveToCwd,
-)
 from misaka.core.tools.read import (
     ReadOperations,
     ReadToolDetails,
@@ -125,39 +74,12 @@ from misaka.core.tools.read import (
     createReadTool,
     createReadToolDefinition,
 )
-from misaka.core.tools.render_utils import (
-    ToolRenderResultLike,
-    get_text_output,
-    getTextOutput,
-    invalid_arg_text,
-    invalidArgText,
-    normalize_display_text,
-    normalizeDisplayText,
-    replace_tabs,
-    replaceTabs,
-    shorten_path,
-    shortenPath,
-    str_value,
-)
-from misaka.core.tools.tool_definition_wrapper import (
-    create_tool_definition_from_agent_tool,
-    createToolDefinitionFromAgentTool,
-    wrap_tool_definition,
-    wrap_tool_definitions,
-    wrapToolDefinition,
-    wrapToolDefinitions,
-)
 from misaka.core.tools.truncate import (
     DEFAULT_MAX_BYTES,
     DEFAULT_MAX_LINES,
-    GREP_MAX_LINE_LENGTH,
     TruncationOptions,
     TruncationResult,
-    format_size,
     formatSize,
-    truncate_head,
-    truncate_line,
-    truncate_tail,
     truncateHead,
     truncateLine,
     truncateTail,
@@ -384,4 +306,5 @@ __all__ = [
     "truncateLine",
     "truncateTail",
     "withFileMutationQueue",
+    "with_file_mutation_queue",
     ]

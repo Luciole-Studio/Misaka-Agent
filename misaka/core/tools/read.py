@@ -209,7 +209,7 @@ def _get_pi_docs_classification(absolute_path: str) -> _CompactReadClassificatio
         return None
 
     label = _to_posix_path(relative_path)
-    if label == "README.md" or label.startswith("docs/") or label.startswith("examples/"):
+    if label == "README.md" or label.startswith(("docs/", "examples/")):
         return _CompactReadClassification(kind="docs", label=label)
     return None
 

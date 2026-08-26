@@ -95,7 +95,7 @@ async def _start_device_flow(domain: str) -> dict[str, Any]:
         content=urlencode({"client_id": CLIENT_ID, "scope": "read:user"}).encode(),
     )
     if not isinstance(data, dict):
-        raise RuntimeError("Invalid device code response")
+        raise RuntimeError("Invalid device code response")  # noqa: TRY004 - callers treat bad input as ValueError
     device_code = data.get("device_code")
     user_code = data.get("user_code")
     verification_uri = data.get("verification_uri")
@@ -171,9 +171,9 @@ async def refresh_github_copilot_token(refresh_token: str, enterprise_domain: st
         },
     )
     if not isinstance(raw, dict):
-        raise RuntimeError("Invalid Copilot token response")
+        raise RuntimeError("Invalid Copilot token response")  # noqa: TRY004 - callers treat bad input as ValueError
     if not isinstance(raw.get("token"), str) or not isinstance(raw.get("expires_at"), (int, float)):
-        raise RuntimeError("Invalid Copilot token response fields")
+        raise RuntimeError("Invalid Copilot token response fields")  # noqa: TRY004 - callers treat bad input as ValueError
     return OAuthCredentials(
         refresh=refresh_token,
         access=raw["token"],

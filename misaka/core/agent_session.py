@@ -1569,7 +1569,7 @@ class AgentSession:
             result = resolved.handler(raw_args, self._extensionRunner.create_command_context())
             if inspect.isawaitable(result):
                 await result
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             self._extensionRunner.emit_error(
                 ExtensionError(
                     extensionPath=f"command:{command_name}",
@@ -2573,7 +2573,7 @@ def _event_timestamp_ms(value: Any) -> int:
         return int(value)
     if isinstance(value, str):
         try:
-            return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000)
+            return int(datetime.fromisoformat(value).timestamp() * 1000)
         except ValueError:
             return 0
     return 0

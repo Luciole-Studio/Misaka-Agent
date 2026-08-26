@@ -140,8 +140,7 @@ class TreeList(Component):
         while preorder_stack:
             node = preorder_stack.pop()
             all_nodes.append(node)
-            for child in reversed(node.children):
-                preorder_stack.append(child)
+            preorder_stack.extend(reversed(node.children))
         for node in reversed(all_nodes):
             entry_id = node.entry.get("id")
             has_active = leaf_id is not None and entry_id == leaf_id
@@ -694,7 +693,7 @@ class TreeList(Component):
         return theme.bold(result) if isSelected else result
 
     def formatLabelTimestamp(self, timestamp: str) -> str:
-        date = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone()
+        date = datetime.fromisoformat(timestamp).astimezone()
         now = datetime.now().astimezone()
         time = f"{date.hour:02d}:{date.minute:02d}"
         if date.year == now.year and date.month == now.month and date.day == now.day:

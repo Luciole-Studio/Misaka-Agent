@@ -69,7 +69,7 @@ def tree(con, task_id):
     """Return nested task items with ``children`` lists."""
     nodes, roots = {}, []
     for r in items(con, task_id):
-        node = {**{k: r[k] for k in r.keys()}, "children": []}
+        node = {**{k: r[k] for k in r}, "children": []}
         nodes[r["id"]] = node
         parent = nodes.get(r["parent_id"])
         (parent["children"] if parent else roots).append(node)

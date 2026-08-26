@@ -826,12 +826,12 @@ def matchesKey(data: str, key_id: KeyId) -> bool:
         is_letter = "a" <= key <= "z"
         is_digit = is_digit_key(key)
 
-        if modifier == MODIFIERS["ctrl"] + MODIFIERS["alt"] and not _kitty_protocol_active and raw_ctrl:
-            if data == f"\x1b{raw_ctrl}":
-                return True
-        if modifier == MODIFIERS["alt"] and not _kitty_protocol_active and (is_letter or is_digit or key in SYMBOL_KEYS):
-            if data == f"\x1b{key}":
-                return True
+        if (modifier == MODIFIERS["ctrl"] + MODIFIERS["alt"] and not _kitty_protocol_active and raw_ctrl
+                and data == f"\x1b{raw_ctrl}"):
+            return True
+        if (modifier == MODIFIERS["alt"] and not _kitty_protocol_active and (is_letter or is_digit or key in SYMBOL_KEYS)
+                and data == f"\x1b{key}"):
+            return True
         if modifier == MODIFIERS["ctrl"]:
             if raw_ctrl and data == raw_ctrl:
                 return True

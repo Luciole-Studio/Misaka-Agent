@@ -78,7 +78,7 @@ def _probe_tmux_hyperlinks() -> bool:
     try:
         out = subprocess.run(
             ["tmux", "display-message", "-p", "#{client_termfeatures}"],
-            capture_output=True, text=True, timeout=0.25, stdin=subprocess.DEVNULL)
+            capture_output=True, text=True, timeout=0.25, stdin=subprocess.DEVNULL, check=False)
         return "hyperlinks" in (part.strip() for part in out.stdout.split(","))
     except Exception:  # noqa: BLE001
         return False
@@ -157,7 +157,7 @@ def setCapabilities(caps: TerminalCapabilities | dict[str, object]) -> None:
 
 def isImageLine(line: str) -> bool:
     return (
-        line.startswith(KITTY_PREFIX) or line.startswith(ITERM2_PREFIX) or KITTY_PREFIX in line or ITERM2_PREFIX in line
+        line.startswith((KITTY_PREFIX, ITERM2_PREFIX)) or KITTY_PREFIX in line or ITERM2_PREFIX in line
     )
 
 

@@ -102,7 +102,7 @@ def publish(con, resource_type, resource_id, kind, payload=None, *, dedupe_key=N
 def subscribe(con, owner, channel, resource_type="*", resource_id="*", kind="*", *,
               from_now=False):
     init(con)
-    signature = "\0".join((owner, channel, resource_type, resource_id, kind))
+    signature = f"{owner}\x00{channel}\x00{resource_type}\x00{resource_id}\x00{kind}"
     subscription_id = "ns_" + hashlib.sha256(signature.encode()).hexdigest()[:16]
     now = int(time.time())
     cursor = con.execute("SELECT COALESCE(MAX(id),0) FROM notification_events").fetchone()[0]

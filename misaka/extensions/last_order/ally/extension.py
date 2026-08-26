@@ -153,8 +153,8 @@ def register(harn):
                     "immediately; when the ally finishes, its report.json is the submission and the acceptance. "
                     "Do not poll while waiting.",
         snippet="Dispatch an ally card",
-        guidelines=["misaka_ally_dispatch spends the external agent's own quota; do not call it unless the user "
-                    "explicitly said to start."],
+        guidelines=[("misaka_ally_dispatch spends the external agent's own quota; do not call it unless the user "
+                    "explicitly said to start.")],
         parameters=DispatchParams)
     async def misaka_ally_dispatch(tool_call_id, params, signal, on_update, ctx):
         if not params.confirmed:

@@ -85,9 +85,9 @@ def build_skill_message(entry, *, user_instruction="", session_id=None):
     skill_dir = Path(entry["dir"])
     parts = [f'{_SKILL_INVOCATION_PREFIX}"{entry["name"]}" skill. {_SINGLE_SKILL_MARKER}',
              "", _body(entry, session_id), "", f"[Skill directory: {skill_dir}]",
-             "Resolve any relative paths in this skill (e.g. `scripts/foo.js`, "
+             ("Resolve any relative paths in this skill (e.g. `scripts/foo.js`, "
              "`templates/config.yaml`) against that directory, then run them "
-             "with the terminal tool using the absolute path."]
+             "with the terminal tool using the absolute path.")]
     supporting = [f for files in collect_linked_files(skill_dir).values() for f in files]
     if supporting:
         parts += ["", "[This skill has supporting files:]"]
