@@ -240,14 +240,22 @@ def _create_abort_wait_task(signal: Any | None) -> tuple[asyncio.Task[None] | No
     return asyncio.create_task(_poll_abort()), lambda: None
 
 
-def _ignore_background_task_result(task: asyncio.Task[Any]) -> None:
-    def _consume(done: asyncio.Task[Any]) -> None:
+async def _drain_worker(task: asyncio.Task[Any]) -> bool:
+    """Wait through repeated caller cancellation; return whether another cancel arrived."""
+    cancelled = False
+    while not task.done():
         try:
-            done.result()
-        except Exception:  # noqa: BLE001 - the background task's outcome is intentionally discarded
-            return
-
-    task.add_done_callback(_consume)
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+        except BaseException:  # noqa: BLE001 - draining must survive every worker outcome
+            break
+    if task.done():
+        try:
+            task.result()
+        except BaseException:  # noqa: BLE001, S110 - observing the drained outcome is sufficient
+            pass
+    return cancelled
 
 
 def _get_edit_call_render_component(state: dict[str, Any], last_component: Any) -> _EditCallRenderComponent:
@@ -474,7 +482,7 @@ def create_edit_tool_definition(
 
             try:
                 if abort_task is None:
-                    result = await worker_task
+                    result = await asyncio.shield(worker_task)
                     if result is None:
                         raise RuntimeError("Operation aborted")
                     return result
@@ -482,13 +490,23 @@ def create_edit_tool_definition(
                 done, _pending = await asyncio.wait({worker_task, abort_task}, return_when=asyncio.FIRST_COMPLETED)
                 if abort_task in done and worker_task not in done:
                     aborted = True
-                    _ignore_background_task_result(worker_task)
+                    # A to-thread/custom write cannot be stopped by cancelling its Task.
+                    # Hold the per-file lock until it really ends so it cannot overtake
+                    # and overwrite a later mutation.
+                    if await _drain_worker(worker_task):
+                        raise asyncio.CancelledError
                     raise RuntimeError("Operation aborted")
 
-                result = await worker_task
+                result = await asyncio.shield(worker_task)
                 if aborted or result is None:
                     raise RuntimeError("Operation aborted")
                 return result
+            except BaseException as error:
+                aborted = True
+                cancelled = await _drain_worker(worker_task)
+                if cancelled and not isinstance(error, asyncio.CancelledError):
+                    raise asyncio.CancelledError from error
+                raise
             finally:
                 cleanup_abort()
                 if abort_task is not None and not abort_task.done():
