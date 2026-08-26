@@ -229,7 +229,7 @@ def close_openai_codex_websocket_sessions(session_id: str | None = None) -> None
         if entry.idle_handle is not None:
             entry.idle_handle.cancel()
             entry.idle_handle = None
-        _run_socket_close_nowait(entry.socket, 1000, "debug_close")
+        _run_socket_close_nowait(entry.socket, 1000, "session_end")
 
     if session_id is not None:
         entry = _websocket_session_cache.pop(session_id, None)

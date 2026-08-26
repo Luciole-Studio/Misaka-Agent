@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -42,7 +43,7 @@ async def generate_images_openrouter(
         stopReason="stop",
         timestamp=0,
     )
-    output.timestamp = __import__("time").time_ns() // 1_000_000
+    output.timestamp = time.time_ns() // 1_000_000
 
     try:
         api_key = options.apiKey if options and options.apiKey else get_env_api_key(model.provider)

@@ -3025,7 +3025,7 @@ def launch():
                     resize_keys(chunk)
                     chunk = b""
                 plain = bytearray()
-                detach = False
+                quitting = False   # prefix+d ends the panel, and everything it started
                 for offset in range(len(chunk)):       # Byte by byte: prefix and command may arrive in one read.
                     key = chunk[offset:offset + 1]
                     if help_open:                      # Key help is open: any key closes it and redraws.
@@ -3080,14 +3080,14 @@ def launch():
                     elif key == b"W":                  # herdr rename_workspace (prefix+shift+w).
                         open_rename("space")
                     elif key == b"d":
-                        detach = True
+                        quitting = True
                     elif key == b"x":
                         # herdr prefix+x = ClosePane: one key, no confirmation (actions.rs:2035 only
                         # confirms when closing a worktree group, which MISAKA does not have).
                         # Closing the last pane exits the panel.
                         if close_focused():
                             exit_reason[0] = "closed_all"
-                            detach = True
+                            quitting = True
                     elif key == b"?":
                         help_open = True
                         draw_help_overlay()
@@ -3095,7 +3095,7 @@ def launch():
                     control.request("pane.input", {
                         "id": focused, "data": base64.b64encode(bytes(plain)).decode()})
                     repaint_after_typing = now + 0.9   # Repaint after typing stops to erase IME leftovers.
-                if detach:
+                if quitting:
                     return
 
             if stream.sock in readable or stream.buf:

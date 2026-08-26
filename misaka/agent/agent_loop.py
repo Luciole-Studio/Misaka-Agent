@@ -87,6 +87,11 @@ class StreamOptionsNamespace(SimpleNamespace):
     unpacking require the target to expose ``keys()`` and ``__getitem__()`` (the
     informal mapping protocol).  Without these methods, ``dict(namespace)`` raises
     ``TypeError: 'StreamOptionsNamespace' object is not iterable``.
+
+    It deliberately does *not* answer None for a missing attribute. Providers read their
+    options with ``getattr(options, name, default)``, and a ``__getattr__`` that returns
+    None intercepts that call before the default can apply -- so every option a provider
+    tried to default was silently None instead. Missing now means missing.
     """
 
     def keys(self):
@@ -107,12 +112,6 @@ class StreamOptionsNamespace(SimpleNamespace):
     def __len__(self) -> int:
         return len(self.__dict__)
 
-    def __getattr__(self, name: str) -> Any:
-        # Return None for missing attributes instead of raising AttributeError.
-        # This is needed because downstream code (e.g. build_base_options) accesses
-        # fields like cacheRetention, sessionId, etc. that may not be present when
-        # the namespace is constructed from AgentLoopConfig fields.
-        return None
 
     def model_dump(self, *, exclude_none: bool = False) -> dict[str, Any]:
         payload = dict(self.__dict__)
