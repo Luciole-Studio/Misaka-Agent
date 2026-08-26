@@ -436,6 +436,17 @@ def attach_guidance(messages: list[Any], guidance: str) -> list[Any]:
 _TURN_STATE: dict[tuple[str, str], dict[str, Any]] = {}
 
 
+def forget_session(session_id: str | None) -> None:
+    """Drop one session's cached advisor outputs.
+
+    Each entry holds the advisors' full text for cadence reuse; without this the table grew
+    for the life of a long-running process.
+    """
+    key = str(session_id or "no-session")
+    for cached in [item for item in _TURN_STATE if item[0] == key]:
+        del _TURN_STATE[cached]
+
+
 def _hash_view(view) -> str:
     return hashlib.sha256(
         "\u0000".join(f"{m['role']}:{m['content']}" for m in view).encode("utf-8", "replace")

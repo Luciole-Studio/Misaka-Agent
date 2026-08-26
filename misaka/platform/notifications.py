@@ -71,6 +71,22 @@ def _txn(con):
 
 
 NOTIFICATION_SCHEMA_VERSION = 1
+EVENT_RETENTION_SECONDS = 30 * 86400      # an event every subscriber has passed is history
+
+
+def prune(con, *, now=None):
+    """Drop delivered events older than the retention window.
+
+    The trigger appends one row per terminal transition and nothing ever removed them, so the
+    table grew for the life of the board. A row is only dropped once every subscription's
+    cursor is past it, so a subscriber that has been away still gets what it missed.
+    """
+    now = int(time.time()) if now is None else int(now)
+    floor = con.execute("SELECT MIN(cursor) FROM notification_subscriptions").fetchone()[0]
+    con.execute(
+        "DELETE FROM notification_events WHERE created_at < ? AND id <= ?",
+        (now - EVENT_RETENTION_SECONDS, int(floor) if floor is not None else 0),
+    )
 
 
 def init(con):
@@ -110,6 +126,7 @@ def init(con):
         "INSERT OR IGNORE INTO schema_migrations(component,version,applied_at) VALUES(?,?,?)",
         ("notifications", NOTIFICATION_SCHEMA_VERSION, int(time.time())),
     )
+    prune(con)
 
 
 def publish(con, resource_type, resource_id, kind, payload=None, *, dedupe_key=None):

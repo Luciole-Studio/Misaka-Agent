@@ -66,22 +66,49 @@ def _store_blob(path):
     return digest
 
 
-def snapshot(root):
-    """Snapshot a skill directory as relative paths and content hashes."""
+def snapshot(root, *, store=True):
+    """A skill directory as relative paths and content hashes.
+
+    ``store`` writes each file into the rollback blob store. Taking a fingerprint does not
+    need that, and doing it anyway meant every staged or approved write grew an ungarbaged
+    store by a copy of the whole tree.
+    """
     root = Path(root)
     if not root.is_dir():
         return []
     out = []
     for f in sorted(root.rglob("*")):
         if f.is_file() and not f.is_symlink():
-            out.append({"path": str(f.relative_to(root)), "sha256": _store_blob(f)})
+            sha = _store_blob(f) if store else hashlib.sha256(f.read_bytes()).hexdigest()
+            out.append({"path": str(f.relative_to(root)), "sha256": sha})
     return out
 
 
 def digest(root):
     """One hash of a skill tree's content: what a pending write was reviewed against, checked
-    again at approval so a tree that changed in between is not patched blind."""
-    return hashlib.sha256(json.dumps(snapshot(root), sort_keys=True).encode()).hexdigest()
+    again at approval so a tree that changed in between is not patched blind. Read-only."""
+    return hashlib.sha256(json.dumps(snapshot(root, store=False), sort_keys=True).encode()).hexdigest()
+
+
+BLOB_LIMIT = 500        # beyond this, sweep what no ledger entry can restore
+
+
+def _collect_blobs():
+    """Delete blobs no ledger entry references. Rollback keeps only what it can name."""
+    try:
+        blobs = {path.name for path in _blob_dir().iterdir() if path.is_file()}
+    except OSError:
+        return
+    if len(blobs) <= BLOB_LIMIT:
+        return
+    referenced = {item["sha256"] for entry in entries()
+                  for item in (entry.get("before") or []) + (entry.get("after") or [])
+                  if isinstance(item, dict) and item.get("sha256")}
+    for name in blobs - referenced:
+        try:
+            (_blob_dir() / name).unlink()
+        except OSError:                    # one stubborn blob must not stop the sweep
+            continue
 
 
 def restore(root, before):
@@ -130,6 +157,7 @@ def record(action, skill, *, before=None, after_root=None, evidence=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    _collect_blobs()
     return entry["id"]
 
 

@@ -28,4 +28,9 @@ def register_provider(harn):
     async def bind_registry(_event, ctx):
         provider.set_model_resolver(ctx.modelRegistry.find)
 
+    async def release_turn_state(_event, ctx):
+        session = getattr(getattr(ctx, "sessionManager", None), "getSessionId", None)
+        provider.forget_session(session() if callable(session) else None)
+
     harn.on("session_start", bind_registry)
+    harn.on("session_shutdown", release_turn_state)
