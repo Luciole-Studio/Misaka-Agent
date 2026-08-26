@@ -409,20 +409,28 @@ def has_background_tasks() -> bool:
 
 
 async def route_to_children(to: str, message: str, _summary: str, ctx: Any):
-    """In-process branch of SendMessage: resume the child if this session spawned it, else return None so the mailbox handles it."""
+    """In-process branch of SendMessage: resume the child if THIS session spawned it, else return
+    None so the mailbox handles it. A child's address is (parent session, name): another session's
+    same-named child is never a match, so only the caller's own manager is consulted."""
 
+    from misaka.extensions.sisters.subagent.runtime import _safe_component
+    try:
+        sid = _safe_component(str(ctx.sessionManager.getSessionId()))
+    except Exception:  # noqa: BLE001 - no session identity: no child can be addressed safely
+        return None
     managers = _ACTIVE_MANAGERS.get(asyncio.get_running_loop(), set())
     for manager in tuple(managers):
         if manager._closed:
             managers.discard(manager)
             continue
+        if manager._parent_session_id != sid:
+            continue
         try:
-            # No ctx here on purpose: route only looks for live tasks (in memory or already bound).
-            # Passing ctx would bind a blank manager to the caller's session and poison
-            # concurrent sessions in the same process (review 2026-08-20).
+            # No ctx in the lookup on purpose: route only looks for live tasks (in memory or already
+            # bound); binding a blank manager here would poison concurrent sessions (review 2026-08-20).
             if manager._find_task(to) is None:
                 continue
-        except RuntimeError:  # Another session's manager: the ownership check raised, so skip it rather than fail the tool.
+        except RuntimeError:
             continue
         return await manager.send_message(to, message, context=ctx)
     return None
