@@ -176,16 +176,19 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
             args = event.get("input") if isinstance(event, dict) else getattr(event, "input", None)
             tool = event.get("toolName") if isinstance(event, dict) else getattr(event, "toolName", "")
             if _touches_live_skills(str(tool or ""), args if isinstance(args, dict) else {}):
-                return {"block": True, "reason": "Live skill trees change only through skill_manage (approval, scan, "
-                                                 "ledger); generic file and shell tools are refused there."}
+                return {"block": True, "reason": (
+                    "Live skill trees change only through skill_manage (approval, scan, ledger). "
+                    "write and edit are refused on paths inside them; bash is refused whenever the "
+                    "command mentions one at all, reads included -- use skill_view to read a skill."
+                )}
             return None
 
         harn.on("tool_call", guard_live_skills)
 
         # ── the [Skills] block on the startup screen ──
-        # The engine's own one lists engine-loaded skills, of which there are none under
-        # the engine has no skill section of its own; this one takes its place (same name, same style), showing the
-        # index: names collapsed, the full category tree behind ctrl+o.
+        # The engine loads no skills of its own, so it has no section to show; this one takes
+        # that place (same name, same style) and shows the index instead: names collapsed, the
+        # full category tree behind ctrl+o.
         from misaka.core.extensions import startup_sections
 
         def _dim(text):

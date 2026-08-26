@@ -338,6 +338,13 @@ THREAT_PATTERNS = [
      "backtick_subshell", "medium", "execution",
      "backtick string with command substitution"),
 
+    # SKILL.md's own inline-shell form: `!`cmd`` runs when the skill body is read, before
+    # the model sees a word of it. The known-bad patterns above catch a hostile command;
+    # this catches the fact that there is a command at all, so a reviewer is told.
+    (r'!`[^`\n]+`',
+     "skill_inline_shell", "medium", "execution",
+     "inline shell snippet — runs when the skill is loaded"),
+
     # ── Path traversal ──
     (r'\.\./\.\./\.\.',
      "path_traversal_deep", "high", "traversal",
