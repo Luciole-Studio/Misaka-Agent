@@ -9,9 +9,9 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any, Literal, NotRequired, TypedDict, cast
+from typing import Annotated, Any, Literal, NotRequired, TypedDict, cast
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError
 
 from misaka.ai.api_registry import ApiProvider, register_api_provider
 from misaka.ai.models import get_models, get_providers
@@ -54,47 +54,6 @@ class _ConfigModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
 
-class _PercentileCutoffsSchema(_ConfigModel):
-    p50: float | None = None
-    p75: float | None = None
-    p90: float | None = None
-    p99: float | None = None
-
-
-class _OpenRouterRoutingSortSchema(_ConfigModel):
-    by: str | None = None
-    partition: str | None = None
-
-
-class _OpenRouterRoutingMaxPriceSchema(_ConfigModel):
-    prompt: float | str | None = None
-    completion: float | str | None = None
-    image: float | str | None = None
-    audio: float | str | None = None
-    request: float | str | None = None
-
-
-class _OpenRouterRoutingSchema(_ConfigModel):
-    allow_fallbacks: bool | None = None
-    require_parameters: bool | None = None
-    data_collection: Literal["deny", "allow"] | None = None
-    zdr: bool | None = None
-    enforce_distillable_text: bool | None = None
-    order: list[str] | None = None
-    only: list[str] | None = None
-    ignore: list[str] | None = None
-    quantizations: list[str] | None = None
-    sort: str | _OpenRouterRoutingSortSchema | None = None
-    max_price: _OpenRouterRoutingMaxPriceSchema | None = None
-    preferred_min_throughput: float | _PercentileCutoffsSchema | None = None
-    preferred_max_latency: float | _PercentileCutoffsSchema | None = None
-
-
-class _VercelGatewayRoutingSchema(_ConfigModel):
-    only: list[str] | None = None
-    order: list[str] | None = None
-
-
 class _ThinkingLevelMapSchema(_ConfigModel):
     off: str | None = None
     minimal: str | None = None
@@ -118,43 +77,51 @@ class _PartialModelCostSchema(_ConfigModel):
     cacheWrite: float | None = None
 
 
-class _OpenAICompletionsCompatSchema(_ConfigModel):
-    supportsStore: bool | None = None
-    supportsDeveloperRole: bool | None = None
-    supportsReasoningEffort: bool | None = None
-    supportsUsageInStreaming: bool | None = None
-    maxTokensField: Literal["max_completion_tokens", "max_tokens"] | None = None
-    requiresToolResultName: bool | None = None
-    requiresAssistantAfterToolResult: bool | None = None
-    requiresThinkingAsText: bool | None = None
-    requiresReasoningContentOnAssistantMessages: bool | None = None
-    thinkingFormat: Literal[
-        "openai",
-        "openrouter",
-        "together",
-        "deepseek",
-        "zai",
-        "qwen",
-        "qwen-chat-template",
-    ] | None = None
-    cacheControlFormat: Literal["anthropic"] | None = None
-    openRouterRouting: _OpenRouterRoutingSchema | None = None
-    vercelGatewayRouting: _VercelGatewayRoutingSchema | None = None
-    supportsStrictMode: bool | None = None
-    supportsLongCacheRetention: bool | None = None
+# Which compat shape a block is, decided once. The config validator and the parser both
+# asked this question, in opposite orders: a block carrying both marker sets was checked
+# against the Anthropic schema and then built as an OpenAI-responses one.
+_COMPAT_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("anthropic-messages", (
+        "supportsEagerToolInputStreaming",
+        "supportsCacheControlOnTools",
+        "forceAdaptiveThinking",
+        "sendSessionAffinityHeaders",
+    )),
+    ("openai-responses", ("sendSessionIdHeader",)),
+)
 
 
-class _OpenAIResponsesCompatSchema(_ConfigModel):
-    sendSessionIdHeader: bool | None = None
-    supportsLongCacheRetention: bool | None = None
+def _compat_kind(value: Mapping[str, Any]) -> str:
+    for kind, markers in _COMPAT_MARKERS:
+        if any(marker in value for marker in markers):
+            return kind
+    return "openai-completions"
 
 
-class _AnthropicMessagesCompatSchema(_ConfigModel):
-    supportsEagerToolInputStreaming: bool | None = None
-    supportsLongCacheRetention: bool | None = None
-    sendSessionAffinityHeaders: bool | None = None
-    supportsCacheControlOnTools: bool | None = None
-    forceAdaptiveThinking: bool | None = None
+# The runtime models are the definition of a compat block, so the config validator uses
+# them directly. The three mirror schemas that used to live here had already drifted: the
+# openai-completions one was missing two fields the runtime model accepts, and all three
+# ignored unknown keys the runtime models forbid -- so a typo passed validation and then
+# failed the load with a generic message instead of a path to the offending key.
+_COMPAT_SCHEMAS: dict[str, type[BaseModel]] = {
+    "anthropic-messages": AnthropicMessagesCompat,
+    "openai-responses": OpenAIResponsesCompat,
+    "openai-completions": OpenAICompletionsCompat,
+}
+
+
+def _check_compat_block(value: Any) -> Any:
+    """Validate a compat block against the shape its own markers select.
+
+    Declaring it on the field means pydantic reports the path, and means the document is
+    not walked a second time afterwards just to reach these blocks.
+    """
+    if isinstance(value, dict):
+        _COMPAT_SCHEMAS[_compat_kind(value)].model_validate(value)
+    return value
+
+
+_CompatBlock = Annotated[dict[str, Any] | None, BeforeValidator(_check_compat_block)]
 
 
 class _ModelDefinitionSchema(_ConfigModel):
@@ -169,7 +136,7 @@ class _ModelDefinitionSchema(_ConfigModel):
     contextWindow: float | None = None
     maxTokens: float | None = None
     headers: dict[str, str] | None = None
-    compat: dict[str, Any] | None = None
+    compat: _CompatBlock = None
 
 
 class _ModelOverrideSchema(_ConfigModel):
@@ -181,7 +148,7 @@ class _ModelOverrideSchema(_ConfigModel):
     contextWindow: float | None = None
     maxTokens: float | None = None
     headers: dict[str, str] | None = None
-    compat: dict[str, Any] | None = None
+    compat: _CompatBlock = None
 
 
 class _ProviderConfigSchema(_ConfigModel):
@@ -190,7 +157,7 @@ class _ProviderConfigSchema(_ConfigModel):
     apiKey: str | None = Field(default=None, min_length=1)
     api: str | None = Field(default=None, min_length=1)
     headers: dict[str, str] | None = None
-    compat: dict[str, Any] | None = None
+    compat: _CompatBlock = None
     authHeader: bool | None = None
     models: list[_ModelDefinitionSchema] | None = None
     modelOverrides: dict[str, _ModelOverrideSchema] | None = None
@@ -278,19 +245,12 @@ def _coerce_compat(compat: _ProviderCompat | None) -> _ProviderCompat | None:
     if not isinstance(compat, dict):
         return compat
     compat_dict = dict(compat)
-    if "sendSessionIdHeader" in compat_dict:
-        return OpenAIResponsesCompat.model_validate(compat_dict)
-    if any(
-        key in compat_dict
-        for key in (
-            "supportsEagerToolInputStreaming",
-            "supportsCacheControlOnTools",
-            "forceAdaptiveThinking",
-            "sendSessionAffinityHeaders",
-        )
-    ):
-        return AnthropicMessagesCompat.model_validate(compat_dict)
-    return OpenAICompletionsCompat.model_validate(compat_dict)
+    runtime_model = {
+        "anthropic-messages": AnthropicMessagesCompat,
+        "openai-responses": OpenAIResponsesCompat,
+        "openai-completions": OpenAICompletionsCompat,
+    }[_compat_kind(compat_dict)]
+    return runtime_model.model_validate(compat_dict)
 
 
 def _merge_compat(baseCompat: _ProviderCompat | None, overrideCompat: _ProviderCompat | None) -> _ProviderCompat | None:
@@ -345,69 +305,13 @@ def _validation_messages(error: ValidationError, prefix: tuple[Any, ...] = ()) -
     return messages
 
 
-def _validate_compat_schema(value: Any, prefix: tuple[Any, ...]) -> list[str]:
-    if value is None:
-        return []
-    if not isinstance(value, dict):
-        return [f"{_format_validation_path(prefix)}: Input should be a valid dictionary"]
-    schema: type[BaseModel]
-    if any(
-        key in value
-        for key in (
-            "supportsEagerToolInputStreaming",
-            "supportsCacheControlOnTools",
-            "forceAdaptiveThinking",
-            "sendSessionAffinityHeaders",
-        )
-    ):
-        schema = _AnthropicMessagesCompatSchema
-    elif "sendSessionIdHeader" in value:
-        schema = _OpenAIResponsesCompatSchema
-    else:
-        schema = _OpenAICompletionsCompatSchema
-    try:
-        schema.model_validate(value)
-    except ValidationError as error:
-        return _validation_messages(error, prefix)
-    return []
-
-
 def _validate_models_config(parsed: Any) -> list[str]:
     try:
         _ModelsConfigSchema.model_validate(parsed)
     except ValidationError as error:
         return _validation_messages(error)
 
-    errors: list[str] = []
-    providers = parsed.get("providers") if isinstance(parsed, dict) else None
-    if not isinstance(providers, dict):
-        return errors
-
-    for provider_name, provider_config in providers.items():
-        if not isinstance(provider_config, dict):
-            continue
-        errors.extend(_validate_compat_schema(provider_config.get("compat"), ("providers", provider_name, "compat")))
-
-        models = provider_config.get("models")
-        if isinstance(models, list):
-            for index, model_def in enumerate(models):
-                if isinstance(model_def, dict):
-                    errors.extend(
-                        _validate_compat_schema(model_def.get("compat"), ("providers", provider_name, "models", index, "compat"))
-                    )
-
-        model_overrides = provider_config.get("modelOverrides")
-        if isinstance(model_overrides, dict):
-            for model_id, model_override in model_overrides.items():
-                if isinstance(model_override, dict):
-                    errors.extend(
-                        _validate_compat_schema(
-                            model_override.get("compat"),
-                            ("providers", provider_name, "modelOverrides", model_id, "compat"),
-                        )
-                    )
-
-    return errors
+    return []
 
 
 def _strip_json_comments(value: str) -> str:
