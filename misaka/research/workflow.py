@@ -463,8 +463,11 @@ async def _expand(con, cfg, runner, worker, run, node, *, spawner, context, tool
                         if not os.path.isdir(probe_dir):             # resume: a fork already forked keeps its session
                             planner.fork_session(planner._lo_session(run, node), probe_dir)
                         runs.set_issue(con, issue["id"], "probing")
-                        handles[issue["id"]] = spawner.spawn(_probe_argv(run, issue), cwd=run["workspace"],
-                                                             title=f"LO·{nid}·{issue['id']}", place="split")
+                        _reap_orphan_runner(con, "research_issues", issue)
+                        handle = spawner.spawn(_probe_argv(run, issue), cwd=run["workspace"],
+                                               title=f"LO·{nid}·{issue['id']}", place="split")
+                        handles[issue["id"]] = handle
+                        _record_runner(con, "research_issues", issue["id"], handle)
                 except BaseException:
                     _stop_all(spawner, handles)
                     raise
@@ -664,6 +667,30 @@ async def probe(con, cfg, runner, worker, *, run_id, issue_id, progress=None, po
     return verdict["verdict"]
 
 
+def _record_runner(con, table, row_id, handle):
+    """Persist a spawned child's identity so a successor driver can see and reap it."""
+    pid = getattr(handle, "pid", None)
+    if pid is None:
+        return                                   # a pane handle: the panel daemon owns that process
+    from misaka.platform import processes
+    con.execute(f'UPDATE "{table}" SET runner_pid=?, runner_identity=? WHERE id=?',
+                (int(pid), processes.identity(int(pid)), row_id))
+
+
+def _reap_orphan_runner(con, table, row):
+    """A previous driver's child may still be running this node or probe. Never start a second
+    one beside it: terminate the recorded tree first (its own claim fences any late writes)."""
+    keys = row.keys() if hasattr(row, "keys") else row
+    pid = row["runner_pid"] if "runner_pid" in keys else None
+    identity = row["runner_identity"] if "runner_identity" in keys else None
+    if pid and identity:
+        from misaka.platform import processes
+        if processes.identity_is_alive(int(pid), identity):
+            processes.terminate(int(pid))
+    if pid or identity:
+        con.execute(f'UPDATE "{table}" SET runner_pid=NULL, runner_identity=NULL WHERE id=?', (row["id"],))
+
+
 async def _expand_level(con, cfg, spawner, run, level, *, poll_seconds, progress, driver_lock=None):
     """Spawn every node of the level and wait until each has left the frontier (terminal,
     closing, or waiting for input). Returns "done", a halt, or a waiting_input result. If one
@@ -671,8 +698,11 @@ async def _expand_level(con, cfg, spawner, run, level, *, poll_seconds, progress
     handles = {}
     try:
         for node in level:                              # registered one by one: a failed spawn stops the started ones
-            handles[node["id"]] = spawner.spawn(_node_argv(run, node), cwd=run["workspace"],
-                                                title=f"LO·{node['id']}", place="split")
+            _reap_orphan_runner(con, "research_branches", node)
+            handle = spawner.spawn(_node_argv(run, node), cwd=run["workspace"],
+                                   title=f"LO·{node['id']}", place="split")
+            handles[node["id"]] = handle
+            _record_runner(con, "research_branches", node["id"], handle)
         return await _wait_level(con, cfg, spawner, run, handles, poll_seconds=poll_seconds, progress=progress,
                                  driver_lock=driver_lock)
     except BaseException:

@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS research_branches (
   worktree        TEXT,
   session_file    TEXT,
   context_artifact TEXT,
+  runner_pid      INTEGER,
+  runner_identity TEXT,
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
 );
@@ -77,6 +79,8 @@ CREATE TABLE IF NOT EXISTS research_issues (
   status          TEXT NOT NULL DEFAULT 'open',
   reason          TEXT,
   child_branch_id TEXT,
+  runner_pid      INTEGER,
+  runner_identity TEXT,
   created_at      INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS research_artifacts (
@@ -130,7 +134,7 @@ NODE_STATES = ("queued", "planning", "waiting_input", "executing", "synthesizing
                "probing", "triaging", "closing", "conflict", *NODE_TERMINAL)
 # closing = triaged, waiting for its children; conflict = its branch did not merge, a human resolves it
 DEFAULT_LIMITS = {"max_depth": 3}
-RESEARCH_SCHEMA_VERSION = 9    # 9: artifact paths are unique inside a run, not across unrelated runs
+RESEARCH_SCHEMA_VERSION = 10   # 10: node/probe runner identity on the row, visible to a successor driver
 DRIVER_TTL_SECONDS = 300
 RESEARCH_TABLES = (
     "research_claims", "research_evidence_assessments", "research_findings",
