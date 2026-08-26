@@ -51,6 +51,26 @@ def _expand(path):
     return os.path.expanduser(path)
 
 
+def _write_pty(fd, data):
+    """Write all of ``data`` to a non-blocking PTY. ``os.write`` may take only part of the
+    buffer; the remainder is retried until the queue is full. A pane whose program stops
+    reading raises instead of silently truncating the input — no waiting: the daemon's
+    single event loop serves every pane, so blocking here would freeze all of them."""
+    view = memoryview(data)
+    while view:
+        try:
+            written = os.write(fd, view)
+        except BlockingIOError:
+            written = 0
+        if not written:
+            sent = len(data) - len(view)
+            raise RuntimeError(
+                f"Pane input buffer is full after {sent} of {len(data)} bytes; "
+                "the program in the pane is not reading."
+            ) from None
+        view = view[written:]
+
+
 # pyte does not understand these modern terminal sequences and would leak them
 # as visible characters; strip them before emulation.
 _UNSUPPORTED = re.compile(
@@ -444,6 +464,7 @@ class Pane:
         "screen",
         "seen_status",
         "sent_cursor",
+        "started",
         "started_at",
         "stream",
         "submitted",
@@ -457,6 +478,7 @@ class Pane:
         self.claim_lock = self.generation = self.deadline = None
         self.proc = self.fd = self.exit_code = None
         self.buf = bytearray()
+        self.started = None           # card-hosting start time (set by _host_card; None for plain panes)
         self.started_at = int(time.time())
         self.submitted = False
         self.seen_status = None       # board status seen while focused ("finished but not yet looked at")
@@ -1195,15 +1217,15 @@ class Daemon:
                  if p.card and p.card == params.get("card")), None)
             if pane is None or pane.fd is None:
                 raise ValueError(f"Pane is missing or has exited: {params.get('id') or params.get('card')}")
-            os.write(pane.fd, params["text"].encode())
+            _write_pty(pane.fd, params["text"].encode())
             if params.get("enter"):
-                os.write(pane.fd, b"\r")
+                _write_pty(pane.fd, b"\r")
             return {"sent": True}
         if method == "pane.input":
             pane = self.panes.get(params["id"])
             if pane is None or pane.fd is None:
                 raise ValueError(f"Pane is missing or has exited: {params['id']}")
-            os.write(pane.fd, base64.b64decode(params["data"]))
+            _write_pty(pane.fd, base64.b64decode(params["data"]))
             return {"sent": True}
         if method == "pane.resize":
             pane = self.panes.get(params["id"])
