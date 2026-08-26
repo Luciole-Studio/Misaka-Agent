@@ -67,10 +67,11 @@ async def login(provider_id: str) -> None:
     if storage.loadError is not None:
         print(f"Cannot read {get_auth_path()}: {storage.loadError}", file=sys.stderr)
         raise SystemExit(1)
-    storage.set(provider_id, {"type": "oauth", **credentials.model_dump(mode="json")})
-    if storage.errors:
-        print(f"Credentials were NOT saved to {get_auth_path()}: {storage.errors[-1]}", file=sys.stderr)
-        raise SystemExit(1)
+    try:
+        storage.set(provider_id, {"type": "oauth", **credentials.model_dump(mode="json")})
+    except (OSError, RuntimeError) as error:
+        print(f"Credentials were NOT saved to {get_auth_path()}: {error}", file=sys.stderr)
+        raise SystemExit(1) from None
     print(f"\nCredentials saved to {get_auth_path()}")
 
 

@@ -11,6 +11,18 @@ pip install 'misaka[anthropic]'   # a user install picks its provider SDKs: anth
                                   # (misaka[providers] = all five; misaka[pageindex] = PDF outline extraction)
 ```
 
+## First run
+
+A fresh install talks to `anthropic` / `claude-sonnet-4-5`. Give it a credential either way, then check it:
+
+```sh
+export ANTHROPIC_API_KEY=sk-ant-...   # the environment is honoured for every builtin provider
+misaka chat                           # or, inside the chat: /login stores an OAuth token or an API key in ~/.misaka/agent/auth.json
+misaka auth check                     # ✓/✗ per provider, through the same resolver every session uses
+```
+
+Change provider and model with `/model` inside the chat; the choice is saved as `defaultProvider` / `defaultModel` in `~/.misaka/agent/settings.json` and becomes the default for every Sister.
+
 ## Run
 
 ```sh
@@ -21,7 +33,38 @@ misaka board           # the task board
 misaka doc add x.pdf   # index a document
 ```
 
-Configuration lives in `~/.misaka/` (`agent/models.json` for providers, `profiles/` for Sisters). `MISAKA_*` environment variables override defaults; see `misaka/config/product.py`.
+## Configure
+
+Everything lives under `~/.misaka/`:
+
+| Where | What |
+|---|---|
+| `agent/settings.json` | engine settings; `defaultProvider` / `defaultModel` are the product defaults (`/model` writes them) |
+| `agent/auth.json` | stored credentials (`/login`), kept at mode 0600 |
+| `agent/models.json` | custom providers and models (an OpenAI-compatible gateway, a local server); their IDs are valid `defaultModel` values |
+| `profiles/last_order/` | Last Order: persona (`SOUL.md`), MCP servers (`config.yaml`, `mcp/`), `skills/`, and `config.json` `{"model": "..."}` to pin her model |
+| `profiles/sisters/<id>/` | one directory per Sister (`misaka create`): `DESCRIBE.md` for routing, `SOUL.md`, `config.json` to pin a model, `skills/` |
+| `allies.json` | the recognised ally CLIs |
+
+Environment variables override the files (all optional):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MISAKA_PROVIDER` / `MISAKA_MODEL` | `settings.json`, then `anthropic` / `claude-sonnet-4-5` | provider and model for Sisters and chat |
+| `MISAKA_LO_MODEL` | Last Order's pinned model, then `MISAKA_MODEL` | Last Order's model |
+| `MISAKA_CODING_AGENT_DIR` | `~/.misaka/agent` | the engine directory: settings, auth, models, sessions |
+| `MISAKA_DB` / `MISAKA_MESSAGES` / `MISAKA_LCM_DB` | `~/.misaka/{board,messages,lcm}.db` | task board, message queue, compaction store |
+| `MISAKA_TASKS` | `~/.misaka/tasks` | per-card state: sessions, reports, locks |
+| `MISAKA_NET_SOCK` / `MISAKA_NET_SNAPSHOT` | `~/.misaka/net.sock` / `net.json` | the panel daemon's socket and roster snapshot |
+| `MISAKA_JUDGE_TIMEOUT` | `600` | seconds a research planner / judge call may take |
+| `MISAKA_TOKEN_CAP` | `0` (off) | token budget shown and enforced on the board |
+| `MISAKA_CONTEXT_ENGINE` | `lcm` | `lcm` (lossless compaction) or `native` (the engine's one-shot summary) |
+| `MISAKA_LCM_SUMMARY_PROVIDER` / `MISAKA_LCM_SUMMARY_MODEL` / `MISAKA_LCM_SUMMARY_FALLBACK_MODELS` | the product provider / model | the summariser; fallbacks are comma-separated |
+| `MISAKA_LCM_SUMMARY_TIMEOUT` | `60` | seconds per summary |
+| `MISAKA_LCM_RETRIEVAL_MODE` / `MISAKA_LCM_EMBEDDING_MODEL` | `fts` / none | retrieval over compacted history |
+| `MISAKA_THEME` | the terminal's | `dark` or `light` |
+
+A number that does not parse stops the command with the variable's name and value. Other `MISAKA_*` variables are set by MISAKA for its own child processes and are not configuration.
 
 ## Check
 

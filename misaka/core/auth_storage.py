@@ -76,6 +76,8 @@ class FileAuthStorageBackend(AuthStorageBackend):
 
     def ensureFileExists(self) -> None:
         if os.path.exists(self.authPath):
+            if os.stat(self.authPath).st_mode & 0o077:      # a store from before 0600 was enforced
+                os.chmod(self.authPath, 0o600)
             return
         atomic.write_text(self.authPath, "{}", mode=0o600)
 
@@ -215,7 +217,6 @@ class AuthStorage:
         self.runtimeOverrides: dict[str, str] = {}
         self.fallbackResolver: Callable[[str], str | None] | None = None
         self.loadError: Exception | None = None
-        self.errors: list[Exception] = []
         self.storage = storage
         self.reload()
 
@@ -242,9 +243,6 @@ class AuthStorage:
     def setFallbackResolver(self, resolver: Callable[[str], str | None]) -> None:
         self.fallbackResolver = resolver
 
-    def _record_error(self, error: Any) -> None:
-        self.errors.append(error if isinstance(error, Exception) else Exception(str(error)))
-
     def _parse_storage_data(self, content: str | None) -> AuthStorageData:
         if not content:
             return {}
@@ -264,11 +262,12 @@ class AuthStorage:
             self.loadError = None
         except Exception as error:  # noqa: BLE001
             self.loadError = error
-            self._record_error(error)
 
     def persistProviderChange(self, provider: str, credential: AuthCredential | None) -> None:
+        """One provider's change, written through the lock. A store that could not be read is never
+        overwritten, and a failed write raises: the caller reports it instead of saying "saved"."""
         if self.loadError is not None:
-            return
+            raise RuntimeError(f"the credential store could not be read ({self.loadError}); not overwriting it")
 
         def persist(current: str | None) -> LockResult:
             current_data = _coerce_storage_object(self._parse_storage_data(current))
@@ -279,25 +278,22 @@ class AuthStorage:
                 merged[provider] = credential
             return LockResult(result=None, next=json.dumps(merged, indent=2))
 
-        try:
-            self.storage.withLock(persist)
-        except Exception as error:  # noqa: BLE001
-            self._record_error(error)
+        self.storage.withLock(persist)
 
     def get(self, provider: str) -> AuthCredential | None:
         return _coerce_storage_object(self.data).get(provider)
 
     def set(self, provider: str, credential: AuthCredential) -> None:
+        self.persistProviderChange(provider, credential)     # disk first: memory never holds what the file lacks
         if not isinstance(self.data, dict):
             self.data = _coerce_storage_object(self.data)
         self.data[provider] = credential
-        self.persistProviderChange(provider, credential)
 
     def remove(self, provider: str) -> None:
+        self.persistProviderChange(provider, None)
         if not isinstance(self.data, dict):
             self.data = _coerce_storage_object(self.data)
         self.data.pop(provider, None)
-        self.persistProviderChange(provider, None)
 
     def list(self) -> list[str]:
         return list(_coerce_storage_object(self.data).keys())
@@ -328,11 +324,6 @@ class AuthStorage:
 
     def getAll(self) -> AuthStorageData:
         return dict(_coerce_storage_object(self.data))
-
-    def drainErrors(self) -> list[Exception]:
-        drained = list(self.errors)
-        self.errors = []
-        return drained
 
     async def login(self, providerId: str, callbacks: Any) -> None:
         provider = getOAuthProvider(providerId)

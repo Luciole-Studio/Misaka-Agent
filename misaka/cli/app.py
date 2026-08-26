@@ -133,7 +133,7 @@ def _parser():
     cr = sub.add_parser("create", help="Create a new Sister")
     cr.add_argument("sid", nargs="?", help="Sister ID, such as 10033")
     cr.add_argument("--desc", help="Personality or specialty, written to SOUL.md")
-    cr.add_argument("--model", help="Pinned model, such as claude-opus-5")
+    cr.add_argument("--model", help="Pinned model, such as claude-opus-4-5")
     rm = sub.add_parser("remove", help="Remove a Sister along with her sessions and workspace")
     rm.add_argument("sid", help="Sister ID")
     rm.add_argument("--yes", action="store_true", help="Skip confirmation")
@@ -156,28 +156,28 @@ def _doc_tree_lines(tree, depth=1):
     return lines
 
 
-def _cmd_chat(args, con):
+def _cmd_chat(args):
     from misaka.cli import chat
     chat.launch(args.as_agent, model=args.model, cont=args.cont, pick=args.pick,
                 session=args.session)
 
 
-def _cmd_panel(args, con):
+def _cmd_panel(args):
     from misaka.ui.panel import panel
     panel.launch()
 
 
-def _cmd_net_daemon(args, con):
+def _cmd_net_daemon(args):
     from misaka.ui.panel import daemon
     daemon.main()
 
 
-def _cmd_card_shell(args, con):
+def _cmd_card_shell(args):
     from misaka.cli import card_shell
     card_shell.launch(args.task_id, resume_only=args.resume, say=args.say)
 
 
-def _cmd_net(args, con):
+def _cmd_net(args):
     from misaka.ui.panel import client as net
     if args.net_cmd == "stop":
         try:
@@ -215,10 +215,10 @@ def _cmd_net(args, con):
             print(f"{out['id']}  {mark}  {out['title']}\n    {out['why']}")
 
 
-def _cmd_init(args, con):
+def _cmd_init(args):
     from misaka.platform import cards
     if args.migrate:
-        written, existed, no_folder = cards.migrate(con)
+        written, existed, no_folder = cards.migrate(db.connect(CFG["db"]))
         print(f"migrated {written} card(s) to files ({existed} already had files, "
               f"{no_folder} skipped: project folder gone)")
         from misaka.config import migrations
@@ -233,36 +233,36 @@ def _cmd_init(args, con):
     print("board:", os.path.expanduser(CFG["db"]))
 
 
-def _cmd_create(args, con):
+def _cmd_create(args):
     from misaka.network import roster
     sys.exit(roster.cli_create(args.sid, desc=args.desc, model=args.model))
 
 
-def _cmd_remove(args, con):
+def _cmd_remove(args):
     from misaka.network import roster
     sys.exit(roster.cli_remove(args.sid, yes=args.yes))
 
 
-def _cmd_add(args, con):
+def _cmd_add(args):
     from misaka.platform import cards
     body = args.body
     if args.body_file:
         with open(args.body_file, encoding="utf-8") as f:
             body = f.read()
-    tid = cards.create(con, os.getcwd(), args.title, body, args.assignee,
+    tid = cards.create(db.connect(CFG["db"]), os.getcwd(), args.title, body, args.assignee,
                        model=args.model, priority=args.priority,
                        timeout_seconds=args.timeout)
     print(tid)
 
 
-def _cmd_tell(args, con):
+def _cmd_tell(args):
     from misaka.extensions.last_order.ally import tell as ally_tell
     ok, msg = ally_tell.tell(args.message, to_addr=args.to, summary=args.summary)
     print(msg)
     sys.exit(0 if ok else 1)
 
 
-def _cmd_dm(args, con):
+def _cmd_dm(args):
     from misaka.cli import dm as dm_cli
     sys.exit(dm_cli.deliver(args.to, args.message, sender=args.sender,
                             model=args.model, timeout=args.timeout,
@@ -270,8 +270,9 @@ def _cmd_dm(args, con):
                             summary=args.summary))
 
 
-def _cmd_task(args, con):
+def _cmd_task(args):
     from misaka.platform import cards as card_files
+    con = db.connect(CFG["db"])
     row = db.get(con, args.task_id)
     ok, msg = (card_files.remove(con, row["workspace"], args.task_id) if row
                else (False, f"Card not found: {args.task_id}"))
@@ -279,11 +280,11 @@ def _cmd_task(args, con):
     sys.exit(0 if ok else 1)
 
 
-def _cmd_board(args, con):
-    tail.board_view(con, db.canonical_workspace())
+def _cmd_board(args):
+    tail.board_view(db.connect(CFG["db"]), db.canonical_workspace())
 
 
-def _cmd_research(args, con):
+def _cmd_research(args):
     import asyncio as _asyncio
 
     from misaka.network import worker as worker_mod
@@ -293,6 +294,7 @@ def _cmd_research(args, con):
         sys.exit(research_node.main(*args.node))
     if args.probe:
         sys.exit(research_node.main_probe(*args.probe))
+    con = db.connect(CFG["db"])
     runs.init(con)
     if args.resume:
         run = runs.get(con, args.resume)
@@ -318,7 +320,7 @@ def _cmd_research(args, con):
         print(final["path"])
 
 
-def _cmd_lcm(args, con):
+def _cmd_lcm(args):
     import os as _os
 
     from misaka.extensions.lcm import maintenance as lcm_maint
@@ -360,7 +362,7 @@ def _cmd_lcm(args, con):
         )
 
 
-def _cmd_auth(args, con):
+def _cmd_auth(args):
     # Verify credentials up front so a run does not fail halfway through.
     import asyncio as _asyncio
 
@@ -389,7 +391,7 @@ def _cmd_auth(args, con):
     sys.exit(1 if bad else 0)
 
 
-def _cmd_moa(args, con):
+def _cmd_moa(args):
     import json as _json
     import os as _os
 
@@ -434,7 +436,7 @@ def _cmd_moa(args, con):
             print(f"    aggregator: {slot_label(preset['aggregator'])}")
 
 
-def _cmd_skills(args, con):
+def _cmd_skills(args):
     import os as _os
 
     from misaka.skills import layers as skill_layers
@@ -551,7 +553,7 @@ def _cmd_skills(args, con):
             print(f"{e['layer']:<9}{e['category']}/{e['name']}  {e['description']}  ({e['dir']})")
 
 
-def _cmd_doc(args, con):
+def _cmd_doc(args):
     if args.action == "add":
         if not args.arg:
             sys.exit("Usage: misaka doc add <file> [--no-tree]")
@@ -617,12 +619,12 @@ COMMANDS = {
 
 
 def main(argv=None):
-    """The CLI entry point: one handler per sub-command (``COMMANDS``); ``argv`` defaults to the
-    process arguments so tests can drive it directly."""
+    """The CLI entry point: one handler per sub-command (``COMMANDS``), each opening the board only
+    if it uses it; ``argv`` defaults to the process arguments so tests can drive it directly."""
     signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
         # No arguments: open the panel in a terminal, plain chat when piped.
         argv = ["panel"] if sys.stdin.isatty() and sys.stdout.isatty() else ["chat"]
     args = _parser().parse_args(argv)
-    return COMMANDS[args.cmd](args, db.connect(CFG["db"]))
+    return COMMANDS[args.cmd](args)

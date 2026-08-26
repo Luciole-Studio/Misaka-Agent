@@ -9,13 +9,16 @@ from misaka.config.product import CFG
 
 ROOT = CFG["profiles_root"]
 ACTIVE = ("running", "review", "ready", "todo", "blocked", "triage")   # anything a Sister still owes
-MODEL_CHOICES = [
-    "default (use global setting)",
-    "claude-opus-5",
-    "claude-sonnet-5",
-    "gemini-3.5-flash",
-    "Custom…",
-]
+
+
+def model_choices():
+    """The pinning menu: the global default, then what the sessions' own registry can run on the
+    product provider (builtin catalog plus models.json), then a free-form ID."""
+    from misaka.core.auth_storage import AuthStorage
+    from misaka.core.model_registry import ModelRegistry
+    registry = ModelRegistry.create(AuthStorage.create())
+    mine = sorted({m.id for m in registry.getAvailable() if m.provider == CFG["provider"]})
+    return ["default (use global setting)", *mine, "Custom…"]
 
 SOUL_TEMPLATE = """# Misaka {sid}
 
@@ -148,13 +151,13 @@ def register(harn):
         if specialty is None:
             ctx.ui.notify("Creation cancelled.", "info")
             return
-        model_pick = await ctx.ui.select(f"Choose a model for Sister {sid}", MODEL_CHOICES)
+        model_pick = await ctx.ui.select(f"Choose a model for Sister {sid}", model_choices())
         if model_pick is None:
             ctx.ui.notify("Creation cancelled.", "info")
             return
         model = None
         if model_pick == "Custom…":
-            model = await ctx.ui.input("Model ID", "For example: claude-opus-5")
+            model = await ctx.ui.input("Model ID", "For example: claude-opus-4-5")
             if model is None:
                 ctx.ui.notify("Creation cancelled.", "info")
                 return

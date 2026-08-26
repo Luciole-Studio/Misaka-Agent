@@ -17,13 +17,13 @@ _RESET = "\x1b[0m"
 
 
 def migrate_auth_to_auth_json() -> list[str]:
+    """oauth.json and settings.apiKeys into auth.json, one provider at a time: a provider the store
+    already holds is left as it is, so a run that failed halfway simply continues; the old sources
+    go only once every provider is in. A failed write raises and leaves them in place."""
     agent_dir = Path(get_agent_dir())
     auth_path = agent_dir / "auth.json"
     oauth_path = agent_dir / "oauth.json"
     settings_path = agent_dir / "settings.json"
-
-    if auth_path.exists() and auth_path.stat().st_size > 2:     # "{}" is an empty store, not a finished migration
-        return []
 
     # Read every old source first; nothing is renamed or rewritten until the new store holds it.
     migrated: dict[str, object] = {}
@@ -48,10 +48,13 @@ def migrate_auth_to_auth_json() -> list[str]:
 
     from misaka.core.auth_storage import AuthStorage
     storage = AuthStorage.create(str(auth_path))
+    if storage.loadError is not None:
+        return []                                              # an unreadable store is never overwritten
     for provider, credential in migrated.items():
-        storage.set(provider, credential)
+        if not storage.has(provider):
+            storage.set(provider, credential)
     storage.reload()
-    if storage.loadError is not None or storage.errors or not all(storage.has(p) for p in migrated):
+    if not all(storage.has(p) for p in migrated):
         return []                                              # the store did not take it: old sources stay untouched
 
     if oauth_path.exists():

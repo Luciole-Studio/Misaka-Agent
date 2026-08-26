@@ -282,7 +282,7 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
                     "isError": not result.get("success"),
                     "details": {k: v for k, v in result.items() if k != "message"}}
 
-        if kind != "card":             # skills are read-only at run time inside a card
+        if kind not in ("card", "child"):   # skills are read-only at run time inside a card and its children
             harn.registerTool(ToolDefinition(
                 name="skill_manage", label="Manage skills",
                 description="Create, update, or delete a reusable skill; every change goes through approval, validation, the security scan, and the rollback ledger.",
@@ -368,7 +368,7 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
             harn.registerCommand("skill-mode", {
                 "handler": skill_mode_cmd,
                 "description": "Show or change the skill write mode: off, forbid / ask (writes wait for your review), or allow."})
-        if kind != "card":
+        if kind not in ("card", "child"):
             harn.registerCommand("learn", {
                 "handler": learn_cmd,
                 "description": "Create or improve a reusable skill from files, links, notes, or the workflow just completed."})
@@ -376,7 +376,7 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
     return register
 
 
-SESSION_KINDS = {"foreground", "dm", "card"}
+SESSION_KINDS = {"foreground", "dm", "card", "child"}
 
 
 def activate(spec):
