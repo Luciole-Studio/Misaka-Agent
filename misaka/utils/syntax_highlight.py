@@ -14,10 +14,6 @@ from pygments.util import ClassNotFound
 HighlightFormatter = Callable[[str], str]
 HighlightTheme = dict[str, HighlightFormatter]
 
-_SPAN_CLOSE = "</span>"
-_HIGHLIGHT_CLASS_PREFIX = "hljs-"
-
-
 @dataclass(slots=True)
 class HighlightOptions:
     language: str | None = None
@@ -99,19 +95,6 @@ def _resolve_lexer(code: str, options: HighlightOptions):
         return TextLexer()
 
 
-def _get_scope_from_span_tag(tag: str) -> str | None:
-    import re
-
-    match = re.search(r"""\sclass\s*=\s*(?:"([^"]*)"|'([^']*)')""", tag)
-    class_value = match.group(1) if match and match.group(1) is not None else match.group(2) if match else None
-    if not class_value:
-        return None
-    for class_name in class_value.split():
-        if class_name.startswith(_HIGHLIGHT_CLASS_PREFIX):
-            return class_name[len(_HIGHLIGHT_CLASS_PREFIX) :]
-    return None
-
-
 def _get_scope_formatter(scope: str | None, theme: HighlightTheme) -> HighlightFormatter | None:
     if scope is None:
         return None
@@ -125,22 +108,6 @@ def _get_scope_formatter(scope: str | None, theme: HighlightTheme) -> HighlightF
             if formatter is not None:
                 return formatter
     return None
-
-
-def _get_active_formatter(scopes: list[str | None], theme: HighlightTheme) -> HighlightFormatter | None:
-    for scope in reversed(scopes):
-        formatter = _get_scope_formatter(scope, theme)
-        if formatter is not None:
-            return formatter
-    return theme.get("default")
-
-
-def _is_span_open_tag_start(html: str, index: int) -> bool:
-    if not html.startswith("<span", index):
-        return False
-    next_index = index + len("<span")
-    next_char = html[next_index] if next_index < len(html) else ""
-    return next_char in {">", " ", "\t", "\n", "\r"}
 
 
 def _scope_for_token(token: Any) -> str | None:

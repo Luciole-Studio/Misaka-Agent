@@ -114,10 +114,6 @@ def resolve_headers_or_throw(
     return resolved or None
 
 
-def clear_config_value_cache() -> None:
-    _command_result_cache.clear()
-
-
 resolveConfigValue = resolve_config_value
 resolveConfigValueUncached = resolve_config_value_uncached
 resolveConfigValueOrThrow = resolve_config_value_or_throw

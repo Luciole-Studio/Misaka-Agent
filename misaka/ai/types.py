@@ -462,11 +462,7 @@ AssistantMessageEventValue: TypeAlias = (
 AssistantMessageEvent: TypeAlias = Annotated[AssistantMessageEventValue, Field(discriminator="type")]
 
 USER_CONTENT_ADAPTER = TypeAdapter(UserContent)
-ASSISTANT_CONTENT_ADAPTER = TypeAdapter(AssistantContent)
 MESSAGE_ADAPTER = TypeAdapter(Message)
-ASSISTANT_MESSAGE_EVENT_ADAPTER = TypeAdapter(AssistantMessageEvent)
-
-
 def validate_user_content(value: Any) -> UserContentValue:
     return USER_CONTENT_ADAPTER.validate_python(value)
 

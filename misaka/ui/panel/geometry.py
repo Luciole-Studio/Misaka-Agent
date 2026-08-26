@@ -224,19 +224,6 @@ def compute_view(area, sidebar_width, tab_count,
 
 # ── src/ui/sidebar.rs ─────────────────────────────────────────────────
 
-def sidebar_section_heights(total_h, split_ratio):
-    """src/ui/sidebar.rs:42-57."""
-    if total_h == 0:
-        return 0, 0
-    if total_h < 6:
-        ws_h = -(-total_h // 2)               # div_ceil
-        return ws_h, max(0, total_h - ws_h)
-    ratio = min(0.9, max(0.1, split_ratio))
-    ws_h = round(total_h * ratio)
-    ws_h = min(max(ws_h, 3), max(0, total_h - 3))
-    return ws_h, max(0, total_h - ws_h)
-
-
 WORKSPACE_SECTION_HEADER_ROWS = 2     # src/ui/sidebar.rs:20
 AGENT_PANEL_HEADER_ROWS = 3           # src/ui/sidebar.rs:21
 

@@ -4,15 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import os
-import posixpath
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, fields
-from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
-from pathspec import GitIgnoreSpec
 from pydantic import BaseModel, ConfigDict, Field
-from wcmatch import glob
 
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
@@ -56,9 +52,6 @@ def _relativize_find_result(path_value: str, search_path: str) -> str:
     return _to_posix_path(path_value)
 
 
-_GLOB_FLAGS = glob.GLOBSTAR | glob.DOTMATCH
-
-
 class FindToolInput(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -86,12 +79,6 @@ class FindOperations(Protocol):
 @dataclass(slots=True)
 class FindToolOptions:
     operations: FindOperations | None = None
-
-
-@dataclass(slots=True)
-class _IgnoreSpecEntry:
-    base_dir: str
-    spec: GitIgnoreSpec
 
 
 def _coerce_options(options: FindToolOptions | Mapping[str, Any] | None) -> FindToolOptions:
@@ -200,44 +187,6 @@ def _format_find_result(result: Any, options: Any, theme_obj: Any, show_images: 
         warning_text = f"[Truncated: {', '.join(warnings)}]"
         text += "\n" + theme_obj.fg("warning", warning_text)
     return text
-
-
-def _validate_glob_pattern(pattern: str) -> None:
-    if pattern.count("[") != pattern.count("]"):
-        raise RuntimeError(f"error parsing glob: {pattern}")
-
-
-def _is_ancestor(base_dir: str, relative_path: str) -> bool:
-    return relative_path == base_dir or relative_path.startswith(f"{base_dir}/")
-
-
-def _load_gitignore_spec(directory: str) -> GitIgnoreSpec | None:
-    gitignore_path = Path(directory) / ".gitignore"
-    if not gitignore_path.exists():
-        return None
-    lines = gitignore_path.read_text(encoding="utf-8").splitlines()
-    return GitIgnoreSpec.from_lines(lines)
-
-
-def _check_ignored(relative_path: str, specs: list[_IgnoreSpecEntry], *, is_dir: bool = False) -> bool:
-    candidate = f"{relative_path}/" if is_dir else relative_path
-    ignored = False
-    for entry in specs:
-        if entry.base_dir and not _is_ancestor(entry.base_dir, relative_path):
-            continue
-        subpath = candidate
-        if entry.base_dir:
-            subpath = posixpath.relpath(candidate, entry.base_dir)
-        result = entry.spec.check_file(subpath)
-        if result.include is not None:
-            ignored = bool(result.include)
-    return ignored
-
-
-def _matches_pattern(relative_path: str, pattern: str) -> bool:
-    if "/" in pattern:
-        return glob.globmatch(relative_path, pattern, flags=_GLOB_FLAGS)
-    return glob.globmatch(posixpath.basename(relative_path), pattern, flags=_GLOB_FLAGS)
 
 
 def _details_or_none(details: FindToolDetails) -> FindToolDetails | None:
