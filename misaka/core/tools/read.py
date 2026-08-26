@@ -15,11 +15,19 @@ from pydantic import BaseModel, ConfigDict, Field
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import Api, ImageContent, Model, TextContent
 from misaka.core.extensions.types import ToolDefinition
+from misaka.core.tools._common import (
+    _ignore_background_task_result,
+    _is_aborted,
+    _string_arg,
+    _value,
+    abort_race,
+)
 from misaka.core.tools.path_utils import resolve_read_path
 from misaka.core.tools.render_utils import (
     get_text_output,
     invalid_arg_text,
     replace_tabs,
+    shorten_path,
 )
 from misaka.core.tools.tool_definition_wrapper import wrap_tool_definition
 from misaka.core.tools.truncate import (
@@ -97,72 +105,6 @@ def _coerce_options(options: ReadToolOptions | Mapping[str, Any] | None) -> Read
     )
 
 
-def _is_aborted(signal: Any | None) -> bool:
-    return bool(getattr(signal, "aborted", False))
-
-
-def _create_abort_wait_task(signal: Any | None) -> tuple[asyncio.Task[None] | None, Callable[[], None]]:
-    if signal is None:
-        return None, lambda: None
-
-    wait = getattr(signal, "wait", None)
-    if callable(wait):
-        wait_result = wait()
-        if isinstance(wait_result, Awaitable):
-            return asyncio.create_task(wait_result), lambda: None
-
-    add_listener = getattr(signal, "addEventListener", None)
-    remove_listener = getattr(signal, "removeEventListener", None)
-    if callable(add_listener):
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[None] = loop.create_future()
-
-        def _on_abort(*_args: Any, **_kwargs: Any) -> None:
-            if not future.done():
-                future.set_result(None)
-
-        add_listener("abort", _on_abort, {"once": True})
-
-        def _cleanup() -> None:
-            if callable(remove_listener):
-                remove_listener("abort", _on_abort)
-
-        return asyncio.ensure_future(future), _cleanup
-
-    async def _poll_abort() -> None:
-        while not _is_aborted(signal):
-            await asyncio.sleep(0.01)
-
-    return asyncio.create_task(_poll_abort()), lambda: None
-
-
-def _ignore_background_task_result(task: asyncio.Task[Any]) -> None:
-    def _consume(done: asyncio.Task[Any]) -> None:
-        try:
-            done.result()
-        except Exception:  # noqa: BLE001 - the background task's outcome is intentionally discarded
-            return
-
-    task.add_done_callback(_consume)
-
-
-def _string_arg(value: object) -> str | None:
-    if isinstance(value, str):
-        return value
-    if value is None:
-        return ""
-    return None
-
-
-def _shorten_path(path: object) -> str:
-    if not isinstance(path, str):
-        return ""
-    home = os.path.expanduser("~")
-    if path.startswith(home):
-        return f"~{path[len(home):]}"
-    return path
-
-
 def _format_read_line_range(args: Mapping[str, Any] | None, theme_obj: Any) -> str:
     if _value(args, "offset") is None and _value(args, "limit") is None:
         return ""
@@ -174,7 +116,7 @@ def _format_read_line_range(args: Mapping[str, Any] | None, theme_obj: Any) -> s
 
 def _format_read_call(args: Mapping[str, Any] | None, theme_obj: Any) -> str:
     raw_path = _string_arg(_value(args, "file_path", _value(args, "path")))
-    path_value = _shorten_path(raw_path) if raw_path is not None else None
+    path_value = shorten_path(raw_path) if raw_path is not None else None
     invalid_arg = invalid_arg_text(theme_obj)
     path_display = invalid_arg if path_value is None else (theme_obj.fg("accent", path_value) if path_value else theme_obj.fg("toolOutput", "..."))
     return f"{theme_obj.fg('toolTitle', theme_obj.bold('read'))} {path_display}{_format_read_line_range(args, theme_obj)}"
@@ -284,12 +226,6 @@ def _format_read_result(
             )
         text += "\n" + theme_obj.fg("warning", warning)
     return text
-
-
-def _value(obj: Any, name: str, default: Any = None) -> Any:
-    if isinstance(obj, Mapping):
-        return obj.get(name, default)
-    return getattr(obj, name, default)
 
 
 def create_read_tool_definition(
@@ -413,8 +349,7 @@ def create_read_tool_definition(
             return AgentToolResult(content=content, details=details)
 
         worker_task = asyncio.create_task(worker())
-        abort_task, cleanup_abort = _create_abort_wait_task(signal)
-        try:
+        async with abort_race(signal) as abort_task:
             if abort_task is None:
                 return await worker_task
 
@@ -427,12 +362,6 @@ def create_read_tool_definition(
             if _is_aborted(signal):
                 raise RuntimeError("Operation aborted")
             return result
-        finally:
-            cleanup_abort()
-            if abort_task is not None and not abort_task.done():
-                abort_task.cancel()
-            if abort_task is not None:
-                await asyncio.gather(abort_task, return_exceptions=True)
 
     def render_call(args: Mapping[str, Any] | None, theme_obj: Any, context: Any) -> Text:
         text = context.lastComponent if isinstance(context.lastComponent, Text) else Text("", 0, 0)

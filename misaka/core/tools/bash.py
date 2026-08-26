@@ -6,7 +6,7 @@ import asyncio
 import os
 import subprocess
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, TypedDict
 
@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
+from misaka.core.tools._common import _is_aborted, _string_arg, _value, abort_race
 from misaka.core.tools.output_accumulator import (
     OutputAccumulator,
     OutputAccumulatorOptions,
@@ -194,48 +195,43 @@ class _LocalBashOperations:
 
         forward_task = asyncio.create_task(_forward_output(stream_count))
         wait_task = asyncio.create_task(wait_for_child_process(process))
-        abort_task, cleanup_abort = _create_abort_wait_task(signal)
         timeout_task = asyncio.create_task(asyncio.sleep(timeout)) if timeout is not None and timeout > 0 else None
         timed_out = False
 
-        try:
-            pending: set[asyncio.Task[Any]] = {wait_task}
-            if abort_task is not None:
-                pending.add(abort_task)
-            if timeout_task is not None:
-                pending.add(timeout_task)
-            done, _pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+        async with abort_race(signal) as abort_task:
+            try:
+                pending: set[asyncio.Task[Any]] = {wait_task}
+                if abort_task is not None:
+                    pending.add(abort_task)
+                if timeout_task is not None:
+                    pending.add(timeout_task)
+                done, _pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
 
-            if wait_task not in done:
-                if timeout_task is not None and timeout_task in done:
-                    timed_out = True
+                if wait_task not in done:
+                    if timeout_task is not None and timeout_task in done:
+                        timed_out = True
+                    if process.pid is not None:
+                        kill_process_tree(process.pid)
+                    exit_code = await wait_task
+                else:
+                    exit_code = await wait_task
+
+                if _is_aborted(signal):
+                    raise RuntimeError("aborted")
+                if timed_out:
+                    raise RuntimeError(f"timeout:{timeout}")
+                return {"exitCode": None if exit_code is not None and exit_code < 0 else exit_code}
+            finally:
+                if timeout_task is not None and not timeout_task.done():
+                    timeout_task.cancel()
+                await asyncio.gather(*reader_tasks, return_exceptions=True)
+                await forward_task
+                await asyncio.sleep(0)
+                await asyncio.gather(wait_task, return_exceptions=True)
+                if timeout_task is not None:
+                    await asyncio.gather(timeout_task, return_exceptions=True)
                 if process.pid is not None:
-                    kill_process_tree(process.pid)
-                exit_code = await wait_task
-            else:
-                exit_code = await wait_task
-
-            if _is_aborted(signal):
-                raise RuntimeError("aborted")
-            if timed_out:
-                raise RuntimeError(f"timeout:{timeout}")
-            return {"exitCode": None if exit_code is not None and exit_code < 0 else exit_code}
-        finally:
-            cleanup_abort()
-            if abort_task is not None and not abort_task.done():
-                abort_task.cancel()
-            if timeout_task is not None and not timeout_task.done():
-                timeout_task.cancel()
-            await asyncio.gather(*reader_tasks, return_exceptions=True)
-            await forward_task
-            await asyncio.sleep(0)
-            await asyncio.gather(wait_task, return_exceptions=True)
-            if abort_task is not None:
-                await asyncio.gather(abort_task, return_exceptions=True)
-            if timeout_task is not None:
-                await asyncio.gather(timeout_task, return_exceptions=True)
-            if process.pid is not None:
-                untrack_detached_child_pid(process.pid)
+                    untrack_detached_child_pid(process.pid)
 
 
 def create_local_bash_operations(options: Mapping[str, Any] | None = None) -> BashOperations:
@@ -261,46 +257,6 @@ def _resolve_spawn_context(command: str, cwd: str, spawn_hook: BashSpawnHook | N
     return spawn_hook(base_context) if spawn_hook else base_context
 
 
-def _is_aborted(signal: Any | None) -> bool:
-    return bool(getattr(signal, "aborted", False))
-
-
-async def _poll_abort(signal: Any) -> None:
-    while not _is_aborted(signal):
-        await asyncio.sleep(0.01)
-
-
-def _create_abort_wait_task(signal: Any | None) -> tuple[asyncio.Task[None] | None, Callable[[], None]]:
-    if signal is None:
-        return None, lambda: None
-
-    wait = getattr(signal, "wait", None)
-    if callable(wait):
-        wait_result = wait()
-        if isinstance(wait_result, Awaitable):
-            return asyncio.create_task(wait_result), lambda: None
-
-    add_listener = getattr(signal, "addEventListener", None)
-    remove_listener = getattr(signal, "removeEventListener", None)
-    if callable(add_listener):
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[None] = loop.create_future()
-
-        def _on_abort(*_args: Any, **_kwargs: Any) -> None:
-            if not future.done():
-                future.set_result(None)
-
-        add_listener("abort", _on_abort, {"once": True})
-
-        def _cleanup() -> None:
-            if callable(remove_listener):
-                remove_listener("abort", _on_abort)
-
-        return asyncio.create_task(future), _cleanup
-
-    return asyncio.create_task(_poll_abort(signal)), lambda: None
-
-
 def _make_text_result(text: str, details: BashToolDetails | None = None) -> AgentToolResult:
     return AgentToolResult(content=[TextContent(text=text)], details=details)
 
@@ -315,20 +271,6 @@ def _now_ms() -> float:
 
 def _format_duration(ms: float) -> str:
     return f"{ms / 1000:.1f}s"
-
-
-def _string_arg(value: object) -> str | None:
-    if isinstance(value, str):
-        return value
-    if value is None:
-        return ""
-    return None
-
-
-def _value(obj: Any, name: str, default: Any = None) -> Any:
-    if isinstance(obj, Mapping):
-        return obj.get(name, default)
-    return getattr(obj, name, default)
 
 
 def _get_render_state(state: dict[str, Any]) -> _BashRenderState:

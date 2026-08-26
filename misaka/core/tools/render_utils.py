@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import builtins
 import os
 from typing import Any, TypeVar
 
@@ -18,16 +17,16 @@ TDetails = TypeVar("TDetails")
 
 
 def shorten_path(path: object) -> str:
-    if not isinstance(path, builtins.str):
+    if not isinstance(path, str):
         return ""
-    home = builtins.str(os.path.expanduser("~"))
+    home = os.path.expanduser("~")
     if path.startswith(home):
         return f"~{path[len(home):]}"
     return path
 
 
 def str_value(value: object) -> str | None:
-    if isinstance(value, builtins.str):
+    if isinstance(value, str):
         return value
     if value is None:
         return ""
@@ -71,7 +70,7 @@ def render_image_indicator(block: object) -> str:
     data = get_attr(block, "data")
     dims = (
         getImageDimensions(data, mime_type)
-        if isinstance(data, builtins.str) and isinstance(mime_type, builtins.str)
+        if isinstance(data, str) and isinstance(mime_type, str)
         else None
     )
     return imageFallback(mime_type, dims)

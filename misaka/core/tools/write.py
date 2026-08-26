@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
+from misaka.core.tools._common import _drain_worker, _is_aborted, _value, abort_race
 from misaka.core.tools.file_mutation_queue import with_file_mutation_queue
 from misaka.core.tools.path_utils import resolve_to_cwd
 from misaka.core.tools.render_utils import (
@@ -78,69 +79,6 @@ def _coerce_options(options: WriteToolOptions | Mapping[str, Any] | None) -> Wri
     if isinstance(options, WriteToolOptions):
         return options
     return WriteToolOptions(operations=options.get("operations"))
-
-
-def _value(obj: Any, name: str, default: Any = None) -> Any:
-    if isinstance(obj, Mapping):
-        return obj.get(name, default)
-    return getattr(obj, name, default)
-
-
-def _is_aborted(signal: Any | None) -> bool:
-    return bool(getattr(signal, "aborted", False))
-
-
-def _create_abort_wait_task(signal: Any | None) -> tuple[asyncio.Task[None] | None, Callable[[], None]]:
-    if signal is None:
-        return None, lambda: None
-
-    wait = getattr(signal, "wait", None)
-    if callable(wait):
-        wait_result = wait()
-        if isinstance(wait_result, Awaitable):
-            return asyncio.create_task(wait_result), lambda: None
-
-    add_listener = getattr(signal, "addEventListener", None)
-    remove_listener = getattr(signal, "removeEventListener", None)
-    if callable(add_listener):
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[None] = loop.create_future()
-
-        def _on_abort(*_args: Any, **_kwargs: Any) -> None:
-            if not future.done():
-                future.set_result(None)
-
-        add_listener("abort", _on_abort, {"once": True})
-
-        def _cleanup() -> None:
-            if callable(remove_listener):
-                remove_listener("abort", _on_abort)
-
-        return asyncio.ensure_future(future), _cleanup
-
-    async def _poll_abort() -> None:
-        while not _is_aborted(signal):
-            await asyncio.sleep(0.01)
-
-    return asyncio.create_task(_poll_abort()), lambda: None
-
-
-async def _drain_worker(task: asyncio.Task[Any]) -> bool:
-    """Wait through repeated caller cancellation; return whether another cancel arrived."""
-    cancelled = False
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            cancelled = True
-        except BaseException:  # noqa: BLE001 - draining must survive every worker outcome
-            break
-    if task.done():
-        try:
-            task.result()
-        except BaseException:  # noqa: BLE001, S110 - observing the drained outcome is sufficient
-            pass
-    return cancelled
 
 
 def _ensure_write_call_render_component(component: Any) -> WriteCallRenderComponent:
@@ -329,41 +267,34 @@ def create_write_tool_definition(
                     raise
 
             worker_task = asyncio.create_task(worker())
-            abort_task, cleanup_abort = _create_abort_wait_task(signal)
+            async with abort_race(signal) as abort_task:
+                try:
+                    if abort_task is None:
+                        result = await asyncio.shield(worker_task)
+                        if result is None:
+                            raise RuntimeError("Operation aborted")
+                        return result
 
-            try:
-                if abort_task is None:
+                    done, _pending = await asyncio.wait({worker_task, abort_task}, return_when=asyncio.FIRST_COMPLETED)
+                    if abort_task in done and worker_task not in done:
+                        aborted = True
+                        # A to-thread/custom write cannot be stopped by cancelling its Task.
+                        # Hold the per-file lock until it really ends so it cannot overtake
+                        # and overwrite a later mutation.
+                        if await _drain_worker(worker_task):
+                            raise asyncio.CancelledError
+                        raise RuntimeError("Operation aborted")
+
                     result = await asyncio.shield(worker_task)
-                    if result is None:
+                    if aborted or result is None:
                         raise RuntimeError("Operation aborted")
                     return result
-
-                done, _pending = await asyncio.wait({worker_task, abort_task}, return_when=asyncio.FIRST_COMPLETED)
-                if abort_task in done and worker_task not in done:
+                except BaseException as error:
                     aborted = True
-                    # A to-thread/custom write cannot be stopped by cancelling its Task.
-                    # Hold the per-file lock until it really ends so it cannot overtake
-                    # and overwrite a later mutation.
-                    if await _drain_worker(worker_task):
-                        raise asyncio.CancelledError
-                    raise RuntimeError("Operation aborted")
-
-                result = await asyncio.shield(worker_task)
-                if aborted or result is None:
-                    raise RuntimeError("Operation aborted")
-                return result
-            except BaseException as error:
-                aborted = True
-                cancelled = await _drain_worker(worker_task)
-                if cancelled and not isinstance(error, asyncio.CancelledError):
-                    raise asyncio.CancelledError from error
-                raise
-            finally:
-                cleanup_abort()
-                if abort_task is not None and not abort_task.done():
-                    abort_task.cancel()
-                if abort_task is not None:
-                    await asyncio.gather(abort_task, return_exceptions=True)
+                    cancelled = await _drain_worker(worker_task)
+                    if cancelled and not isinstance(error, asyncio.CancelledError):
+                        raise asyncio.CancelledError from error
+                    raise
 
         return await with_file_mutation_queue(absolute_path, mutate)
 

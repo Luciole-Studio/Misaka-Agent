@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
+from misaka.core.tools._common import _is_aborted, _maybe_await, _value, abort_race
 from misaka.core.tools.path_utils import resolve_to_cwd
 from misaka.core.tools.render_utils import (
     get_text_output,
@@ -89,57 +90,6 @@ def _coerce_options(options: FindToolOptions | Mapping[str, Any] | None) -> Find
     return FindToolOptions(operations=options.get("operations"))
 
 
-async def _maybe_await[T](value: Awaitable[T] | T) -> T:
-    if asyncio.isfuture(value) or hasattr(value, "__await__"):
-        return await value
-    return value
-
-
-def _signal_aborted(signal: Any | None) -> bool:
-    return bool(getattr(signal, "aborted", False))
-
-
-def _value(obj: Any, name: str, default: Any = None) -> Any:
-    if isinstance(obj, Mapping):
-        return obj.get(name, default)
-    return getattr(obj, name, default)
-
-
-def _create_abort_wait_task(signal: Any | None) -> tuple[asyncio.Task[None] | None, Callable[[], None]]:
-    if signal is None:
-        return None, lambda: None
-
-    wait = getattr(signal, "wait", None)
-    if callable(wait):
-        wait_result = wait()
-        if isinstance(wait_result, Awaitable):
-            return asyncio.create_task(wait_result), lambda: None
-
-    add_listener = getattr(signal, "addEventListener", None)
-    remove_listener = getattr(signal, "removeEventListener", None)
-    if callable(add_listener):
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[None] = loop.create_future()
-
-        def _on_abort(*_args: Any, **_kwargs: Any) -> None:
-            if not future.done():
-                future.set_result(None)
-
-        add_listener("abort", _on_abort, {"once": True})
-
-        def _cleanup() -> None:
-            if callable(remove_listener):
-                remove_listener("abort", _on_abort)
-
-        return asyncio.ensure_future(future), _cleanup
-
-    async def _poll_abort() -> None:
-        while not _signal_aborted(signal):
-            await asyncio.sleep(0.01)
-
-    return asyncio.create_task(_poll_abort()), lambda: None
-
-
 def _format_find_call(args: Mapping[str, Any] | None, theme_obj: Any) -> str:
     pattern = str_value(_value(args, "pattern"))
     raw_path = str_value(_value(args, "path"))
@@ -207,8 +157,7 @@ async def _run_fd_search(fd_path: str, args: list[str], signal: Any | None) -> t
         raise RuntimeError(f"Failed to run fd: {error}") from None
 
     communicate_task = asyncio.create_task(process.communicate())
-    abort_task, cleanup_abort = _create_abort_wait_task(signal)
-    try:
+    async with abort_race(signal) as abort_task:
         if abort_task is not None:
             done, _pending = await asyncio.wait({communicate_task, abort_task}, return_when=asyncio.FIRST_COMPLETED)
             if abort_task in done and not communicate_task.done():
@@ -217,14 +166,8 @@ async def _run_fd_search(fd_path: str, args: list[str], signal: Any | None) -> t
                 raise RuntimeError("Operation aborted")
 
         stdout, stderr = await communicate_task
-    finally:
-        cleanup_abort()
-        if abort_task is not None and not abort_task.done():
-            abort_task.cancel()
-        if abort_task is not None:
-            await asyncio.gather(abort_task, return_exceptions=True)
 
-    if _signal_aborted(signal):
+    if _is_aborted(signal):
         raise RuntimeError("Operation aborted")
 
     return stdout, stderr, process.returncode
@@ -243,7 +186,7 @@ def create_find_tool_definition(
         _on_update: Callable[[AgentToolResult], None] | None = None,
         _ctx: Any = None,
     ) -> AgentToolResult:
-        if _signal_aborted(signal):
+        if _is_aborted(signal):
             raise RuntimeError("Operation aborted")
 
         parsed = FindToolInput.model_validate(params)
@@ -253,7 +196,7 @@ def create_find_tool_definition(
         if custom_ops is not None and callable(getattr(custom_ops, "glob", None)):
             if not await _maybe_await(custom_ops.exists(search_path)):
                 raise RuntimeError(f"Path not found: {search_path}")
-            if _signal_aborted(signal):
+            if _is_aborted(signal):
                 raise RuntimeError("Operation aborted")
 
             results = await _maybe_await(
@@ -263,7 +206,7 @@ def create_find_tool_definition(
                     {"ignore": ["**/node_modules/**", "**/.git/**"], "limit": effective_limit},
                 )
             )
-            if _signal_aborted(signal):
+            if _is_aborted(signal):
                 raise RuntimeError("Operation aborted")
             if not results:
                 return AgentToolResult(content=[TextContent(text="No files found matching pattern")], details=None)
@@ -290,7 +233,7 @@ def create_find_tool_definition(
             )
 
         fd_path = await ensure_tool("fd", silent=True)
-        if _signal_aborted(signal):
+        if _is_aborted(signal):
             raise RuntimeError("Operation aborted")
         if not fd_path:
             raise RuntimeError("fd is not available and could not be downloaded")

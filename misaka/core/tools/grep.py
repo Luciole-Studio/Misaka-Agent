@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
+from misaka.core.tools._common import _is_aborted, _maybe_await, _value, abort_race
 from misaka.core.tools.path_utils import resolve_to_cwd
 from misaka.core.tools.render_utils import (
     get_text_output,
@@ -96,57 +97,6 @@ def _coerce_options(options: GrepToolOptions | Mapping[str, Any] | None) -> Grep
     if isinstance(options, GrepToolOptions):
         return options
     return GrepToolOptions(operations=options.get("operations"))
-
-
-async def _maybe_await[T](value: Awaitable[T] | T) -> T:
-    if asyncio.isfuture(value) or hasattr(value, "__await__"):
-        return await value
-    return value
-
-
-def _signal_aborted(signal: Any | None) -> bool:
-    return bool(getattr(signal, "aborted", False))
-
-
-def _value(obj: Any, name: str, default: Any = None) -> Any:
-    if isinstance(obj, Mapping):
-        return obj.get(name, default)
-    return getattr(obj, name, default)
-
-
-def _create_abort_wait_task(signal: Any | None) -> tuple[asyncio.Task[None] | None, Callable[[], None]]:
-    if signal is None:
-        return None, lambda: None
-
-    wait = getattr(signal, "wait", None)
-    if callable(wait):
-        wait_result = wait()
-        if isinstance(wait_result, Awaitable):
-            return asyncio.create_task(wait_result), lambda: None
-
-    add_listener = getattr(signal, "addEventListener", None)
-    remove_listener = getattr(signal, "removeEventListener", None)
-    if callable(add_listener):
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[None] = loop.create_future()
-
-        def _on_abort(*_args: Any, **_kwargs: Any) -> None:
-            if not future.done():
-                future.set_result(None)
-
-        add_listener("abort", _on_abort, {"once": True})
-
-        def _cleanup() -> None:
-            if callable(remove_listener):
-                remove_listener("abort", _on_abort)
-
-        return asyncio.ensure_future(future), _cleanup
-
-    async def _poll_abort() -> None:
-        while not _signal_aborted(signal):
-            await asyncio.sleep(0.01)
-
-    return asyncio.create_task(_poll_abort()), lambda: None
 
 
 def _format_grep_call(args: Mapping[str, Any] | None, theme_obj: Any) -> str:
@@ -241,7 +191,7 @@ def create_grep_tool_definition(
         _on_update: Callable[[AgentToolResult], None] | None = None,
         _ctx: Any = None,
     ) -> AgentToolResult:
-        if _signal_aborted(signal):
+        if _is_aborted(signal):
             raise RuntimeError("Operation aborted")
 
         parsed = GrepToolInput.model_validate(params)
@@ -296,7 +246,6 @@ def create_grep_tool_definition(
             raise RuntimeError(f"Failed to run ripgrep: {error}") from None
 
         stderr_task = asyncio.create_task(_read_stderr(process.stderr))
-        abort_task, cleanup_abort = _create_abort_wait_task(signal)
         match_count = 0
         match_limit_reached = False
         lines_truncated = False
@@ -310,7 +259,7 @@ def create_grep_tool_definition(
                 killed_due_to_limit = due_to_limit
                 process.kill()
 
-        try:
+        async with abort_race(signal) as abort_task:
             assert process.stdout is not None
             while True:
                 line_task = asyncio.create_task(process.stdout.readline())
@@ -355,17 +304,11 @@ def create_grep_tool_definition(
                     match_limit_reached = True
                     stop_process(True)
                     break
-        finally:
-            cleanup_abort()
-            if abort_task is not None and not abort_task.done():
-                abort_task.cancel()
-            if abort_task is not None:
-                await asyncio.gather(abort_task, return_exceptions=True)
 
         return_code = await process.wait()
         stderr_text = (await stderr_task).strip()
 
-        if aborted or _signal_aborted(signal):
+        if aborted or _is_aborted(signal):
             raise RuntimeError("Operation aborted")
 
         if not killed_due_to_limit and return_code not in {0, 1}:
