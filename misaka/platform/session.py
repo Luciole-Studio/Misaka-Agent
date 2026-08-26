@@ -1,9 +1,10 @@
 """Session adapter for creating, resuming, and driving engine sessions."""
 import asyncio
+import contextvars
 import json
 import os
 import threading
-import weakref
+from contextlib import asynccontextmanager
 
 from misaka.agent.request_budget import install_turn_budget
 
@@ -15,10 +16,19 @@ def run_coro(coro):
     except RuntimeError:
         return asyncio.run(coro)
     box = {}
+    context = contextvars.copy_context()
+    owner = _ENV_WINDOW_OWNER.get()
 
     def _target():
         try:
-            box["r"] = asyncio.run(coro)
+            def _run():
+                token = _ENV_REENTRY_OWNER.set(owner)
+                try:
+                    return asyncio.run(coro)
+                finally:
+                    _ENV_REENTRY_OWNER.reset(token)
+
+            box["r"] = context.run(_run)
         except BaseException as e:  # noqa: BLE001
             box["e"] = e
 
@@ -61,7 +71,6 @@ async def open_session(flags, cwd, extension_factories=None):
         create_runtime_factory(
             parsed, AuthStorage.create(),
             resolved_extension_paths=resolve_cli_paths(cwd, parsed.extensions),
-            resolved_skill_paths=resolve_cli_paths(cwd, parsed.skills),
             resolved_prompt_template_paths=resolve_cli_paths(cwd, parsed.promptTemplates),
             resolved_theme_paths=resolve_cli_paths(cwd, parsed.themes),
             extension_factories=list(extension_factories) if extension_factories else None,
@@ -92,15 +101,41 @@ def event_line(ev):
     return json.dumps(to_json_event(ev), ensure_ascii=False, separators=(",", ":"))
 
 
-_ENV_LOCKS = weakref.WeakKeyDictionary()      # one lock per event loop
+_ENV_LOCK = threading.Lock()
+_ENV_OWNER = None
+_ENV_WINDOW_OWNER = contextvars.ContextVar("misaka_env_window_owner", default=None)
+_ENV_REENTRY_OWNER = contextvars.ContextVar("misaka_env_reentry_owner", default=None)
 
 
-def _env_lock():
-    loop = asyncio.get_running_loop()
-    lock = _ENV_LOCKS.get(loop)
-    if lock is None:
-        lock = _ENV_LOCKS[loop] = asyncio.Lock()
-    return lock
+@asynccontextmanager
+async def _env_window():
+    """Serialize the process-wide environment without blocking an event loop.
+
+    ``asyncio.Lock`` is bound to one loop, while ``run_coro`` deliberately creates
+    helper loops in other threads.  A non-blocking process lock covers both cases;
+    polling keeps cancellation safe (a cancelled waiter never acquires an orphaned
+    lock).  The long-term boundary is one identity per process, but until then there
+    must be exactly one environment window.
+    """
+    global _ENV_OWNER
+
+    inherited = _ENV_WINDOW_OWNER.get()
+    if (inherited is not None and inherited is _ENV_OWNER
+            and _ENV_REENTRY_OWNER.get() is inherited):
+        yield
+        return
+
+    while not _ENV_LOCK.acquire(blocking=False):
+        await asyncio.sleep(0.01)
+    owner = object()
+    _ENV_OWNER = owner
+    token = _ENV_WINDOW_OWNER.set(owner)
+    try:
+        yield
+    finally:
+        _ENV_WINDOW_OWNER.reset(token)
+        _ENV_OWNER = None
+        _ENV_LOCK.release()
 
 
 async def run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
@@ -109,9 +144,9 @@ async def run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
 
     The session's identity (role, profile, workspace, usage lease, MCP config) travels through
     ``os.environ`` because the extensions read it there, so two sessions in one process must not
-    overlap: the environment window is held under a per-loop lock. Separate processes (nodes,
-    cards) are naturally isolated."""
-    async with _env_lock():
+    overlap: the environment window is held under one process-wide lock. Separate processes
+    (nodes, cards) are naturally isolated."""
+    async with _env_window():
         return await _run_session(flags, prompt, cwd, on_event=on_event, timeout=timeout, env=env,
                                   extension_factories=extension_factories)
 
