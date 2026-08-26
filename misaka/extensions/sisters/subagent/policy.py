@@ -21,6 +21,10 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from misaka.extensions.sisters.subagent.hooks import (
+    HOOK_DEFAULT_TIMEOUT,
+    HOOK_DEFAULT_TIMEOUTS,
+)
 from misaka.platform.prompt_guard import untrusted
 from misaka.utils.values import read_field
 
@@ -1007,7 +1011,8 @@ class AgentPolicy:
                         )
                     try:
                         raw_timeout = hook.get("timeout")
-                        timeout = 60.0 if raw_timeout is None else float(raw_timeout)
+                        timeout = (HOOK_DEFAULT_TIMEOUTS.get(str(kind), HOOK_DEFAULT_TIMEOUT)
+                                   if raw_timeout is None else float(raw_timeout))
                     except (TypeError, ValueError) as error:
                         raise ValueError(
                             f"Agent hooks.{event} has an invalid timeout"

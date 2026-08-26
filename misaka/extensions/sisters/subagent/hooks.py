@@ -30,6 +30,25 @@ _ENV_PATTERN = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}|\$([A-Z_][A-Z0-9_]*)")
 _HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _FORBIDDEN_HEADERS = frozenset({"host", "content-length", "transfer-encoding"})
 
+# A hook's output goes straight into the model's context, so it is bounded the way every
+# other agent-facing output in this project is bounded. Without a cap a single hook can
+# spend the whole context window -- and the caller has no way to tell that it did.
+HOOK_MAX_OUTPUT_CHARS = 32_000
+
+# One default per hook type, read by both the runtime and the config validator; they used
+# to disagree (the validator assumed 60 for everything).
+HOOK_DEFAULT_TIMEOUTS = {"agent": 60.0}
+HOOK_DEFAULT_TIMEOUT = 30.0
+
+
+def clamp_hook_output(text: str) -> str:
+    """Keep the head and the tail: a hook's verdict is usually in one or the other."""
+    if len(text) <= HOOK_MAX_OUTPUT_CHARS:
+        return text
+    keep = HOOK_MAX_OUTPUT_CHARS // 2
+    dropped = len(text) - 2 * keep
+    return f"{text[:keep]}\n[... {dropped} characters of hook output dropped ...]\n{text[-keep:]}"
+
 
 def set_hook_evaluator(callback: HookEvaluator | None) -> None:
     """Set the process-wide evaluator used by ``prompt`` and ``agent`` hooks."""
@@ -127,7 +146,7 @@ def parse_hook_output(value: Any, *, expected_event: str | None = None) -> HookR
             except json.JSONDecodeError:
                 value = None
             if value is None:
-                return _result(additional_context=text)
+                return _result(additional_context=clamp_hook_output(text))
     if not isinstance(value, Mapping):
         return _result(reason="hook returned a non-object result")
 
@@ -169,14 +188,15 @@ def parse_hook_output(value: Any, *, expected_event: str | None = None) -> HookR
     return _result(
         allowed=decision not in {"deny", "ask"},
         decision=decision,
-        additional_context=str(additional_context) if additional_context is not None else None,
+        additional_context=(clamp_hook_output(str(additional_context))
+                            if additional_context is not None else None),
         reason=str(reason) if reason is not None else None,
         updated_input=updated_input if isinstance(updated_input, Mapping) else None,
     )
 
 
 def _timeout(hook: Mapping[str, Any]) -> float:
-    default = 60.0 if hook.get("type") == "agent" else 30.0
+    default = HOOK_DEFAULT_TIMEOUTS.get(str(hook.get("type")), HOOK_DEFAULT_TIMEOUT)
     try:
         value = float(hook.get("timeout", default))
     except (TypeError, ValueError):
