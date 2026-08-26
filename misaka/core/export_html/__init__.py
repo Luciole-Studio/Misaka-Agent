@@ -15,6 +15,7 @@ from misaka.core.export_html.tool_renderer import (
     ToolHtmlRenderer,
 )
 from misaka.core.session_manager import SessionManager
+from misaka.modes.jsonl import to_jsonable
 from misaka.ui.tui.interactive.theme.theme import (
     get_resolved_theme_colors,
     get_theme_export_colors,
@@ -158,8 +159,10 @@ def generate_html(session_data: SessionData, theme_name: str | None = None) -> s
     container_bg = _nullish(theme_export.get("cardBg"), derived["cardBg"])
     info_bg = _nullish(theme_export.get("infoBg"), derived["infoBg"])
 
+    # Entries may carry dataclass/pydantic values (a `!cmd` run puts a BashExecutionMessage
+    # into fileEntries); serialize through the same wire conversion the JSONL mode uses.
     encoded_session_data = base64.b64encode(
-        json.dumps(session_data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        json.dumps(to_jsonable(session_data), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     ).decode("ascii")
 
     css = (
