@@ -63,6 +63,7 @@ from misaka.ai.types import (
     UsageCost,
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream
+from misaka.ai.utils.headers import headers_to_record
 from misaka.ai.utils.json_parse import parse_streaming_json
 from misaka.ai.utils.node_http_proxy import create_http_proxy_agents_for_target
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
@@ -112,8 +113,6 @@ class BedrockClientSettings:
     config_kwargs: dict[str, Any]
     default_headers: dict[str, str]
     bearer_token: str | None
-    aws_access_key_id: str | None
-    aws_secret_access_key: str | None
 
 
 class BedrockRuntimeServiceException(RuntimeError):
@@ -234,10 +233,6 @@ def create_client(model: Model, options: StreamOptions | dict[str, Any] | None =
         client_kwargs["endpoint_url"] = settings.endpoint_url
     if settings.config_kwargs:
         client_kwargs["config"] = Config(**settings.config_kwargs)
-    if settings.aws_access_key_id is not None:
-        client_kwargs["aws_access_key_id"] = settings.aws_access_key_id
-    if settings.aws_secret_access_key is not None:
-        client_kwargs["aws_secret_access_key"] = settings.aws_secret_access_key
 
     client = session.client("bedrock-runtime", **client_kwargs)
     _register_request_overrides(client, settings.default_headers, settings.bearer_token)
@@ -263,11 +258,14 @@ def build_client_settings(model: Model, options: StreamOptions | dict[str, Any] 
         }
 
     bearer_token = _option(options, "bearerToken") or os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
-    skip_auth = os.environ.get("AWS_BEDROCK_SKIP_AUTH") == "1"
-    if bearer_token and not skip_auth:
+    if bearer_token:
         config_kwargs["signature_version"] = UNSIGNED
 
+    # Custom headers from models.json and from the call site: declared, and until now dropped.
     default_headers: dict[str, str] = {}
+    for source in (model.headers, _option(options, "headers")):
+        if source:
+            default_headers.update(headers_to_record(source))
 
     region_name = configured_region
     if region_name is None and endpoint_region is not None and use_explicit_endpoint:
@@ -281,9 +279,7 @@ def build_client_settings(model: Model, options: StreamOptions | dict[str, Any] 
         endpoint_url=model.baseUrl if use_explicit_endpoint else None,
         config_kwargs=config_kwargs,
         default_headers=default_headers,
-        bearer_token=None if skip_auth else bearer_token,
-        aws_access_key_id="dummy-access-key" if skip_auth else None,
-        aws_secret_access_key="dummy-secret-key" if skip_auth else None,
+        bearer_token=bearer_token,
     )
 
 
@@ -720,7 +716,7 @@ def supports_prompt_caching(model: Model) -> bool:
     candidates = get_model_match_candidates(model.id, model.name)
     has_claude_ref = any("claude" in value for value in candidates)
     if not has_claude_ref:
-        return os.environ.get("AWS_BEDROCK_FORCE_CACHE") == "1"
+        return False
     if any("-4-" in value for value in candidates):
         return True
     if any("claude-3-7-sonnet" in value for value in candidates):
