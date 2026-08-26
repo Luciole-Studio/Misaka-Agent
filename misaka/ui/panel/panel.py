@@ -43,6 +43,7 @@ def _prefix_key():
 
 PREFIX = _prefix_key()
 POLL_SECONDS = 2.0
+GIT_TTL_SECONDS = 10.0     # a branch row is not worth a git subprocess every other second
 SIDEBAR_W = 26            # herdr ui.sidebar_width default (config/model.rs:1010); the separator column is the last one.
 SIDEBAR_COLLAPSED_W = 4   # herdr ui.rs:229: the collapsed sidebar.
 _MOUSE = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
@@ -289,22 +290,33 @@ def git_info(folder, active_cards=()):
             return None
         return done.stdout if done.returncode == 0 else None
 
-    branch = git("symbolic-ref", "--short", "-q", "HEAD")
+    # One status call carries branch, upstream distance and the change list; the ref scan is
+    # the only other thing needed. This used to be five subprocesses per folder per poll.
+    report = git("status", "--porcelain=v2", "--branch")
+    if report is None:
+        return None
+    branch, oid, ahead, behind, dirty = None, None, 0, 0, 0
+    for line in report.splitlines():
+        if not line.startswith("# "):
+            dirty += 1
+            continue
+        key, _, value = line[2:].partition(" ")
+        if key == "branch.head":
+            branch = value.strip()
+        elif key == "branch.oid":
+            oid = value.strip()
+        elif key == "branch.ab":
+            parts = value.split()
+            ahead = int(parts[0]) if parts and parts[0].lstrip("+-").isdigit() else 0
+            behind = int(parts[1]) if len(parts) > 1 and parts[1].lstrip("+-").isdigit() else 0
     if not branch:
-        head = git("rev-parse", "--short", "HEAD")
-        if not head:
-            return None
-        branch = "@" + head.strip()
-    else:
-        branch = branch.strip()
-    status = git("status", "--porcelain")
-    counts = git("rev-list", "--left-right", "--count", "@{upstream}...HEAD")
-    behind, ahead = (int(n) for n in counts.split()) if counts else (0, 0)
+        return None
+    if branch == "(detached)":
+        branch = "@" + (oid or "")[:7]
     refs = git("for-each-ref", "refs/heads/card/", "--format=%(refname:short)") or ""
     stray = sum(1 for ref in refs.split()
                 if ref.removeprefix("card/") not in active_cards)
-    return {"branch": branch, "dirty": len((status or "").splitlines()),
-            "ahead": ahead, "behind": behind, "stray": stray}
+    return {"branch": branch, "dirty": dirty, "ahead": abs(ahead), "behind": abs(behind), "stray": stray}
 
 
 def _sorted_agents(agents, sort):
@@ -1415,32 +1427,37 @@ def launch():
             pass
 
     git_cache = {}      # realpath folder -> {"at": monotonic, "info": git_info() or None}
-    git_folders = set()  # folders the sidebar showed; only these are polled
+    git_seen = set()     # folders the sidebar drew since the last poll
 
     def git_view(folder):
         """The sidebar's lookup: cached info now, and a note to the poll to keep it fresh."""
         folder = os.path.realpath(folder)
-        git_folders.add(folder)
+        git_seen.add(folder)
         entry = git_cache.get(folder)
         return entry["info"] if entry else None
 
     def refresh_git(now):
-        # ponytail: a 5s TTL instead of herdr's ref-fingerprint cache; per-folder mtime
-        # fingerprints if git subprocesses ever show up in a profile.
+        # Only folders the sidebar actually drew since the last poll: this set used to be
+        # add-only, so every folder ever shown kept spawning git for the panel's whole life.
+        polled = set(git_seen)
+        git_seen.clear()
         active = {c["id"] for c in cards_cache["items"] if c["status"] in GIT_OWNED}
-        for folder in list(git_folders):
+        for folder in polled:
             entry = git_cache.get(folder)
-            if entry and now - entry["at"] < 5.0:
+            if entry and now - entry["at"] < GIT_TTL_SECONDS:
                 continue
             git_cache[folder] = {"at": now, "info": git_info(folder, active)}
+        for folder in [f for f in git_cache if f not in polled]:
+            del git_cache[folder]
 
     def session_entry_ids(path):
         """Every entry id in a session file, cached by mtime: the divergence test for forks."""
         try:
-            key = ("ids", path, os.path.getmtime(path))
+            key = ("ids", path)
+            stamp = os.path.getmtime(path)
         except OSError:
             return frozenset()
-        if key not in meta_cache:
+        if meta_cache.get(key, (None,))[0] != stamp:
             ids = set()
             try:
                 with open(path, encoding="utf-8", errors="replace") as f:
@@ -1453,18 +1470,19 @@ def launch():
                             ids.add(entry_id)
             except OSError:
                 pass
-            meta_cache[key] = frozenset(ids)
-        return meta_cache[key]
+            meta_cache[key] = (stamp, frozenset(ids))
+        return meta_cache[key][1]
 
     def session_meta(path):
         """A session file's title (its first user message; a fork -- header ``parentSession``
         set -- titles itself by its first message NOT in the source, the reason it exists),
         the folder it worked in, and what it was forked from. Cached by mtime."""
         try:
-            key = (path, os.path.getmtime(path))
+            key = ("meta", path)
+            stamp = os.path.getmtime(path)
         except OSError:
             return {"title": os.path.basename(path), "cwd": None, "parent": None}
-        if key not in meta_cache:
+        if meta_cache.get(key, (None,))[0] != stamp:
             cwd, parent, users = None, None, []
             try:
                 with open(path, encoding="utf-8", errors="replace") as f:
@@ -1497,9 +1515,9 @@ def launch():
             if parent and users:
                 shared = session_entry_ids(parent)
                 title = next((t for i, t in users if i not in shared), title)
-            meta_cache[key] = {"title": title or os.path.basename(path)[:20],
-                               "cwd": cwd, "parent": parent}
-        return meta_cache[key]
+            meta_cache[key] = (stamp, {"title": title or os.path.basename(path)[:20],
+                               "cwd": cwd, "parent": parent})
+        return meta_cache[key][1]
 
     def gather_sessions():
         """Past sessions: Last Order's, each Sister's direct chats, and card sessions from the
@@ -1560,6 +1578,17 @@ def launch():
             sessions_cache["rows"] = gather_sessions()
         except OSError:
             pass
+
+    def prune_meta_cache():
+        """Drop cached titles for session files the sidebar no longer lists.
+
+        The cache is keyed by path now (mtime rides along as the validity stamp); before
+        that every save of a live session minted a new key and orphaned the old one -- about
+        eighteen hundred retained entries an hour, each holding the file's whole id set.
+        """
+        live = {row.get("path") for row in sessions_cache["rows"] if isinstance(row, dict)}
+        for cached in [key for key in meta_cache if os.path.realpath(key[1]) not in live]:
+            del meta_cache[cached]      # the rows carry realpaths; the cache is keyed as called
 
     def session_pane(action):
         """The live pane already writing this session, if any (one session, one tab)."""
@@ -2895,7 +2924,7 @@ def launch():
         refresh_cards()
         reload_layout()        # the daemon seated every pane (Last Order included) in a space
         for space in spaces:               # warm the branch rows so the first frame has them
-            git_folders.add(os.path.realpath(space["folder"]))
+            git_seen.add(os.path.realpath(space["folder"]))
         refresh_git(time.monotonic())
         refresh_sessions()
         side["ws"] = space_of(focused) or (spaces[0]["id"] if spaces else None)
@@ -3107,10 +3136,16 @@ def launch():
                 refresh_cards()
                 refresh_git(now)
                 refresh_sessions()
+                prune_meta_cache()
                 try:
                     listing = panes()
                 except (RuntimeError, ConnectionError):
                     return
+                open_ids = {pane["id"] for pane in listing}
+                for gone in [pane_id for pane_id in pane_cursor if pane_id not in open_ids]:
+                    pane_cursor.pop(gone, None)      # per-pane state dies with its pane
+                for gone in [pane_id for pane_id in scroll_state if pane_id not in open_ids]:
+                    scroll_state.pop(gone, None)
                 for pane in listing:      # /new and in-place forks swap the file under a named tab
                     source = auto_names.get(pane["id"])
                     reported = (pane.get("reported") or {}).get("session")
