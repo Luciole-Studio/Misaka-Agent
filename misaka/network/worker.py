@@ -504,8 +504,8 @@ def run_card(
             if isinstance(r, dict)
             else int(reservation.get("tokens") or 0)
         )
+        skill_sandbox.cleanup(ro_root)          # the read-only copies go with the run, however it ended
 
-    skill_sandbox.cleanup(ro_root)
     ok, result = check_report(workspace, con=con, task_id=task_id, generation=task.get("generation"))
     if ok:
         return {"ok": True, "report": result, "exit_code": 0, "timed_out": False}

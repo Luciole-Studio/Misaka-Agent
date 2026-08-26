@@ -569,8 +569,12 @@ def scan_file(file_path: Path, rel_path: str = "") -> List[Finding]:
 
     try:
         content = file_path.read_text(encoding='utf-8')
-    except (UnicodeDecodeError, OSError):
-        return []
+    except (UnicodeDecodeError, OSError) as error:
+        return [Finding(              # fail closed: an unscannable text file is a finding, not a pass
+            pattern_id="unreadable_file", severity="high", category="structure", file=rel_path, line=0,
+            match=type(error).__name__,
+            description="file could not be read as UTF-8 text, so it was not scanned",
+        )]
 
     findings = []
     lines = content.split('\n')

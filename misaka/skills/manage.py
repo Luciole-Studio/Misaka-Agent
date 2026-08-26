@@ -70,14 +70,17 @@ def _is_skill_md(target, skill_dir):
 def validate_frontmatter(content, *, new_skill=False):
     """Return an error message if the SKILL.md frontmatter or body is invalid, else None."""
     from misaka.skills.index import SKILL_PROMPT_DESC_LIMIT
-    from misaka.utils.frontmatter import parse_frontmatter
+    from misaka.utils.frontmatter import FrontmatterError, parse_frontmatter
 
     if not str(content or "").strip():
         return "Content cannot be empty."
     text = str(content).lstrip("﻿")
     if not text.startswith("---"):
         return "SKILL.md must start with YAML frontmatter (`---`)."
-    parsed = parse_frontmatter(text)
+    try:
+        parsed = parse_frontmatter(text)
+    except FrontmatterError as error:
+        return f"Frontmatter is not valid YAML: {error}"
     fm = parsed.frontmatter
     if not isinstance(fm, dict) or not fm:
         return "Frontmatter is unclosed or is not a key-value mapping."
@@ -99,6 +102,16 @@ def validate_frontmatter(content, *, new_skill=False):
     return None
 
 
+def name_mismatch(name, content):
+    """The frontmatter ``name`` is the directory name: the index, ``/skill`` and ``skill_view``
+    all address a skill by it, so the two must not drift apart."""
+    from misaka.utils.frontmatter import parse_frontmatter
+    declared = str((parse_frontmatter(str(content)).frontmatter or {}).get("name") or "").strip()
+    if declared != name:
+        return f"Frontmatter name '{declared}' must equal the skill directory name '{name}'."
+    return None
+
+
 def validate_content_size(content, label="SKILL.md"):
     if len(str(content or "")) > MAX_SKILL_CONTENT_CHARS:
         return (
@@ -109,17 +122,18 @@ def validate_content_size(content, label="SKILL.md"):
 
 
 def _security_scan(skill_dir):
-    """Run the skill security scan; return a blocking message, or None when allowed or the scanner fails."""
+    """Run the skill security scan; return a blocking message, or None when allowed. A scanner
+    that cannot run blocks too: a change nobody scanned is not a scanned change."""
     try:
         from misaka.skills.guard import (
             format_scan_report, scan_skill, should_allow_install)
         result = scan_skill(Path(skill_dir), source="agent-created")
         allowed, reason = should_allow_install(result)
-        if allowed is False or allowed is None:
-            return f"""The security scan blocked this skill ({reason}):
+    except Exception as error:  # noqa: BLE001 - whatever failed inside the scanner, the answer is "not scanned"
+        return f"The security scan could not run ({type(error).__name__}: {error}); the change was not applied."
+    if allowed is False or allowed is None:
+        return f"""The security scan blocked this skill ({reason}):
 {format_scan_report(result)}"""
-    except Exception:  # noqa: BLE001 - scanner failure is fail-open, matching load behavior
-        return None
     return None
 
 
@@ -152,7 +166,7 @@ def _invalidate_index():
 def _create(profile_dir, name, content):
     skill_dir, err = _skill_dir(profile_dir, name)
     err = err or validate_frontmatter(content, new_skill=True)
-    err = err or validate_content_size(content)
+    err = err or name_mismatch(name, content) or validate_content_size(content)
     if err:
         return {"success": False, "error": err}
 
@@ -191,9 +205,6 @@ def _create(profile_dir, name, content):
     return result
 
 
-MAX_SKILL_FILE_BYTES = 1024 * 1024
-
-
 def _resolve_target(skill_dir, file_path):
     """Resolve a support-file path within a skill directory."""
     err = lookup_path_error(file_path)
@@ -226,12 +237,10 @@ def _atomic_write(target, text):
 def _write_file(profile_dir, name, file_path, file_content):
     if file_content is None:
         return {"success": False, "error": "write_file requires file_content; pass an empty string for an empty file"}
-    if len(file_content.encode("utf-8")) > MAX_SKILL_FILE_BYTES:
+    from misaka.skills.guard import MAX_SINGLE_FILE_KB     # one limit for support files: the scanner's
+    if len(file_content.encode("utf-8")) > MAX_SINGLE_FILE_KB * 1024:
         return {"success": False,
-                "error": f"Support file exceeds {MAX_SKILL_FILE_BYTES:,} bytes (1 MiB)."}
-    err = validate_content_size(file_content, label=file_path)
-    if err:
-        return {"success": False, "error": err}
+                "error": f"Support file exceeds {MAX_SINGLE_FILE_KB} KB, the security scanner's single-file limit."}
     skill_dir, err = _require_skill(profile_dir, name)
     if err:
         return {"success": False, "error": err}
@@ -257,7 +266,7 @@ def _write_file(profile_dir, name, file_path, file_content):
 
 def _edit_skill(profile_dir, name, content):
     """Replace SKILL.md wholesale, rolling back if the security scan rejects the result."""
-    err = validate_frontmatter(content) or validate_content_size(content)
+    err = validate_frontmatter(content) or name_mismatch(name, content) or validate_content_size(content)
     if err:
         return {"success": False, "error": err}
     skill_dir, err = _require_skill(profile_dir, name)
@@ -444,8 +453,10 @@ def manage(action, name, *, profile_dir, content=None, file_path=None,
     if result.get("success"):
         evidence = {k: v for k, v in (("file_path", file_path),
                                       ("absorbed_into", absorbed_into)) if v is not None}
-        skill_write.record(action, name, before=before, after_root=skill_dir,
-                           evidence=evidence)
+        try:
+            skill_write.record(action, name, before=before, after_root=skill_dir, evidence=evidence)
+        except OSError as error:
+            result["ledger_error"] = f"The change was applied but could not be recorded in the skill ledger: {error}"
         _invalidate_index()
     return result
 

@@ -46,9 +46,16 @@ def _extract_frontmatter(content: str) -> tuple[str | None, str]:
     return normalized[4 : end_index + 1], normalized[end_index + 4 :].strip()
 
 
+class FrontmatterError(ValueError):
+    """The frontmatter block is not valid YAML; callers turn this into a validation message."""
+
+
 def _yaml_load(content: str) -> Any:
-    yaml = YAML(typ="safe")
-    return yaml.load(content)
+    from ruamel.yaml.error import YAMLError
+    try:
+        return YAML(typ="safe").load(content)
+    except YAMLError as error:
+        raise FrontmatterError(str(error).strip().splitlines()[0]) from error
 
 
 __all__ = [

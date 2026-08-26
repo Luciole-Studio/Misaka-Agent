@@ -83,25 +83,23 @@ def snapshot(root):
 
 
 def record(action, skill, *, before=None, after_root=None, evidence=None):
-    """Record a change without allowing ledger failure to block the change itself."""
-    try:
-        entry = {
-            "id": uuid.uuid4().hex[:12],
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "actor": current_origin(),
-            "action": action,
-            "skill": str(skill),
-            "evidence": evidence or {},
-            "before": before if before is not None else [],
-            "after": snapshot(after_root) if after_root else [],
-        }
-        path = _ledger_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        return entry["id"]
-    except Exception:  # noqa: BLE001 - ledger telemetry is not a write gate
-        return None
+    """Append a change to the ledger and return the entry id. Raises OSError when the ledger
+    cannot be written: callers say so instead of pretending the change was recorded."""
+    entry = {
+        "id": uuid.uuid4().hex[:12],
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "actor": current_origin(),
+        "action": action,
+        "skill": str(skill),
+        "evidence": evidence or {},
+        "before": before if before is not None else [],
+        "after": snapshot(after_root) if after_root else [],
+    }
+    path = _ledger_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    return entry["id"]
 
 
 def entries(limit=None):
@@ -134,8 +132,10 @@ def rollback(entry_id, skill_root):
             return False, f"Missing rollback blob for {item['path']} ({item['sha256'][:12]})."
     if root.exists() and not str(root.resolve()).startswith(str(_root().resolve())):
         return False, "Rollback target must be inside ~/.misaka."
-    record("pre-rollback", target["skill"], after_root=root,
-           evidence={"rollback_of": entry_id})
+    try:
+        record("pre-rollback", target["skill"], after_root=root, evidence={"rollback_of": entry_id})
+    except OSError as error:
+        return False, f"The skill ledger cannot be written ({error}); nothing was rolled back."
     root.mkdir(parents=True, exist_ok=True)
     keep = set()
     for item in target["before"]:
@@ -147,8 +147,10 @@ def rollback(entry_id, skill_root):
         dest = root / item["path"]
         if dest.is_file() and dest.resolve() not in keep:
             dest.unlink()
-    record("rollback", target["skill"], after_root=root,
-           evidence={"rollback_of": entry_id})
+    try:
+        record("rollback", target["skill"], after_root=root, evidence={"rollback_of": entry_id})
+    except OSError as error:
+        return True, f"Rolled back {target['skill']} ({len(target['before'])} files), but the ledger could not record it: {error}"
     return True, f"Rolled back {target['skill']} ({len(target['before'])} files)."
 
 

@@ -60,7 +60,13 @@ def walk_skill_tree(root):
     """``(directory, files)`` for every directory under a layer root, pruning dependency
     trees and a skill's support directories as it goes (hermes iter_skill_index_files).
     Symlinked directories are followed: a role's skill is often a link into a library."""
+    seen = set()
     for here, dirs, files in os.walk(root, followlinks=True):
+        real = os.path.realpath(here)
+        if real in seen:                    # a link back into the tree: walked already
+            dirs[:] = []
+            continue
+        seen.add(real)
         has_skill = "SKILL.md" in files
         dirs[:] = [d for d in dirs
                    if d not in EXCLUDED_SKILL_DIRS and not (has_skill and d in SKILL_SUPPORT_DIRS)]

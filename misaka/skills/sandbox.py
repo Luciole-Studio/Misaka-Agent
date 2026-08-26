@@ -28,9 +28,8 @@ def _strip_write(path):
 
 
 def readonly_copies(skill_dirs, dest_root):
-    """Copy skill directories into a read-only sandbox."""
-    if not skill_dirs:
-        return []
+    """Copy skill directories into a read-only sandbox. A reused root ends up holding exactly
+    this stack -- an empty stack leaves it empty."""
     total = sum(_tree_size(d) for d in skill_dirs)
     if total > SIZE_CAP_MB * 1024 * 1024:
         raise RuntimeError(
