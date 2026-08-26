@@ -47,7 +47,8 @@ def _parser():
 
     ini = sub.add_parser("init", help="Make this folder a MISAKA project (git repo + PROJECT.md + cards/) and initialize the database")
     ini.add_argument("--migrate", action="store_true",
-                     help="One-shot: write card files for every existing board row (all projects)")
+                     help="One-shot: write card files for every existing board row (all projects) and run the "
+                          "agent-directory migrations (credentials → auth.json; sessions/tools/commands/keybindings layout)")
 
     nt = sub.add_parser("net", help="Control the Misaka Network daemon and its panes")
     nt_sub = nt.add_subparsers(dest="net_cmd", required=True)
@@ -118,7 +119,6 @@ def _parser():
     ac.add_argument("op", nargs="?", default="check", choices=["check"])
     ac.add_argument("provider", nargs="?", help="Provider ID (default: every configured provider)")
     ac.add_argument("--show", action="store_true", help="Print the resolved credential")
-
 
 
     dc = sub.add_parser("doc", help="Index documents, search them, show their structure, and verify quotes")
@@ -219,6 +219,12 @@ def main():
             written, existed, no_folder = cards.migrate(con)
             print(f"migrated {written} card(s) to files ({existed} already had files, "
                   f"{no_folder} skipped: project folder gone)")
+            from misaka.config import migrations
+            result = migrations.run_migrations(os.getcwd())
+            if result["migratedAuthProviders"]:
+                print("migrated credentials to auth.json: " + ", ".join(result["migratedAuthProviders"]))
+            for warning in result["deprecationWarnings"]:
+                print(f"warning: {warning}")
         else:
             for line in cards.init_project(os.getcwd()):
                 print(line)

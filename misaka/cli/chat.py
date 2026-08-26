@@ -11,23 +11,6 @@ from misaka.config import profiles
 from misaka.config import CFG, sisters
 
 
-def _migrate_lo_soul(prof):
-    """One-time rename: SOUL-chat.md becomes SOUL.md, Last Order's only persona file.
-
-    The previous SOUL.md (the planning contract) is kept as SOUL-plan-retired.md in
-    case it holds user edits. Idempotent: no SOUL-chat.md means already migrated."""
-    chat_soul = os.path.join(prof, "SOUL-chat.md")
-    if not os.path.isfile(chat_soul):
-        return
-    try:
-        old = os.path.join(prof, "SOUL.md")
-        if os.path.isfile(old):
-            os.rename(old, os.path.join(prof, "SOUL-plan-retired.md"))
-        os.rename(chat_soul, old)
-    except OSError:
-        pass
-
-
 def assembly(who):
     """Shared role setup for foreground chat and the DM loop.
 
@@ -40,7 +23,6 @@ def assembly(who):
             sys.exit(f"Unknown Sister {who!r}. Roster: {', '.join(sorted(sisters()))}")
         return prof, CFG["default_model"]
     prof = os.path.join(CFG["roles_root"], "last_order")
-    _migrate_lo_soul(prof)
     return prof, CFG["lo_model"]
 
 

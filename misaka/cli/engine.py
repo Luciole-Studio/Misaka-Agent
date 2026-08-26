@@ -45,7 +45,6 @@ from misaka.core.session_cwd import (
 from misaka.core.session_manager import SessionManager
 from misaka.core.settings_manager import SettingsManager
 from misaka.core.timings import print_timings, reset_timings, time as time_mark
-from misaka.config.migrations import run_migrations, show_deprecation_warnings
 from misaka.modes import runPrintMode as run_print_mode
 from misaka.ui.tui.interactive.components.extension_selector import ExtensionSelectorComponent
 from misaka.ui.tui.interactive import InteractiveMode
@@ -594,8 +593,6 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
         return finish(1)
 
     cwd = os.getcwd()
-    migration_result = run_migrations(cwd) or {}
-    time_mark("runMigrations")
     agent_dir = get_agent_dir()
     startup_settings_manager = SettingsManager.create(cwd, agent_dir)
     report_diagnostics(collect_settings_diagnostics(startup_settings_manager, "startup session lookup"))
@@ -697,10 +694,6 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
         init_theme(settings_manager.getTheme(), app_mode == "interactive")
         time_mark("initTheme")
 
-        deprecation_warnings = migration_result.get("deprecationWarnings") or []
-        if app_mode == "interactive" and deprecation_warnings:
-            await show_deprecation_warnings(deprecation_warnings)
-
         time_mark("resolveModelScope")
         report_diagnostics(list(runtime.diagnostics))
         if any(item.type == "error" for item in runtime.diagnostics):
@@ -727,7 +720,6 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
             interactive_mode = InteractiveMode(
                 runtime,
                 {
-                    "migratedProviders": migration_result.get("migratedAuthProviders"),
                     "modelFallbackMessage": runtime.modelFallbackMessage,
                     "initialMessage": initial_message,
                     "initialImages": initial_images,

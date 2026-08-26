@@ -157,7 +157,6 @@ _DEAD_TERMINAL_ERROR_CODES = frozenset({"EIO", "EPIPE", "ENOTCONN"})
 
 @dataclass(slots=True)
 class InteractiveModeOptions:
-    migratedProviders: list[str] | None = None
     modelFallbackMessage: str | None = None
     initialMessage: str | None = None
     initialImages: list[ImageContent] | None = None
@@ -4941,9 +4940,6 @@ class InteractiveMode:
         self.isShuttingDown = False
         self._schedule_task(self._check_tmux_keyboard_setup())
 
-        migrated = list(self.options.migratedProviders or [])
-        if migrated:
-            self.showWarning(f"Migrated credentials to auth.json: {', '.join(migrated)}")
         get_model_registry_error = _callable_attr(getattr(self.session, "modelRegistry", None), "getError")
         model_registry_error = get_model_registry_error() if get_model_registry_error is not None else None
         if model_registry_error:

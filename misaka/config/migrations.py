@@ -1,11 +1,8 @@
-"""One-time migrations that run on startup."""
+"""One-time migrations of the agent directory, run by ``misaka init --migrate`` (never at startup)."""
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
-import sys
 from pathlib import Path
 
 from misaka.config import CONFIG_DIR_NAME, get_agent_dir, get_bin_dir
@@ -177,43 +174,6 @@ def migrate_extension_system(cwd: str) -> list[str]:
     ]
 
 
-async def show_deprecation_warnings(warnings: list[str]) -> None:
-    if not warnings:
-        return
-    for warning in warnings:
-        print(f"{_YELLOW}Warning: {warning}{_RESET}")
-    print(f"{_YELLOW}\nMove your extensions to the extensions/ directory.{_RESET}")
-    print(f"{_DIM}\nPress any key to continue...{_RESET}")
-    if sys.stdin.isatty():
-        await asyncio.to_thread(_read_single_keypress)
-    print()
-
-
-def _read_single_keypress() -> None:
-    if os.name == "nt":
-        import msvcrt
-
-        msvcrt.getch()
-        return
-
-    import termios
-    import tty
-
-    stream = sys.stdin
-    try:
-        fileno = stream.fileno()
-    except OSError:
-        stream.read(1)
-        return
-
-    original_settings = termios.tcgetattr(fileno)
-    try:
-        tty.setraw(fileno)
-        stream.read(1)
-    finally:
-        termios.tcsetattr(fileno, termios.TCSADRAIN, original_settings)
-
-
 def run_migrations(cwd: str) -> dict[str, list[str]]:
     migrated_auth_providers = migrate_auth_to_auth_json()
     migrate_sessions_from_agent_root()
@@ -225,9 +185,3 @@ def run_migrations(cwd: str) -> dict[str, list[str]]:
         "deprecationWarnings": deprecation_warnings,
     }
 
-
-runMigrations = run_migrations
-
-__all__ = [
-    "runMigrations",
-]

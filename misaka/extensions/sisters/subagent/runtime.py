@@ -1141,12 +1141,7 @@ class SubagentManager:
         ]
         from misaka.extensions import mcp
 
-        configured = list(
-            mcp.wanted_for(
-                mcp.servers_for(self.role_context.profile_dir),
-                self.role_context.mcp_role,
-            )
-        )
+        configured = list(mcp.servers_for(self.role_context.profile_dir))
         missing_config = [
             pattern
             for pattern in required
@@ -2420,10 +2415,7 @@ class SubagentManager:
             return None
         from misaka.extensions import mcp
 
-        available = mcp.wanted_for(
-            mcp.servers_for(self.role_context.profile_dir),
-            self.role_context.mcp_role,
-        )
+        available = mcp.servers_for(self.role_context.profile_dir)
         selected: dict[str, Any] = dict(available)
         for spec in task.definition.mcp_servers:
             if isinstance(spec, str) and spec in available:

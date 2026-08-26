@@ -15,20 +15,19 @@ Configuration follows Hermes: each role lists its own servers in
         args: ["-y", "camofox-mcp"]
 
 A role can use whatever its own directory declares; no separate assignment field is
-needed. Hand-written servers live in `profiles/<role>/mcp/*.py` (as in Hermes). For
-compatibility, a global `~/.misaka/mcp.json` (Claude Desktop format) is still read and
-its servers are shared by every role.
+needed. Hand-written servers live in `profiles/<role>/mcp/*.py` (as in Hermes). A parent
+hands a sub-agent child its selection through `MISAKA_MCP_CONFIG` (a `{"mcpServers": ...}`
+file); nothing else is read.
 
 Tools are registered as `mcp__<server>__<tool>`, matching Claude Code's naming so they
 never collide with built-in tools.
 """
 import asyncio
+from dataclasses import dataclass
 import re
 import json
 import os
 import shutil
-import sys
-from dataclasses import dataclass
 
 from misaka.core.extensions import startup_sections
 from misaka.core.extensions.types import ToolDefinition
@@ -36,9 +35,6 @@ from pydantic import BaseModel
 
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-def _config_path():
-    """Resolved at call time: reading it at import time hands tests and child processes a stale value."""
-    return os.path.expanduser(os.environ.get("MISAKA_MCP_CONFIG", "~/.misaka/mcp.json"))
 INIT_TIMEOUT = float(os.environ.get("MISAKA_MCP_INIT_TIMEOUT", "30"))
 CALL_TIMEOUT = float(os.environ.get("MISAKA_MCP_CALL_TIMEOUT", "120"))
 PROTOCOL_VERSION = "2025-06-18"
@@ -133,25 +129,10 @@ def _clean(servers):
             if isinstance(v, dict) and not v.get("disabled")}
 
 
-def load_config(path=None):
-    """Global shared servers (optional); an absent file means none."""
-    p = path or _config_path()
-    if not os.path.exists(p):
-        return {}
-    try:
-        with open(p, encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        return {}
-    return _clean(data.get("mcpServers") or data.get("servers") or {})
-
-
 def load_profile_config(profile_dir):
     """The role's own `mcp_servers` (stored in ~/.misaka/profiles/<role>/config.yaml)."""
     from misaka.config import profiles
     p = profiles.config_yaml(profile_dir)
-    if not os.path.isfile(p):                      # Compatibility: also accept the old in-repo location.
-        p = os.path.join(profile_dir or "", "config.yaml")
     if not os.path.isfile(p):
         return {}
     try:
@@ -163,24 +144,24 @@ def load_profile_config(profile_dir):
     return _clean(data.get("mcp_servers"))
 
 
+def injected_servers():
+    """The selection a parent process hands this one (``MISAKA_MCP_CONFIG``); none when unset."""
+    p = os.environ.get("MISAKA_MCP_CONFIG")
+    if not p or not os.path.isfile(p):
+        return {}
+    try:
+        with open(p, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return _clean(data.get("mcpServers") or {})
+
+
 def servers_for(profile_dir):
-    """Servers available to a role: its own config.yaml entries plus the global shared ones (its own win)."""
-    merged = dict(load_config())
-    merged.update(load_profile_config(profile_dir))
-    return merged
-
-
-def wanted_for(servers, role):
-    """Legacy global-config filter on the `roles` field (absent means every role).
-
-    The per-role layout does not need it: a server belongs to whichever role's config.yaml declares it.
-    """
-    out = {}
-    for name, cfg in servers.items():
-        roles = cfg.get("roles")
-        if not roles or role in roles:
-            out[name] = cfg
-    return out
+    """Servers available to a role: what its own config.yaml declares, plus what its parent injected."""
+    servers = dict(load_profile_config(profile_dir))
+    servers.update(injected_servers())
+    return servers
 
 
 class McpClient:
@@ -366,7 +347,7 @@ def expanded_text(state):
 
 
 def _register_bound(harn, context):
-    servers = wanted_for(servers_for(context.profile_dir), context.role)
+    servers = servers_for(context.profile_dir)
     if not servers:
         return  # Nothing configured: stay out of the session entirely.
 
