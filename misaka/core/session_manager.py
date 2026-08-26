@@ -479,6 +479,10 @@ class SessionManager:
                         self.labelsById.pop(target_id, None)
                         self.labelTimestampsById.pop(target_id, None)
 
+    def rewrite_file(self) -> None:
+        """Persist the in-memory entries to the session file now (public entry for extensions)."""
+        self._rewriteFile()
+
     def _rewriteFile(self) -> None:
         if not self.persist or not self.sessionFile:
             return

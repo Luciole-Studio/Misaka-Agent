@@ -40,7 +40,7 @@ def disabled_skill_names():
     return {str(x).strip() for x in raw or [] if str(x).strip()}
 
 
-def _write_skills_config(cfg):
+def write_skills_config(cfg):
     path = config_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:

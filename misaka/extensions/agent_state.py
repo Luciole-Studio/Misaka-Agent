@@ -58,13 +58,15 @@ class Reporter:
 
 
 def activate(spec):
+    if os.environ.get("MISAKA_SUBAGENT_ID"):
+        return None            # a child process inherits its parent's pane id but must not speak for that pane
     return register if os.environ.get("MISAKA_NET_PANE") else None
 
 
 def register(harn, send=None):
     pane_id = os.environ.get("MISAKA_NET_PANE", "")
     if send is None:
-        from misaka.net import client as net
+        from misaka.ui.panel import client as net
 
         def send(state, message, seq, session=""):
             net.request("pane.report_state",

@@ -1,13 +1,13 @@
 """Public exports for the harn TUI package."""
 
-from misaka.tui.autocomplete import (
+from misaka.ui.tui.autocomplete import (
     AutocompleteItem,
     AutocompleteProvider,
     AutocompleteSuggestions,
     CombinedAutocompleteProvider,
     SlashCommand,
 )
-from misaka.tui.components import (
+from misaka.ui.tui.components import (
     Box,
     CancellableLoader,
     DefaultTextStyle,
@@ -34,9 +34,9 @@ from misaka.tui.components import (
     Text,
     TruncatedText,
 )
-from misaka.tui.editor_component import EditorComponent
-from misaka.tui.fuzzy import FuzzyMatch, fuzzyFilter, fuzzyMatch
-from misaka.tui.keybindings import (
+from misaka.ui.tui.editor_component import EditorComponent
+from misaka.ui.tui.fuzzy import FuzzyMatch, fuzzyFilter, fuzzyMatch
+from misaka.ui.tui.keybindings import (
     TUI_KEYBINDINGS,
     Keybinding,
     KeybindingConflict,
@@ -48,7 +48,7 @@ from misaka.tui.keybindings import (
     getKeybindings,
     setKeybindings,
 )
-from misaka.tui.keys import (
+from misaka.ui.tui.keys import (
     Key,
     KeyEventType,
     KeyId,
@@ -60,9 +60,9 @@ from misaka.tui.keys import (
     parseKey,
     setKittyProtocolActive,
 )
-from misaka.tui.stdin_buffer import StdinBuffer, StdinBufferEventMap, StdinBufferOptions
-from misaka.tui.terminal import ProcessTerminal, Terminal
-from misaka.tui.terminal_image import (
+from misaka.ui.tui.stdin_buffer import StdinBuffer, StdinBufferEventMap, StdinBufferOptions
+from misaka.ui.tui.terminal import ProcessTerminal, Terminal
+from misaka.ui.tui.terminal_image import (
     CellDimensions,
     ImageDimensions,
     ImageProtocol,
@@ -89,7 +89,7 @@ from misaka.tui.terminal_image import (
     setCapabilities,
     setCellDimensions,
 )
-from misaka.tui.tui import (
+from misaka.ui.tui.tui import (
     CURSOR_MARKER,
     TUI,
     Component,
@@ -102,13 +102,13 @@ from misaka.tui.tui import (
     SizeValue,
     isFocusable,
 )
-from misaka.tui.terminal_colors import (
+from misaka.ui.tui.terminal_colors import (
     RgbColor,
     TerminalColorScheme,
     parseOsc11BackgroundColor,
     parseTerminalColorSchemeReport,
 )
-from misaka.tui.utils import (
+from misaka.ui.tui.utils import (
     sliceByColumn,
     truncateToWidth,
     visibleWidth,

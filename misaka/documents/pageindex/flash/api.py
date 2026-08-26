@@ -11,6 +11,11 @@ import pypdfium2 as pdfium
 from .main import extract_toc
 
 
+def _is_pdfium_password_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "password" in msg or "security" in msg or "encrypted" in msg
+
+
 def _validate_path(path: Path) -> str:
     if not path.exists():
         raise FileNotFoundError(f"PDF file not found: {path}")
@@ -52,6 +57,8 @@ def _validate_pdf(pdf):
         if len(doc) == 0:
             raise ValueError("PDF contains no pages")
     except pdfium.PdfiumError as exc:
+        if _is_pdfium_password_error(exc):
+            raise ValueError("PDF is encrypted or password-protected") from exc
         raise ValueError(f"Could not open PDF: {exc}") from exc
     finally:
         if doc is not None:

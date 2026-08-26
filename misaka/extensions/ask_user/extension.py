@@ -7,7 +7,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from misaka.core.extensions.types import ToolDefinition
-from misaka.modes.interactive.components.ask_user_question import AskUserQuestionComponent
+from misaka.ui.tui.interactive.components.ask_user_question import AskUserQuestionComponent
 
 ASK_USER_QUESTION_TOOL_NAME = "AskUserQuestion"
 

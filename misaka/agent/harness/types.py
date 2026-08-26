@@ -11,8 +11,9 @@ from misaka.ai.types import ImageContent, Model, TextContent, Transport
 
 from misaka.agent.types import AgentEvent, AgentMessage, AgentTool, QueueMode, ThinkingLevel
 
-if TYPE_CHECKING:
-    from misaka.agent.harness.session.session import Session
+# The harness ``Session`` class went away with the unused harness runtime; the
+# protocols below only ever used it as an opaque annotation.
+Session = Any
 
 TValue = TypeVar("TValue")
 TError = TypeVar("TError")
@@ -847,20 +848,8 @@ getOrUndefined = get_or_undefined
 toError = to_error
 
 
-def __getattr__(name: str) -> Any:
-    if name == "Session":
-        from misaka.agent.harness.session.session import Session
-
-        return Session
-    if name == "AgentHarness":
-        from misaka.agent.harness.agent_harness import AgentHarness
-
-        return AgentHarness
-    raise AttributeError(name)
-
 
 __all__ = [
-    "AgentHarness",
     "AbortEvent",
     "AbortResult",
     "AfterProviderResponseEvent",

@@ -30,8 +30,8 @@ import time
 from pathlib import Path
 from typing import Any, Protocol
 
-from misaka.tui.keys import setKittyProtocolActive
-from misaka.tui.stdin_buffer import StdinBuffer
+from misaka.ui.tui.keys import setKittyProtocolActive
+from misaka.ui.tui.stdin_buffer import StdinBuffer
 
 try:
     import termios

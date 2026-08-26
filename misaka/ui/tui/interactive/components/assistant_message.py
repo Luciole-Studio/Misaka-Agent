@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from misaka.tui import Container, DefaultTextStyle, Markdown, MarkdownTheme, Spacer, Text
+from misaka.ui.tui import Container, DefaultTextStyle, Markdown, MarkdownTheme, Spacer, Text
 
-from misaka.modes.interactive.theme.theme import get_markdown_theme, theme
+from misaka.ui.tui.interactive.theme.theme import get_markdown_theme, theme
 
 OSC133_ZONE_START = "\x1b]133;A\x07"
 OSC133_ZONE_END = "\x1b]133;B\x07"

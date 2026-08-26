@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from misaka.tui.tui import Component
-from misaka.tui.utils import truncateToWidth, visibleWidth
+from misaka.ui.tui.tui import Component
+from misaka.ui.tui.utils import truncateToWidth, visibleWidth
 
 
 class TruncatedText(Component):

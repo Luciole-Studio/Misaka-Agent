@@ -22,8 +22,6 @@ from misaka.utils.paths import normalize_path
 
 InstallMethod = Literal["pipx", "uv-tool", "pip", "source", "unknown"]
 
-isBunBinary = False
-isBunRuntime = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -82,8 +80,6 @@ def get_package_dir() -> str:
     if env_dir:
         return normalize_path(env_dir)
 
-    if isBunBinary:
-        return str(Path(sys.executable).resolve().parent)
 
     module_dir = Path(__file__).resolve().parent
     return str(_find_package_root(module_dir))
@@ -350,17 +346,13 @@ def _get_package_module_dir() -> Path:
 
 
 def get_themes_dir() -> str:
-    if isBunBinary:
-        return str(Path(get_package_dir()) / "theme")
     # Use __file__-relative resolution so that theme files are found correctly
-    # both when running from source (uv run harn) and when installed as a
-    # package (uv tool install harn / pip install harn).
-    return str(_get_package_module_dir() / "modes" / "interactive" / "theme")
+    # both when running from source (uv run misaka) and when installed as a
+    # package (uv tool install misaka / pip install misaka).
+    return str(_get_package_module_dir() / "ui" / "tui" / "interactive" / "theme")
 
 
 def get_export_template_dir() -> str:
-    if isBunBinary:
-        return str(Path(get_package_dir()) / "export-html")
     return str(_get_package_module_dir() / "core" / "export_html")
 
 
@@ -372,8 +364,6 @@ def get_package_json_path() -> str:
 
 
 def get_readme_path() -> str:
-    if isBunBinary:
-        return str((Path(get_package_dir()) / "README.md").resolve())
     # Use __file__-relative resolution so that bundled assets are found correctly
     # both when running from source (uv run harn) and when installed as a
     # package (uv tool install harn / pip install harn).
@@ -381,31 +371,15 @@ def get_readme_path() -> str:
 
 
 def get_docs_path() -> str:
-    if isBunBinary:
-        return str((Path(get_package_dir()) / "docs").resolve())
     return str((_get_package_module_dir() / "docs").resolve())
 
 
 def get_examples_path() -> str:
-    if isBunBinary:
-        return str((Path(get_package_dir()) / "examples").resolve())
     return str((_get_package_module_dir() / "examples").resolve())
 
 
 def get_changelog_path() -> str:
-    if isBunBinary:
-        return str((Path(get_package_dir()) / "CHANGELOG.md").resolve())
     return str((_get_package_module_dir() / "CHANGELOG.md").resolve())
-
-
-def get_interactive_assets_dir() -> str:
-    if isBunBinary:
-        return str(Path(get_package_dir()) / "assets")
-    return str(_get_package_module_dir() / "modes" / "interactive" / "assets")
-
-
-def get_bundled_interactive_asset_path(name: str) -> str:
-    return str(Path(get_interactive_assets_dir()) / name)
 
 
 def get_sessions_dir() -> str:
@@ -441,8 +415,6 @@ getReadmePath = get_readme_path
 getDocsPath = get_docs_path
 getExamplesPath = get_examples_path
 getChangelogPath = get_changelog_path
-getInteractiveAssetsDir = get_interactive_assets_dir
-getBundledInteractiveAssetPath = get_bundled_interactive_asset_path
 getSessionsDir = get_sessions_dir
 getDebugLogPath = get_debug_log_path
 
@@ -461,14 +433,12 @@ __all__ = [
     "getAgentDir",
     "getAuthPath",
     "getBinDir",
-    "getBundledInteractiveAssetPath",
     "getChangelogPath",
     "getCustomThemesDir",
     "getDebugLogPath",
     "getDocsPath",
     "getExamplesPath",
     "getExportTemplateDir",
-    "getInteractiveAssetsDir",
     "getModelsPath",
     "getPackageDir",
     "getPackageJsonPath",
@@ -482,6 +452,4 @@ __all__ = [
     "getThemesDir",
     "getToolsDir",
     "getUpdateInstruction",
-    "isBunBinary",
-    "isBunRuntime",
 ]

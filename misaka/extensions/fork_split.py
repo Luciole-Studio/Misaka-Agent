@@ -3,9 +3,8 @@
 pi's fork (core/agent_session_runtime.fork) moves THIS pane onto the branched file, which
 in the panel hides the divergence: the original line silently vanishes from view. Inside a
 panel pane this extension cancels the swap, creates the same branched file the runtime
-would, and asks the daemon to seat a fresh ``misaka chat --session <branch>`` beside this
-pane in the same tab (the panel tiles children the way it seats a summoned Sister). Both
-branches stay live, side by side.
+would, and asks the daemon to seat a fresh ``misaka chat --session <branch>`` as a split of this
+pane -- the fork rule: one line of context, one tab. Both branches stay live, side by side.
 
 Untouched on purpose: bare/headless chats (no pane to split), card panes (card_shell's
 Supervisor owns this process; SESSION_KINDS keeps them out), and forking from before the
@@ -28,7 +27,7 @@ def activate(spec):
     def register(harn, request=None, open_manager=None):
         pane_id = os.environ["MISAKA_NET_PANE"]
         if request is None:
-            from misaka.net import client as net
+            from misaka.ui.panel import client as net
             request = net.request
         if open_manager is None:
             from misaka.core.session_manager import SessionManager
@@ -57,14 +56,14 @@ def activate(spec):
                 if not os.path.isfile(branched):
                     # createBranchedSession defers the write until the branch holds an
                     # assistant message; the new pane resumes from disk, so write it now.
-                    branch_manager._rewriteFile()  # noqa: SLF001
+                    branch_manager.rewrite_file()
                 chat = [sys.executable, "-m", "misaka", "chat"]
                 if role != "last_order":           # chat.py:42 -- Last Order's role name
                     chat += ["--as", role]
                 request("pane.create",
                         {"argv": [*chat, "--session", branched], "cwd": manager.getCwd(),
                          "title": "Last Order" if role == "last_order" else role,
-                         "parent": pane_id})
+                         "place": {"split": pane_id}})
                 return True
 
             try:

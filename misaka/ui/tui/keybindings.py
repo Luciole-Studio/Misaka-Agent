@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from misaka.tui.keys import KeyId, matchesKey
+from misaka.ui.tui.keys import KeyId, matchesKey
 
 type Keybinding = str
 type KeybindingsConfig = dict[str, KeyId | list[KeyId] | None]

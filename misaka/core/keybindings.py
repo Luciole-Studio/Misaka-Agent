@@ -8,7 +8,7 @@ import sys
 from typing import Any
 from typing import Literal
 
-from misaka.tui import (
+from misaka.ui.tui import (
     TUI_KEYBINDINGS,
     Keybinding,
     KeybindingDefinition,
@@ -16,7 +16,7 @@ from misaka.tui import (
     KeybindingsConfig,
     KeyId,
 )
-from misaka.tui import (
+from misaka.ui.tui import (
     KeybindingsManager as TuiKeybindingsManager,
 )
 

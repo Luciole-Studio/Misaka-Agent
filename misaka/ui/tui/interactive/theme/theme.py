@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Literal, TypedDict, cast
 
-from misaka.tui import MarkdownTheme, SelectListTheme, SettingsListTheme, getCapabilities
+from misaka.ui.tui import MarkdownTheme, SelectListTheme, SettingsListTheme, getCapabilities
 
 from misaka.config import get_custom_themes_dir, get_themes_dir
 from misaka.utils.syntax_highlight import highlight, supports_language
@@ -662,6 +662,19 @@ def set_global_theme(theme_instance: Theme) -> None:
     theme = theme_instance
 
 
+def _fall_back_to_dark(error: Exception) -> None:
+    """Load the built-in dark theme after ``error``; explain the install path if even that fails."""
+    global _CURRENT_THEME_NAME
+    _CURRENT_THEME_NAME = "dark"
+    try:
+        set_global_theme(load_theme("dark"))
+    except Exception as fallback_error:
+        raise RuntimeError(
+            f"Cannot load the built-in 'dark' theme from {get_themes_dir()} "
+            f"(requested theme failed first: {error})"
+        ) from fallback_error
+
+
 def init_theme(theme_name: str | None = None, enableWatcher: bool = False) -> None:
     name = theme_name or get_default_theme()
     global _CURRENT_THEME_NAME
@@ -670,9 +683,8 @@ def init_theme(theme_name: str | None = None, enableWatcher: bool = False) -> No
         set_global_theme(load_theme(name))
         if enableWatcher:
             _start_theme_watcher()
-    except Exception:
-        _CURRENT_THEME_NAME = "dark"
-        set_global_theme(load_theme("dark"))
+    except Exception as error:
+        _fall_back_to_dark(error)
 
 
 def set_theme(name: str, enableWatcher: bool = False) -> dict[str, Any]:
@@ -686,8 +698,7 @@ def set_theme(name: str, enableWatcher: bool = False) -> dict[str, Any]:
             _ON_THEME_CHANGE()
         return {"success": True}
     except Exception as error:
-        _CURRENT_THEME_NAME = "dark"
-        set_global_theme(load_theme("dark"))
+        _fall_back_to_dark(error)
         return {"success": False, "error": str(error)}
 
 
@@ -994,7 +1005,7 @@ def _start_theme_watcher() -> None:
     _THEME_WATCHER_STOP = stop_event
     _THEME_WATCHER_THREAD = threading.Thread(
         target=watch_loop,
-        name="harn-theme-watcher",
+        name="misaka-theme-watcher",
         daemon=True,
     )
     _THEME_WATCHER_THREAD.start()

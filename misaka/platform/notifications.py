@@ -55,23 +55,6 @@ BEGIN
 END;
 """
 
-RESEARCH_TRIGGER = """
-CREATE TRIGGER IF NOT EXISTS research_terminal_notification
-AFTER UPDATE OF status ON research_runs
-WHEN NEW.status IN ('done','failed','stopped') AND OLD.status IS NOT NEW.status
-BEGIN
-  INSERT INTO notification_events
-    (resource_type,resource_id,kind,payload,created_at)
-  VALUES
-    ('research_run',NEW.id,'terminal',
-     json_object('status',NEW.status,'phase',NEW.phase,'wave',NEW.wave,
-                 'workspace',NEW.workspace,
-                 'final_artifact',NEW.final_artifact,
-                 'error',NEW.last_error),unixepoch());
-END;
-"""
-
-
 @contextmanager
 def _txn(con):
     serialized = getattr(con, "serialized", None)
@@ -104,12 +87,6 @@ def init(con):
             "'task:'||id||':'||generation||':terminal',COALESCE(completed_at,created_at) "
             "FROM tasks WHERE status IN ('done','failed','stopped','blocked','triage')"
         )
-
-
-def install_research(con):
-    init(con)
-    con.execute("DROP TRIGGER IF EXISTS research_terminal_notification")
-    con.executescript(RESEARCH_TRIGGER)
 
 
 def publish(con, resource_type, resource_id, kind, payload=None, *, dedupe_key=None):

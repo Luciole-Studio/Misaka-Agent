@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 
-from misaka.tui import fuzzyFilter
+from misaka.ui.tui import fuzzyFilter
 
 from misaka.core.auth_guidance import format_no_models_available_message
 

@@ -23,6 +23,7 @@ Tools are registered as `mcp__<server>__<tool>`, matching Claude Code's naming s
 never collide with built-in tools.
 """
 import asyncio
+import re
 import json
 import os
 import shutil
@@ -210,10 +211,25 @@ class McpClient:
             })
         env.update(self.cfg.get("env") or {})
         env["PYTHONUNBUFFERED"] = "1"  # A Python server that never flushes stdout looks hung.
-        self.proc = await asyncio.create_subprocess_exec(
-            *cmd, env=env, cwd=self.cfg.get("cwd") or None,
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL)
+        stderr_target = asyncio.subprocess.DEVNULL
+        stderr_log = None
+        try:
+            from misaka.config import get_agent_dir
+            log_dir = os.path.join(get_agent_dir(), "mcp")
+            os.makedirs(log_dir, exist_ok=True)
+            safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(self.name)) or "server"
+            stderr_log = open(os.path.join(log_dir, f"{safe_name}.stderr.log"), "ab")  # noqa: SIM115 - handed to the child
+            stderr_target = stderr_log
+        except OSError:
+            pass
+        try:
+            self.proc = await asyncio.create_subprocess_exec(
+                *cmd, env=env, cwd=self.cfg.get("cwd") or None,
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=stderr_target)
+        finally:
+            if stderr_log is not None:
+                stderr_log.close()  # the child holds its own descriptor
         asyncio.ensure_future(self._pump())
         await self._handshake()
         self.tools = (await self._request("tools/list", {})).get("tools") or []
@@ -321,7 +337,7 @@ def tool_name(server, tool):
 
 
 def _dim(text):
-    from misaka.modes.interactive.theme.theme import theme
+    from misaka.ui.tui.interactive.theme.theme import theme
     return theme.fg("dim", text)
 
 

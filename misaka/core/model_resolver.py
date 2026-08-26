@@ -286,7 +286,7 @@ def resolveCliModel(options: dict[str, Any]) -> ResolveCliModelResult:
         return ResolveCliModelResult(
             model=None,
             warning=None,
-            error=f'Unknown provider "{cli_provider}". Use --list-models to see available providers/models.',
+            error=f'Unknown provider "{cli_provider}". Use --list-models to see available providers/models; custom providers are defined in ~/.misaka/agent/models.json and the default is set by MISAKA_PROVIDER.',
         )
 
     pattern = cli_model

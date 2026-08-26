@@ -11,7 +11,7 @@ from typing import Any, Literal, Protocol, TypedDict
 
 from misaka.ai.models import models_are_equal
 from misaka.ai.types import ImageContent
-from misaka.tui import ProcessTerminal, TUI, setKeybindings
+from misaka.ui.tui import ProcessTerminal, TUI, setKeybindings
 
 from misaka.cli import session_picker
 from misaka.cli.args import Args, parse_args, print_help
@@ -47,9 +47,9 @@ from misaka.core.settings_manager import SettingsManager
 from misaka.core.timings import print_timings, reset_timings, time as time_mark
 from misaka.config.migrations import run_migrations, show_deprecation_warnings
 from misaka.modes import runPrintMode as run_print_mode
-from misaka.modes.interactive.components.extension_selector import ExtensionSelectorComponent
-from misaka.modes.interactive import InteractiveMode
-from misaka.modes.interactive.theme.theme import init_theme, stop_theme_watcher
+from misaka.ui.tui.interactive.components.extension_selector import ExtensionSelectorComponent
+from misaka.ui.tui.interactive import InteractiveMode
+from misaka.ui.tui.interactive.theme.theme import init_theme, stop_theme_watcher
 from misaka.modes.rpc import run_rpc_mode
 from misaka.cli.package_manager import (
     _take_command_exit_code,

@@ -75,7 +75,7 @@ from misaka.core.tools.tool_definition_wrapper import (
     create_tool_definition_from_agent_tool,
     wrap_tool_definition,
 )
-from misaka.modes.interactive.theme.theme import theme
+from misaka.ui.tui.interactive.theme.theme import theme
 from misaka.utils.frontmatter import strip_frontmatter
 from misaka.utils.paths import resolve_path
 from misaka.utils.sleep import sleep
@@ -84,12 +84,12 @@ _SKILL_BLOCK_PATTERN = re.compile(
     r'^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n</skill>(?:\n\n([\s\S]+))?$'
 )
 _STALE_CONTEXT_MESSAGE = (
-    "This extension ctx is stale after session replacement or reload. Do not use a captured harn or command ctx "
+    "This extension ctx is stale after session replacement or reload. Do not use a captured extension or command ctx "
     "after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and "
     "switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For "
     "reload, do not use the old ctx after await ctx.reload()."
 )
-_THINKING_LEVELS: tuple[ThinkingLevel, ...] = ("off", "minimal", "low", "medium", "high")
+_THINKING_LEVELS: tuple[ThinkingLevel, ...] = ("off", "minimal", "low", "medium", "high", "xhigh")
 _RETRYABLE_ERROR_PATTERN = re.compile(
     r"overloaded|provider.?returned.?error|exceeded request buffer limit while retrying upstream|"  # pi fe10558
     r"rate.?limit|too many requests|429|500|502|503|504|"
@@ -2707,47 +2707,6 @@ def _calculate_context_tokens(usage: dict[str, Any]) -> int:
         + int(usage.get("cacheRead", 0) or 0)
         + int(usage.get("cacheWrite", 0) or 0)
     )
-
-
-def _estimate_context_tokens(messages: list[Any]) -> int:
-    last_usage_tokens = 0
-    last_usage_index: int | None = None
-    for index in range(len(messages) - 1, -1, -1):
-        message = messages[index]
-        if _message_role(message) != "assistant":
-            continue
-        if _message_field(message, "stopReason") in {"aborted", "error"}:
-            continue
-        usage_tokens = _calculate_context_tokens(_message_field(message, "usage") or {})
-        if usage_tokens > 0:
-            last_usage_tokens = usage_tokens
-            last_usage_index = index
-            break
-
-    if last_usage_index is None:
-        return sum(_estimate_message_tokens(message) for message in messages)
-
-    trailing_tokens = sum(_estimate_message_tokens(message) for message in messages[last_usage_index + 1 :])
-    return last_usage_tokens + trailing_tokens
-
-
-def _estimate_message_tokens(message: Any) -> int:
-    content = _message_content(message)
-    text_parts: list[str] = []
-    if isinstance(content, str):
-        text_parts.append(content)
-    elif isinstance(content, list):
-        for block in content:
-            block_type = _content_type(block)
-            if block_type == "text":
-                text_parts.append(str(_message_field(block, "text", "")))
-            elif block_type == "toolCall":
-                text_parts.append(str(_message_field(block, "name", "")))
-                text_parts.append(str(_message_field(block, "arguments", "")))
-    elif content is not None:
-        text_parts.append(str(content))
-    text = "".join(text_parts)
-    return max(1, math.ceil(len(text) / 4)) if text else 0
 
 
 parseSkillBlock = parse_skill_block

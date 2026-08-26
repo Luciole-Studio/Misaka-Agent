@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from misaka.tui.fuzzy import fuzzyFilter
+from misaka.ui.tui.fuzzy import fuzzyFilter
 
 PATH_DELIMITERS = {" ", "\t", '"', "'", "="}
 _MISSING = object()

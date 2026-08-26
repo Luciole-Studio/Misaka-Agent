@@ -82,7 +82,7 @@ def ensure(timeout=8.0):
     place when no cards are running; refuse with an explanation when cards are
     running. Never serve from a stale daemon.
     """
-    from misaka.net import daemon as _d
+    from misaka.ui.panel import daemon as _d
 
     try:
         info = request("ping", timeout=2)

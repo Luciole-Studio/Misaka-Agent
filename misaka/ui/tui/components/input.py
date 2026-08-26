@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from misaka.tui.keybindings import getKeybindings
-from misaka.tui.keys import decodeKittyPrintable
-from misaka.tui.kill_ring import KillRing
-from misaka.tui.tui import CURSOR_MARKER
-from misaka.tui.undo_stack import UndoStack
-from misaka.tui.components.editor import _is_word_nav_punct as _nav_punct
-from misaka.tui.utils import _CJK_BREAK_RE
-from misaka.tui.utils import getSegmenter, isPunctuationChar, isWhitespaceChar, sliceByColumn, visibleWidth
+from misaka.ui.tui.keybindings import getKeybindings
+from misaka.ui.tui.keys import decodeKittyPrintable
+from misaka.ui.tui.kill_ring import KillRing
+from misaka.ui.tui.tui import CURSOR_MARKER
+from misaka.ui.tui.undo_stack import UndoStack
+from misaka.ui.tui.components.editor import _is_word_nav_punct as _nav_punct
+from misaka.ui.tui.utils import _CJK_BREAK_RE
+from misaka.ui.tui.utils import getSegmenter, isPunctuationChar, isWhitespaceChar, sliceByColumn, visibleWidth
 
 segmenter = getSegmenter()
 

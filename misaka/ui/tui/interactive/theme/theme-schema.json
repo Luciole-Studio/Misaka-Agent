@@ -291,6 +291,18 @@
 				"bashMode": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Editor border color in bash mode"
+				},
+				"sectionTitle": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Startup-screen section titles (optional; falls back to accent)"
+				},
+				"appTitle": {
+					"$ref": "#/$defs/colorValue",
+					"description": "App title on a dark terminal background (optional)"
+				},
+				"appTitleOnLight": {
+					"$ref": "#/$defs/colorValue",
+					"description": "App title on a light terminal background (optional)"
 				}
 			},
 			"additionalProperties": false

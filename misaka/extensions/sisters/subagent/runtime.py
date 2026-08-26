@@ -25,6 +25,21 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from xml.sax.saxutils import escape
 
+
+def _log_warning(message: str) -> None:
+    """Append a timestamped warning to ``<agent dir>/misaka-warnings.log``.
+
+    The manager runs inside the TUI process, so stderr is not a usable channel.
+    """
+    try:
+        from misaka.config import get_agent_dir
+        path = Path(get_agent_dir()) / "misaka-warnings.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [subagent] {message}\n")
+    except Exception:  # noqa: BLE001 - diagnostics must never break a turn
+        pass
+
 from misaka.platform import processes as process_tree
 from misaka.extensions.sisters.subagent import agents as agent_roster
 
@@ -2065,8 +2080,7 @@ class SubagentManager:
             else:
                 # Mirror semantics (D18): a foreground subagent is recorded as completed, but the
                 # failure details must not vanish (review 2026-08-20: error was previously set to None).
-                logger.warning('Foreground subagent %s ended its turn with an error (recorded as completed): %s',
-                               task.id, failure)
+                _log_warning(f"Foreground subagent {task.id} ended its turn with an error (recorded as completed): {failure}")
             await self._finish(
                 task,
                 "failed" if task.background else "completed",

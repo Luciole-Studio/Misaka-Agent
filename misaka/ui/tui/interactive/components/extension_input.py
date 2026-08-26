@@ -5,9 +5,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from misaka.tui import Container, Input, Spacer, Text, getKeybindings
+from misaka.ui.tui import Container, Input, Spacer, Text, getKeybindings
 
-from misaka.modes.interactive.theme.theme import theme
+from misaka.ui.tui.interactive.theme.theme import theme
 
 from .countdown_timer import CountdownTimer
 from .dynamic_border import DynamicBorder

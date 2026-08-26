@@ -21,11 +21,11 @@ from misaka.core.tools.render_utils import (
     normalize_display_text,
     replace_tabs,
     shorten_path,
-    str as str_value,
+    str_value,
 )
 from misaka.core.tools.tool_definition_wrapper import wrap_tool_definition
-from misaka.modes.interactive.theme.theme import get_language_from_path, highlight_code
-from misaka.tui import Container, Text
+from misaka.ui.tui.interactive.theme.theme import get_language_from_path, highlight_code
+from misaka.ui.tui import Container, Text
 
 
 class WriteToolInput(BaseModel):
@@ -225,7 +225,7 @@ def _format_write_call(
     theme_obj: Any,
     cache: WriteHighlightCache | None,
 ) -> str:
-    from misaka.modes.interactive.components.keybinding_hints import key_hint
+    from misaka.ui.tui.interactive.components.keybinding_hints import key_hint
 
     raw_path = str_value(_value(args, "file_path", _value(args, "path")))
     file_content = str_value(_value(args, "content"))

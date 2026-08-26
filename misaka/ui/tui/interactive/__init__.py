@@ -11,7 +11,7 @@ __all__ = [
 ]
 
 if TYPE_CHECKING:
-    from misaka.modes.interactive.interactive_mode import (
+    from misaka.ui.tui.interactive.interactive_mode import (
         ANTHROPIC_SUBSCRIPTION_AUTH_WARNING,
         InteractiveMode,
         is_anthropic_subscription_auth_key,
@@ -22,7 +22,7 @@ def __getattr__(name: str) -> Any:
     if name not in __all__:
         raise AttributeError(name)
 
-    from misaka.modes.interactive.interactive_mode import (
+    from misaka.ui.tui.interactive.interactive_mode import (
         ANTHROPIC_SUBSCRIPTION_AUTH_WARNING,
         InteractiveMode,
         is_anthropic_subscription_auth_key,

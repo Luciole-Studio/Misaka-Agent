@@ -29,7 +29,7 @@ from misaka.core.tools.truncate import (
     format_size,
     truncate_head,
 )
-from misaka.tui import Text
+from misaka.ui.tui import Text
 
 T = TypeVar("T")
 
@@ -154,7 +154,7 @@ def _format_ls_call(args: Mapping[str, Any] | None, theme_obj: Any) -> str:
 
 
 def _format_ls_result(result: Any, options: Any, theme_obj: Any, show_images: bool) -> str:
-    from misaka.modes.interactive.components.keybinding_hints import key_hint
+    from misaka.ui.tui.interactive.components.keybinding_hints import key_hint
 
     output = get_text_output(result, show_images).strip()
     text = ""

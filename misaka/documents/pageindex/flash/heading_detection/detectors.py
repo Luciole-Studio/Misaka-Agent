@@ -94,7 +94,7 @@ def detect_numbered_heading(page_scan: PageScanState, block: Block, tokens: Toke
             return None
         # Accept period-like punctuation or a symbol token as a numbering
         # separator.
-        if token.str in (".", "\uff0e", "\uff61", "\u3002") or token.type == 4:
+        if token.str in (".", "．", "｡", "。") or token.type == 4:
             prev = tokens.token_at(index - 1)   # token_at(-1) returns None
             if prev is None or prev.type != 1:
                 break
@@ -136,11 +136,11 @@ def detect_labeled_heading(page_scan: PageScanState, block: Block, tokens: Token
         return None
     # Roman numeral path
     roman = ROMAN_NUMERAL_MAP.get(first.str)
-    if roman is not None and is_word_token(second) and second.str in ".\uff0e\uff61\u3002:)":
+    if roman is not None and is_word_token(second) and second.str in ".．｡。:)":
         prefix = tokens.slice(0, 2)
         return make_heading_candidate(page_scan, 2, block, [roman], prefix, tokens.slice(prefix.length))
     # CJK number path
-    cjk_pos = "\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341".find(first.str)
+    cjk_pos = "一二三四五六七八九十".find(first.str)
     if cjk_pos >= 0 and is_word_token(second):
         prefix = tokens.slice(0, 2)
         rest = tokens.slice(prefix.length)

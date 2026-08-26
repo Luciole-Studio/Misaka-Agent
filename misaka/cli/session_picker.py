@@ -6,11 +6,11 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Protocol
 
-from misaka.tui import TUI, ProcessTerminal, setKeybindings
+from misaka.ui.tui import TUI, ProcessTerminal, setKeybindings
 
 from misaka.core.keybindings import KeybindingsManager
 from misaka.core.session_manager import SessionInfo, SessionListProgress
-from misaka.modes.interactive.components.session_selector import SessionSelectorComponent
+from misaka.ui.tui.interactive.components.session_selector import SessionSelectorComponent
 
 type SessionsLoader = Callable[[SessionListProgress | None], Awaitable[list[SessionInfo]]]
 

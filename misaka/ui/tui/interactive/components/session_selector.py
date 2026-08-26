@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from misaka.tui import (
+from misaka.ui.tui import (
     Component,
     Container,
     Focusable,
@@ -28,7 +28,7 @@ from misaka.tui import (
 
 from misaka.core.keybindings import KeybindingsManager
 from misaka.core.session_manager import SessionInfo, SessionListProgress
-from misaka.modes.interactive.theme.theme import theme
+from misaka.ui.tui.interactive.theme.theme import theme
 from misaka.utils.paths import canonicalize_path
 
 from .dynamic_border import DynamicBorder

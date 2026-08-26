@@ -11,14 +11,14 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
-from misaka.tui.autocomplete import AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions
-from misaka.tui.components.select_list import SelectItem, SelectList, SelectListLayoutOptions, SelectListTheme
-from misaka.tui.keybindings import getKeybindings
-from misaka.tui.keys import decodePrintableKey, matchesKey
-from misaka.tui.kill_ring import KillRing
-from misaka.tui.tui import CURSOR_MARKER, TUI
-from misaka.tui.undo_stack import UndoStack
-from misaka.tui.utils import (
+from misaka.ui.tui.autocomplete import AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions
+from misaka.ui.tui.components.select_list import SelectItem, SelectList, SelectListLayoutOptions, SelectListTheme
+from misaka.ui.tui.keybindings import getKeybindings
+from misaka.ui.tui.keys import decodePrintableKey, matchesKey
+from misaka.ui.tui.kill_ring import KillRing
+from misaka.ui.tui.tui import CURSOR_MARKER, TUI
+from misaka.ui.tui.undo_stack import UndoStack
+from misaka.ui.tui.utils import (
     _CJK_BREAK_RE,
     SegmentData,
     getSegmenter,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from misaka.modes.interactive.theme.theme import theme
+from misaka.ui.tui.interactive.theme.theme import theme
 
 
 class DynamicBorder:

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from misaka.tui import (
+from misaka.ui.tui import (
     Component,
     Container,
     Focusable,
@@ -23,7 +23,7 @@ from misaka.tui import (
 from misaka.config import CONFIG_DIR_NAME
 from misaka.core.package_manager import PathMetadata, ResolvedPaths, ResolvedResource
 from misaka.core.settings_manager import SettingsManager
-from misaka.modes.interactive.theme.theme import theme
+from misaka.ui.tui.interactive.theme.theme import theme
 
 from .dynamic_border import DynamicBorder
 from .keybinding_hints import raw_key_hint

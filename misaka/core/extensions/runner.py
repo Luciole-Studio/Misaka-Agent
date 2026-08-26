@@ -25,7 +25,7 @@ from misaka.core.extensions.types import (
     RegisteredTool,
     ResolvedCommand,
 )
-from misaka.modes.interactive.theme.theme import theme
+from misaka.ui.tui.interactive.theme.theme import theme
 
 RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS = (
     "app.interrupt",

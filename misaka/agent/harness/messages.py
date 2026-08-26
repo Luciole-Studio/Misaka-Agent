@@ -167,7 +167,7 @@ def convert_to_llm(messages: list[AgentMessage]) -> list[MessageValue]:
 def _message_field(message: Any, name: str) -> Any:
     if isinstance(message, dict):
         return message.get(name)
-    return getattr(message, name)
+    return getattr(message, name, None)
 
 
 def _message_dump(message: Any) -> Any:

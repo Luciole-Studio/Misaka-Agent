@@ -28,18 +28,20 @@ from misaka.ai.types import (
     UserMessage,
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream
+from misaka.config.product import CFG
 
 logger = logging.getLogger(__name__)
 
 MOA_CONFIG_PATH = "~/.misaka/moa.json"
 DEFAULT_MOA_PRESET_NAME = "default"
 
-# Default slots point at providers from this repo's models.json; override them in ~/.misaka/moa.json.
+# Default slots follow the product configuration (MISAKA_PROVIDER / MISAKA_LO_MODEL / MISAKA_MODEL);
+# override them in ~/.misaka/moa.json.
 DEFAULT_MOA_REFERENCE_MODELS = [
-    {"provider": "sub2api-claude", "model": "claude-opus-5"},
-    {"provider": "sub2api-claude", "model": "claude-sonnet-5"},
+    {"provider": CFG["provider"], "model": CFG["lo_model"]},
+    {"provider": CFG["provider"], "model": CFG["default_model"]},
 ]
-DEFAULT_MOA_AGGREGATOR = {"provider": "sub2api-claude", "model": "claude-opus-5"}
+DEFAULT_MOA_AGGREGATOR = {"provider": CFG["provider"], "model": CFG["lo_model"]}
 
 # Head+tail preview budget per tool result in the advisor view.
 TOOL_RESULT_BUDGET = 4000

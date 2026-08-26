@@ -21,7 +21,7 @@ from misaka.ai.types import (
 )
 from misaka.ai.utils.typebox_helpers import Static, TSchema
 from misaka.ai.utils.oauth.types import OAuthCredentials, OAuthLoginCallbacks
-from misaka.tui import (
+from misaka.ui.tui import (
     AutocompleteItem,
     AutocompleteProvider,
     Component,
@@ -47,7 +47,7 @@ from misaka.core.session_manager import (
 from misaka.core.slash_commands import SlashCommandInfo
 from misaka.core.source_info import SourceInfo
 from misaka.core.system_prompt import BuildSystemPromptOptions
-from misaka.modes.interactive.theme.theme import Theme
+from misaka.ui.tui.interactive.theme.theme import Theme
 
 if TYPE_CHECKING:
     from misaka.core.bash_executor import BashResult
@@ -81,6 +81,7 @@ type AppKeybinding = Literal[
     "app.thinking.toggle",
     "app.session.toggleNamedFilter",
     "app.editor.external",
+    "app.message.copy",
     "app.message.followUp",
     "app.message.dequeue",
     "app.clipboard.pasteImage",

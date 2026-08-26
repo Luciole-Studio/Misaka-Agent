@@ -103,10 +103,8 @@ def ingest_report(con, run, task, report):
             continue
         if artifact["id"] not in artifact_texts:
             try:
-                artifact_texts[artifact["id"]] = Path(artifact["path"]).read_text(
-                    encoding="utf-8", errors="replace"
-                )
-            except OSError:
+                artifact_texts[artifact["id"]] = runs.artifact_text(artifact)
+            except (OSError, ValueError):
                 artifact_texts[artifact["id"]] = None
         artifact_text = artifact_texts[artifact["id"]]
         if artifact_text is None:
@@ -134,26 +132,3 @@ def ingest_report(con, run, task, report):
     if len(raw) > MAX_FINDINGS:
         dropped.append(f"more than {MAX_FINDINGS} findings submitted; the remainder were ignored")
     return {"findings": made, "claims": made_claims, "dropped": dropped}
-
-
-def audit(con, run_id):
-    bad = []
-    rows = con.execute(
-        "SELECT c.*,a.path,a.sha256 AS current_sha FROM research_claims c "
-        "LEFT JOIN research_artifacts a ON a.id=c.artifact_id "
-        "JOIN research_findings f ON f.id=c.finding_id WHERE f.run_id=?",
-        (run_id,),
-    )
-    for row in rows:
-        try:
-            path = Path(row["path"])
-            data = path.read_bytes()
-            text = data.decode("utf-8", errors="replace")
-        except (OSError, TypeError):
-            bad.append((row["id"], row["finding_id"], "Source artifact is missing."))
-            continue
-        if hashlib.sha256(data).hexdigest() != row["evidence_sha"]:
-            bad.append((row["id"], row["finding_id"], "Source artifact hash has changed."))
-        elif _norm(row["quote"]) not in _norm(text):
-            bad.append((row["id"], row["finding_id"], "Quotation no longer matches the source artifact."))
-    return bad

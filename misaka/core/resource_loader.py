@@ -28,7 +28,7 @@ from misaka.core.prompt_templates import PromptTemplate, load_prompt_templates
 from misaka.core.settings_manager import SettingsManager
 from misaka.core.skills import LoadSkillsResult, Skill, load_skills
 from misaka.core.source_info import SourceInfo, create_source_info
-from misaka.modes.interactive.theme.theme import Theme, load_theme_from_path
+from misaka.ui.tui.interactive.theme.theme import Theme, load_theme_from_path
 from misaka.utils.paths import canonicalize_path, is_local_path, resolve_path
 
 

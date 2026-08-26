@@ -6,10 +6,10 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from misaka.tui import Container, Spacer, Text, getKeybindings, truncateToWidth
+from misaka.ui.tui import Container, Spacer, Text, getKeybindings, truncateToWidth
 
-from misaka.modes.interactive.components.dynamic_border import DynamicBorder
-from misaka.modes.interactive.theme.theme import theme
+from misaka.ui.tui.interactive.components.dynamic_border import DynamicBorder
+from misaka.ui.tui.interactive.theme.theme import theme
 
 
 @dataclass(slots=True)

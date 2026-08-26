@@ -73,7 +73,7 @@ _ROMAN_EXCLUDED = frozenset({"di", "div", "li", "liv", "mi", "mix", "xi"})
 _CONTENT_UNITS = frozenset({
     "chapter", "chap", "ch", "part", "pt", "section", "sec", "book",
     "appendix", "unit", "lesson",
-    "\u7ae0", "\u90e8", "\u8282", "\u7bc7", "\u5377", "\u7b2c\u7ae0", "\u7b2c\u90e8", "\u7b2c\u8282", "\u7b2c\u7bc7", "\u7b2c\u5377",
+    "章", "部", "节", "篇", "卷", "第章", "第部", "第节", "第篇", "第卷",
 })
 
 
@@ -123,13 +123,19 @@ def read_bookmarks(doc_handle: Union[str, Path, BytesIO]) -> list[dict]:
         doc = pdfium.PdfDocument(handle)
         entries = []
         for item in doc.get_toc():
-            if item.page_index is None:
+            if hasattr(item, "get_dest"):
+                dest = item.get_dest()
+                page_idx = dest.get_index() if dest else None
+                title = item.get_title()
+            else:
+                page_idx, title = item.page_index, item.title
+            if page_idx is None:
                 continue
-            title = (item.title or "").strip()
+            title = (title or "").strip()
             if not title:
                 continue
             entries.append(
-                {"title": title, "level": item.level + 1, "page": item.page_index + 1}
+                {"title": title, "level": item.level + 1, "page": page_idx + 1}
             )
         return entries
     except (pdfium.PdfiumError, OSError, ValueError, TypeError):

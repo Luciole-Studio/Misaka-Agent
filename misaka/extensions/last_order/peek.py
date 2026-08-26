@@ -104,7 +104,7 @@ def register(harn):
             return _text(error)
         return _text(
             prompt_guard.untrusted(f"peek:{params.task_id}", text)
-            + "\nThis is raw process output; whether the card is done is decided by the task board and the acceptance checks."
+            + "\nThis is raw process output; whether the card is done is decided by the task board."
         )
 
     harn.registerTool(ToolDefinition(

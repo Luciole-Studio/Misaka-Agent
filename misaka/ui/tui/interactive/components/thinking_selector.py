@@ -5,10 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from misaka.agent.types import ThinkingLevel
-from misaka.tui import Container, SelectItem, SelectList, SelectListLayoutOptions
+from misaka.ui.tui import Container, SelectItem, SelectList, SelectListLayoutOptions
 
-from misaka.modes.interactive.components.dynamic_border import DynamicBorder
-from misaka.modes.interactive.theme.theme import get_select_list_theme
+from misaka.ui.tui.interactive.components.dynamic_border import DynamicBorder
+from misaka.ui.tui.interactive.theme.theme import get_select_list_theme
 
 THINKING_SELECT_LIST_LAYOUT = SelectListLayoutOptions(minPrimaryColumnWidth=12, maxPrimaryColumnWidth=32)
 

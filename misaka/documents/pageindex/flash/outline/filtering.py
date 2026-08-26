@@ -71,7 +71,7 @@ def _looks_like_pseudo_code(text: str) -> bool:
     if any(pat.search(text) for pat in _PSEUDO_CODE_PATTERNS):
         return True
     # No alphabetic word of >= 3 letters? Reject.
-    if not re.search(r"[A-Za-zÀ-ÿ\u4e00-\u9fff\uac00-\ud7af]{3,}", text):
+    if not re.search(r"[A-Za-zÀ-ÿ一-鿿가-힯]{3,}", text):
         return True
     # Bullet-list item: "1. long flowing prose..."
     if _BULLET_LIST_RE.match(text) and len(text) > 80:
@@ -235,7 +235,7 @@ def filter_by_clique(headings: list[Block]) -> list[Block]:
         # Also require: at least one alphabetic word AFTER the number
         # ("2 Introduction" yes, "9else" no, "1.804 1.737 1.692" no)
         after_num = re.sub(r"^\s*\d+(?:\.\d+){0,2}\s*[.:)]?\s*", "", text)
-        if not re.search(r"[A-Za-zÀ-ÿ\u4e00-\u9fff\uac00-\ud7af]{3,}", after_num):
+        if not re.search(r"[A-Za-zÀ-ÿ一-鿿가-힯]{3,}", after_num):
             continue
         out.append(state_item)
     return out

@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-from misaka.tui import fuzzyMatch
+from misaka.ui.tui import fuzzyMatch
 
 from misaka.core.session_manager import SessionInfo
 

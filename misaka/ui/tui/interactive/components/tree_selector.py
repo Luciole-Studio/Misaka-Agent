@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from misaka.tui import (
+from misaka.ui.tui import (
     Component,
     Container,
     Focusable,
@@ -22,7 +22,7 @@ from misaka.tui import (
 )
 
 from misaka.core.session_manager import SessionTreeNode
-from misaka.modes.interactive.theme.theme import theme
+from misaka.ui.tui.interactive.theme.theme import theme
 
 from .dynamic_border import DynamicBorder
 from .keybinding_hints import key_hint, key_text

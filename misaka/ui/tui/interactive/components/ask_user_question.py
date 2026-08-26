@@ -12,11 +12,11 @@ from types import SimpleNamespace
 from typing import Any
 
 from misaka.ai.types import ImageContent
-from misaka.tui import Editor, EditorOptions, Markdown, getKeybindings, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi
+from misaka.ui.tui import Editor, EditorOptions, Markdown, getKeybindings, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi
 from misaka.utils.clipboard_image import read_clipboard_image
 
-from misaka.modes.interactive.components.extension_editor import edit_text_external
-from misaka.modes.interactive.theme.theme import get_editor_theme, get_markdown_theme, theme
+from misaka.ui.tui.interactive.components.extension_editor import edit_text_external
+from misaka.ui.tui.interactive.theme.theme import get_editor_theme, get_markdown_theme, theme
 
 
 def _get(value: Any, key: str, default: Any = None) -> Any:

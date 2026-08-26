@@ -5,10 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from misaka.tui.fuzzy import fuzzyFilter
-from misaka.tui.keybindings import getKeybindings
-from misaka.tui.tui import Component
-from misaka.tui.utils import truncateToWidth, visibleWidth, wrapTextWithAnsi
+from misaka.ui.tui.fuzzy import fuzzyFilter
+from misaka.ui.tui.keybindings import getKeybindings
+from misaka.ui.tui.tui import Component
+from misaka.ui.tui.utils import truncateToWidth, visibleWidth, wrapTextWithAnsi
 
 from .input import Input
 

@@ -5,10 +5,10 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 
-from misaka.tui import getKeybindings
-from misaka.tui.keybindings import Keybinding
+from misaka.ui.tui import getKeybindings
+from misaka.ui.tui.keybindings import Keybinding
 
-from misaka.modes.interactive.theme.theme import theme
+from misaka.ui.tui.interactive.theme.theme import theme
 
 
 @dataclass(slots=True)

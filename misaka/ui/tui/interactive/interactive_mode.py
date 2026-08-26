@@ -28,7 +28,7 @@ from uuid import uuid4
 
 from misaka.ai.types import ImageContent
 from misaka.ai.models import getProviders
-from misaka.tui import (
+from misaka.ui.tui import (
     TUI,
     AutocompleteProvider,
     CombinedAutocompleteProvider,
@@ -78,28 +78,25 @@ from misaka.core.session_cwd import MissingSessionCwdError, format_missing_sessi
 from misaka.core.session_manager import SessionManager
 from misaka.core.slash_commands import BUILTIN_SLASH_COMMANDS, _LOCAL_ALIAS_SLASH_COMMANDS
 from misaka.core.tools.truncate import TruncationResult
-from misaka.modes.interactive.components.assistant_message import AssistantMessageComponent
-from misaka.modes.interactive.components.armin import ArminComponent
-from misaka.modes.interactive.components.bash_execution import BashExecutionComponent
-from misaka.modes.interactive.components.branch_summary_message import (
+from misaka.ui.tui.interactive.components.assistant_message import AssistantMessageComponent
+from misaka.ui.tui.interactive.components.bash_execution import BashExecutionComponent
+from misaka.ui.tui.interactive.components.branch_summary_message import (
     BranchSummaryMessageComponent,
 )
-from misaka.modes.interactive.components.compaction_summary_message import (
+from misaka.ui.tui.interactive.components.compaction_summary_message import (
     CompactionSummaryMessageComponent,
 )
-from misaka.modes.interactive.components.countdown_timer import CountdownTimer
-from misaka.modes.interactive.components.custom_editor import CustomEditor
-from misaka.modes.interactive.components.custom_message import CustomMessageComponent
-from misaka.modes.interactive.components.daxnuts import DaxnutsComponent
-from misaka.modes.interactive.components.dynamic_border import DynamicBorder
-from misaka.modes.interactive.components.earendil_announcement import EarendilAnnouncementComponent
-from misaka.modes.interactive.components.extension_editor import ExtensionEditorComponent
-from misaka.modes.interactive.components.extension_input import ExtensionInputComponent
-from misaka.modes.interactive.components.extension_selector import (
+from misaka.ui.tui.interactive.components.countdown_timer import CountdownTimer
+from misaka.ui.tui.interactive.components.custom_editor import CustomEditor
+from misaka.ui.tui.interactive.components.custom_message import CustomMessageComponent
+from misaka.ui.tui.interactive.components.dynamic_border import DynamicBorder
+from misaka.ui.tui.interactive.components.extension_editor import ExtensionEditorComponent
+from misaka.ui.tui.interactive.components.extension_input import ExtensionInputComponent
+from misaka.ui.tui.interactive.components.extension_selector import (
     ExtensionSelectorComponent,
 )
-from misaka.modes.interactive.components.footer import FooterComponent
-from misaka.modes.interactive.components.keybinding_hints import (
+from misaka.ui.tui.interactive.components.footer import FooterComponent
+from misaka.ui.tui.interactive.components.keybinding_hints import (
     KeyTextFormatOptions,
     format_key_text,
     key_display_text,
@@ -107,37 +104,37 @@ from misaka.modes.interactive.components.keybinding_hints import (
     key_text,
     raw_key_hint,
 )
-from misaka.modes.interactive.components.login_dialog import LoginDialogComponent
-from misaka.modes.interactive.components.model_selector import (
+from misaka.ui.tui.interactive.components.login_dialog import LoginDialogComponent
+from misaka.ui.tui.interactive.components.model_selector import (
     ModelSelectorComponent,
     ScopedModelItem,
 )
-from misaka.modes.interactive.components.oauth_selector import (
+from misaka.ui.tui.interactive.components.oauth_selector import (
     AuthSelectorProvider,
     OAuthSelectorComponent,
 )
-from misaka.modes.interactive.components.scoped_models_selector import (
+from misaka.ui.tui.interactive.components.scoped_models_selector import (
     ModelsCallbacks,
     ModelsConfig,
     ScopedModelsSelectorComponent,
 )
-from misaka.modes.interactive.components.session_selector import SessionSelectorComponent
-from misaka.modes.interactive.components.thinking_selector import (
+from misaka.ui.tui.interactive.components.session_selector import SessionSelectorComponent
+from misaka.ui.tui.interactive.components.thinking_selector import (
     ADAPTIVE_LEVEL_DESCRIPTIONS,
     ThinkingSelectorComponent,
 )
-from misaka.modes.interactive.components.settings_selector import (
+from misaka.ui.tui.interactive.components.settings_selector import (
     SettingsCallbacks,
     SettingsConfig,
     SettingsSelectorComponent,
 )
-from misaka.modes.interactive.components.skill_invocation_message import (
+from misaka.ui.tui.interactive.components.skill_invocation_message import (
     SkillInvocationMessageComponent,
 )
-from misaka.modes.interactive.components.tool_execution import ToolExecutionComponent
-from misaka.modes.interactive.components.tree_selector import TreeSelectorComponent
-from misaka.modes.interactive.components.user_message import UserMessageComponent
-from misaka.modes.interactive.components.user_message_selector import (
+from misaka.ui.tui.interactive.components.tool_execution import ToolExecutionComponent
+from misaka.ui.tui.interactive.components.tree_selector import TreeSelectorComponent
+from misaka.ui.tui.interactive.components.user_message import UserMessageComponent
+from misaka.ui.tui.interactive.components.user_message_selector import (
     UserMessageItem,
     UserMessageSelectorComponent,
 )
@@ -150,7 +147,7 @@ from misaka.utils.clipboard_image import (
 from misaka.utils.shell import kill_tracked_detached_children
 from misaka.utils.tools_manager import ensureTool
 
-interactive_theme = import_module("misaka.modes.interactive.theme.theme")
+interactive_theme = import_module("misaka.ui.tui.interactive.theme.theme")
 
 ANTHROPIC_SUBSCRIPTION_AUTH_WARNING = (
     "Anthropic subscription auth is active. Third-party harness usage draws from extra usage and is billed per "
@@ -2214,7 +2211,7 @@ class InteractiveMode:
             )
         if extended_keys_format == "xterm":
             return (
-                "tmux extended-keys-format is xterm. Harn works best with csi-u. "
+                "tmux extended-keys-format is xterm. MISAKA works best with csi-u. "
                 "Add `set -g extended-keys-format csi-u` to ~/.tmux.conf and restart tmux."
             )
         return None
@@ -3069,25 +3066,6 @@ class InteractiveMode:
         )
         self._request_render()
 
-    def handleArminSaysHi(self) -> None:
-        self.chatContainer.addChild(Spacer(1))
-        self.chatContainer.addChild(ArminComponent(self.ui))
-        self._request_render()
-
-    def handleDementedDelves(self) -> None:
-        self.chatContainer.addChild(Spacer(1))
-        self.chatContainer.addChild(EarendilAnnouncementComponent())
-        self._request_render()
-
-    def handleDaxnuts(self) -> None:
-        self.chatContainer.addChild(Spacer(1))
-        self.chatContainer.addChild(DaxnutsComponent(self.ui))
-        self._request_render()
-
-    def checkDaxnutsEasterEgg(self, model: Any) -> None:
-        if str(_value(model, "provider", "")) == "opencode" and "kimi-k2.5" in str(_value(model, "id", "")).lower():
-            self.handleDaxnuts()
-
     async def handleResumeSession(
         self,
         sessionPath: str,
@@ -3194,7 +3172,7 @@ class InteractiveMode:
             entries[0]["id"] = old_id
         if old_file:
             sm.sessionFile = old_file
-            sm._rewriteFile()
+            sm.rewrite_file()
             sm.flushed = True
 
     async def handleBashCommand(self, command: str, excludeFromContext: bool = False) -> None:
@@ -3377,14 +3355,6 @@ class InteractiveMode:
         if text == "/debug":
             self._set_editor_text("")
             self.handleDebugCommand()
-            return
-        if text == "/arminsayshi":
-            self._set_editor_text("")
-            self.handleArminSaysHi()
-            return
-        if text == "/dementedelves":
-            self._set_editor_text("")
-            self.handleDementedDelves()
             return
         if text == "/quit":
             self._set_editor_text("")
@@ -3776,7 +3746,6 @@ class InteractiveMode:
                 f"{action_label}. Selected {_value(selected_model, 'id')}. Credentials saved to {get_auth_path()}"
             )
             self._schedule_task(self.maybeWarnAboutAnthropicSubscriptionAuth(selected_model))
-            self.checkDaxnutsEasterEgg(selected_model)
             return
 
         self.showStatus(f"{action_label}. Credentials saved to {get_auth_path()}")
@@ -4570,7 +4539,7 @@ class InteractiveMode:
 
             tmp_dir = Path(tempfile.gettempdir())
             extension = extension_for_image_mime_type(image.mimeType) or "png"
-            file_path = tmp_dir / f"harn-clipboard-{uuid4()}.{extension}"
+            file_path = tmp_dir / f"misaka-clipboard-{uuid4()}.{extension}"
             file_path.write_bytes(image.bytes)
 
             insert_text_at_cursor = _callable_attr(self.editor, "insertTextAtCursor")
@@ -4650,7 +4619,7 @@ class InteractiveMode:
             return
 
         current_text = self._get_editor_text()
-        tmp_file = Path(tempfile.gettempdir()) / f"harn-editor-{int(time.time() * 1000)}.harn.md"
+        tmp_file = Path(tempfile.gettempdir()) / f"misaka-editor-{int(time.time() * 1000)}.md"
 
         try:
             tmp_file.write_text(current_text, encoding="utf-8")
@@ -4662,7 +4631,7 @@ class InteractiveMode:
             parts = [part for part in editor_cmd.split(" ") if part]
             editor = parts[0]
             editor_args = parts[1:]
-            sys.stdout.write(f"Launching external editor: {editor_cmd}\nHarn will resume when the editor exits.\n")
+            sys.stdout.write(f"Launching external editor: {editor_cmd}\nMISAKA will resume when the editor exits.\n")
             try:
                 status = await asyncio.to_thread(
                     subprocess.run,
@@ -5191,7 +5160,7 @@ class InteractiveMode:
         if stop is not None:
             with contextlib.suppress(Exception):
                 stop()
-        print("harn exiting due to uncaughtException:", file=sys.stderr)
+        print("misaka exiting due to an uncaught exception:", file=sys.stderr)
         print(error, file=sys.stderr)
         raise SystemExit(1)
 
@@ -5387,7 +5356,6 @@ class InteractiveMode:
             done()
             self.showStatus(f"Model: {_value(model, 'id', model)}")
             self._schedule_task(self.maybeWarnAboutAnthropicSubscriptionAuth(model))
-            self.checkDaxnutsEasterEgg(model)
         except Exception as error:  # noqa: BLE001
             done()
             self.showError(str(error))
@@ -5454,7 +5422,6 @@ class InteractiveMode:
             self.updateEditorBorderColor()
             self.showStatus(f"Model: {_value(model, 'id', model)}")
             self._schedule_task(self.maybeWarnAboutAnthropicSubscriptionAuth(model))
-            self.checkDaxnutsEasterEgg(model)
         except Exception as error:  # noqa: BLE001
             self.showError(str(error))
 

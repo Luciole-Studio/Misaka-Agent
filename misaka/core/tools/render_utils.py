@@ -6,7 +6,7 @@ import builtins
 import os
 from typing import Any, Protocol, TypeVar
 
-from misaka.tui.terminal_image import getCapabilities, getImageDimensions, imageFallback
+from misaka.ui.tui.terminal_image import getCapabilities, getImageDimensions, imageFallback
 
 from misaka.utils.ansi import strip_ansi
 from misaka.utils.shell import sanitize_binary_output
@@ -90,7 +90,6 @@ def invalid_arg_text(theme: object) -> str:
 
 
 shortenPath = shorten_path
-str = str_value
 replaceTabs = replace_tabs
 normalizeDisplayText = normalize_display_text
 getTextOutput = get_text_output
@@ -103,5 +102,4 @@ __all__ = [
     "normalizeDisplayText",
     "replaceTabs",
     "shortenPath",
-    "str",
 ]

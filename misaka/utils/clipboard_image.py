@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from PIL import Image
 
-from misaka.utils.clipboard_native import clipboard as native_clipboard
+from misaka.utils.clipboard_native import get_clipboard as _get_native_clipboard_backend
 from misaka.utils.exif_orientation import apply_exif_orientation
 
 SUPPORTED_IMAGE_MIME_TYPES = ("image/png", "image/jpeg", "image/webp", "image/gif")
@@ -317,7 +317,7 @@ def _platform() -> str:
 
 
 def _get_native_clipboard() -> _NativeClipboard | None:
-    return native_clipboard
+    return _get_native_clipboard_backend()
 
 extensionForImageMimeType = extension_for_image_mime_type
 isWaylandSession = is_wayland_session

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from misaka.tui import Box, DefaultTextStyle, Markdown, Spacer, Text
+from misaka.ui.tui import Box, DefaultTextStyle, Markdown, Spacer, Text
 
 from misaka.core.messages import BranchSummaryMessage
-from misaka.modes.interactive.components.keybinding_hints import key_text
-from misaka.modes.interactive.theme.theme import get_markdown_theme, theme
+from misaka.ui.tui.interactive.components.keybinding_hints import key_text
+from misaka.ui.tui.interactive.theme.theme import get_markdown_theme, theme
 
 
 class BranchSummaryMessageComponent(Box):

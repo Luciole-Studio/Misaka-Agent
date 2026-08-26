@@ -57,7 +57,7 @@ async def execute_bash_with_operations(
         nonlocal temp_file_path, temp_file_handle
         if temp_file_path is not None:
             return
-        temp_file_path = os.path.join(tempfile.gettempdir(), f"harn-bash-{secrets.token_hex(8)}.log")
+        temp_file_path = os.path.join(tempfile.gettempdir(), f"misaka-bash-{secrets.token_hex(8)}.log")
         temp_file_handle = open(temp_file_path, "w", encoding="utf-8")
         for chunk in output_chunks:
             temp_file_handle.write(chunk)

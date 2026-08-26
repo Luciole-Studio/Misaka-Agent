@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from misaka.tui import Box, Container, DefaultTextStyle, Markdown, Spacer, Text
+from misaka.ui.tui import Box, Container, DefaultTextStyle, Markdown, Spacer, Text
 
 from misaka.core.extensions.types import MessageRenderer
 from misaka.core.messages import CustomMessage
-from misaka.modes.interactive.theme.theme import get_markdown_theme, theme
+from misaka.ui.tui.interactive.theme.theme import get_markdown_theme, theme
 
 class CustomMessageComponent(Container):
     def __init__(

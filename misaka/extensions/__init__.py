@@ -19,7 +19,7 @@ from typing import Any
 
 from misaka.config import profiles
 
-KINDS = frozenset({"foreground", "dm", "card", "child", "one-shot", "beast", "bare"})
+KINDS = frozenset({"foreground", "dm", "card", "child", "beast", "bare"})
 DEFAULT_KINDS = KINDS - {"bare"}
 _ROLE_DIRS = ("last_order", "sisters")
 

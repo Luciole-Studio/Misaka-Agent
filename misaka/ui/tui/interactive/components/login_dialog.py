@@ -10,10 +10,10 @@ from collections.abc import Callable
 from typing import Any
 
 from misaka.ai.utils.oauth import OAuthDeviceCodeInfo, getOAuthProviders
-from misaka.tui import Container, Input, Spacer, Text, getKeybindings
-from misaka.tui.components import AbortController
+from misaka.ui.tui import Container, Input, Spacer, Text, getKeybindings
+from misaka.ui.tui.components import AbortController
 
-from misaka.modes.interactive.theme.theme import theme
+from misaka.ui.tui.interactive.theme.theme import theme
 
 from .dynamic_border import DynamicBorder
 from .keybinding_hints import keyHint

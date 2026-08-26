@@ -5,8 +5,10 @@ import re
 import shutil
 import sys
 
-ROOT = os.path.expanduser("~/.misaka/profiles/sisters")
-ACTIVE = ("running", "review", "verifying", "finalizing")
+from misaka.config.product import CFG
+
+ROOT = CFG["profiles_root"]
+ACTIVE = ("running", "review")
 MODEL_CHOICES = [
     "default (use global setting)",
     "claude-opus-5",

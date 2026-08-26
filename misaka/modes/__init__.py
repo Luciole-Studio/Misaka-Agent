@@ -6,8 +6,8 @@ from importlib import import_module
 from typing import Any
 
 _PUBLIC_EXPORTS: dict[str, tuple[str, str]] = {
-    "InteractiveMode": ("misaka.modes.interactive.interactive_mode", "InteractiveMode"),
-    "InteractiveModeOptions": ("misaka.modes.interactive.interactive_mode", "InteractiveModeOptions"),
+    "InteractiveMode": ("misaka.ui.tui.interactive.interactive_mode", "InteractiveMode"),
+    "InteractiveModeOptions": ("misaka.ui.tui.interactive.interactive_mode", "InteractiveModeOptions"),
     "PrintModeOptions": ("misaka.modes.print_mode", "PrintModeOptions"),
     "runPrintMode": ("misaka.modes.print_mode", "runPrintMode"),
     "ModelInfo": ("misaka.modes.rpc.rpc_client", "ModelInfo"),

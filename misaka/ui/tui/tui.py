@@ -14,17 +14,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypedDict
 
-from misaka.tui.keys import isKeyRelease, matchesKey
-from misaka.tui.terminal import Terminal
-from misaka.tui.terminal_colors import (
+from misaka.ui.tui.keys import isKeyRelease, matchesKey
+from misaka.ui.tui.terminal import Terminal
+from misaka.ui.tui.terminal_colors import (
     RgbColor,
     TerminalColorScheme,
     is_osc11_background_color_response,
     parse_osc11_background_color,
     parse_terminal_color_scheme_report,
 )
-from misaka.tui.terminal_image import deleteKittyImage, getCapabilities, isImageLine, setCellDimensions
-from misaka.tui.utils import (
+from misaka.ui.tui.terminal_image import deleteKittyImage, getCapabilities, isImageLine, setCellDimensions
+from misaka.ui.tui.utils import (
     extractSegments,
     normalizeTerminalOutput,
     sliceByColumn,

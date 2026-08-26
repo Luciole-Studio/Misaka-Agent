@@ -12,10 +12,6 @@ from misaka.config import CONFIG_DIR_NAME, get_agent_dir, get_bin_dir
 from misaka.core.keybindings import migrateKeybindingsConfig
 from misaka.core.session_manager import get_default_session_dir
 
-MIGRATION_GUIDE_URL = (
-    "https://github.com/secemp9/harn/blob/main/packages/misaka/CHANGELOG.md#extensions-migration"
-)
-EXTENSIONS_DOC_URL = "https://github.com/secemp9/harn/blob/main/packages/misaka/docs/extensions.md"
 _GREEN = "\x1b[32m"
 _YELLOW = "\x1b[33m"
 _DIM = "\x1b[2m"
@@ -150,10 +146,7 @@ def migrate_tools_to_bin() -> None:
 
 def check_deprecated_extension_dirs(base_dir: str, label: str) -> list[str]:
     warnings: list[str] = []
-    hooks_dir = Path(base_dir) / "hooks"
     tools_dir = Path(base_dir) / "tools"
-    if hooks_dir.exists():
-        warnings.append(f"{label} hooks/ directory found. Hooks have been renamed to extensions.")
     if tools_dir.exists():
         try:
             custom_tools = [
@@ -188,8 +181,6 @@ async def show_deprecation_warnings(warnings: list[str]) -> None:
     for warning in warnings:
         print(f"{_YELLOW}Warning: {warning}{_RESET}")
     print(f"{_YELLOW}\nMove your extensions to the extensions/ directory.{_RESET}")
-    print(f"{_YELLOW}Migration guide: {MIGRATION_GUIDE_URL}{_RESET}")
-    print(f"{_YELLOW}Documentation: {EXTENSIONS_DOC_URL}{_RESET}")
     print(f"{_DIM}\nPress any key to continue...{_RESET}")
     if sys.stdin.isatty():
         await asyncio.to_thread(_read_single_keypress)

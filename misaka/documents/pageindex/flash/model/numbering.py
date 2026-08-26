@@ -30,8 +30,8 @@ from .span_line import (
 # - dotted lowercase ivx (group 3)
 _NUMBERING_PREFIX_RE = regex_module.compile(
     r"^(?:"
-    r"([IVX]+|[1-9\uff11-\uff19]\p{Number}?)(?:[.\uff0e\uff61\u3002):]|-\P{Number}|-$|[" + _UNICODE_WHITESPACE_CLASS + r"]|$)"
-    r"|(?:([A-Ha-h])|([ivx]))[.\uff0e\uff61\u3002)]"
+    r"([IVX]+|[1-9１-９]\p{Number}?)(?:[.．｡。):]|-\P{Number}|-$|[" + _UNICODE_WHITESPACE_CLASS + r"]|$)"
+    r"|(?:([A-Ha-h])|([ivx]))[.．｡。)]"
     r")"
 )
 

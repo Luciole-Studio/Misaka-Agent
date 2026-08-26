@@ -80,6 +80,7 @@ def load_prompt_templates(options: LoadPromptTemplatesOptions) -> list[PromptTem
 
     templates: list[PromptTemplate] = []
     global_prompts_dir = os.path.join(resolved_agent_dir, "prompts")
+    project_prompts_dir = os.path.join(resolved_cwd, ".misaka", "prompts")
 
     def is_under_path(target: str, root: str) -> bool:
         normalized_root = os.path.abspath(root)
@@ -94,6 +95,11 @@ def load_prompt_templates(options: LoadPromptTemplatesOptions) -> list[PromptTem
             return create_synthetic_source_info(
                 resolved_path,
                 {"source": "local", "scope": "user", "baseDir": global_prompts_dir},
+            )
+        if is_under_path(resolved_path, project_prompts_dir):
+            return create_synthetic_source_info(
+                resolved_path,
+                {"source": "local", "scope": "project", "baseDir": project_prompts_dir},
             )
         base_dir = resolved_path if os.path.isdir(resolved_path) else os.path.dirname(resolved_path)
         return create_synthetic_source_info(

@@ -2,13 +2,12 @@
 
 The daemon launches this in a pane and owns the claim; everything after that is
 this process's job (phase 2, the card drives itself): the ``Supervisor`` thread
-watches its own submission (commit + verifying), heartbeat, blocked report, and
-timeout, and settles the card when the session exits. The daemon only hosts the
-pane. Verification feedback from the previous round is folded into the prompt, and
+watches its own submission (commit; submission is acceptance), heartbeat, blocked
+report, and timeout, and settles the card when the session exits. The daemon only hosts
+the pane, and
 an existing session is resumed when there is one.
 """
 import asyncio
-import json
 import os
 import sys
 import threading
@@ -18,7 +17,7 @@ from misaka.config import CFG
 from misaka.platform import tasks as db
 from misaka.network import worker
 
-ACTIVE_STATUSES = ("running", "review", "verifying", "finalizing")
+ACTIVE_STATUSES = ("running", "review")
 
 
 class Supervisor:
@@ -44,15 +43,9 @@ class Supervisor:
         return self
 
     def _submit(self, con, report):
-        from misaka.platform import repo
-        tid = self.task["id"]
-        repo.commit_card(self.run_dir, tid, report, f"card {tid}: submit")
-        if db.mark_verifying(con, tid, generation=self.generation, claim_lock=self.lock):
-            db.add_event(con, tid, "submitted",
-                         {"summary": report["summary"], "artifacts": report["artifacts"],
-                          "notes": report.get("notes", ""),
-                          "uncertain": report.get("uncertain", [])},
-                         generation=self.generation)
+        from misaka.network import dispatch
+        dispatch.accept(con, self.task, report, generation=self.generation, claim_lock=self.lock,
+                        workspace=self.run_dir)
         self.submitted = True
 
     def _step(self, con):
@@ -148,12 +141,6 @@ def launch(task_id, resume_only=False, say=None):
     if resume_only and task["status"] in ACTIVE_STATUSES:
         # The live session is being written by another process; do not open it twice.
         sys.exit(f"Card {task_id} is still running in another pane ({task['status']}); open that pane instead.")
-    feedback = db.latest_payload(con, task_id, "verify_fail", generation=task["generation"])
-    if feedback:
-        fixes = json.loads(feedback).get("must_fix", [])
-        if fixes:
-            task["feedback"] = ("⚠️ The previous review failed. Fix the following before resubmitting (rewrite deliverables to the latest requirements):\n"
-                                + "\n".join(f"- {x}" for x in fixes))
     workspace = db.workspace_for(task)
     if not os.path.isdir(workspace):
         # The card's folder is the project; a deleted or moved one is never recreated in silence.

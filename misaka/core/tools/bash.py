@@ -19,7 +19,7 @@ from misaka.core.tools.output_accumulator import OutputAccumulator, OutputAccumu
 from misaka.core.tools.render_utils import get_text_output, invalid_arg_text
 from misaka.core.tools.tool_definition_wrapper import wrap_tool_definition
 from misaka.core.tools.truncate import DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, TruncationResult, format_size
-from misaka.modes.interactive.theme.theme import theme
+from misaka.ui.tui.interactive.theme.theme import theme
 from misaka.utils.child_process import wait_for_child_process
 from misaka.utils.shell import (
     get_shell_config,
@@ -28,7 +28,7 @@ from misaka.utils.shell import (
     track_detached_child_pid,
     untrack_detached_child_pid,
 )
-from misaka.tui import Container, Text, truncateToWidth
+from misaka.ui.tui import Container, Text, truncateToWidth
 
 _BASH_PREVIEW_LINES = 5
 _BASH_UPDATE_THROTTLE_SECONDS = 0.1
@@ -102,8 +102,8 @@ class _CollapsedBashPreview:
         self._state = state
 
     def render(self, width: int) -> list[str]:
-        from misaka.modes.interactive.components.keybinding_hints import key_hint
-        from misaka.modes.interactive.components.visual_truncate import truncate_to_visual_lines
+        from misaka.ui.tui.interactive.components.keybinding_hints import key_hint
+        from misaka.ui.tui.interactive.components.visual_truncate import truncate_to_visual_lines
 
         if self._state.cachedLines is None or self._state.cachedWidth != width:
             preview = truncate_to_visual_lines(self._styled_output, _BASH_PREVIEW_LINES, width)
@@ -476,7 +476,7 @@ def create_bash_tool_definition(
             f"{resolved_options.commandPrefix}\n{parsed.command}" if resolved_options.commandPrefix else parsed.command
         )
         spawn_context = _resolve_spawn_context(resolved_command, cwd, resolved_options.spawnHook)
-        output = OutputAccumulator(OutputAccumulatorOptions(tempFilePrefix="harn-bash"))
+        output = OutputAccumulator(OutputAccumulatorOptions(tempFilePrefix="misaka-bash"))
         loop = asyncio.get_running_loop()
         update_handle: asyncio.TimerHandle | None = None
         update_dirty = False

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from misaka.tui import Box, Container, DefaultTextStyle, Markdown, MarkdownTheme
+from misaka.ui.tui import Box, Container, DefaultTextStyle, Markdown, MarkdownTheme
 
-from misaka.modes.interactive.theme.theme import get_markdown_theme, theme
+from misaka.ui.tui.interactive.theme.theme import get_markdown_theme, theme
 
 OSC133_ZONE_START = "\x1b]133;A\x07"
 OSC133_ZONE_END = "\x1b]133;B\x07"

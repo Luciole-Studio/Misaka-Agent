@@ -135,7 +135,6 @@ from misaka.core.tools.render_utils import (
     replaceTabs,
     shorten_path,
     shortenPath,
-    str,
     str_value,
 )
 from misaka.core.tools.tool_definition_wrapper import (

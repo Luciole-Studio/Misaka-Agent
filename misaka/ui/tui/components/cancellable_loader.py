@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from misaka.tui.keybindings import getKeybindings
+from misaka.ui.tui.keybindings import getKeybindings
 
 from .loader import Loader
 

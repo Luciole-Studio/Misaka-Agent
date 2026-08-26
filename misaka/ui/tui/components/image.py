@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from misaka.tui.utils import truncateToWidth
-from misaka.tui.terminal_image import (
+from misaka.ui.tui.utils import truncateToWidth
+from misaka.ui.tui.terminal_image import (
     ImageDimensions,
     allocateImageId,
     getCapabilities,
@@ -15,7 +15,7 @@ from misaka.tui.terminal_image import (
     imageFallback,
     renderImage,
 )
-from misaka.tui.tui import Component
+from misaka.ui.tui.tui import Component
 
 
 @dataclass(slots=True)

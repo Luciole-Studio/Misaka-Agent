@@ -7,7 +7,7 @@ from misaka.network import messages
 
 def activate(spec):
     can_delegate = delegates(spec)
-    if spec.kind in ("one-shot", "beast") and not can_delegate:
+    if spec.kind == "beast" and not can_delegate:
         return None
     route = None
     if can_delegate:

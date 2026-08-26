@@ -33,7 +33,7 @@ from misaka.core.tools.file_mutation_queue import with_file_mutation_queue
 from misaka.core.tools.path_utils import resolve_to_cwd
 from misaka.core.tools.render_utils import invalid_arg_text
 from misaka.core.tools.tool_definition_wrapper import wrap_tool_definition
-from misaka.tui import Box, Container, Spacer, Text
+from misaka.ui.tui import Box, Container, Spacer, Text
 
 type EditPreview = EditDiffResult | EditDiffError
 
@@ -335,7 +335,7 @@ def _format_edit_result(
     theme_obj: Any,
     is_error: bool,
 ) -> str | None:
-    from misaka.modes.interactive.components.diff import render_diff
+    from misaka.ui.tui.interactive.components.diff import render_diff
 
     raw_path = _string_arg(_value(args, "file_path", _value(args, "path")))
     preview_diff = preview.diff if isinstance(preview, EditDiffResult) else None
@@ -373,7 +373,7 @@ def _build_edit_call_component(
     args: RenderableEditArgs | None,
     theme_obj: Any,
 ) -> _EditCallRenderComponent:
-    from misaka.modes.interactive.components.diff import render_diff
+    from misaka.ui.tui.interactive.components.diff import render_diff
 
     component.setBgFn(_get_edit_header_bg(component.preview, component.settledError, theme_obj))
     component.clear()

@@ -8,11 +8,11 @@ from typing import Any, Literal
 
 from misaka.ai.models import modelsAreEqual
 from misaka.ai.types import Model
-from misaka.tui import Container, Input, Spacer, Text, fuzzyFilter, getKeybindings
+from misaka.ui.tui import Container, Input, Spacer, Text, fuzzyFilter, getKeybindings
 
 from misaka.core.model_registry import ModelRegistry
 from misaka.core.settings_manager import SettingsManager
-from misaka.modes.interactive.theme.theme import theme
+from misaka.ui.tui.interactive.theme.theme import theme
 
 from .dynamic_border import DynamicBorder
 from .keybinding_hints import keyHint

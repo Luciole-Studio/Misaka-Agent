@@ -205,7 +205,7 @@ def _number_at_token_index(tokens: TokenView, index: int) -> int:
     from ..labels import PERIOD_CHARS as period_chars
     if not (
         next_tok.str in period_chars
-        or next_tok.str in (")", "]", "\uff0e", "\uff61", "\u3002", "\uff09", "\uff3d", "\u3011")
+        or next_tok.str in (")", "]", "．", "｡", "。", "）", "］", "】")
     ):
         return 0
     val = token_numeric_value(token)

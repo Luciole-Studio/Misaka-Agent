@@ -6,12 +6,12 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from misaka.tui import TUI, ProcessTerminal
+from misaka.ui.tui import TUI, ProcessTerminal
 
 from misaka.core.package_manager import ResolvedPaths
 from misaka.core.settings_manager import SettingsManager
-from misaka.modes.interactive.components.config_selector import ConfigSelectorComponent
-from misaka.modes.interactive.theme.theme import init_theme, stop_theme_watcher
+from misaka.ui.tui.interactive.components.config_selector import ConfigSelectorComponent
+from misaka.ui.tui.interactive.theme.theme import init_theme, stop_theme_watcher
 
 
 @dataclass(slots=True)

@@ -41,14 +41,14 @@ def register(harn):
             ctx.ui.notify(f"Already using {cur}.", "info")
             return
         if os.environ.get("MISAKA_NET_PANE"):
-            from misaka.net import client as net
+            from misaka.ui.panel import client as net
             argv = [sys.executable, "-m", "misaka", "chat"]
             title = "Last Order" if name == "last-order" else name
             if name != "last-order":
                 argv += ["--as", name]
             out = net.request("pane.create",
                               {"argv": argv, "cwd": os.getcwd(), "title": title,
-                               "parent": os.environ["MISAKA_NET_PANE"]})
+                               "place": {"tab": os.environ["MISAKA_NET_PANE"]}})   # a tab of her own
             ctx.ui.notify(
                 f"{name} is now open in pane {out['pane_id']}. "
                 "Select it from the sidebar or press Ctrl+B and its number.",
@@ -77,9 +77,4 @@ SESSION_KINDS = {"foreground", "dm"}
 
 
 def activate(spec):
-    from misaka.network import roster
-
-    def both(harn):
-        register(harn)
-        roster.register(harn)
-    return both
+    return register

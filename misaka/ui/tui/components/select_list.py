@@ -6,8 +6,8 @@ import re
 
 from dataclasses import dataclass
 
-from misaka.tui.keybindings import getKeybindings
-from misaka.tui.utils import truncateToWidth, visibleWidth
+from misaka.ui.tui.keybindings import getKeybindings
+from misaka.ui.tui.utils import truncateToWidth, visibleWidth
 
 DEFAULT_PRIMARY_COLUMN_WIDTH = 32
 PRIMARY_COLUMN_GAP = 2

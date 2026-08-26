@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from misaka.tui import Text
+from misaka.ui.tui import Text
 
 
 @dataclass(slots=True)

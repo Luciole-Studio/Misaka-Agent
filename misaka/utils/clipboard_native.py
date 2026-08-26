@@ -82,6 +82,17 @@ def _load_clipboard(
     return _NativeClipboardImpl(pyperclip, image_grab)
 
 
-clipboard = _load_clipboard()
+_CLIPBOARD: ClipboardModule | None = None
+_CLIPBOARD_LOADED = False
 
-__all__ = ["clipboard"]
+
+def get_clipboard() -> ClipboardModule | None:
+    """The native clipboard backend, loaded on first use (pyperclip/PIL are slow imports)."""
+    global _CLIPBOARD, _CLIPBOARD_LOADED
+    if not _CLIPBOARD_LOADED:
+        _CLIPBOARD = _load_clipboard()
+        _CLIPBOARD_LOADED = True
+    return _CLIPBOARD
+
+
+__all__ = ["get_clipboard"]

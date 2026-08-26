@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from misaka.tui.tui import Component
-from misaka.tui.utils import applyBackgroundToLine, visibleWidth
+from misaka.ui.tui.tui import Component
+from misaka.ui.tui.utils import applyBackgroundToLine, visibleWidth
 
 
 @dataclass(slots=True)

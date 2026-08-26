@@ -6,9 +6,9 @@ import os
 import re
 from typing import Any
 
-from misaka.tui import truncateToWidth, visibleWidth
+from misaka.ui.tui import truncateToWidth, visibleWidth
 
-from misaka.modes.interactive.theme.theme import theme
+from misaka.ui.tui.interactive.theme.theme import theme
 
 
 def _value(obj: Any, name: str, default: Any = None) -> Any:

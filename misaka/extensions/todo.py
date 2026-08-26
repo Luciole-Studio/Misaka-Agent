@@ -5,4 +5,4 @@ SESSION_KINDS = {"card", "beast"}
 
 
 def activate(spec):
-    return todo.tools_for(spec.task_id) if spec.task_id else None
+    return todo.tools_for(spec.task_id, spec.sender or spec.role.rsplit("/", 1)[-1]) if spec.task_id else None

@@ -8,7 +8,7 @@ import subprocess
 import sys
 from typing import Any, Protocol
 
-from misaka.utils.clipboard_native import clipboard as native_clipboard
+from misaka.utils.clipboard_native import get_clipboard as _get_native_clipboard_backend
 
 MAX_OSC52_ENCODED_LENGTH = 100_000
 _DEFAULT_TIMEOUT_MS = 5_000
@@ -152,7 +152,7 @@ def _platform() -> str:
 
 
 def _get_native_clipboard() -> _NativeClipboard | None:
-    return native_clipboard
+    return _get_native_clipboard_backend()
 
 
 copyToClipboard = copy_to_clipboard

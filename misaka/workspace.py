@@ -133,62 +133,6 @@ def outline(bcon, task_id=None, *, workspace=None, run_id=None, research_store=N
             "nodes": top_nodes}
 
 
-def read(bcon, node_id, max_chars=6000, *, workspace=None, research_store=None):
-    """Read one workspace node by ID."""
-    if node_id.startswith("task:"):
-        tid, _, part = node_id[5:].partition("#")
-        t = bcon.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
-        if not t:
-            return None
-        if part == "contract" or not part:
-            return (
-                f"# [{t['id']}] {t['title']}\nStatus: {t['status']} · Assignee: {t['assignee']}\n\n{t['body'] or ''}"
-            )
-        return None
-    if node_id.startswith("doc:"):
-        did, _, page = node_id[4:].partition("#p")
-        if page:
-            txt = corpus.read_page(did, int(page))
-            return txt[:max_chars] if txt else None
-        return corpus.read_pages(did, 1, 10 ** 9, max_chars=max_chars) or None
-    if node_id.startswith("artifact:"):
-        if research_store is None:
-            return None
-        aid, _, anchor = node_id[9:].partition("#L")
-        row = research_store.artifact(bcon, aid)
-        if not row:
-            return None
-        try:
-            text = open(row["path"], encoding="utf-8", errors="replace").read()
-        except OSError:
-            return None
-        if not anchor:
-            return text[:max_chars]
-        lines = text.splitlines()
-        start = max(0, int(anchor) - 1)
-        level = len(lines[start]) - len(lines[start].lstrip("#")) if start < len(lines) else 0
-        end = len(lines)
-        for i in range(start + 1, len(lines)):
-            stripped = lines[i].lstrip()
-            if stripped.startswith("#"):
-                next_level = len(stripped) - len(stripped.lstrip("#"))
-                if next_level <= level:
-                    end = i
-                    break
-        return "\n".join(lines[start:end])[:max_chars]
-    if node_id == "project" or node_id.startswith("project#L"):
-        if not _project_file(workspace):
-            return None
-        _, _, anchor = node_id.partition("#L")
-        text = open(os.path.join(workspace, "PROJECT.md"), encoding="utf-8", errors="replace").read()
-        if not anchor:
-            return text[:max_chars]
-        lines = text.splitlines()
-        start = max(0, int(anchor) - 1)
-        return "\n".join(lines[start:])[:max_chars]
-    return None
-
-
 def render(tree, depth=0, out=None):
     """Render a workspace tree as indented text."""
     out = [] if out is None else out

@@ -35,7 +35,6 @@ from misaka.extensions.sisters.subagent.runtime import (
 )
 
 AGENT_TOOL_NAME = "Agent"
-LEGACY_AGENT_TOOL_NAME = "Task"
 TASK_OUTPUT_TOOL_NAME = "TaskOutput"
 TASK_STOP_TOOL_NAME = "TaskStop"
 SUBAGENT_TOOL_NAMES = (
@@ -146,7 +145,7 @@ def _render_result(result: Any, context: Any = None, *_args: Any) -> Any:
     """Compact task line in the TUI; rendering failure never affects execution."""
 
     try:
-        from misaka.tui import Text
+        from misaka.ui.tui import Text
 
         details = result.get("details", {}) if isinstance(result, dict) else {}
         status = details.get("status")
@@ -349,18 +348,6 @@ def bind(
     return bound
 
 
-def register(harn: Any) -> None:
-    """Legacy factory: capture the process environment once, then bind it."""
-
-    context = RoleContext.capture()
-    permitted = allows_subagents(
-        context.profile_dir,
-        context.role,
-        _env_role=context.role,
-    )
-    _register(harn, context, permitted)
-
-
 async def wait_for_background_tasks() -> None:
     """Keep a nested child process alive until its detached agents settle."""
 
@@ -459,7 +446,6 @@ def has_background_task_records() -> bool:
 
 __all__ = [
     "AGENT_TOOL_NAME",
-    "LEGACY_AGENT_TOOL_NAME",
     "TASK_OUTPUT_TOOL_NAME",
     "TASK_STOP_TOOL_NAME",
     "SUBAGENT_TOOL_NAMES",

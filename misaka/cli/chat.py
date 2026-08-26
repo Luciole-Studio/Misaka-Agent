@@ -41,7 +41,7 @@ def assembly(who):
         return prof, CFG["default_model"]
     prof = os.path.join(CFG["roles_root"], "last_order")
     _migrate_lo_soul(prof)
-    return prof, "claude-opus-5"
+    return prof, CFG["lo_model"]
 
 
 def launch(who, model=None, cont=False, pick=False, session=None):

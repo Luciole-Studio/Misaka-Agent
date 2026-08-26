@@ -189,7 +189,7 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
         thinking_level = settings_manager.getDefaultThinkingLevel() or DEFAULT_THINKING_LEVEL
     thinking_level = "off" if model is None else clamp_thinking_level(model, thinking_level)
 
-    default_active_tool_names: list[ToolName] = ["read", "bash", "edit", "write"]
+    default_active_tool_names: list[ToolName] = ["read", "bash", "edit", "write", "grep", "find", "ls"]
     # defaultTools setting = startup tool allowlist when --tools/-nt is not given explicitly (pi 4d9aa837c)
     configured_default_tools = settings_manager.getDefaultTools()
     allowed_tool_names = resolved_options.get("tools")

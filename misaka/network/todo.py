@@ -1,4 +1,4 @@
-"""Nested, durable to-do items for one task card."""
+"""Per-card tools: nested, durable to-do items, and a line in the card's log."""
 import secrets
 import time
 
@@ -110,7 +110,7 @@ NAG_EMPTY_AFTER = 10
 NAG_STALE_AFTER = 25
 
 
-def tools_for(task_id):
+def tools_for(task_id, sender):
     """Return a registrar that adds the ``misaka_todo`` tools and reminder hooks for one task card."""
 
     def register(harn):
@@ -188,6 +188,51 @@ def tools_for(task_id):
             parameters=ListParams.model_json_schema(), execute=list_exec,
             promptSnippet='Check the list of sub-tasks for this card',
             promptGuidelines=["After context compaction, use `misaka_todo_list` to recover the task's current work state."]))
+
+        class MyCardParams(BaseModel):
+            pass
+
+        async def my_card_exec(tool_call_id, raw, signal, on_update, ctx):
+            from misaka.platform import cards
+            c = con()
+            row = bdb.get(c, task_id)
+            state, parents = bdb.dependency_state(c, task_id)
+            lines = [f"{row['id']}  {row['status']}  assignee {row['assignee']}"
+                     + (f"  reviewer {row['reviewer']}" if row["reviewer"] else ""),
+                     f"dependencies: {state}" + (f" ({', '.join(str(p) for p in parents)})" if parents else " (none)"),
+                     f"generation {row['generation']}  timeout {row['timeout_seconds']}s"]
+            if row["block_reason"]:
+                lines.append(f"blocked: {row['block_reason']}")
+            log = cards.read_log(row["workspace"], task_id)
+            if log:
+                lines += ["log:", *(f"  {line}" for line in log[-20:])]
+            return _text("\n".join(lines))
+
+        harn.registerTool(ToolDefinition(
+            name="misaka_my_card", label="View my card",
+            description="This card as the board sees it: status, dependencies and whether they are done, the reviewer "
+                        "if one is named, a block reason, and the last lines of the card's log.",
+            parameters=MyCardParams.model_json_schema(), execute=my_card_exec,
+            promptSnippet="Check this card's status, dependencies, and log",
+            promptGuidelines=["Check the card before waiting on something: a blocked dependency or a named reviewer changes what to do next."]))
+
+        class NoteParams(BaseModel):
+            text: str = Field(description="One line for the card's log: a decision, a change of course, a dead end.")
+
+        async def note_exec(tool_call_id, raw, signal, on_update, ctx):
+            from misaka.platform import cards
+            p = raw if isinstance(raw, NoteParams) else NoteParams(**(raw or {}))
+            row = bdb.get(con(), task_id)
+            cards.append_log(row["workspace"], task_id, sender, p.text)
+            return _text("Logged on the card.")
+
+        harn.registerTool(ToolDefinition(
+            name="misaka_card_note", label="Log a note on the card",
+            description="Append one line to this card's log (its `## log` section in the card file): a decision, a change "
+                        "of course, a dead end. Last Order reads the log when she looks at the card.",
+            parameters=NoteParams.model_json_schema(), execute=note_exec,
+            promptSnippet="Log a decision or change of course on this card",
+            promptGuidelines=["Log why you changed course or dropped a line of inquiry as it happens; report.json is for the end."]))
 
         def _field(event, key, default=None):
             try:

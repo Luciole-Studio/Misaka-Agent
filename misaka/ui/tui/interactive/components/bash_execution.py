@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from misaka.tui import Container, Loader, Spacer, Text
+from misaka.ui.tui import Container, Loader, Spacer, Text
 
 from misaka.core.tools.truncate import (
     DEFAULT_MAX_BYTES,
@@ -14,10 +14,10 @@ from misaka.core.tools.truncate import (
     TruncationResult,
     truncate_tail,
 )
-from misaka.modes.interactive.components.dynamic_border import DynamicBorder
-from misaka.modes.interactive.components.keybinding_hints import key_hint, key_text
-from misaka.modes.interactive.components.visual_truncate import truncate_to_visual_lines
-from misaka.modes.interactive.theme.theme import theme
+from misaka.ui.tui.interactive.components.dynamic_border import DynamicBorder
+from misaka.ui.tui.interactive.components.keybinding_hints import key_hint, key_text
+from misaka.ui.tui.interactive.components.visual_truncate import truncate_to_visual_lines
+from misaka.ui.tui.interactive.theme.theme import theme
 from misaka.utils.ansi import strip_ansi
 
 PREVIEW_LINES = 20

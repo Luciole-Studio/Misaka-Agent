@@ -17,7 +17,7 @@ from ..tokens import Token, TokenView, wrap_tokens, enumerate_tokens, last_token
 # --------------------------------------------------------------------------- #
 
 
-PERIOD_CHARS = {".", "\uff0e", "\uff61", "\u3002"}
+PERIOD_CHARS = {".", "．", "｡", "。"}                  # period-character set
 
 
 # Structural-number pattern: Unicode numeric code points, optional letter

@@ -26,7 +26,7 @@ from misaka.core.export_html.tool_renderer import (
     trim_rendered_result_lines,
 )
 from misaka.core.session_manager import SessionManager
-from misaka.modes.interactive.theme.theme import (
+from misaka.ui.tui.interactive.theme.theme import (
     get_resolved_theme_colors,
     get_theme_export_colors,
 )

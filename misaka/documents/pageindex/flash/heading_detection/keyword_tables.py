@@ -69,7 +69,7 @@ EQUATION_KEYWORDS_TRIE = build_trie(
         "equació", "rovnica", "rovnice", "równanie", "vergelijking",
         "jednadžba", "jöfnu", "võrrand", "vienādojums", "lygtis",
         "enačba", "egyenlet", "phương trình", "εξίσωση",
-        "\u65b9\u7a0b", "\ubc29\uc815\uc2dd", "уравнение", "рівняння", "раўнанне", "једначина",
+        "方程", "방정식", "уравнение", "рівняння", "раўнанне", "једначина",
     ],
     set_case_fold(TrieConfig(), True),
 )

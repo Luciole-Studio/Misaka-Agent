@@ -46,7 +46,7 @@ class OutputAccumulator:
         self.maxLines = resolved.maxLines if resolved.maxLines is not None else DEFAULT_MAX_LINES
         self.maxBytes = resolved.maxBytes if resolved.maxBytes is not None else DEFAULT_MAX_BYTES
         self.maxRollingBytes = max(self.maxBytes * 2, 1)
-        self.tempFilePrefix = resolved.tempFilePrefix or "harn-output"
+        self.tempFilePrefix = resolved.tempFilePrefix or "misaka-output"
         self.decoder = codecs.getincrementaldecoder("utf-8")()
 
         self.rawChunks: list[bytes] = []

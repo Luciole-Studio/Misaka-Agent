@@ -6,7 +6,7 @@ import difflib
 import re
 from dataclasses import dataclass
 
-from misaka.modes.interactive.theme.theme import theme
+from misaka.ui.tui.interactive.theme.theme import theme
 
 _DIFF_LINE_RE = re.compile(r"^([+\-\s])(\s*\d*)\s(.*)$")
 _TOKEN_RE = re.compile(r"\S+\s*|\s+")

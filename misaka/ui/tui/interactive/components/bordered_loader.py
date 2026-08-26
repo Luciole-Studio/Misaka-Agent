@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from misaka.tui import CancellableLoader, Container, Loader, Spacer, Text
-from misaka.tui.components import AbortController
+from misaka.ui.tui import CancellableLoader, Container, Loader, Spacer, Text
+from misaka.ui.tui.components import AbortController
 
-from misaka.modes.interactive.components.dynamic_border import DynamicBorder
-from misaka.modes.interactive.components.keybinding_hints import key_hint
+from misaka.ui.tui.interactive.components.dynamic_border import DynamicBorder
+from misaka.ui.tui.interactive.components.keybinding_hints import key_hint
 
 
 class BorderedLoader(Container):

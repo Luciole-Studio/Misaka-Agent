@@ -7,7 +7,7 @@ from typing import Literal
 
 from misaka.extensions import discover
 
-type SessionKind = Literal["foreground", "dm", "card", "child", "one-shot", "beast", "bare"]
+type SessionKind = Literal["foreground", "dm", "card", "child", "beast", "bare"]
 
 
 @dataclass(frozen=True, slots=True)

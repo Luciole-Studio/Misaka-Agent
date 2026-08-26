@@ -17,14 +17,14 @@ import unicodedata
 # 3 lowercase letter (Ll)
 # 4 other letter (Lo) -- CJK ideographs, syllabics, etc.
 # 5 mark (Mc, Me, Mn)
-# 6 sentence-ending punctuation
+# 6 sentence-end punct -- . ? ! ｡ 。 ？ ！ ．
 # 7 connector / dash -- _ - — − ⁻ ₋ etc.
 # 8 other punctuation
 # 9 math symbol (Sm)
 # 10 whitespace
 # 11 other (symbols, format, control, unassigned)
 
-_SENTENCE_END_CHARS = frozenset(".?!\uff61\u3002\uff1f\uff01\uff0e")
+_SENTENCE_END_CHARS = frozenset(".?!｡。？！．")
 _MINUS_SIGN_CHARS = frozenset("−⁻₋")  # minus, superscript/subscript minus
 
 

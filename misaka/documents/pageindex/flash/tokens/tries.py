@@ -309,7 +309,7 @@ def strip_leading_if_in(tokens: TokenView, other_items: set) -> TokenView:
 
 
 # Six comma variants only, not general punctuation.
-COMMA_CHARS: set[str] = {",", "\ufe50", "\uff0c", "\u3001", "\ufe51", "\uff64"}
+COMMA_CHARS: set[str] = {",", "﹐", "，", "、", "﹑", "､"}
 
 
 def strip_trailing_comma(tokens: TokenView) -> TokenView:

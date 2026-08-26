@@ -7,9 +7,9 @@ import os
 import shlex
 
 from misaka.config import CFG
-from misaka.modes.interactive.components.ask_user_question import AskUserQuestionComponent
-from misaka.platform import budget, notifications, tasks as task_store
-from misaka.research import planner, runs, tools as research_tools, workflow
+from misaka.ui.tui.interactive.components.ask_user_question import AskUserQuestionComponent
+from misaka.platform import budget, tasks as task_store
+from misaka.research import node as research_node, planner, runs, tools as research_tools, workflow
 
 _CON = None
 _DRIVERS = {}
@@ -98,19 +98,16 @@ def _status(con, target, workspace):
     )
 
 
-def bind(runner_factory, worker):
+def bind(worker):
     def factory(harn):
-        return register(harn, runner_factory=runner_factory, worker=worker)
+        return register(harn, worker=worker)
     return factory
 
 
-def register(harn, *, runner_factory=None, worker=None):
+def register(harn, *, worker=None):
     con = _con()
-    runtime = runner_factory(harn, _con, _cfg) if runner_factory else workflow.NullRunner()
+    spawner = research_node.spawner()     # nodes are processes: panes beside this Last Order, or plain children
     research_tools.register(harn, _con)
-    terminal_subscription = notifications.subscribe(
-        con, "last-order", "research-harness", "research_run", "*", "terminal"
-    )
 
     def send_progress(content, *, run_id=None, details=None):
         payload = dict(details or {})
@@ -121,47 +118,6 @@ def register(harn, *, runner_factory=None, worker=None):
              "content": content, "details": payload},
             {"deliverAs": "followUp", "triggerTurn": False},
         )
-
-    def deliver_terminals(preferred=None):
-        preferred = preferred or {}
-        delivered = set()
-        for _ in range(100):
-            event = notifications.claim_next(con, terminal_subscription)
-            if event is None:
-                break
-            run_id = event["resource_id"]
-            try:
-                payload = json.loads(event["payload"] or "{}")
-            except (TypeError, ValueError):
-                payload = {}
-            result = preferred.get(run_id) or {}
-            final = result.get("final") or {}
-            status = payload.get("status") or result.get("reason") or "done"
-            content = final.get("content")
-            if not content:
-                artifact_id = payload.get("final_artifact")
-                artifact = runs.artifact(con, artifact_id) if artifact_id else None
-                suffix = f"\nFinal artifact: {artifact['path']}" if artifact else ""
-                error = f"\nReason: {payload['error']}" if payload.get("error") else ""
-                content = f"Research run `{run_id}` finished with status {status}.{suffix}{error}"
-            try:
-                harn.sendMessage(
-                    {"customType": "research-error" if status == "failed" else "research-final",
-                     "display": True, "content": content,
-                     "details": {"run_id": run_id, "result": result.get("run"),
-                                 "status": status}},
-                    {"deliverAs": "followUp", "triggerTurn": False},
-                )
-            except Exception as error:
-                notifications.nack(
-                    con, terminal_subscription, event["id"], event["lease_token"], error
-                )
-                break
-            notifications.ack(
-                con, terminal_subscription, event["id"], event["lease_token"]
-            )
-            delivered.add(run_id)
-        return delivered
 
     async def drive(run_id, ctx):
         try:
@@ -174,8 +130,7 @@ def register(harn, *, runner_factory=None, worker=None):
                 send_progress(content, run_id=run_id, details=event)
 
             result = await workflow.run(
-                con, dict(_cfg()), runtime, worker, run_id=run_id, context=ctx,
-                tool_call_id=f"research:{run_id}", progress=progress)
+                con, dict(_cfg()), spawner, worker, run_id=run_id, progress=progress)
             if result["reason"] == "waiting_input":
                 questions = "\n".join(f"- {q}" for q in result.get("questions") or [])
                 content = (f"""Research run `{run_id}` needs clarification:
@@ -189,26 +144,26 @@ Continue with `/research resume {run_id} YOUR_ANSWER`.""")
                     {"deliverAs": "followUp", "triggerTurn": False},
                 )
             else:
-                if run_id not in deliver_terminals({run_id: result}):
-                    final = result.get("final") or {}
-                    harn.sendMessage(
-                        {"customType": "research-final", "display": True,
-                         "content": final.get("content")
-                                    or f"Research run `{run_id}` finished: {result['reason']}.",
-                         "details": {"run_id": run_id, "result": result.get("run")}},
-                        {"deliverAs": "followUp", "triggerTurn": False},
-                    )
+                final = result.get("final") or {}
+                content = final.get("content") or f"Research run `{run_id}` finished: {result['reason']}."
+                if final.get("survey_path"):
+                    content += f"\n\n---\nSurvey by node: `{final['survey_path']}`"
+                harn.sendMessage(
+                    {"customType": "research-final", "display": True,
+                     "content": content,
+                     "details": {"run_id": run_id, "result": result.get("run")}},
+                    {"deliverAs": "followUp", "triggerTurn": False},
+                )
         except asyncio.CancelledError:
             raise
         except Exception as error:  # infrastructure failures stay visible, and the run stays resumable
-            if run_id not in deliver_terminals():
-                harn.sendMessage(
-                    {"customType": "research-error", "display": True,
-                     "content": f"Research run `{run_id}` paused: {type(error).__name__}: {error}\n"
-                                f"Continue with `/research resume {run_id}` after fixing the problem.",
-                     "details": {"run_id": run_id}},
-                    {"deliverAs": "followUp", "triggerTurn": False},
-                )
+            harn.sendMessage(
+                {"customType": "research-error", "display": True,
+                 "content": f"Research run `{run_id}` paused: {type(error).__name__}: {error}\n"
+                            f"Continue with `/research resume {run_id}` after fixing the problem.",
+                 "details": {"run_id": run_id}},
+                {"deliverAs": "followUp", "triggerTurn": False},
+            )
         finally:
             _DRIVERS.pop(run_id, None)
 
@@ -275,11 +230,6 @@ Continue with `/research resume {run_id} YOUR_ANSWER`.""")
         return {"action": "handled"}
 
     harn.on("input", capture_question)
-
-    async def collect_terminal_notifications(_event, _ctx):
-        deliver_terminals()
-
-    harn.on("session_start", collect_terminal_notifications)
 
     async def command(raw, ctx):
         try:
@@ -392,17 +342,10 @@ User clarification: {spec['clarification']}""", run["id"]))
         for task in intake_tasks:
             task.cancel()
         drivers = list(_DRIVERS.items())
-        for run_id, _task in drivers:
+        for run_id, _task in drivers:       # node processes see the stop and drain; the daemon takes their panes down with the panel
             runs.request_stop(con, run_id)
-        for run_id, _task in drivers:
-            linked = runs.tasks(con, run_id)
-            await workflow._stop_active(
-                runtime, [row["id"] for row in linked if row["status"] in workflow.ACTIVE_TASKS],
-                _ctx,
-            )
             for row in runs.tasks(con, run_id):
-                changed = task_store.mark_stopped(con, row["id"])
-                if changed:
+                if task_store.mark_stopped(con, row["id"]):
                     task_store.add_event(con, row["id"], "frontend_shutdown")
         for _run_id, task in drivers:
             if not task.done():
@@ -411,9 +354,6 @@ User clarification: {spec['clarification']}""", run["id"]))
             await asyncio.gather(*(task for _run_id, task in drivers), return_exceptions=True)
         if intake_tasks:
             await asyncio.gather(*intake_tasks, return_exceptions=True)
-        close = getattr(runtime, "close", None)
-        if callable(close):
-            await close()
 
     harn.on("session_shutdown", cleanup)
 
@@ -422,5 +362,4 @@ SESSION_KINDS = {"foreground", "dm"}
 
 def activate(spec):
     from misaka.network import worker
-    from misaka.network.sister_runtime import SisterRuntime
-    return bind(lambda harn, con_factory, cfg_factory: SisterRuntime(harn, con_factory, cfg_factory), worker)
+    return bind(worker)

@@ -281,11 +281,11 @@ def check_report(workspace, con=None, task_id=None):
 def run_llm_json(profile_dir, prompt, provider, default_model,
                  cwd=None, tools=None, timeout=600, model=None,
                  usage_db=None, usage_task_id=None, usage_generation=None,
-                 usage_token_cap=None, on_event=None, raw=False, bare=False,
+                 usage_token_cap=None, on_event=None, raw=False,
                  soul=True, session_dir=None, continue_session=False,
                  thinking="low"):
-    """Run a one-shot session under ``profile_dir`` and extract the first JSON
-    object from its output. Returns ``(obj, raw_text, error)``."""
+    """Run a bare session under ``profile_dir`` (only the tools listed, no delegation) and extract
+    the first JSON object from its output. Returns ``(obj, raw_text, error)``."""
     from misaka.network import validate
 
     soul_path, cfg = _load_profile(profile_dir)
@@ -301,18 +301,14 @@ def run_llm_json(profile_dir, prompt, provider, default_model,
     role = profiles.role_of(profile_dir)
     from misaka.app.composition import SessionSpec, build_extensions
 
-    kind = "bare" if bare else "one-shot"
-    delegates = not bare and not profiles.is_last_order(profile_dir)
     allowed = list(tools or ())
-    if delegates:
-        allowed.extend(SUBAGENT_TOOLS)
     factories = build_extensions(SessionSpec(
         profile_dir=profile_dir,
         role=role,
         workspace=workdir,
-        kind=kind,
+        kind="bare",
         sender=role.rsplit("/", 1)[-1],
-        tool_ceiling=tuple(allowed) if delegates else None,
+        tool_ceiling=None,
     )) or None
     flags += ["-t", ",".join(dict.fromkeys(allowed))] if allowed else ["-nt"]
     if soul:
@@ -404,6 +400,7 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
         workspace=workspace,
         kind=kind,
         sender=sender,
+        receive_messages=True,          # a card hears Last Order (and her Sisters) at its next tool boundary
         task_id=task.get("id"),
         tool_ceiling=SUBAGENT_TOOLS if beast and delegates else None,
         skill_roots=skill_roots,

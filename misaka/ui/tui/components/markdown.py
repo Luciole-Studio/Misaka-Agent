@@ -11,13 +11,13 @@ from markdown_it.tree import SyntaxTreeNode
 
 
 def _render_latex_or_none(source: str):
-    from misaka.tui.latex import render_latex
+    from misaka.ui.tui.latex import render_latex
 
     return render_latex(source)
 
-from misaka.tui.terminal_image import getCapabilities, hyperlink, isImageLine
-from misaka.tui.tui import Component
-from misaka.tui.utils import applyBackgroundToLine, visibleWidth, wrapTextWithAnsi
+from misaka.ui.tui.terminal_image import getCapabilities, hyperlink, isImageLine
+from misaka.ui.tui.tui import Component
+from misaka.ui.tui.utils import applyBackgroundToLine, visibleWidth, wrapTextWithAnsi
 
 type StyleFn = Callable[[str], str]
 type HighlightCodeFn = Callable[[str, str | None], list[str]]

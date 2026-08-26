@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Protocol, runtime_checkable
 
-from misaka.tui.autocomplete import AutocompleteProvider
-from misaka.tui.tui import Component
+from misaka.ui.tui.autocomplete import AutocompleteProvider
+from misaka.ui.tui.tui import Component
 
 
 @runtime_checkable

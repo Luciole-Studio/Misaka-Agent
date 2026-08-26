@@ -6,10 +6,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
-from misaka.tui import Container, Input, Spacer, TruncatedText, fuzzyFilter, getKeybindings
+from misaka.ui.tui import Container, Input, Spacer, TruncatedText, fuzzyFilter, getKeybindings
 
 from misaka.core.auth_storage import AuthStatus, AuthStorage
-from misaka.modes.interactive.theme.theme import theme
+from misaka.ui.tui.interactive.theme.theme import theme
 
 from .dynamic_border import DynamicBorder
 

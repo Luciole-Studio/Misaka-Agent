@@ -30,11 +30,11 @@ from misaka.core.tools.truncate import (
     format_size,
     truncate_head,
 )
-from misaka.modes.interactive.theme.theme import get_language_from_path, highlight_code
+from misaka.ui.tui.interactive.theme.theme import get_language_from_path, highlight_code
 from misaka.utils.image_resize import format_dimension_note, resize_image
 from misaka.utils.mime import detect_supported_image_mime_type_from_file
 from misaka.utils.paths import format_path_relative_to_cwd_or_absolute
-from misaka.tui import Text
+from misaka.ui.tui import Text
 
 
 class ReadToolInput(BaseModel):
@@ -241,7 +241,7 @@ def _format_compact_read_call(
     args: Mapping[str, Any] | None,
     theme_obj: Any,
 ) -> str:
-    from misaka.modes.interactive.components.keybinding_hints import key_text
+    from misaka.ui.tui.interactive.components.keybinding_hints import key_text
 
     expand_hint = theme_obj.fg("dim", f" ({key_text('app.tools.expand')} to expand)")
     if classification.kind == "skill":
@@ -270,7 +270,7 @@ def _format_read_result(
     cwd: str,
     is_error: bool,
 ) -> str:
-    from misaka.modes.interactive.components.keybinding_hints import key_hint
+    from misaka.ui.tui.interactive.components.keybinding_hints import key_hint
 
     if not bool(_value(options, "expanded")) and not is_error and _get_compact_read_classification(args, cwd):
         return ""

@@ -298,7 +298,7 @@ _register(
 )
 _register("misaka.cli.engine", "MainOptions", "main")
 _register(
-    "misaka.modes.interactive.interactive_mode",
+    "misaka.ui.tui.interactive.interactive_mode",
     "InteractiveMode",
     "InteractiveModeOptions",
 )
@@ -322,8 +322,7 @@ _register(
 _register("misaka.modes.print_mode", "runPrintMode")
 _register("misaka.modes.rpc.rpc_mode", "runRpcMode")
 _register(
-    "misaka.modes.interactive.components",
-    "ArminComponent",
+    "misaka.ui.tui.interactive.components",
     "AssistantMessageComponent",
     "BashExecutionComponent",
     "BorderedLoader",
@@ -361,7 +360,7 @@ _register(
     "VisualTruncateResult",
 )
 _register(
-    "misaka.modes.interactive.theme.theme",
+    "misaka.ui.tui.interactive.theme.theme",
     "getLanguageFromPath",
     "getMarkdownTheme",
     "getSelectListTheme",

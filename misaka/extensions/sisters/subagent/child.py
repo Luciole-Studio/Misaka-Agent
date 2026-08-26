@@ -393,6 +393,7 @@ async def amain() -> int:
     role = os.environ.get("MISAKA_WHO") or ""
     workspace = os.environ.get("MISAKA_WORKSPACE") or os.getcwd()
     mcp_role = os.environ.get("MISAKA_MCP_ROLE") or role
+    card = os.environ.get("MISAKA_SISTER_OWNER_TASK_ID")    # set only on the child that is a card's own session
     from misaka.app.composition import SessionSpec, build_extensions
     runtime, session, error = await engine_session.open_session(
         flags,
@@ -401,9 +402,11 @@ async def amain() -> int:
             profile_dir=profile_dir,
             role=role,
             workspace=workspace,
-            kind="child",
+            kind="card" if card else "child",
             sender=role.rsplit("/", 1)[-1],
             mcp_role=mcp_role,
+            receive_messages=bool(card),
+            task_id=card,
         )),
     )
     if error:
