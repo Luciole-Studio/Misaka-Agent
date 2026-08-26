@@ -25,11 +25,14 @@ def enabled(workspace):
 
 
 def commit(workspace, paths, message):
-    """Commit ``paths`` (relative to ``workspace``) on the line checked out there.
-    Missing paths are skipped; True when a commit was made."""
+    """Commit ``paths`` (relative to ``workspace``) on the line checked out there. A path that is
+    gone from disk but tracked is committed as a deletion; a path git has never seen is skipped.
+    True when a commit was made."""
     if not enabled(workspace):
         return False
-    paths = [p for p in paths if os.path.lexists(os.path.join(workspace, p))]
+    paths = [p for p in paths
+             if os.path.lexists(os.path.join(workspace, p))
+             or _git(workspace, "ls-files", "--", p).stdout.strip()]
     if not paths:
         return False
     _git(workspace, "add", "-A", "--", *paths)

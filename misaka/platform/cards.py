@@ -142,9 +142,12 @@ def attach(workspace, task_id, source):
     target_dir = attachment_dir(workspace, task_id)
     os.makedirs(target_dir, exist_ok=True)
     name, target = src.name, os.path.join(target_dir, src.name)
-    if os.path.exists(target):
-        stem, dot, ext = src.name.rpartition(".")
-        name = f"{stem or ext}-{int(time.time())}{dot}{ext if stem else ''}"
+    stem, dot, ext = src.name.rpartition(".")
+    counter = 0
+    while os.path.exists(target):                  # same name, same second: keep counting, never overwrite
+        counter += 1
+        suffix = f"{int(time.time())}" + (f"-{counter}" if counter > 1 else "")
+        name = f"{stem or ext}-{suffix}{dot}{ext if stem else ''}"
         target = os.path.join(target_dir, name)
     import shutil
     shutil.copyfile(src, target)
@@ -232,6 +235,16 @@ def remove(con, workspace, task_id):
     except OSError as error:
         return False, (f"Card {task_id} left the board but its file could not be deleted ({error}); "
                        f"remove {path} by hand or the card comes back on the next rebuild.")
+    attachments = attachment_dir(workspace, task_id)
+    if os.path.isdir(attachments):
+        import shutil
+        try:
+            shutil.rmtree(attachments)
+        except OSError as error:
+            return False, f"Card {task_id} was deleted but its attachments remain ({error}): {attachments}"
+    from misaka.platform import repo
+    repo.commit(workspace, [os.path.join("cards", f"{task_id}.md"), os.path.join("cards", str(task_id))],
+                f"card {task_id}: delete")
     return ok, msg
 
 
