@@ -4,7 +4,7 @@ import os
 import signal
 import sys
 
-from misaka.config import CFG
+from misaka.config import CFG, current_config
 from misaka.documents import index as corpus
 from misaka.observability import board as tail
 from misaka.platform import budget
@@ -294,7 +294,8 @@ def _cmd_research(args):
         sys.exit(research_node.main(*args.node))
     if args.probe:
         sys.exit(research_node.main_probe(*args.probe))
-    con = db.connect(CFG["db"])
+    cfg = current_config()
+    con = db.connect(cfg["db"])
     runs.init(con)
     if args.resume:
         run = runs.get(con, args.resume)
@@ -304,7 +305,7 @@ def _cmd_research(args):
     else:
         if not args.goal:
             sys.exit("A new research run requires a question; use --resume RUN_ID to continue one.")
-        brief = planner.ensure_project_brief(dict(CFG), worker_mod, args.goal, os.getcwd())
+        brief = planner.ensure_project_brief(cfg, worker_mod, args.goal, os.getcwd())
         from misaka.platform import cards as card_files
         card_files.init_project(os.getcwd())
         run = runs.create(con, workspace=os.getcwd(), question=args.goal,
@@ -312,7 +313,7 @@ def _cmd_research(args):
                           token_start=budget.spent(con))
         print(f"Project brief: {brief}\nResearch run {run['id']}: {runs.run_dir(run)}")
     out = _asyncio.run(workflow.run(
-        con, dict(CFG), research_node.spawner(), worker_mod,
+        con, cfg, research_node.spawner(), worker_mod,
         run_id=run["id"], poll_seconds=1.0))
     print(f"Research run {run['id']}: {out['reason']}")
     final = out.get("final") or {}
@@ -457,7 +458,7 @@ def _cmd_skills(args):
                 f"Available modes: {', '.join(skill_write.WRITE_MODES)}"
             )
         elif skill_write.agent_session():
-            sys.exit("Skill write mode can only be changed by the user, not from an agent session.")
+            sys.exit("Marked agent sessions do not change skill write mode; this is a workflow guard, not an OS sandbox.")
         else:
             cfg = skill_layers.load_skills_config()
             cfg["skill_write_mode"] = args.name
@@ -467,7 +468,7 @@ def _cmd_skills(args):
         from misaka.skills import write as skill_write
         live = _os.path.join(CFG["roles_root"], args.role, "skills")
         if args.op in ("approve", "reject", "rollback") and skill_write.agent_session():
-            sys.exit("Skill review decisions are the user's; they cannot be made from an agent session.")
+            sys.exit("Marked agent sessions do not make skill review decisions; this is a workflow guard, not an OS sandbox.")
 
         if args.op == "pending":
             print(f"Skill write mode: {skill_write.write_mode()}")
@@ -477,7 +478,14 @@ def _cmd_skills(args):
             from misaka.skills.linter import format_findings, lint_content
             for r in records:
                 payload = r.get("payload") or {}
-                print(f"  [{r['id']}] {r['summary']} (submitted by {r['origin']})")
+                pending_id = r.get("_pending_file_id") or r.get("id") or "invalid"
+                print(f"  [{pending_id}] {r.get('summary') or '(no summary)'} "
+                      f"(submitted by {r.get('origin') or 'unknown'})")
+                print(f"    Payload SHA-256: {r.get('payload_sha256') or '(missing)'}")
+                if r.get("_integrity_error"):
+                    print(f"    INVALID: {r['_integrity_error']}")
+                    print(f"    Reject: misaka skills reject {pending_id}")
+                    continue
                 if payload.get("content"):
                     # Advisory lint findings, shown before approval.
                     print(format_findings(lint_content(payload["content"])))
@@ -487,20 +495,18 @@ def _cmd_skills(args):
                 print(f"    Approve: misaka skills approve {r['id']}")
         elif args.op == "approve":
             if not args.name:
-                sys.exit("Usage: misaka skills approve <pending-id-or-skill-name>")
+                sys.exit("Usage: misaka skills approve <pending-id>")
             from misaka.skills import manage as skill_manage
-            record = skill_write.get_pending(args.name) or next(
-                (r for r in skill_write.list_pending()
-                 if (r.get("payload") or {}).get("name") == args.name), None)
+            record = skill_write.get_pending(args.name)
             if record is not None:
                 # Re-run the reviewed request through the normal validation path.
-                result = skill_manage.apply_pending(record["payload"])
+                result = skill_manage.apply_pending(record)
                 if not result.get("success"):
                     sys.exit(f"Approval failed: {result.get('error')}")
-                skill_write.discard_pending(record["id"])
+                skill_write.discard_pending(record.get("_pending_file_id") or record["id"])
                 print("Approved and applied.")
             else:
-                sys.exit(f"No pending write named '{args.name}'.")
+                sys.exit(f"No pending write with ID '{args.name}'.")
         elif args.op == "reject":
             if not args.name:
                 sys.exit("Usage: misaka skills reject <pending-id-or-skill-name>")
@@ -508,7 +514,7 @@ def _cmd_skills(args):
                 (r for r in skill_write.list_pending()
                  if (r.get("payload") or {}).get("name") == args.name), None)
             if record is not None:
-                skill_write.discard_pending(record["id"])
+                skill_write.discard_pending(record.get("_pending_file_id") or record["id"])
                 skill_write.record("reject", (record.get("payload") or {}).get("name", ""),
                                    evidence={"pending_id": record["id"]})
                 print(f"Rejected: {record['summary']}")
@@ -558,7 +564,8 @@ def _cmd_doc(args):
         if not args.arg:
             sys.exit("Usage: misaka doc add <file> [--no-tree]")
         did, n = corpus.ingest(args.arg, with_tree=not args.no_tree)
-        has = corpus.doc_dir(did) and os.path.exists(os.path.join(corpus.doc_dir(did), "tree.json"))
+        doc = corpus.resolve_doc(did)
+        has = doc and os.path.exists(os.path.join(doc, "tree.json"))
         structure = "with PageIndex structure" if has else "page navigation only"
         print(f"Added {os.path.basename(args.arg)} as {did}: {n} pages, {structure}.")
     elif args.action == "scan":
@@ -579,14 +586,14 @@ def _cmd_doc(args):
     elif args.action == "verify":
         if not args.arg or not args.doc:
             sys.exit("Usage: misaka doc verify <quote> --doc <doc-id>")
-        v = corpus.verify_quote(args.doc, args.arg)
+        v = corpus.verify_quote(args.doc, args.arg, workspace=db.canonical_workspace())
         if not v:
             sys.exit("❌ Quote not found in that document.")
         print(f"✅ p{v['page']} offset {v['offset']}\n   claim_hash {v['claim_hash']}")
     elif args.action == "tree":
         if not (args.arg or args.doc):
             sys.exit("Usage: misaka doc tree <doc-id>")
-        st = corpus.structure(args.arg or args.doc)
+        st = corpus.structure(args.arg or args.doc, workspace=db.canonical_workspace())
         if not st:
             sys.exit("Document not found.")
         print(f"{st['title']} ({st['mode']})")

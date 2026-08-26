@@ -79,23 +79,6 @@ class OpenAICodexResponsesOptions(TypedDict, total=False):
     textVerbosity: Literal["low", "medium", "high"]
 
 
-class OpenAICodexWebSocketDebugStats(TypedDict, total=False):
-    requests: int
-    connectionsCreated: int
-    connectionsReused: int
-    cachedContextRequests: int
-    storeTrueRequests: int
-    fullContextRequests: int
-    deltaRequests: int
-    lastInputItems: int
-    lastDeltaInputItems: int
-    lastPreviousResponseId: str
-    websocketFailures: int
-    sseFallbacks: int
-    websocketFallbackActive: bool
-    lastWebSocketError: str
-
-_websocket_debug_stats: dict[str, dict[str, Any]] = {}
 _websocket_fallback_sessions: set[str] = set()
 _websocket_session_cache: dict[str, _CachedWebSocketConnection] = {}
 _cached_websocket_connector: Callable[..., Any] | None = None
@@ -240,39 +223,6 @@ async def _await_with_abort(awaitable: Any, signal: Any, *, on_abort: Any = None
             await asyncio.gather(abort_task, return_exceptions=True)
 
 
-def _create_debug_stats(session_id: str) -> dict[str, Any]:
-    stats = _websocket_debug_stats.get(session_id)
-    if stats is None:
-        stats = {
-            "requests": 0,
-            "connectionsCreated": 0,
-            "connectionsReused": 0,
-            "cachedContextRequests": 0,
-            "storeTrueRequests": 0,
-            "fullContextRequests": 0,
-            "deltaRequests": 0,
-            "lastInputItems": 0,
-            "websocketFailures": 0,
-            "sseFallbacks": 0,
-        }
-        _websocket_debug_stats[session_id] = stats
-    return stats
-
-
-def get_openai_codex_websocket_debug_stats(session_id: str) -> dict[str, Any] | None:
-    stats = _websocket_debug_stats.get(session_id)
-    return dict(stats) if stats else None
-
-
-def reset_openai_codex_websocket_debug_stats(session_id: str | None = None) -> None:
-    if session_id is None:
-        _websocket_debug_stats.clear()
-        _websocket_fallback_sessions.clear()
-        return
-    _websocket_debug_stats.pop(session_id, None)
-    _websocket_fallback_sessions.discard(session_id)
-
-
 def _run_socket_close_nowait(socket: Any, code: int = 1000, reason: str = "done") -> None:
     try:
         result = socket.close(code=code, reason=reason)
@@ -306,29 +256,13 @@ def close_openai_codex_websocket_sessions(session_id: str | None = None) -> None
         entry = _websocket_session_cache.pop(session_id, None)
         if entry is not None:
             close_entry(entry)
+        _websocket_fallback_sessions.discard(session_id)
         return
 
     for entry in list(_websocket_session_cache.values()):
         close_entry(entry)
     _websocket_session_cache.clear()
-
-
-def _record_sse_fallback(session_id: str | None) -> None:
-    if not session_id:
-        return
-    stats = _create_debug_stats(session_id)
-    stats["sseFallbacks"] += 1
-    stats["websocketFallbackActive"] = session_id in _websocket_fallback_sessions
-
-
-def _record_websocket_failure(session_id: str | None, error: Any) -> None:
-    if not session_id:
-        return
-    _websocket_fallback_sessions.add(session_id)
-    stats = _create_debug_stats(session_id)
-    stats["websocketFailures"] += 1
-    stats["lastWebSocketError"] = format_thrown_value(error)
-    stats["websocketFallbackActive"] = True
+    _websocket_fallback_sessions.clear()
 
 
 register_session_resource_cleanup(close_openai_codex_websocket_sessions)
@@ -968,7 +902,7 @@ async def process_websocket_stream(
     options: StreamOptions | dict[str, Any] | None = None,
 ) -> None:
     session_id = _option(options, "sessionId")
-    socket, entry, reused, release = await _acquire_websocket(
+    socket, entry, _, release = await _acquire_websocket(
         url,
         headers,
         session_id,
@@ -978,27 +912,6 @@ async def process_websocket_stream(
     use_cached_context = _option(options, "transport") in {"websocket-cached", "auto"}
     full_body = body
     request_body = _build_cached_websocket_request_body(entry, full_body) if use_cached_context and entry else full_body
-    stats = _create_debug_stats(session_id) if session_id else None
-    if stats is not None:
-        stats["requests"] += 1
-        if reused:
-            stats["connectionsReused"] += 1
-        else:
-            stats["connectionsCreated"] += 1
-        if use_cached_context:
-            stats["cachedContextRequests"] += 1
-        if request_body.get("store") is True:
-            stats["storeTrueRequests"] += 1
-        stats["lastInputItems"] = len(request_body.get("input") or [])
-        if request_body.get("previous_response_id"):
-            stats["deltaRequests"] += 1
-            stats["lastDeltaInputItems"] = len(request_body.get("input") or [])
-            stats["lastPreviousResponseId"] = request_body["previous_response_id"]
-        else:
-            stats["fullContextRequests"] += 1
-            stats["lastDeltaInputItems"] = None
-            stats["lastPreviousResponseId"] = None
-
     try:
         await _maybe_await(socket.send(json.dumps({"type": "response.create", **request_body})))
         await process_responses_stream(
@@ -1098,8 +1011,6 @@ def stream_openai_codex_responses(
             )
             body_json = json.dumps(body)
             websocket_disabled_for_session = transport != "sse" and session_id in _websocket_fallback_sessions
-            if websocket_disabled_for_session:
-                _record_sse_fallback(session_id)
 
             if transport != "sse" and not websocket_disabled_for_session:
                 websocket_state = {"started": False}
@@ -1139,10 +1050,10 @@ def stream_openai_codex_responses(
                             },
                         ),
                     )
-                    _record_websocket_failure(session_id, error)
+                    if session_id:
+                        _websocket_fallback_sessions.add(session_id)
                     if websocket_state["started"]:
                         raise
-                    _record_sse_fallback(session_id)
 
             url = resolve_codex_url(model.baseUrl)
             signal = _option(options, "signal")
@@ -1245,7 +1156,6 @@ __all__ = [
     "DEFAULT_CODEX_BASE_URL",
     "JWT_CLAIM_PATH",
     "OpenAICodexResponsesOptions",
-    "OpenAICodexWebSocketDebugStats",
     "applyServiceTierPricing",
     "apply_service_tier_pricing",
     "build_request_body",
@@ -1255,7 +1165,6 @@ __all__ = [
     "create_codex_request_id",
     "extract_account_id",
     "getServiceTierCostMultiplier",
-    "get_openai_codex_websocket_debug_stats",
     "get_service_tier_cost_multiplier",
     "is_codex_non_transport_error",
     "map_codex_events",
@@ -1264,7 +1173,6 @@ __all__ = [
     "parse_sse",
     "process_stream",
     "process_websocket_stream",
-    "reset_openai_codex_websocket_debug_stats",
     "resolve_codex_service_tier",
     "resolve_codex_url",
     "resolve_codex_websocket_url",

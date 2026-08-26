@@ -397,7 +397,8 @@ class DefaultPackageManager:
 
     async def resolve(self) -> ResolvedPaths:
         """Resources from settings (explicit ``extensions``/``prompts``/``themes`` entries) plus
-        the auto-discovered directories under the agent dir and the project's config dir."""
+        auto-discovered user resources. Project files never opt themselves into Python execution;
+        a local extension must be selected explicitly with the CLI."""
         accumulator = _Accumulator()
         global_settings = self.settingsManager.getGlobalSettings()
         project_settings = self.settingsManager.getProjectSettings()
@@ -405,13 +406,14 @@ class DefaultPackageManager:
         project_base_dir = os.path.join(self.cwd, CONFIG_DIR_NAME)
         for resource_type in RESOURCE_TYPES:
             target = self._get_target_map(accumulator, resource_type)
-            self._resolve_local_entries(
-                list(project_settings.get(resource_type) or []),
-                resource_type,
-                target,
-                {"source": "local", "scope": "project", "origin": "top-level"},
-                project_base_dir,
-            )
+            if resource_type != "extensions":
+                self._resolve_local_entries(
+                    list(project_settings.get(resource_type) or []),
+                    resource_type,
+                    target,
+                    {"source": "local", "scope": "project", "origin": "top-level"},
+                    project_base_dir,
+                )
             self._resolve_local_entries(
                 list(global_settings.get(resource_type) or []),
                 resource_type,
@@ -564,13 +566,6 @@ class DefaultPackageManager:
             for path in paths:
                 self._add_resource(target, path, metadata, self._is_enabled_by_overrides(path, overrides, base_dir))
 
-        add_resources(
-            "extensions",
-            _collect_auto_extension_entries(project_dirs["extensions"]),
-            project_metadata,
-            project_overrides["extensions"],
-            project_base_dir,
-        )
         add_resources(
             "prompts",
             _collect_auto_prompt_entries(project_dirs["prompts"]),

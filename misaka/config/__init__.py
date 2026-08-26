@@ -19,4 +19,4 @@ from misaka.config.engine import (  # noqa: F401
     get_sessions_dir,
     get_themes_dir,
 )
-from misaka.config.product import CFG, sisters  # noqa: F401
+from misaka.config.product import CFG, current_config, sisters  # noqa: F401

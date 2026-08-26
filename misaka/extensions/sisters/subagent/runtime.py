@@ -1014,8 +1014,27 @@ class AgentTask:
             with self.transcript.open("rb") as handle:
                 handle.seek(0, os.SEEK_END)
                 size = handle.tell()
-                handle.seek(max(0, size - 100_000))
-                return handle.read().decode("utf-8", errors="replace")
+                start = max(0, size - 100_000)
+                prefix = max(0, start - 3)
+                handle.seek(prefix)
+                tail = handle.read()
+                cut = start - prefix
+                complete_end = tail.rfind(b"\n") + 1
+                if complete_end <= cut:
+                    return ""
+                if not start or tail[cut - 1 : cut] == b"\n":
+                    return tail[cut:complete_end].decode("utf-8")
+                line_start = tail.find(b"\n", cut, complete_end) + 1
+                if line_start < complete_end:
+                    return tail[line_start:complete_end].decode("utf-8")
+                for aligned in range(cut, max(-1, cut - 4), -1):
+                    try:
+                        return tail[aligned:complete_end].decode("utf-8")
+                    except UnicodeDecodeError:
+                        pass
+                return tail[cut:complete_end].decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError(f"Sub-agent transcript is not valid UTF-8: {self.transcript}") from error
         except OSError:
             return ""
 

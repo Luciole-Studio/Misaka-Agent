@@ -18,7 +18,6 @@ from misaka.ai.providers.anthropic import (  # noqa: F401
 from misaka.ai.providers.azure_openai_responses import (
     AzureOpenAIResponsesOptions,  # noqa: F401
 )
-from misaka.ai.providers.faux import *
 from misaka.ai.providers.google import GoogleOptions  # noqa: F401
 from misaka.ai.providers.google_shared import GoogleThinkingLevel  # noqa: F401
 from misaka.ai.providers.google_vertex import GoogleVertexOptions  # noqa: F401
@@ -26,7 +25,6 @@ from misaka.ai.providers.images.register_builtins import *
 from misaka.ai.providers.mistral import MistralOptions  # noqa: F401
 from misaka.ai.providers.openai_codex_responses import (  # noqa: F401
     OpenAICodexResponsesOptions,
-    OpenAICodexWebSocketDebugStats,
 )
 from misaka.ai.providers.openai_completions import (
     OpenAICompletionsOptions,  # noqa: F401

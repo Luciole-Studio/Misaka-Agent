@@ -21,7 +21,7 @@ import os
 import sys
 from contextlib import contextmanager
 
-from misaka.config import CFG
+from misaka.config import CFG, current_config
 
 DM_TITLE = "Bot Chat"   # Hermes BOT_CHAT_TITLE verbatim; the injection gate keys on it.
 
@@ -126,13 +126,14 @@ def deliver(to, message=None, sender=None, model=None, timeout=600,
     text = "\n\n".join((dm_prefix(r["sender"]) + r["body"]) if r["sender"] and r["sender"] != "user" else r["body"]
                        for r in mine)
 
-    prof, model_default = chat.assembly(None if to == "last-order" else to)
+    cfg = current_config()
+    prof, model_default = chat.assembly(None if to == "last-order" else to, cfg)
     home = os.path.expanduser("~")
     sess_dir = dm_session_dir(to)
     os.makedirs(sess_dir, exist_ok=True)
     role = profiles.role_of(prof)
     from misaka.config import identity
-    flags = ["--provider", CFG["provider"], "--model", model or model_default,
+    flags = ["--provider", cfg["provider"], "--model", model or model_default,
              "--append-system-prompt", profiles.shared_soul()]
     for section in identity.prompt_sections(prof, role):
         flags += ["--append-system-prompt", section]

@@ -29,20 +29,23 @@ from misaka.ai.types import (
     UserMessage,
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream
-from misaka.config.product import CFG
+from misaka.config.product import current_config
 
 logger = logging.getLogger(__name__)
 
 MOA_CONFIG_PATH = "~/.misaka/moa.json"
 DEFAULT_MOA_PRESET_NAME = "default"
 
-# Default slots follow the product configuration (MISAKA_PROVIDER / MISAKA_LO_MODEL / MISAKA_MODEL);
-# override them in ~/.misaka/moa.json.
-DEFAULT_MOA_REFERENCE_MODELS = [
-    {"provider": CFG["provider"], "model": CFG["lo_model"]},
-    {"provider": CFG["provider"], "model": CFG["default_model"]},
-]
-DEFAULT_MOA_AGGREGATOR = {"provider": CFG["provider"], "model": CFG["lo_model"]}
+def _default_slots():
+    """Follow the current product model settings; override these in ~/.misaka/moa.json."""
+    cfg = current_config()
+    return (
+        [
+            {"provider": cfg["provider"], "model": cfg["lo_model"]},
+            {"provider": cfg["provider"], "model": cfg["default_model"]},
+        ],
+        {"provider": cfg["provider"], "model": cfg["lo_model"]},
+    )
 
 # Head+tail preview budget per tool result in the advisor view.
 TOOL_RESULT_BUDGET = 4000
@@ -146,10 +149,11 @@ def _clean_slot(slot, *, include_enabled=False):
 
 
 def _default_preset() -> dict[str, Any]:
+    reference_models, aggregator = _default_slots()
     return {
         "enabled": True,
-        "reference_models": [{**s, "enabled": True} for s in deepcopy(DEFAULT_MOA_REFERENCE_MODELS)],
-        "aggregator": deepcopy(DEFAULT_MOA_AGGREGATOR),
+        "reference_models": [{**s, "enabled": True} for s in reference_models],
+        "aggregator": aggregator,
         "reference_temperature": None,
         "aggregator_temperature": None,
         "reference_timeout": None,
@@ -162,6 +166,7 @@ def _default_preset() -> dict[str, Any]:
 def _normalize_preset(raw) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raw = {}
+    default_refs, default_aggregator = _default_slots()
     raw_refs = raw.get("reference_models")
     if isinstance(raw_refs, str):
         try:
@@ -172,13 +177,13 @@ def _normalize_preset(raw) -> dict[str, Any]:
         raw_refs = [raw_refs] if isinstance(raw_refs, dict) else []
     refs = [s for s in (_clean_slot(x, include_enabled=True) for x in raw_refs) if s]
     if not refs:
-        refs = [{**s, "enabled": True} for s in deepcopy(DEFAULT_MOA_REFERENCE_MODELS)]
+        refs = [{**s, "enabled": True} for s in default_refs]
     policy = str(raw.get("degraded_reference_policy") or "loud").strip().lower()
     timeout = _coerce_float_or_none(raw.get("reference_timeout"))
     return {
         "enabled": raw.get("enabled") is not False,
         "reference_models": refs,
-        "aggregator": _clean_slot(raw.get("aggregator")) or deepcopy(DEFAULT_MOA_AGGREGATOR),
+        "aggregator": _clean_slot(raw.get("aggregator")) or default_aggregator,
         "reference_temperature": _coerce_float_or_none(raw.get("reference_temperature")),
         "aggregator_temperature": _coerce_float_or_none(raw.get("aggregator_temperature")),
         "reference_timeout": timeout if timeout and timeout > 0 else None,
@@ -728,5 +733,4 @@ def preset_models(*, resolve_aggregators: bool = True) -> list[Model]:
             maxTokens=agg.maxTokens if agg else 32_000,
         ))
     return out
-
 

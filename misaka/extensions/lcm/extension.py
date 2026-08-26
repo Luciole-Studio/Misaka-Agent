@@ -6,7 +6,7 @@ import time
 import uuid
 from datetime import datetime
 
-from misaka.config import CFG
+from misaka.config import CFG, current_config
 
 logger = logging.getLogger(__name__)
 
@@ -32,9 +32,10 @@ def _compactor():
     return compactor
 
 
-def _summary_models():
-    primary = str(CFG.get("lcm_summary_model") or CFG["default_model"]).strip()
-    fallbacks = str(CFG.get("lcm_summary_fallback_models") or "")
+def _summary_models(cfg=None):
+    cfg = cfg or current_config()
+    primary = str(cfg.get("lcm_summary_model") or cfg["default_model"]).strip()
+    fallbacks = str(cfg.get("lcm_summary_fallback_models") or "")
     return list(dict.fromkeys([primary, *(m.strip() for m in fallbacks.split(",") if m.strip())]))
 
 
@@ -53,10 +54,11 @@ def _call_llm(prompt, max_tokens, timeout):
     """Bare summarizer with same-provider model fallback and usage estimates."""
     from misaka.platform.session import run_text
 
-    profile = os.path.join(os.path.expanduser(CFG["roles_root"]), SUMMARIZER_ROLE)
+    cfg = current_config()
+    profile = os.path.join(os.path.expanduser(cfg["roles_root"]), SUMMARIZER_ROLE)
     os.makedirs(profile, exist_ok=True)
-    provider = str(CFG.get("lcm_summary_provider") or CFG["provider"])
-    for model in _summary_models():
+    provider = str(cfg.get("lcm_summary_provider") or cfg["provider"])
+    for model in _summary_models(cfg):
         try:
             result = run_text(prompt, profile, provider, model,
                               timeout=max(60, int(timeout)), max_tokens=max_tokens)
@@ -442,12 +444,13 @@ def register(harn):
                 semantic_line = f"hybrid {coverage['indexed']}/{coverage['total']}"
         except Exception as exc:  # noqa: BLE001 - the status line reports the fallback
             semantic_line = f"hybrid→fts ({exc})"
+        cfg = current_config()
         return _text(
             f"{sid}: source messages {compactor.store.get_session_count(sid)} | "
             f"summaries {depth_line} | frontier {len(compactor.dag.frontier_nodes(sid))} | "
             f"pending {len(compactor.dag.pending_attempts(sid))} | retrieval {semantic_line} | "
-            f"summary model {CFG.get('lcm_summary_provider') or CFG['provider']}/"
-            f"{CFG.get('lcm_summary_model') or CFG['default_model']} | "
+            f"summary model {cfg.get('lcm_summary_provider') or cfg['provider']}/"
+            f"{cfg.get('lcm_summary_model') or cfg['default_model']} | "
             f"calls {usage.get('calls', 0)} | failures {usage.get('failures', 0)} | "
             f"input ≈{usage.get('input_tokens_est', 0)} tok | "
             f"output ≈{usage.get('output_tokens_est', 0)} tok"

@@ -5,7 +5,7 @@ import re
 import shutil
 import sys
 
-from misaka.config.product import CFG
+from misaka.config.product import CFG, current_config
 
 ROOT = CFG["profiles_root"]
 ACTIVE = ("running", "review", "ready", "todo", "blocked", "triage")   # anything a Sister still owes
@@ -17,7 +17,8 @@ def model_choices():
     from misaka.core.auth_storage import AuthStorage
     from misaka.core.model_registry import ModelRegistry
     registry = ModelRegistry.create(AuthStorage.create())
-    mine = sorted({m.id for m in registry.getAvailable() if m.provider == CFG["provider"]})
+    provider = current_config()["provider"]
+    mine = sorted({m.id for m in registry.getAvailable() if m.provider == provider})
     return ["default (use global setting)", *mine, "Custom…"]
 
 SOUL_TEMPLATE = """# Misaka {sid}

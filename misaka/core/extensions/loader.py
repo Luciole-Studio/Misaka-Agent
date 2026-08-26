@@ -37,8 +37,6 @@ from misaka.core.extensions.types import (
 from misaka.core.source_info import create_synthetic_source_info
 from misaka.utils.paths import resolve_path
 
-CONFIG_DIR_NAME = ".misaka"
-
 
 @dataclass(slots=True)
 class _RuntimeState:
@@ -357,7 +355,6 @@ async def discover_and_load_extensions(
             seen.add(resolved)
             all_paths.append(candidate)
 
-    add_paths(discover_extensions_in_dir(os.path.join(resolved_cwd, CONFIG_DIR_NAME, "extensions")))
     add_paths(discover_extensions_in_dir(os.path.join(resolved_agent_dir, "extensions")))
 
     for raw_path in configured_paths:
