@@ -453,6 +453,9 @@ def register(harn):
         in_panel = bool(os.environ.get("MISAKA_NET_PANE"))
         net_owned = str(row["claim_lock"] or "").startswith("net:")
         if net_owned or (in_panel and await asyncio.to_thread(_pane_for_card, params.task_id)):
+            if row["status"] not in ACTIVE_BOARD_STATUSES and not params.confirmed:
+                return _text(f"Card {params.task_id} is {row['status']}; continuing it starts a new "
+                             "model turn. Ask the user, then call again with confirmed=true.")
             # A network-owned or reopened task receives steering through its live pane.
             from misaka.ui.panel import client as net
             await asyncio.to_thread(
