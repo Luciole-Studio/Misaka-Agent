@@ -253,8 +253,25 @@ def _migrate(con):
     for name, definition in task_columns.items():
         if name not in existing:
             con.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")
-    for retired in ("task_comments", "task_attachments", "task_links"):   # phases 2-3: truth moved into the card file / repo
-        con.execute(f"DROP TABLE IF EXISTS {retired}")
+    # Phases 2-3 moved comments, attachments and links into the card file / repo. Nothing copies
+    # the old rows over, so a table that still holds any is renamed, not dropped: the data stays
+    # reachable until someone migrates it by hand.
+    stamp = time.strftime("%Y%m%d%H%M%S")
+    for retired in ("task_comments", "task_attachments", "task_links"):
+        if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (retired,)).fetchone():
+            continue
+        if con.execute(f"SELECT COUNT(*) FROM {retired}").fetchone()[0] == 0:
+            con.execute(f"DROP TABLE {retired}")
+        else:
+            con.execute(f"ALTER TABLE {retired} RENAME TO {retired}_bak_{stamp}")
+    # The verifier and its two statuses are gone; a card left there needs a human, not silence.
+    con.execute(
+        "UPDATE tasks SET status='triage', block_kind='needs_input', "
+        "block_reason='left in a retired verifier state (verifying/finalizing); review the card and unblock it', "
+        "blocked_at=?, claim_lock=NULL, claim_expires=NULL, worker_pid=NULL, worker_identity=NULL "
+        "WHERE status IN ('verifying','finalizing')",
+        (int(time.time()),),
+    )
     if "run_id" not in _columns(con, "events"):
         con.execute("ALTER TABLE events ADD COLUMN run_id TEXT")
     con.execute("CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id, id)")

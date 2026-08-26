@@ -43,9 +43,9 @@ def readonly_copies(skill_dirs, dest_root):
     for d in skill_dirs:
         base = os.path.basename(d.rstrip("/")) or "skill"
         name, n = base, 2
-        while name in used:   # two sources, one basename: keep both, deterministically
+        while name.casefold() in used:   # two sources, one basename (macOS folds case): keep both
             name, n = f"{base}-{n}", n + 1
-        used.add(name)
+        used.add(name.casefold())
         dst = os.path.join(dest_root, name)
         if os.path.exists(dst):
             cleanup(dst)
@@ -56,6 +56,11 @@ def readonly_copies(skill_dirs, dest_root):
         shutil.copytree(d, dst, symlinks=False, ignore=_ignore)
         _strip_write(dst)
         copies.append(dst)
+    # A reused sandbox root must hold exactly this stack: copies of skills that were removed or
+    # disabled since the last run would otherwise stay visible to the card.
+    for stale in os.listdir(dest_root):
+        if stale.casefold() not in used:
+            cleanup(os.path.join(dest_root, stale))
     return copies
 
 
