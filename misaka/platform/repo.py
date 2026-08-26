@@ -60,22 +60,24 @@ def branch_start(workspace, name, worktree, base=None):
 
 
 def branch_finish(workspace, name, worktree, *, into=None, merge=True, message=""):
-    """Close a branch: leftover work is committed, the worktree removed, and -- when ``merge`` --
-    the branch merged --no-ff into the line checked out at ``into`` (default: the workspace).
-    The branch itself stays as the record. Returns "merged" / "conflict" / "closed" / None."""
+    """Close a branch: leftover work is committed, then -- when ``merge`` -- the branch is merged
+    --no-ff into the line checked out at ``into`` (default: the workspace), and only then is the
+    worktree removed. A conflict leaves both the branch and its worktree in place for a human.
+    The branch itself always stays as the record. Returns "merged" / "conflict" / "closed" / None."""
     if not enabled(workspace):
         return None
-    if os.path.exists(os.path.join(worktree, ".git")):
+    live = os.path.exists(os.path.join(worktree, ".git"))
+    if live:
         commit(worktree, ["."], f"{name}: leftover changes")
+    if merge:
+        merged = _git(into or workspace, "merge", "--no-ff", "-q", "-m", message or f"{name}: merged", name)
+        if merged.returncode != 0:
+            _git(into or workspace, "merge", "--abort")
+            return "conflict"                          # the branch and its worktree stay for a human
+    if live:
         _git(workspace, "worktree", "remove", "--force", worktree)
     _git(workspace, "worktree", "prune")
-    if not merge:
-        return "closed"
-    merged = _git(into or workspace, "merge", "--no-ff", "-q", "-m", message or f"{name}: merged", name)
-    if merged.returncode != 0:
-        _git(into or workspace, "merge", "--abort")
-        return "conflict"                              # the branch stays for a human
-    return "merged"
+    return "merged" if merge else "closed"
 
 
 if __name__ == "__main__":                              # self-check: nested node branches on a temp repo

@@ -159,8 +159,18 @@ def init(con):
     )
 
 
+# Cards past these statuses keep their dependency history as it is: the DAG must not be rewritten
+# under a moving card, and a finished one (whose node line may already be merged and gone) has
+# nothing left to wait for.
+_SETTLED_TASK_STATUSES = frozenset({"running", "review", "done", "failed", "stopped", "archived"})
+
+
 def _backfill_dependencies(con):
-    """Replay the stored local-id dependencies into the generic task DAG."""
+    """Replay the stored local-id dependencies into the generic task DAG.
+
+    Idempotent and tolerant: it runs on every ``init``, so edges that already exist are skipped,
+    settled cards are left alone, and a card whose line no longer exists (a closed node's
+    worktree) cannot make the whole replay fail."""
     rows = con.execute(
         "SELECT task_id,run_id,branch_id,local_id,depends_json FROM research_run_tasks"
     ).fetchall()
@@ -173,8 +183,20 @@ def _backfill_dependencies(con):
         parents = [by_scope.get((row["run_id"], row["branch_id"], dep)) for dep in dependencies]
         if any(parent is None for parent in parents):
             continue
+        task = task_store.get(con, row["task_id"])
+        if task is None or task["status"] in _SETTLED_TASK_STATUSES:
+            continue
+        from misaka.platform import cards as card_files
+        if not os.path.isfile(card_files.card_path(task["workspace"], row["task_id"])):
+            continue        # the card's line is gone (closed node): its `needs` cannot be read, so nothing moves
+        existing = set(task_store.parent_ids(con, row["task_id"]))
         for parent_id in parents:
-            task_store.link_tasks(con, parent_id, row["task_id"])
+            if parent_id in existing:
+                continue
+            try:
+                task_store.link_tasks(con, parent_id, row["task_id"])
+            except (ValueError, OSError):
+                continue        # settled meanwhile, or the card's line is gone: history, not an error
         if dependencies:
             con.execute(
                 "UPDATE tasks SET status='todo' WHERE id=? AND status='held'", (row["task_id"],)
