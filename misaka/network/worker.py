@@ -452,6 +452,8 @@ def run_card(
            "MISAKA_WORKSPACE": workspace,
            "MISAKA_TASK_DIR": task_store.task_state_dir(task_id),
            "MISAKA_TASK_OUTPUT_DIR": str(task.get("output_dir") or workspace)}
+    if os.path.isdir(ro_root):
+        env["MISAKA_SKILL_SANDBOX"] = ro_root    # nested agents pin the same read-only skill snapshot
     if usage_db and task_id and usage_generation is not None:
         env.update({
             "MISAKA_USAGE_DB": str(usage_db),

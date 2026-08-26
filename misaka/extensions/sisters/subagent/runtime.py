@@ -110,6 +110,8 @@ class RoleContext:
     permission_mode: str | None = None
     permission_can_prompt: bool = False
     agent_hooks: str | None = None
+    # The pinned skill snapshot (a card's read-only copies); every nested agent inherits it.
+    skill_sandbox: str | None = field(default_factory=lambda: os.environ.get("MISAKA_SKILL_SANDBOX") or None)
 
     @classmethod
     def capture(
@@ -2445,8 +2447,12 @@ class SubagentManager:
                 lines.append(f"- read `{candidate / 'SKILL.md' if candidate.is_dir() else candidate}`")
         return ["Skills for this task; load each before starting:\n" + "\n".join(lines)] if lines else []
 
-    def child_env_extra(self, task: AgentTask) -> dict[str, str]:
-        """What a subclass adds to its children's environment (a Sister manager: its skill sandbox)."""
+    def child_env_extra(self, _task: AgentTask) -> dict[str, str]:
+        """Extra child environment. The pinned skill snapshot travels to every nested agent, so a
+        card's children index the same read-only copies as the card itself (a Sister manager
+        overrides this with the sandbox it built)."""
+        if self.role_context.skill_sandbox:
+            return {"MISAKA_SKILL_SANDBOX": self.role_context.skill_sandbox}
         return {}
 
     def _agent_mcp_config(self, task: AgentTask) -> str | None:
