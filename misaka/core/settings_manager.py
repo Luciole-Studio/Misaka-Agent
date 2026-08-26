@@ -31,7 +31,6 @@ type ThinkingBudgetsSettings = dict[str, Any]
 type MarkdownSettings = dict[str, Any]
 type WarningSettings = dict[str, Any]
 type Settings = dict[str, Any]
-type PackageSource = str | dict[str, Any]
 type SettingsScope = Literal["global", "project"]
 type TransportSetting = Transport
 
@@ -577,12 +576,6 @@ class SettingsManager:
     def setShellCommandPrefix(self, prefix: str | None) -> None:
         self._set_global_value("shellCommandPrefix", prefix)
 
-    def getNpmCommand(self) -> list[str] | None:
-        npm_command = self.settings.get("npmCommand")
-        return list(npm_command) if isinstance(npm_command, list) else None
-
-    def setNpmCommand(self, command: list[str] | None) -> None:
-        self._set_global_value("npmCommand", list(command) if command is not None else None)
 
     def getCollapseChangelog(self) -> bool:
         return self._nullish(self.settings.get("collapseChangelog"), False)
@@ -590,17 +583,6 @@ class SettingsManager:
     def setCollapseChangelog(self, collapse: bool) -> None:
         self._set_global_value("collapseChangelog", collapse)
 
-    def getPackages(self) -> list[PackageSource]:
-        return list(self.settings.get("packages") or [])
-
-    def setPackages(self, packages: list[PackageSource]) -> None:
-        self._set_global_value("packages", packages)
-
-    def setProjectPackages(self, packages: list[PackageSource]) -> None:
-        project_settings = copy.deepcopy(self.projectSettings)
-        project_settings["packages"] = packages
-        self.markProjectModified("packages")
-        self.saveProjectSettings(project_settings)
 
     def getExtensionPaths(self) -> list[str]:
         return list(self.settings.get("extensions") or [])
@@ -780,7 +762,6 @@ __all__ = [
     "MarkdownSettings",
     "WarningSettings",
     "TransportSetting",
-    "PackageSource",
     "Settings",
     "SettingsScope",
     "SettingsStorage",

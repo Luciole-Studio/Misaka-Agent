@@ -33,7 +33,6 @@ from misaka.ui.tui import (
     AutocompleteProvider,
     CombinedAutocompleteProvider,
     Container,
-    DefaultTextStyle,
     EditorOptions,
     Loader,
     LoaderIndicatorOptions,
@@ -51,9 +50,7 @@ from misaka.ui.tui import (
 from misaka.config import (
     APP_NAME,
     APP_TITLE,
-    PACKAGE_NAME,
     VERSION,
-    get_agent_dir,
     get_auth_path,
     get_changelog_path,
     get_debug_log_path,
@@ -65,14 +62,13 @@ from misaka.core.agent_session import parse_skill_block
 from misaka.core.agent_session_runtime import SessionImportFileNotFoundError
 from misaka.core.footer_data_provider import FooterDataProvider
 from misaka.core.http_dispatcher import configureHttpDispatcher
-from misaka.core.keybindings import KEYBINDINGS, KeybindingsManager
+from misaka.core.keybindings import KeybindingsManager
 from misaka.core.messages import createCompactionSummaryMessage
 from misaka.core.model_resolver import (
     defaultModelPerProvider,
     findExactModelReferenceMatch,
     resolveModelScope,
 )
-from misaka.core.package_manager import DefaultPackageManager
 from misaka.core.provider_display_names import BUILT_IN_PROVIDER_DISPLAY_NAMES
 from misaka.core.session_cwd import MissingSessionCwdError, format_missing_session_cwd_prompt
 from misaka.core.session_manager import SessionManager
@@ -789,7 +785,6 @@ class InteractiveMode:
                 set_rebind(self.rebindCurrentSession)
 
     def _refresh_expandables(self) -> None:
-        import os as _os
         containers = (getattr(self.chatContainer, "children", None) or [],
                       getattr(getattr(self, "headerContainer", None), "children", None) or [])
         for child in [c for kids in containers for c in kids]:
@@ -943,31 +938,6 @@ class InteractiveMode:
     def showWarning(self, message: str) -> None:
         self._append_notice(message, "warning", "Warning")
 
-    def showPackageUpdateNotification(self, packages: list[str]) -> None:
-        package_lines = "\n".join(f"- {package_name}" for package_name in packages)
-        action = interactive_theme.theme.fg("accent", f"{APP_NAME} update")
-        update_instruction = interactive_theme.theme.fg("muted", "Package updates are available. Run ") + action
-
-        self.chatContainer.addChild(Spacer(1))
-        self.chatContainer.addChild(DynamicBorder(lambda text: interactive_theme.theme.fg("warning", text)))
-        self.chatContainer.addChild(
-            Text(
-                "\n".join(
-                    [
-                        interactive_theme.theme.bold(
-                            interactive_theme.theme.fg("warning", "Package Updates Available")
-                        ),
-                        update_instruction,
-                        interactive_theme.theme.fg("muted", "Packages:"),
-                        package_lines,
-                    ]
-                ),
-                1,
-                0,
-            )
-        )
-        self.chatContainer.addChild(DynamicBorder(lambda text: interactive_theme.theme.fg("warning", text)))
-        self._request_render()
 
     def getAllQueuedMessages(self) -> dict[str, list[str]]:
         get_steering = _callable_attr(self.session, "getSteeringMessages")
@@ -1755,9 +1725,6 @@ class InteractiveMode:
             return "project"
         return "path"
 
-    def _is_package_source(self, sourceInfo: Any = None) -> bool:
-        source = str(_value(sourceInfo, "source", ""))
-        return source.startswith("npm:") or source.startswith("git:")
 
     def getCompactExtensionLabels(self, extensions: list[dict[str, Any]]) -> list[str]:
         counts: dict[str, int] = {}
@@ -1780,37 +1747,21 @@ class InteractiveMode:
 
     def buildScopeGroups(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         groups = {
-            "project": {"scope": "project", "paths": [], "packages": {}},
-            "user": {"scope": "user", "paths": [], "packages": {}},
-            "path": {"scope": "path", "paths": [], "packages": {}},
+            "project": {"scope": "project", "paths": []},
+            "user": {"scope": "user", "paths": []},
+            "path": {"scope": "path", "paths": []},
         }
         for item in items:
-            source_info = _value(item, "sourceInfo")
-            group = groups[self._scope_group(source_info)]
-            if self._is_package_source(source_info):
-                source = str(_value(source_info, "source", "package"))
-                group["packages"].setdefault(source, []).append(item)
-            else:
-                group["paths"].append(item)
-        return [
-            group
-            for group in (groups["project"], groups["user"], groups["path"])
-            if group["paths"] or group["packages"]
-        ]
+            groups[self._scope_group(_value(item, "sourceInfo"))]["paths"].append(item)
+        return [group for group in (groups["project"], groups["user"], groups["path"]) if group["paths"]]
 
     def formatScopeGroups(self, groups: list[dict[str, Any]], options: dict[str, Any]) -> str:
         lines: list[str] = []
         format_path = options["formatPath"]
-        format_package_path = options["formatPackagePath"]
-
         for group in groups:
             lines.append(f"  {interactive_theme.theme.fg('accent', group['scope'])}")
             for item in sorted(group["paths"], key=lambda entry: str(_value(entry, "path", ""))):
                 lines.append(interactive_theme.theme.fg("dim", f"    {format_path(item)}"))
-            for source, items in sorted(group["packages"].items()):
-                lines.append(f"    {interactive_theme.theme.fg('accent', source)}")
-                for item in sorted(items, key=lambda entry: str(_value(entry, "path", ""))):
-                    lines.append(interactive_theme.theme.fg("dim", f"      {format_package_path(item, source)}"))
         return "\n".join(lines)
 
     def findSourceInfoForPath(self, path: str, sourceInfos: dict[str, Any]) -> Any:
@@ -1975,7 +1926,6 @@ class InteractiveMode:
                         self.buildScopeGroups(prompt_items),
                         {
                             "formatPath": lambda item: f"/{_value(template_by_path.get(str(_value(item, 'path', ''))), 'name', Path(str(_value(item, 'path', ''))).stem)}",
-                            "formatPackagePath": lambda item, _source: f"/{_value(template_by_path.get(str(_value(item, 'path', ''))), 'name', Path(str(_value(item, 'path', ''))).stem)}",
                         },
                     ),
                 )
@@ -1988,9 +1938,6 @@ class InteractiveMode:
                         self.buildScopeGroups(list(extensions)),
                         {
                             "formatPath": lambda item: self.formatExtensionDisplayPath(str(_value(item, "path", ""))),
-                            "formatPackagePath": lambda item, _source: self.formatExtensionDisplayPath(
-                                self.getShortPath(str(_value(item, "path", "")), _value(item, "sourceInfo"))
-                            ),
                         },
                     ),
                 )
@@ -2019,10 +1966,6 @@ class InteractiveMode:
                         self.buildScopeGroups(theme_items),
                         {
                             "formatPath": lambda item: self.formatDisplayPath(str(_value(item, "path", ""))),
-                            "formatPackagePath": lambda item, _source: self.getShortPath(
-                                str(_value(item, "path", "")),
-                                _value(item, "sourceInfo"),
-                            ),
                         },
                     ),
                 )
@@ -2098,27 +2041,6 @@ class InteractiveMode:
 
         return None
 
-    async def checkForPackageUpdates(self) -> list[str]:
-        if os.environ.get("MISAKA_OFFLINE"):
-            return []
-
-        try:
-            package_manager = DefaultPackageManager(
-                {
-                    "cwd": self.sessionManager.getCwd(),
-                    "agentDir": get_agent_dir(),
-                    "settingsManager": self.settingsManager,
-                }
-            )
-            updates = await package_manager.checkForAvailableUpdates()
-        except Exception:
-            return []
-
-        return [
-            display_name
-            for update in updates
-            if (display_name := str(_value(update, "displayName", "")).strip())
-        ]
 
     async def checkTmuxKeyboardSetup(self) -> str | None:
         if not os.environ.get("TMUX"):
@@ -4987,10 +4909,6 @@ class InteractiveMode:
             on_branch_change(lambda: self._request_render())
         await _maybe_await(self.updateAvailableProviderCount())
 
-    async def _check_for_package_updates(self) -> None:
-        updates = await self.checkForPackageUpdates()
-        if updates:
-            self.showPackageUpdateNotification(updates)
 
     async def _check_tmux_keyboard_setup(self) -> None:
         warning = await self.checkTmuxKeyboardSetup()
@@ -5021,7 +4939,6 @@ class InteractiveMode:
             return await self._shutdownFuture
 
         self.isShuttingDown = False
-        self._schedule_task(self._check_for_package_updates())
         self._schedule_task(self._check_tmux_keyboard_setup())
 
         migrated = list(self.options.migratedProviders or [])

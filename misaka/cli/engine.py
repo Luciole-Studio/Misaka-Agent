@@ -18,7 +18,7 @@ from misaka.cli.args import Args, parse_args, print_help
 from misaka.cli.file_processor import ProcessFileOptions, process_file_arguments
 from misaka.cli.initial_message import build_initial_message
 from misaka.cli.list_models import list_models
-from misaka.config import ENV_SESSION_DIR, VERSION, expand_tilde_path, get_agent_dir, get_package_dir
+from misaka.config import ENV_SESSION_DIR, VERSION, expand_tilde_path, get_agent_dir
 from misaka.core.agent_session_runtime import (
     CreateAgentSessionRuntimeResult,
     create_agent_session_runtime,
@@ -51,13 +51,7 @@ from misaka.ui.tui.interactive.components.extension_selector import ExtensionSel
 from misaka.ui.tui.interactive import InteractiveMode
 from misaka.ui.tui.interactive.theme.theme import init_theme, stop_theme_watcher
 from misaka.modes.rpc import run_rpc_mode
-from misaka.cli.package_manager import (
-    _take_command_exit_code,
-    handle_config_command,
-    handle_package_command,
-)
 from misaka.utils.paths import is_local_path, normalize_path, resolve_path
-from misaka.utils.windows_self_update import cleanup_windows_self_update_quarantine
 
 AppMode = Literal["interactive", "print", "json", "rpc"]
 PrintOutputMode = Literal["text", "json"]
@@ -555,23 +549,6 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
     if "--offline" in args or is_truthy_env_flag(os.environ.get("MISAKA_OFFLINE")):
         os.environ["MISAKA_OFFLINE"] = "1"
         os.environ["MISAKA_SKIP_VERSION_CHECK"] = "1"
-
-    if sys.platform == "win32":
-        cleanup_windows_self_update_quarantine(get_package_dir())
-
-    package_command_result = await handle_package_command(args)
-    if type(package_command_result) is bool:
-        if package_command_result:
-            return _take_command_exit_code()
-    elif package_command_result is not None:
-        return package_command_result
-
-    config_command_result = await handle_config_command(args)
-    if type(config_command_result) is bool:
-        if config_command_result:
-            return _take_command_exit_code()
-    elif config_command_result is not None:
-        return config_command_result
 
     parsed = parse_args(args)
     for diagnostic in parsed.diagnostics:

@@ -9,62 +9,13 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import tomllib
-from collections.abc import Sequence
-from dataclasses import dataclass
 from functools import lru_cache
 from importlib import metadata as importlib_metadata
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from misaka.utils.paths import normalize_path
-
-InstallMethod = Literal["pipx", "uv-tool", "pip", "source", "unknown"]
-
-
-
-@dataclass(slots=True, frozen=True)
-class SelfUpdateCommandStep:
-    command: str
-    args: tuple[str, ...]
-    display: str
-
-
-@dataclass(slots=True, frozen=True)
-class SelfUpdateCommand(SelfUpdateCommandStep):
-    steps: tuple[SelfUpdateCommandStep, ...] | None = None
-
-
-def _quote_command_arg(arg: str) -> str:
-    return f'"{arg}"' if any(char.isspace() for char in arg) else arg
-
-
-def _make_self_update_command_step(parts: Sequence[str]) -> SelfUpdateCommandStep:
-    if not parts:
-        raise ValueError("command step cannot be empty")
-    rendered = " ".join(_quote_command_arg(part) for part in parts)
-    return SelfUpdateCommandStep(command=parts[0], args=tuple(parts[1:]), display=rendered)
-
-
-def _make_self_update_command(
-    install_step: SelfUpdateCommandStep,
-    uninstall_step: SelfUpdateCommandStep | None = None,
-) -> SelfUpdateCommand:
-    if uninstall_step is None:
-        return SelfUpdateCommand(
-            command=install_step.command,
-            args=install_step.args,
-            display=install_step.display,
-            steps=None,
-        )
-
-    return SelfUpdateCommand(
-        command=install_step.command,
-        args=install_step.args,
-        display=f"{uninstall_step.display} && {install_step.display}",
-        steps=(uninstall_step, install_step),
-    )
 
 
 def _find_package_root(start: Path) -> Path:
@@ -178,121 +129,6 @@ def get_share_viewer_url(gist_id: str) -> str:
     return f"{base_url}#{gist_id}"
 
 
-def _detect_install_method(package_dir: str | None = None, exec_path: str | None = None) -> InstallMethod:
-    normalized_package_dir = normalize_path(package_dir or get_package_dir()).lower().replace("\\", "/")
-    normalized_exec_path = normalize_path(exec_path or sys.executable).lower().replace("\\", "/")
-    resolved_path = f"{normalized_package_dir}\0{normalized_exec_path}"
-
-    if "/pipx/venvs/" in resolved_path or "/pipx/shared/" in resolved_path:
-        return "pipx"
-    if "/uv/tools/" in resolved_path or "/.local/share/uv/tools/" in resolved_path:
-        return "uv-tool"
-    if "/site-packages/" in resolved_path or "/dist-packages/" in resolved_path:
-        return "pip"
-    if (Path(package_dir or get_package_dir()) / "pyproject.toml").exists():
-        return "source"
-    return "unknown"
-
-
-def detect_install_method() -> InstallMethod:
-    return _detect_install_method()
-
-
-def _get_python_pip_command(python_command: Sequence[str] | None = None) -> list[str]:
-    if python_command:
-        return list(python_command)
-    return [sys.executable, "-m", "pip"]
-
-
-def _get_self_update_command_for_method(
-    method: InstallMethod,
-    installed_package_name: str,
-    update_package_name: str | None = None,
-    python_command: Sequence[str] | None = None,
-) -> SelfUpdateCommand | None:
-    update_package = update_package_name or installed_package_name
-
-    if method == "pipx":
-        install_step = _make_self_update_command_step(["pipx", "upgrade", update_package])
-        if update_package == installed_package_name:
-            return _make_self_update_command(install_step)
-        uninstall_step = _make_self_update_command_step(["pipx", "uninstall", installed_package_name])
-        reinstall_step = _make_self_update_command_step(["pipx", "install", update_package])
-        return _make_self_update_command(reinstall_step, uninstall_step)
-
-    if method == "uv-tool":
-        install_parts = ["uv", "tool", "upgrade", update_package]
-        if update_package == installed_package_name:
-            return _make_self_update_command(_make_self_update_command_step(install_parts))
-        uninstall_step = _make_self_update_command_step(["uv", "tool", "uninstall", installed_package_name])
-        reinstall_step = _make_self_update_command_step(["uv", "tool", "install", update_package])
-        return _make_self_update_command(reinstall_step, uninstall_step)
-
-    if method == "pip":
-        pip_command = _get_python_pip_command(python_command)
-        install_step = _make_self_update_command_step([*pip_command, "install", "--upgrade", update_package])
-        if update_package == installed_package_name:
-            return _make_self_update_command(install_step)
-        uninstall_step = _make_self_update_command_step([*pip_command, "uninstall", "-y", installed_package_name])
-        return _make_self_update_command(install_step, uninstall_step)
-
-    return None
-
-
-def _is_self_update_path_writable(package_dir: str | None = None) -> bool:
-    resolved_package_dir = Path(package_dir or get_package_dir())
-    try:
-        return os.access(resolved_package_dir, os.W_OK) and os.access(resolved_package_dir.parent, os.W_OK)
-    except OSError:
-        return False
-
-
-def get_self_update_command(
-    package_name: str,
-    python_command: Sequence[str] | None = None,
-    update_package_name: str | None = None,
-) -> SelfUpdateCommand | None:
-    command = _get_self_update_command_for_method(
-        detect_install_method(),
-        package_name,
-        update_package_name,
-        python_command,
-    )
-    if command is None or not _is_self_update_path_writable():
-        return None
-    return command
-
-
-def get_self_update_unavailable_instruction(
-    package_name: str,
-    python_command: Sequence[str] | None = None,
-    update_package_name: str | None = None,
-) -> str:
-    method = detect_install_method()
-    update_package = update_package_name or package_name
-    command = _get_self_update_command_for_method(method, package_name, update_package, python_command)
-    if command is not None:
-        if not _is_self_update_path_writable():
-            return (
-                f"This installation is managed by a {method} install, but the install path is not writable. "
-                f"Update it yourself with: {command.display}"
-            )
-        return f"Update it yourself with: {command.display}"
-    if method == "source":
-        return (
-            "This installation comes from a source checkout. "
-            "Update the checkout and resync its environment (for example: git pull && uv sync)."
-        )
-    return f"Update {update_package} using the Python environment or tool manager that provides this installation."
-
-
-def get_update_instruction(package_name: str) -> str:
-    command = _get_self_update_command_for_method(detect_install_method(), package_name)
-    if command is not None:
-        return f"Run: {command.display}"
-    return get_self_update_unavailable_instruction(package_name)
-
-
 def get_agent_dir() -> str:
     env_dir = os.environ.get(ENV_AGENT_DIR)
     if env_dir:
@@ -394,11 +230,7 @@ def get_debug_log_path() -> str:
 
 
 expandTildePath = expand_tilde_path
-detectInstallMethod = detect_install_method
 getShareViewerUrl = get_share_viewer_url
-getSelfUpdateCommand = get_self_update_command
-getSelfUpdateUnavailableInstruction = get_self_update_unavailable_instruction
-getUpdateInstruction = get_update_instruction
 getAgentDir = get_agent_dir
 getCustomThemesDir = get_custom_themes_dir
 getModelsPath = get_models_path
@@ -424,11 +256,8 @@ __all__ = [
     "CONFIG_DIR_NAME",
     "ENV_AGENT_DIR",
     "ENV_SESSION_DIR",
-    "InstallMethod",
     "PACKAGE_NAME",
-    "SelfUpdateCommand",
     "VERSION",
-    "detectInstallMethod",
     "expandTildePath",
     "getAgentDir",
     "getAuthPath",
@@ -447,9 +276,6 @@ __all__ = [
     "getSessionsDir",
     "getSettingsPath",
     "getShareViewerUrl",
-    "getSelfUpdateCommand",
-    "getSelfUpdateUnavailableInstruction",
     "getThemesDir",
     "getToolsDir",
-    "getUpdateInstruction",
 ]

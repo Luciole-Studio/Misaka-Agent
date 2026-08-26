@@ -160,16 +160,6 @@ _register("misaka.core.footer_data_provider", "ReadonlyFooterDataProvider")
 _register("misaka.core.messages", "convertToLlm")
 _register("misaka.core.model_registry", "ModelRegistry")
 _register(
-    "misaka.core.package_manager",
-    "PackageManager",
-    "PathMetadata",
-    "ProgressCallback",
-    "ProgressEvent",
-    "ResolvedPaths",
-    "ResolvedResource",
-    "DefaultPackageManager",
-)
-_register(
     "misaka.core.resource_loader",
     "ResourceCollision",
     "ResourceDiagnostic",
@@ -231,7 +221,6 @@ _register(
     "misaka.core.settings_manager",
     "CompactionSettings",
     "ImageSettings",
-    "PackageSource",
     "RetrySettings",
     "SettingsManager",
 )
