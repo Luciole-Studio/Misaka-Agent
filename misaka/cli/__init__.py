@@ -14,12 +14,12 @@ def _set_process_title(title: str) -> None:
 
     try:
         import setproctitle  # type: ignore[import-not-found]
-    except Exception:
+    except ImportError:
         return
 
     try:
         setproctitle.setproctitle(title)
-    except Exception:
+    except Exception:  # noqa: BLE001 - a process title is cosmetic
         return
 
 

@@ -23,7 +23,7 @@ def cleanup_session_resources(session_id: str | None = None) -> None:
     for cleanup in tuple(_session_resource_cleanups.keys()):
         try:
             cleanup(session_id)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - every cleanup runs; the errors are re-raised together below
             errors.append(error)
     if errors:
         raise ExceptionGroup("Failed to cleanup session resources", errors)

@@ -131,7 +131,7 @@ class _ToolHtmlRenderer:
             )
             self.rendered_call_components[toolCallId] = component
             return ansi_lines_to_html(component.render(self.deps.width))
-        except Exception:
+        except Exception:  # noqa: BLE001 - a renderer that fails falls back to the plain result
             return None
 
     def renderResult(
@@ -188,7 +188,7 @@ class _ToolHtmlRenderer:
                 collapsed=collapsed_html if collapsed_html and collapsed_html != expanded_html else None,
                 expanded=expanded_html,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - a renderer that fails falls back to the plain result
             return None
 
 

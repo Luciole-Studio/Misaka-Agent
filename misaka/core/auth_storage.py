@@ -179,7 +179,7 @@ class FileAuthStorageBackend(AuthStorageBackend):
         finally:
             try:
                 lock.release()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - releasing an already-released lock is fine
                 pass
 
 

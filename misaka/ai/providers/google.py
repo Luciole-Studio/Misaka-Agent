@@ -502,7 +502,7 @@ def stream_google(
             if callable(close):
                 try:
                     await _maybe_await(close())
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001, S110 - closing the SDK client is best-effort after the stream ended
                     pass
             stream.end()
 

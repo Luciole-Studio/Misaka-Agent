@@ -279,9 +279,9 @@ def _run_socket_close_nowait(socket: Any, code: int = 1000, reason: str = "done"
     except TypeError:
         try:
             result = socket.close(code, reason)
-        except Exception:
+        except Exception:  # noqa: BLE001 - closing a dead websocket must not raise
             return
-    except Exception:
+    except Exception:  # noqa: BLE001 - closing a dead websocket must not raise
         return
 
     if not hasattr(result, "__await__"):
@@ -539,7 +539,7 @@ def _get_codex_user_agent() -> str:
             "aarch64": "arm64",
         }.get(arch, arch)
         return f"harn ({platform_name} {platform.release()}; {arch})"
-    except Exception:
+    except Exception:  # noqa: BLE001 - a user-agent string is cosmetic
         return "harn (browser)"
 
 
@@ -566,7 +566,7 @@ async def parse_error_response(response: httpx.Response) -> dict[str, str]:
 
     try:
         payload = json.loads(text_value)
-    except Exception:
+    except ValueError:
         return {"message": message}
 
     if isinstance(payload, Mapping):
@@ -596,7 +596,7 @@ async def _get_websocket_connector() -> Callable[..., Any] | None:
 
     try:
         module = importlib.import_module("websockets.asyncio.client")
-    except Exception:
+    except ImportError:
         return None
 
     connector = getattr(module, "connect", None)
@@ -1196,7 +1196,7 @@ def stream_openai_codex_responses(
                     raise RuntimeError("Request was aborted")
                 stream.push(DoneEvent(reason=output.stopReason, message=output))
             stream.end()
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - every failure becomes an error event on the stream
             for block in output.content:
                 if isinstance(block, dict):
                     block.pop("partialJson", None)

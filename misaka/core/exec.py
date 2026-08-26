@@ -167,7 +167,7 @@ async def exec_command(
 
         try:
             await wait_task
-        except Exception:
+        except Exception:  # noqa: BLE001 - the process is being torn down; a failed wait is recorded as wait_failed
             wait_failed = True
 
         await _wait_for_streams(stdout_task, stderr_task, process.stdout, process.stderr)

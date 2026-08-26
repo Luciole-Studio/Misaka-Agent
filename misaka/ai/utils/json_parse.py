@@ -110,7 +110,7 @@ def _recover_partial_top_level_string(json_string: str) -> str | None:
         return None
     try:
         recovered = parse_json_with_repair(f'{json_string}"')
-    except Exception:
+    except Exception:  # noqa: BLE001 - json_repair raises assorted errors on garbage; the fallback chain handles it
         return None
     return recovered if isinstance(recovered, str) else None
 
@@ -131,15 +131,15 @@ def parse_streaming_json(partial_json: str | None) -> TJson:
 
     try:
         return parse_json_with_repair(partial_json)
-    except Exception:
+    except Exception:  # noqa: BLE001 - json_repair raises assorted errors on garbage; the fallback chain handles it
         try:
             result = _partial_parse_json(partial_json)
             return _coalesce_partial_parse_result(result, partial_json)
-        except Exception:
+        except Exception:  # noqa: BLE001 - json_repair raises assorted errors on garbage; the fallback chain handles it
             try:
                 result = _partial_parse_json(repair_json(partial_json))
                 return _coalesce_partial_parse_result(result, partial_json)
-            except Exception:
+            except Exception:  # noqa: BLE001 - json_repair raises assorted errors on garbage; the fallback chain handles it
                 return {}
 
 

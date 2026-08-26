@@ -583,7 +583,7 @@ def get_available_themes_with_paths() -> list[ThemeInfo]:
         for path in sorted(custom_dir.glob("*.json")):
             try:
                 loaded_theme = load_theme_from_path(str(path))
-            except Exception:
+            except Exception:  # noqa: BLE001, S112 - a broken custom theme is skipped
                 continue
             if loaded_theme.name:
                 add(loaded_theme.name, str(path))
@@ -687,7 +687,7 @@ def init_theme(theme_name: str | None = None, enableWatcher: bool = False) -> No
         set_global_theme(load_theme(name))
         if enableWatcher:
             _start_theme_watcher()
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - any theme failure falls back to dark
         _fall_back_to_dark(error)
 
 
@@ -701,7 +701,7 @@ def set_theme(name: str, enableWatcher: bool = False) -> dict[str, Any]:
         if callable(_ON_THEME_CHANGE):
             _ON_THEME_CHANGE()
         return {"success": True}
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - any theme failure falls back to dark
         _fall_back_to_dark(error)
         return {"success": False, "error": str(error)}
 
@@ -735,7 +735,7 @@ def stop_theme_watcher() -> None:
 def get_theme_by_name(name: str | None = None) -> Theme | None:
     try:
         return load_theme(name or _CURRENT_THEME_NAME or get_default_theme())
-    except Exception:
+    except Exception:  # noqa: BLE001 - no theme by that name
         return None
 
 
@@ -777,7 +777,7 @@ def get_theme_export_colors(theme_name: str | None = None) -> ThemeExportColors:
             if resolved_value is not None:
                 result[key] = resolved_value  # type: ignore[literal-required]
         return result
-    except Exception:
+    except Exception:  # noqa: BLE001 - export colours are optional
         return {}
 
 
@@ -869,7 +869,7 @@ def _highlight_code_with_theme(theme_instance: Theme, code: str, language: str |
                 "theme": _get_cli_highlight_theme(theme_instance),
             },
         ).split("\n")
-    except Exception:
+    except Exception:  # noqa: BLE001 - highlighting is cosmetic; the plain code is shown
         return code.split("\n")
 
 
@@ -890,7 +890,7 @@ def _markdown_highlight_code(code: str, lang: str | None = None) -> list[str]:
                 "theme": _get_cli_highlight_theme(theme),
             },
         ).split("\n")
-    except Exception:
+    except Exception:  # noqa: BLE001 - highlighting is cosmetic; the plain code is shown
         return [theme.fg("mdCodeBlock", line) for line in code.split("\n")]
 
 
@@ -999,7 +999,7 @@ def _start_theme_watcher() -> None:
                 continue
             try:
                 reloaded = load_theme_from_path(watched_path)
-            except Exception:
+            except Exception:  # noqa: BLE001, S112 - a theme mid-write is retried on the next change
                 continue
             _REGISTERED_THEMES[watched_theme_name] = reloaded
             set_global_theme(reloaded)
@@ -1018,7 +1018,7 @@ def _start_theme_watcher() -> None:
 try:
     theme = load_theme(get_default_theme())
     _CURRENT_THEME_NAME = theme.name
-except Exception:
+except Exception:  # noqa: BLE001 - the module must import even with a broken default theme
     theme = Theme({}, {}, name="uninitialized")
 
 

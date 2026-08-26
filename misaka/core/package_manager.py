@@ -263,7 +263,7 @@ def _read_harn_manifest(package_root: str) -> HarnManifest | None:
 def _read_harn_package_json_manifest(package_json_path: str) -> HarnManifest | None:
     try:
         payload = json.loads(Path(package_json_path).read_text(encoding="utf-8-sig"))
-    except Exception:
+    except (OSError, ValueError):
         return None
     manifest = payload.get("harn")
     return cast(HarnManifest, manifest) if isinstance(manifest, dict) else None
@@ -272,7 +272,7 @@ def _read_harn_package_json_manifest(package_json_path: str) -> HarnManifest | N
 def _read_harn_pyproject_manifest(pyproject_path: str) -> HarnManifest | None:
     try:
         payload = tomllib.loads(Path(pyproject_path).read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
         return None
     tool = payload.get("tool")
     manifest = tool.get("harn") if isinstance(tool, dict) else None

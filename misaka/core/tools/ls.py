@@ -136,7 +136,7 @@ def _ignore_background_task_result(task: asyncio.Task[Any]) -> None:
     def _consume(done: asyncio.Task[Any]) -> None:
         try:
             done.result()
-        except Exception:
+        except Exception:  # noqa: BLE001 - the background task's outcome is intentionally discarded
             return
 
     task.add_done_callback(_consume)
@@ -229,7 +229,7 @@ def create_ls_tool_definition(
 
             try:
                 entries = await _maybe_await(operations.readdir(dir_path))
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - any readdir failure becomes the user-facing error
                 raise RuntimeError(f"Cannot read directory: {error}") from None
 
             entries.sort(key=str.lower)
@@ -242,7 +242,7 @@ def create_ls_tool_definition(
                 full_path = os.path.join(dir_path, entry)
                 try:
                     entry_stat = await _maybe_await(operations.stat(full_path))
-                except Exception:
+                except Exception:  # noqa: BLE001, S112 - an entry that vanished or cannot be read is left out
                     continue
                 results.append(f"{entry}/" if _is_directory(entry_stat) else entry)
 

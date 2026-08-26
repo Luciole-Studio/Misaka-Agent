@@ -265,7 +265,7 @@ def calculateImageRows(
 def getPngDimensions(base64_data: str) -> ImageDimensions | None:
     try:
         buffer = base64.b64decode(base64_data)
-    except Exception:
+    except ValueError:
         return None
     if len(buffer) < 24 or buffer[:4] != b"\x89PNG":
         return None
@@ -277,7 +277,7 @@ def getPngDimensions(base64_data: str) -> ImageDimensions | None:
 def getJpegDimensions(base64_data: str) -> ImageDimensions | None:
     try:
         buffer = base64.b64decode(base64_data)
-    except Exception:
+    except ValueError:
         return None
     if len(buffer) < 2 or buffer[:2] != b"\xff\xd8":
         return None
@@ -303,7 +303,7 @@ def getJpegDimensions(base64_data: str) -> ImageDimensions | None:
 def getGifDimensions(base64_data: str) -> ImageDimensions | None:
     try:
         buffer = base64.b64decode(base64_data)
-    except Exception:
+    except ValueError:
         return None
     if len(buffer) < 10 or buffer[:6] not in {b"GIF87a", b"GIF89a"}:
         return None
@@ -315,7 +315,7 @@ def getGifDimensions(base64_data: str) -> ImageDimensions | None:
 def getWebpDimensions(base64_data: str) -> ImageDimensions | None:
     try:
         buffer = base64.b64decode(base64_data)
-    except Exception:
+    except ValueError:
         return None
     if len(buffer) < 30 or buffer[:4] != b"RIFF" or buffer[8:12] != b"WEBP":
         return None

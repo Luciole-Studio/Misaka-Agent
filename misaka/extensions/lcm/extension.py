@@ -117,7 +117,7 @@ def _session_id(ctx, explicit=None):
         return str(explicit)
     try:
         return str(ctx.sessionManager.getSessionId())
-    except Exception:
+    except Exception:  # noqa: BLE001 - no session id available
         return ""
 
 
@@ -129,7 +129,7 @@ def _sync_ctx(ctx):
     try:
         entries = list(ctx.sessionManager.getEntries())
         source = ctx.sessionManager.getSessionFile() or ""
-    except Exception:
+    except Exception:  # noqa: BLE001 - a session without readable entries is addressed by id only
         return sid
     messages, entry_ids = [], []
     for entry in entries:
@@ -280,7 +280,7 @@ def register(harn):
                 if not coverage["complete"]:
                     degraded = (f"Semantic index coverage is {coverage['indexed']}/{coverage['total']}; "
                                 "returning the available mixed results.")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - hybrid retrieval degrades to FTS and says so
             degraded = f"Hybrid retrieval fell back to FTS/LIKE: {exc}"
         lines = [_render_hit(row, show_session=sid is None) for row in rows]
         lines += [f"Node {node.node_id} (d{node.depth}/{getattr(node, 'retrieval', 'fts')}) "
@@ -440,7 +440,7 @@ def register(harn):
             if semantic:
                 coverage = semantic.coverage(session_id=sid)
                 semantic_line = f"hybrid {coverage['indexed']}/{coverage['total']}"
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - the status line reports the fallback
             semantic_line = f"hybrid→fts ({exc})"
         return _text(
             f"{sid}: source messages {compactor.store.get_session_count(sid)} | "
@@ -500,7 +500,7 @@ def register(harn):
             try:
                 from misaka.core.compaction.utils import compute_file_lists
                 details = compute_file_lists(_field(prep, "fileOps"))
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - file lists are decoration in the log line
                 pass
             logger.info("LCM staged: %s leaves, %s condensed (%s)",
                         stats.leaf_nodes, stats.condensed_nodes, sid)

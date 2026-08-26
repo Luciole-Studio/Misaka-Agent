@@ -537,7 +537,7 @@ async def _wait_probes(con, cfg, spawner, run, handles, *, poll_seconds):
             if stop is not None:
                 try:
                     stop(handle)
-                except Exception:  # noqa: BLE001 - best effort while unwinding
+                except Exception:  # noqa: BLE001, S110 - best effort while unwinding
                     pass
         raise
 
@@ -650,7 +650,7 @@ async def _expand_level(con, cfg, spawner, run, level, *, poll_seconds, progress
             if stop is not None:
                 try:
                     stop(handle)
-                except Exception:  # noqa: BLE001 - best effort while unwinding
+                except Exception:  # noqa: BLE001, S110 - best effort while unwinding
                     pass
         raise
 

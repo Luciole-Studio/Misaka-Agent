@@ -38,7 +38,7 @@ def _execute_with_configured_shell(command: str) -> tuple[bool, str | None]:
         return True, None
     except subprocess.TimeoutExpired:
         return True, None
-    except Exception:
+    except Exception:  # noqa: BLE001 - any failure to probe the command means 'not available'
         return False, None
 
     if result.returncode != 0:
@@ -59,7 +59,7 @@ def _execute_with_default_shell(command: str) -> str | None:
             timeout=10,
             shell=True,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - any failure to run the resolver command yields no value
         return None
 
     if result.returncode != 0:

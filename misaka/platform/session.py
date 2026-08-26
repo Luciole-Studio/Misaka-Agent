@@ -81,7 +81,7 @@ async def dispose(runtime):
         return
     try:
         await asyncio.wait_for(runtime.dispose(), 30)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, S110 - dispose is best-effort with a hard timeout
         pass
 
 
@@ -145,7 +145,7 @@ async def run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
             timed_out = True
             try:
                 await asyncio.wait_for(session.abort(), 10)
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001, S110 - aborting after a timeout is best-effort
                 pass
         text, err = None, None
         msgs = session.state.messages or []

@@ -41,7 +41,7 @@ def whoami(cwd=None):
             con.close()
             if row:
                 sender = row["assignee"]
-        except Exception:  # noqa: BLE001 - unknown sender; tell() refuses to send below
+        except Exception:  # noqa: BLE001, S110 - unknown sender; tell() refuses to send below
             pass
     return sender, task_id
 

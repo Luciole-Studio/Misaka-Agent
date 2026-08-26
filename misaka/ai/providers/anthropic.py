@@ -1129,7 +1129,7 @@ def stream_anthropic(
             if output.stopReason in {"aborted", "error"}:
                 raise RuntimeError("An unknown error occurred")
             stream.push(DoneEvent(reason=output.stopReason, message=output))
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - every failure becomes an error event on the stream
             output.stopReason = "aborted" if _is_aborted(_option(options, "signal")) else "error"
             output.errorMessage = _format_anthropic_error(error)
             stream.push(ErrorEvent(reason=output.stopReason, error=output))

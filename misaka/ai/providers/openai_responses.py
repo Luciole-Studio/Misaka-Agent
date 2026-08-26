@@ -172,7 +172,7 @@ def format_openai_responses_error(error: Any) -> str:
         return _error_message(error)
     try:
         return json.dumps(error)
-    except Exception:
+    except (TypeError, ValueError):
         return str(error)
 
 

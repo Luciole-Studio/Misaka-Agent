@@ -32,7 +32,7 @@ class _NativeClipboardImpl:
     def has_image(self) -> bool:
         try:
             image = self._image_grab.grabclipboard()
-        except Exception:
+        except Exception:  # noqa: BLE001 - no clipboard image
             return False
         return hasattr(image, "save")
 
@@ -42,7 +42,7 @@ class _NativeClipboardImpl:
     def _get_image_binary_sync(self) -> list[int] | None:
         try:
             image = self._image_grab.grabclipboard()
-        except Exception:
+        except Exception:  # noqa: BLE001 - no clipboard image
             return None
         if not hasattr(image, "save"):
             return None
@@ -76,7 +76,7 @@ def _load_clipboard(
         image_grab = image_grab_module
         if image_grab is None:
             from PIL import ImageGrab as image_grab  # type: ignore[no-redef]
-    except Exception:
+    except ImportError:
         return None
 
     return _NativeClipboardImpl(pyperclip, image_grab)

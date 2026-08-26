@@ -726,7 +726,7 @@ class SisterRuntime:
                 if manager:
                     try:
                         await asyncio.shield(manager.close())
-                    except BaseException:
+                    except BaseException:  # noqa: BLE001, S110 - closing during teardown must not mask the board transition
                         pass
                     skill_sandbox.cleanup(manager.skill_root)
                 self._handles.pop(task_id, None)
@@ -1026,7 +1026,7 @@ class SisterRuntime:
                         claim_lock=handle.claim_lock,
                     )
             raise
-        except Exception as error:  # infrastructure errors are explicit board failures
+        except Exception as error:  # noqa: BLE001 - infrastructure errors are explicit board failures
             row = self._row_for_run(handle, token)
             if row is not None and row["status"] == "running" and handle.claim_lock:
                 reason = f"supervisor: {error}"
@@ -1048,7 +1048,7 @@ class SisterRuntime:
                     # it from the durable row and transcript.
                     try:
                         await asyncio.shield(handle.manager.close())
-                    except BaseException:
+                    except BaseException:  # noqa: BLE001, S110 - closing during teardown must not mask the board transition
                         pass
                     self._handles.pop(handle.board_id, None)
             done_event.set()
@@ -1083,7 +1083,7 @@ class SisterRuntime:
                 },
                 {"deliverAs": "followUp", "triggerTurn": True},
             )
-        except Exception as error:  # delivery failed: release the claim so another session (or the next attempt) can redeliver
+        except Exception as error:  # noqa: BLE001 - delivery failed: release the claim so another session (or the next attempt) can redeliver
             handle.notified = False
             try:
                 db.release_notification(
@@ -1096,7 +1096,7 @@ class SisterRuntime:
                     {"error": f"{type(error).__name__}: {error}"[:500]},
                     generation=handle.generation,
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - recording the delivery error is itself best-effort
                 pass
         else:
             try:
@@ -1107,7 +1107,7 @@ class SisterRuntime:
                     {"status": data["status"]},
                     generation=handle.generation,
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - the notified event is bookkeeping
                 pass
 
     def notify_row(self, task_id: str) -> bool:
@@ -1132,19 +1132,19 @@ class SisterRuntime:
                 },
                 {"deliverAs": "followUp", "triggerTurn": True},
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - delivery failed: the claim is released so it can be redelivered
             if handle and handle.generation == generation:
                 handle.notified = False
             try:
                 db.release_notification(self.con, task_id, generation=generation)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - releasing after a failed delivery is best-effort
                 pass
             return False
         try:
             db.add_event(self.con, task_id, "notified",
                          {"status": data["status"], "collected": True},
                          generation=generation)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - the notified event is bookkeeping
             pass
         return True
 
@@ -1416,7 +1416,7 @@ class SisterRuntime:
                 )
                 try:
                     await asyncio.shield(handle.manager.close())
-                except BaseException:
+                except BaseException:  # noqa: BLE001, S110 - closing during teardown must not mask the board transition
                     pass
                 done_event.set()
                 self._handles.pop(task_id, None)

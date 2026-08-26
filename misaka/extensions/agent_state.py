@@ -52,7 +52,7 @@ class Reporter:
         self.seq += 1
         try:
             await asyncio.to_thread(self.send, state, message, self.seq, self.session)
-        except Exception:  # noqa: BLE001 - the daemon may be gone; a status ping never breaks the session
+        except Exception:  # noqa: BLE001, S110 - the daemon may be gone; a status ping never breaks the session
             pass
         return True
 

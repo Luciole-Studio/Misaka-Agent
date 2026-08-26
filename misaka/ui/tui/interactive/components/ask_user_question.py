@@ -293,7 +293,7 @@ class AskUserQuestionComponent:
     async def _paste_image(self) -> None:
         try:
             image = await read_clipboard_image()
-        except Exception:
+        except Exception:  # noqa: BLE001 - no clipboard image
             image = None
         if image is None or self.inputMode != "other":
             self.warning = "No image found on the clipboard."

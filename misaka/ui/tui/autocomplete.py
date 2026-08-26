@@ -229,7 +229,7 @@ async def walk_directory_with_fd(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - no fd binary or a spawn failure: no suggestions
         return []
 
     stdout_task = asyncio.create_task(_read_stream(process.stdout))
@@ -670,7 +670,7 @@ class CombinedAutocompleteProvider:
                     )
                 )
             return suggestions
-        except Exception:
+        except Exception:  # noqa: BLE001 - any filesystem failure: no suggestions
             return []
 
     def shouldTriggerFileCompletion(self, lines: list[str], cursorLine: int, cursorCol: int) -> bool:

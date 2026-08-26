@@ -485,7 +485,7 @@ class Markdown(Component):
         try:  # markdown-it percent-encodes href, so decode before comparing with the plain-text label
             from urllib.parse import unquote
             candidates |= {unquote(href), unquote(href_for_comparison)}
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110 - an href that cannot be decoded is compared as-is
             pass
         if linkTextPlain in candidates:
             return styled_link + stylePrefix

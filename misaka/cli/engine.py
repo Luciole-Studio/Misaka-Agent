@@ -578,7 +578,7 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
         output_path = parsed.messages[0] if parsed.messages else None
         try:
             result = await export_from_file(parsed.export, output_path)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - any export failure is reported to the user and exits 1
             print(_format_colored_message(f"Error: {error}", _RED), file=sys.stderr)
             return finish(1)
         print(f"Exported to: {result}")

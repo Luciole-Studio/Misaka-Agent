@@ -50,7 +50,7 @@ async def copy_to_clipboard(text: str) -> None:
         if native is not None and platform_name != "linux":
             await native.set_text(text)
             copied = True
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - clipboard backends are best-effort; the fallback chain continues
         pass
 
     remote = is_remote_session()
@@ -67,7 +67,7 @@ async def copy_to_clipboard(text: str) -> None:
                 copied = True
             else:
                 copied = _copy_to_linux_clipboard(text)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - clipboard backends are best-effort; the fallback chain continues
             pass
 
     if remote or not copied:
@@ -83,7 +83,7 @@ def _copy_to_linux_clipboard(text: str) -> bool:
         try:
             _run_command(["termux-clipboard-set"], text)
             return True
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - clipboard backends are best-effort; the fallback chain continues
             pass
 
     has_wayland_display = bool(os.environ.get("WAYLAND_DISPLAY"))
@@ -93,7 +93,7 @@ def _copy_to_linux_clipboard(text: str) -> bool:
         try:
             _spawn_background_command(["wl-copy"], text)
             return True
-        except Exception:
+        except Exception:  # noqa: BLE001 - wl-copy failed: try X11
             if has_x11_display:
                 _copy_to_x11_clipboard(text)
                 return True
@@ -109,7 +109,7 @@ def _copy_to_linux_clipboard(text: str) -> bool:
 def _copy_to_x11_clipboard(text: str) -> None:
     try:
         _run_command(["xclip", "-selection", "clipboard"], text)
-    except Exception:
+    except Exception:  # noqa: BLE001 - xclip failed: try xsel
         _run_command(["xsel", "--clipboard", "--input"], text)
 
 

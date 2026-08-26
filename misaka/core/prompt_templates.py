@@ -123,7 +123,7 @@ def load_prompt_templates(options: LoadPromptTemplatesOptions) -> list[PromptTem
                 template = _load_template_from_file(resolved, get_source_info(resolved))
                 if template is not None:
                     templates.append(template)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S112 - an unreadable entry is skipped
             continue
 
     return templates
@@ -157,7 +157,7 @@ def _load_templates_from_dir(
             if entry.is_symlink():
                 try:
                     is_file = os.stat(entry_path).st_mode is not None and os.path.isfile(entry_path)
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001, S112 - an unreadable entry is skipped
                     continue
             if is_file and entry.name.endswith(".md"):
                 template = _load_template_from_file(entry_path, get_source_info(entry_path))

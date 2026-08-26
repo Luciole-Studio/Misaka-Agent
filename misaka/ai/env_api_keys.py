@@ -54,7 +54,7 @@ def _get_proc_env(key: str) -> str | None:
                 index = entry.find("=")
                 if index > 0:
                     _proc_env_cache[entry[:index]] = entry[index + 1 :]
-        except Exception:
+        except (OSError, UnicodeError):
             pass
 
     return _proc_env_cache.get(key)

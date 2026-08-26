@@ -299,7 +299,7 @@ async def _run_fd_search(fd_path: str, args: list[str], signal: Any | None) -> t
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - any spawn failure is reported as 'failed to run fd'
         raise RuntimeError(f"Failed to run fd: {error}") from None
 
     communicate_task = asyncio.create_task(process.communicate())

@@ -817,7 +817,7 @@ class SessionSelectorComponent(Container, Focusable):
 
             if scope == "all" and not sessions and not (self.currentSessions or []):
                 self.onCancel()
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - any load failure is shown in the picker
             if scope == "current":
                 self.currentLoading = False
             else:

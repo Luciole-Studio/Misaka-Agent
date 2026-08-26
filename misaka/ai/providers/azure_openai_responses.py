@@ -118,7 +118,7 @@ def format_azure_openai_error(error: Any) -> str:
         return str(error)
     try:
         return json.dumps(error)
-    except Exception:
+    except (TypeError, ValueError):
         return str(error)
 
 

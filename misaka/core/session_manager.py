@@ -1122,7 +1122,7 @@ def _build_session_info_sync(file_path: str) -> SessionInfo | None:
             firstMessage=first_message or "(no messages)",
             allMessagesText=" ".join(all_messages),
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - a corrupt session file is skipped in the picker
         return None
 
 
@@ -1148,7 +1148,7 @@ async def _build_session_infos_with_concurrency(
         async def run() -> None:
             try:
                 results[index] = await _build_session_info(files[index])
-            except Exception:
+            except Exception:  # noqa: BLE001 - a corrupt session file is skipped in the picker
                 results[index] = None
             finally:
                 on_loaded()

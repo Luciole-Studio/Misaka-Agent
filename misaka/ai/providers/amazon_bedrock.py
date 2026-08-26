@@ -505,7 +505,7 @@ async def iterate_stream_events(response_stream: Any, signal: Any = None):
         try:
             for event in response_stream:
                 loop.call_soon_threadsafe(queue.put_nowait, event)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - any stream failure is delivered to the consumer as an item
             loop.call_soon_threadsafe(queue.put_nowait, error)
         finally:
             loop.call_soon_threadsafe(queue.put_nowait, _STREAM_SENTINEL)

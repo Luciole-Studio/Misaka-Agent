@@ -92,7 +92,7 @@ class _UsageRecorder:
         if self.callback:
             try:
                 delivered = self.callback(line) is True
-            except Exception:  # accounting fallback must survive observer failure
+            except Exception:  # noqa: BLE001 - accounting fallback must survive observer failure
                 delivered = False
         if total and not delivered:
             self.fallback_tokens += total

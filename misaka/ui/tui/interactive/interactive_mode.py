@@ -284,7 +284,7 @@ def _coerce_bash_result(result: Any) -> BashResult:
     exit_code = _value(result, "exitCode", _value(result, "exit_code"))
     try:
         resolved_exit_code = int(exit_code) if exit_code is not None else None
-    except Exception:
+    except (TypeError, ValueError):
         resolved_exit_code = None
 
     full_output_path = _value(result, "fullOutputPath", _value(result, "full_output_path"))
@@ -800,7 +800,7 @@ class InteractiveMode:
             if callable(refresh):
                 try:
                     refresh()
-                except Exception:  # noqa: BLE001 - one broken block must not block the redraw
+                except Exception:  # noqa: BLE001, S110 - one broken block must not block the redraw
                     pass
 
     def _request_render(self, force: bool | None = None) -> None:
@@ -1608,7 +1608,7 @@ class InteractiveMode:
             return
         try:
             api_key = await _maybe_await(get_api_key("anthropic"))
-        except Exception:
+        except Exception:  # noqa: BLE001 - no key means no warning
             return
         if not is_anthropic_subscription_auth_key(api_key):
             return
@@ -3836,7 +3836,7 @@ class InteractiveMode:
             clear_status()
         try:
             await self.session.compact(customInstructions)
-        except Exception:
+        except Exception:  # noqa: BLE001 - compaction reports its own failure
             return
 
     async def checkShutdownRequested(self) -> None:
@@ -4436,7 +4436,7 @@ class InteractiveMode:
                     set_text(current_text + str(file_path))
 
             self.ui.requestRender()
-        except Exception:
+        except Exception:  # noqa: BLE001 - a failed file drop is ignored
             return
 
     async def updateAvailableProviderCount(self) -> None:
@@ -4890,7 +4890,7 @@ class InteractiveMode:
                 return
             try:
                 rgb = await query(timeoutMs=1000)
-            except Exception:
+            except Exception:  # noqa: BLE001 - no background colour answer within the timeout
                 return
             if rgb is None:
                 return
@@ -5318,7 +5318,7 @@ class InteractiveMode:
             return []
         try:
             return list((await _maybe_await(get_available())) or [])
-        except Exception:
+        except Exception:  # noqa: BLE001 - a registry that cannot list models offers none
             return []
 
     def showSettingsSelector(self) -> None:
@@ -5825,7 +5825,7 @@ def _safe_call_bool(obj: Any, name: str, default: bool = False) -> bool:
         return default
     try:
         return bool(getter())
-    except Exception:
+    except Exception:  # noqa: BLE001 - an accessor that fails yields the default
         return default
 
 
@@ -5835,7 +5835,7 @@ def _safe_call_int(obj: Any, name: str, default: int = 0) -> int:
         return default
     try:
         return int(getter())
-    except Exception:
+    except Exception:  # noqa: BLE001 - an accessor that fails yields the default
         return default
 
 
@@ -5845,7 +5845,7 @@ def _safe_call_str(obj: Any, name: str, default: str | None = None) -> str | Non
         return default
     try:
         value = getter()
-    except Exception:
+    except Exception:  # noqa: BLE001 - an accessor that fails yields the default
         return default
     return str(value) if value is not None else default
 

@@ -47,7 +47,7 @@ class _PollingWatcher:
                 filename = Path(self._path).name or None
                 try:
                     self._listener("change", filename)
-                except Exception:
+                except Exception:  # noqa: BLE001 - listener code: reported through on_error
                     self._safe_on_error()
                     return
 
@@ -63,14 +63,14 @@ def close_watcher(watcher: FSWatcher | None) -> None:
         return
     try:
         watcher.close()
-    except Exception:
+    except Exception:  # noqa: BLE001 - closing a watcher twice is fine
         return
 
 
 def watch_with_error_handler(path: str, listener: WatchListener, on_error: Any) -> FSWatcher | None:
     try:
         return _PollingWatcher(path, listener, on_error)
-    except Exception:
+    except Exception:  # noqa: BLE001 - any watcher failure is reported through on_error
         on_error()
         return None
 

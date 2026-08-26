@@ -160,7 +160,7 @@ Continue with `/research resume {run_id} YOUR_ANSWER`.""")
                 )
         except asyncio.CancelledError:
             raise
-        except Exception as error:  # infrastructure failures stay visible, and the run stays resumable
+        except Exception as error:  # noqa: BLE001 - infrastructure failures stay visible, and the run stays resumable
             harn.sendMessage(
                 {"customType": "research-error", "display": True,
                  "content": f"Research run `{run_id}` paused: {type(error).__name__}: {error}\n"
@@ -211,7 +211,7 @@ Continue with `/research resume {run_id} YOUR_ANSWER`.""")
     async def begin_safely(question, depth, workspace, ctx):
         try:
             await begin(question, depth, workspace, ctx)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - the failure is shown and the question is kept for a retry
             pending["depth"] = depth
             pending["workspace"] = workspace
             send_progress(

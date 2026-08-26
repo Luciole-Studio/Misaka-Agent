@@ -32,7 +32,7 @@ def normalize_domain(input_text: str) -> str | None:
         if not hostname or any(character.isspace() for character in hostname):
             return None
         return hostname
-    except Exception:
+    except ValueError:
         return None
 
 
@@ -199,7 +199,7 @@ async def _enable_github_copilot_model(token: str, model_id: str, enterprise_dom
                 json={"state": "enabled"},
             )
         return response.is_success
-    except Exception:
+    except Exception:  # noqa: BLE001 - an unreachable policy endpoint reads as 'not enabled'
         return False
 
 

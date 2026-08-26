@@ -64,7 +64,7 @@ def _profile_role(profile_dir: str | None) -> str:
         from misaka.config.profiles import role_of
 
         return role_of(profile_dir)
-    except Exception:  # pragma: no cover - defensive import boundary
+    except Exception:  # noqa: BLE001 - defensive import boundary: the directory name is the fallback
         return os.path.basename(profile_dir)
 
 

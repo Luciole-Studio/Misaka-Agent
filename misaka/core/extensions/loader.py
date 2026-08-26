@@ -407,7 +407,7 @@ def _read_harn_manifest(dir_path: str) -> dict[str, list[str]] | None:
 def _read_harn_package_json_manifest(package_json_path: str) -> dict[str, list[str]] | None:
     try:
         package = json.loads(Path(package_json_path).read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
         return None
     harn_section = package.get("harn")
     return harn_section if isinstance(harn_section, dict) else None
@@ -416,7 +416,7 @@ def _read_harn_package_json_manifest(package_json_path: str) -> dict[str, list[s
 def _read_harn_pyproject_manifest(pyproject_path: str) -> dict[str, list[str]] | None:
     try:
         package = tomllib.loads(Path(pyproject_path).read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
         return None
     tool_section = package.get("tool")
     harn_section = tool_section.get("harn") if isinstance(tool_section, dict) else None
@@ -438,7 +438,7 @@ async def _load_extension(
         api = _ExtensionAPI(extension=extension, cwd=cwd, runtime=runtime, events=_TrackedEventBus(runtime=runtime, bus=event_bus))
         await _invoke_factory(factory, api)
         return extension, None
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - extension code: a failing factory is reported as a load error
         return None, f"Failed to load extension: {error}"
 
 

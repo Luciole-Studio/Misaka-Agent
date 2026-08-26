@@ -124,7 +124,7 @@ def finish(workspace, exit_code, output, *, assignee, task_id, output_dir=None, 
     try:
         notify(task_id, f"Ally {assignee} {head} (card {task_id}):\n\n{summary}",
                sender=assignee)
-    except Exception:  # noqa: BLE001 - a failed notification must not change the submission result
+    except Exception:  # noqa: BLE001, S110 - a failed notification must not change the submission result
         pass
     return ok, summary
 

@@ -41,7 +41,7 @@ def _parse_authorization_input(input_text: str) -> dict[str, str | None]:
         if parsed.scheme and parsed.netloc and hostname and not any(character.isspace() for character in hostname):
             params = parse_qs(parsed.query)
             return {"code": params.get("code", [None])[0], "state": params.get("state", [None])[0]}
-    except Exception:
+    except ValueError:
         pass
 
     if "#" in value:
@@ -64,7 +64,7 @@ def _decode_jwt(token: str) -> dict[str, Any] | None:
         padding = "=" * (-len(payload) % 4)
         decoded = base64.urlsafe_b64decode(payload + padding)
         return json.loads(decoded)
-    except Exception:
+    except ValueError:
         return None
 
 
@@ -111,7 +111,7 @@ async def _refresh_access_token(refresh_token: str) -> dict[str, Any]:
                     "client_id": CLIENT_ID,
                 },
             )
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - any refresh failure is reported as a failed credential
         return {"type": "failed", "message": f"OpenAI Codex token refresh error: {error}"}
 
     if response.status_code >= 400:
@@ -210,7 +210,7 @@ async def _start_local_oauth_server(state: str) -> _OAuthServerInfo:
             )
             writer.write(response.encode("utf-8"))
             await writer.drain()
-        except Exception:
+        except Exception:  # noqa: BLE001 - a failing callback response must still get a 500 page
             body = oauth_error_html("Internal error while processing OAuth callback.")
             response = (
                 "HTTP/1.1 500 Internal Server Error\r\n"
@@ -227,7 +227,7 @@ async def _start_local_oauth_server(state: str) -> _OAuthServerInfo:
 
     try:
         server = await asyncio.start_server(handler, CALLBACK_HOST, 1455)
-    except Exception:
+    except OSError:
         future.set_result(None)
         return _OAuthServerInfo(None, future)
     return _OAuthServerInfo(server, future)

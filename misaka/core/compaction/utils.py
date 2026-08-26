@@ -157,7 +157,7 @@ def _truncate_for_summary(text: str, max_chars: int) -> str:
 def _safe_json_stringify(value: Any) -> str:
     try:
         serialized = json.dumps(value)
-    except Exception:
+    except (TypeError, ValueError):
         return "[unserializable]"
     return serialized if serialized is not None else "undefined"
 

@@ -412,7 +412,7 @@ async def compute_edits_diff(path: str, edits: list[Edit | dict[str, str]], cwd:
     try:
         try:
             await asyncio.to_thread(_check_readable_file, absolute_path)
-        except BaseException as error:
+        except BaseException as error:  # noqa: BLE001 - any access failure becomes the user-facing edit error
             return EditDiffError(error=f"Could not edit file: {path}. {_format_access_error(error)}.")
 
         raw_content = await asyncio.to_thread(Path(absolute_path).read_text, encoding="utf-8")
@@ -420,7 +420,7 @@ async def compute_edits_diff(path: str, edits: list[Edit | dict[str, str]], cwd:
         normalized_content = normalize_to_lf(content)
         applied = apply_edits_to_normalized_content(normalized_content, edits, path)
         return generate_diff_string(applied.baseContent, applied.newContent)
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - any diff failure is returned as EditDiffError
         return EditDiffError(error=str(error))
 
 

@@ -173,7 +173,7 @@ def register(harn, *, sender, route=None, receive=False):
                             {"customType": "agent-messages", "content": "\n".join(lines),
                              "display": True, "details": {"count": len(mine)}},
                             {"deliverAs": "followUp", "triggerTurn": True})
-                    except Exception:  # restore delivery state so the next session can retry
+                    except Exception:  # noqa: BLE001 - restore delivery state so the next session can retry
                         marks = ",".join("?" * len(mine))
                         con.execute(
                             f"UPDATE messages SET delivered_at=NULL WHERE id IN ({marks})",

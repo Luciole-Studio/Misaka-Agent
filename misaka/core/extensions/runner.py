@@ -412,7 +412,7 @@ class ExtensionRunner:
                     fallback_register(registration.name, registration.config)
                 else:
                     raise RuntimeError("No provider registration handler bound")  # noqa: TRY004 - callers treat bad input as ValueError
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception
                 self._emit_extension_exception(registration.extensionPath, "register_provider", error)
         self.runtime.pendingProviderRegistrations.clear()
 
@@ -670,7 +670,7 @@ class ExtensionRunner:
                         result = handler_result
                         if _result_flag(result, "cancel", False):
                             return result
-                except Exception as error:
+                except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception
                     self._emit_extension_exception(extension.path, event_type, error)
         return result
 
@@ -699,7 +699,7 @@ class ExtensionRunner:
                         continue
                     current_message = message
                     modified = True
-                except Exception as error:
+                except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception
                     self._emit_extension_exception(extension.path, "message_end", error)
         return current_message if modified else None
 
@@ -723,7 +723,7 @@ class ExtensionRunner:
                             else:
                                 setattr(current_event, field_name, value)
                             modified = True
-                except Exception as error:
+                except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception
                     self._emit_extension_exception(extension.path, "tool_result", error)
         if not modified:
             return None
@@ -757,7 +757,7 @@ class ExtensionRunner:
                         handler_result = await handler_result
                     if handler_result is not None:
                         return handler_result
-                except Exception as error:
+                except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception
                     self._emit_extension_exception(extension.path, "user_bash", error)
         return None
 
@@ -776,7 +776,7 @@ class ExtensionRunner:
                         handler_result = await handler_result
                     if _result_flag(handler_result, "messages"):
                         current_messages = _result_flag(handler_result, "messages")
-                except Exception as error:
+                except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception
                     self._emit_extension_exception(extension.path, "context", error)
         return current_messages
 
@@ -795,7 +795,7 @@ class ExtensionRunner:
                         handler_result = await handler_result
                     if handler_result is not None:
                         current_payload = handler_result
-                except Exception as error:
+                except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception
                     self._emit_extension_exception(extension.path, "before_provider_request", error)
         return current_payload
 
@@ -838,7 +838,7 @@ class ExtensionRunner:
                     if _result_flag(handler_result, "systemPrompt") is not None:
                         current_system_prompt = _result_flag(handler_result, "systemPrompt")
                         system_prompt_modified = True
-                except Exception as error:
+                except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception
                     self._emit_extension_exception(extension.path, "before_agent_start", error)
         if messages or system_prompt_modified:
             return {
@@ -872,7 +872,7 @@ class ExtensionRunner:
                                 "agent_end hook blocked completion",
                             ),
                         }
-                except Exception as error:
+                except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception
                     self._emit_extension_exception(extension.path, "agent_end", error)
         return None
 
@@ -896,7 +896,7 @@ class ExtensionRunner:
                     ):
                         for path in _result_flag(handler_result, field_name, []) or []:
                             target.append({"path": path, "extensionPath": extension.path})
-                except Exception as error:
+                except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception
                     self._emit_extension_exception(extension.path, "resources_discover", error)
         return {
             "promptPaths": prompt_paths,
@@ -922,7 +922,7 @@ class ExtensionRunner:
                         images_result = _result_flag(handler_result, "images", _MISSING)
                         if images_result is not _MISSING and images_result is not None:
                             current_images = images_result
-                except Exception as error:
+                except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception
                     self._emit_extension_exception(extension.path, "input", error)
         if current_text != text or current_images != images:
             return {"action": "transform", "text": current_text, "images": current_images}

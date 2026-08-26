@@ -62,7 +62,7 @@ def _parse_authorization_input(input_text: str) -> dict[str, str | None]:
                 "code": params.get("code", [None])[0],
                 "state": params.get("state", [None])[0],
             }
-    except Exception:
+    except ValueError:
         pass
 
     if "#" in value:
@@ -154,7 +154,7 @@ async def _start_callback_server(expected_state: str) -> _CallbackServerInfo:
             )
             writer.write(response.encode("utf-8"))
             await writer.drain()
-        except Exception:
+        except Exception:  # noqa: BLE001 - a failing callback response must still get a 500 page
             response = (
                 "HTTP/1.1 500 Internal Server Error\r\n"
                 "Content-Type: text/plain; charset=utf-8\r\n"
@@ -254,7 +254,7 @@ async def login_anthropic(options: dict[str, Any]) -> OAuthCredentials:
                 nonlocal manual_input, manual_error
                 try:
                     manual_input = await options["onManualCodeInput"]()
-                except Exception as error:
+                except Exception as error:  # noqa: BLE001 - captured and re-raised on the main path
                     manual_error = error
                 finally:
                     server.cancel_wait()

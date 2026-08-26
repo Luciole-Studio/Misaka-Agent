@@ -321,7 +321,7 @@ class ProcessTerminal:
             if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
                 return
             kernel32.SetConsoleMode(handle, mode.value | ENABLE_VIRTUAL_TERMINAL_INPUT)
-        except Exception:
+        except Exception:  # noqa: BLE001 - console mode setup on Windows is best-effort
             return
 
     async def drainInput(self, maxMs: int = 1000, idleMs: int = 50) -> None:
@@ -583,7 +583,7 @@ class ProcessTerminal:
     def _stdin_fileno(self) -> int | None:
         try:
             return int(self.stdin.fileno())
-        except Exception:
+        except Exception:  # noqa: BLE001 - no usable stdin fd
             return None
 
     def _enter_raw_mode(self) -> None:

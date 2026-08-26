@@ -91,7 +91,7 @@ def _json_safe(value: Any, seen: set[int]) -> Any:
     if callable(dump):
         try:
             return _json_safe(dump(), seen)
-        except Exception:  # noqa: BLE001 - fall through to a string
+        except Exception:  # noqa: BLE001, S110 - fall through to a string
             pass
     try:
         return str(value)
@@ -416,7 +416,7 @@ async def _evaluate_hook(
         return parse_hook_output(value, expected_event=str(payload.get("hook_event_name") or "") or None)
     except TimeoutError:
         return _result(reason=f"{kind} hook timed out")
-    except Exception as error:  # evaluator failures must not stop the child
+    except Exception as error:  # noqa: BLE001 - evaluator failures must not stop the child
         return _result(reason=f"{kind} hook failed: {error}")
 
 

@@ -259,7 +259,7 @@ def _ignore_background_task_result(task: asyncio.Task[Any]) -> None:
     def _consume(done: asyncio.Task[Any]) -> None:
         try:
             done.result()
-        except Exception:
+        except Exception:  # noqa: BLE001 - the background task's outcome is intentionally discarded
             return
 
     task.add_done_callback(_consume)
@@ -445,7 +445,7 @@ def create_edit_tool_definition(
                 try:
                     try:
                         await operations.access(absolute_path)
-                    except Exception as error:
+                    except Exception as error:  # noqa: BLE001 - any access failure becomes the user-facing edit error
                         raise RuntimeError(f"Could not edit file: {path}. {_format_access_error(error)}.") from None
 
                     if aborted:

@@ -141,7 +141,7 @@ def _ignore_background_task_result(task: asyncio.Task[Any]) -> None:
     def _consume(done: asyncio.Task[Any]) -> None:
         try:
             done.result()
-        except Exception:
+        except Exception:  # noqa: BLE001 - the background task's outcome is intentionally discarded
             return
 
     task.add_done_callback(_consume)

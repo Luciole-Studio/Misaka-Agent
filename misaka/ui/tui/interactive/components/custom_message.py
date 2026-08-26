@@ -45,7 +45,7 @@ class CustomMessageComponent(Container):
         if self.customRenderer is not None:
             try:
                 component = self.customRenderer(self.message, {"expanded": self._expanded}, theme)
-            except Exception:
+            except Exception:  # noqa: BLE001 - a failing custom renderer falls back to the default
                 component = None
             if component is not None:
                 self.customComponent = component

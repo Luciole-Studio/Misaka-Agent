@@ -86,7 +86,7 @@ def _resize_image_sync(img: ImageContent, options: ImageResizeOptions | None) ->
     resolved = _resolve_options(options)
     try:
         input_buffer = base64.b64decode(img.data)
-    except Exception:
+    except ValueError:
         return None
 
     input_base64_size = len(img.data.encode("utf-8"))

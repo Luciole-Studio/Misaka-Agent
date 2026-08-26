@@ -266,7 +266,7 @@ async def ensure_tool(
         if not silent:
             printer(f"{config.name} installed to {path}")
         return path
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - any download failure is reported to the user
         if not silent:
             printer(f"Failed to download {config.name}: {error}")
         return None

@@ -301,7 +301,7 @@ class ToolExecutionComponent(Container):
             else:
                 try:
                     component = call_renderer(self.args, theme, self.getRenderContext(self.callRendererComponent))
-                except Exception:
+                except Exception:  # noqa: BLE001 - a failing tool renderer falls back to the default
                     self.callRendererComponent = None
                     component = None
                 if component is None:
@@ -329,7 +329,7 @@ class ToolExecutionComponent(Container):
                             theme,
                             self.getRenderContext(self.resultRendererComponent),
                         )
-                    except Exception:
+                    except Exception:  # noqa: BLE001 - a failing tool renderer falls back to the default
                         self.resultRendererComponent = None
                         component = None
                     if component is None:

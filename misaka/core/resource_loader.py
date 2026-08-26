@@ -632,7 +632,7 @@ class DefaultResourceLoader:
                 if entry.is_symlink():
                     try:
                         is_file = os.path.isfile(entry.path)
-                    except Exception:  # noqa: BLE001
+                    except Exception:  # noqa: BLE001, S112 - an unreadable entry is skipped
                         continue
                 if not is_file or not entry.name.endswith(".json"):
                     continue
@@ -654,7 +654,7 @@ class DefaultResourceLoader:
     ) -> None:
         try:
             themes.append(load_theme_from_path(file_path))
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - a broken theme file is a diagnostic, not a crash
             diagnostics.append(
                 ResourceDiagnostic(
                     type="warning",
@@ -683,7 +683,7 @@ class DefaultResourceLoader:
                 )
                 extension.hidden = bool(is_named and input_.get("hidden"))
                 extensions.append(extension)
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - extension code: a failing load is reported as an error entry
                 errors.append({"path": extension_path, "error": _error_message(error, "failed to load extension")})
         return {"extensions": extensions, "errors": errors}
 

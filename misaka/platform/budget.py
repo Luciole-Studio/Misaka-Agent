@@ -103,7 +103,7 @@ def reserved(con):
                 con.execute("RELEASE SAVEPOINT misaka_budget_expiry")
             else:
                 con.rollback()
-        except Exception:  # noqa: BLE001 - preserve the original database error
+        except Exception:  # noqa: BLE001, S110 - preserve the original database error
             pass
         if "no such table" in str(e):
             return 0   # caller-owned legacy/in-memory ledgers may lack the table

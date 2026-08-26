@@ -31,7 +31,7 @@ class _EventBusController:
         for handler in list(self._listeners.get(channel, [])):
             try:
                 result = handler(data)
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - listener code: the failure is reported and the other listeners still run
                 _report_handler_error(channel, error)
                 continue
             if inspect.isawaitable(result):
@@ -55,7 +55,7 @@ class _EventBusController:
 async def _await_handler(channel: str, awaitable: Awaitable[Any]) -> None:
     try:
         await awaitable
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - listener code: the failure is reported and the other listeners still run
         _report_handler_error(channel, error)
 
 

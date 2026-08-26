@@ -252,7 +252,7 @@ def create_grep_tool_definition(
         search_path = resolve_to_cwd(parsed.path or ".", cwd)
         try:
             is_directory = await _maybe_await(operations.isDirectory(search_path))
-        except Exception:
+        except Exception:  # noqa: BLE001 - any lookup failure reads as 'path not found'
             raise RuntimeError(f"Path not found: {search_path}") from None
 
         context_value = parsed.context if parsed.context and parsed.context > 0 else 0
@@ -271,7 +271,7 @@ def create_grep_tool_definition(
             try:
                 content = await _maybe_await(operations.readFile(file_path))
                 lines = str(content).replace("\r\n", "\n").replace("\r", "\n").split("\n")
-            except Exception:
+            except Exception:  # noqa: BLE001 - an unreadable file searches as empty
                 lines = []
             file_cache[file_path] = lines
             return lines
@@ -292,7 +292,7 @@ def create_grep_tool_definition(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - any spawn failure is reported as 'failed to run ripgrep'
             raise RuntimeError(f"Failed to run ripgrep: {error}") from None
 
         stderr_task = asyncio.create_task(_read_stderr(process.stderr))

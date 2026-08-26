@@ -38,7 +38,7 @@ def _log_warning(message: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [subagent] {message}\n")
-    except Exception:  # noqa: BLE001 - diagnostics must never break a turn
+    except Exception:  # noqa: BLE001, S110 - diagnostics must never break a turn
         pass
 
 from misaka.extensions.sisters.subagent import agents as agent_roster
@@ -1439,7 +1439,7 @@ class SubagentManager:
                     token,
                     600,
                 )
-            except Exception:  # noqa: BLE001 - terminal result already exists
+            except Exception:  # noqa: BLE001, S112 - terminal result already exists
                 # Keep retrying while the existing 10-minute lease is
                 # valid; one transient busy/IO error must not fail open.
                 continue
@@ -1739,7 +1739,7 @@ class SubagentManager:
             self._deferred_worktree_cleanup.discard(task.id)
             try:
                 await self._cleanup_worktree(task)
-            except Exception:  # noqa: BLE001 - terminal state must still settle
+            except Exception:  # noqa: BLE001, S110 - terminal state must still settle
                 pass
 
     async def _run_turn(self, task: AgentTask, prompt: str, *, notify: bool) -> None:
@@ -2165,7 +2165,7 @@ class SubagentManager:
                     "agentId": task.id,
                 }
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - a failed permission bubble reads as denied
             return False
 
     def _durable_child_environment(self, _task: AgentTask) -> dict[str, str]:
@@ -2509,7 +2509,7 @@ class SubagentManager:
         try:
             try:
                 await task.persist()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - the terminal state is already set; a failed persist is retried on the next transition
                 pass
             async def commit_usage() -> None:
                 context = self.role_context
@@ -2556,7 +2556,7 @@ class SubagentManager:
                 self._deferred_worktree_cleanup.discard(task.id)
                 try:
                     await self._cleanup_worktree(task)
-                except Exception:  # noqa: BLE001 - preserve the result/notification
+                except Exception:  # noqa: BLE001, S110 - preserve the result/notification
                     pass
             if notify:
                 await self._notify_task(task)
@@ -2570,7 +2570,7 @@ class SubagentManager:
             task.notified = True
             try:
                 await task.persist()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - the notification proceeds; a failed persist is retried on the next transition
                 pass
             details = task.notification_data()
             message = build_task_notification(details)
@@ -2755,7 +2755,7 @@ class SubagentManager:
                     task._settled.set()
                     try:
                         await task.persist()
-                    except Exception:  # noqa: BLE001
+                    except Exception:  # noqa: BLE001, S110 - the original error is re-raised right after
                         pass
                     raise
                 return {

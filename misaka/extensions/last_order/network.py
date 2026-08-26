@@ -538,7 +538,7 @@ def register(harn):
                 from misaka.ui.panel import client as net
                 open_cards = {p["card"] for p in net.request("panes.list")["panes"]
                               if p.get("card") and p.get("alive")}
-            except Exception:  # noqa: BLE001 - the daemon may be gone; the briefing still lists the cards
+            except Exception:  # noqa: BLE001, S110 - the daemon may be gone; the briefing still lists the cards
                 pass
         lines = [f"  {r['id']}  {r['status']:<10} {r['assignee']:<8} {r['title'][:50]}"
                  + ("  (open in a pane)" if r["id"] in open_cards else "") for r in rows]
@@ -562,7 +562,7 @@ def register(harn):
         try:
             from misaka.network import dispatch
             await asyncio.to_thread(dispatch.reconcile, _con(), _cfg())
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - reconciliation is a safety net at startup, never a blocker
             pass
 
     harn.on("session_start", settle_orphans)

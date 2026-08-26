@@ -22,7 +22,7 @@ async def convert_to_png(base64_data: str, mime_type: str) -> ConvertedImage | N
     try:
         raw_bytes = base64.b64decode(base64_data)
         raw_image = load_image_bytes(raw_bytes)
-    except Exception:
+    except Exception:  # noqa: BLE001 - an undecodable image converts to nothing
         return None
 
     normalized = apply_exif_orientation(raw_image, raw_bytes)
@@ -33,7 +33,7 @@ async def convert_to_png(base64_data: str, mime_type: str) -> ConvertedImage | N
             data=base64.b64encode(output.getvalue()).decode("ascii"),
             mimeType="image/png",
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - an image that cannot be re-encoded converts to nothing
         return None
     finally:
         if normalized is not raw_image:

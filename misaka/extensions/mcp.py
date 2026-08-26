@@ -392,7 +392,7 @@ def _register_bound(harn, context):
         if callable(refresh):
             try:
                 refresh()
-            except Exception:  # noqa: BLE001 - a failed UI refresh must not break discovery
+            except Exception:  # noqa: BLE001, S110 - a failed UI refresh must not break discovery
                 pass
 
     def register_tool(harn_, client, t):

@@ -66,7 +66,7 @@ def parse_text_signature(signature: str | None) -> dict[str, str] | None:
     if signature.startswith("{"):
         try:
             parsed = json.loads(signature)
-        except Exception:
+        except ValueError:
             parsed = None
         if isinstance(parsed, dict) and parsed.get("v") == 1 and isinstance(parsed.get("id"), str):
             phase = parsed.get("phase")

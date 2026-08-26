@@ -345,7 +345,7 @@ def _pane_busy(pane, ally_state=None):
         for line in pane.screen.display:
             if any(ch in _SPINNER_CHARS for ch in line):
                 return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, S110 - an emulator screen mid-update is not an error
         pass
     return False
 
@@ -566,7 +566,7 @@ class Daemon:
                     pane.screen.reset()
                 if piece:
                     pane.stream.feed(piece)
-        except Exception:  # noqa: BLE001 - a sequence the emulator cannot digest must not take the pane down
+        except Exception:  # noqa: BLE001, S110 - a sequence the emulator cannot digest must not take the pane down
             pass
         if self._attached and pane.flush is None:
             # Coalesce per frame instead of pushing every read. The PTY splits one

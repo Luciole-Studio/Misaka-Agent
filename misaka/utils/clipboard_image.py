@@ -98,7 +98,7 @@ def convert_to_png(image_bytes: bytes) -> bytes | None:
             if normalized is not raw_image:
                 normalized.close()
             raw_image.close()
-    except Exception:
+    except Exception:  # noqa: BLE001 - any decode failure means no image
         return None
 
 

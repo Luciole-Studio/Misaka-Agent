@@ -1569,7 +1569,7 @@ class AgentSession:
             result = resolved.handler(raw_args, self._extensionRunner.create_command_context())
             if inspect.isawaitable(result):
                 await result
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - extension code: any failure is reported as an extension error
             self._extensionRunner.emit_error(
                 ExtensionError(
                     extensionPath=f"command:{command_name}",
@@ -2080,7 +2080,7 @@ class AgentSession:
                 mimeType=str(_message_field(block, "mimeType") or ""))
             try:
                 resized = await resize_image(img)
-            except Exception:  # noqa: BLE001 - keep the original block if the image backend is unavailable (matches upstream)
+            except Exception:  # noqa: BLE001, S112 - keep the original block if the image backend is unavailable (matches upstream)
                 continue
             if resized is None or not resized.wasResized:
                 continue
@@ -2517,7 +2517,7 @@ class AgentSession:
                 return True
 
             return self.agent.hasQueuedMessages()
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - compaction failure is reported to the user, never fatal
             error_message = str(error) if str(error) else "compaction failed"
             formatted_error = (
                 f"Context overflow recovery failed: {error_message}"
@@ -2631,7 +2631,7 @@ def _as_assistant_message(message: Any) -> AssistantMessage | None:
         return message
     try:
         validated = validate_message(_message_dict(message))
-    except Exception:
+    except Exception:  # noqa: BLE001 - validation errors of any shape mean 'not an assistant message'
         return None
     return validated if isinstance(validated, AssistantMessage) else None
 

@@ -802,7 +802,7 @@ def convert_messages(
                         continue
                     try:
                         reasoning_details.append(json.loads(tool_call.thoughtSignature))
-                    except Exception:
+                    except ValueError:
                         continue
                 if reasoning_details:
                     assistant_message["reasoning_details"] = reasoning_details

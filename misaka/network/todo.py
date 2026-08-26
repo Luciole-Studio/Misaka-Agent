@@ -246,7 +246,7 @@ def tools_for(task_id, sender):
                     {"customType": "todo-reminder", "display": True,
                      "content": "[To-do reminder] " + text, "details": {}},
                     {"deliverAs": "followUp", "triggerTurn": False})
-            except Exception:  # noqa: BLE001 - reminders must never interrupt work
+            except Exception:  # noqa: BLE001, S110 - reminders must never interrupt work
                 pass
 
         async def on_result(event, _ctx=None):

@@ -31,7 +31,7 @@ def migrate_auth_to_auth_json() -> list[str]:
         try:
             for provider, credential in json.loads(oauth_path.read_text(encoding="utf-8")).items():
                 migrated[str(provider)] = {"type": "oauth", **credential}
-        except Exception:  # noqa: BLE001 - an unreadable oauth.json is left in place
+        except Exception:  # noqa: BLE001, S110 - an unreadable oauth.json is left in place
             pass
     if settings_path.exists():
         try:
@@ -80,7 +80,7 @@ def migrate_sessions_from_agent_root() -> None:
             if target_path.exists():
                 continue
             session_file.rename(target_path)
-        except Exception:
+        except (OSError, ValueError, IndexError):
             continue
 
 
@@ -103,7 +103,7 @@ def migrate_keybindings_config_file() -> None:
         return
     try:
         parsed = json.loads(config_path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
         return
     if not isinstance(parsed, dict):
         return
