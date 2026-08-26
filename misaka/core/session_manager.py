@@ -473,6 +473,7 @@ class SessionManager:
         self.fileEntries = [header]
         self.byId.clear()
         self.labelsById.clear()
+        self.labelTimestampsById.clear()
         self.leafId = None
         self.flushed = False
 

@@ -738,9 +738,17 @@ class ExtensionRunner:
         result: Any = None
         for extension in self.extensions:
             for handler in extension.handlers.get("tool_call", []):
-                handler_result = _invoke_handler(handler, event, ctx)
-                if hasattr(handler_result, "__await__"):
-                    handler_result = await handler_result
+                try:
+                    handler_result = _invoke_handler(handler, event, ctx)
+                    if hasattr(handler_result, "__await__"):
+                        handler_result = await handler_result
+                except Exception as error:
+                    # Unlike the other emitters this one must stay fail-closed: a permission
+                    # hook that crashes must not fall through to "allowed". Report through
+                    # the extension-error channel, then re-raise so the agent loop turns it
+                    # into an error tool result.
+                    self._emit_extension_exception(extension.path, "tool_call", error)
+                    raise
                 if handler_result:
                     result = handler_result
                     if _result_flag(result, "block", False):

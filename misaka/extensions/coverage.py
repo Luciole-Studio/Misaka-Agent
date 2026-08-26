@@ -3,6 +3,7 @@ subfield and topic, so a plan is checked against the field's real distribution r
 the planner's memory. Every role, including the bare one-shot sessions research planning runs in."""
 from __future__ import annotations
 
+import asyncio
 import json
 import urllib.parse
 import urllib.request
@@ -49,7 +50,9 @@ def register(harn):
     async def execute(tool_call_id, raw, signal, on_update, ctx):
         params = raw if isinstance(raw, ScanParams) else ScanParams(**(raw or {}))
         try:
-            text = scan(params.query)
+            # Three sequential urllib calls at up to 25s each: never on the event loop
+            # (the same rule documents.py states for its corpus calls).
+            text = await asyncio.to_thread(scan, params.query)
         except Exception as error:  # noqa: BLE001 - the radar is optional; planning goes on without it
             text = f"OpenAlex is unreachable ({type(error).__name__}: {error}); plan from the coverage maps alone."
         return {"content": [{"type": "text", "text": text}], "details": {}}

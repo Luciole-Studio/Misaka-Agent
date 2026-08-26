@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import re
 from collections.abc import Callable, Mapping
@@ -35,8 +34,6 @@ from misaka.ai.types import (
 )
 from misaka.ai.utils.oauth.types import OAuthCredentials
 from misaka.config import get_agent_dir
-
-logger = logging.getLogger(__name__)
 from misaka.core.provider_display_names import BUILT_IN_PROVIDER_DISPLAY_NAMES
 from misaka.core.resolve_config_value import (
     resolveConfigValueOrThrow,
