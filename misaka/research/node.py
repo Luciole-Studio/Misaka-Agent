@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+import time
 
 from misaka.config import CFG
 from misaka.platform import tasks as task_store
@@ -38,6 +39,10 @@ class PaneSpawner:
     def stop(self, pane_id):
         from misaka.ui.panel import client as net
         net.request("pane.close", {"id": pane_id})
+        for _ in range(25):                          # the daemon escalates SIGTERM -> SIGKILL itself; wait for it
+            if not self.alive(pane_id):
+                return
+            time.sleep(0.2)
 
 
 class ProcessSpawner:
@@ -50,8 +55,14 @@ class ProcessSpawner:
         return proc.poll() is None
 
     def stop(self, proc):
-        if proc.poll() is None:
-            proc.terminate()
+        if proc.poll() is not None:
+            return
+        proc.terminate()
+        try:
+            proc.wait(5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(5)
 
 
 def spawner():

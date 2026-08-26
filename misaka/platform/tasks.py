@@ -317,7 +317,13 @@ def connect(path: str) -> sqlite3.Connection:
     con.execute("PRAGMA journal_mode=WAL")
     con.executescript(SCHEMA)
     from misaka.platform import notifications
-    _migrate(con)
+    newest = con.execute("SELECT MAX(version) FROM schema_migrations WHERE component='tasks'").fetchone()[0]
+    if newest is not None and int(newest) > TASK_SCHEMA_VERSION:
+        con.close()
+        raise RuntimeError(f"This board was written by a newer MISAKA (task schema v{newest}; this build knows "
+                           f"v{TASK_SCHEMA_VERSION}). Upgrade MISAKA rather than downgrading the data.")
+    if newest != TASK_SCHEMA_VERSION:
+        _migrate(con)                        # once per upgrade, not on every connection
     notifications.init(con)
     return con
 
@@ -430,7 +436,7 @@ def add_event(
 
 @contextmanager
 def _write_txn(con):
-    """Commit task-row and task-run changes as one crash-safe unit."""
+    """Commit task-row and task-run changes as one crash-safe unit (nested use joins the outer one)."""
     owner = not con.in_transaction
     if owner:
         con.execute("BEGIN IMMEDIATE")
@@ -443,6 +449,9 @@ def _write_txn(con):
     else:
         if owner:
             con.commit()
+
+
+write_txn = _write_txn     # callers outside this module that must make several card writes one unit
 
 
 def _start_run(
@@ -1376,6 +1385,7 @@ def claim_resume(
         ).fetchone()
         if row is None:
             return False
+        _invalidate_descendants(con, task_id)     # work built on the old answer goes back to todo
         _start_run(con, task_id, int(row["generation"]), "worker", lock, pid, worker_identity)
         return True
 

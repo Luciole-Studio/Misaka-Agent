@@ -136,6 +136,12 @@ def init(con):
         "SELECT 1 FROM schema_migrations WHERE component='research' AND version=?",
         (RESEARCH_SCHEMA_VERSION,),
     ).fetchone()
+    newest = con.execute("SELECT MAX(version) FROM schema_migrations WHERE component='research'").fetchone()[0]
+    if newest is not None and int(newest) > RESEARCH_SCHEMA_VERSION:
+        raise RuntimeError(f"This board was written by a newer MISAKA (research schema v{newest}; this build knows "
+                           f"v{RESEARCH_SCHEMA_VERSION}). Upgrade MISAKA rather than downgrading the data.")
+    if columns and current:
+        return                               # current schema: nothing to migrate, nothing to replay
     if columns and not current:
         # No migration from older schemas: files are the truth and the tables are meant to be a
         # rebuildable index -- but nothing rebuilds them yet, so the old tables are renamed, not

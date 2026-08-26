@@ -12,7 +12,6 @@ from misaka.platform import budget, tasks as task_store
 from misaka.research import node as research_node, planner, runs, tools as research_tools, workflow
 
 _CON = None
-_DRIVERS = {}
 _DEPTH_QUESTION = "How deep should this research run go?"
 USAGE = (
     "Usage: /research [DEPTH]                 enter research mode; omit DEPTH to pick 2, 5, 10, or type your own.\n"
@@ -105,6 +104,7 @@ def bind(worker):
 
 
 def register(harn, *, worker=None):
+    drivers = {}     # this session's research drivers; another session's are not ours to stop
     con = _con()
     spawner = research_node.spawner()     # nodes are processes: panes beside this Last Order, or plain children
     research_tools.register(harn, _con)
@@ -165,13 +165,13 @@ Continue with `/research resume {run_id} YOUR_ANSWER`.""")
                 {"deliverAs": "followUp", "triggerTurn": False},
             )
         finally:
-            _DRIVERS.pop(run_id, None)
+            drivers.pop(run_id, None)
 
     def launch(run_id, ctx):
-        existing = _DRIVERS.get(run_id)
+        existing = drivers.get(run_id)
         if existing and not existing.done():
             return False
-        _DRIVERS[run_id] = asyncio.create_task(drive(run_id, ctx))
+        drivers[run_id] = asyncio.create_task(drive(run_id, ctx))
         return True
 
     pending = {"depth": None, "workspace": None}
@@ -264,6 +264,9 @@ Continue with `/research resume {run_id} YOUR_ANSWER`.""")
                 run = _find_run(con, spec["run_id"], _workspace(ctx))
                 if not run:
                     raise ValueError("No research run to resume.")
+                if run["status"] == "stopping":
+                    ctx.ui.notify(f"Research run {run['id']} is still stopping; resume it once it has stopped.", "info")
+                    return
                 if spec["clarification"]:
                     n = len(runs.artifacts(con, run["id"], kind="clarification")) + 1
                     runs.write_text(con, run["id"], "clarification", f"User clarification {n}",
@@ -341,7 +344,7 @@ User clarification: {spec['clarification']}""", run["id"]))
         intake_tasks = list(intakes)
         for task in intake_tasks:
             task.cancel()
-        drivers = list(_DRIVERS.items())
+        drivers = list(drivers.items())
         for run_id, _task in drivers:       # node processes see the stop and drain; the daemon takes their panes down with the panel
             runs.request_stop(con, run_id)
             for row in runs.tasks(con, run_id):

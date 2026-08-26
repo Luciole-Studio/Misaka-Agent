@@ -8,7 +8,7 @@ import sys
 from misaka.config.product import CFG
 
 ROOT = CFG["profiles_root"]
-ACTIVE = ("running", "review")
+ACTIVE = ("running", "review", "ready", "todo", "held", "blocked", "triage")   # anything a Sister still owes
 MODEL_CHOICES = [
     "default (use global setting)",
     "claude-opus-5",
@@ -120,7 +120,7 @@ def remove_sister(sid, root=None, db_path=None):
     counts = card_counts(sid, db_path)
     live = {k: v for k, v in counts.items() if k in ACTIVE}
     if live:
-        return False, f"Sister {sid} has active cards ({live}); stop or finish them before removal."
+        return False, f"Sister {sid} still has unfinished cards ({live}); finish, reassign or delete them before removal."
     shutil.rmtree(prof)
     rest = ','.join(f"{k}×{v}" for k, v in sorted(counts.items())) or 'none'
     return True, f"Sister {sid} was removed. Historical cards ({rest}), workspaces, and transcripts were preserved."

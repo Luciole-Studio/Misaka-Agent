@@ -1771,7 +1771,7 @@ class SubagentManager:
         env.update(
             {
                 "PYTHONUNBUFFERED": "1",
-                "MISAKA_WHO": task.agent_type,
+                "MISAKA_WHO": self._who(task),
                 "MISAKA_MCP_ROLE": self.role_context.mcp_role,
                 "MISAKA_WORKSPACE": task.cwd,
                 "MISAKA_SUBAGENT_ID": task.id,
@@ -2463,6 +2463,10 @@ class SubagentManager:
             "Use MEMORY.md for concise durable learnings; update it with the file tools when useful."
             f"{current}"
         )
+
+    def _who(self, task: AgentTask) -> str:
+        """The identity the child runs as: its mailbox address and persona role."""
+        return task.agent_type
 
     async def _finish(self, task: AgentTask, status: str, error: str | None, notify: bool) -> None:
         async with task._state_lock:

@@ -313,13 +313,18 @@ def validate_plan(obj, roster):
     tasks = _validate_tasks(obj.get("tasks"), roster_ids)
     if status == "ready" and not tasks:
         raise ValueError("A ready research plan must contain at least one task.")
+    questions = obj.get("clarifying_questions") or []
+    if not isinstance(questions, list) or any(not isinstance(q, str) or not q.strip() for q in questions):
+        raise ValueError("clarifying_questions must be a list of non-empty strings.")
+    if status == "clarify" and not questions:
+        raise ValueError("A clarify plan must ask at least one question.")
     red_team = obj.get("red_team") if isinstance(obj.get("red_team"), dict) else {}
     if status == "ready" and red_team.get("assignee") not in roster_ids:
         raise ValueError("Last Order must name one roster Sister as the red team.")
     return {
         **obj, "status": status, "plan_markdown": plan_markdown.strip(), "tasks": tasks,
         "red_team": {"assignee": red_team.get("assignee"), "reason": str(red_team.get("reason") or "")},
-        "clarifying_questions": [str(x) for x in obj.get("clarifying_questions") or []],
+        "clarifying_questions": [q.strip() for q in questions],
         "methods": obj.get("methods") if isinstance(obj.get("methods"), list) else [],
         "extensions": obj.get("extensions") if isinstance(obj.get("extensions"), dict) else {},
     }

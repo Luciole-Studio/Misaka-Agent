@@ -120,8 +120,8 @@ def run_task(con, t, cfg):
     host_cap, assignee_cap = admission.limits()
     profile_dir = _profile_dir(cfg, t["assignee"])
     if not profile_dir:
-        if t["id"] not in _skipped_logged:
-            _skipped_logged.add(t["id"])
+        if (t["id"], t["generation"]) not in _skipped_logged:    # a reopened card gets a fresh look
+            _skipped_logged.add((t["id"], t["generation"]))
             lock = f"{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(4)}"
             generation = int(t["generation"])
             if db.claim(con, t["id"], lock, ttl_seconds=60,
@@ -147,7 +147,10 @@ def run_task(con, t, cfg):
     ):
         return False
     workspace = db.workspace_for(t)
-    os.makedirs(workspace, exist_ok=True)
+    if not os.path.isdir(workspace):          # the card's folder is the project; a gone one is never recreated in silence
+        db.block_task(con, t["id"], "needs_input", f"the project folder no longer exists: {workspace}",
+                      generation=generation)
+        return False
     if not t["workspace"] and not db.set_workspace(
         con, t["id"], workspace, generation=generation, claim_lock=lock
     ):

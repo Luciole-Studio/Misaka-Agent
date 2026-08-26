@@ -251,6 +251,12 @@ class _SisterManager(SubagentManager):
     def agent_type(self) -> str:
         return f"sister-{self.sister}"
 
+    def _who(self, task):
+        return self.sister                   # mail is addressed to "10032", never to the agent type
+
+    def workspace_ready(self, row):
+        return os.path.isdir(db.workspace_for(row))
+
     def _session_paths(self, _context: Any) -> tuple[Path, Path]:
         if self._parent_session_id not in (None, self.board_id):
             raise RuntimeError("A Sister manager cannot be shared between board cards")
@@ -569,7 +575,10 @@ class SisterRuntime:
             self._owned_claims.add(lock)
             workspace = db.workspace_for(row)
             try:
-                os.makedirs(workspace, exist_ok=True)
+                if not os.path.isdir(workspace):
+                    db.block_task(self.con, task_id, "needs_input", f"the project folder no longer exists: {workspace}",
+                                  generation=generation)
+                    raise RuntimeError(f"Card {task_id}: its folder {workspace} no longer exists.")
                 if not row["workspace"] and not db.set_workspace(
                     self.con,
                     task_id,

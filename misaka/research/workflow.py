@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import secrets
 import socket
 import shutil
@@ -151,11 +152,12 @@ async def _submit_tasks(con, run, cfg, worker, node, specs, *, kind, issue_id=No
                            f"tasks/{spec['local_id']}-preflight.md",
                            preflight["preflight_markdown"].rstrip() + "\n",
                            assignee=spec["assignee"], session_file=session)
-        tid = card_files.create(con, root, spec["title"], planner.task_body(spec, path, evidence=evidence),
-                                spec["assignee"], priority=spec.get("priority", 0),
-                                timeout_seconds=runs.call_timeout(cfg, 1800))
-        runs.link_task(con, run["id"], tid, kind=kind, node=node, preflight_artifact=aid,
-                       local_id=spec["local_id"], issue_id=issue_id, dependencies=spec.get("dependencies") or [])
+        with task_store.write_txn(con):                # card, link and output dir land together or not at all
+            tid = card_files.create(con, root, spec["title"], planner.task_body(spec, path, evidence=evidence),
+                                    spec["assignee"], priority=spec.get("priority", 0),
+                                    timeout_seconds=runs.call_timeout(cfg, 1800))
+            runs.link_task(con, run["id"], tid, kind=kind, node=node, preflight_artifact=aid,
+                           local_id=spec["local_id"], issue_id=issue_id, dependencies=spec.get("dependencies") or [])
         local_to_task[spec["local_id"]] = tid
     # depends_json keeps Last Order's plan as written; the cards' frontmatter `needs` is the executable projection of it.
     for spec in specs:
@@ -456,8 +458,10 @@ async def _expand(con, cfg, runner, worker, run, node, *, spawner, context, tool
                 if issue["status"] != "undermines" or issue["child_branch_id"]:
                     continue
                 if node["depth"] < runs.limits(run)["max_depth"]:
-                    child = runs.create_node(con, run["id"], trigger=issue["question"], parent_id=nid,
-                                             depth=node["depth"] + 1)
+                    child = next((n for n in runs.nodes(con, run["id"], parent_id=nid)     # created before a crash
+                                  if n["trigger_text"] == issue["question"]), None) \
+                        or runs.create_node(con, run["id"], trigger=issue["question"], parent_id=nid,
+                                            depth=node["depth"] + 1)
                     probe_dir = runs.probe_session_dir(run, issue["id"])
                     if os.path.isdir(probe_dir):                 # the fork that found it becomes the child's Last Order
                         shutil.copytree(probe_dir, planner._lo_session(run, child), dirs_exist_ok=True)
@@ -521,7 +525,22 @@ def _partial_result(con, run, reason, *, status="stopped"):
 
 
 async def _wait_probes(con, cfg, spawner, run, handles, *, poll_seconds):
-    """Wait until every fork has written its verdict (or the run halted)."""
+    """Wait until every fork has written its verdict (or the run halted). If one fork's process
+    dies, the others are stopped before the error propagates."""
+    try:
+        return await _wait_probes_inner(con, cfg, spawner, run, handles, poll_seconds=poll_seconds)
+    except BaseException:
+        for handle in handles.values():
+            stop = getattr(spawner, "stop", None)
+            if stop is not None:
+                try:
+                    stop(handle)
+                except Exception:  # noqa: BLE001 - best effort while unwinding
+                    pass
+        raise
+
+
+async def _wait_probes_inner(con, cfg, spawner, run, handles, *, poll_seconds):
     while handles:
         await asyncio.sleep(poll_seconds)
         halted = (runs.stop_requested(con, run["id"])
@@ -552,6 +571,16 @@ async def expand_node(con, cfg, runner, worker, *, run_id, node_id, spawner, pro
                          progress=progress)
 
 
+def _probe_rounds_done(con, run_id, issue_id):
+    """How many rounds this fork already opened cards for, read off the scoped local ids."""
+    rounds = 0
+    for t in runs.tasks(con, run_id, issue_id=issue_id):
+        found = re.match(rf"{re.escape(issue_id)}\.r(\d+)\.", t["local_id"] or "")
+        if found:
+            rounds = max(rounds, int(found.group(1)))
+    return rounds
+
+
 async def probe(con, cfg, runner, worker, *, run_id, issue_id, progress=None, poll_seconds=POLL_SECONDS):
     """Last Order's fork on one issue, as run by its own process: open cards, read what they
     returned, judge. Ends with the issue's verdict written; halts propagate like a node's."""
@@ -561,7 +590,17 @@ async def probe(con, cfg, runner, worker, *, run_id, issue_id, progress=None, po
         raise ValueError(f"Research issue not found: {run_id}/{issue_id}")
     node = runs.node(con, issue["branch_id"])
     synthesis_path = _artifact_path(con, run, node, "synthesis")
-    for round_no in range(1, MAX_PROBE_ROUNDS + 1):
+    # A resumed fork continues where it stopped: open cards of the last round are driven first,
+    # and the round counter comes from the cards on record, so the three-round cap holds.
+    unfinished = {t["id"] for t in runs.tasks(con, run_id, issue_id=issue_id) if t["status"] != "done"}
+    if unfinished:
+        outcome = await _drive_tasks(con, dict(cfg), runner, run_id, scope=unfinished,
+                                     tool_call_id=f"research:{run_id}:{issue_id}", poll_seconds=poll_seconds,
+                                     progress=progress)
+        if outcome != "done":
+            return outcome
+        settle_done_tasks(con, run_id=run_id)
+    for round_no in range(_probe_rounds_done(con, run_id, issue_id) + 1, MAX_PROBE_ROUNDS + 1):
         cards = [t for t in runs.tasks(con, run_id, issue_id=issue_id) if t["status"] == "done"]
         await _progress(progress, "probe", f"Fork on issue {issue_id}: round {round_no}, {len(cards)} card(s) in.", run)
         tasks, verdict = await asyncio.to_thread(
