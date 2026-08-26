@@ -10,11 +10,11 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from misaka.config import CFG, sisters
+from misaka.config import CFG, current_config, sisters
 from misaka.core.extensions.types import ToolDefinition
 from misaka.network import validate
 from misaka.network.sister_runtime import ACTIVE_BOARD_STATUSES, SisterRuntime
-from misaka.platform import budget, notifications
+from misaka.platform import budget
 from misaka.platform import tasks as db
 
 _CON = None
@@ -63,7 +63,7 @@ def _pane_for_card(task_id):
 
 
 def _cfg():
-    return CFG
+    return current_config()
 
 
 def _con():
@@ -90,11 +90,31 @@ def _schema(model):
     return model.model_json_schema()
 
 
+def _task_ids(args):
+    """Task IDs named by a board tool, for the one project-ownership check."""
+    data = args.model_dump() if isinstance(args, BaseModel) else {}
+    out = []
+    for key in ("task_id", "parent_id", "child_id"):
+        if data.get(key):
+            out.append(str(data[key]))
+    out.extend(str(task_id) for task_id in (data.get("task_ids") or []))
+    return list(dict.fromkeys(out))
+
+
+def _require_project_tasks(ctx, args):
+    workspace = _workspace(ctx)
+    for task_id in _task_ids(args):
+        row = db.get(_con(), task_id)
+        if row is None or db.workspace_for(row) != workspace:
+            raise ValueError(f"Task card not found in this project: {task_id}")
+
+
 def _register(harn, name, label, description, parameters, snippet=None, guidelines=None):
     """Decorator: register ``fn`` as a harness tool whose raw arguments are parsed into ``parameters``."""
     def deco(fn):
         async def execute(tool_call_id, raw, signal, on_update, ctx):
             args = raw if isinstance(raw, parameters) else parameters(**(raw or {}))
+            _require_project_tasks(ctx, args)
             return await fn(tool_call_id, args, signal, on_update, ctx)
         harn.registerTool(ToolDefinition(
             name=name, label=label, description=description,
@@ -275,7 +295,7 @@ def register(harn):
             return _text(f"Review recorded: approve; the card is done ({state}).")
         follow = await runtime.launch_ready(
             context=ctx, tool_call_id=tool_call_id, on_update=on_update,
-            task_ids=[params.task_id],
+            task_ids=[params.task_id], workspace=_workspace(ctx),
         )
         state = follow[0].get("status") if follow else db.get(con, params.task_id)["status"]
         outcome = "the card is done" if params.decision == "approve" else "sent back for revision"
@@ -300,7 +320,8 @@ def register(harn):
         if not params.confirmed:
             return _text("Work was not started. Show the plan and wait for explicit user approval.")
         con = _con()
-        ready = len(db.by_status(con, "ready"))
+        workspace = _workspace(ctx)
+        ready = len(db.by_status(con, "ready", workspace=workspace))
         if not ready:
             return _text("No task cards are ready to run.")
         if on_update:
@@ -310,7 +331,7 @@ def register(harn):
             from misaka.ui.panel import client as net
             wanted = set(params.task_ids or [])
             lines, started = [], 0
-            for row in db.fair_ready(con, lane="workers"):
+            for row in db.fair_ready(con, lane="workers", workspace=workspace):
                 if wanted and row["id"] not in wanted:
                     continue
                 try:
@@ -327,6 +348,7 @@ def register(harn):
             tool_call_id=tool_call_id,
             on_update=on_update,
             task_ids=params.task_ids,
+            workspace=workspace,
         )
         if not results:
             return _text("No cards were started.")
@@ -519,7 +541,9 @@ def register(harn):
             return
         rows = _con().execute(
             "SELECT id,status,assignee,title FROM tasks WHERE origin_session IN "
-            f"({','.join('?' * len(mine))}) ORDER BY created_at", mine).fetchall()
+            f"({','.join('?' * len(mine))}) AND workspace=? ORDER BY created_at",
+            [*mine, _workspace(ctx)],
+        ).fetchall()
         if not rows:
             return
         open_cards = set()
@@ -755,7 +779,9 @@ def register(harn):
         except (OSError, ValueError):
             pass
         counts = {r[0]: r[1] for r in _con().execute(
-            "SELECT status, COUNT(*) FROM tasks WHERE assignee=? GROUP BY status", (sid,))}
+            "SELECT status, COUNT(*) FROM tasks WHERE assignee=? AND workspace=? GROUP BY status",
+            (sid, _workspace(ctx)),
+        )}
         cards = ','.join(f"{k}×{v}" for k, v in sorted(counts.items())) or 'none'
         head = (
             f"Sister {sid}\n"
@@ -773,42 +799,12 @@ def register(harn):
 
     harn.on("session_shutdown", cleanup)
 
-    async def collect_pending():
+    async def collect_pending(ctx):
         """Deliver terminal-card notifications queued while no session was running, then hint about cards awaiting review."""
         con = _con()
-        workspace = db.canonical_workspace(os.getcwd())
-        subscription = notifications.subscribe(               # one cursor per project: another project's
-            con, "last-order", f"board-harness:{workspace}", "task", "*", "terminal"   # cards are not ours to consume
-        )
-        for _ in range(100):
-            event = notifications.claim_next(con, subscription)
-            if event is None:
-                break
-            try:
-                payload = json.loads(event["payload"] or "{}")
-            except (TypeError, ValueError):
-                payload = {}
-            generation = int(payload.get("generation") or 0)
-            row = db.get(con, event["resource_id"])
-            if row is not None and row["workspace"] != workspace:
-                notifications.ack(con, subscription, event["id"], event["lease_token"])
-                continue
-            delivered = runtime.notify_row(event["resource_id"])
-            consumed = (
-                delivered or row is None or int(row["generation"]) != generation
-                or int(row["notified_generation"]) >= generation
-            )
-            if consumed:
-                notifications.ack(
-                    con, subscription, event["id"], event["lease_token"]
-                )
-            else:
-                notifications.nack(
-                    con, subscription, event["id"], event["lease_token"],
-                    "board harness delivery failed",
-                )
-                break
-        reviewing = [r["id"] for r in db.by_status(con, "review")]
+        workspace = _workspace(ctx)
+        runtime.deliver_pending(workspace)
+        reviewing = [r["id"] for r in db.by_status(con, "review", workspace=workspace)]
         if reviewing:
             harn.sendMessage(
                 {"customType": "board-hint", "display": True,
@@ -819,7 +815,7 @@ def register(harn):
             )
 
     async def _kickoff(_event, _ctx):
-        asyncio.ensure_future(collect_pending())
+        asyncio.ensure_future(collect_pending(_ctx))
 
     harn.on("session_start", _kickoff)
     harn.on("before_agent_start", _kickoff)     # a long-lived session hears about cards that finished meanwhile

@@ -8,7 +8,7 @@ import shutil
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from functools import wraps
 from pathlib import Path
 
@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS tasks (
  worker_identity TEXT,
  current_run_id TEXT,
  generation INTEGER NOT NULL DEFAULT 1,
- notified_generation INTEGER NOT NULL DEFAULT 0,
+ notified_generation INTEGER NOT NULL DEFAULT 0, -- legacy cache; notification_events/subscriptions own delivery
  review_rounds INTEGER NOT NULL DEFAULT 0,
  review_feedback TEXT,
  review_lock TEXT,
@@ -355,6 +355,14 @@ def workspace_for(task):
     return canonical_workspace(task["workspace"])
 
 
+def _card_dispatchable(con, task_id):
+    row = con.execute("SELECT workspace FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if row is None:
+        return False
+    from misaka.platform import cards
+    return task_id in cards.reconcile(con, row["workspace"])
+
+
 @_serialized
 def create_task(con, title, body="", assignee="", model=None, priority=0, timeout_seconds=900,
                 executor=None, reviewer=None, workspace=None, output_dir=None,
@@ -450,19 +458,27 @@ def add_event(
 
 @contextmanager
 def _write_txn(con):
-    """Commit task-row and task-run changes as one crash-safe unit (nested use joins the outer one)."""
-    owner = not con.in_transaction
-    if owner:
-        con.execute("BEGIN IMMEDIATE")
-    try:
-        yield
-    except BaseException:
+    """Commit task-row and task-run changes as one crash-safe unit.
+
+    The connection lock covers the *whole* transaction, not just individual SQL
+    statements.  Otherwise another thread can see ``in_transaction`` and
+    accidentally join a transaction that later rolls its successful work back.
+    The lock is re-entrant, so nested use in the owning thread still joins the
+    outer transaction.
+    """
+    serialized = getattr(con, "serialized", None)
+    with serialized() if serialized else nullcontext():
+        owner = not con.in_transaction
         if owner:
-            con.rollback()
-        raise
-    else:
-        if owner:
-            con.commit()
+            con.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+            if owner:
+                con.commit()
+        except BaseException:
+            if owner:
+                con.rollback()
+            raise
 
 
 write_txn = _write_txn     # callers outside this module that must make several card writes one unit
@@ -533,6 +549,8 @@ def claim(
     assignee_cap=None,
 ) -> bool:
     now = int(time.time())
+    if not _card_dispatchable(con, task_id):
+        return False
     with _write_txn(con):
         row = con.execute(
             "SELECT generation,assignee,next_attempt_at FROM tasks WHERE id=?", (task_id,)
@@ -573,18 +591,20 @@ def get(con, task_id):
 def insert_index_row(con, fields, body, *, workspace):
     """Restore one index row from a card file (misaka.platform.cards.rebuild). The file is
     the truth; this only re-derives the index and never overwrites an existing row."""
-    con.execute(
+    cur = con.execute(
         "INSERT OR IGNORE INTO tasks (id,title,body,assignee,reviewer,executor,model,"
-        "priority,timeout_seconds,workspace,origin_session,status,created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "priority,timeout_seconds,workspace,origin_session,status,generation,created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (str(fields.get("id")), str(fields.get("title") or ""), body,
          str(fields.get("assignee") or ""), fields.get("reviewer"),
          json.dumps(fields["executor"]) if fields.get("executor") else None,
          fields.get("model"), int(fields.get("priority") or 0),
          int(fields.get("timeout_seconds") or 900), canonical_workspace(workspace),
          fields.get("origin_session"), str(fields.get("status") or "ready"),
+         max(1, int(fields.get("generation") or 1)),
          int(time.time())),
     )
+    return cur.rowcount == 1
 
 
 @_serialized
@@ -625,27 +645,42 @@ def delete_task(con, task_id, *, allow_active=False):
 
 
 @_serialized
-def by_status(con, status):
-    return con.execute(
-        "SELECT * FROM tasks WHERE status=? ORDER BY priority DESC, created_at", (status,)
-    ).fetchall()
+def by_status(con, status, *, workspace=None):
+    sql = "SELECT * FROM tasks WHERE status=?"
+    params = [status]
+    if workspace is not None:
+        sql += " AND workspace=?"
+        params.append(canonical_workspace(workspace))
+    return con.execute(sql + " ORDER BY priority DESC, created_at", params).fetchall()
 
 
 @_serialized
-def fair_ready(con, *, limit=None, lane="workers", advance=True, now=None):
+def fair_ready(con, *, limit=None, lane="workers", advance=True, now=None, workspace=None):
     """Return runnable cards round-robin across assignees, keeping priority order within each assignee."""
     now = int(time.time()) if now is None else int(now)
-    rows = con.execute(
+    workspace = canonical_workspace(workspace) if workspace is not None else None
+    from misaka.platform import cards
+    workspaces = ([workspace] if workspace is not None else
+                  [row[0] for row in con.execute("SELECT DISTINCT workspace FROM tasks")])
+    valid = set().union(*(cards.reconcile(con, item) for item in workspaces if item))
+    where = ""
+    params = [now]
+    if workspace is not None:
+        where = "AND workspace=? "
+        params.append(workspace)
+    rows = [row for row in con.execute(
         "SELECT * FROM tasks WHERE status='ready' "
         "AND (next_attempt_at IS NULL OR next_attempt_at<=?) "
+        + where +
         "ORDER BY assignee,priority DESC,created_at,id",
-        (now,),
-    ).fetchall()
+        params,
+    ).fetchall() if row["id"] in valid]
     queues = {}
     for row in rows:
         queues.setdefault(row["assignee"], []).append(row)
     assignees = sorted(queues)
-    state = con.execute("SELECT cursor FROM scheduler_state WHERE lane=?", (lane,)).fetchone()
+    state_lane = f"{lane}:{workspace}" if workspace is not None else lane
+    state = con.execute("SELECT cursor FROM scheduler_state WHERE lane=?", (state_lane,)).fetchone()
     if state and state["cursor"] in assignees:
         pivot = assignees.index(state["cursor"]) + 1
         assignees = assignees[pivot:] + assignees[:pivot]
@@ -663,7 +698,7 @@ def fair_ready(con, *, limit=None, lane="workers", advance=True, now=None):
         con.execute(
             "INSERT INTO scheduler_state(lane,cursor,updated_at) VALUES(?,?,?) "
             "ON CONFLICT(lane) DO UPDATE SET cursor=excluded.cursor,updated_at=excluded.updated_at",
-            (lane, selected[-1]["assignee"], now),
+            (state_lane, selected[-1]["assignee"], now),
         )
     return selected
 
@@ -706,20 +741,25 @@ def link_tasks(con, parent_id, child_id) -> bool:
 
 
 def _mirror_status(con, task_id, *, commit=False):
-    """Write the index's at-rest status onto the card file. The file is the truth: this runs inside
-    the transition's transaction and a failure (OSError) rolls the transition back, so the index
-    never claims a state the card does not have. With ``commit`` the transition is also recorded
-    in git (terminal, blocked and review states). ``running`` is live state owned by a claim and is
-    deliberately never written to the file."""
+    """Write the live transition's at-rest fields to its authoritative card.
+
+    File-write failure aborts the SQLite transition. Git is only history: commit
+    failure leaves the file dirty and records a retry hint instead of fabricating
+    a rollback across stores. ``running`` remains lease-only and is never mirrored.
+    """
     row = get(con, task_id)
     if row is None or not row["workspace"]:
         return
     from misaka.platform import cards, repo
-    previous = cards.set_fields(row["workspace"], task_id, status=row["status"])
+    cards.set_fields(
+        row["workspace"], task_id, status=row["status"], generation=int(row["generation"])
+    )
     if commit and repo.enabled(row["workspace"]) and not repo.commit(
             row["workspace"], [os.path.join("cards", f"{task_id}.md")], f"card {task_id}: {row['status']}"):
-        cards.restore(row["workspace"], task_id, previous)      # the file never claims what git refused
-        raise OSError(f"card {task_id}: status {row['status']} could not be committed to git")
+        add_event(
+            con, task_id, "git_commit_pending", {"status": row["status"]},
+            generation=row["generation"],
+        )
 
 
 @_serialized
@@ -1133,6 +1173,8 @@ def claim_review(
     pid=None, reviewer_identity=None,
 ) -> bool:
     now = int(time.time())
+    if not _card_dispatchable(con, task_id):
+        return False
     generation_clause = " AND generation=?" if generation is not None else ""
     params = [lock, now + max(60, int(ttl_seconds)), pid, reviewer_identity,
               task_id, reviewer, now, lock]
@@ -1377,6 +1419,8 @@ def claim_resume(
 ) -> bool:
     """Atomically reopen a finished card as a new generation and claim it for continuation."""
     now = int(time.time())
+    if not _card_dispatchable(con, task_id):
+        return False
     generation_clause = (
         " AND generation=?" if expected_generation is not None else ""
     )
@@ -1621,50 +1665,4 @@ def heartbeat(con, task_id, lock, *, generation=None, ttl_seconds=1800) -> bool:
             "WHERE id=(SELECT current_run_id FROM tasks WHERE id=?) AND status='running'",
             (now, task_id),
         )
-    return cur.rowcount == 1
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-def pending_completions(con):
-    """Return finished cards whose current generation has not been reported yet."""
-    return con.execute(
-        "SELECT * FROM tasks WHERE status IN ('done','failed','stopped','blocked','triage') "
-        "AND notified_generation<generation ORDER BY completed_at"
-    ).fetchall()
-
-
-@_serialized
-def claim_notification(con, task_id, generation=None) -> bool:
-    """Claim the single completion notification for this card generation."""
-    generation_clause = " AND generation=?" if generation is not None else ""
-    params = (task_id, generation) if generation is not None else (task_id,)
-    cur = con.execute(
-        "UPDATE tasks SET notified_generation=generation WHERE id=? "
-        "AND status IN ('done','failed','stopped','blocked','triage') "
-        "AND notified_generation<generation"
-        + generation_clause,
-        params,
-    )
-    return cur.rowcount == 1
-
-
-@_serialized
-def release_notification(con, task_id, *, generation) -> bool:
-    """Give back a claimed notification so another session can deliver it."""
-    cur = con.execute(
-        "UPDATE tasks SET notified_generation=generation-1 WHERE id=? "
-        "AND generation=? AND notified_generation=generation",
-        (task_id, generation),
-    )
     return cur.rowcount == 1

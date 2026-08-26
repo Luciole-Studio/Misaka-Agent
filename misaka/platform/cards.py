@@ -1,12 +1,12 @@
-"""Task cards as files: ``cards/<id>.md`` in the project repository is the card's truth.
+"""Task-card persistence.
 
-Phase 1 of the git unification (docs/plan-git-unification.md). The file carries
-identity, contract, and log; the SQLite board stays as a **rebuildable index** the
-runtime works against (claims, leases, live status) until phase 2 makes git itself
-carry the lifecycle. The frontmatter ``status`` is the card's *at-rest* state
-(ready/todo/blocked/done/...): while a card is in flight, live status comes from the
-index. Create cards through :func:`create`, never through ``tasks.create_task``
-directly -- a card without its file has no truth.
+``cards/<id>.md`` owns identity, contract fields, dependencies, references, log,
+generation, and at-rest status. SQLite caches those fields and exclusively owns
+runtime leases, PIDs, attempts, cooldowns, and the live ``running`` state. Git is
+history: a failed commit leaves the authoritative file dirty for a later retry; it
+does not roll a lifecycle transition backward. Create cards through :func:`create`,
+never through ``tasks.create_task`` directly -- a row without its file is refused
+at dispatch and may be removed after inspection.
 """
 import io
 import json
@@ -22,8 +22,11 @@ from misaka.utils import atomic
 from misaka.utils.frontmatter import parse_frontmatter
 
 LOG_HEADING = "## log"
-_FIELD_ORDER = ("id", "title", "status", "assignee", "reviewer", "executor", "model",
+_FIELD_ORDER = ("id", "title", "status", "generation", "assignee", "reviewer", "executor", "model",
                 "priority", "timeout_seconds", "origin_session", "needs", "urls", "created_at")
+_AT_REST_STATUSES = frozenset({
+    "ready", "todo", "review", "done", "failed", "stopped", "blocked", "triage", "archived", "held",
+})
 
 
 def _now_iso(ts=None):
@@ -39,7 +42,9 @@ def _dump(fields, body):
     yaml.default_flow_style = False
     out = io.StringIO()
     out.write("---\n")
-    yaml.dump({k: fields[k] for k in _FIELD_ORDER if fields.get(k) is not None}, out)
+    ordered = {k: fields[k] for k in _FIELD_ORDER if fields.get(k) is not None}
+    ordered.update((key, value) for key, value in fields.items() if key not in _FIELD_ORDER)
+    yaml.dump(ordered, out)
     out.write("---\n\n")
     out.write(body.strip() + "\n")
     return out.getvalue()
@@ -74,7 +79,7 @@ def create(con, workspace, title, body, assignee, *, reviewer=None, model=None,
                             priority=priority, timeout_seconds=timeout_seconds,
                             executor=executor, reviewer=reviewer, workspace=workspace,
                             origin_session=origin_session)
-    fields = {"id": tid, "title": title, "status": "ready", "assignee": assignee,
+    fields = {"id": tid, "title": title, "status": "ready", "generation": 1, "assignee": assignee,
               "reviewer": reviewer, "executor": executor, "model": model,
               "priority": priority, "timeout_seconds": timeout_seconds,
               "origin_session": origin_session, "created_at": _now_iso()}
@@ -95,18 +100,9 @@ def _rewrite(workspace, task_id, mutate):
     from filelock import FileLock
     path = card_path(workspace, task_id)
     with FileLock(os.path.join(tasks.task_state_dir(task_id), "card.lock")):   # outside the tracked tree
-        previous = Path(path).read_text(encoding="utf-8")
         card = read(path)
         fields, body = mutate(card["fields"], card["body"])
         _write_file(path, _dump(fields, body))
-    return previous
-
-
-def restore(workspace, task_id, text):
-    """Put a card file back to ``text`` (what ``set_fields`` returned) when what came after it failed."""
-    from filelock import FileLock
-    with FileLock(os.path.join(tasks.task_state_dir(task_id), "card.lock")):
-        _write_file(card_path(workspace, task_id), text)
 
 
 def append_log(workspace, task_id, author, text):
@@ -132,7 +128,7 @@ def set_fields(workspace, task_id, **updates):
                 fields[key] = value
         return fields, body
 
-    return _rewrite(workspace, task_id, mutate)
+    _rewrite(workspace, task_id, mutate)
 
 
 MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
@@ -172,13 +168,18 @@ def attach_url(workspace, task_id, url):
     """Record an http(s) reference on the card (frontmatter ``urls`` list, plus the log)."""
     if not str(url).startswith(("http://", "https://")):
         raise ValueError("Only http(s) URLs can be attached.")
-    path = card_path(workspace, task_id)
-    card = read(path)
-    urls = list(card["fields"].get("urls") or [])
-    if url not in urls:
-        urls.append(url)
-        set_fields(workspace, task_id, urls=urls)
-    append_log(workspace, task_id, "last-order", f"[url] {url}")
+    line = f"- {_now_iso()} last-order: [url] {url}"
+
+    def mutate(fields, body):
+        urls = list(fields.get("urls") or [])
+        if url not in urls:
+            urls.append(url)
+            fields["urls"] = urls
+        if LOG_HEADING not in body:
+            body = body.rstrip() + f"\n\n{LOG_HEADING}"
+        return fields, body.rstrip() + "\n" + line
+
+    _rewrite(workspace, task_id, mutate)
 
 
 def attachment_list(base_dir, task_id, workspace=None):
@@ -213,6 +214,7 @@ def board(con, workspace):
     """The board, file-first: every card file joined with its live index status; index rows
     without a file (pre-migration strays) listed last so nothing hides."""
     workspace = tasks.canonical_workspace(workspace)
+    rebuild(con, workspace)
     out, seen = [], set()
     for tid, path in iter_cards(workspace):
         fields = read(path)["fields"]
@@ -237,6 +239,8 @@ def remove(con, workspace, task_id):
     """Delete a card: index row (refusing active ones) and its file. The one entry point for
     deletion: a file left behind would resurrect the card on the next rebuild, so that is
     reported as a failure, never as success."""
+    git_paths = [os.path.join("cards", f"{task_id}.md"), os.path.join("cards", str(task_id))]
+    tracked = repo.enabled(workspace) and bool(repo._git(workspace, "ls-files", "--", *git_paths).stdout.strip())
     ok, msg = tasks.delete_task(con, task_id)
     if not ok:
         return ok, msg
@@ -255,10 +259,7 @@ def remove(con, workspace, task_id):
             shutil.rmtree(attachments)
         except OSError as error:
             return False, f"Card {task_id} was deleted but its attachments remain ({error}): {attachments}"
-    from misaka.platform import repo
-    if repo.enabled(workspace) and not repo.commit(
-            workspace, [os.path.join("cards", f"{task_id}.md"), os.path.join("cards", str(task_id))],
-            f"card {task_id}: delete"):
+    if tracked and not repo.commit(workspace, git_paths, f"card {task_id}: delete"):
         return False, f"Card {task_id} was deleted but the deletion could not be committed to git; commit it by hand."
     return ok, msg
 
@@ -277,6 +278,7 @@ def migrate(con):
             existed += 1
             continue
         fields = {"id": row["id"], "title": row["title"], "status": row["status"],
+                  "generation": max(1, int(row["generation"])),
                   "assignee": row["assignee"], "reviewer": row["reviewer"],
                   "executor": json.loads(row["executor"]) if row["executor"] else None,
                   "model": row["model"],
@@ -290,18 +292,101 @@ def migrate(con):
     return written, existed, no_folder
 
 
-def rebuild(con, workspace):
-    """Restore missing index rows from the files (the index is derived; the files are not).
-    Existing rows are left alone -- live state belongs to the runtime."""
-    restored = 0
-    for tid, path in iter_cards(workspace):
-        if tasks.get(con, tid) is not None:
-            continue
+def _card_values(fields, body):
+    status = str(fields.get("status") or "ready")
+    if status not in _AT_REST_STATUSES:
+        raise ValueError(f"Invalid at-rest card status: {status}")
+    generation = int(fields.get("generation") or 1)
+    if generation < 1:
+        raise ValueError("Card generation must be positive.")
+    return {
+        "title": str(fields.get("title") or ""), "body": body,
+        "assignee": str(fields.get("assignee") or ""), "reviewer": fields.get("reviewer"),
+        "executor": json.dumps(fields["executor"]) if fields.get("executor") else None,
+        "model": fields.get("model"), "priority": int(fields.get("priority") or 0),
+        "timeout_seconds": int(fields.get("timeout_seconds") or 900),
+        "origin_session": fields.get("origin_session"), "status": status, "generation": generation,
+    }
+
+
+def reconcile_one(con, workspace, task_id):
+    """Refresh one idle index row from its card; false means it is unsafe to dispatch."""
+    workspace = tasks.canonical_workspace(workspace)
+    path = card_path(workspace, task_id)
+    if os.path.islink(path) or not os.path.isfile(path):
+        return False
+    try:
         card = read(path)
-        tasks.insert_index_row(con, card["fields"], card["body"],
-                               workspace=tasks.canonical_workspace(workspace))
-        restored += 1
-    return restored
+        fields = card["fields"]
+        if str(fields.get("id") or "") != str(task_id):
+            return False
+        values = _card_values(fields, card["body"])
+    except (OSError, TypeError, ValueError):
+        return False
+    row = con.execute("SELECT status,workspace FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if row is None:
+        return bool(tasks.insert_index_row(con, fields, card["body"], workspace=workspace))
+    if tasks.canonical_workspace(row["workspace"]) != workspace:
+        return False
+    if row["status"] in {"running", "review"}:
+        return True                         # an in-flight contract is immutable until it rests again
+    con.execute(
+        "UPDATE tasks SET title=?,body=?,assignee=?,reviewer=?,executor=?,model=?,priority=?,"
+        "timeout_seconds=?,origin_session=?,status=?,generation=? WHERE id=?",
+        (*values.values(), task_id),
+    )
+    return True
+
+
+def reconcile(con, workspace):
+    """Derive one project's idle index, then return cards safe to dispatch.
+
+    The second pass validates the complete ``needs`` graph only after every card
+    row has been restored.  A missing/cross-project parent, malformed edge, or
+    cycle therefore holds the affected chain instead of being mistaken for a
+    satisfied dependency.
+    """
+    workspace = tasks.canonical_workspace(workspace)
+    contracts = {}
+    for task_id, path in iter_cards(workspace):
+        if not reconcile_one(con, workspace, task_id):
+            continue
+        try:
+            raw = read(path)["fields"].get("needs") or []
+        except (OSError, TypeError, ValueError):
+            continue
+        if not isinstance(raw, list) or any(not isinstance(parent, str) or not parent for parent in raw):
+            continue
+        contracts[task_id] = list(dict.fromkeys(raw))
+
+    # ponytail: O(cards^2) fixed-point validation; use a graph library only if
+    # projects grow large enough for reconciliation to show up in profiles.
+    valid = set()
+    while True:
+        resolved = {
+            task_id for task_id, parents in contracts.items()
+            if task_id not in parents and all(parent in valid for parent in parents)
+        }
+        if resolved <= valid:
+            break
+        valid.update(resolved)
+
+    statuses = {
+        row["id"]: row["status"] for row in con.execute(
+            "SELECT id,status FROM tasks WHERE workspace=?", (workspace,)
+        )
+    }
+    return {
+        task_id for task_id in valid
+        if all(statuses.get(parent) == "done" for parent in contracts[task_id])
+    }
+
+
+def rebuild(con, workspace):
+    """Restore missing rows and reconcile idle rows from card files; return the number restored."""
+    missing = {tid for tid, _path in iter_cards(workspace) if tasks.get(con, tid) is None}
+    reconcile(con, workspace)
+    return sum(tasks.get(con, tid) is not None for tid in missing)
 
 
 PROJECT_TEMPLATE = """# {name}

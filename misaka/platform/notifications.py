@@ -40,7 +40,7 @@ CREATE INDEX IF NOT EXISTS idx_notification_events_resource
 """
 
 TASK_TRIGGER = """
-CREATE TRIGGER IF NOT EXISTS task_terminal_notification
+CREATE TRIGGER IF NOT EXISTS task_terminal_notification_v3
 AFTER UPDATE OF status,generation ON tasks
 WHEN NEW.status IN ('done','failed','stopped','blocked','triage')
  AND (OLD.status IS NOT NEW.status OR OLD.generation IS NOT NEW.generation)
@@ -50,7 +50,7 @@ BEGIN
   VALUES
     ('task',NEW.id,'terminal',
      json_object('status',NEW.status,'generation',NEW.generation),
-     'task:'||NEW.id||':'||NEW.generation||':terminal',unixepoch());
+     NULL,unixepoch());
 END;
 """
 
@@ -63,13 +63,12 @@ def _txn(con):
             con.execute("BEGIN IMMEDIATE")
         try:
             yield
+            if owner:
+                con.commit()
         except BaseException:
             if owner:
                 con.rollback()
             raise
-        else:
-            if owner:
-                con.commit()
 
 
 def init(con):
@@ -78,13 +77,21 @@ def init(con):
         row[1] for row in con.execute("PRAGMA table_info(tasks)").fetchall()
     }
     if {"id", "status", "generation", "completed_at", "created_at"} <= task_columns:
-        con.executescript(TASK_TRIGGER)
+        con.executescript(TASK_TRIGGER)           # install the replacement before retiring old triggers
+        for obsolete in ("task_terminal_notification", "task_terminal_notification_v2"):
+            if con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?", (obsolete,)
+            ).fetchone():
+                con.execute(f'DROP TRIGGER "{obsolete}"')
         con.execute(
             "INSERT OR IGNORE INTO notification_events"
             "(resource_type,resource_id,kind,payload,dedupe_key,created_at) "
             "SELECT 'task',id,'terminal',json_object('status',status,'generation',generation),"
-            "'task:'||id||':'||generation||':terminal',COALESCE(completed_at,created_at) "
-            "FROM tasks WHERE status IN ('done','failed','stopped','blocked','triage')"
+            "'task:'||id||':'||generation||':'||status||':backfill',COALESCE(completed_at,created_at) "
+            "FROM tasks t WHERE status IN ('done','failed','stopped','blocked','triage') "
+            "AND NOT EXISTS (SELECT 1 FROM notification_events n WHERE n.resource_type='task' "
+            "AND n.resource_id=t.id AND n.kind='terminal' "
+            "AND n.payload=json_object('status',t.status,'generation',t.generation))"
         )
 
 
@@ -122,7 +129,7 @@ def claim_next(con, subscription_id, *, token=None, ttl_seconds=60):
     now = int(time.time())
     with _txn(con):
         sub = con.execute(
-            "SELECT * FROM notification_subscriptions WHERE id=? AND disabled=0",
+            "SELECT * FROM notification_subscriptions WHERE id=?",
             (subscription_id,),
         ).fetchone()
         if sub is None:
@@ -151,7 +158,7 @@ def claim_next(con, subscription_id, *, token=None, ttl_seconds=60):
             return None
         cur = con.execute(
             "UPDATE notification_subscriptions SET lease_token=?,leased_event_id=?,"
-            "lease_expires=?,updated_at=? WHERE id=? AND disabled=0 "
+            "lease_expires=?,updated_at=? WHERE id=? "
             "AND (lease_token IS NULL OR lease_expires IS NULL OR lease_expires<?)",
             (token, event["id"], now + max(1, int(ttl_seconds)), now,
              subscription_id, now),
@@ -175,14 +182,12 @@ def ack(con, subscription_id, event_id, token):
     return cur.rowcount == 1
 
 
-def nack(con, subscription_id, event_id, token, error, *, max_failures=12):
+def nack(con, subscription_id, event_id, token, error):
     now = int(time.time())
     cur = con.execute(
         "UPDATE notification_subscriptions SET lease_token=NULL,leased_event_id=NULL,"
-        "lease_expires=NULL,failure_count=failure_count+1,last_error=?,"
-        "disabled=CASE WHEN failure_count+1>=? THEN 1 ELSE disabled END,updated_at=? "
+        "lease_expires=NULL,failure_count=failure_count+1,last_error=?,disabled=0,updated_at=? "
         "WHERE id=? AND lease_token=? AND leased_event_id=?",
-        (str(error)[:1000], max(1, int(max_failures)), now, subscription_id,
-         token, int(event_id)),
+        (str(error)[:1000], now, subscription_id, token, int(event_id)),
     )
     return cur.rowcount == 1

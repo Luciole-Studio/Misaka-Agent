@@ -32,7 +32,7 @@ from misaka.extensions.sisters.subagent.runtime import (
     clean_resume_transcript,
 )
 from misaka.network import worker
-from misaka.platform import admission, budget
+from misaka.platform import admission, budget, notifications
 from misaka.platform import processes as process_tree
 from misaka.platform import tasks as db
 from misaka.skills import sandbox as skill_sandbox
@@ -338,7 +338,6 @@ class SisterHandle:
     claim_lock: str | None = None
     done: asyncio.Event = field(default_factory=asyncio.Event)
     supervisor: asyncio.Task[None] | None = None
-    notified: bool = False
     stop_requested: bool = False
     timed_out: bool = False
     state_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
@@ -402,7 +401,6 @@ class SisterRuntime:
             )
         handle.claim_lock = claim_lock
         handle.done = asyncio.Event()
-        handle.notified = False
         handle.stop_requested = False
         handle.timed_out = False
         handle.run_token = object()
@@ -461,7 +459,7 @@ class SisterRuntime:
             and int(expires) >= int(time.time())
         )
 
-    def _reconcile_abandoned(self, task_ids: list[str] | None) -> None:
+    def _reconcile_abandoned(self, task_ids: list[str] | None, workspace: str | None = None) -> None:
         """Recover dead LO owners with an exact ownership CAS.
 
         Lease expiry alone is not proof of death: a paused-but-live Last Order
@@ -470,7 +468,7 @@ class SisterRuntime:
         """
         wanted = set(task_ids) if task_ids is not None else None
         now = int(time.time())
-        for observed in db.by_status(self.con, "running"):
+        for observed in db.by_status(self.con, "running", workspace=workspace):
             if wanted is not None and observed["id"] not in wanted:
                 continue
             expires = observed["claim_expires"]
@@ -743,17 +741,20 @@ class SisterRuntime:
         tool_call_id: str,
         on_update: Any = None,
         task_ids: list[str] | None = None,
+        workspace: str | None = None,
     ) -> list[dict[str, Any]]:
         if task_ids == []:
             return []
         if self._closing:
             raise RuntimeError("Sister runtime is closing")
-        await asyncio.to_thread(self._reconcile_abandoned, task_ids)
+        await asyncio.to_thread(self._reconcile_abandoned, task_ids, workspace)
         free = self._sister_semaphore.available
         default_ready = None
         if task_ids is None:
             default_ready = [
-                row["id"] for row in db.fair_ready(self.con, limit=free, lane="workers")
+                row["id"] for row in db.fair_ready(
+                    self.con, limit=free, lane="workers", workspace=workspace
+                )
             ]
         wanted = list(dict.fromkeys(task_ids if task_ids is not None else default_ready))
         if not wanted:
@@ -764,7 +765,7 @@ class SisterRuntime:
         if task_ids is None:
             selected = set(wanted)
             deferred = [
-                row["id"] for row in db.by_status(self.con, "ready")
+                row["id"] for row in db.by_status(self.con, "ready", workspace=workspace)
                 if row["id"] not in selected
             ]
             starting = wanted
@@ -1060,40 +1061,15 @@ class SisterRuntime:
 
 
     async def _notify(self, handle: SisterHandle, token: object) -> None:
-        if (
-            not self._is_current(handle, token)
-            or handle.notified
-            or self._closing
-        ):
+        if not self._is_current(handle, token) or self._closing:
             return
         row = self._row_for_run(handle, token)
         if row is None or row["status"] not in TERMINAL_BOARD_STATUSES:
             return
-        # Freeze generation-N data before claiming its notification.  If N+1
-        # wins first, the CAS below fails; if this CAS wins, later workspace
-        # reuse cannot change the already-copied payload.
-        data = self._snapshot_row(row)
-        if not db.claim_notification(
-            self.con, handle.board_id, generation=handle.generation
-        ):
-            return
-        handle.notified = True
         try:
-            self.harness.sendMessage(
-                {
-                    "customType": "sister-notification",
-                    "content": _sister_notification(data),
-                    "display": True,
-                    "details": data,
-                },
-                {"deliverAs": "followUp", "triggerTurn": True},
-            )
+            self.deliver_pending(row["workspace"])
         except Exception as error:  # noqa: BLE001 - delivery failed: release the claim so another session (or the next attempt) can redeliver
-            handle.notified = False
             try:
-                db.release_notification(
-                    self.con, handle.board_id, generation=handle.generation
-                )
                 db.add_event(
                     self.con,
                     handle.board_id,
@@ -1103,30 +1079,19 @@ class SisterRuntime:
                 )
             except Exception:  # noqa: BLE001, S110 - recording the delivery error is itself best-effort
                 pass
-        else:
-            try:
-                db.add_event(
-                    self.con,
-                    handle.board_id,
-                    "notified",
-                    {"status": data["status"]},
-                    generation=handle.generation,
-                )
-            except Exception:  # noqa: BLE001, S110 - the notified event is bookkeeping
-                pass
 
-    def notify_row(self, task_id: str) -> bool:
-        """Claim and deliver one terminal card notification."""
-        row = db.get(self.con, task_id)
-        if row is None or row["status"] not in TERMINAL_BOARD_STATUSES:
+    def notify_row(self, task_id: str, *, generation=None, status=None, row=None) -> bool:
+        """Send one already-leased durable event; the caller owns ACK/NACK."""
+        row = dict(row) if row is not None else db.get(self.con, task_id)
+        if row is None:
             return False
-        generation = int(row["generation"])
-        data = self._snapshot_row(row)
-        if not db.claim_notification(self.con, task_id, generation=generation):
+        generation = int(row["generation"] if generation is None else generation)
+        status = str(row["status"] if status is None else status)
+        if status not in TERMINAL_BOARD_STATUSES:
             return False
-        handle = self._handles.get(task_id)
-        if handle and handle.generation == generation:
-            handle.notified = True
+        frozen = dict(row)
+        frozen.update(generation=generation, status=status)
+        data = self._snapshot_row(frozen)
         try:
             self.harness.sendMessage(
                 {
@@ -1137,13 +1102,7 @@ class SisterRuntime:
                 },
                 {"deliverAs": "followUp", "triggerTurn": True},
             )
-        except Exception:  # noqa: BLE001 - delivery failed: the claim is released so it can be redelivered
-            if handle and handle.generation == generation:
-                handle.notified = False
-            try:
-                db.release_notification(self.con, task_id, generation=generation)
-            except Exception:  # noqa: BLE001, S110 - releasing after a failed delivery is best-effort
-                pass
+        except Exception:  # noqa: BLE001 - caller NACKs the durable lease
             return False
         try:
             db.add_event(self.con, task_id, "notified",
@@ -1152,6 +1111,47 @@ class SisterRuntime:
         except Exception:  # noqa: BLE001, S110 - the notified event is bookkeeping
             pass
         return True
+
+    def deliver_pending(self, workspace: str, *, limit=100) -> int:
+        """Deliver this project's durable outbox, ACKing only after ``sendMessage`` succeeds."""
+        workspace = db.canonical_workspace(workspace)
+        subscription = notifications.subscribe(
+            self.con, "last-order", f"board-harness:{workspace}", "task", "*", "terminal"
+        )
+        delivered = 0
+        for _ in range(max(0, int(limit))):
+            event = notifications.claim_next(self.con, subscription)
+            if event is None:
+                break
+            try:
+                payload = json.loads(event["payload"] or "{}")
+            except (TypeError, ValueError):
+                payload = {}
+            row = db.get(self.con, event["resource_id"])
+            if row is None or db.workspace_for(row) != workspace:
+                notifications.ack(self.con, subscription, event["id"], event["lease_token"])
+                continue
+            generation = int(payload.get("generation") or 0)
+            status = str(payload.get("status") or "")
+            if (generation != int(row["generation"]) or status != row["status"]
+                    or status not in TERMINAL_BOARD_STATUSES):
+                # The outbox freezes only transition identity.  Never combine an
+                # old status with a newer row's report/body; stale transitions are
+                # superseded by the current terminal event.
+                notifications.ack(self.con, subscription, event["id"], event["lease_token"])
+                continue
+            ok = self.notify_row(
+                event["resource_id"], generation=generation, status=status, row=dict(row),
+            )
+            if not ok:
+                notifications.nack(
+                    self.con, subscription, event["id"], event["lease_token"],
+                    "board harness delivery failed",
+                )
+                break
+            notifications.ack(self.con, subscription, event["id"], event["lease_token"])
+            delivered += 1
+        return delivered
 
     def _snapshot_row(
         self,
@@ -1166,7 +1166,7 @@ class SisterRuntime:
                 self.con, task_id, "submitted", generation=row["generation"]
             )
         ) or {}
-        report = submitted or _report(row["id"]) or {}
+        report = submitted or (_report(row["id"]) if row["status"] == "done" else {}) or {}
         blocked = row["status"] in {"blocked", "triage"}
         failure = (
             _json(
@@ -1270,19 +1270,6 @@ class SisterRuntime:
         terminal = row["status"] in TERMINAL_BOARD_STATUSES
         retrieval = "success" if terminal else "timeout" if block else "not_ready"
         data = self._snapshot_row(row)
-        if terminal:
-            generation = int(row["generation"])
-            handle = self._handles.get(task_id)
-            if handle and handle.generation == generation:
-                handle.notified = True
-            if db.claim_notification(self.con, task_id, generation=generation):
-                db.add_event(
-                    self.con,
-                    task_id,
-                    "notification_consumed",
-                    {"status": STATUS_MAP.get(row["status"], row["status"])},
-                    generation=generation,
-                )
         return {"retrieval_status": retrieval, "task": data}
 
     async def _restore(self, task_id: str, context: Any) -> SisterHandle:
