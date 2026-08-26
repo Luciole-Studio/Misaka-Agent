@@ -259,7 +259,7 @@ def create_write_tool_definition(
                     if aborted:
                         return None
                     return AgentToolResult(
-                        content=[TextContent(text=f"Successfully wrote {len(parsed.content)} bytes to {parsed.path}")],
+                        content=[TextContent(text=f"Successfully wrote {len(parsed.content.encode('utf-8'))} bytes to {parsed.path}")],
                         details=None,
                     )
                 except Exception:

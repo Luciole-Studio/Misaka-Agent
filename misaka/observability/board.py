@@ -38,7 +38,9 @@ def board_text(con, workspace=None):
         if r["workspace"] != cur:
             cur = r["workspace"]
             out.append(f"\n▌{os.path.basename(cur.rstrip(os.sep)) or cur}")
-        out.append(f"{r['id']}  {_c(r['status'], r['status']):<18}  {r['assignee']:<16} p{r['priority']}  {r['title']}")
+        # Pad the plain text first: format widths count ANSI escape bytes as visible columns.
+        status = f"{r['status']:<18}"
+        out.append(f"{r['id']}  {_c(r['status'], status)}  {r['assignee']:<16} p{r['priority']}  {r['title']}")
     return "\n".join(out)
 
 

@@ -225,6 +225,8 @@ def _cmd_init(args):
         result = migrations.run_migrations(os.getcwd())
         if result["migratedAuthProviders"]:
             print("migrated credentials to auth.json: " + ", ".join(result["migratedAuthProviders"]))
+        if result["movedSessions"]:
+            print(f"moved {result['movedSessions']} session file(s) to per-folder buckets")
         for warning in result["deprecationWarnings"]:
             print(f"warning: {warning}")
     else:

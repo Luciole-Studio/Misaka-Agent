@@ -434,7 +434,7 @@ def register(harn):
         compactor = _compactor()
         stats = compactor.dag.get_session_depth_stats(sid)
         depth_line = ' | '.join(f"d{depth}×{value['count']}({value['tokens']}tok)"
-                              for depth, value in sorted(stats.items())) or "no nodes"
+                                for depth, value in sorted(stats.items())) or "no nodes"
         usage = compactor.store.read_metadata_json("summary_usage") or {}
         semantic_line = "fts"
         try:

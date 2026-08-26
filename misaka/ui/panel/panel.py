@@ -1869,6 +1869,7 @@ def launch():
             if new_tree != tree:
                 trees = tabs_of()
                 trees[trees.index(tree)] = new_tree
+                push_layout()   # relayout() re-pulls the daemon's layout; unpushed, the resize would be discarded
                 relayout()
 
     # ── Mouse drags: split dividers and pane scrollbars (app/input/mouse.rs drag state machine) ──

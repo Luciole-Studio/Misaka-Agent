@@ -29,8 +29,11 @@ def build_initial_message(
     if parsed.messages:
         parts.append(parsed.messages.pop(0))
 
+    # Blank-line separated: piped stdin, @file text and the CLI message are distinct
+    # inputs, and joining them with "" glued the last stdin line to the prompt.
+    message = "\n\n".join(part.strip("\n") for part in parts if part.strip())
     return InitialMessageResult(
-        initialMessage="".join(parts) if parts else None,
+        initialMessage=message or None,
         initialImages=fileImages if fileImages else None,
     )
 

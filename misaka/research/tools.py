@@ -23,8 +23,10 @@ def register(harn, con_factory):
 
     async def execute(_tool_call_id, raw, _signal, _on_update, ctx):
         params = raw if isinstance(raw, Params) else Params(**(raw or {}))
-        con = con_factory()
         workspace = os.path.realpath(getattr(ctx, "cwd", None) or os.getcwd())
+        # con_factory is memoized at the registration site (last_order/research.py) and the
+        # same connection backs the /research commands — it must not be closed here.
+        con = con_factory()
         run = (runs.get(con, params.run_id) if params.run_id
                else runs.latest(con, workspace=workspace))
         if not run:

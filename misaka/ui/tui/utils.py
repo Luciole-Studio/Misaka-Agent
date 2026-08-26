@@ -12,7 +12,6 @@ from functools import lru_cache
 from wcwidth import wcswidth
 
 _THAI_LAO_AM_RE = re.compile(r"[\u0e33\u0eb3]")
-_THAI_LAO_AM_GLOBAL_RE = re.compile(r"[\u0e33\u0eb3]")
 _PUNCTUATION_RE = re.compile(r"""[(){}\[\]<>.,;:'"!?+\-=*/\\|&%^$#@~`]""")
 _WIDTH_CACHE_SIZE = 512
 _width_cache: OrderedDict[str, int] = OrderedDict()
@@ -156,7 +155,7 @@ def visible_width(text: str) -> int:
 def normalize_terminal_output(text: str) -> str:
     normalized = text
     if _THAI_LAO_AM_RE.search(normalized):
-        normalized = _THAI_LAO_AM_GLOBAL_RE.sub(
+        normalized = _THAI_LAO_AM_RE.sub(
             lambda match: "\u0e4d\u0e32" if match.group(0) == "\u0e33" else "\u0ecd\u0eb2",
             normalized,
         )

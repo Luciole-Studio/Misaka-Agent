@@ -251,7 +251,7 @@ def migrate_extension_system(cwd: str) -> list[str]:
     ]
 
 
-def run_migrations(cwd: str) -> dict[str, list[str]]:
+def run_migrations(cwd: str) -> dict[str, list[str] | int]:
     migrated_auth_providers = migrate_auth_to_auth_json()
     migrate_sessions_from_agent_root()
     moved_sessions = migrate_legacy_session_buckets()
