@@ -155,19 +155,9 @@ def report_instructions(generation):
 
 
 def set_aside_report(task_id):
-    """Set aside the previous report.json: a continuation must submit fresh proof, never reuse stale."""
-    from pathlib import Path
-
-    from misaka.platform import tasks as db
-    root = Path(db.task_state_dir(task_id))
-    current, previous = root / "report.json", root / ".previous-report.json"
-    if not current.is_file():
-        return
-    try:
-        previous.unlink(missing_ok=True)
-        current.replace(previous)
-    except OSError:
-        current.unlink(missing_ok=True)
+    """Alias of ``tasks.set_aside_report`` for the runtimes that import it from here."""
+    from misaka.platform import tasks
+    tasks.set_aside_report(task_id)
 
 
 def card_prompt(task):

@@ -65,9 +65,10 @@ def iter_cards(workspace):
 
 
 def create(con, workspace, title, body, assignee, *, reviewer=None, model=None,
-           priority=0, timeout_seconds=900, executor=None, origin_session=None):
-    """The one front door for new cards: index row first (it mints the id), then the file.
-    A failed file write rolls the row back -- no card exists without its truth."""
+           priority=0, timeout_seconds=900, executor=None, origin_session=None, after_row=None):
+    """The one front door for new cards: index row first (it mints the id), then ``after_row(tid)``
+    for whatever else the row must be tied to (a research link), then the file. Any failure before
+    the file exists rolls the row back -- no card exists without its truth, and no file without its row."""
     workspace = tasks.canonical_workspace(workspace)
     tid = tasks.create_task(con, title, body=body, assignee=assignee, model=model,
                             priority=priority, timeout_seconds=timeout_seconds,
@@ -79,8 +80,10 @@ def create(con, workspace, title, body, assignee, *, reviewer=None, model=None,
               "origin_session": origin_session, "created_at": _now_iso()}
     text = body.strip() + f"\n\n{LOG_HEADING}\n- {_now_iso()} last-order: created\n"
     try:
+        if after_row is not None:
+            after_row(tid)
         _write_file(card_path(workspace, tid), _dump(fields, text))
-    except OSError:
+    except BaseException:
         tasks.delete_task(con, tid, allow_active=True)
         raise
     return tid
@@ -92,9 +95,18 @@ def _rewrite(workspace, task_id, mutate):
     from filelock import FileLock
     path = card_path(workspace, task_id)
     with FileLock(os.path.join(tasks.task_state_dir(task_id), "card.lock")):   # outside the tracked tree
+        previous = Path(path).read_text(encoding="utf-8")
         card = read(path)
         fields, body = mutate(card["fields"], card["body"])
         _write_file(path, _dump(fields, body))
+    return previous
+
+
+def restore(workspace, task_id, text):
+    """Put a card file back to ``text`` (what ``set_fields`` returned) when what came after it failed."""
+    from filelock import FileLock
+    with FileLock(os.path.join(tasks.task_state_dir(task_id), "card.lock")):
+        _write_file(card_path(workspace, task_id), text)
 
 
 def append_log(workspace, task_id, author, text):
@@ -120,7 +132,7 @@ def set_fields(workspace, task_id, **updates):
                 fields[key] = value
         return fields, body
 
-    _rewrite(workspace, task_id, mutate)
+    return _rewrite(workspace, task_id, mutate)
 
 
 MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024

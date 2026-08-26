@@ -155,11 +155,12 @@ async def _submit_tasks(con, run, cfg, worker, node, specs, *, kind, issue_id=No
                            preflight["preflight_markdown"].rstrip() + "\n",
                            assignee=spec["assignee"], session_file=session)
         with task_store.write_txn(con):                # card, link and output dir land together or not at all
-            tid = card_files.create(con, root, spec["title"], planner.task_body(spec, path, evidence=evidence),
-                                    spec["assignee"], priority=spec.get("priority", 0),
-                                    timeout_seconds=runs.call_timeout(cfg, 1800))
-            runs.link_task(con, run["id"], tid, kind=kind, node=node, preflight_artifact=aid,
-                           local_id=spec["local_id"], issue_id=issue_id, dependencies=spec.get("dependencies") or [])
+            tid = card_files.create(
+                con, root, spec["title"], planner.task_body(spec, path, evidence=evidence), spec["assignee"],
+                priority=spec.get("priority", 0), timeout_seconds=runs.call_timeout(cfg, 1800),
+                after_row=lambda tid: runs.link_task(          # linked before the file exists: a failed link leaves no file
+                    con, run["id"], tid, kind=kind, node=node, preflight_artifact=aid,
+                    local_id=spec["local_id"], issue_id=issue_id, dependencies=spec.get("dependencies") or []))
         local_to_task[spec["local_id"]] = tid
     # depends_json keeps Last Order's plan as written; the cards' frontmatter `needs` is the executable projection of it.
     for spec in specs:

@@ -332,6 +332,20 @@ def canonical_workspace(path=None):
     return str(Path(path or os.getcwd()).expanduser().resolve())
 
 
+def set_aside_report(task_id):
+    """Set aside the previous report.json: a new attempt must submit fresh proof, never reuse stale."""
+    from pathlib import Path
+    root = Path(task_state_dir(task_id))
+    current, previous = root / "report.json", root / ".previous-report.json"
+    if not current.is_file():
+        return
+    try:
+        previous.unlink(missing_ok=True)
+        current.replace(previous)
+    except OSError:
+        current.unlink(missing_ok=True)
+
+
 def task_state_dir(task_id):
     from misaka.config import CFG
     return str(Path(CFG.get("tasks_root", "~/.misaka/tasks")).expanduser() / str(task_id))
@@ -701,9 +715,10 @@ def _mirror_status(con, task_id, *, commit=False):
     if row is None or not row["workspace"]:
         return
     from misaka.platform import cards, repo
-    cards.set_fields(row["workspace"], task_id, status=row["status"])
+    previous = cards.set_fields(row["workspace"], task_id, status=row["status"])
     if commit and repo.enabled(row["workspace"]) and not repo.commit(
             row["workspace"], [os.path.join("cards", f"{task_id}.md")], f"card {task_id}: {row['status']}"):
+        cards.restore(row["workspace"], task_id, previous)      # the file never claims what git refused
         raise OSError(f"card {task_id}: status {row['status']} could not be committed to git")
 
 
@@ -805,11 +820,14 @@ def _invalidate_descendants(con, task_id):
         changed = [row[0] for row in con.execute(
             "UPDATE tasks SET status='todo',completed_at=NULL,claim_lock=NULL,claim_expires=NULL,"
             "worker_pid=NULL,worker_identity=NULL,review_lock=NULL,review_expires=NULL,"
-            "review_pid=NULL,review_identity=NULL WHERE id IN (" + marks + ") "
+            "review_pid=NULL,review_identity=NULL,generation=generation+1 WHERE id IN (" + marks + ") "
             "AND status<>'todo' RETURNING id",
             descendants,
         ).fetchall()]
         for child_id in changed:
+            # A new epoch: the old report carries the old generation and can never be accepted again,
+            # and it is set aside so a re-run submits fresh proof rather than finding stale proof.
+            set_aside_report(child_id)
             add_event(con, child_id, "dependency_invalidated", {"reopened_ancestor": task_id})
             _mirror_status(con, child_id)
     return changed
@@ -908,14 +926,18 @@ def configure_review(con, task_id, reviewer=None) -> bool:
         return False
     if reviewer == row["assignee"]:
         raise ValueError("The reviewer must be different from the assignee.")
-    cur = con.execute(
-        "UPDATE tasks SET reviewer=?,review_feedback=NULL WHERE id=? "
-        "AND status IN ('todo','ready')",
-        (reviewer, task_id),
-    )
-    if cur.rowcount == 1:
-        add_event(con, task_id, "review_configured", {"reviewer": reviewer})
-    return cur.rowcount == 1
+    with _write_txn(con):
+        cur = con.execute(
+            "UPDATE tasks SET reviewer=?,review_feedback=NULL WHERE id=? "
+            "AND status IN ('todo','ready')",
+            (reviewer, task_id),
+        )
+        if cur.rowcount == 1:
+            add_event(con, task_id, "review_configured", {"reviewer": reviewer})
+            if row["workspace"]:
+                from misaka.platform import cards
+                cards.set_fields(row["workspace"], task_id, reviewer=reviewer)   # OSError rolls the change back
+        return cur.rowcount == 1
 
 
 def _terminal_transition(

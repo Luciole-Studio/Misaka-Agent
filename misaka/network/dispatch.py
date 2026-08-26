@@ -326,9 +326,10 @@ def accept(con, t, report, *, generation, claim_lock, workspace):
         db.block_task(con, t["id"], "transient", "the submission could not be committed to git; fix the repository, then resume the card",
                       generation=generation)
         return False
-    if not db.submit_task(con, t["id"], generation=generation, claim_lock=claim_lock):
-        return False
-    db.add_event(con, t["id"], "submitted", _submitted(report), generation=generation)
+    with db.write_txn(con):                                # done and its submitted payload land together
+        if not db.submit_task(con, t["id"], generation=generation, claim_lock=claim_lock):
+            return False
+        db.add_event(con, t["id"], "submitted", _submitted(report), generation=generation)
     index_artifacts(con, t["id"], report.get("artifacts", []), generation)
     return True
 

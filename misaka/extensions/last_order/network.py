@@ -55,16 +55,6 @@ def _card_log(workspace, task_id, author, text):
         pass
 
 
-def _mirror_card(workspace, task_id, **fields):
-    """Reflect an at-rest change onto the card file; a stray index row without a file
-    (pre-migration) must not fail the tool -- the board marks it instead."""
-    from misaka.platform import cards as card_files
-    try:
-        card_files.set_fields(workspace, task_id, **fields)
-    except OSError:
-        pass
-
-
 def _pane_for_card(task_id):
     """The live pane running or showing this card, if any (panel mode only)."""
     from misaka.ui.panel import client as net
@@ -228,7 +218,6 @@ def register(harn):
             return _text("The reviewer must be different from the assignee.")
         if not db.configure_review(_con(), params.task_id, params.reviewer):
             return _text(f"Task card {params.task_id} is {row['status']}; review can be configured only while todo or ready.")
-        _mirror_card(row["workspace"], params.task_id, reviewer=params.reviewer)
         reviewer = params.reviewer or "none"
         return _text(f"Task card {params.task_id} reviewer: {reviewer}.")
 
@@ -714,7 +703,6 @@ def register(harn):
                 else f"Task card {params.task_id} is {row['status']}, not blocked or in triage."
             )
         row = db.get(_con(), params.task_id)
-        _mirror_card(row["workspace"], params.task_id, status=row["status"])
         return _text(f"Card {params.task_id} unblocked and returned to {row['status']}; work has not started.")
 
 
