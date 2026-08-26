@@ -579,7 +579,8 @@ def claim(
         if cur.rowcount != 1:
             return False
         _start_run(con, task_id, actual_generation, "worker", lock, pid, worker_identity)
-        return True
+    set_aside_report(task_id)   # a fresh attempt submits fresh proof, even inside the same generation
+    return True
 
 
 @_serialized
@@ -1453,7 +1454,8 @@ def claim_resume(
             return False
         _invalidate_descendants(con, task_id)     # work built on the old answer goes back to todo
         _start_run(con, task_id, int(row["generation"]), "worker", lock, pid, worker_identity)
-        return True
+    set_aside_report(task_id)   # the reopened attempt starts with no report of its own
+    return True
 
 
 @_serialized
