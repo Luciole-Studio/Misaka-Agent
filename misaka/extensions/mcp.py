@@ -178,6 +178,7 @@ class McpClient:
         self._pending = {}
         self._lock = asyncio.Lock()
         self._start_lock = asyncio.Lock()
+        self._pump_task = None
 
     async def start(self):
         cmd = [self.cfg.get("command") or ""] + list(self.cfg.get("args") or [])
@@ -213,7 +214,9 @@ class McpClient:
         finally:
             if stderr_log is not None:
                 stderr_log.close()  # the child holds its own descriptor
-        asyncio.ensure_future(self._pump())
+        # Hold the reference: the loop keeps only a weak one, and a collected pump
+        # would leave every request waiting forever.
+        self._pump_task = asyncio.ensure_future(self._pump())
         await self._handshake()
         self.tools = (await self._request("tools/list", {})).get("tools") or []
         return self.tools
@@ -382,15 +385,18 @@ def _register_bound(harn, context):
         for name, cfg in pending.items():
             client = clients[name]
             try:
-                tools = await client.start()
-            except Exception as e:  # noqa: BLE001 - one server failing to start must not take the session down
-                failed.append(f"{name}: {str(e)[:60]}")
-                continue
-            if not is_local(cfg):      # Local servers are not cached; re-probing them costs milliseconds.
-                cache[name] = {"fingerprint": _fingerprint(cfg), "tools": tools}
-            for t in tools:
-                register_tool(harn, client, t)
-            await client.stop()      # Stop after probing; ensure_started restarts it on first use.
+                try:
+                    tools = await client.start()
+                except Exception as e:  # noqa: BLE001 - one server failing to start must not take the session down
+                    failed.append(f"{name}: {str(e)[:60]}")
+                    continue
+                if not is_local(cfg):      # Local servers are not cached; re-probing them costs milliseconds.
+                    cache[name] = {"fingerprint": _fingerprint(cfg), "tools": tools}
+                for t in tools:
+                    register_tool(harn, client, t)
+                await client.stop()      # Stop after probing; ensure_started restarts it on first use.
+            finally:
+                state["pending"] -= 1    # the startup screen counts down and stops saying "Probing…"
         save_cache(cache)
         ui = ui_ref.get("ui")
         refresh = getattr(ui, "refresh", None)
@@ -459,7 +465,8 @@ def _register_bound(harn, context):
     async def _kickoff(event, ctx):
         ui_ref["ui"] = getattr(ctx, "ui", None)
         if need_probe:                       # Only on first run or after a config change; cached afterwards.
-            asyncio.ensure_future(probe_and_cache(need_probe))
+            # Held in state so the probe task cannot be garbage-collected mid-run.
+            state["probe_task"] = asyncio.ensure_future(probe_and_cache(need_probe))
 
     harn.on("session_start", _kickoff)
     # Do not return a coroutine: the harness would await it and a slow server would stall startup.

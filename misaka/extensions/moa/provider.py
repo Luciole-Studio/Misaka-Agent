@@ -27,7 +27,7 @@ from misaka.ai.types import (
     UsageCost,
     UserMessage,
 )
-from misaka.ai.utils.event_stream import AssistantMessageEventStream
+from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.config.product import current_config
 
 logger = logging.getLogger(__name__)
@@ -702,7 +702,7 @@ def stream_simple_moa(model: Model, context: Context, options: SimpleStreamOptio
             outer.push(ErrorEvent(reason="error", error=message))
             outer.end(message)
 
-    asyncio.create_task(run())
+    spawn_stream_task(run())   # a bare create_task can be garbage-collected mid-stream
     return outer
 
 
