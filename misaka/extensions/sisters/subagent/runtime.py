@@ -46,6 +46,7 @@ from misaka.platform import processes as process_tree
 from misaka.utils import atomic
 
 TERMINAL_STATUSES = frozenset({"completed", "failed", "killed"})
+BUDGET_HEARTBEAT_SECONDS = 60
 MANAGEMENT_TOOLS = ("Agent", "TaskOutput", "SendMessage", "TaskStop")
 _TOOL_CEILING_UNSET = object()
 DEFAULT_MAX_CONCURRENCY = 20
@@ -1441,7 +1442,7 @@ class SubagentManager:
         from misaka.platform import budget
 
         while task._budget_reservation and self.role_context.usage_db:
-            await asyncio.sleep(60)
+            await asyncio.sleep(BUDGET_HEARTBEAT_SECONDS)
             token = task._budget_reservation
             if not token:
                 return
@@ -1457,6 +1458,14 @@ class SubagentManager:
                 # valid; one transient busy/IO error must not fail open.
                 continue
             if not alive:
+                # The lease is the right to run: losing it stops the child, not just this loop.
+                task.error = task.error or "Shared token budget lease lost; the agent was stopped"
+                task._stop_requested = True
+                task._budget_reservation = None
+                if task.process is None and task.runner is not None:
+                    task.runner.cancel()
+                elif task.process is not None:
+                    await task.stop()
                 return
 
     @staticmethod

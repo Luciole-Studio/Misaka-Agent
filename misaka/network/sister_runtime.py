@@ -813,12 +813,13 @@ class SisterRuntime:
                 return False
             except TimeoutError:
                 if loop.time() < deadline and handle.claim_lock:
-                    db.heartbeat(
+                    if db.heartbeat(
                         self.con, handle.board_id, handle.claim_lock,
                         generation=handle.generation,
                         ttl_seconds=max(1800, handle.timeout + 60),
-                    )
-                    continue
+                    ):
+                        continue
+                    break     # the lease is gone: stop the child now; later writes are CAS-fenced anyway
                 break
         if handle.manager and handle.agent and handle.agent.status == "running":
             await handle.manager.stop_task(handle.agent.id, context=handle.context)
