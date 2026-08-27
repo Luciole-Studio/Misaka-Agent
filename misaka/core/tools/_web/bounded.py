@@ -145,7 +145,7 @@ def _strip_cross_origin_credentials(
     }
 
 
-def _pin_to_address(
+def pin_to_address(
     url: str, address: str, headers: dict[str, str]
 ) -> tuple[str, dict[str, str], dict[str, object]]:
     """Rewrite one hop to dial *address*, the one vetting looked at.
@@ -212,7 +212,7 @@ async def open_checked_stream(
     ) as client:
         for _hop in range(max_redirects + 1):
             addresses = await vet_public_url(current)
-            dial_url, dial_headers, extensions = _pin_to_address(
+            dial_url, dial_headers, extensions = pin_to_address(
                 current, addresses[0], request_headers
             )
             async with client.stream(
@@ -291,6 +291,7 @@ __all__ = [
     "decode_body",
     "is_text_content_type",
     "open_checked_stream",
+    "pin_to_address",
     "read_bounded",
     "vet_public_url",
 ]

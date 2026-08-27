@@ -19,7 +19,7 @@ from typing import Any
 
 import httpx
 
-from misaka.core.tools._web.bounded import vet_public_url
+from misaka.core.tools._web.bounded import pin_to_address, vet_public_url
 
 HookResult = dict[str, Any]
 HookEvaluator = Callable[..., Awaitable[Any] | Any]
@@ -344,9 +344,19 @@ def _interpolate_header(value: str, allowed: set[str], environ: Mapping[str, str
     return _ENV_PATTERN.sub(replace, value).replace("\r", "").replace("\n", "").replace("\x00", "")
 
 
-async def _post_http(url: str, body: Mapping[str, Any], headers: Mapping[str, str], timeout: float) -> httpx.Response:
+async def _post_http(
+    url: str, address: str, body: Mapping[str, Any], headers: Mapping[str, str], timeout: float
+) -> httpx.Response:
+    """POST to the address vetting resolved, not to whatever the resolver says next.
+
+    Vetting a name and then letting httpx resolve it again leaves the window a
+    rebinding resolver needs: the check sees a public answer, the socket gets a
+    private one. Dialling the checked address closes it; ``Host`` and SNI keep
+    virtual-host routing and certificate verification working against the name.
+    """
+    dial_url, dial_headers, extensions = pin_to_address(url, address, dict(headers))
     async with httpx.AsyncClient(follow_redirects=False, trust_env=False, timeout=timeout) as client:
-        return await client.post(url, json=dict(body), headers=dict(headers))
+        return await client.post(dial_url, json=dict(body), headers=dial_headers, extensions=extensions)
 
 
 async def _http_hook(
@@ -357,7 +367,7 @@ async def _http_hook(
         return _result(reason="HTTP hook is missing url")
     try:
         normalized_payload = json_payload(payload)
-        await vet_public_url(url)
+        addresses = await vet_public_url(url)
         allowed = {str(name) for name in hook.get("allowedEnvVars", []) if isinstance(name, str)}
         headers: dict[str, str] = {"Content-Type": "application/json"}
         configured = hook.get("headers", {})
@@ -369,7 +379,7 @@ async def _http_hook(
                 raise ValueError(f"HTTP hook header is not allowed: {name}")
             headers[name] = _interpolate_header(str(raw_value), allowed, environ)
         response = await _post_http(
-            url, normalized_payload, headers, _timeout(hook)
+            url, addresses[0], normalized_payload, headers, _timeout(hook)
         )
     except Exception as error:  # noqa: BLE001 - hook failures are fail-open
         return _result(reason=f"HTTP hook failed: {error}")
