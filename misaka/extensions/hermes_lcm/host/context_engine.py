@@ -1,0 +1,184 @@
+"""The vendored ``LCMEngine``, driven from misaka's compaction seam.
+
+Upstream owns the whole message list: its host calls ``compress(messages)`` and replaces
+its context with what comes back. misaka's seam is the other way round -- ``pi`` decides
+*when* to compact and *where* to cut, then asks an extension for the summary text that
+replaces everything before the cut. Reconciling the two is this module's whole job:
+
+* the cut stays misaka's. ``pi`` already reasons about turn boundaries, split turns and
+  ``keepRecentTokens``; a second opinion from the engine would only mean two boundaries
+  disagreeing, and whichever lost would silently drop messages out of the live context.
+* so for one host-driven call the engine's fresh tail is pinned to exactly the region
+  ``pi`` is keeping. Everything ``pi`` drops is then, by construction, what the engine
+  summarises into DAG leaves -- no message leaves the active context without a summary
+  covering it, and none is summarised twice.
+* the summary text is read back out of the assembled context the engine returns. That
+  block is upstream's own summary prefix, DAG-derived and cumulative, which is exactly
+  what a compaction entry should carry.
+
+Everything here is fail-open, the posture the pre-port extension already had: any
+failure returns ``None``, ``pi`` runs its native summariser for that round, and the
+durable store keeps the originals either way.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+import sqlite3
+from contextlib import contextmanager
+
+from misaka.utils.values import read_field
+
+from . import config_bridge, ingest, llm, switch
+
+logger = logging.getLogger(__name__)
+
+# Upstream's summary prefix, as `_assemble_context` writes it. Finding it is how the
+# host tells "the engine produced a summary" from "the engine decided this was a noop".
+_SUMMARY_BLOCK = re.compile(r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d\d+, node \d+\)\]")
+
+_ENGINES: dict[str, object] = {}
+
+
+def engine():
+    """The process-wide engine for the configured database, or ``None`` if unusable."""
+    db_path = switch.database_path()
+    if db_path in _ENGINES:
+        return _ENGINES[db_path]
+    # Upstream's bootstrap would find its own table names already present in a pre-port
+    # database and bind to a schema it cannot read, so it is refused until the migrator
+    # has rebuilt it rather than left to grow a hybrid neither side can use.
+    if switch.schema(db_path) == "mini":
+        logger.warning(
+            "LCM database %s still has the pre-port schema; run `misaka lcm migrate` to "
+            "rebuild it for the ported engine. Compaction stays on the native summariser.",
+            db_path,
+        )
+        _ENGINES[db_path] = None
+        return None
+    from ..vendor.engine import LCMEngine
+
+    llm.install()
+    config = config_bridge.load_config()
+    try:
+        built = LCMEngine(config=config, hermes_home="")
+    except sqlite3.OperationalError:
+        # Two misaka processes opening the database for the first time race inside
+        # upstream's bootstrap -- one is mid-`CREATE VIRTUAL TABLE messages_fts` when the
+        # other creates it. Upstream hosts one process and does not guard the window; the
+        # loser only has to look again, because the winner has finished by then.
+        logger.debug("LCM storage bootstrap raced another process; opening again.", exc_info=True)
+        built = LCMEngine(config=config, hermes_home="")
+    _ENGINES[db_path] = built
+    return built
+
+
+def close_all() -> None:
+    """Release every cached engine. Used when a test or a migration changes the database."""
+    for built in _ENGINES.values():
+        if built is not None:
+            built.shutdown()
+    _ENGINES.clear()
+
+
+@contextmanager
+def _host_driven_boundary(config, fresh_tail_count: int):
+    """Pin the engine's compaction boundary to the one ``pi`` chose, for one call.
+
+    ``fresh_tail_count`` is a suffix length, so setting it to the number of messages
+    ``pi`` keeps makes upstream's "raw backlog outside the fresh tail" equal to the
+    region ``pi`` drops. The other two are the gates that would otherwise let the engine
+    decline or split that region: the chunk-size floor (``pi`` has already decided it is
+    time) and the dynamic chunker (which compacts a slice per pass and would leave the
+    rest raw).
+    """
+    saved = (config.fresh_tail_count, config.fresh_tail_max_tokens,
+             config.leaf_chunk_tokens, config.dynamic_leaf_chunk_enabled)
+    config.fresh_tail_count = fresh_tail_count
+    config.fresh_tail_max_tokens = 0
+    config.leaf_chunk_tokens = 1
+    config.dynamic_leaf_chunk_enabled = False
+    try:
+        yield
+    finally:
+        (config.fresh_tail_count, config.fresh_tail_max_tokens,
+         config.leaf_chunk_tokens, config.dynamic_leaf_chunk_enabled) = saved
+
+
+def _summary_of(messages) -> str:
+    """The engine's summary prefix out of the context it assembled."""
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str) and _SUMMARY_BLOCK.search(content):
+            return content
+    return ""
+
+
+def start(ctx) -> str:
+    """Bind the engine to this misaka session. Returns the session id, or ``""``."""
+    session_id = ingest.session_id(ctx)
+    built = engine()
+    if session_id and built is not None:
+        built.on_session_start(session_id, platform="misaka")
+    return session_id
+
+
+def sync(ctx) -> None:
+    """Persist the session's active context. Idempotent: upstream keeps its own cursor."""
+    built = engine()
+    if built is None or not ingest.session_id(ctx):
+        return
+    built.ingest(ingest.upstream_messages(ctx.sessionManager.buildSessionContext().messages))
+
+
+def compact(event, ctx) -> dict | None:
+    """Serve one ``session_before_compact``: the summary for the region ``pi`` drops."""
+    from misaka.core.session_manager import build_session_context
+
+    built = engine()
+    if built is None:
+        return None
+    prep = read_field(event, "preparation")
+    branch = list(read_field(event, "branchEntries") or [])
+    dropped = list(read_field(prep, "messagesToSummarize") or []) + list(
+        read_field(prep, "turnPrefixMessages") or []
+    )
+    if not dropped or not branch:
+        return None
+
+    messages = ingest.upstream_messages(build_session_context(branch).messages)
+    # The built context leads with the previous compaction's summary when there is one;
+    # that message belongs to neither the dropped region nor the kept tail.
+    lead = 1 if read_field(prep, "previousSummary") is not None else 0
+    fresh_tail_count = len(messages) - lead - len(ingest.upstream_messages(dropped))
+    if fresh_tail_count <= 0:
+        logger.warning("LCM boundary does not fit the built context; leaving this compaction native.")
+        return None
+
+    # `_config` is how upstream's own plugin entry point reaches an engine's config
+    # (`getattr(active_engine, "_config", None)`); there is no other accessor.
+    with _host_driven_boundary(built._config, fresh_tail_count):
+        summary = _summary_of(built.compress(messages, current_tokens=int(read_field(prep, "tokensBefore", 0) or 0)))
+    if not summary.strip():
+        logger.warning(
+            "LCM produced no summary (%s: %s); leaving this compaction native.",
+            built.last_compression_status, built.last_compression_noop_reason or "-",
+        )
+        return None
+
+    details = None
+    try:
+        from misaka.core.compaction.utils import compute_file_lists
+
+        details = compute_file_lists(read_field(prep, "fileOps"))
+    except Exception:  # noqa: BLE001, S110 - the file lists are decoration on the entry
+        pass
+    logger.info("LCM compacted %d messages, keeping %d (%s)",
+                len(messages) - lead - fresh_tail_count, fresh_tail_count, built.current_session_id)
+    return {"compaction": {
+        "summary": summary,
+        "firstKeptEntryId": read_field(prep, "firstKeptEntryId"),
+        "tokensBefore": int(read_field(prep, "tokensBefore", 0) or 0),
+        "details": details,
+    }}

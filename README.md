@@ -107,10 +107,25 @@ Context engine:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MISAKA_CONTEXT_ENGINE` | `lcm` | `lcm` (lossless compaction) or `native` (the engine's one-shot summary) |
+| `MISAKA_CONTEXT_ENGINE` | `lcm` | `lcm` (lossless compaction), `hermes-lcm` (the ported upstream engine, see below), or `native` (the engine's one-shot summary) |
 | `MISAKA_LCM_SUMMARY_PROVIDER` / `MISAKA_LCM_SUMMARY_MODEL` / `MISAKA_LCM_SUMMARY_FALLBACK_MODELS` | the product provider / model | the summariser; fallbacks are comma-separated |
 | `MISAKA_LCM_SUMMARY_TIMEOUT` | `60` | seconds per summary |
 | `MISAKA_LCM_RETRIEVAL_MODE` / `MISAKA_LCM_EMBEDDING_MODEL` | `fts` / none | retrieval over compacted history |
+
+`hermes-lcm` selects the ported upstream engine (`misaka/extensions/hermes_lcm/vendor/`,
+pinned in `UPSTREAM_COMMIT`) instead of misaka's own smaller one. It reads upstream's
+`LCM_*` environment variables directly -- all of them, documented upstream -- and the
+`MISAKA_LCM_*` names above fill in as lower-precedence aliases for the four they overlap.
+The two implementations cannot share a database: run `misaka lcm migrate` (a dry run by
+default, `--apply` to commit) to back up `~/.misaka/lcm.db` and rebuild it in upstream's
+schema first. In this release it serves ingest and compaction only; the `lcm_*` tools are
+still the pre-port ones and are unavailable while it is selected. Every compaction
+rewrites the front of the context and so invalidates an Anthropic prompt-cache prefix;
+`LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED=1` keeps the engine from also rebuilding its
+higher-level summaries in the same round as a leaf, which costs one rewrite per
+compaction instead of two. `misaka lcm migrate` rebuilds the database file in place, so
+close every other misaka session first -- it refuses while another process still has it
+open.
 
 Terminal and panel:
 

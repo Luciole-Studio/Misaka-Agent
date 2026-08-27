@@ -97,10 +97,12 @@ def _parser():
                     help="(internal) run Last Order's fork on one issue in this process")
 
 
-    lc = sub.add_parser("lcm", help="Inspect, back up, repair, or rebuild the LCM context database")
+    lc = sub.add_parser("lcm", help="Inspect, back up, repair, rebuild, or migrate the LCM context database")
     lc.add_argument("op", nargs="?", default="status",
-                    choices=["status", "doctor", "backup", "repair", "rebuild"])
+                    choices=["status", "doctor", "backup", "repair", "rebuild", "migrate"])
     lc.add_argument("target", nargs="?", help="Session JSONL path for rebuild")
+    lc.add_argument("--apply", action="store_true",
+                    help="migrate: rebuild the database for real (the default only prints the plan)")
 
     sk = sub.add_parser("skills", help="Discover, review, approve, and manage skills")
     sk.add_argument("op", nargs="?", default="list",
@@ -333,7 +335,23 @@ def _cmd_lcm(args):
     import os as _os
 
     from misaka.extensions.hermes_lcm import maintenance as lcm_maint
+    from misaka.extensions.hermes_lcm.host import migrate as lcm_migrate
+    from misaka.extensions.hermes_lcm.host import switch as lcm_switch
     lcm_db = _os.path.expanduser(CFG.get("lcm_db") or "~/.misaka/lcm.db")
+    if lcm_switch.schema(lcm_db) == "ported" and args.op in {"status", "repair", "rebuild"}:
+        # These three read the pre-port schema. Porting upstream's own operations surface
+        # (`lcm status`, `doctor`, `inspect`, `rotate`, ...) is a later phase; until then a
+        # migrated database gets the counts, not a traceback.
+        if args.op != "status":
+            print(f"`misaka lcm {args.op}` operates on the pre-port schema; {lcm_db} has been "
+                  "migrated to the ported engine's. Use `misaka lcm backup` or `doctor`.")
+            sys.exit(2)
+        counted = lcm_migrate.sessions(lcm_db)
+        print(f"Database {lcm_db} | {_os.path.getsize(lcm_db):,} bytes | {len(counted)} sessions | "
+              f"{sum(counted.values())} source messages | ported schema")
+        for sid_, count in sorted(counted.items()):
+            print(f"  {sid_}: {count} source messages")
+        return
     if args.op == "status":
         st = lcm_maint.status(lcm_db)
         print(
@@ -352,6 +370,23 @@ def _cmd_lcm(args):
     elif args.op == "backup":
         dest, err = lcm_maint.backup(lcm_db)
         print(err if err else f"Backup created: {dest}")
+    elif args.op == "migrate":
+        result = lcm_migrate.run(lcm_db) if args.apply else lcm_migrate.plan(lcm_db)
+        print(f"Database {result['database']}")
+        if not result["legacy"]:
+            print(result["note"])
+            return
+        for sid_, count in sorted(result["sessions"].items()):
+            print(f"  {sid_}: {count} source messages")
+        moved = "moved" if result.get("applied") else "would move"
+        print(f"{result['messages']} source messages in {len(result['sessions'])} sessions "
+              f"{moved}; old summaries stay in the backup.")
+        if not args.apply:
+            print("Dry run; nothing was written. Re-run with --apply to migrate.")
+        elif result["applied"]:
+            print(f"Migrated. Backup: {result['backup']}")
+        else:
+            print(f"Not migrated: {result['note']}  Backup: {result['backup']}")
     elif args.op == "repair":
         result = lcm_maint.repair(lcm_db)
         print(

@@ -78,3 +78,7 @@ packages = ["misaka"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Upstream hermes-lcm's own suite lives under tests/ but is not written to misaka's
+# -W error standard, so it is not part of the main run. `make vendor-test` names that
+# directory explicitly, which overrides this, and `make check` gates on both.
+norecursedirs = ["hermes_lcm_vendor"]
