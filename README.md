@@ -107,46 +107,23 @@ Context engine:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MISAKA_CONTEXT_ENGINE` | `lcm` | `lcm` (lossless compaction), `hermes-lcm` (the ported upstream engine, see below), or `native` (the engine's one-shot summary) |
 | `MISAKA_LCM_SUMMARY_PROVIDER` / `MISAKA_LCM_SUMMARY_MODEL` / `MISAKA_LCM_SUMMARY_FALLBACK_MODELS` | the product provider / model | the summariser; fallbacks are comma-separated |
 | `MISAKA_LCM_SUMMARY_TIMEOUT` | `60` | seconds per summary |
-| `MISAKA_LCM_RETRIEVAL_MODE` / `MISAKA_LCM_EMBEDDING_MODEL` | `fts` / none | retrieval over compacted history; `hybrid` plus a model name is also the on-switch for the ported engine's semantic retrieval, as a local `fastembed` provider (`uv sync --extra lcm-semantic`, then `misaka lcm embed warmup` and `misaka lcm embed backfill --apply`). Upstream's `LCM_EMBEDDING_PROVIDER`/`LCM_EMBEDDING_MODEL` reach `voyage` and `ollama` instead |
+| `MISAKA_LCM_RETRIEVAL_MODE` / `MISAKA_LCM_EMBEDDING_MODEL` | `fts` / none | retrieval over compacted history; `hybrid` plus a model name is also the on-switch for semantic retrieval, as a local `fastembed` provider (`uv sync --extra lcm-semantic`, then `misaka lcm embed warmup` and `misaka lcm embed backfill --apply`). Upstream's `LCM_EMBEDDING_PROVIDER`/`LCM_EMBEDDING_MODEL` reach `voyage` and `ollama` instead |
 
-#### The two LCM implementations
+#### The context engine
 
-`MISAKA_CONTEXT_ENGINE` picks which code compacts a long session, and two of its three
-values are whole implementations of the same idea:
+Long sessions are compacted by [hermes-lcm](https://github.com/stephenschoettler/hermes-lcm),
+ported whole into `misaka/extensions/hermes_lcm/vendor/` (60 modules, byte-identical to the
+commit in `UPSTREAM_COMMIT`, with misaka's adapters quarantined in `host/`). It keeps every
+message in `~/.misaka/lcm.db`, compacts older context into a hierarchical summary DAG, and
+rebuilds the prompt from the best summaries plus a protected fresh tail -- so nothing is
+lost, only moved out of the way and retrievable through the fifteen `lcm_*` tools.
 
-- **`lcm`** (default) is misaka's own small one: a summary DAG, full-text recall, five
-  `lcm_*` tools. It is the one every existing `~/.misaka/lcm.db` was written by.
-- **`hermes-lcm`** is [hermes-lcm](https://github.com/stephenschoettler/hermes-lcm)
-  ported whole into `misaka/extensions/hermes_lcm/vendor/` (60 modules, byte-identical to
-  the commit in `UPSTREAM_COMMIT`, with misaka's adapters quarantined in `host/`). It
-  brings hierarchical condensation, fifteen `lcm_*` tools, secret redaction, large-output
-  externalization, day/week/month rollups, semantic retrieval and the V4 assertion layer.
-- **`native`** turns LCM off entirely and lets the engine write one flat summary. It is
-  the escape hatch: nothing below applies.
-
-Both read `MISAKA_LCM_DB` for their database, though the ported one lets upstream's own
-`LCM_DATABASE_PATH` outrank it. It also reads the rest of upstream's `LCM_*` variables --
-all ~115 of them, documented in upstream's README -- and every `MISAKA_LCM_*` name above
-except `MISAKA_LCM_SUMMARY_PROVIDER` (which has no upstream counterpart) fills in as a
-lower-precedence alias for the `LCM_*` name it overlaps.
-`misaka/extensions/hermes_lcm/PORT_NOTES.md` records every place the port differs from
-upstream and why.
-
-**Switching means migrating.** The two schemas collide: both call their tables `messages`
-and `summary_nodes` and mean different things by them, and opening the wrong one grows a
-hybrid neither can read. So `misaka lcm migrate` backs the old file up, rebuilds a new one
-beside it through upstream's own ingest, checks the counts session by session, and only
-then gives it the old name. It is a dry run until `--apply`, it never edits the old file,
-and it refuses while another process still has the database open -- close every other
-misaka session first. Original messages move; old summaries stay in the backup, because
-the ported engine re-derives its own the first time it compacts.
-
-`misaka lcm status` and `misaka lcm doctor` report from whichever implementation is
-selected, and say which one they are on the first line. The ported engine's reports are
-upstream's own -- far more detail, entirely different shape.
+It reads upstream's own `LCM_*` environment variables -- all of them, documented upstream --
+and the `MISAKA_LCM_*` names above fill in as lower-precedence aliases for the four they
+overlap. `PORT_NOTES.md` records every deviation from upstream (currently none) and
+`docs/plans/hermes-lcm-sync.md` is the procedure for taking a newer upstream release.
 
 #### The four opt-in families
 
@@ -167,13 +144,12 @@ four commands, and all of them print a plan first and write only on `--apply`.
 
 #### Operator commands
 
-`misaka lcm <op>`: `status` and `doctor` report; `backup` snapshots; `migrate` converts
-between the two implementations; `rotate SESSION_ID` compacts one session in place
+`misaka lcm <op>`: `status` and `doctor` report; `backup` snapshots; `rotate SESSION_ID` compacts one session in place
 (advancing the lifecycle frontier past its pre-tail raw rows without changing its
 identity, deleting nothing, calling no model, backup-first on `--apply`); `preset
 show|suggest|apply` reads upstream's benchmarked model-family settings, and never writes
-any -- upstream's apply is preview-only, so `--apply` has nothing to commit; `repair` and
-`rebuild` serve the pre-port implementation only. `--apply` is what commits, everywhere.
+any -- upstream's apply is preview-only, so `--apply` has nothing to commit.
+`--apply` is what commits, everywhere.
 The ported ops answer in upstream's own text, which names its slash command: read
 `/lcm X` there as `misaka lcm X`.
 

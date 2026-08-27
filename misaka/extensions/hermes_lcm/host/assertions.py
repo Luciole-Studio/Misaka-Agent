@@ -27,7 +27,7 @@ thing between the operator and 100 auxiliary calls. So the CLI names the number.
 
 from __future__ import annotations
 
-from . import context_engine, switch
+from . import config_bridge, context_engine
 
 
 def rebuild(*, apply: bool = False, limit: int | None = None) -> str:
@@ -35,8 +35,7 @@ def rebuild(*, apply: bool = False, limit: int | None = None) -> str:
     built = context_engine.engine()
     if built is None:
         return (
-            f"No usable LCM engine for {switch.database_path()}. A pre-port database has "
-            "to be rebuilt first: `misaka lcm migrate --apply`."
+            f"No usable LCM engine for {config_bridge.database_path()}."
         )
     tokens = ["assertions", "rebuild"]
     if apply:

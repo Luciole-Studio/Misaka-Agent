@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from . import context_engine, rollups, switch
+from . import config_bridge, context_engine, rollups
 
 # How many sessions a bare `misaka lcm rotate` lists before it stops. Long enough to
 # recognise the one you meant, short enough not to be the reason you scroll.
@@ -56,17 +56,11 @@ def _command(tokens: str, built) -> str:
     return handle_lcm_command(tokens, built)
 
 
-def report(op: str) -> str | None:
-    """``status`` or ``doctor`` from the ported engine, or ``None`` if it is not selected.
-
-    ``None`` is the whole routing decision: the caller keeps its pre-port report when the
-    pre-port implementation is what serves this install.
-    """
-    if not switch.selected():
-        return None
+def report(op: str) -> str:
+    """``status``, ``doctor`` or ``backup``, straight from the engine."""
     built = context_engine.engine()
     if built is None:
-        return _NO_ENGINE.format(db=switch.database_path())
+        return _NO_ENGINE.format(db=config_bridge.database_path())
     try:
         text = _command(op, built)
         # Upstream's doctor reaches storage, FTS, redaction and externalized payloads --
@@ -83,7 +77,7 @@ def rotate(session_id: str, *, apply: bool = False) -> str:
     """One ``/lcm rotate`` run against the named session."""
     built = context_engine.engine()
     if built is None:
-        return _NO_ENGINE.format(db=switch.database_path())
+        return _NO_ENGINE.format(db=config_bridge.database_path())
     try:
         rows = built._store.scan_session_cleanup_stats()
         if not session_id:
@@ -108,7 +102,7 @@ def preset(subcommand: str, name: str = "", *, apply: bool = False) -> str:
     """One ``/lcm preset show|suggest|apply`` run against the configured database."""
     built = context_engine.engine()
     if built is None:
-        return _NO_ENGINE.format(db=switch.database_path())
+        return _NO_ENGINE.format(db=config_bridge.database_path())
     try:
         tokens = ["preset", subcommand]
         if name:
@@ -141,7 +135,7 @@ def _sessions_text(rows: list, reason: str) -> str:
          "`misaka lcm rotate SESSION_ID` takes it as an argument"),
     ]
     if not rows:
-        lines.append(f"note: no sessions in {switch.database_path()} to rotate")
+        lines.append(f"note: no sessions in {config_bridge.database_path()} to rotate")
         return "\n".join(lines)
     lines.append(f"sessions: {len(rows)}")
     for session_id, messages, tokens, nodes in rows[:_LISTED_SESSIONS]:

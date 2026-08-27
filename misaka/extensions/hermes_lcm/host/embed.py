@@ -15,7 +15,7 @@ operations until then.
 
 from __future__ import annotations
 
-from . import context_engine, switch
+from . import config_bridge, context_engine
 
 
 def run(subcommand: str, *, apply: bool = False, limit: int | None = None) -> str:
@@ -23,8 +23,7 @@ def run(subcommand: str, *, apply: bool = False, limit: int | None = None) -> st
     built = context_engine.engine()
     if built is None:
         return (
-            f"No usable LCM engine for {switch.database_path()}. A pre-port database has "
-            "to be rebuilt first: `misaka lcm migrate --apply`."
+            f"No usable LCM engine for {config_bridge.database_path()}."
         )
     tokens = ["embed", subcommand]
     # `warmup` takes no flags and upstream answers a flagged one with its help text, so

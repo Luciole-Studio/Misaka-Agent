@@ -73,11 +73,6 @@ CFG = {
     "roles_root": ROLES_ROOT,
     "judge_timeout": _number("MISAKA_JUDGE_TIMEOUT", "600", int),
     "token_cap": _number("MISAKA_TOKEN_CAP", "0", int),
-    # Context engine: lcm = lossless compaction (originals kept in lcm.db and
-    # retrievable); native = the engine's built-in one-shot summary.  Any failure
-    # inside LCM falls back to native automatically (fail-open); this switch is
-    # the explicit escape hatch.
-    "context_engine": os.environ.get("MISAKA_CONTEXT_ENGINE", "lcm"),
     "lcm_db": os.environ.get("MISAKA_LCM_DB", "~/.misaka/lcm.db"),
     "lcm_summary_provider": os.environ.get("MISAKA_LCM_SUMMARY_PROVIDER", ""),
     "lcm_summary_model": os.environ.get("MISAKA_LCM_SUMMARY_MODEL", ""),

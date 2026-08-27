@@ -31,7 +31,7 @@ from contextlib import contextmanager
 from misaka.platform.prompt_guard import untrusted
 from misaka.utils.values import read_field
 
-from . import config_bridge, fence, ingest, llm, rollups, switch
+from . import config_bridge, fence, ingest, llm, rollups
 
 logger = logging.getLogger(__name__)
 
@@ -44,20 +44,9 @@ _ENGINES: dict[str, object] = {}
 
 def engine():
     """The process-wide engine for the configured database, or ``None`` if unusable."""
-    db_path = switch.database_path()
+    db_path = config_bridge.database_path()
     if db_path in _ENGINES:
         return _ENGINES[db_path]
-    # Upstream's bootstrap would find its own table names already present in a pre-port
-    # database and bind to a schema it cannot read, so it is refused until the migrator
-    # has rebuilt it rather than left to grow a hybrid neither side can use.
-    if switch.schema(db_path) == "mini":
-        logger.warning(
-            "LCM database %s still has the pre-port schema; run `misaka lcm migrate` to "
-            "rebuild it for the ported engine. Compaction stays on the native summariser.",
-            db_path,
-        )
-        _ENGINES[db_path] = None
-        return None
     from ..vendor.engine import LCMEngine
 
     llm.install()

@@ -45,7 +45,16 @@ from contextlib import contextmanager
 from misaka.config import CFG
 
 from ..vendor.config import LCMConfig
-from .switch import database_path, misaka_database_path
+
+
+def misaka_database_path() -> str:
+    """The database misaka's own settings name, before any upstream override."""
+    return os.path.expanduser(str(CFG.get("lcm_db") or "~/.misaka/lcm.db"))
+
+
+def database_path() -> str:
+    """The database in use: upstream's own environment name first, then misaka's."""
+    return os.environ.get("LCM_DATABASE_PATH") or misaka_database_path()
 
 # Externalized payloads live beside the database they belong to, under the name upstream
 # gives the directory. Read before the aliases are applied, `database_path()` is already

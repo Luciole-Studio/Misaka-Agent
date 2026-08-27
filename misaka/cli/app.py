@@ -97,17 +97,17 @@ def _parser():
                     help="(internal) run Last Order's fork on one issue in this process")
 
 
-    lc = sub.add_parser("lcm", help="Inspect, back up, repair, rebuild, or migrate the LCM context database")
+    lc = sub.add_parser("lcm", help="Inspect, back up, and maintain the LCM context database")
     lc.add_argument("op", nargs="?", default="status",
-                    choices=["status", "doctor", "backup", "repair", "rebuild", "migrate", "embed",
+                    choices=["status", "doctor", "backup", "embed",
                              "rollups", "externalize-backfill", "assertions", "rotate", "preset"])
     lc.add_argument("target", nargs="?",
-                    help="Session JSONL path for rebuild; warmup|backfill for embed; rebuild for assertions; "
+                    help="warmup|backfill for embed; rebuild for assertions; "
                          "session id for rotate; show|suggest|apply for preset")
     lc.add_argument("name", nargs="?",
                     help="preset: which preset show or apply reports on (show defaults to the active one)")
     lc.add_argument("--apply", action="store_true",
-                    help="migrate/embed/externalize backfill/assertions/rotate: do it for real "
+                    help="embed/externalize backfill/assertions/rotate: do it for real "
                          "(the default only prints the plan); preset has nothing to commit and "
                          "says so")
     lc.add_argument("--limit", type=int,
@@ -345,76 +345,15 @@ def _cmd_research(args):
 
 
 def _cmd_lcm(args):
-    import os as _os
+    """The LCM operator surface: everything upstream's own `/lcm` offers, plus the four
+    opt-in families upstream's doctor predates."""
+    from misaka.extensions.hermes_lcm.host import config_bridge as lcm_config
+    from misaka.extensions.hermes_lcm.host import operations as lcm_ops
 
-    from misaka.extensions.hermes_lcm import maintenance as lcm_maint
-    from misaka.extensions.hermes_lcm.host import migrate as lcm_migrate
-    from misaka.extensions.hermes_lcm.host import switch as lcm_switch
-    lcm_db = _os.path.expanduser(CFG.get("lcm_db") or "~/.misaka/lcm.db")
-    if args.op in {"status", "doctor"}:
-        # Two implementations answer to `misaka lcm`, and their reports have nothing in
-        # common -- the mini one counts rows, the ported engine names sixty runtime
-        # fields. So whichever `context_engine` selected is the one that speaks, with a
-        # line saying which, because "LCM status" alone does not tell them apart.
-        from misaka.extensions.hermes_lcm.host import operations as lcm_operations
-        ported = lcm_operations.report(args.op)
-        print(f"# {'ported hermes-lcm engine' if ported is not None else 'pre-port mini implementation'}"
-              f" | misaka lcm {args.op}")
-        if ported is not None:
-            print(ported)
-            return
-    if lcm_switch.schema(lcm_db) == "ported" and args.op in {"status", "repair", "rebuild"}:
-        # These three read the pre-port schema, and reaching here means the pre-port
-        # implementation is the selected one (upstream's own `status` answered above when
-        # it was not). A migrated database gets the counts, not a traceback.
-        if args.op != "status":
-            print(f"`misaka lcm {args.op}` operates on the pre-port schema; {lcm_db} has been "
-                  "migrated to the ported engine's. Use `misaka lcm backup` or `doctor`.")
-            sys.exit(2)
-        counted = lcm_migrate.sessions(lcm_db)
-        print(f"Database {lcm_db} | {_os.path.getsize(lcm_db):,} bytes | {len(counted)} sessions | "
-              f"{sum(counted.values())} source messages | ported schema")
-        for sid_, count in sorted(counted.items()):
-            print(f"  {sid_}: {count} source messages")
-        return
-    if args.op == "status":
-        st = lcm_maint.status(lcm_db)
-        print(
-            f"Database {st['db']} | {st['size_bytes']:,} bytes | "
-            f"{st['sessions']} sessions | {st['messages']} source messages | "
-            f"{st['nodes']} summary nodes"
-        )
-        for sid_, v in st["per_session"].items():
-            print(f"  {sid_}: {v['messages']} source messages, {v['nodes']} summaries")
-    elif args.op == "doctor":
-        for c in lcm_maint.doctor(lcm_db):
-            mark = {"pass": "✅", "warn": "⚠️", "fail": "❌"}[c["status"]]
-            suffix = f"  → {c['action']}" if c["status"] != "pass" else ""
-            print(f"{mark} {c['check']}: {c['detail']}{suffix}")
-        print("Read-only check; nothing was modified.")
-    elif args.op == "backup":
-        # Snapshot the file the selected implementation actually opens. The ported engine
-        # lets upstream's own `LCM_DATABASE_PATH` win over misaka's `lcm_db`, and backing
-        # up a database nothing has written to is worse than not backing up at all.
-        dest, err = lcm_maint.backup(lcm_switch.database_path() if lcm_switch.selected() else lcm_db)
-        print(err if err else f"Backup created: {dest}")
-    elif args.op == "migrate":
-        result = lcm_migrate.run(lcm_db) if args.apply else lcm_migrate.plan(lcm_db)
-        print(f"Database {result['database']}")
-        if not result["legacy"]:
-            print(result["note"])
-            return
-        for sid_, count in sorted(result["sessions"].items()):
-            print(f"  {sid_}: {count} source messages")
-        moved = "moved" if result.get("applied") else "would move"
-        print(f"{result['messages']} source messages in {len(result['sessions'])} sessions "
-              f"{moved}; old summaries stay in the backup.")
-        if not args.apply:
-            print("Dry run; nothing was written. Re-run with --apply to migrate.")
-        elif result["applied"]:
-            print(f"Migrated. Backup: {result['backup']}")
-        else:
-            print(f"Not migrated: {result['note']}  Backup: {result['backup']}")
+    lcm_db = lcm_config.database_path()
+
+    if args.op in {"status", "doctor", "backup"}:
+        print(lcm_ops.report(args.op))
     elif args.op == "externalize-backfill":
         # Old rows do not benefit from switching externalization on; this is how they
         # catch up. Dry run first, like migrate: `--apply` is what rewrites anything.
@@ -458,7 +397,7 @@ def _cmd_lcm(args):
         # upstream's own `LCM_DATABASE_PATH` win. Reporting on `lcm_db` instead would
         # answer "nothing has been built" about a file the engine never opened -- and
         # `--rebuild` would build into one database and print a status from another.
-        rollup_db = lcm_switch.database_path()
+        rollup_db = lcm_db
         if args.rebuild:
             outcome = lcm_rollups.rebuild(rollup_db)
             if outcome.get("error"):
@@ -502,23 +441,6 @@ def _cmd_lcm(args):
             print("Usage: misaka lcm preset show|suggest|apply [NAME] [--apply]")
             sys.exit(2)
         print(lcm_operations.preset(args.target, args.name or "", apply=args.apply))
-    elif args.op == "repair":
-        result = lcm_maint.repair(lcm_db)
-        print(
-            f"Backup {result['backup'] or '-'} | messages FTS {result['messages_fts']} | "
-            f"nodes FTS {result['nodes_fts']} | removed orphaned pending attempts "
-            f"{result['orphan_pending_deleted']}"
-        )
-    else:
-        if not args.target:
-            print("Usage: misaka lcm rebuild SESSION.jsonl")
-            sys.exit(2)
-        result = lcm_maint.rebuild_from_session_file(lcm_db, args.target)
-        print(
-            f"Rebuild complete | session {result['session_id']} | "
-            f"source messages {result['messages']} | summaries {result['nodes']} | "
-            f"backup {result['backup'] or '-'}"
-        )
 
 
 def _cmd_auth(args):
