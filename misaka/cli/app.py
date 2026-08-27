@@ -100,12 +100,16 @@ def _parser():
     lc = sub.add_parser("lcm", help="Inspect, back up, repair, rebuild, or migrate the LCM context database")
     lc.add_argument("op", nargs="?", default="status",
                     choices=["status", "doctor", "backup", "repair", "rebuild", "migrate", "embed",
-                             "rollups", "externalize-backfill", "assertions"])
+                             "rollups", "externalize-backfill", "assertions", "rotate", "preset"])
     lc.add_argument("target", nargs="?",
-                    help="Session JSONL path for rebuild; warmup|backfill for embed; rebuild for assertions")
+                    help="Session JSONL path for rebuild; warmup|backfill for embed; rebuild for assertions; "
+                         "session id for rotate; show|suggest|apply for preset")
+    lc.add_argument("name", nargs="?",
+                    help="preset: which preset show or apply reports on (show defaults to the active one)")
     lc.add_argument("--apply", action="store_true",
-                    help="migrate/embed/externalize backfill/assertions: do it for real "
-                         "(the default only prints the plan)")
+                    help="migrate/embed/externalize backfill/assertions/rotate: do it for real "
+                         "(the default only prints the plan); preset has nothing to commit and "
+                         "says so")
     lc.add_argument("--limit", type=int,
                     help="embed/externalize backfill: how many rows to move in this run; "
                          "assertions: how many source rows one --apply pass may re-derive, "
@@ -347,10 +351,22 @@ def _cmd_lcm(args):
     from misaka.extensions.hermes_lcm.host import migrate as lcm_migrate
     from misaka.extensions.hermes_lcm.host import switch as lcm_switch
     lcm_db = _os.path.expanduser(CFG.get("lcm_db") or "~/.misaka/lcm.db")
+    if args.op in {"status", "doctor"}:
+        # Two implementations answer to `misaka lcm`, and their reports have nothing in
+        # common -- the mini one counts rows, the ported engine names sixty runtime
+        # fields. So whichever `context_engine` selected is the one that speaks, with a
+        # line saying which, because "LCM status" alone does not tell them apart.
+        from misaka.extensions.hermes_lcm.host import operations as lcm_operations
+        ported = lcm_operations.report(args.op)
+        print(f"# {'ported hermes-lcm engine' if ported is not None else 'pre-port mini implementation'}"
+              f" | misaka lcm {args.op}")
+        if ported is not None:
+            print(ported)
+            return
     if lcm_switch.schema(lcm_db) == "ported" and args.op in {"status", "repair", "rebuild"}:
-        # These three read the pre-port schema. Porting upstream's own operations surface
-        # (`lcm status`, `doctor`, `inspect`, `rotate`, ...) is a later phase; until then a
-        # migrated database gets the counts, not a traceback.
+        # These three read the pre-port schema, and reaching here means the pre-port
+        # implementation is the selected one (upstream's own `status` answered above when
+        # it was not). A migrated database gets the counts, not a traceback.
         if args.op != "status":
             print(f"`misaka lcm {args.op}` operates on the pre-port schema; {lcm_db} has been "
                   "migrated to the ported engine's. Use `misaka lcm backup` or `doctor`.")
@@ -377,7 +393,10 @@ def _cmd_lcm(args):
             print(f"{mark} {c['check']}: {c['detail']}{suffix}")
         print("Read-only check; nothing was modified.")
     elif args.op == "backup":
-        dest, err = lcm_maint.backup(lcm_db)
+        # Snapshot the file the selected implementation actually opens. The ported engine
+        # lets upstream's own `LCM_DATABASE_PATH` win over misaka's `lcm_db`, and backing
+        # up a database nothing has written to is worse than not backing up at all.
+        dest, err = lcm_maint.backup(lcm_switch.database_path() if lcm_switch.selected() else lcm_db)
         print(err if err else f"Backup created: {dest}")
     elif args.op == "migrate":
         result = lcm_migrate.run(lcm_db) if args.apply else lcm_migrate.plan(lcm_db)
@@ -466,6 +485,23 @@ def _cmd_lcm(args):
             print(f"  {scope}  {counted}" + (f"  (oldest stale {oldest})" if oldest else ""))
         if report["last_error"]:
             print(f"Last build error: {report['last_error']}")
+    elif args.op == "rotate":
+        # Upstream's own in-place compact, forwarded whole: same session id, same
+        # conversation id, no summariser call, and the raw rows stay recoverable. The
+        # preview is the default and `--apply` is what writes the rolling backup and
+        # advances the lifecycle frontier. The session is an argument because a CLI has
+        # no active session for upstream to rotate.
+        from misaka.extensions.hermes_lcm.host import operations as lcm_operations
+        print(lcm_operations.rotate(args.target or "", apply=args.apply))
+    elif args.op == "preset":
+        # Upstream's benchmarked model-family presets, forwarded whole. Its `apply`
+        # writes no configuration in any mode, so `--apply` gets the same preview plus a
+        # line saying it had nothing to commit.
+        from misaka.extensions.hermes_lcm.host import operations as lcm_operations
+        if args.target not in {"show", "suggest", "apply"}:
+            print("Usage: misaka lcm preset show|suggest|apply [NAME] [--apply]")
+            sys.exit(2)
+        print(lcm_operations.preset(args.target, args.name or "", apply=args.apply))
     elif args.op == "repair":
         result = lcm_maint.repair(lcm_db)
         print(

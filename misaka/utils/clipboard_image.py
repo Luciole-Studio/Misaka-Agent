@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import tempfile
@@ -271,10 +272,7 @@ async def read_clipboard_image(
         wayland = is_wayland_session(env)
 
         if wayland or wsl:
-            image = read_clipboard_image_via_wl_paste(env=env) or read_clipboard_image_via_xclip(env=env)
-
-        if image is None and wsl:
-            image = read_clipboard_image_via_powershell(env=env)
+            image = await asyncio.to_thread(_read_via_external_commands, env=env, wsl=wsl)
 
         if image is None and not wayland:
             image = await read_clipboard_image_via_native_clipboard()
@@ -285,11 +283,34 @@ async def read_clipboard_image(
         return None
 
     if not is_supported_image_mime_type(image.mimeType):
-        png_bytes = convert_to_png(image.bytes)
+        # A decode plus a PNG re-encode of up to DEFAULT_MAX_BUFFER_BYTES, in Python:
+        # off the loop for the same reason the cascade above is.
+        png_bytes = await asyncio.to_thread(convert_to_png, image.bytes)
         if png_bytes is None:
             return None
         return ClipboardImage(bytes=png_bytes, mimeType="image/png")
 
+    return image
+
+
+def _read_via_external_commands(
+    *, env: dict[str, str] | None, wsl: bool
+) -> ClipboardImage | None:
+    """The wl-paste/xclip/powershell cascade, as one call off the event loop.
+
+    Three helpers rather than one because each may come back empty, and every step is a
+    ``subprocess.run`` with its own timeout: 1s + 3s to list and read through wl-paste,
+    the same again through xclip once per candidate MIME type, then 1s + 5s for wslpath
+    and powershell. A WSL box with nothing image-shaped on the clipboard can spend the
+    better part of half a minute in here, and pasting is a keystroke in the TUI -- on the
+    loop it is the whole interface that stops answering, not just the paste.
+
+    Reached only when the caller found Wayland or WSL, which is also the only way the
+    powershell step below is reachable, so the sequence matches the cascade it replaced.
+    """
+    image = read_clipboard_image_via_wl_paste(env=env) or read_clipboard_image_via_xclip(env=env)
+    if image is None and wsl:
+        image = read_clipboard_image_via_powershell(env=env)
     return image
 
 

@@ -112,20 +112,75 @@ Context engine:
 | `MISAKA_LCM_SUMMARY_TIMEOUT` | `60` | seconds per summary |
 | `MISAKA_LCM_RETRIEVAL_MODE` / `MISAKA_LCM_EMBEDDING_MODEL` | `fts` / none | retrieval over compacted history; `hybrid` plus a model name is also the on-switch for the ported engine's semantic retrieval, as a local `fastembed` provider (`uv sync --extra lcm-semantic`, then `misaka lcm embed warmup` and `misaka lcm embed backfill --apply`). Upstream's `LCM_EMBEDDING_PROVIDER`/`LCM_EMBEDDING_MODEL` reach `voyage` and `ollama` instead |
 
-`hermes-lcm` selects the ported upstream engine (`misaka/extensions/hermes_lcm/vendor/`,
-pinned in `UPSTREAM_COMMIT`) instead of misaka's own smaller one. It reads upstream's
-`LCM_*` environment variables directly -- all of them, documented upstream -- and the
-`MISAKA_LCM_*` names above fill in as lower-precedence aliases for the four they overlap.
-The two implementations cannot share a database: run `misaka lcm migrate` (a dry run by
-default, `--apply` to commit) to back up `~/.misaka/lcm.db` and rebuild it in upstream's
-schema first. In this release it serves ingest and compaction only; the `lcm_*` tools are
-still the pre-port ones and are unavailable while it is selected. Every compaction
-rewrites the front of the context and so invalidates an Anthropic prompt-cache prefix;
-`LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED=1` keeps the engine from also rebuilding its
-higher-level summaries in the same round as a leaf, which costs one rewrite per
-compaction instead of two. `misaka lcm migrate` rebuilds the database file in place, so
-close every other misaka session first -- it refuses while another process still has it
-open.
+#### The two LCM implementations
+
+`MISAKA_CONTEXT_ENGINE` picks which code compacts a long session, and two of its three
+values are whole implementations of the same idea:
+
+- **`lcm`** (default) is misaka's own small one: a summary DAG, full-text recall, five
+  `lcm_*` tools. It is the one every existing `~/.misaka/lcm.db` was written by.
+- **`hermes-lcm`** is [hermes-lcm](https://github.com/stephenschoettler/hermes-lcm)
+  ported whole into `misaka/extensions/hermes_lcm/vendor/` (60 modules, byte-identical to
+  the commit in `UPSTREAM_COMMIT`, with misaka's adapters quarantined in `host/`). It
+  brings hierarchical condensation, fifteen `lcm_*` tools, secret redaction, large-output
+  externalization, day/week/month rollups, semantic retrieval and the V4 assertion layer.
+- **`native`** turns LCM off entirely and lets the engine write one flat summary. It is
+  the escape hatch: nothing below applies.
+
+Both read `MISAKA_LCM_DB` for their database, though the ported one lets upstream's own
+`LCM_DATABASE_PATH` outrank it. It also reads the rest of upstream's `LCM_*` variables --
+all ~115 of them, documented in upstream's README -- and every `MISAKA_LCM_*` name above
+except `MISAKA_LCM_SUMMARY_PROVIDER` (which has no upstream counterpart) fills in as a
+lower-precedence alias for the `LCM_*` name it overlaps.
+`misaka/extensions/hermes_lcm/PORT_NOTES.md` records every place the port differs from
+upstream and why.
+
+**Switching means migrating.** The two schemas collide: both call their tables `messages`
+and `summary_nodes` and mean different things by them, and opening the wrong one grows a
+hybrid neither can read. So `misaka lcm migrate` backs the old file up, rebuilds a new one
+beside it through upstream's own ingest, checks the counts session by session, and only
+then gives it the old name. It is a dry run until `--apply`, it never edits the old file,
+and it refuses while another process still has the database open -- close every other
+misaka session first. Original messages move; old summaries stay in the backup, because
+the ported engine re-derives its own the first time it compacts.
+
+`misaka lcm status` and `misaka lcm doctor` report from whichever implementation is
+selected, and say which one they are on the first line. The ported engine's reports are
+upstream's own -- far more detail, entirely different shape.
+
+#### The four opt-in families
+
+Everything the port added beyond compaction is off by default, which is upstream's
+posture. Each family is one switch, and each has a price:
+
+| Family | Switch | What it does | What it costs when on |
+|---|---|---|---|
+| Large-output externalization | `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` | tool results over `LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS` (12,000) move to side files next to the database, leaving a reference the model can expand | no model calls at all; disk beside `lcm.db` instead of megabytes inside it. Add `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` to stub them in the live prompt too |
+| Temporal rollups | `LCM_TEMPORAL_ROLLUPS_ENABLED` | day/week/month summaries beside the DAG, so `lcm_recent("this week")` answers from a rollup instead of re-reading leaves | one summariser call per period built, `LCM_ROLLUP_BUILDS_PER_PASS` (2) per maintenance pass. A quiet session builds a handful a day |
+| Semantic retrieval | `LCM_EMBEDDINGS_ENABLED` + `LCM_EMBEDDING_PROVIDER`/`LCM_EMBEDDING_MODEL` | `lcm_grep` gains `semantic` and `hybrid` modes, which find a paraphrase full-text cannot | one vector per summary node and chunk. `fastembed` runs locally and costs nothing per call (`uv sync --extra lcm-semantic`, ~130 MB model download); `voyage` is billed per token, and `misaka lcm embed backfill` prints the estimate before `--apply` spends it |
+| V4 assertions | `LCM_ASSERTIONS_ENABLED` + `LCM_ASSERTION_EXTRACTION_ENABLED` | claims with exact provenance, extracted from stored messages and queryable through `lcm_query_state` | one auxiliary model call per source row, bounded at `LCM_ASSERTION_EXTRACTION_MAX_SOURCES_PER_PASS` (4, ceiling 8) per compaction. `misaka lcm assertions rebuild --apply` is the unbounded one: `--limit` (100, max 500) is all that stands between it and 500 calls |
+
+Turning a family on helps traffic from that moment; history already in the database
+catches up only when told to. `misaka lcm externalize-backfill`, `misaka lcm rollups
+--rebuild`, `misaka lcm embed backfill` and `misaka lcm assertions rebuild` are those
+four commands, and all of them print a plan first and write only on `--apply`.
+
+#### Operator commands
+
+`misaka lcm <op>`: `status` and `doctor` report; `backup` snapshots; `migrate` converts
+between the two implementations; `rotate SESSION_ID` compacts one session in place
+(advancing the lifecycle frontier past its pre-tail raw rows without changing its
+identity, deleting nothing, calling no model, backup-first on `--apply`); `preset
+show|suggest|apply` reads upstream's benchmarked model-family settings, and never writes
+any -- upstream's apply is preview-only, so `--apply` has nothing to commit; `repair` and
+`rebuild` serve the pre-port implementation only. `--apply` is what commits, everywhere.
+The ported ops answer in upstream's own text, which names its slash command: read
+`/lcm X` there as `misaka lcm X`.
+
+**Prompt caching.** Every compaction rewrites the front of the context and so invalidates
+an Anthropic prompt-cache prefix. `LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED=1` keeps the
+engine from also rebuilding its higher-level summaries in the same round as a leaf, which
+costs one rewrite per compaction instead of two.
 
 Terminal and panel:
 

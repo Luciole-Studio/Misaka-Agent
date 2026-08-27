@@ -4,6 +4,8 @@
 改动都必须在此登记,升级时逐条重放。没有记录的漂移 = 缺陷。
 
 施工蓝图:`docs/plans/hermes-lcm-port-plan.md`。
+**升级上游按 `docs/plans/hermes-lcm-sync.md` 做**;`scripts/lcm_sync_check.py` 是它的巡检工具
+(逐文件比 sha,报未登记的漂移,退出码 1 = 有漂移)。
 
 ## 允许的改动只有四类
 
@@ -86,6 +88,7 @@
 | `rollups.py` | P4 时间记忆的两件事:每轮压缩后的 `nudge`(misaka 一次会话只绑一次)+ `misaka lcm rollups [--rebuild]` |
 | `embed.py` | P5:把上游自己的 `/lcm embed warmup\|backfill` 转发到 `misaka lcm embed` |
 | `preanswer.py` | P6:上游 `pre_llm_call` 的预答证据钩子 → `context` 事件的第二个处理器 |
+| `operations.py` | P7:上游的 `status` `doctor` `rotate` `preset` 四个运维口 → `misaka lcm`;doctor 后面补一段四族体检 |
 
 **压缩缝的关键决定**:pi 给的是「要被替换的那一段 + `firstKeptEntryId`」,上游给的是「整张消息表进、整张出」。
 桥接方式是**把引擎的 fresh tail 钉死成 pi 保留的那一段**(`fresh_tail_count = 保留条数`,同时临时把
@@ -289,7 +292,7 @@ vendored 文件 —— 它是自愈的可用性问题,不值得为它打破 `ven
 |---|---|
 | P2–P7 那 26 个闭包外溢文件 | 依赖闭包要求它们**可导入**,不要求它们**被接线**。host 适配层按分期做:P2 工具面、P3 保护层、P4 时间记忆、P5 语义、P6 证据层、P7 运维面 |
 | `codex_routing.py` | 蓝图 §5.4:misaka 的模型目录负责上下文窗,永久 vendored-inert |
-| `command.py` | Hermes 的 `/lcm` 斜杠命令实现;misaka 走 `misaka lcm` CLI(P7)。**P5 起有一个例外**:`handle_lcm_command("embed ...")` 被 `host/embed.py` 转发,见下 |
+| `command.py` | Hermes 的 `/lcm` 斜杠命令实现。**P7 后已不在这张表里的多数条目之列**:P5 起 `host/embed.py` 转发 `embed`,P6 起 `host/assertions.py` 转发 `assertions rebuild`,P7 起 `host/operations.py` 转发 `status` `doctor` `rotate` `preset`。仍不转发的只有 `backup`(misaka 自己有一个)、`rollups`(`host/rollups.py` 要的是只读状态与重建循环,不是上游那个绑定会话的 `rebuild <kind> [date]`)与 `help`(讲的是 `/lcm` 不是 `misaka lcm`) |
 
 ## 语义检索(P5,host 侧,vendor 未动)
 
@@ -468,6 +471,88 @@ misaka 的研究台账和这一族回答的是同一个问题(手上到底有什
 「引用格式谁说了算」「研究 claim 要不要变成 LCM 断言」——都不是接缝问题,蓝图 §4 P6 明写
 本期不做。注释落在 `host/preanswer.py` 模块文档串末尾:`_brief` 是唯一产出文本的地方
 (台账段落将来并在它旁边),`_baseline` 是唯一决定编译器能看见什么的地方。
+
+## 运维面(P7,host 侧,vendor 未动)
+
+上游 `/lcm` 有 9 个子命令,`misaka lcm` 到 P6 末已有 10 个 op。逐个对完之后**实际缺的只有两个**
+(`rotate` 与 `preset`),另有一处**分流**是本期真正的问题。
+
+| 处 | 做了什么 |
+|---|---|
+| `host/operations.rotate` | `misaka lcm rotate [SESSION_ID] [--apply]` → `/lcm rotate [apply]`。上游转的是**它宿主当前打开的那个会话**,CLI 一个都没有,所以会话是参数;省略时列出库里的会话(`store.scan_session_cleanup_stats`,按消息数降序,最多 20 个)而不是干答一句 `no_active_session`。**绑定前先查这个会话在不在库里**:绑定会把找不到的会话**建**出来,一个拼错的名字会给只读预览留下一条空 lifecycle 行,正是上游 doctor 的 `empty_lifecycle_rows` 要报的碎片 |
+| `host/operations.preset` | `misaka lcm preset show\|suggest\|apply [NAME] [--apply]` → `/lcm preset ...` |
+| `host/operations.report` | `misaka lcm status` / `doctor` 的**分流**:`switch.selected()` 为真就走上游的 `_status_text`/`_doctor_text`,否则返回 `None`,CLI 保留迷你实现自己那份 |
+| `host/operations._families` | 上游 doctor 后面补一段四族体检(下面单列) |
+
+### 分流:两套实现,两种报告,不强行统一
+
+`misaka lcm status` 到 P6 末走的一直是**迷你实现**的 `maintenance.py`——数行数、数节点。移植版被选中
+的时候那份报告是错的对象:它对 rollup、嵌入、断言、外部化一无所知,而这些正是移植版存在的理由。
+
+分流判据是 `switch.selected()`(即 `context_engine` 的值),**不是**磁盘上的 schema。理由:
+schema 说的是"这个文件能被谁打开",选择说的是"谁在压缩这个装置的会话"。一个装了移植版 schema
+却选了 `lcm` 的库,它的会话是迷你实现在压——报告就该是迷你实现的。四种组合的实测结果:
+
+| `context_engine` | 磁盘 schema | 结果 |
+|---|---|---|
+| `hermes-lcm` | ported | 上游 `_status_text` / `_doctor_text` + 四族体检 |
+| `hermes-lcm` | mini | `report()` 返回一句拒绝(`misaka lcm migrate --apply`),不打开库 |
+| `lcm` | mini | `report()` 返 `None`,CLI 走迷你实现(P1 起就有的路径) |
+| `lcm` | ported | 同上,落到 P1 那条"迁移过的库给计数"的兜底 |
+
+**两套输出形状不统一是刻意的**(蓝图之外、本期决定):上游那份有六十来个字段,迷你那份有五行,
+把它们压成同一张表等于扔掉上游报告的大部分。取而代之是 CLI 在第一行打一句
+`# ported hermes-lcm engine | misaka lcm doctor` / `# pre-port mini implementation | ...`,
+让"在看哪一套"这个问题一眼有答案。
+
+### doctor 的四族体检:上游为什么不报,host 为什么补
+
+`_doctor_text`(480 行)覆盖 schema、integrity、两张 FTS、payload 风险扫描、**外部化载荷**、
+敏感串脱敏、lifecycle 碎片、source 血统。它**不覆盖** rollup、嵌入、断言——这三族都比它晚,
+上游至今没回头给它加。`lcm_inspect` 里有 `_temporal_rollups_status`,但那是工具面,不是 doctor。
+
+所以 host 在上游 doctor 后面接一段 `families:`,四族各一行:开关状态 + 计数 + 深查那一族的命令。
+读的都是现成的东西——rollup 用 `host/rollups.status()`(只读连接,不能是表出现的原因),
+嵌入/断言用引擎**自己已经开着的**那个连接跑几条 `SELECT`(`SELECT` 不会建表,所以查状态
+仍然不会改变状态)。表不存在 = 那一族在这个库里从没打开过,一律当"空"读,不当错误读。
+
+两个判据值得留意:
+
+- 嵌入这一族"开着但还没 warmup"是唯一会让操作者**静默无效**的状态(检索照常回退全文),
+  所以它单独一行(`no profile registered yet`),不靠一个 0 计数暗示。
+- 断言只报**不等于** `CURRENT_EXTRACTION_VERSION` 的版本行:那才是"该重建了"的信号,
+  "全都是当前版本"上面的总数已经说过了。
+
+### `preset apply` 的 `--apply`:唯一一处不原样转发上游文本
+
+上游 `preset apply` 在**任何模式下都不写配置**:不带 `--dry-run` 时它答
+`status: denied / error: preset apply is preview-only for now; pass --dry-run`。
+把这句原样转给 misaka 操作者,他会去找一个 `misaka lcm` 根本没有的 `--dry-run` 旗标
+(这边 dry run 是默认)。所以 `preset apply` 一律附 `--dry-run` 转发,`--apply` 时在末尾补一句
+host 自己的话说明"没有东西可提交"。**这是四个转发口里唯一一处对上游文本的加工**,而且只是追加,
+不改上游写的任何一个字节。
+
+其余三个口的文本原样打出,包括里面提到的 `/lcm X`——README 的运维节说明了读作 `misaka lcm X`。
+翻译它需要对上游文本做字符串替换,那是再同步时最容易无声出错的一类改动,不值得为观感付。
+
+### 依赖的上游形状(再同步时复核)
+
+| 依赖 | 位置 | 变了会怎样 |
+|---|---|---|
+| `handle_lcm_command` 的 `status` / `doctor` / `rotate [apply]` / `preset show\|suggest\|apply [name] [--dry-run]` 词法 | `command.py:4991-5068` | 词法改名 → 对应 op 落到上游的 help 文本上(不报错,但也不干活) |
+| `engine.rotate_active_session` 只认 `on_session_start` 绑过的会话 | `engine.py:6347` | 上游若改成接收 session 参数,`operations.rotate` 的绑定这一步就多余了 |
+| `store.scan_session_cleanup_stats()` 的四元组 `(session_id, message_count, token_total, node_count)` | `store.py:867` | 列变了 → 会话列表解包失败 |
+| `lcm_embedding_profile` / `lcm_embedding_vectors` / `lcm_chunk_vectors` / `lcm_assertions` 的列名 | `db_bootstrap.py:1295-1339`、`:1890` | 体检那几行的计数静默变 0(表不存在被当成"没开过") |
+| `assertion_store.CURRENT_EXTRACTION_VERSION` | `assertion_store.py:34` | 它一动,库里所有行就都成了"superseded",体检会提示重建——这正是想要的行为 |
+
+### 蓝图 §4 P7 里本期**没**做的
+
+- **聊天内 `/lcm` 扩展命令**:`misaka lcm` 这条 CLI 已经把全部运维口接完了,聊天内再开一条
+  是第二个入口,不是第二份能力。蓝图列了它,但它不属于"缺口";要做的时候
+  `host/operations.py` 的四个函数就是现成的实现。
+- **`benchmarking/` 与 `scripts/`**:蓝图 §5.6 明写"留作 P7 可选";没移植,所以
+  `test_stress_release_check.py` 等几个上游测试仍在下面那张 skip 表里。
+- **`codex_routing.py`**:蓝图 §5.4,永久 vendored-inert,本期确认不变。
 
 ## 刻意不移植的上游文件
 

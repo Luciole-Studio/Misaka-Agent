@@ -763,11 +763,13 @@ class SisterRuntime:
         free = self._sister_semaphore.available
         default_ready = None
         if task_ids is None:
-            default_ready = [
-                row["id"] for row in db.fair_ready(
-                    self.con, limit=free, lane="workers", workspace=workspace
-                )
-            ]
+            # fair_ready reconciles every card in the project against its file before it picks;
+            # that is filesystem work, so it goes off the loop the way _reconcile_abandoned above
+            # does. Blocking here freezes every other Last Order turn for the whole pass.
+            rows = await asyncio.to_thread(
+                db.fair_ready, self.con, limit=free, lane="workers", workspace=workspace
+            )
+            default_ready = [row["id"] for row in rows]
         wanted = list(dict.fromkeys(task_ids if task_ids is not None else default_ready))
         if not wanted:
             return []

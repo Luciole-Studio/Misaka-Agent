@@ -62,7 +62,7 @@ from misaka.ai.types import (
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
-from misaka.ai.utils.json_parse import parse_json_with_repair, parse_streaming_json
+from misaka.ai.utils.json_parse import StreamingArgs, parse_json_with_repair
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
 from misaka.utils.values import maybe_await, signal_aborted
 
@@ -901,7 +901,7 @@ def stream_anthropic(
             await _emit_response_metadata(raw_response, options, model)
             stream.push(StartEvent(partial=output))
             provider_indexes: dict[int, int] = {}
-            tool_partial_json: dict[int, str] = {}
+            tool_partial_json: dict[int, StreamingArgs] = {}
 
             if hasattr(raw_response, "http_response") or hasattr(raw_response, "iter_lines") or hasattr(raw_response, "aiter_lines"):
                 event_iter: AsyncIterator[dict[str, Any]] = iterate_anthropic_events(raw_response, _option(options, "signal"))
@@ -963,7 +963,7 @@ def stream_anthropic(
                         )
                         output.content.append(block)
                         provider_indexes[provider_index] = len(output.content) - 1
-                        tool_partial_json[provider_index] = ""
+                        tool_partial_json[provider_index] = StreamingArgs()
                         stream.push(ToolCallStartEvent(contentIndex=len(output.content) - 1, partial=output))
                     continue
 
@@ -987,8 +987,9 @@ def stream_anthropic(
                         stream.push(ThinkingDeltaEvent(contentIndex=content_index, delta=thinking_delta, partial=output))
                     elif delta_type == "input_json_delta" and isinstance(block, ToolCall):
                         partial_delta = str(delta.get("partial_json") or "")
-                        tool_partial_json[provider_index] = tool_partial_json.get(provider_index, "") + partial_delta
-                        block.arguments = parse_streaming_json(tool_partial_json[provider_index])
+                        accumulated = tool_partial_json.setdefault(provider_index, StreamingArgs())
+                        accumulated.append(partial_delta)
+                        block.arguments = accumulated.arguments
                         stream.push(ToolCallDeltaEvent(contentIndex=content_index, delta=partial_delta, partial=output))
                     elif delta_type == "signature_delta" and isinstance(block, ThinkingContent):
                         block.thinkingSignature = (block.thinkingSignature or "") + str(delta.get("signature") or "")
@@ -1012,9 +1013,9 @@ def stream_anthropic(
                         # start block and send no input_json_delta, and parsing the empty
                         # buffer would hand the tool {} instead. Same guard as the
                         # openai-completions and openai-responses adapters.
-                        accumulated_json = tool_partial_json.get(provider_index, "")
-                        if accumulated_json:
-                            block.arguments = parse_streaming_json(accumulated_json)
+                        accumulated = tool_partial_json.get(provider_index)
+                        if accumulated is not None and accumulated.raw:
+                            block.arguments = accumulated.finish()
                         stream.push(ToolCallEndEvent(contentIndex=content_index, toolCall=block, partial=output))
                     continue
 

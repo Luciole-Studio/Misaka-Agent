@@ -1,5 +1,6 @@
-"""Research processes: a node (``misaka research --node RUN NODE``) and Last Order's fork on
-one issue (``misaka research --probe RUN ISSUE``).
+"""Research processes: a node (``misaka research --node RUN NODE``), Last Order's fork on
+one issue (``misaka research --probe RUN ISSUE``), and one card of theirs
+(``python -m misaka.research.node --run-card TASK_ID``, this module's own child).
 
 Inside the panel a node is a pane split beside the Last Order that started the run, a fork is
 a pane split beside its node (the fork rule: one line of context, one tab), and every Sister
@@ -12,11 +13,12 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+import sys
 import time
 
 from misaka.config import CFG, current_config
 from misaka.platform import tasks as task_store
-from misaka.research import runs, workflow
+from misaka.research import runs
 
 
 class PaneSpawner:
@@ -100,20 +102,86 @@ class PaneRunner:
             pass
 
 
+CARD_ARGV = [sys.executable, "-m", "misaka.research.node", "--run-card"]   # tests may override
+
+
 class HeadlessRunner:
-    """No panel: dispatch runs a ready card inline; its submission is its acceptance."""
+    """No panel: every ready card becomes a child process of its own, so a node's batch runs at
+    the width the run asked for and the drive loop keeps watching stop and budget while the
+    cards run. Running them inline made ``research_parallel`` a number with no effect: a batch
+    was one thread running one card to the end of its turn before starting the next.
+
+    Threads are not the alternative -- ``platform.session`` serialises sessions inside one
+    process on purpose -- so the parallelism is processes. Each child settles its own card
+    through ``dispatch.run_task`` (claim, admission, budget, settle); this side only starts
+    one, reaps it, and can kill it."""
 
     def __init__(self, con, cfg):
         self.con, self.cfg = con, cfg
+        self.flying = {}                     # task_id -> Popen: the cards this node started
+        self._processes = ProcessSpawner()   # one place decides how a child of ours starts and dies
 
     async def launch_ready(self, *, task_ids, **_kwargs):
         from misaka.network import dispatch
-        await asyncio.to_thread(dispatch.dispatch_once, self.con, self.cfg, task_ids=task_ids)
+        from misaka.platform import admission
+        self._reap()                         # before reconcile: an unwaited-for child still answers to its pid
+        # A card whose child died mid-turn comes back through the reconciler, exactly as it did
+        # when this method was dispatch_once. finish_abandoned can reach git, so it stays off
+        # the loop thread.
+        await asyncio.to_thread(dispatch.reconcile, self.con, self.cfg)
+        rows = {task_id: task_store.get(self.con, task_id) for task_id in task_ids}
+        host_cap, assignee_cap = admission.limits()
+        taken = self._slots_taken(rows)
+        for task_id, row in rows.items():
+            if task_id in self.flying or row is None or row["status"] != "ready":
+                continue
+            if row["next_attempt_at"] is not None and int(row["next_attempt_at"]) > time.time():
+                continue                     # a rate-limit cooldown: the claim would refuse it anyway
+            if sum(taken.values()) >= host_cap or taken.get(row["assignee"], 0) >= assignee_cap:
+                continue                     # no admission slot: the card stays ready for a later poll
+            # No cwd of our own: the child inherits the run's, and run_task is what decides
+            # what a card whose project folder is gone means. The parallelism ceiling is the
+            # drive loop's free-slot count, already applied to task_ids -- not ours to re-decide.
+            self.flying[task_id] = self._processes.spawn(
+                [*CARD_ARGV, task_id], cwd=None, title=f"card {task_id}")
+            taken[row["assignee"]] = taken.get(row["assignee"], 0) + 1
 
     async def stop(self, task_id, **_kwargs):
-        """Inline dispatch runs a card to the end of its turn in this very process; it cannot be
-        killed from here. The drive loop already holds back ready/todo cards on a halt -- this
-        exists so a halt is an explicit no-op instead of a silently missing method."""
+        """A halt: this card's process and everything it started go now. The claim it dies
+        holding is left to ``dispatch.reconcile`` -- the one path that knows how to settle or
+        return a card whose worker is gone."""
+        proc = self.flying.pop(task_id, None)
+        if proc is not None:
+            await asyncio.to_thread(self._processes.stop, proc)
+
+    def close(self):
+        """The node's routine is over: no card of this node may outlive the node. Called from
+        the process shell below, so a halt, a failure and a clean finish all end the same way."""
+        while self.flying:
+            _task_id, proc = self.flying.popitem()
+            self._processes.stop(proc)
+
+    def _slots_taken(self, rows):
+        """The admission slots a new child would have to fit into: every claimed card on the
+        board (what ``db.claim`` counts) plus the children of ours that have not claimed theirs
+        yet. The claim stays the authority -- counting here only keeps this node from starting a
+        process per poll for a card the host has no room for. Inline, a refused claim cost
+        nothing; a refused claim now costs a process, and the drive loop offers the same card
+        again two seconds later."""
+        taken = {}
+        for row in self.con.execute(
+                "SELECT assignee FROM tasks WHERE status='running' AND claim_lock IS NOT NULL"):
+            taken[row["assignee"]] = taken.get(row["assignee"], 0) + 1
+        for task_id in self.flying:
+            row = rows[task_id] if task_id in rows else task_store.get(self.con, task_id)
+            if row is not None and row["status"] == "ready":     # started, about to claim
+                taken[row["assignee"]] = taken.get(row["assignee"], 0) + 1
+        return taken
+
+    def _reap(self):
+        for task_id, proc in list(self.flying.items()):
+            if proc.poll() is not None:      # poll() reaps: the pid is free before reconcile looks
+                self.flying.pop(task_id)
 
 
 class Reporter:
@@ -156,6 +224,12 @@ def _run(label, routine):
         print(f"{label} failed: {type(error).__name__}: {error}", flush=True)
         report("blocked", f"{type(error).__name__}: {error}")
         return 1
+    finally:
+        # However this process ends, the card processes it started end with it. A pane
+        # runner has nothing of its own to close: the daemon owns those panes.
+        close = getattr(runner, "close", None)
+        if close is not None:
+            close()
     if isinstance(result, dict):
         questions = "; ".join(result.get("questions") or [])
         print(f"{label} needs input: {questions}", flush=True)
@@ -166,11 +240,41 @@ def _run(label, routine):
     return 3 if result in ("stopped", "budget") else 0
 
 
+def main_card(task_id):
+    """Run one ready card in this process: the entry point ``HeadlessRunner`` spawns. Claim,
+    admission, budget and settle are ``dispatch.run_task``'s and are not repeated here, so a
+    card started this way is the same card the daemon or a pane would have run. Exit 0 when
+    this process ran the card, 1 when it did not (no such card, someone else holds the claim,
+    the budget stopped, the assignee has no profile)."""
+    from misaka.network import dispatch
+    con = task_store.connect(os.path.expanduser(CFG["db"]))
+    try:
+        row = task_store.get(con, task_id)
+        if row is None:
+            print(f"card {task_id}: not on the board", flush=True)
+            return 1
+        return 0 if dispatch.run_task(con, row, current_config()) else 1
+    finally:
+        con.close()
+
+
 def main(run_id, node_id):
+    # Imported here, not at the top: a card child runs this module too, and the research
+    # workflow is a second of imports it has no use for.
+    from misaka.research import workflow
     return _run(f"node {node_id}", lambda con, cfg, runner, worker, progress: workflow.expand_node(
         con, cfg, runner, worker, run_id=run_id, node_id=node_id, spawner=spawner(), progress=progress))
 
 
 def main_probe(run_id, issue_id):
+    from misaka.research import workflow
     return _run(f"fork {issue_id}", lambda con, cfg, runner, worker, progress: workflow.probe(
         con, cfg, runner, worker, run_id=run_id, issue_id=issue_id, progress=progress))
+
+
+if __name__ == "__main__":
+    # ``python -m misaka.research.node --run-card TASK_ID``. A node and a fork are user-facing
+    # and keep their CLI sub-command; a card child is this module's own and needs no CLI surface.
+    if sys.argv[1:2] != ["--run-card"] or len(sys.argv) != 3:
+        sys.exit("usage: python -m misaka.research.node --run-card TASK_ID")
+    sys.exit(main_card(sys.argv[2]))

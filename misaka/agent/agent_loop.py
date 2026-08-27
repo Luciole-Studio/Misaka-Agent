@@ -363,13 +363,20 @@ async def stream_assistant_response(
             "toolcall_end",
         }:
             if partial_message is not None:
+                # One snapshot per event, shared by the context and the event. The copy
+                # exists to cut the provider's live ``partial`` loose -- it keeps being
+                # mutated until the stream ends -- and a second copy of the same snapshot
+                # bought nothing: no consumer of message_update mutates the message it is
+                # given (checked across agent_session, the TUI, the extension runner and
+                # jsonl). Two deep copies of everything said so far, per delta, is the
+                # cost this removes.
                 partial_message = event.partial.model_copy(deep=True)
                 context.messages[-1] = partial_message
                 await _emit(
                     emit,
                     MessageUpdateEvent(
                         assistantMessageEvent=event,
-                        message=partial_message.model_copy(deep=True),
+                        message=partial_message,
                     ),
                 )
             continue

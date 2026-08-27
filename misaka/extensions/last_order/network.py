@@ -272,23 +272,39 @@ def register(harn):
             generation=int(row["generation"]), reviewer_identity="board-tool",
         ):
             return _text(f"Task card {params.task_id} is {row['status']} or its review is already claimed.")
-        try:
-            if params.decision == "approve":
-                changed = db.approve_review(
-                    con, params.task_id, lock, generation=int(row["generation"]),
-                    summary=params.feedback,
-                )
-                if changed:
-                    from misaka.network import dispatch
-                    dispatch.index_after_review(con, params.task_id, int(row["generation"]))
-            else:
-                changed = db.request_review_changes(
-                    con, params.task_id, lock, params.feedback,
-                    generation=int(row["generation"]),
-                )
-        except Exception:
-            db.release_review(con, params.task_id, lock, generation=int(row["generation"]))
-            raise
+
+        def decide():
+            """The decision and everything it drags behind it, off Last Order's loop.
+
+            Both branches mirror the card file and commit it (``platform/repo`` retries an
+            index.lock with a ``time.sleep`` backoff), and an approval then indexes the
+            submitted artifacts -- which runs ``pdftotext`` at up to 300s per PDF. On the
+            loop that is Last Order's whole conversation frozen, DM handling and every
+            other tool included, for as long as the biggest artifact takes. The board
+            connection is a ``SerializedConnection`` (``check_same_thread=False`` plus a
+            re-entrant statement lock), so a worker thread is a place it can be used; the
+            compensating release travels with the decision for the same reason it exists.
+            """
+            try:
+                if params.decision == "approve":
+                    done = db.approve_review(
+                        con, params.task_id, lock, generation=int(row["generation"]),
+                        summary=params.feedback,
+                    )
+                    if done:
+                        from misaka.network import dispatch
+                        dispatch.index_after_review(con, params.task_id, int(row["generation"]))
+                else:
+                    done = db.request_review_changes(
+                        con, params.task_id, lock, params.feedback,
+                        generation=int(row["generation"]),
+                    )
+            except Exception:
+                db.release_review(con, params.task_id, lock, generation=int(row["generation"]))
+                raise
+            return done
+
+        changed = await asyncio.to_thread(decide)
         if not changed:
             return _text("Review ownership expired; no decision was recorded.")
         if params.decision == "approve":              # the card is done; there is nothing to relaunch

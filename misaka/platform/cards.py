@@ -11,6 +11,7 @@ at dispatch and may be removed after inspection.
 import io
 import json
 import os
+import stat
 import subprocess
 import time
 from pathlib import Path
@@ -34,7 +35,13 @@ def _now_iso(ts=None):
 
 
 def card_path(workspace, task_id):
-    return os.path.join(tasks.canonical_workspace(workspace), "cards", f"{task_id}.md")
+    return _card_path(tasks.canonical_workspace(workspace), task_id)
+
+
+def _card_path(workspace, task_id):
+    """The card's path under an already-canonical workspace. ``canonical_workspace`` lstats
+    every component of the path; the reconcile loop pays that once per pass, not per card."""
+    return os.path.join(workspace, "cards", f"{task_id}.md")
 
 
 def _dump(fields, body):
@@ -50,8 +57,30 @@ def _dump(fields, body):
     return out.getvalue()
 
 
+# The mtime gate for :func:`reconcile_one`, which is run over every card in the project on
+# every dispatch and every research tick. Nothing durable lives here: losing the dict to
+# process death costs one re-read per card, never a lost fact, so it stays on the allowed
+# side of "process-local caches may not hold anything a crash must not lose".
+#
+# The key is the stat triple a rewrite moves. Our own writer replaces the inode (atomic.write
+# renames a fresh temp file over the target) *and* calls _forget below, so an in-process edit
+# can never be missed. An outside writer -- a card shell in its own process, a person's editor,
+# a git checkout -- moves st_mtime_ns, and usually st_ino with it. What remains possible is an
+# outside in-place rewrite landing the exact same byte count within one mtime tick of our last
+# stat; on the filesystems this runs on that tick is sub-microsecond, and the cost is one stale
+# dispatch of a card that is re-read on its next write -- the same window reconcile already has
+# between reading a card and the claim it feeds.
+_PARSED: dict[str, tuple] = {}
+_PARSED_CAP = 4096          # cards seen in one long-lived process; a cache, so overflow just drops it
+
+
+def _forget(path):
+    _PARSED.pop(str(path), None)
+
+
 def _write_file(path, text):
     atomic.write_text(path, text)
+    _forget(path)
 
 
 def read(path):
@@ -309,35 +338,64 @@ def _card_values(fields, body):
     }
 
 
+_MIRRORED = ("title", "body", "assignee", "reviewer", "executor", "model", "priority",
+             "timeout_seconds", "origin_session", "status", "generation")
+
+
 def reconcile_one(con, workspace, task_id):
     """Refresh one idle index row from its card; return the parsed card, or None if unusable.
 
     Returning the card lets the caller answer further questions about it -- dependencies,
     say -- without reading the file a second time.
+
+    Neither half of the work is repeated for nothing: an unchanged file is not re-read or
+    re-parsed (the stat gate above), and a row that already mirrors its file is not rewritten
+    -- an identical UPDATE still costs a WAL frame per idle card on every tick.
     """
     workspace = tasks.canonical_workspace(workspace)
-    path = card_path(workspace, task_id)
-    if os.path.islink(path) or not os.path.isfile(path):
-        return None
+    path = _card_path(workspace, task_id)
     try:
-        card = read(path)
-        fields = card["fields"]
-        if str(fields.get("id") or "") != str(task_id):
-            return None
-        values = _card_values(fields, card["body"])
-    except (OSError, TypeError, ValueError):
+        info = os.stat(path, follow_symlinks=False)     # lstat: a symlinked card is not a card
+    except OSError:
         return None
-    row = con.execute("SELECT status,workspace FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    key = (info.st_mtime_ns, info.st_size, info.st_ino)
+    cached = _PARSED.get(path)
+    if cached is not None and cached[0] == key:
+        _, fields, body, values = cached
+    else:
+        try:
+            card = read(path)
+            fields, body = card["fields"], card["body"]
+            if str(fields.get("id") or "") != str(task_id):
+                return None
+            values = _card_values(fields, body)
+        except (OSError, TypeError, ValueError):
+            return None                     # a card we cannot use is re-read next pass, never cached
+        if len(_PARSED) >= _PARSED_CAP:
+            _PARSED.clear()
+        _PARSED[path] = (key, fields, body, values)
+    # The caller gets its own mapping: an edit to the returned fields must not rewrite the
+    # parse every later reconcile will answer with.
+    card = {"fields": dict(fields), "body": body}
+    row = con.execute(
+        "SELECT workspace," + ",".join(_MIRRORED) + " FROM tasks WHERE id=?", (task_id,)
+    ).fetchone()
     if row is None:
-        return card if tasks.insert_index_row(con, fields, card["body"], workspace=workspace) else None
-    if tasks.canonical_workspace(row["workspace"]) != workspace:
+        return card if tasks.insert_index_row(con, fields, body, workspace=workspace) else None
+    # The stored workspace is written canonical; re-resolving it is for rows an older build
+    # left behind, so only a string that differs is worth another walk of the filesystem.
+    if row["workspace"] != workspace and tasks.canonical_workspace(row["workspace"]) != workspace:
         return None
     if row["status"] in {"running", "review"}:
         return card                         # an in-flight contract is immutable until it rests again
+    if all(row[column] == values[column] for column in _MIRRORED):
+        return card
     con.execute(
         "UPDATE tasks SET title=?,body=?,assignee=?,reviewer=?,executor=?,model=?,priority=?,"
         "timeout_seconds=?,origin_session=?,status=?,generation=? WHERE id=?",
-        (*values.values(), task_id),
+        (*(values[column] for column in _MIRRORED), task_id),
     )
     return card
 

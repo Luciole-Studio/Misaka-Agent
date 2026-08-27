@@ -118,6 +118,11 @@ CREATE TABLE IF NOT EXISTS todos (
 );
 CREATE INDEX IF NOT EXISTS idx_task_runs_task ON task_runs(task_id, generation, attempt);
 CREATE INDEX IF NOT EXISTS idx_task_runs_status ON task_runs(status);
+-- latest_payload asks for one card's newest event of a kind; without this it walks the whole
+-- table backwards on every miss, and settle_done_tasks probes exactly that miss once per
+-- unsettled done card. Every connect runs this script, so an older board gains the index on
+-- its next open -- IF NOT EXISTS is the migration.
+CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id, kind, id);
 """
 RECLAIM_CAP = 2
 TASK_SCHEMA_VERSION = 5
@@ -315,6 +320,12 @@ def connect(path: str) -> sqlite3.Connection:
     )
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
+    # WAL's canonical pairing. FULL fsyncs the WAL on every autocommit statement, and this board
+    # is written a statement at a time (one UPDATE per reconciled card, one row per event).
+    # NORMAL cannot corrupt the database; it risks only the last commits before a power cut, and
+    # every durable decision here is a lease or a CAS that re-runs when it is not observed: an
+    # un-fsynced claim is simply claimed again. The card file, not this index, is the contract.
+    con.execute("PRAGMA synchronous=NORMAL")
     con.executescript(SCHEMA)
     from misaka.platform import notifications
     newest = con.execute("SELECT MAX(version) FROM schema_migrations WHERE component='tasks'").fetchone()[0]

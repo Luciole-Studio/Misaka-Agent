@@ -123,13 +123,62 @@ def _scope_local_ids(specs, prefix):
     return out
 
 
+async def _preflight_specs(run, cfg, worker, node, specs, *, progress):
+    """Plan every spec's approach at once. Returns one ``planner.preflight`` result per spec, in order.
+
+    A preflight is a whole model session with a five-minute floor on its timeout, and the specs of
+    one plan share nothing: each has its own session directory and none of them touches the board.
+    Run one after another they were N sessions of dead time before the first Sister opened a page,
+    and every probe round paid the same again. The bound is ``research_parallel`` -- the same number
+    that bounds the cards these sessions are planning.
+
+    The first failure keeps the specs that have not opened a session yet from opening one, the way
+    the serial loop stopped at the spec that raised. A session already open is waited for rather
+    than abandoned: a thread cannot be cancelled, and an orphan session would go on spending the
+    run's budget after the submit that owns it has returned.
+
+    What this cannot lift on its own: ``platform/session._env_window`` is held for the whole of every
+    in-process session, so these sessions queue on that one process-wide lock instead of on the
+    network. The structure is the half that has to be right first; the wall clock follows when a
+    preflight runs in its own process -- the same answer headless card dispatch needs -- or when
+    that window narrows to the environment mutation it is named for.
+    """
+    gate = asyncio.Semaphore(min(len(specs), max(1, int(cfg.get("research_parallel", 4) or 4))))
+    failed = asyncio.Event()
+
+    async def one(spec):
+        async with gate:
+            if failed.is_set():
+                return None                            # a sibling already failed: this submit is over
+            await _progress(progress, "preflight",
+                            f"Sister {spec['assignee']} is planning its approach for {spec['title']!r}.", run)
+            try:
+                return await asyncio.to_thread(planner.preflight, run, cfg, worker, spec, node=node)
+            except BaseException:                      # re-raised below; the flag only stops the siblings
+                failed.set()
+                raise
+
+    planned = await asyncio.gather(*(one(spec) for spec in specs), return_exceptions=True)
+    for result in planned:
+        if isinstance(result, BaseException):
+            raise result
+    return planned
+
+
 async def _submit_tasks(con, run, cfg, worker, node, specs, *, kind, issue_id=None, evidence="", progress=None,
                         local_prefix=""):
     """Preflight every spec, then open its card on the node's line. Returns local_id -> task id
-    (the scoped id when ``local_prefix`` is set)."""
+    (the scoped id when ``local_prefix`` is set).
+
+    Three passes, because only the middle one may leave the loop thread: which specs still need a
+    card is read off the board here, their plans are written concurrently, and the cards are then
+    created one at a time in the plan's own order -- so creation, link and output directory stay one
+    transaction, and the card a dependency points at still exists before the card that needs it.
+    """
     root = runs.node_root(run, node)
     local_to_task = {}
     specs = _scope_local_ids(specs, local_prefix)
+    pending = []
     for spec in specs:
         if runs.stop_requested(con, run["id"]):
             break
@@ -142,10 +191,11 @@ async def _submit_tasks(con, run, cfg, worker, node, specs, *, kind, issue_id=No
             continue
         if existing:                                   # the card was deleted: drop the stale link and rebuild it
             con.execute("DELETE FROM research_run_tasks WHERE task_id=?", (existing["task_id"],))
-        await _progress(progress, "preflight",
-                        f"Sister {spec['assignee']} is planning its approach for {spec['title']!r}.", run)
-        preflight, _raw, session = await asyncio.to_thread(
-            planner.preflight, run, cfg, worker, spec, node=node)
+        pending.append(spec)
+    planned = await _preflight_specs(run, cfg, worker, node, pending, progress=progress) if pending else []
+    for spec, (preflight, _raw, session) in zip(pending, planned, strict=True):   # one plan per spec, in order
+        if runs.stop_requested(con, run["id"]):
+            break                                      # a stop that arrived while the plans were being written
         aid, path = _write(con, run, node, "preflight", f"{spec['title']} · preflight",
                            f"tasks/{spec['local_id']}-preflight.md",
                            preflight["preflight_markdown"].rstrip() + "\n",
@@ -551,14 +601,124 @@ async def _keep_lease(con, run_id, lock, lost):
             return
 
 
+_INCOMPLETE_BANNER = (
+    "> **This research is incomplete.** The run stopped before its final adjudication, so nothing below has\n"
+    "> been weighed against anything else. Each conclusion is quoted exactly as the node that reached it wrote\n"
+    "> it: none has been reconciled with the others, none has been through the citation gate, and the issues\n"
+    "> listed below were never settled. This is the material the run had produced when it stopped, not its\n"
+    "> answer.")
+
+
+def _cell(value):
+    """One table cell. ``report._one_line`` is what decides where a row begins, so text the run
+    fetched cannot open a row of its own; escaping the pipes stops it opening a *column*."""
+    return report._one_line(value).replace("|", r"\|")
+
+
+_HEADING = re.compile(r"^(#{1,6})(\s|$)")
+_FENCE = re.compile(r"^\s{0,3}(```|~~~)")
+
+
+def _headings(text):
+    """``(line index, level)`` of every ATX heading outside a fenced block -- a ``#`` in code is prose."""
+    fence, out = None, []
+    for index, line in enumerate(text.splitlines()):
+        opener = _FENCE.match(line)
+        if fence is not None:
+            if opener and line.strip().startswith(fence):
+                fence = None
+        elif opener:
+            fence = opener.group(1)
+        elif found := _HEADING.match(line):
+            out.append((index, len(found.group(1))))
+    return out
+
+
+def _nested(text, under):
+    """A conclusion with its own headings pushed below the heading of the section quoting it.
+
+    A node writes free-form Markdown and usually opens at ``##``, which outranks the ``###`` naming
+    the node it came from: left alone, the second node's heading reads in any outline as part of the
+    first node's conclusion, and the tree renders backwards. Only the level moves. The words are
+    untouched, as is the synthesis artifact on disk -- that copy, not this one, is what gets cited.
+    """
+    found = _headings(text)
+    if not found:
+        return text
+    lines = text.splitlines()
+    deeper = max(0, under + 1 - min(level for _index, level in found))
+    for index, level in found:
+        lines[index] = "#" * min(6, level + deeper) + lines[index][level:]
+    return "\n".join(lines)
+
+
+def _conclusions(con, run):
+    """Every node's conclusion, inlined whole, in tree order.
+
+    A halted run cannot call the model again, and its nodes have already written the only thing it
+    has to hand back. Listing those files as paths hands the reader a directory listing instead of
+    a document. ``runs.nodes`` orders by depth then creation -- the root, then each node that
+    re-researched a point in it -- which is the order the survey and the adjudication read them in.
+    """
+    out = []
+    for node in runs.nodes(con, run["id"]):
+        rows = runs.artifacts(con, run["id"], kind="synthesis", **_scope(node))
+        if not rows:
+            continue
+        texts = []
+        for row in rows:
+            try:
+                texts.append(_nested(runs.artifact_text(row).strip(), 3))
+            except (OSError, ValueError) as error:
+                # A conclusion moved or edited under the run costs this document that one section.
+                # It must never cost the document: this is a halted run's whole deliverable.
+                texts.append(f"*(This conclusion could not be read back: {error})*")
+        out.append(f"### [{node['id']}] depth {node['depth']} — {report._one_line(node['trigger_text'])}\n\n"
+                   + "\n\n".join(texts))
+    return out
+
+
+def _open_issues(con, run):
+    """The issues nobody settled, as a table.
+
+    ``report._boundary`` is the query, not a copy of it: the boundary a halted run declares and the
+    one the final report is held to have to be the same set, or two documents of one run disagree
+    about what it left unanswered.
+    """
+    rows = report._boundary(con, run)
+    if not rows:
+        return ["No issue was left open, inconclusive, or parked."]
+    return ["The issues this run left open, inconclusive, or parked by the depth limit:", "",
+            "| Issue | Node | Status | Question | Why it was raised |",
+            "| --- | --- | --- | --- | --- |",
+            *(f"| {_cell(row['issue'])} | {_cell(row['node'])} | {_cell(row['status'])} "
+              f"| {_cell(row['question'])} | {_cell(row['rationale'])} |" for row in rows)]
+
+
 def _partial_result(con, run, reason, *, status="stopped"):
-    artifacts = runs.artifacts(con, run["id"])
+    """What a run that cannot finish hands back -- a deliverable, never a list of paths.
+
+    Assembled with no model call at all, because the halt this most often answers is the token
+    budget: at that moment there is nothing left to spend, and everything the document needs is
+    already on disk. Each node's conclusion as that node wrote it, the ledger's count of what the
+    run actually verified, and the issues it never settled.
+    """
+    findings = len(ledger.findings(con, run["id"], limit=report._LEDGER_LIMIT))
     lines = ['# Incomplete research run', "", f"- Run: `{run['id']}`",
              f"- Project: `{runs.project_name(run)}` (`{run['workspace']}`)",
-             f"- Reason: {reason}", "", '## Original question',
-             run["question"], "", '## Saved artifacts']
-    lines.extend(f"- [{row['kind']}] {row['title']} — `{row['path']}`" for row in artifacts)
-    lines += ["", "This document records where the run stopped. It is not a final report, and the research is incomplete.", ""]
+             f"- Reason: {reason}", "", _INCOMPLETE_BANNER, "", '## Original question',
+             run["question"], "", '## Conclusions reached before the run stopped']
+    for section in _conclusions(con, run) or ["No node had written its conclusion yet."]:
+        lines += ["", section]
+    lines += ["", '## Evidence on record', "",
+              (f"The ledger holds {findings} verified finding{'' if findings == 1 else 's'}: each rests on a "
+               "quotation checked verbatim against the source the card registered for it."),
+              "", '## Unresolved issues', ""]
+    lines += _open_issues(con, run)
+    lines += ["", '## Saved artifacts', ""]
+    lines.extend(f"- [{row['kind']}] {row['title']} — `{row['path']}`"
+                 for row in runs.artifacts(con, run["id"]))
+    lines += [""]
     aid, path = runs.write_text(con, run["id"], "partial", 'Incomplete research run', "partial.md", "\n".join(lines))
     runs.set_state(con, run["id"], status=status, final_artifact=aid)
     return {"reason": status, "final": {"artifact": aid, "path": path,

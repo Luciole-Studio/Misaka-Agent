@@ -64,7 +64,7 @@ from misaka.ai.types import (
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
-from misaka.ai.utils.json_parse import parse_streaming_json
+from misaka.ai.utils.json_parse import StreamingArgs
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
 from misaka.utils.values import maybe_await, read_field, signal_aborted
 
@@ -167,7 +167,7 @@ def stream_openai_completions(
             has_finish_reason = False
             tool_call_index_by_stream_index: dict[int, int] = {}
             tool_call_index_by_id: dict[str, int] = {}
-            tool_call_partial_args: dict[int, str] = {}
+            tool_call_partial_args: dict[int, StreamingArgs] = {}
 
             def content_index_for(block: TextContent | ThinkingContent | ToolCall) -> int:
                 return output.content.index(block)
@@ -179,9 +179,9 @@ def stream_openai_completions(
                 elif isinstance(block, ThinkingContent):
                     stream.push(ThinkingEndEvent(contentIndex=index, content=block.thinking, partial=output))
                 else:
-                    partial_args = tool_call_partial_args.get(index, "")
-                    if partial_args:
-                        block.arguments = parse_streaming_json(partial_args)
+                    partial_args = tool_call_partial_args.get(index)
+                    if partial_args is not None and partial_args.raw:
+                        block.arguments = partial_args.finish()
                     stream.push(ToolCallEndEvent(contentIndex=index, toolCall=block, partial=output))
 
             def ensure_text_block() -> TextContent:
@@ -314,8 +314,9 @@ def stream_openai_completions(
                         tool_delta = ""
                         if isinstance(function, Mapping) and isinstance(function.get("arguments"), str):
                             tool_delta = function["arguments"]
-                            tool_call_partial_args[content_index] = tool_call_partial_args.get(content_index, "") + tool_delta
-                            block.arguments = parse_streaming_json(tool_call_partial_args[content_index])
+                            accumulated = tool_call_partial_args.setdefault(content_index, StreamingArgs())
+                            accumulated.append(tool_delta)
+                            block.arguments = accumulated.arguments
                         stream.push(ToolCallDeltaEvent(contentIndex=content_index, delta=tool_delta, partial=output))
 
                 reasoning_details = delta.get("reasoning_details")

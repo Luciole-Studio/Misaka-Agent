@@ -34,7 +34,7 @@ from misaka.ai.types import (
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream
 from misaka.ai.utils.hash import short_hash
-from misaka.ai.utils.json_parse import parse_streaming_json
+from misaka.ai.utils.json_parse import StreamingArgs, parse_streaming_json
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
 
 _TOOL_CALL_ID_PART_PATTERN = re.compile(r"[^a-zA-Z0-9_-]")
@@ -271,7 +271,7 @@ async def process_responses_stream(
 ) -> None:
     current_item: dict[str, Any] | None = None
     current_block: ThinkingContent | TextContent | ToolCall | None = None
-    current_tool_partial_json = ""
+    current_tool_args = StreamingArgs()
     blocks = output.content
     saw_terminal = False
 
@@ -291,19 +291,21 @@ async def process_responses_stream(
             item_type = item.get("type")
             if item_type == "reasoning":
                 current_item = item
-                current_tool_partial_json = ""
+                current_tool_args = StreamingArgs()
                 current_block = ThinkingContent(thinking="")
                 blocks.append(current_block)
                 stream.push(ThinkingStartEvent(contentIndex=block_index(), partial=output))
             elif item_type == "message":
                 current_item = item
-                current_tool_partial_json = ""
+                current_tool_args = StreamingArgs()
                 current_block = TextContent(text="")
                 blocks.append(current_block)
                 stream.push(TextStartEvent(contentIndex=block_index(), partial=output))
             elif item_type == "function_call":
                 current_item = item
-                current_tool_partial_json = item.get("arguments") or ""
+                # An item that inlines its arguments seeds the buffer; the block itself
+                # stays ``{}`` until the item is done, exactly as before.
+                current_tool_args = StreamingArgs(item.get("arguments") or "")
                 current_block = ToolCall(
                     id=f"{item.get('call_id', '')}|{item.get('id', '')}",
                     name=item.get("name", ""),
@@ -378,16 +380,17 @@ async def process_responses_stream(
         elif event_type == "response.function_call_arguments.delta":
             if isinstance(current_item, dict) and current_item.get("type") == "function_call" and isinstance(current_block, ToolCall):
                 delta = event.get("delta", "")
-                current_tool_partial_json += delta
-                current_block.arguments = parse_streaming_json(current_tool_partial_json)
+                current_tool_args.append(delta)
+                current_block.arguments = current_tool_args.arguments
                 stream.push(ToolCallDeltaEvent(contentIndex=block_index(), delta=delta, partial=output))
         elif event_type == "response.function_call_arguments.done":
             if isinstance(current_item, dict) and current_item.get("type") == "function_call" and isinstance(current_block, ToolCall):
-                previous_partial_json = current_tool_partial_json
-                current_tool_partial_json = event.get("arguments", "")
-                current_block.arguments = parse_streaming_json(current_tool_partial_json)
-                if current_tool_partial_json.startswith(previous_partial_json):
-                    delta = current_tool_partial_json[len(previous_partial_json) :]
+                previous_partial_json = current_tool_args.raw
+                # The arguments are complete here: replace the buffer and parse it whole.
+                current_tool_args = StreamingArgs(event.get("arguments", ""))
+                current_block.arguments = current_tool_args.finish()
+                if current_tool_args.raw.startswith(previous_partial_json):
+                    delta = current_tool_args.raw[len(previous_partial_json) :]
                     if delta:
                         stream.push(ToolCallDeltaEvent(contentIndex=block_index(), delta=delta, partial=output))
         elif event_type == "response.output_item.done":
@@ -417,7 +420,11 @@ async def process_responses_stream(
                 current_block = None
             elif item_type == "function_call":
                 if isinstance(current_block, ToolCall):
-                    current_block.arguments = parse_streaming_json(current_tool_partial_json or item.get("arguments") or "{}")
+                    current_block.arguments = (
+                        current_tool_args.finish()
+                        if current_tool_args.raw
+                        else parse_streaming_json(item.get("arguments") or "{}")
+                    )
                     tool_call = current_block
                 else:
                     tool_call = ToolCall(
@@ -425,7 +432,7 @@ async def process_responses_stream(
                         name=item.get("name", ""),
                         arguments=parse_streaming_json(item.get("arguments") or "{}"),
                     )
-                current_tool_partial_json = ""
+                current_tool_args = StreamingArgs()
                 current_block = None
                 stream.push(ToolCallEndEvent(contentIndex=block_index(), toolCall=tool_call, partial=output))
         elif event_type == "response.completed":

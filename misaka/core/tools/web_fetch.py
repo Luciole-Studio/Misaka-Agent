@@ -14,6 +14,7 @@ model can act on, because a traceback in a tool result only ever produces a retr
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -367,6 +368,99 @@ def _save_page(cwd: str | None, stem: str, provenance: dict[str, Any], text: str
 # --- fetch -------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class _Extracted:
+    """One fetched body after everything that can be derived from it has been.
+
+    ``render`` is :func:`check_render`'s verdict; anything but ``"ok"`` means the
+    response carried no page, and ``has_text`` distinguishes the other empty outcome --
+    markup whose visible text survived the render check but not extraction.
+    """
+
+    render: str
+    advice: str
+    has_text: bool = False
+    title: str = ""
+    full: str = ""
+    body_sha: str = ""
+    text_sha: str = ""
+    saved: str | None = None
+
+
+def _extract(
+    target: _Target,
+    final_url: str,
+    content_type: str | None,
+    body: bytes,
+    text: str,
+    cwd: str | None,
+) -> _Extracted:
+    """The whole derive-and-save stage of one fetch, meant to be run off the event loop.
+
+    It is one function rather than three because that is what makes a single
+    ``asyncio.to_thread`` hop enough. The render check parses the entire document, the
+    extractor parses it again, and both are stdlib ``HTMLParser`` -- Python bytecode
+    holding the GIL for as long as the page is large. A 2.00 MiB page (the fetch cap)
+    measured 132ms in ``check_render`` and 335ms in ``_readable`` here, and the loop
+    paying that is also running the other tools of a parallel call, the guard callbacks,
+    and a Sister's lease heartbeat.
+
+    Nothing here touches process-local state: the negative cache and the spend record
+    stay with the caller, on the loop that owns them. The one side effect is the evidence
+    file, whose name is a digest of its own contents, so writing it from a worker thread
+    is no different from writing it from any other caller (see :func:`_page_stem`).
+    """
+    verdict = check_render(text, content_type)
+    if verdict.kind != "ok":
+        return _Extracted(render=verdict.kind, advice=verdict.advice)
+    if _is_markup(content_type, text):
+        content, title = _readable(text, final_url)
+    else:
+        content, title = text, ""
+    if not content.strip():
+        # Markup whose visible text survived check_render but not extraction (a frameset,
+        # a document that is one big <svg>). Nothing is saved for it, and nothing is shown.
+        return _Extracted(render="ok", advice="")
+
+    # The title is page-written, so it goes inside the fence with the rest of the page,
+    # never into this tool's own sentence: a <title> carrying the fence's own closing
+    # marker would otherwise end the block early and let the page speak as the tool.
+    full = f"Title: {title}\n\n{content}" if title else content
+
+    # The provenance stamp research/ledger.py evidence is anchored to: sha256 of the
+    # exact response bytes read, alongside the sha of the complete extracted text --
+    # which is the text saved below, and therefore the text a quote is checked in. It is
+    # deliberately not the sha of the truncated rendering: that prefix is cut at a
+    # private constant nobody outside this module can re-derive.
+    body_sha = hashlib.sha256(body).hexdigest()
+    text_sha = hashlib.sha256(full.encode()).hexdigest()
+    # fetched_at is reported by the caller and deliberately not written: it is the one
+    # value here that changes between two fetches of the same page, and the file's bytes
+    # are what git and research_artifacts.sha256 have to agree on.
+    saved = _save_page(
+        cwd,
+        _page_stem(target.requested, final_url, body),
+        {
+            "source_url": target.requested,
+            "final_url": final_url,
+            "sha256": body_sha,
+            "text_sha256": text_sha,
+            "title": title,
+        },
+        full,
+    )
+    return _Extracted(
+        render="ok",
+        advice="",
+        has_text=True,
+        title=title,
+        full=full,
+        body_sha=body_sha,
+        text_sha=text_sha,
+        saved=saved,
+    )
+
+
 @dataclass(slots=True)
 class _Outcome:
     """What one fetch attempt has to say. ``text`` is already model-facing prose;
@@ -470,8 +564,10 @@ async def _fetch(target: _Target, cwd: str | None = None) -> _Outcome:
             refused=type(error).__name__,
         )
 
-    verdict = check_render(text, content_type)
-    if verdict.kind != "ok":
+    # One hop off the loop for the whole CPU-and-disk stage; the decisions it feeds are
+    # taken back here, because every one of them writes state the loop owns alone.
+    got = await asyncio.to_thread(_extract, target, final_url, content_type, body, text, cwd)
+    if got.render != "ok":
         # Not a transport failure, so nothing above recorded it: this is the one place
         # that knows a 200 carried no content.
         record_failure(url, _NO_CONTENT_STATUS)
@@ -480,17 +576,13 @@ async def _fetch(target: _Target, cwd: str | None = None) -> _Outcome:
         # landed -- and "no readable content" plus "this host is subscriber-only" is a
         # different instruction ("find an open copy") from "no readable content" alone.
         landed = route_academic(final_url)
-        advice = f"{verdict.advice} {landed.note}" if landed.kind == "paywall" else verdict.advice
+        advice = f"{got.advice} {landed.note}" if landed.kind == "paywall" else got.advice
         return failed(
             f"{url} returned no readable content. {advice}",
             status=status,
-            render=verdict.kind,
+            render=got.render,
         )
-    if _is_markup(content_type, text):
-        content, title = _readable(text, final_url)
-    else:
-        content, title = text, ""
-    if not content.strip():
+    if not got.has_text:
         # Markup whose visible text survived check_render but not extraction (a frameset,
         # a document that is one big <svg>). Reported, never returned as a blank page.
         record_failure(url, _NO_CONTENT_STATUS)
@@ -509,41 +601,15 @@ async def _fetch(target: _Target, cwd: str | None = None) -> _Outcome:
     # single_flight, so coalesced callers share the one transfer that was paid for.
     budget.record_external_call("web_fetch", subject=url, bytes=len(body))
 
-    # The title is page-written, so it goes inside the fence with the rest of the page,
-    # never into this tool's own sentence: a <title> carrying the fence's own closing
-    # marker would otherwise end the block early and let the page speak as the tool.
-    full = f"Title: {title}\n\n{content}" if title else content
-
-    # The provenance stamp research/ledger.py evidence is anchored to: sha256 of the
-    # exact response bytes read, alongside the sha of the complete extracted text --
-    # which is the text saved below, and therefore the text a quote is checked in. It is
-    # deliberately not the sha of the truncated rendering: that prefix is cut at a
-    # private constant nobody outside this module can re-derive.
-    body_sha = hashlib.sha256(body).hexdigest()
-    text_sha = hashlib.sha256(full.encode()).hexdigest()
+    saved = got.saved
     fetched_at = int(time.time())
-    # fetched_at is reported below and deliberately not written: it is the one value here
-    # that changes between two fetches of the same page, and the file's bytes are what git
-    # and research_artifacts.sha256 have to agree on.
-    saved = _save_page(
-        cwd,
-        _page_stem(target.requested, final_url, body),
-        {
-            "source_url": target.requested,
-            "final_url": final_url,
-            "sha256": body_sha,
-            "text_sha256": text_sha,
-            "title": title,
-        },
-        full,
-    )
 
     notes = [f"Fetched {url}"]
     if final_url != url:
         notes.append(f"redirected to {final_url}")
     notes.append(f"{len(body)} bytes")
     header = "; ".join(notes) + "."
-    page = full
+    page = got.full
     extra = []
     if saved:
         extra.append(
@@ -574,13 +640,13 @@ async def _fetch(target: _Target, cwd: str | None = None) -> _Outcome:
             "final_url": final_url,
             "status": status,
             "content_type": content_type,
-            "sha256": body_sha,
-            "text_sha256": text_sha,
+            "sha256": got.body_sha,
+            "text_sha256": got.text_sha,
             "fetched_at": fetched_at,
             "bytes": len(body),
             "chars": len(page),
             "truncated": truncated,
-            "title": title,
+            "title": got.title,
             "saved_path": saved,
         },
     )

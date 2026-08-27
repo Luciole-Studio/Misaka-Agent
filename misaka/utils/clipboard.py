@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 import subprocess
@@ -59,14 +60,7 @@ async def copy_to_clipboard(text: str) -> None:
 
     if not copied:
         try:
-            if platform_name == "darwin":
-                _run_command(["pbcopy"], text)
-                copied = True
-            elif platform_name == "win32":
-                _run_command(["clip"], text)
-                copied = True
-            else:
-                copied = _copy_to_linux_clipboard(text)
+            copied = await asyncio.to_thread(_copy_via_command, platform_name, text)
         except Exception:  # noqa: BLE001, S110 - clipboard backends are best-effort; the fallback chain continues
             pass
 
@@ -76,6 +70,23 @@ async def copy_to_clipboard(text: str) -> None:
 
     if not copied:
         raise RuntimeError("Failed to copy to clipboard")
+
+
+def _copy_via_command(platform_name: str, text: str) -> bool:
+    """The shell-out half of the fallback chain, as one call off the event loop.
+
+    Every branch below ends in ``subprocess.run`` with a 5s timeout, and on Linux two of
+    them can run in sequence (xclip, then xsel). A copy is a keystroke in the TUI: the
+    loop that would otherwise sit through that timeout is the one drawing the terminal
+    and streaming the model's reply.
+    """
+    if platform_name == "darwin":
+        _run_command(["pbcopy"], text)
+        return True
+    if platform_name == "win32":
+        _run_command(["clip"], text)
+        return True
+    return _copy_to_linux_clipboard(text)
 
 
 def _copy_to_linux_clipboard(text: str) -> bool:

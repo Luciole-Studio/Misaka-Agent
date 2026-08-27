@@ -69,7 +69,7 @@ from misaka.ai.types import (
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
-from misaka.ai.utils.json_parse import parse_streaming_json
+from misaka.ai.utils.json_parse import StreamingArgs
 from misaka.ai.utils.node_http_proxy import create_http_proxy_agents_for_target
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
 from misaka.utils.values import maybe_await, signal_aborted
@@ -271,7 +271,7 @@ def stream_bedrock(
 
             response_stream = response.get("stream") if isinstance(response, dict) else None
             block_indices: dict[int, int] = {}
-            partial_json: dict[int, str] = {}
+            partial_json: dict[int, StreamingArgs] = {}
 
             async for item in iterate_stream_events(response_stream, signal):
                 if signal_aborted(signal):
@@ -447,7 +447,7 @@ def format_bedrock_error(error: Any) -> str:
 def handle_content_block_start(
     event: dict[str, Any],
     block_indices: dict[int, int],
-    partial_json: dict[int, str],
+    partial_json: dict[int, StreamingArgs],
     output: AssistantMessage,
     stream: AssistantMessageEventStream,
 ) -> None:
@@ -465,14 +465,14 @@ def handle_content_block_start(
     output.content.append(block)
     content_index = len(output.content) - 1
     block_indices[content_block_index] = content_index
-    partial_json[content_index] = ""
+    partial_json[content_index] = StreamingArgs()
     stream.push(ToolCallStartEvent(contentIndex=content_index, partial=output))
 
 
 def handle_content_block_delta(
     event: dict[str, Any],
     block_indices: dict[int, int],
-    partial_json: dict[int, str],
+    partial_json: dict[int, StreamingArgs],
     output: AssistantMessage,
     stream: AssistantMessageEventStream,
 ) -> None:
@@ -499,8 +499,9 @@ def handle_content_block_delta(
     if delta.get("toolUse") and block is not None and block.type == "toolCall":
         tool_use = delta["toolUse"] or {}
         input_delta = str(tool_use.get("input") or "")
-        partial_json[content_index] = partial_json.get(content_index, "") + input_delta
-        block.arguments = parse_streaming_json(partial_json[content_index])
+        accumulated = partial_json.setdefault(content_index, StreamingArgs())
+        accumulated.append(input_delta)
+        block.arguments = accumulated.arguments
         stream.push(ToolCallDeltaEvent(contentIndex=content_index, delta=input_delta, partial=output))
         return
 
@@ -540,7 +541,7 @@ def handle_metadata(event: dict[str, Any], model: Model, output: AssistantMessag
 def handle_content_block_stop(
     event: dict[str, Any],
     block_indices: dict[int, int],
-    partial_json: dict[int, str],
+    partial_json: dict[int, StreamingArgs],
     output: AssistantMessage,
     stream: AssistantMessageEventStream,
 ) -> None:
@@ -559,8 +560,13 @@ def handle_content_block_stop(
         return
 
     if block.type == "toolCall":
-        block.arguments = parse_streaming_json(partial_json.get(content_index, ""))
-        partial_json.pop(content_index, None)
+        # Same guard as the anthropic adapter's content_block_stop (F4): a start block
+        # that inlined the input and got no delta must keep it, not be handed the parse
+        # of an empty buffer. Bedrock's contentBlockStart carries no input today, so this
+        # only ever preserves ``{}`` -- but the shape has to match, not the luck.
+        accumulated = partial_json.pop(content_index, None)
+        if accumulated is not None and accumulated.raw:
+            block.arguments = accumulated.finish()
         stream.push(ToolCallEndEvent(contentIndex=content_index, toolCall=block, partial=output))
 
 

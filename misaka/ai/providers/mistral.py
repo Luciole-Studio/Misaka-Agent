@@ -39,7 +39,7 @@ from misaka.ai.types import (
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.hash import short_hash
-from misaka.ai.utils.json_parse import parse_streaming_json
+from misaka.ai.utils.json_parse import StreamingArgs
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
 
 try:
@@ -447,7 +447,7 @@ async def consume_chat_stream(
 ) -> None:
     current_block: TextContent | ThinkingContent | None = None
     tool_blocks_by_key: dict[str, int] = {}
-    partial_args_by_index: dict[int, str] = {}
+    partial_args_by_index: dict[int, StreamingArgs] = {}
 
     def block_index() -> int:
         return len(output.content) - 1
@@ -565,8 +565,9 @@ async def consume_chat_stream(
             function = _coalesce_attr(tool_call, "function") or {}
             raw_arguments = function.get("arguments") if isinstance(function, dict) else _coalesce_attr(function, "arguments")
             args_delta = raw_arguments if isinstance(raw_arguments, str) else json.dumps(raw_arguments or {})
-            partial_args_by_index[existing_index] = partial_args_by_index.get(existing_index, "") + args_delta
-            block.arguments = parse_streaming_json(partial_args_by_index[existing_index])
+            accumulated = partial_args_by_index.setdefault(existing_index, StreamingArgs())
+            accumulated.append(args_delta)
+            block.arguments = accumulated.arguments
             stream.push(
                 ToolCallDeltaEvent(
                     contentIndex=existing_index,
@@ -580,7 +581,11 @@ async def consume_chat_stream(
         block = output.content[index]
         if block.type != "toolCall":
             continue
-        block.arguments = parse_streaming_json(partial_args_by_index.get(index, ""))
+        # Same guard as the anthropic adapter's content_block_stop (F4): only a buffer
+        # that actually received something may overwrite what the tool call was born with.
+        accumulated = partial_args_by_index.get(index)
+        if accumulated is not None and accumulated.raw:
+            block.arguments = accumulated.finish()
         stream.push(ToolCallEndEvent(contentIndex=index, toolCall=block, partial=output))
 
 
