@@ -100,6 +100,37 @@ D3 双进程压测已补:`tests/test_hermes_lcm_host.py::test_two_processes_inge
 (两个进程并发 ingest + compact 同一个库,断言 integrity ok、每会话行数精确、FTS 同步、各出一个 DAG 节点)。
 手工加压到 8 进程 × 120 条同样干净。
 
+## 围栏保全(P2/B,host 侧,vendor 未动)
+
+`host/fence.py` 把 misaka 的 `prompt_guard.untrusted` 围栏在 LCM 出口重新补上(蓝图 §4 P2 的
+安全项)。蓝图原本设想给 vendored `store.py` 加一列(D6 第③类);实现时改为**零 vendored 改动**:
+染色标记本来就在内容里(`untrusted()` 把哨兵写进文本,store 原样保存,body 里的哨兵被换成
+`UNTRUSTED-DATA-ESCAPED` 仍含该子串),血统用上游自己的 `summary_nodes.source_ids` 递归即可。
+所以不占 D6 登记表。
+
+但它**依赖三条上游形状**,再同步时要复核(变了就是静默失效 = 洞重新打开):
+
+| 依赖 | 位置 | 变了会怎样 |
+|---|---|---|
+| `messages.content` 逐字保存原文 | `store.append` | 哨兵被改写后检测不到 → 摘要出口不再加围栏 |
+| `summary_nodes.source_ids` / `source_type` 的 JSON 形状 | `dag.py:149`、`source_message_ids` 的递归 CTE | 递归查不到源行 → 摘要被当成可信 |
+| `SummaryDAG.connection` 是公开只读属性 | `dag.py:171` | 取不到连接时 `is_tainted` fail-closed(全部加围栏),不会漏,但会误伤 |
+| `lcm_rollup_sources(rollup_id, node_id)` | `db_bootstrap.py:730` | `lcm_recent` 的 rollup 模式只报 `rollup_id`,查不到就没有血统可追 |
+| 外部化占位符含 `xternalized ` 与 `; ref=` | `externalize.py:538-565`、`:1114` | 占位符改词 → 外部化行重新被判成干净 |
+
+### 攻击审查(P2 后)补的四个洞
+
+| 洞 | 触发条件 | 修法 |
+|---|---|---|
+| `host/tools.py` 出口根本没接 `refence` | 默认,15 个工具全裸 | 接线 + `test_the_registered_tool_fences_what_it_hands_back` 走注册后的 `execute` |
+| `lcm_recent` rollup 模式只报 `rollup_id`,不报 store/node | `LCM_TEMPORAL_ROLLUPS_ENABLED=true` | `_ROLLUP_KEYS` + `lcm_rollup_sources` 解析回 node |
+| 源行被删,摘要节点判干净 | `delete_session_messages` / 任何删行 | 血统里**任一**源行不在了就 fail-closed(LEFT JOIN),节点/rollup 解析不出来同理 |
+| 外部化把哨兵搬进旁路文件,行里只剩 stub | `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED=true` | stub 与哨兵同列为「看不透的内容」,一律不担保 |
+
+仍然开着(条件与代价都写在报告里):`context_engine.compact()` 注入 live context 的压缩摘要
+不过围栏(仓主决策:给每轮压缩摘要加围栏 = 模型对自己的历史长期降级信任);以及 fence.py 只能
+恢复围栏、不能发明围栏——misaka 侧没过 `untrusted()` 就进模型的外部内容它无从知道。
+
 ## 刻意不接线的 vendored 文件
 
 | 文件 | 原因 |

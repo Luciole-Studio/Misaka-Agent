@@ -2,21 +2,22 @@
 
 Deliberately thin, and deliberately not a copy of the pre-port ``extension.py`` next to
 it: that file registers four ``lcm_*`` tools which read the mini implementation's schema
-and would go blind against an upstream database. Upstream's own fifteen tools are P2's
-work, so this phase wires ingest and compaction only.
+and would go blind against an upstream database. Upstream's own fifteen replace them
+here, and only here -- ``activate`` picks one register function, so the two sets of
+``lcm_*`` names can never both be on the model's tool list.
 """
 
 from __future__ import annotations
 
 import logging
 
-from . import context_engine
+from . import context_engine, tools
 
 logger = logging.getLogger(__name__)
 
 
 def register(harn):
-    """Subscribe the vendored engine to the session events it needs."""
+    """Register the engine's tools and subscribe it to the session events it needs."""
 
     async def session_start(event, ctx):
         try:
@@ -50,6 +51,11 @@ def register(harn):
         except Exception:
             logger.warning("LCM could not reset its ingest cursor after a discarded "
                            "compaction; the store may take duplicate rows.", exc_info=True)
+
+    try:
+        tools.register(harn)
+    except Exception:
+        logger.warning("LCM tools were not registered; this session runs without them.", exc_info=True)
 
     harn.on("session_start", session_start)
     harn.on("before_agent_start", sync_event)

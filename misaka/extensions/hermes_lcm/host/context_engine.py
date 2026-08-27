@@ -28,15 +28,16 @@ import re
 import sqlite3
 from contextlib import contextmanager
 
+from misaka.platform.prompt_guard import untrusted
 from misaka.utils.values import read_field
 
-from . import config_bridge, ingest, llm, switch
+from . import config_bridge, fence, ingest, llm, switch
 
 logger = logging.getLogger(__name__)
 
 # Upstream's summary prefix, as `_assemble_context` writes it. Finding it is how the
 # host tells "the engine produced a summary" from "the engine decided this was a noop".
-_SUMMARY_BLOCK = re.compile(r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d\d+, node \d+\)\]")
+_SUMMARY_BLOCK = re.compile(r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d(\d+), node (\d+)\)\]")
 
 _ENGINES: dict[str, object] = {}
 
@@ -115,6 +116,29 @@ def _summary_of(messages) -> str:
     return ""
 
 
+def _guarded_summary(built, summary: str) -> str:
+    """The compaction entry, fenced when the history it summarises was fenced.
+
+    This is LCM's other exit, and the wider one: the tool seam answers when the model
+    asks, but a compaction entry arrives every round wearing the prompt's own voice. A
+    summary of a page misaka had fenced would hand that voice to the page.
+
+    The check is per node rather than blanket. Fencing every compaction entry would
+    teach the model that its own history is data -- the cost the fence exists to avoid --
+    while fencing only the rounds that actually swallowed hostile text costs a clean
+    session nothing. The prefix upstream writes names the nodes, so there is no guessing.
+
+    Upstream recognises its own scaffold with a `re.search` over the content, so both
+    substrings it looks for survive inside the wrapper and the fenced entry is still
+    skipped on re-ingest rather than stored as a fresh message.
+    """
+    node_ids = [int(node) for _, node in _SUMMARY_BLOCK.findall(summary)]
+    if not fence.is_tainted(built, node_ids=node_ids):
+        return summary
+    logger.info("LCM compaction summary covers fenced material; handing it back as data.")
+    return untrusted(f"lcm:compaction:{built.current_session_id}", summary)
+
+
 def start(ctx) -> str:
     """Bind the engine to this misaka session. Returns the session id, or ``""``."""
     session_id = ingest.session_id(ctx)
@@ -166,6 +190,7 @@ def compact(event, ctx) -> dict | None:
             built.last_compression_status, built.last_compression_noop_reason or "-",
         )
         return None
+    summary = _guarded_summary(built, summary)
 
     details = None
     try:
