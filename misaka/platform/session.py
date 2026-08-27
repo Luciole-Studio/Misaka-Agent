@@ -168,7 +168,7 @@ async def _run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
         limiter = install_turn_budget(session)
         # Headless sessions have nobody watching them repeat themselves into their
         # whole budget; the guards are that reader.
-        install_guards(session, limiter)
+        install_guards(session, limiter, wall_seconds=timeout)
         if on_event:
             session.subscribe(lambda ev: on_event(event_line(ev)))
 

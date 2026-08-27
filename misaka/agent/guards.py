@@ -15,6 +15,7 @@ from __future__ import annotations
 import inspect
 import json
 import re
+import time
 from collections import deque
 from dataclasses import dataclass
 from itertools import pairwise
@@ -311,15 +312,65 @@ class FinalizationReserve:
 
 
 class _SessionGuards:
-    """The three guards wired to one engine session's turn cycle."""
+    """The three guards wired to one engine session's turn cycle.
 
-    def __init__(self, session: Any, limiter: Any = None):
+    A ``stop`` verdict does not cut the loop where it stands. Every stop message is an
+    instruction to *say* something ("stop calling tools and write the deliverable now"),
+    and a run killed mid-batch ends on a toolResult: the session has no assistant text to
+    return, so a card is marked failed, a DM is acked and silently dropped, and a research
+    call gets "no json in output". So a stop steers the message in and strips the tools
+    off the next turn instead, letting the model spend one tool-free turn on the wrap-up
+    it was just told to write. The hard return only happens if that turn is somehow not
+    the end of it.
+    """
+
+    def __init__(self, session: Any, limiter: Any = None, wall_seconds: float | None = None):
         self._session = session
         self._limiter = limiter
+        # The wall clock is the one allowance every headless run has: `run_session`
+        # cuts the whole prompt off with `asyncio.wait_for`, and a run cut there has
+        # no assistant text to return. A token cap only exists when one is configured.
+        self._wall_total = float(wall_seconds) if wall_seconds else 0.0
+        self._wall_start = time.monotonic() if self._wall_total > 0 else 0.0
         self.repeated = RepeatedToolCallGuard()
         self.text = TextRepetitionGuard()
         self.reserve = FinalizationReserve()
         self.stopped: str = ""
+        self._forcing = False
+        self._forced_turn = False
+        self._previous_calls = ""
+
+    def _scarcest_allowance(self) -> tuple[float, float] | None:
+        """Whichever of the token budget and the wall clock is closer to running out."""
+        pairs: list[tuple[float, float]] = []
+        if self._limiter is not None:
+            pairs.append((self._limiter.limit - self._limiter.accounted, self._limiter.limit))
+        if self._wall_total > 0:
+            pairs.append((self._wall_total - (time.monotonic() - self._wall_start), self._wall_total))
+        if not pairs:
+            return None
+        return min(pairs, key=lambda pair: pair[0] / pair[1] if pair[1] > 0 else 1.0)
+
+    def _resolve(self, decisions: list[GuardDecision], tool_calls: Any) -> GuardDecision | None:
+        """The one verdict worth acting on, after vetoing a text stop that has progress.
+
+        ``RepeatedToolCallGuard`` stops on proof of a loop: the same call, byte for byte.
+        ``TextRepetitionGuard`` has no such proof -- a model that narrates each step with
+        the same sentence and a different filename measures 0.879 similar while doing
+        genuinely different work, and CJK per-character bigrams sit higher again. A
+        changed tool-call signature is the evidence of progress the text guard lacks, so
+        it downgrades that stop to a hint rather than killing a working run.
+        """
+        signature = _batch_signature(tool_calls) if tool_calls else ""
+        progressing = bool(signature) and signature != self._previous_calls
+        self._previous_calls = signature
+
+        text_decision = decisions[1]
+        if progressing and text_decision.action == "stop":
+            decisions[1] = GuardDecision("hint", text_decision.message)
+        return next((d for d in decisions if d.action == "stop"), None) or next(
+            (d for d in decisions if d.action == "hint"), None
+        )
 
     async def after_turn(self, context: Any) -> bool:
         message = read_field(context, "message")
@@ -331,30 +382,67 @@ class _SessionGuards:
             if read_field(block, "type", "") == "text"
         )
 
+        if self._forced_turn:
+            # The wrap-up turn ran with no tools available. Whatever it produced is the
+            # answer; end here rather than letting a guard fire on it a second time.
+            self._forcing = self._forced_turn = False
+            return True
+
         # Every turn is observed, tool-free ones included: that call is what tells
         # RepeatedToolCallGuard one request ended, so the next request may legitimately
         # open with the same call.
         decisions = [self.repeated.observe(tool_calls), self.text.observe(text)]
-        if self._limiter is not None:
-            decisions.append(
-                self.reserve.observe(self._limiter.limit - self._limiter.accounted, self._limiter.limit)
-            )
+        allowance = self._scarcest_allowance()
+        if allowance is not None:
+            decisions.append(self.reserve.observe(*allowance))
 
-        stop = next((d for d in decisions if d.action == "stop"), None)
-        if stop is not None:
-            self.stopped = stop.message
-            return True
+        verdict = self._resolve(decisions, tool_calls)
+        if verdict is None:
+            return False
+        if verdict.action == "stop":
+            self.stopped = verdict.message
+            if not tool_calls:
+                # Already a prose turn: the request is ending on its own and the model
+                # has had its say. Nothing left to force.
+                return True
+            self._forcing = True
+            await self._session.steer(verdict.message)
+            return False
         # A hint is only worth queueing while the loop is still going. A tool-free turn
         # ends the request; waking it back up to deliver advice would answer nobody.
         if tool_calls:
-            for decision in decisions:
-                if decision.action == "hint":
-                    await self._session.steer(decision.message)
-                    break
+            await self._session.steer(verdict.message)
         return False
 
+    def next_turn(self, context: Any) -> Any:
+        """Strip the tools off the wrap-up turn, so the model can only answer in prose.
 
-def install_guards(session: Any, limiter: Any = None) -> _SessionGuards | None:
+        Arming and firing are two flags rather than one because a run can die between
+        them: an errored or aborted turn returns out of the loop without consulting
+        ``shouldStopAfterTurn``. A single flag would then survive into the next request
+        and end its very first turn. This way a stranded arm costs one tool-free turn
+        and clears itself.
+        """
+        if not self._forcing:
+            return None
+        self._forced_turn = True
+        from misaka.agent.types import AgentContext, AgentLoopTurnUpdate
+
+        current = read_field(context, "context")
+        if current is None:
+            return None
+        return AgentLoopTurnUpdate(
+            context=AgentContext(
+                systemPrompt=read_field(current, "systemPrompt", "") or "",
+                messages=read_field(current, "messages", []) or [],
+                tools=[],
+            )
+        )
+
+
+def install_guards(
+    session: Any, limiter: Any = None, wall_seconds: float | None = None
+) -> _SessionGuards | None:
     """Install one idempotent set of pathology guards on an engine session.
 
     Composed onto whatever ``shouldStopAfterTurn`` the session already carries, never
@@ -368,8 +456,9 @@ def install_guards(session: Any, limiter: Any = None) -> _SessionGuards | None:
     if isinstance(existing_guards, _SessionGuards):
         return existing_guards
 
-    guards = _SessionGuards(session, limiter)
+    guards = _SessionGuards(session, limiter, wall_seconds)
     original = agent.shouldStopAfterTurn
+    original_prepare = getattr(agent, "prepareNextTurn", None)
 
     async def should_stop(context: Any) -> bool:
         if await guards.after_turn(context):
@@ -379,7 +468,17 @@ def install_guards(session: Any, limiter: Any = None) -> _SessionGuards | None:
         result = original(context)
         return bool(await result if inspect.isawaitable(result) else result)
 
+    async def prepare_next_turn(context: Any) -> Any:
+        forced = guards.next_turn(context)
+        if forced is not None:
+            return forced
+        if original_prepare is None:
+            return None
+        result = original_prepare(context)
+        return await result if inspect.isawaitable(result) else result
+
     agent.shouldStopAfterTurn = should_stop
+    agent.prepareNextTurn = prepare_next_turn
     agent._misaka_guards = guards
     return guards
 
