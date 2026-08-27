@@ -80,21 +80,37 @@ def _compact_event(line, cap=4000):
     return _event_summary(d, len(line))
 
 
-def _pid_alive(pid):
-    if not pid:
-        return False
+def _worker_identity():
+    """A verifiable identity for the process that is about to claim a card.
+
+    A bare PID was enough while the claimer was one long-lived dispatcher. A card is now
+    claimed by the short-lived child that runs it, and a killed child's PID comes back around:
+    ``reconcile`` below would find a live unrelated process behind the recorded number, skip the
+    card forever, and the drive loop would offer it again on every poll.
+
+    When the claiming process leads its own process group -- the shape ``research.node`` starts a
+    card child in -- publish the group form the Sister path uses, so the reconciler can also
+    fence the model session the child left behind before the card is given to a new owner. The
+    prefix is a promise about the process group, so it is only made when it is true: claimed from
+    inside someone else's group, it would aim ``terminate_orphaned_group`` at that group.
+    """
+    from misaka.extensions.sisters.subagent.child import PROCESS_GROUP_IDENTITY
+    from misaka.platform import processes as process_tree
+    me = process_tree.identity(os.getpid())
+    if not me:
+        return None
     try:
-        os.kill(pid, 0)
-        return True
+        leads_group = os.name == "posix" and os.getpgrp() == os.getpid()
     except OSError:
-        return False
+        leads_group = False
+    return PROCESS_GROUP_IDENTITY + me if leads_group else me
 
 
 def reconcile(con, cfg):
     import time as _time
 
     from misaka.extensions.sisters.subagent.child import PROCESS_GROUP_IDENTITY
-    from misaka.network.sister_runtime import _claimer_alive
+    from misaka.network.sister_runtime import _claimer_alive, _owner_alive
     from misaka.platform import processes as process_tree
 
     now = int(_time.time())
@@ -110,7 +126,9 @@ def reconcile(con, cfg):
                 continue
             if not process_tree.terminate_orphaned_group(int(t["worker_pid"]), leader):
                 continue
-        elif _pid_alive(t["worker_pid"]):
+        elif _owner_alive(t):
+            # Also the Sister path's rule: a recorded identity is checked against the PID that
+            # holds it now, so a reused PID does not read as the original worker.
             continue
         finish_abandoned(con, t)
 
@@ -118,6 +136,7 @@ def reconcile(con, cfg):
 
 def run_task(con, t, cfg):
     host_cap, assignee_cap = admission.limits()
+    identity = _worker_identity()
     profile_dir = _profile_dir(cfg, t["assignee"])
     if not profile_dir:
         if (t["id"], t["generation"]) not in _skipped_logged:    # a reopened card gets a fresh look
@@ -125,7 +144,7 @@ def run_task(con, t, cfg):
             lock = f"{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(4)}"
             generation = int(t["generation"])
             if db.claim(con, t["id"], lock, ttl_seconds=60,
-                        generation=generation, pid=os.getpid(),
+                        generation=generation, pid=os.getpid(), worker_identity=identity,
                         host_cap=host_cap, assignee_cap=assignee_cap):
                 db.add_event(con, t["id"], "failed",
                              {"reason": f"Assignee profile not found: {t['assignee']}"},
@@ -142,6 +161,7 @@ def run_task(con, t, cfg):
         ttl_seconds=max(1800, int(t["timeout_seconds"]) + 60),
         generation=generation,
         pid=os.getpid(),
+        worker_identity=identity,
         host_cap=host_cap,
         assignee_cap=assignee_cap,
     ):
@@ -339,15 +359,4 @@ def index_artifacts(con, task_id, artifacts, generation):
         return
     if got:
         db.add_event(con, task_id, "indexed", {"docs": [item[0] for item in got]}, generation=generation)
-
-
-def dispatch_once(con, cfg, task_ids=None):
-    reconcile(con, cfg)
-    n = 0
-    wanted = set(task_ids) if task_ids is not None else None
-    for t in db.fair_ready(con, lane="workers"):
-        if wanted is not None and t["id"] not in wanted:
-            continue
-        n += run_task(con, db.get(con, t["id"]), cfg) or 0
-    return n
 

@@ -50,8 +50,11 @@ class PaneSpawner:
 class ProcessSpawner:
     """No panel: a child process whose output goes to the terminal."""
 
-    def spawn(self, argv, *, cwd, title, place="split"):
-        return subprocess.Popen(argv, cwd=cwd)
+    def spawn(self, argv, *, cwd, title, place="split", new_session=False):
+        # new_session makes the child the leader of a process group of its own, which is what
+        # lets its claim name that group (see HeadlessRunner). setsid is POSIX-only.
+        return subprocess.Popen(argv, cwd=cwd,
+                                start_new_session=new_session and os.name == "posix")
 
     def alive(self, proc):
         return proc.poll() is None
@@ -102,7 +105,12 @@ class PaneRunner:
             pass
 
 
-CARD_ARGV = [sys.executable, "-m", "misaka.research.node", "--run-card"]   # tests may override
+CARD_ARGV = [sys.executable, "-m", "misaka.research.node", "--run-card"]   # + the card's id
+
+# A settled card's child is not finished: acceptance commits first, and only then does the child
+# commit the card's line and index its artifacts, which budgets up to 300s for a single PDF.
+# Nothing re-runs that tail, so close() waits this long for it before it starts signalling.
+SETTLED_TAIL_SECONDS = 300
 
 
 class HeadlessRunner:
@@ -114,7 +122,11 @@ class HeadlessRunner:
     Threads are not the alternative -- ``platform.session`` serialises sessions inside one
     process on purpose -- so the parallelism is processes. Each child settles its own card
     through ``dispatch.run_task`` (claim, admission, budget, settle); this side only starts
-    one, reaps it, and can kill it."""
+    one, reaps it, and can kill it.
+
+    A child leads a process group of its own, so the claim it takes can name that group: a node
+    that dies without running its ``close`` leaves children holding claims, and the reconciler
+    fences the group -- the model session included -- before the card goes to a new owner."""
 
     def __init__(self, con, cfg):
         self.con, self.cfg = con, cfg
@@ -126,15 +138,30 @@ class HeadlessRunner:
         from misaka.platform import admission
         self._reap()                         # before reconcile: an unwaited-for child still answers to its pid
         # A card whose child died mid-turn comes back through the reconciler, exactly as it did
-        # when this method was dispatch_once. finish_abandoned can reach git, so it stays off
-        # the loop thread.
+        # when a node ran its cards inline in one dispatch pass. finish_abandoned can reach git,
+        # so it stays off the loop thread.
         await asyncio.to_thread(dispatch.reconcile, self.con, self.cfg)
         rows = {task_id: task_store.get(self.con, task_id) for task_id in task_ids}
+        candidates = [row for task_id, row in rows.items()
+                      if row is not None and task_id not in self.flying and row["status"] == "ready"]
+        # The same pass also carried the project's validity gate: a card whose file is missing or
+        # unreadable, whose needs list is malformed, or that blocks itself is not dispatchable, and
+        # spawning it is a fresh interpreter every poll for a card no claim will ever take.
+        # fair_ready keeps exactly those cards. It reads every card file of the project to do it,
+        # so it goes off the loop thread like the reconcile above, and only when there is a card
+        # to start -- most polls of a running batch have none. Its round-robin cursor belongs to
+        # the schedulers that use its order; we use only its set.
+        dispatchable = set()
+        for space in {task_store.workspace_for(row) for row in candidates}:
+            dispatchable.update(row["id"] for row in await asyncio.to_thread(
+                task_store.fair_ready, self.con, lane="workers", advance=False, workspace=space))
         host_cap, assignee_cap = admission.limits()
         taken = self._slots_taken(rows)
         for task_id, row in rows.items():
             if task_id in self.flying or row is None or row["status"] != "ready":
                 continue
+            if task_id not in dispatchable:
+                continue                     # the card is not dispatchable: no process, this poll or any
             if row["next_attempt_at"] is not None and int(row["next_attempt_at"]) > time.time():
                 continue                     # a rate-limit cooldown: the claim would refuse it anyway
             if sum(taken.values()) >= host_cap or taken.get(row["assignee"], 0) >= assignee_cap:
@@ -143,7 +170,7 @@ class HeadlessRunner:
             # what a card whose project folder is gone means. The parallelism ceiling is the
             # drive loop's free-slot count, already applied to task_ids -- not ours to re-decide.
             self.flying[task_id] = self._processes.spawn(
-                [*CARD_ARGV, task_id], cwd=None, title=f"card {task_id}")
+                [*CARD_ARGV, task_id], cwd=None, title=f"card {task_id}", new_session=True)
             taken[row["assignee"]] = taken.get(row["assignee"], 0) + 1
 
     async def stop(self, task_id, **_kwargs):
@@ -156,9 +183,24 @@ class HeadlessRunner:
 
     def close(self):
         """The node's routine is over: no card of this node may outlive the node. Called from
-        the process shell below, so a halt, a failure and a clean finish all end the same way."""
-        while self.flying:
-            _task_id, proc = self.flying.popitem()
+        the process shell below, so a halt, a failure and a clean finish all end the same way.
+
+        A child whose card has already left the board's active states settled it and is running
+        the tail that follows acceptance -- the commit on the card's line, then the artifacts
+        joining the corpus. Nothing re-runs that tail, so it is waited for rather than signalled.
+        Every other child is killed outright: still ``running`` means the turn is in flight (and
+        the card comes back through the reconciler), still ``ready`` or ``todo`` means the child
+        has not claimed it yet and has a whole turn's spending ahead of it -- waiting there would
+        let a halted node run the very card the halt was meant to stop."""
+        self._reap()                         # an exited child needs neither wait nor signal
+        for task_id, proc in list(self.flying.items()):
+            row = task_store.get(self.con, task_id)
+            if row is not None and row["status"] not in ("ready", "todo", "running"):
+                try:
+                    proc.wait(SETTLED_TAIL_SECONDS)
+                except subprocess.TimeoutExpired:
+                    pass                     # the tail is not finishing: stop the tree below
+            self.flying.pop(task_id, None)
             self._processes.stop(proc)
 
     def _slots_taken(self, rows):
