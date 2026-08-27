@@ -6,6 +6,7 @@ import os
 import threading
 from contextlib import asynccontextmanager
 
+from misaka.agent.guards import install_guards
 from misaka.agent.request_budget import install_turn_budget
 
 
@@ -165,6 +166,9 @@ async def _run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
         if err:
             return {"text": None, "timed_out": False, "error": err, "budget_usage": None}
         limiter = install_turn_budget(session)
+        # Headless sessions have nobody watching them repeat themselves into their
+        # whole budget; the guards are that reader.
+        install_guards(session, limiter)
         if on_event:
             session.subscribe(lambda ev: on_event(event_line(ev)))
 
