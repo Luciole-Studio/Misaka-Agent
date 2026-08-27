@@ -282,6 +282,18 @@ class _SisterManager(SubagentManager):
         # The child indexes the read-only copies this manager made, never the live trees.
         return {"MISAKA_SKILL_SANDBOX": self.skill_root}
 
+    def _child_tool_vocabulary(self) -> list[str] | None:
+        """A Sister card is a root of her own, not a worker inside Last Order's pool.
+
+        The child this manager starts assembles its tools from the Sister's
+        profile -- her extensions and her MCP servers -- which is neither a
+        subset nor a superset of Last Order's.  Handing Last Order's names down
+        would both authorise names this session never had and, by intersection,
+        erase the Sister's own tools from every agent she launches.
+        """
+
+        return None
+
     async def process_started(self, _task: AgentTask, process: Any) -> None:
         """Publish the real Sister child identity before it can outlive LO."""
 

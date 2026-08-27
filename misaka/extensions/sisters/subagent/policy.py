@@ -37,6 +37,10 @@ PLAN_GIT_COMMANDS = frozenset(
     {"cat-file", "diff", "grep", "log", "ls-files", "ls-tree", "rev-parse", "show", "status"}
 )
 READ_ONLY_TOOLS = frozenset({"find", "grep", "glob", "ls", "read"})
+# Tools that carry their own per-action classification further down
+# ``_permission_action``.  Inheriting one of these names from the parent
+# session must never short-circuit that classification.
+CLASSIFIED_TOOLS = frozenset({"bash", "edit", "write"})
 ACCEPT_EDITS_COMMANDS = frozenset({"cp", "mkdir", "mv", "rm", "rmdir", "sed", "touch"})
 SENSITIVE_DIRECTORIES = frozenset({".claude", ".git", ".idea", ".ssh", ".vscode"})
 SENSITIVE_FILES = frozenset(
@@ -824,12 +828,18 @@ def _permission_restriction(
     tool_name: str,
     tool_input: Mapping[str, Any],
     workspace: str,
+    vocabulary: frozenset[str] = frozenset(),
 ) -> str | None:
     """Return a workspace/protected-path guard that grants cannot bypass."""
 
     name = _tool_name(tool_name)
     raw = tool_input.get("path") or tool_input.get("file_path")
-    if name in READ_ONLY_TOOLS and isinstance(raw, str) and raw.strip():
+    # An inherited tool reaches the same path guard as the built-in read
+    # tools: gaining a name must never gain a way out of the workspace.
+    guarded = name in READ_ONLY_TOOLS or (
+        name in vocabulary and name not in CLASSIFIED_TOOLS
+    )
+    if guarded and isinstance(raw, str) and raw.strip():
         if _sensitive_path(raw, workspace):
             return f"protected path requires approval: {raw}"
         if not _path_in_workspace(raw, workspace) and not _path_rule_allows(
@@ -856,8 +866,15 @@ def _permission_action(
     tool_name: str,
     tool_input: Mapping[str, Any],
     workspace: str,
+    vocabulary: frozenset[str] = frozenset(),
 ) -> tuple[str, str | None]:
-    """Return ``allow``, ``ask``, ``classify`` or ``deny`` by mode precedence."""
+    """Return ``allow``, ``ask``, ``classify`` or ``deny`` by mode precedence.
+
+    ``vocabulary`` is the set of tool names inherited from the parent session.
+    It answers only "may this child use a tool by this name at all"; every
+    argument-scoped check below still runs, and an empty set reproduces the
+    behaviour of the hard-coded name tables on their own.
+    """
 
     effective = mode or "default"
     name = _tool_name(tool_name)
@@ -868,9 +885,16 @@ def _permission_action(
         reason = _plan_denial(name, tool_input)
         if reason:
             return "deny", reason
+        # Plan's denial is decided before the workspace guard, which answers
+        # ``ask``.  A guarded tool must not turn a plan denial into something a
+        # parent can approve, so the worse the path the weaker the decision.
+        if name not in READ_ONLY_TOOLS and name != "bash" and not _rule_allows(
+            layers, name, tool_input
+        ):
+            return "deny", f"permissionMode=plan denied non-read-only tool {tool_name}"
 
     restriction = _permission_restriction(
-        layers, name, tool_input, workspace
+        layers, name, tool_input, workspace, vocabulary
     )
     if restriction:
         reason = f"Workspace safety requires approval: {restriction}"
@@ -879,14 +903,18 @@ def _permission_action(
         return "ask", reason
 
     if effective == "plan":
-        if name not in READ_ONLY_TOOLS and name != "bash" and not _rule_allows(
-            layers, name, tool_input
-        ):
-            return "deny", f"permissionMode=plan denied non-read-only tool {tool_name}"
         return "allow", None
     if _rule_allows(layers, name, tool_input):
         return "allow", None
-    if name in READ_ONLY_TOOLS:
+    # plan mode above keeps the strict built-in read-only table on purpose; an
+    # inherited name is not evidence that a tool only reads.  Under ``auto`` it
+    # is no evidence either: the transcript classifier is that mode's per-action
+    # check, and a name must not buy a way around it.
+    if name in READ_ONLY_TOOLS or (
+        effective != "auto"
+        and name in vocabulary
+        and name not in CLASSIFIED_TOOLS
+    ):
         return "allow", None
     if name == "bash" and _plan_denial(name, tool_input) is None:
         return "allow", None
@@ -911,6 +939,13 @@ class AgentPolicy:
         self.context = context
         self.layers = tuple(tuple(layer) for layer in getattr(context, "tool_rule_layers", ()) or ())
         self.permission_mode = getattr(context, "permission_mode", None)
+        # Names this child inherited from its parent session.  Absent means the
+        # parent could not report one, and the hard-coded tables decide alone.
+        self.vocabulary = frozenset(
+            _tool_name(str(item))
+            for item in (getattr(context, "tool_vocabulary", None) or ())
+            if str(item).strip()
+        )
         raw_hooks = getattr(context, "agent_hooks", None)
         try:
             hooks = json.loads(raw_hooks) if raw_hooks else {}
@@ -1297,9 +1332,10 @@ class AgentPolicy:
             name,
             tool_input,
             workspace,
+            self.vocabulary,
         )
         restriction = _permission_restriction(
-            self.layers, name, tool_input, workspace
+            self.layers, name, tool_input, workspace, self.vocabulary
         )
         if hook_decision == "ask" and action != "deny":
             action = "ask"
@@ -1361,9 +1397,10 @@ class AgentPolicy:
                     name,
                     tool_input,
                     workspace,
+                    self.vocabulary,
                 )
                 restriction = _permission_restriction(
-                    self.layers, name, tool_input, workspace
+                    self.layers, name, tool_input, workspace, self.vocabulary
                 )
                 if action == "deny":
                     return {

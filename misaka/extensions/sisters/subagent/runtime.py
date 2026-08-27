@@ -108,6 +108,9 @@ class RoleContext:
     usage_claim_lock: str | None = None
     usage_token_cap: int | None = None
     tool_rule_layers: tuple[tuple[str, ...], ...] = ()
+    # Tool names inherited from the parent session.  ``None`` means no parent
+    # reported one, and the policy falls back to its built-in name tables.
+    tool_vocabulary: tuple[str, ...] | None = None
     permission_mode: str | None = None
     permission_can_prompt: bool = False
     agent_hooks: str | None = None
@@ -153,6 +156,21 @@ class RoleContext:
             )
         except (TypeError, ValueError):
             rule_layers = ()
+        vocabulary_raw = os.environ.get("MISAKA_SUBAGENT_TOOL_VOCABULARY")
+        if vocabulary_raw is None:
+            vocabulary: tuple[str, ...] | None = None
+        else:
+            try:
+                decoded_vocabulary = json.loads(vocabulary_raw)
+            except (TypeError, ValueError):
+                decoded_vocabulary = None
+            # A present but unreadable value is an empty vocabulary, never an
+            # absent one: a corrupted hand-off must not widen the child.
+            vocabulary = (
+                tuple(str(item) for item in decoded_vocabulary if str(item).strip())
+                if isinstance(decoded_vocabulary, list)
+                else ()
+            )
         if tool_ceiling is _TOOL_CEILING_UNSET:
             ceiling_raw = os.environ.get("MISAKA_SUBAGENT_TOOL_CEILING")
             if ceiling_raw is None:
@@ -213,6 +231,7 @@ class RoleContext:
                 else None
             ),
             tool_rule_layers=rule_layers,
+            tool_vocabulary=vocabulary,
             permission_mode=os.environ.get("MISAKA_SUBAGENT_PERMISSION_MODE") or None,
             permission_can_prompt=os.environ.get("MISAKA_SUBAGENT_CAN_PROMPT") == "1",
             agent_hooks=os.environ.get("MISAKA_SUBAGENT_HOOKS") or None,
@@ -1875,6 +1894,13 @@ class SubagentManager:
         # A worker's resolved pool is local to that worker.  It must not turn
         # into a ceiling for agents launched recursively from that worker.
         env.pop("MISAKA_SUBAGENT_TOOL_CEILING", None)
+        vocabulary = self._child_tool_vocabulary()
+        if vocabulary is None:
+            # Drop the value this process inherited rather than pass a
+            # vocabulary that was never intersected with our own tools.
+            env.pop("MISAKA_SUBAGENT_TOOL_VOCABULARY", None)
+        else:
+            env["MISAKA_SUBAGENT_TOOL_VOCABULARY"] = json.dumps(vocabulary)
         rule_layers = self._child_tool_rule_layers(task, flags)
         if rule_layers:
             env["MISAKA_SUBAGENT_TOOL_RULE_LAYERS"] = json.dumps(rule_layers)
@@ -2373,6 +2399,32 @@ class SubagentManager:
             if current and current not in layers:
                 layers.append(current)
         return layers
+
+    def _child_tool_vocabulary(self) -> list[str] | None:
+        """Return the tool names a child may use, or None to keep the old tables.
+
+        A child inherits the vocabulary of the session that launched it, never
+        more: this session's own active tools intersected with whatever it
+        inherited itself.  The result is a set of *names*, not a set of grants;
+        every argument-scoped check in ``policy`` still runs on top of it.
+        """
+
+        inherited = self.role_context.tool_vocabulary
+        try:
+            own = [str(name) for name in self.harness.getActiveTools()]
+        except Exception:  # noqa: BLE001 - an unreadable tool list keeps the pre-inheritance behaviour
+            # Dropping the variable would tell the child it is a root, and a
+            # root intersects with nothing: one unreadable tool list would hand
+            # the grandchildren the child's whole pool.  Pass on what we
+            # inherited instead -- it is already a subset -- and only a real
+            # root falls back to the built-in tables.
+            return None if inherited is None else sorted(
+                {name.casefold() for name in inherited if name.strip()}
+            )
+        if inherited is not None:
+            allowed = {name.casefold() for name in inherited}
+            own = [name for name in own if name.casefold() in allowed]
+        return sorted({name.casefold() for name in own if name.strip()})
 
     def _child_permission_mode(self, task: AgentTask) -> str | None:
         """Apply Claude's parent-mode precedence for a nested agent."""
