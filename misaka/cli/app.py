@@ -100,13 +100,16 @@ def _parser():
     lc = sub.add_parser("lcm", help="Inspect, back up, repair, rebuild, or migrate the LCM context database")
     lc.add_argument("op", nargs="?", default="status",
                     choices=["status", "doctor", "backup", "repair", "rebuild", "migrate", "embed",
-                             "rollups", "externalize-backfill"])
+                             "rollups", "externalize-backfill", "assertions"])
     lc.add_argument("target", nargs="?",
-                    help="Session JSONL path for rebuild; warmup|backfill for embed")
+                    help="Session JSONL path for rebuild; warmup|backfill for embed; rebuild for assertions")
     lc.add_argument("--apply", action="store_true",
-                    help="migrate/embed/externalize backfill: do it for real (the default only prints the plan)")
+                    help="migrate/embed/externalize backfill/assertions: do it for real "
+                         "(the default only prints the plan)")
     lc.add_argument("--limit", type=int,
-                    help="embed/externalize backfill: how many rows to move in this run")
+                    help="embed/externalize backfill: how many rows to move in this run; "
+                         "assertions: how many source rows one --apply pass may re-derive, "
+                         "one auxiliary model call each (upstream default 100, maximum 500)")
     lc.add_argument("--rebuild", action="store_true",
                     help="rollups: re-seed and rebuild every temporal rollup (calls the summariser)")
 
@@ -421,6 +424,15 @@ def _cmd_lcm(args):
             print("Usage: misaka lcm embed warmup|backfill [--apply] [--limit N]")
             sys.exit(2)
         print(lcm_embed.run(args.target, apply=args.apply, limit=args.limit))
+    elif args.op == "assertions":
+        # Upstream's own `/lcm assertions rebuild`, forwarded whole. The dry run is the
+        # default and never constructs an extractor; `--apply` is what calls a model, once
+        # per source row it re-derives.
+        from misaka.extensions.hermes_lcm.host import assertions as lcm_assertions
+        if args.target not in {None, "rebuild"}:
+            print("Usage: misaka lcm assertions rebuild [--apply] [--limit N]")
+            sys.exit(2)
+        print(lcm_assertions.rebuild(apply=args.apply, limit=args.limit))
     elif args.op == "rollups":
         from misaka.extensions.hermes_lcm.host import rollups as lcm_rollups
         # The engine resolves its database through `switch.database_path()`, which lets

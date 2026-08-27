@@ -1,4 +1,5 @@
 """Document ingestion, PageIndex navigation, literal search, and quote verification."""
+import functools
 import hashlib
 import json
 import os
@@ -8,6 +9,7 @@ import stat
 import subprocess
 import threading
 import time
+import unicodedata
 
 from misaka.utils import atomic
 
@@ -351,18 +353,107 @@ def page_heads(doc_id, limit=200, workspace=None):
     return out
 
 
+# Quote matching
+#
+# One rule, used by every literal comparison against a document: corpus search, corpus
+# verification, and the research ledger's quote check (it imports normalize_for_quote_match).
+# Two normalizers meant two answers to "is this passage in the book", and both of the old ones
+# only stripped whitespace -- so a quotation a model copied correctly was reported missing.
+
+_WHITESPACE = re.compile(r"\s+")
+# pdftotext breaks a word across lines with a trailing hyphen ("exam-\nple"), on nearly every line
+# of a real book; the hyphen belongs to the layout, not to the word.
+_HYPHEN_BREAK = re.compile(r"-[^\S\r\n]*\r?\n")
+
+
+def normalize_for_quote_match(text):
+    """Fold the extraction artefacts that make a true quotation fail a literal comparison.
+
+    Applied to both sides of every comparison. Stored quotes and claim hashes stay raw -- only the
+    matching loosens; nothing here fuzzes, ranks, or stems. In order:
+
+    1. hyphen at a line break -- pdftotext hyphenates every word that crosses a line, so
+       ``exam-\\nple`` is the normal shape of a word in any PDF-sourced page;
+    2. U+00AD soft hyphen -- EPUB and HTML sources carry invisible break opportunities inside
+       words, and a model copying the passage will not reproduce them;
+    3. NFKC -- folds full-width punctuation and digits onto ASCII (``，`` ``１``, exactly what a
+       model transcribing CJK produces), half-width kana onto composed kana, and the ligatures
+       (``ﬁ`` -> ``fi``) that PDF fonts leave sitting in the text layer;
+    4. all whitespace -- extraction inserts spaces between CJK glyphs and breaks lines mid-phrase.
+    """
+    folded = _HYPHEN_BREAK.sub("", str(text or "")).replace("\u00ad", "")
+    return _WHITESPACE.sub("", unicodedata.normalize("NFKC", folded))
+
+
+@functools.lru_cache(maxsize=4096)
+def _attaches(ch):
+    """True when NFKC can fold ``ch`` into the character before it: a combining mark, a
+    compatibility form that decomposes to one (half-width ``ﾞ`` after ``ｶ`` composes to ``ガ``),
+    or a trailing Hangul jamo. Such a character must be normalized together with its predecessor."""
+    return (unicodedata.combining(ch) != 0
+            or unicodedata.combining((unicodedata.normalize("NFKD", ch) or ch)[0]) != 0
+            or "\u1160" <= ch <= "\u11ff")      # Hangul jungseong/jongseong
+
+
+def _folded_spans(text):
+    """Return ``(folded, spans)``: ``folded == normalize_for_quote_match(text)``, and ``spans[i]``
+    is the ``(start, end)`` slice of the raw ``text`` that produced ``folded[i]``.
+
+    Normalization is not length preserving -- NFKC turns one ``ﬁ`` into two characters, the hyphen
+    rule deletes two, whitespace removal deletes many -- so a position in ``folded`` is not an
+    index into ``text`` and cannot be recovered by counting. Walking the raw text one normalization
+    segment at a time keeps the correspondence exact: a segment begins at every character NFKC
+    cannot fold backwards, which is precisely where normalizing a piece on its own gives the same
+    answer as normalizing the whole string.
+    """
+    dropped = {i for m in _HYPHEN_BREAK.finditer(text) for i in range(*m.span())}
+    segments = []                                    # [start, end, raw characters]
+    for i, ch in enumerate(text):
+        if i in dropped or ch == "\u00ad":
+            continue
+        if segments and _attaches(ch):
+            segments[-1][1], segments[-1][2] = i + 1, segments[-1][2] + ch
+        else:
+            segments.append([i, i + 1, ch])
+    folded, spans = [], []
+    for start, end, raw in segments:
+        piece = _WHITESPACE.sub("", unicodedata.normalize("NFKC", raw))
+        folded.append(piece)
+        spans.extend([(start, end)] * len(piece))
+    return "".join(folded), spans
+
+
+def _locate(text, needle):
+    """Return the ``(start, end)`` slice of the raw ``text`` holding an already normalized
+    ``needle``, or None. Callers get raw offsets: what is stored and shown is always the page's
+    own text, never the query echoed back."""
+    if needle not in normalize_for_quote_match(text):
+        return None            # cheap reject: one C call per page, the span walk runs only on a hit
+    folded, spans = _folded_spans(text)
+    pos = folded.find(needle)
+    if pos < 0:
+        return None            # the segment walk folded less than the whole-string rule did
+    return spans[pos][0], spans[pos + len(needle) - 1][1]
+
+
 def search_literal(q, limit=10, doc_id=None, workspace=None):
-    """Find exact text across indexed pages (scoped to ``workspace`` when given and no ``doc_id``)."""
-    if not q:
+    """Find exact text across indexed pages (scoped to ``workspace`` when given and no ``doc_id``).
+
+    Matching follows ``normalize_for_quote_match``, so this agrees with ``verify_quote``: a search
+    that reported "no matches" for a passage verification then confirmed used to send the model
+    away from material that was there. Snippets are cut from the raw page.
+    """
+    needle = normalize_for_quote_match(q)
+    if not needle:
         return []
     targets = [doc_id] if doc_id else [m["doc_id"] for m in docs(workspace)]
     hits = []
     for did in targets:
         for page, text in _iter_pages(did, workspace=workspace):
-            pos = text.find(q)
-            if pos >= 0:
-                lo = max(0, pos - 12)
-                snip = text[lo:pos] + "<<" + q + ">>" + text[pos + len(q):pos + len(q) + 12]
+            span = _locate(text, needle)
+            if span:
+                pos, end = span
+                snip = text[max(0, pos - 12):pos] + "<<" + text[pos:end] + ">>" + text[end:end + 12]
                 hits.append({"doc_id": did, "page": page, "s": snip.replace("\n", " ")})
                 if len(hits) >= limit:
                     return hits
@@ -370,22 +461,17 @@ def search_literal(q, limit=10, doc_id=None, workspace=None):
 
 
 def verify_quote(doc_id, quote, page=None, workspace=None):
-    """Verify an exact quotation, optionally on one page, ignoring whitespace differences."""
-    norm = lambda s: re.sub(r"\s+", "", s)
-    nq = norm(quote)
-    if not nq:
+    """Verify an exact quotation, optionally on one page, ignoring the differences
+    ``normalize_for_quote_match`` folds. The returned offset indexes the raw page, and the claim
+    hash binds the quotation as the caller wrote it."""
+    needle = normalize_for_quote_match(quote)
+    if not needle:
         return None
     for pg, text in _iter_pages(doc_id, lo=page, hi=page, workspace=workspace):
-        pos = norm(text).find(nq)
-        if pos < 0:
+        span = _locate(text, needle)
+        if not span:
             continue
-        seen, real = 0, 0
-        for i, ch in enumerate(text):
-            if not ch.isspace():
-                if seen == pos:
-                    real = i
-                    break
-                seen += 1
+        real = span[0]
         return {"page": pg, "offset": real, "claim_hash": claim_hash(doc_id, pg, real, quote)}
     return None
 

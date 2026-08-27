@@ -437,7 +437,12 @@ def synthesize(con, run, cfg, worker, node, task_rows):
               + "\n# Evidence ledger\n" + evidence_block(con, run, node))
     session_dir = _lo_session(run, node)
     _obj, text, err = _call(
-        worker, cfg, prompt, cwd=runs.run_dir(run), session_dir=session_dir, raw=True,
+        # No search here: the contract above forbids facts beyond the supplied artifacts, and this
+        # conclusion is what the final report is written from. A figure searched up at this desk
+        # enters the run with no ledger entry behind it, so the citation gate on final.md reports
+        # it as ungrounded and spends the run's single rewrite deleting it. Reading the cards'
+        # artifacts -- which is what `read` is for -- is the whole of the job.
+        worker, cfg, prompt, cwd=runs.run_dir(run), session_dir=session_dir, raw=True, tools=("read",),
         continue_session=bool(find_most_recent_session(session_dir)), task_id=run["id"],
         timeout=max(900, int(cfg.get("judge_timeout", 600))),
     )
@@ -573,5 +578,10 @@ If material is unavailable, state the limit that creates instead of claiming pro
 - Include a `findings` array in `report.json`. Each item uses:
   `{{"text":"self-contained claim","claim_type":"fact|inference|interpretation|normative",`
   `"source_file":"registered artifact path","quote":"exact text present in that artifact"}}`
+- A document already in the corpus (a book, a downloaded PDF) is cited where it stands rather than copied into
+  an artifact first: run `doc_verify` to confirm the passage and read back its page, then use the other shape:
+  `{{"text":"self-contained claim","claim_type":"fact|inference|interpretation|normative",`
+  `"doc_id":"the document id","page":<the page number doc_verify returned>,"quote":"the passage, verbatim"}}`
+  The quotation is checked against that page the same way. One shape or the other per finding, never both.
 - You write the findings yourself. The system only checks that the path is a registered artifact and the quote appears in it verbatim; it does not judge credibility.
 """

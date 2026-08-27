@@ -45,6 +45,11 @@ def activate(spec):
     anyone's search subscription. Both are rooted at ``spec.workspace``, which is where
     each leaves what it pulled off the internet -- a downloaded file, or a fetched page's
     complete text -- so a card can register the path and the ledger can quote it.
+    ``download_file`` goes one step further for the formats the corpus can read: it indexes
+    the file on arrival and hands back a document ID, because the alternative next step the
+    model is left with is the read tool, which cannot open a PDF at all. That makes the
+    ``doc_*`` tools (registered by ``extensions/documents.py`` for every session kind here
+    except ``bare``) the way a downloaded document is navigated and quoted.
     """
     from misaka.core.tools.download_file import create_download_file_tool_definition
     from misaka.core.tools.web_fetch import create_web_fetch_tool_definition

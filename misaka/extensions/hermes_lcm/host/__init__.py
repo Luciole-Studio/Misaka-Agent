@@ -14,6 +14,7 @@ concern lives:
     rollups.py         temporal rollups: the build nudge misaka's session shape needs
     externalize.py     large-output refs in the live prompt, and a backfill for old rows
     embed.py           upstream's own `/lcm embed`, on `misaka lcm embed`
+    assertions.py      upstream's own `/lcm assertions rebuild`, on `misaka lcm assertions`
     migrate.py         the existing mini-implementation database -> upstream schema
     extension.py       the event subscriptions all of the above are reached through
 

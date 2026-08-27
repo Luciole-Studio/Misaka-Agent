@@ -64,7 +64,9 @@ def build(con, run, *, issue, node, parent=None, max_findings=80):
         "notice": (
             "Ancestor sessions and artifacts remain available at their recorded paths. "
             "Use the index to identify relevant material, then read the original source. "
-            "Summaries are navigation aids, not evidence; verify every quotation against its source."
+            "Summaries are navigation aids, not evidence; verify every quotation against its source. "
+            "Evidence whose source reads `doc:<doc_id>#p<page>` is a corpus document rather than a "
+            "file: read it with doc_read and re-verify its quotation with doc_verify."
         ),
     }
     return payload

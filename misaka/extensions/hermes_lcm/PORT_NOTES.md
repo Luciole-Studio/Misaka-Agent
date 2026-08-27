@@ -20,7 +20,7 @@
 
 | 文件 | 行 | 类 | 原因 | 再同步动作 |
 |---|---|---|---|---|
-| — | — | — | **无。P1 结束时 `vendor/` 下 56 个上游 `.py` 全部与 pin 版本逐字节一致(`cmp -s` 逐个验证)** | 每次再同步后重跑 `cmp -s` |
+| — | — | — | **无。P6 结束时 `vendor/` 下 60 个上游 `.py` 全部与 pin 版本逐字节一致(`cmp -s` 逐个验证)** | 每次再同步后重跑 `cmp -s` |
 
 唯一的宿主接缝(D6 第②类)没有落在任何上游文件里,而是落在两个 misaka 自己的文件上,
 所以不占登记表:
@@ -43,8 +43,9 @@
 
 ## 已 vendored 的文件
 
-`vendor/` 下 56 个上游模块 = **P1 的 30 个文件 + 它们 import 闭包外溢出的 25 个 + `command.py`**。
-闭包用脚本从 P1 的 30 个种子出发递归展开(顶层 import 与函数内 import 都算),不是手数的。
+`vendor/` 下 60 个上游模块 = **P1 的 30 个文件 + 它们 import 闭包外溢出的 25 个 + `command.py`
++ P6 补拷的 4 个叶子**。闭包用脚本从 P1 的 30 个种子出发递归展开(顶层 import 与函数内 import 都算),
+不是手数的;补拷的 4 个不在那个闭包里(没有闭包内模块 import 它们),是 P6 按范围直接拷的。
 
 | 期 | 文件 |
 |---|---|
@@ -54,13 +55,16 @@
 | P4(闭包外溢) | `rollup_store` `rollup_builder` `rollup_periods` `occurrence_time` |
 | P5(闭包外溢) | `embedding_provider` `vector_store` |
 | P6(闭包外溢) | `adaptive_retrieval` `answer_contract` `assertion_extraction` `assertion_rebuild` `assertion_state` `assertion_store` `evidence_compiler` `evidence_pack` `query_view_store` `reasoning` `requirements_compiler` `trajectory_store` |
+| P6(在范围内,补拷) | `preanswer_evidence` `selective_compiler` `selective_recall` `host_evidence` |
 | P7 | `codex_routing`(闭包外溢) `command`(见下) |
 
 `command.py` 不在闭包里(没有任何闭包内模块 import 它),是**为了让上游 11 个测试文件能跑**
 而额外拷进来的:它的 import 面整个落在闭包内,零第三方依赖,拷进来不接线的代价是零。
 
-上游 60 个顶层模块里**没有** vendored 的 4 个,都是 P6 的叶子,闭包够不到:
-`host_evidence` `preanswer_evidence` `selective_compiler` `selective_recall`。
+上游 60 个顶层模块现在**一个不缺**。P6 补拷的那 4 个是最后的空缺:它们各自只被上游的插件入口
+(不移植)或测试直接 import,所以 P1 的闭包够不到;它们自己的 import 面(`evidence_compiler`
+`evidence_pack` `reasoning` `model_routing` + `agent.auxiliary_client` 那个已有接缝)整个落在
+已 vendored 的集合里,补拷后不需要再扩闭包。
 
 ## host/ 适配层(P1 接线了什么)
 
@@ -356,10 +360,11 @@ vendored 套件里 8 个「缺 numpy」的跳过变成了通过(见"vendored 测
 
 ## vendored 测试
 
-`tests/hermes_lcm_vendor/` 有上游 84 个 `test_*.py` 里的 **60 个**(逐字节,`cmp -s` 验证),
-外加上游的 `tests/fixtures/`。结果:**2371 passed / 21 skipped / 12 xfailed,零红。**
+`tests/hermes_lcm_vendor/` 有上游 84 个 `test_*.py` 里的 **64 个**(逐字节,`cmp -s` 验证),
+外加上游的 `tests/fixtures/`。结果:**2407 passed / 21 skipped / 12 xfailed,零红。**
 (P5 装上可选 extra `lcm-semantic` 之后的数字;numpy 随 fastembed 进来,原先 8 个
-「缺 numpy」的跳过变成了通过——见下。没装 extra 时是 2357 passed / 35 skipped。)
+「缺 numpy」的跳过变成了通过——见下。P6 补拷 4 个模块解锁了 4 个测试文件、36 个用例,
+2371 → 2407,跳过数不变。没装 extra 时按同样的 +36 平移:2393 passed / 35 skipped。)
 
 `tests/hermes_lcm_vendor/conftest.py` 是 misaka 的文件(不是上游拷贝),做三件事:
 
@@ -384,26 +389,26 @@ vendored 套件里 8 个「缺 numpy」的跳过变成了通过(见"vendored 测
 跳过一个测试和改一个测试是同一件事,所以 `SKIP_UPSTREAM_TESTS` 需要一条能重跑的证明,
 而不是一句承诺。两步,都是机械的:
 
-1. **同一 venv 跑上游的同一批 60 个文件**当基线:
+1. **同一 venv 跑上游的同一批 64 个文件**当基线:
 
    ```
    cd ~/.hermes/plugins/hermes-lcm && PYTHONPATH=~/.hermes/hermes-agent \
-     <misaka>/.venv/bin/python -m pytest -q $(那 60 个文件)
+     <misaka>/.venv/bin/python -m pytest -q $(那 64 个文件)
    ```
 
-   当前 pin 上、装了 `lcm-semantic` 的结果:**2 failed / 2388 passed / 2 skipped / 12 xfailed**,
+   当前 pin 上、装了 `lcm-semantic` 的结果:**2 failed / 2424 passed / 2 skipped / 12 xfailed**,
    那 2 个 node id 正是 `_SYMLINK`——即"上游在这个环境里也红"的那一类。
-   (没装 extra 时是 **8 failed / 2374 passed / 10 skipped / 12 xfailed**,多出来的 6 个红是 `_NUMPY`。)
+   (没装 extra 时是 **8 failed / 2410 passed / 10 skipped / 12 xfailed**,多出来的 6 个红是 `_NUMPY`。)
 
-2. **对账**:上游 `2388 passed + 2 failed = 2390`;这里 `2371 passed + 19 skipped = 2390`。
+2. **对账**:上游 `2424 passed + 2 failed = 2426`;这里 `2407 passed + 19 skipped = 2426`。
    两边的 `2 skipped` / `12 xfailed` 也逐项相同。**总数相等**就是"没有测试凭空消失"的证明;
-   对不上就是有文件或用例被悄悄丢了。(没装 extra 时两边都是 2382 = 2374+8 = 2357+25。)
+   对不上就是有文件或用例被悄悄丢了。(没装 extra 时两边都是 2418 = 2410+8 = 2393+25。)
 
 把 `SKIP_UPSTREAM_TESTS` 整个停用再跑一遍(临时插件把 skip marker 摘掉即可),应当**恰好**
 红 19 个(没装 extra 时 25 个)、且 node id 与表里逐条对齐:一个都不多(说明没有藏红),
 一个都不少(说明没有多跳过本来能过的测试)。上游修好某条后,对应条目会从"红"变"绿",那时删掉它。
 
-**暂缓的 24 个上游测试文件**:
+**暂缓的 20 个上游测试文件**:
 
 每一行的"缺什么"都是**实测**得来的:把文件拷进来跑一遍,记下第一个错。13 个文件在
 collect 阶段就 `ImportError`(缺模块),11 个能 collect 但**全部**用例失败(缺磁盘上的资产)。
@@ -425,4 +430,8 @@ collect 阶段就 `ImportError`(缺模块),11 个能 collect 但**全部**用例
 | `test_benchmarking_fixtures/replay/report/steady_state/types.py`(5 个) | `import benchmarking`(P7 可选) |
 | `test_h3_composition_replay.py` `test_h5_state_semantic_replay.py` `test_longmemeval_harness.py` `test_state_embedding_backfill_cli.py` | `import benchmarking` |
 | `test_int8_two_stage_knn.py` | `import numpy`;P5 的决定是**不为它新增依赖**——numpy 只在可选 extra `lcm-semantic` 里搭 fastembed 的车进来,不是 misaka 的依赖,所以这个文件仍然暂缓 |
-| `test_host_supplied_evidence.py` `test_preanswer_evidence.py` `test_selective_compiler.py` `test_selective_session_bundle.py` | 分别 import `host_evidence` / `preanswer_evidence` / `selective_compiler` / `selective_recall`——正好是上面"没有 vendored 的 4 个"。P6 一并拷入即解锁 |
+
+(这张表原本有 24 行。P6 补拷 `preanswer_evidence` / `selective_compiler` / `selective_recall` /
+`host_evidence` 之后,`test_preanswer_evidence.py` `test_selective_compiler.py`
+`test_selective_session_bundle.py` `test_host_supplied_evidence.py` 四行删除——36 个用例
+原样拷进来,**一个字节没改就全绿**,不需要任何 skip 条目。)

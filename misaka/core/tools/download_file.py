@@ -10,10 +10,17 @@ next tool to read it has no way to tell.
 
 The network side is not reimplemented: :func:`open_checked_stream` is the one place
 in MISAKA that vets an outbound URL, and it stays that way.
+
+A download that lands in a format the corpus can read is also indexed on arrival, so
+the file and the document it becomes are one step rather than two. Ingestion is the
+only part of this module that may fail without failing the download: the bytes are
+already on disk and verified by then, and a scanned PDF is worth keeping so it can be
+OCR'd -- the refusal is reported and the file stays.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import mimetypes
 import os
@@ -34,6 +41,7 @@ from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.tools._web.bounded import UnsafeUrlError, open_checked_stream
 from misaka.core.tools.path_utils import resolve_to_cwd
+from misaka.documents import index as corpus
 from misaka.platform import budget
 from misaka.platform.prompt_guard import untrusted
 from misaka.utils.values import signal_aborted
@@ -304,6 +312,35 @@ async def _stream_to_disk(
     return total, digest.hexdigest(), head
 
 
+async def _index_in_corpus(path: str) -> tuple[str, str | None]:
+    """Index a downloaded document into the corpus; return ``(line for the model, doc_id)``.
+
+    Without this the download has no usable next step: the read tool understands text and
+    images only, so a downloaded PDF read as text is bytes of noise, and ``doc_add`` -- the
+    step that actually works -- is something the model has to already know to look for.
+    Indexing here makes the download and the corpus entry one motion.
+
+    The ingest is content-addressed under the corpus root, outside the workspace, and a
+    second download of the same bytes links the existing document rather than writing a
+    second one -- so this adds no file to the workspace whose name is not already a
+    function of what is in it.
+    """
+    try:
+        # pdftotext runs under a 300s timeout inside ingest, and page files are written one
+        # by one: on the event loop that is the whole session held still for minutes.
+        doc_id, pages = await asyncio.to_thread(corpus.ingest, path)
+    except Exception as error:  # noqa: BLE001 - the file is downloaded, verified and kept; indexing is the step after, and its failures may damage nothing but themselves
+        # ValueError is ingest's documented refusal (a scanned PDF with no text layer), and
+        # its text is exactly the instruction the model needs -- OCR it, then doc_add. Any
+        # other failure is reported the same way rather than swallowed: the file is on disk
+        # either way, and a download that succeeded must not be reported as one that failed.
+        reason = str(error) or type(error).__name__  # some OSErrors carry no message at all
+        return f"  not indexed: {reason}", None
+    note = (f"  indexed as doc {doc_id} ({pages} pages) — navigate it with doc_outline / doc_read, "
+            "and doc_verify every quotation before you cite it")
+    return note, doc_id
+
+
 async def _download(url: str, requested: str, directory: str, signal: Any) -> AgentToolResult:
     deadline = time.monotonic() + _TOTAL_TIMEOUT
     async with open_checked_stream(url, headers=_REQUEST_HEADERS, timeout=_STREAM_TIMEOUT) as response:
@@ -385,7 +422,24 @@ async def _download(url: str, requested: str, directory: str, signal: Any) -> Ag
         # Compared query-free on both sides: a request URL that carries its own query
         # is not a redirect, and reporting one would be a lie about where this came from.
         lines.insert(1, f"  redirected to: {final_url}")
-    lines.append("The file is on disk, not in this result — use the read tool to open it.")
+
+    # What the corpus can extract text from is defined there, not here: a format added to
+    # SCAN_SUFFIXES starts being indexed on arrival without a second edit in this file.
+    ingestable = suffix in corpus.SCAN_SUFFIXES
+    doc_id = None
+    if ingestable:
+        note, doc_id = await _index_in_corpus(path)
+        lines.append(note)
+        if doc_id:
+            details["doc_id"] = doc_id
+    if doc_id:
+        lines.append("The file is on disk, not in this result — work with it through the doc tools above.")
+    elif ingestable:
+        # Telling the model to "read" an unindexed PDF is what this tool used to do, and it
+        # is the one instruction that cannot work; the reason above is the actionable one.
+        lines.append("The file is on disk and was kept. Fix what the line above reports, then index it with doc_add.")
+    else:
+        lines.append("The file is on disk, not in this result — use the read tool to open it.")
     # The URL, the server's filename, and the declared type are all written by the far
     # end, so the block goes to the model fenced as data like every other tool's.
     return _result(untrusted("download", "\n".join(lines)), details)
@@ -450,13 +504,17 @@ def create_download_file_tool_definition(
         description=(
             "Download one file (PDF, dataset, document, image, or archive) from a public URL into "
             f"the workspace {DOWNLOAD_DIR_NAME}/ directory, and report where it landed with its "
-            "sha256. Size-capped, type-checked, and refused for private addresses. Use it instead "
-            "of curl; use web_fetch for web pages you want to read."
+            "sha256. A PDF, Markdown, or text file is indexed into the document store on arrival "
+            "and comes back with its document ID. Size-capped, type-checked, and refused for "
+            "private addresses. Use it instead of curl; use web_fetch for web pages you want to read."
         ),
         promptSnippet="Download a paper, dataset, or document to the workspace.",
         promptGuidelines=[
             ("Use download_file for files worth keeping (papers, datasets); it saves them without "
-             "putting the content in your context. Read the saved file afterwards with the read tool."),
+             "putting the content in your context. A downloaded PDF, Markdown, or text file is "
+             "indexed on arrival: work with it through doc_outline / doc_read / doc_verify, which "
+             "is also what makes it citable. The read tool understands only text and images, so it "
+             "cannot open a PDF; use it for the other downloaded types."),
         ],
         parameters=DownloadFileToolInput,
         execute=execute,

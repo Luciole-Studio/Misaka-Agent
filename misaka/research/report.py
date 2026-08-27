@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 from misaka.core.session_manager import find_most_recent_session
 from misaka.platform import prompt_guard
@@ -59,6 +60,24 @@ Write free-form Markdown only. Do not output JSON or describe these instructions
 """
 
 
+# -- what the two closing passes may reach -------------------------------------------------------
+
+# The survey restates each node's conclusion and adjudicates nothing, so anything it went and found
+# would be a second adjudication written in the one document nothing checks.
+SURVEY_TOOLS = ("read",)
+# The adjudication is the owner's product call, and this tuple is where it is made.
+#
+# Against searching: FINAL_CONTRACT above makes every factual claim -- and every figure without
+# exception -- carry the [N] of a ledger entry, and the ledger holds only what the cards gathered.
+# Nothing found at this desk has an entry to cite, so the gate below reports the new figure as
+# ungrounded and the run's single rewrite is spent deleting it instead of repairing a real defect.
+# For searching: a last pass that can look something up sometimes catches a factual slip that every
+# earlier stage missed -- it just cannot put what it found into the report.
+# Default: no search. To take the other side, add "web_search" to this one tuple and say in
+# FINAL_CONTRACT that search may check wording only and is never the basis of a claim.
+FINAL_TOOLS = ("read",)
+
+
 def _nodes(con, run):
     out = []
     for node in runs.nodes(con, run["id"]):
@@ -84,8 +103,12 @@ def _boundary(con, run):
             for i in runs.issues(con, run["id"]) if i["status"] in {"inconclusive", "parked", "open"}]
 
 
-def _write(con, run, cfg, worker, contract, *, extra=""):
-    """One Last Order call in the root session over the whole tree; returns the Markdown it wrote."""
+def _write(con, run, cfg, worker, contract, *, tools, extra=""):
+    """One Last Order call in the root session over the whole tree; returns the Markdown it wrote.
+
+    ``tools`` has no default on purpose: the two contracts that run through here differ in what
+    they let her introduce, so each call site names its own surface (SURVEY_TOOLS, FINAL_TOOLS).
+    """
     root = runs.run_dir(run)
     prompt = (contract + f"""
 # Original question
@@ -100,7 +123,7 @@ def _write(con, run, cfg, worker, contract, *, extra=""):
     session_dir = runs.session_dir(run, "root-lo")
     _obj, text, err = worker.run_llm_json(
         os.path.join(cfg["roles_root"], "last_order"), prompt,
-        cfg["provider"], cfg["default_model"], cwd=root, tools=["read", "web_search"],
+        cfg["provider"], cfg["default_model"], cwd=root, tools=list(tools),
         timeout=runs.call_timeout(cfg, max(900, int(cfg.get("judge_timeout", 600)))), soul=False, raw=True,
         usage_db=cfg.get("db"), usage_task_id=run["id"], usage_generation=1,
         usage_token_cap=cfg.get("token_cap"), session_dir=session_dir,
@@ -169,6 +192,25 @@ def _provenance_url(con, artifact_id):
     return next((found[key] for key in _PROVENANCE_KEYS if key in found), "")
 
 
+# A claim verified against a corpus document rather than a card artifact records its location as
+# ``doc:<doc_id>#p<N>`` (``ledger.ingest_report``'s second findings shape). That is a database key,
+# not a place: no file was fetched for it, so it also carries no URL.
+_DOC_SOURCE_RE = re.compile(r"doc:([^#\s]+)#p(\d+)")
+
+
+def _human_source(source_file):
+    """A claim's location as a reader can act on it.
+
+    Every other row of the delivered list ends in a real URL, so a bare ``doc:8c1f2a#p42`` beside
+    them reads as a link that failed to render -- and a reader who does try it has nowhere to go.
+    The document is in the corpus and ``doc_read`` is how one reaches it, so the row says which
+    document and which page instead. Anything that is not exactly that shape is passed through
+    untouched: this renames one machine key, it does not reformat paths a Sister wrote.
+    """
+    match = _DOC_SOURCE_RE.fullmatch(str(source_file or ""))
+    return f"语料文档 {match.group(1)} 第 {match.group(2)} 页" if match else source_file
+
+
 def _one_line(value):
     """Fold a value onto one line, so it can never open a row of the listing below.
 
@@ -200,10 +242,11 @@ def _sources(con, run):
             if claim["artifact_id"] not in urls:
                 urls[claim["artifact_id"]] = _provenance_url(con, claim["artifact_id"])
             url = urls[claim["artifact_id"]]
+            where = _human_source(claim["source_file"])
             sources.append(citation.Source(evidence=claim["quote"], url=url,
-                                           label=f"{finding['id']} {claim['source_file']}"))
+                                           label=f"{finding['id']} {where}"))
             lines.append(f"[{len(sources)}] {_one_line(finding['text'])}\n"
-                         f"    source: {_one_line(claim['source_file'])}"
+                         f"    source: {_one_line(where)}"
                          + (f" — {url}" if url else "") + "\n"
                          f"    quote: {_one_line(claim['quote'])}")
     return tuple(sources), "\n".join(lines)
@@ -259,7 +302,7 @@ def _gate(con, run, cfg, worker, draft, sources, listing):
     failure = ""
     if audit.problems:
         try:
-            second = _write(con, run, cfg, worker, FINAL_CONTRACT,
+            second = _write(con, run, cfg, worker, FINAL_CONTRACT, tools=FINAL_TOOLS,
                             extra=_source_block(listing) + _rewrite_block(audit))
         except Exception as error:  # noqa: BLE001 - the rewrite is a second chance; losing it costs the report its repairs, not its delivery
             failure = f"{type(error).__name__}: {error}"
@@ -278,10 +321,10 @@ def _gate(con, run, cfg, worker, draft, sources, listing):
 
 def finalize(con, run, cfg, worker):
     """survey.md (every node shown, nothing judged) then final.md (the adjudication, citation-gated)."""
-    survey = _write(con, run, cfg, worker, SURVEY_CONTRACT)
+    survey = _write(con, run, cfg, worker, SURVEY_CONTRACT, tools=SURVEY_TOOLS)
     _sid, survey_path = runs.write_text(con, run["id"], "survey", 'Survey by node', "survey.md", survey + "\n")
     sources, listing = _sources(con, run)
-    final = _write(con, run, cfg, worker, FINAL_CONTRACT, extra=_source_block(listing))
+    final = _write(con, run, cfg, worker, FINAL_CONTRACT, tools=FINAL_TOOLS, extra=_source_block(listing))
     if sources:
         final = _gate(con, run, cfg, worker, final, sources, listing)
     aid, path = runs.write_text(con, run["id"], "final", 'Final report', "final.md", final + "\n")

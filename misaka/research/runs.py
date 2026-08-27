@@ -761,6 +761,18 @@ def node_worktree(run, node_id):
     return os.path.join(_home(run), "branches", node_id, "worktree")
 
 
+def evidence_roots(run):
+    """The folders that hold material this run itself worked on.
+
+    The project folder is only half of it: every node below the root works in a worktree under the
+    run's own home (``node_worktree``), so a document a card downloaded and indexed does not sit
+    inside the project folder until -- and unless -- its node merges. A check that accepted only
+    ``run['workspace']`` would therefore reject every citation raised below the root node, which is
+    where most of a run's cards live.
+    """
+    return (run["workspace"], _home(run))
+
+
 def node_branch(node_id):
     return f"research/{node_id}"
 
