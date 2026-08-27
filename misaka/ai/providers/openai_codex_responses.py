@@ -58,6 +58,8 @@ DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api"
 JWT_CLAIM_PATH = "https://api.openai.com/auth"
 MAX_RETRIES = 3
 BASE_DELAY_MS = 1000
+CODEX_CONNECT_TIMEOUT_SECONDS = 30.0
+CODEX_DEFAULT_READ_TIMEOUT_SECONDS = 600.0
 CODEX_TOOL_CALL_PROVIDERS = {"openai", "openai-codex", "opencode"}
 CODEX_RESPONSE_STATUSES = {"completed", "incomplete", "failed", "cancelled", "queued", "in_progress"}
 OPENAI_BETA_RESPONSES_WEBSOCKETS = "responses_websockets=2026-02-06"
@@ -169,6 +171,24 @@ def _parse_retry_after_delay_ms(response: httpx.Response, default_delay_ms: int)
             return max(0, int((retry_at - time.time()) * 1000))
 
     return default_delay_ms
+
+
+def _resolve_codex_timeout(options: StreamOptions | dict[str, Any] | None) -> httpx.Timeout:
+    """The read budget covers the whole SSE stream, not just the first byte.
+
+    httpx's default applies 5s to *every* read of the response body, and the gap between
+    two SSE chunks while the model is thinking on a long context routinely exceeds that:
+    the turn then dies mid-stream with partial content. Only the read leg is stretched --
+    connect/write/pool stay short so an unreachable endpoint still fails fast.
+    """
+    timeout_ms = _option(options, "timeoutMs")
+    read_seconds = timeout_ms / 1000 if timeout_ms is not None else CODEX_DEFAULT_READ_TIMEOUT_SECONDS
+    return httpx.Timeout(
+        connect=CODEX_CONNECT_TIMEOUT_SECONDS,
+        read=read_seconds,
+        write=CODEX_CONNECT_TIMEOUT_SECONDS,
+        pool=CODEX_CONNECT_TIMEOUT_SECONDS,
+    )
 
 
 async def _await_with_abort(awaitable: Any, signal: Any, *, on_abort: Any = None) -> Any:
@@ -866,6 +886,7 @@ async def process_websocket_stream(
         headers,
         session_id,
         _option(options, "signal"),
+        _option(options, "timeoutMs"),
     )
     keep_connection = True
     use_cached_context = _option(options, "transport") in {"websocket-cached", "auto"}
@@ -1017,7 +1038,7 @@ def stream_openai_codex_responses(
             url = resolve_codex_url(model.baseUrl)
             signal = _option(options, "signal")
 
-            async with httpx.AsyncClient(follow_redirects=True) as client:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=_resolve_codex_timeout(options)) as client:
                 last_error: RuntimeError | None = None
                 for attempt in range(MAX_RETRIES + 1):
                     if signal_aborted(signal):

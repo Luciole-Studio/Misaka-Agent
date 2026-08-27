@@ -273,6 +273,7 @@ async def process_responses_stream(
     current_block: ThinkingContent | TextContent | ToolCall | None = None
     current_tool_partial_json = ""
     blocks = output.content
+    saw_terminal = False
 
     def block_index() -> int:
         return len(blocks) - 1
@@ -428,6 +429,7 @@ async def process_responses_stream(
                 current_block = None
                 stream.push(ToolCallEndEvent(contentIndex=block_index(), toolCall=tool_call, partial=output))
         elif event_type == "response.completed":
+            saw_terminal = True
             response = event.get("response")
             if isinstance(response, dict):
                 if isinstance(response.get("id"), str):
@@ -477,6 +479,16 @@ async def process_responses_stream(
             if isinstance(incomplete_details, dict) and incomplete_details.get("reason"):
                 raise RuntimeError(f"incomplete: {incomplete_details['reason']}")
             raise RuntimeError("Unknown error (no error details in response)")
+
+    if not saw_terminal:
+        # A proxy or an idle timeout can close the SSE connection cleanly mid-response.
+        # Without this the caller sees a normal return and reports the constructor's
+        # default stopReason="stop": half a message delivered as a finished turn, with
+        # zero usage and no TextEndEvent for the block still open. Every other family
+        # guards this (anthropic on message_stop, completions on finish_reason).
+        # An abort never reaches here -- it surfaces as an exception out of the event
+        # iterable, so it stays distinguishable from a truncated stream.
+        raise RuntimeError("Responses stream ended before response.completed")
 
 
 __all__ = [

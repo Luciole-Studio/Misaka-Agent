@@ -1007,7 +1007,14 @@ def stream_anthropic(
                     elif isinstance(block, ThinkingContent):
                         stream.push(ThinkingEndEvent(contentIndex=content_index, content=block.thinking, partial=output))
                     elif isinstance(block, ToolCall):
-                        block.arguments = parse_streaming_json(tool_partial_json.get(provider_index, ""))
+                        # Only the deltas may overwrite what content_block_start inlined:
+                        # compatible endpoints (proxies, gateways) put the whole input in the
+                        # start block and send no input_json_delta, and parsing the empty
+                        # buffer would hand the tool {} instead. Same guard as the
+                        # openai-completions and openai-responses adapters.
+                        accumulated_json = tool_partial_json.get(provider_index, "")
+                        if accumulated_json:
+                            block.arguments = parse_streaming_json(accumulated_json)
                         stream.push(ToolCallEndEvent(contentIndex=content_index, toolCall=block, partial=output))
                     continue
 
