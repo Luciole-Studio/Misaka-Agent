@@ -524,6 +524,16 @@ class SettingsManager:
     def setQuietStartup(self, quiet: bool) -> None:
         self._set_global_value("quietStartup", quiet)
 
+    def getEnableInstallTelemetry(self) -> bool:
+        # Defaults to true, as upstream: the setting answers "may this install be
+        # identified to a service", and pi ships attribution headers on that answer.
+        # MISAKA sends nothing of its own; the answer exists so an extension that does
+        # has one place to ask.
+        return self._nullish(self.settings.get("enableInstallTelemetry"), True)
+
+    def setEnableInstallTelemetry(self, enabled: bool) -> None:
+        self._set_global_value("enableInstallTelemetry", enabled)
+
     def getShellCommandPrefix(self) -> str | None:
         return self.settings.get("shellCommandPrefix")
 

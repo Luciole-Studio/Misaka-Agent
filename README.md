@@ -49,7 +49,7 @@ Everything lives under `~/.misaka/`:
 
 | Where | What |
 |---|---|
-| `agent/settings.json` | engine settings; `defaultProvider` / `defaultModel` are the product defaults (`/model` writes them) |
+| `agent/settings.json` | engine settings; `defaultProvider` / `defaultModel` are the product defaults (picking a model in the `/model` selector writes them; `/model <name>` only switches this session) |
 | `agent/auth.json` | stored credentials (`/login`), kept at mode 0600 |
 | `agent/models.json` | custom providers and models (an OpenAI-compatible gateway, a local server); their IDs are valid `defaultModel` values |
 | `profiles/last_order/` | Last Order: persona (`SOUL.md`), MCP servers (`config.yaml`, `mcp/`), `skills/`, and `config.json` `{"model": "..."}` to pin her model |
@@ -77,11 +77,14 @@ Paths — each is a directory or file MISAKA owns:
 | `MISAKA_TASKS` | `~/.misaka/tasks` | per-card state: sessions, reports, locks |
 | `MISAKA_SUBAGENT_DIR` | `~/.misaka/subagents` | subagent state |
 | `MISAKA_PAGEINDEX` | `~/.misaka/pageindex` | the document corpus index |
+| `MISAKA_OCR_LANGS` | `eng+chi_sim+jpn` | tesseract language codes for scanned PDFs, joined with `+`; needs `ocrmypdf` on PATH (`brew install ocrmypdf`) |
 | `MISAKA_RUNS_HOME` | `~/.misaka/runs` | research run artifacts |
 | `MISAKA_WORKTREE_DIR` | `~/.misaka/worktrees` | git worktrees for isolated agents |
 | `MISAKA_AGENT_MEMORY_HOME` | `~/.misaka/memory` | agent memory files |
 | `MISAKA_NET_SOCK` / `MISAKA_NET_SNAPSHOT` | `~/.misaka/net.sock` / `net.json` | the panel daemon's socket and roster snapshot |
 | `MISAKA_INPUT_HISTORY` | none — the feature is off unless set | file for persistent chat input history |
+| `MISAKA_TELEMETRY` | unset — the `enableInstallTelemetry` setting decides (default on) | whether this install may be identified to an outside service; set at all (`0` included) and it wins over the setting |
+| `MISAKA_TIMING` | `0` | `1` prints startup timings to stderr, grouped by namespace (`main`, `extensions`) |
 | `MISAKA_MCP_CONFIG` | the profile's `mcp/` | MCP server configuration |
 | `MISAKA_MCP_CACHE` | `~/.misaka/cache/mcp_schema_cache.json` | cached MCP tool schemas |
 
