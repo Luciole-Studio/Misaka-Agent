@@ -9,6 +9,31 @@ from contextlib import asynccontextmanager
 from misaka.agent.guards import install_guards
 from misaka.agent.request_budget import install_turn_budget
 
+# ``NoProgressGuard``'s vocabulary: the tools a session can call all day without the world
+# changing or one new fact arriving. Assembled here because it is a fact about how this
+# process composes a session (see ``misaka.app.composition`` for who registers what), not
+# about how the guard counts.
+#
+# Everything absent is work and resets the streak -- edit/write/bash, the web and download
+# tools, ``doc_add`` and ``skill_manage`` (both write), ``coverage_scan`` (it queries
+# OpenAlex), ``Agent`` (delegating is work even though the permission layer files it under
+# management), and every MCP or skill tool this list has never heard of. ``AskUserQuestion``
+# is deliberately absent too: it only exists where a person is watching
+# (``misaka.extensions.ask_user``), and waiting on a human is not idling.
+BOOKKEEPING_TOOLS = frozenset({
+    # Builtins that only look (misaka.core.tools).
+    "read", "grep", "find", "ls",
+    # The card's own paperwork (misaka.network.todo.tools_for).
+    "misaka_todo", "misaka_todo_list", "misaka_my_card", "misaka_card_note",
+    # Corpus and skill inspection (misaka.extensions.documents, .skills).
+    "doc_list", "doc_outline", "doc_read", "doc_find", "doc_verify",
+    "skills_list", "skill_view",
+    # The read-only view of a research run (misaka.research.tools).
+    "misaka_research_view",
+    # Inbox and sub-agent management (misaka.network.messages, .extensions.sisters.subagent).
+    "SendMessage", "TaskOutput", "TaskStop",
+})
+
 
 def run_coro(coro):
     """Run a coroutine from synchronous code, using a helper thread if needed."""
@@ -167,8 +192,10 @@ async def _run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
             return {"text": None, "timed_out": False, "error": err, "budget_usage": None}
         limiter = install_turn_budget(session)
         # Headless sessions have nobody watching them repeat themselves into their
-        # whole budget; the guards are that reader.
-        install_guards(session, limiter, wall_seconds=timeout)
+        # whole budget, or spend it entirely on their own to-do list; the guards are
+        # that reader.
+        install_guards(session, limiter, wall_seconds=timeout,
+                       bookkeeping_tools=BOOKKEEPING_TOOLS)
         if on_event:
             session.subscribe(lambda ev: on_event(event_line(ev)))
 

@@ -1,4 +1,4 @@
-"""Three guards against model pathologies the agent loop cannot fix by itself.
+"""Four guards against model pathologies the agent loop cannot fix by itself.
 
 Pure logic and nothing else: a guard is handed one turn's observation and
 answers with a :class:`GuardDecision`. No guard reads the database, the clock,
@@ -66,8 +66,17 @@ def _batch_signature(tool_calls: Any) -> str:
     return "\x00".join(parts)
 
 
+def _call_names(tool_calls: Any) -> list[str]:
+    """Just the names out of a turn's batch, in call order."""
+    return [str(read_field(call, "name", "") or "") for call in tool_calls]
+
+
+def _join_names(names: Any) -> str:
+    return "、".join(sorted(set(names)))
+
+
 def _batch_names(tool_calls: Any) -> str:
-    return "、".join(sorted({str(read_field(call, "name", "") or "") for call in tool_calls}))
+    return _join_names(_call_names(tool_calls))
 
 
 class RepeatedToolCallGuard:
@@ -311,8 +320,85 @@ class FinalizationReserve:
         )
 
 
+# --------------------------------------------------------------------------
+# 4. Turns that spend the allowance without doing any work
+# --------------------------------------------------------------------------
+
+# borrowed from FrontierAgent(workflows/agent_team/observers/no_progress_guard.py), see
+# its comment for the measured basis; revisit with local data.
+NO_PROGRESS_HINT_STREAK = 6
+NO_PROGRESS_STOP_STREAK = 12
+
+
+class NoProgressGuard:
+    """Count consecutive turns that touch nothing but bookkeeping tools.
+
+    ``bookkeeping`` is the vocabulary of names a session can call forever without the
+    world changing or one new fact arriving: its own to-do list, its own card, the
+    corpus index, a file it could already see. The caller supplies it -- misaka's tool
+    surface differs per session kind and grows at run time with MCP servers and
+    skills, so the only place that knows the real list is where the session is
+    assembled (:mod:`misaka.platform.session`). A list frozen in here would be wrong
+    within a release and unreachable from a test.
+
+    A name the vocabulary has never heard of counts as work, and that asymmetry is the
+    whole safety margin: an unknown MCP tool resets the streak instead of being
+    accused of idling.
+
+    One read-only turn is not the pathology and neither is a read-heavy stretch that
+    produces something: a single turn that calls anything real puts the counter back
+    to zero, and only an unbroken run with no work at all in it reaches the
+    thresholds. A tool-free turn resets it too -- misaka's inner loop ends there, so
+    that turn is the model writing rather than looking, and the next request must
+    start clean rather than inherit a streak.
+    """
+
+    def __init__(
+        self,
+        bookkeeping: Any = (),
+        *,
+        hint_streak: int = NO_PROGRESS_HINT_STREAK,
+        stop_streak: int = NO_PROGRESS_STOP_STREAK,
+    ) -> None:
+        self.bookkeeping = frozenset(str(name).casefold() for name in (bookkeeping or ()))
+        # 2 is the floor: hinting at 1 would fire on a session's first status check.
+        self.hint_streak = max(2, int(hint_streak))
+        # Always at least one turn of hint before the stop, so the model gets a chance
+        # to act on the warning.
+        self.stop_streak = max(self.hint_streak + 1, int(stop_streak))
+        self._streak = 0
+        self._hinted = False
+
+    def observe(self, tool_names: Any) -> GuardDecision:
+        """``tool_names``: the names this turn called, in any iterable."""
+        names = [str(name or "") for name in tool_names]
+        idle = bool(names) and all(name.casefold() in self.bookkeeping for name in names)
+        if not idle:
+            self._streak = 0
+            self._hinted = False
+            return _NONE
+
+        self._streak += 1
+        if self._streak >= self.stop_streak:
+            return GuardDecision(
+                "stop",
+                f"你已经连续 {self._streak} 轮没有任何实质产出,只在记录和查看"
+                f"({_join_names(names)})。现在停止调用工具,"
+                "把手上已有的结论和产出物写成完整的交付。",
+            )
+        if self._streak >= self.hint_streak and not self._hinted:
+            self._hinted = True
+            return GuardDecision(
+                "hint",
+                f"你已经连续 {self._streak} 轮只在记录和查看({_join_names(names)}),"
+                "没有产出任何实质结果。请开始真正的动作:改文件、跑命令、查资料、交出产出物;"
+                "如果该做的已经做完,就直接收尾。",
+            )
+        return _NONE
+
+
 class _SessionGuards:
-    """The three guards wired to one engine session's turn cycle.
+    """The four guards wired to one engine session's turn cycle.
 
     A ``stop`` verdict does not cut the loop where it stands. Every stop message is an
     instruction to *say* something ("stop calling tools and write the deliverable now"),
@@ -324,7 +410,13 @@ class _SessionGuards:
     the end of it.
     """
 
-    def __init__(self, session: Any, limiter: Any = None, wall_seconds: float | None = None):
+    def __init__(
+        self,
+        session: Any,
+        limiter: Any = None,
+        wall_seconds: float | None = None,
+        bookkeeping_tools: Any = (),
+    ):
         self._session = session
         self._limiter = limiter
         # The wall clock is the one allowance every headless run has: `run_session`
@@ -334,6 +426,7 @@ class _SessionGuards:
         self._wall_start = time.monotonic() if self._wall_total > 0 else 0.0
         self.repeated = RepeatedToolCallGuard()
         self.text = TextRepetitionGuard()
+        self.no_progress = NoProgressGuard(bookkeeping_tools)
         self.reserve = FinalizationReserve()
         self.stopped: str = ""
         self._forcing = False
@@ -354,8 +447,12 @@ class _SessionGuards:
     def _resolve(self, decisions: list[GuardDecision], tool_calls: Any) -> GuardDecision | None:
         """The one verdict worth acting on, after vetoing a text stop that has progress.
 
+        ``decisions[1]`` is the text guard's, by the order ``after_turn`` builds the list.
+
         ``RepeatedToolCallGuard`` stops on proof of a loop: the same call, byte for byte.
-        ``TextRepetitionGuard`` has no such proof -- a model that narrates each step with
+        ``NoProgressGuard`` stops on proof of its own: a whole run of turns in which
+        nothing the session did could change anything. ``TextRepetitionGuard`` has no such
+        proof -- a model that narrates each step with
         the same sentence and a different filename measures 0.879 similar while doing
         genuinely different work, and CJK per-character bigrams sit higher again. A
         changed tool-call signature is the evidence of progress the text guard lacks, so
@@ -372,6 +469,21 @@ class _SessionGuards:
             (d for d in decisions if d.action == "hint"), None
         )
 
+    def _observe_prose_turn(self, text: str) -> None:
+        """Exactly what an ordinary tool-free turn does to the guards, verdicts discarded.
+
+        Three of the four have per-request state and are handled here: the two streak
+        guards clear on an empty batch, and the text guard takes the turn into its window
+        the way it would any other prose. ``FinalizationReserve`` is absent on purpose --
+        its tier is monotonic by design (one wind-down per session, not per request), so
+        it has nothing to reset and cannot fire twice. ``_previous_calls`` is cleared with
+        them, so the next request's first batch reads as progress in ``_resolve``.
+        """
+        self.repeated.observe(())
+        self.text.observe(text)
+        self.no_progress.observe(())
+        self._previous_calls = ""
+
     async def after_turn(self, context: Any) -> bool:
         message = read_field(context, "message")
         content = read_field(message, "content", []) or []
@@ -384,14 +496,23 @@ class _SessionGuards:
 
         if self._forced_turn:
             # The wrap-up turn ran with no tools available. Whatever it produced is the
-            # answer; end here rather than letting a guard fire on it a second time.
+            # answer, so no verdict of its own is acted on -- but the guards must still
+            # see it. This is the only tool-free turn the whole request has, and a
+            # tool-free turn is the documented reset (see RepeatedToolCallGuard and
+            # NoProgressGuard): `_run_session` keeps the session alive for follow-up
+            # turns, so a streak left standing here stops the next request's first call.
             self._forcing = self._forced_turn = False
+            self._observe_prose_turn(text)
             return True
 
         # Every turn is observed, tool-free ones included: that call is what tells
         # RepeatedToolCallGuard one request ended, so the next request may legitimately
         # open with the same call.
-        decisions = [self.repeated.observe(tool_calls), self.text.observe(text)]
+        decisions = [
+            self.repeated.observe(tool_calls),
+            self.text.observe(text),  # index 1: _resolve downgrades this one
+            self.no_progress.observe(_call_names(tool_calls)),
+        ]
         allowance = self._scarcest_allowance()
         if allowance is not None:
             decisions.append(self.reserve.observe(*allowance))
@@ -441,12 +562,19 @@ class _SessionGuards:
 
 
 def install_guards(
-    session: Any, limiter: Any = None, wall_seconds: float | None = None
+    session: Any,
+    limiter: Any = None,
+    wall_seconds: float | None = None,
+    bookkeeping_tools: Any = (),
 ) -> _SessionGuards | None:
     """Install one idempotent set of pathology guards on an engine session.
 
     Composed onto whatever ``shouldStopAfterTurn`` the session already carries, never
     replacing it: a guard stop and a caller stop are independent reasons to end a run.
+
+    ``bookkeeping_tools`` is ``NoProgressGuard``'s vocabulary, empty by default: a caller
+    that cannot say which of its tools are paperwork gets no opinion about idling rather
+    than a guess. ``misaka.platform.session`` passes the real list.
     """
 
     agent = getattr(session, "agent", None)
@@ -456,7 +584,7 @@ def install_guards(
     if isinstance(existing_guards, _SessionGuards):
         return existing_guards
 
-    guards = _SessionGuards(session, limiter, wall_seconds)
+    guards = _SessionGuards(session, limiter, wall_seconds, bookkeeping_tools)
     original = agent.shouldStopAfterTurn
     original_prepare = getattr(agent, "prepareNextTurn", None)
 
@@ -486,6 +614,7 @@ def install_guards(
 __all__ = [
     "FinalizationReserve",
     "GuardDecision",
+    "NoProgressGuard",
     "RepeatedToolCallGuard",
     "TextRepetitionGuard",
     "install_guards",
