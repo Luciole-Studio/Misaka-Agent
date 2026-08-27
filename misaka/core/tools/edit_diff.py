@@ -195,7 +195,16 @@ def strip_bom(content: str) -> _StripBomResult:
     return _StripBomResult(bom="\ufeff", text=content[1:]) if content.startswith("\ufeff") else _StripBomResult(bom="", text=content)
 
 
-def _count_occurrences(content: str, old_text: str) -> int:
+def _count_occurrences(content: str, old_text: str, *, used_fuzzy_match: bool) -> int:
+    """Occurrences of ``old_text`` in ``content``, counted where the match was found.
+
+    An exact match is unique or not in the content's own coordinates; folding both sides
+    first would refuse a uniquely located oldText because an unrelated line happens to
+    normalize to the same text (``x—y`` next to ``x-y``, curly next to straight quotes).
+    Only a fuzzy match is genuinely ambiguous in normalized coordinates.
+    """
+    if not used_fuzzy_match:
+        return content.count(old_text)
     return normalize_for_fuzzy_match(content).count(normalize_for_fuzzy_match(old_text))
 
 
@@ -252,7 +261,10 @@ def apply_edits_to_normalized_content(
     ]
 
     for index, edit in enumerate(normalized_edits):
-        if edit.oldText == "":
+        # Empty *after* normalization, not just literally empty: matching folds each line's
+        # trailing whitespace away, so a whitespace-only oldText would match at offset 0 with
+        # length 0 and splice newText in as an insertion reported as a replacement.
+        if normalize_for_fuzzy_match(edit.oldText) == "":
             raise _get_empty_old_text_error(path, index, len(normalized_edits))
 
     initial_matches = [fuzzy_find_text(normalized_content, edit.oldText) for edit in normalized_edits]
@@ -268,7 +280,9 @@ def apply_edits_to_normalized_content(
         if not match_result.found:
             raise _get_not_found_error(path, index, len(normalized_edits))
 
-        occurrences = _count_occurrences(base_content, edit.oldText)
+        occurrences = _count_occurrences(
+            base_content, edit.oldText, used_fuzzy_match=match_result.usedFuzzyMatch
+        )
         if occurrences > 1:
             raise _get_duplicate_error(path, index, len(normalized_edits), occurrences)
 
