@@ -40,6 +40,10 @@ _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 INIT_TIMEOUT = float(os.environ.get("MISAKA_MCP_INIT_TIMEOUT", "30"))
 CALL_TIMEOUT = float(os.environ.get("MISAKA_MCP_CALL_TIMEOUT", "120"))
 PROTOCOL_VERSION = "2025-06-18"
+# One JSON-RPC message is one line, and MCP tools routinely return file or page contents:
+# asyncio's default 64 KiB StreamReader limit would turn a run-of-the-mill result into a
+# ValueError out of readline(). 32 MiB is far past any sane tool result.
+STREAM_LIMIT = 32 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +183,7 @@ class McpClient:
         self._lock = asyncio.Lock()
         self._start_lock = asyncio.Lock()
         self._pump_task = None
+        self._ready = False       # handshake and tools/list completed; a live process alone is not enough
 
     async def start(self):
         cmd = [self.cfg.get("command") or ""] + list(self.cfg.get("args") or [])
@@ -210,15 +215,16 @@ class McpClient:
             self.proc = await asyncio.create_subprocess_exec(
                 *cmd, env=env, cwd=self.cfg.get("cwd") or None,
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                stderr=stderr_target)
+                stderr=stderr_target, limit=STREAM_LIMIT)
         finally:
             if stderr_log is not None:
                 stderr_log.close()  # the child holds its own descriptor
         # Hold the reference: the loop keeps only a weak one, and a collected pump
         # would leave every request waiting forever.
-        self._pump_task = asyncio.ensure_future(self._pump())
+        self._pump_task = asyncio.ensure_future(self._pump(self.proc))
         await self._handshake()
         self.tools = (await self._request("tools/list", {})).get("tools") or []
+        self._ready = True         # only now may ensure_started hand this client to a caller
         return self.tools
 
     async def _handshake(self):
@@ -228,25 +234,46 @@ class McpClient:
             "clientInfo": {"name": "misaka", "version": "1.0"}})
         await self._notify("notifications/initialized", {})
 
-    async def _pump(self):
-        """Read the server's output and wake the waiter for each response ID."""
+    async def _pump(self, proc):
+        """Read the server's output and wake the waiter for each response ID.
+
+        Takes its own process handle: a restart may swap ``self.proc`` out from under a
+        pump that is still winding down.
+        """
+        reason = None
         try:
             while True:
-                raw = await self.proc.stdout.readline()
+                try:
+                    raw = await proc.stdout.readline()
+                except ValueError as e:
+                    # readline() reports a line past STREAM_LIMIT as ValueError, and the tail
+                    # of that line is still arriving: this stream can no longer be resynchronised.
+                    # Fail closed with the real reason so ensure_started() gives the next call
+                    # a fresh process instead of one nobody is reading.
+                    reason = (f"MCP server {self.name} sent a message past the "
+                              f"{STREAM_LIMIT}-byte line limit and was disconnected ({e}).")
+                    break
                 if not raw:
                     break
                 try:
                     msg = json.loads(raw.decode("utf-8", "replace").strip())
                 except ValueError:
-                    continue
+                    continue                     # a stray non-JSON line (a print) is not fatal
                 fut = self._pending.pop(msg.get("id"), None)
                 if fut and not fut.done():
                     fut.set_result(msg)
+        except Exception as e:  # noqa: BLE001 - the pump owns the connection; any failure must reach the waiters
+            reason = f"MCP server {self.name} connection failed: {e}"
         finally:
+            if proc is self.proc:                # a restart may already have replaced this connection
+                self._ready = False              # a dead pump can never resolve anything again
+            err = RuntimeError(reason or f"MCP server {self.name} exited.")
             for fut in self._pending.values():   # Wake every waiter when the process dies, or they hang forever.
                 if not fut.done():
-                    fut.set_exception(RuntimeError(f"MCP server {self.name} exited."))
+                    fut.set_exception(err)
             self._pending.clear()
+            if reason is not None:
+                await self._close(proc)          # the process is still alive; release it before restarting
 
     async def _send(self, obj):
         if not self.proc or self.proc.returncode is not None:
@@ -273,13 +300,21 @@ class McpClient:
             raise RuntimeError(f"{self.name}: {msg['error'].get('message') or msg['error']}")
         return msg.get("result") or {}
 
+    def _usable(self):
+        """Live process *and* a completed handshake: a client whose start() timed out or whose
+        pump died is still alive as a process, and using it means waiting out the call timeout."""
+        return self._ready and self.proc is not None and self.proc.returncode is None
+
     async def ensure_started(self):
         """Connect on demand: the process starts on the first real tool call, not at session start."""
-        if self.proc is not None and self.proc.returncode is None:
+        if self._usable():
             return
         async with self._start_lock:
-            if self.proc is None or self.proc.returncode is not None:
-                await self.start()
+            if self._usable():
+                return
+            if self.proc is not None:
+                await self.stop()          # tear down the half-started one before replacing it
+            await self.start()
 
     async def call(self, tool, args):
         await self.ensure_started()
@@ -299,15 +334,23 @@ class McpClient:
         return text
 
     async def stop(self):
-        if self.proc and self.proc.returncode is None:
+        self._ready = False
+        await self._close(self.proc)
+
+    @staticmethod
+    async def _close(proc):
+        if proc and proc.returncode is None:
             try:
-                self.proc.stdin.close()
+                proc.stdin.close()
             except (OSError, RuntimeError):
                 pass
             try:
-                await asyncio.wait_for(self.proc.wait(), 5)
+                await asyncio.wait_for(proc.wait(), 5)
             except TimeoutError:
-                self.proc.kill()
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass               # a concurrent close (the pump's) already reaped it
 
 
 def _schema_of(tool):
