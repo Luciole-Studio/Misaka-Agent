@@ -348,7 +348,12 @@ def register(harn):
             from misaka.ui.panel import client as net
             wanted = set(params.task_ids or [])
             lines, started = [], 0
-            for row in db.fair_ready(con, lane="workers", workspace=workspace):
+            # fair_ready reconciles every card file in the project before it picks, and in panel
+            # mode this is usually a fresh Last Order's first pass -- a cold mtime cache, so the
+            # full read-and-parse plus an UPDATE per drifted row. That is filesystem work, so it
+            # goes off the loop the way the net.request below already does.
+            picked = await asyncio.to_thread(db.fair_ready, con, lane="workers", workspace=workspace)
+            for row in picked:
                 if wanted and row["id"] not in wanted:
                     continue
                 try:
