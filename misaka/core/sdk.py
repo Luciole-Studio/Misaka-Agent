@@ -30,6 +30,7 @@ from misaka.core.messages import convertToLlm
 from misaka.core.model_registry import ModelRegistry
 from misaka.core.model_resolver import findInitialModel
 from misaka.core.prompt_templates import PromptTemplate
+from misaka.core.provider_attribution import merge_provider_attribution_headers
 from misaka.core.resource_loader import DefaultResourceLoader, ResourceLoader
 from misaka.core.session_manager import SessionManager, get_default_session_dir
 from misaka.core.settings_manager import SettingsManager
@@ -246,7 +247,14 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
 
         provider_retry_settings = settings_manager.getProviderRetrySettings()
         resolved_stream_options = _to_dict(stream_options)
-        headers = _merge_headers(auth.get("headers"), resolved_stream_options.get("headers"))
+        # pi sdk.ts:337 merges attribution over the auth headers before the caller's own,
+        # so an explicit header always wins over one of ours.
+        headers = merge_provider_attribution_headers(
+            model_value,
+            settings_manager,
+            session_manager.getSessionId(),
+            _merge_headers(auth.get("headers"), resolved_stream_options.get("headers")),
+        )
         # pi sdk.ts:330-339 hands the merged headers to `before_provider_headers` handlers right
         # here (models.ts:657, after mergeHeaders and before the provider call). Handlers mutate
         # the mapping in place; a None value deletes that header (pi utils/headers.ts).
