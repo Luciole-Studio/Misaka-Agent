@@ -25,7 +25,6 @@ except ImportError:  # optional extra: misaka[bedrock]
 
 from misaka.ai.models import calculate_cost
 from misaka.ai.providers._common import (
-    _await_maybe_with_signal,
     _await_with_signal,
     _close_stream,
     _empty_usage,
@@ -222,7 +221,12 @@ def stream_bedrock(
         response_stream: Any = None
 
         try:
-            client = _option(options, "client") or create_client(model, options)
+            client = _option(options, "client")
+            if not client:
+                # boto3's Session/client construction reads botocore's JSON service models
+                # off disk; on the loop that blocks every other stream, the TUI and the
+                # lease heartbeats along with it.
+                client = await asyncio.to_thread(create_client, model, options)
             cache_retention = resolve_cache_retention(_option(options, "cacheRetention"))
             inference_max_tokens = _option(options, "maxTokens")
             if inference_max_tokens is None and is_anthropic_claude_model(model):
@@ -251,7 +255,10 @@ def stream_bedrock(
                 raise RuntimeError("Request was aborted")
 
             request_input = {key: value for key, value in command_input.items() if value is not None}
-            response = await _await_maybe_with_signal(client.converse_stream(**request_input), signal)
+            # Synchronous boto3: DNS, TLS, upload and time-to-first-byte all happen inside
+            # this one call, so it has to run off the loop. The stream iteration below was
+            # already off it; only the request that opens the stream was left behind.
+            response = await _await_with_signal(asyncio.to_thread(client.converse_stream, **request_input), signal)
             response_metadata = response.get("ResponseMetadata", {}) if isinstance(response, dict) else {}
             on_response = _option(options, "onResponse")
             if callable(on_response) and response_metadata.get("HTTPStatusCode") is not None:

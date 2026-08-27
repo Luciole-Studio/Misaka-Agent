@@ -321,8 +321,6 @@ def build_request_kwargs(model: Model, options: StreamOptions | Mapping[str, Any
     request_kwargs: dict[str, Any] = {
         "retries": {"strategy": "none"},
     }
-    if _option(options, "signal") is not None:
-        request_kwargs["signal"] = _option(options, "signal")
     headers: dict[str, str] = {}
     if model.headers:
         headers.update(model.headers)
@@ -374,13 +372,15 @@ def build_chat_payload(
 
 
 def _prepare_sdk_request_kwargs(request_options: Mapping[str, Any]) -> dict[str, Any]:
+    """Only what ``Chat.stream_async`` declares: it is generated code with a fixed keyword
+    list and no ``**kwargs``, so anything extra -- an abort signal above all, which the
+    agent loop always supplies -- is a TypeError raised before the request is sent.
+    Abort is handled here by ``_await_with_abort``/``_iterate_with_abort`` instead.
+    """
     sdk_request_kwargs: dict[str, Any] = {}
     headers = request_options.get("headers")
     if headers is not None:
         sdk_request_kwargs["http_headers"] = dict(headers)
-    signal = request_options.get("signal")
-    if signal is not None:
-        sdk_request_kwargs["signal"] = signal
     retries = request_options.get("retries")
     if retries is not None:
         sdk_request_kwargs["retries"] = retries
