@@ -84,7 +84,7 @@ def _write(con, run, cfg, worker, contract):
     session_dir = runs.session_dir(run, "root-lo")
     _obj, text, err = worker.run_llm_json(
         os.path.join(cfg["roles_root"], "last_order"), prompt,
-        cfg["provider"], cfg["default_model"], cwd=root, tools=["read"],
+        cfg["provider"], cfg["default_model"], cwd=root, tools=["read", "web_search"],
         timeout=runs.call_timeout(cfg, max(900, int(cfg.get("judge_timeout", 600)))), soul=False, raw=True,
         usage_db=cfg.get("db"), usage_task_id=run["id"], usage_generation=1,
         usage_token_cap=cfg.get("token_cap"), session_dir=session_dir,

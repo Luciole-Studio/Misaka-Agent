@@ -60,6 +60,10 @@ CFG = {
     # Hand-maintained list of recognised ally CLIs. This file is the single source of
     # truth (seeded on first run; deliberately no environment-variable override).
     "allies": "~/.misaka/allies.json",
+    # Web search: which backend, whether the no-key vendor ring may serve, and the
+    # vendor credentials -- one file rather than an environment variable per vendor,
+    # because a sub-agent child inherits a scrubbed environment but reads the same file.
+    "web_config": os.environ.get("MISAKA_WEB_CONFIG", "~/.misaka/web.json"),
     "net_sock": os.environ.get("MISAKA_NET_SOCK", "~/.misaka/net.sock"),
     "net_snapshot": os.environ.get("MISAKA_NET_SNAPSHOT", "~/.misaka/net.json"),
     "tasks_root": os.path.expanduser(os.environ.get("MISAKA_TASKS", "~/.misaka/tasks")),

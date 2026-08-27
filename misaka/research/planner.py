@@ -194,7 +194,7 @@ def _catalog_text(items):
 
 
 def _call(worker, cfg, prompt, *, cwd, session_dir, continue_session=False,
-          profile="last_order", tools=("read",), raw=False, task_id=None,
+          profile="last_order", tools=("read", "web_search"), raw=False, task_id=None,
           timeout=None, thinking="high", model=None):
     kwargs = {
         "cwd": cwd, "tools": list(tools),
@@ -373,7 +373,8 @@ This is a targeted research node. Address the issue that undermined the parent c
 {_catalog_text(methods)}
 """
     obj, raw, err = _call(
-        worker, cfg, prompt, cwd=root, session_dir=session_dir, tools=("read", "coverage_scan"),
+        worker, cfg, prompt, cwd=root, session_dir=session_dir,
+        tools=("read", "coverage_scan", "web_search"),
         continue_session=bool(find_most_recent_session(session_dir)), task_id=run["id"],
     )
     if err:
