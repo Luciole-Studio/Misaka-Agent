@@ -130,6 +130,16 @@ def continue_flags(session_file, session_dir):
     return None
 
 
+def contract_flags(text):
+    """Return engine flags that deliver ``text`` as the session's first message.
+
+    A card body is whatever its author wrote, so it may open with "-" or "---"; passed as a
+    bare positional it was read as an option instead -- the session died at parse time with
+    no turn at all, and the daemon redispatched the identical card until the reclaim cap
+    failed it. The end-of-options terminator is what keeps the contract prose."""
+    return ["--", text]
+
+
 def launch(task_id, resume_only=False, say=None):
     """``resume_only`` reopens the saved session without resending the contract. ``say`` (with
     it) is delivered as the first turn of a new attempt: the daemon claimed the card
@@ -175,11 +185,11 @@ def launch(task_id, resume_only=False, say=None):
         flags += cont
         if say:
             worker.set_aside_report(task_id)              # the new attempt submits fresh proof
-            flags.append(say + worker.report_instructions(generation))
+            flags += contract_flags(say + worker.report_instructions(generation))
     else:
         if cont:
             flags += cont
-        flags.append(prompt)
+        flags += contract_flags(prompt)
 
     os.environ.update({
         "MISAKA_PROFILE_DIR": profile_dir,

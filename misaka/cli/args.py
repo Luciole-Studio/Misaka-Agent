@@ -73,6 +73,12 @@ def parse_args(args: list[str]) -> Args:
         arg = args[index]
         has_next = index + 1 < len(args)
 
+        if arg == "--":
+            # End of options. A message is prose the author wrote -- a card contract whose
+            # body opens with "-" or "---" is the case that forced this -- so past the
+            # terminator nothing is read as a flag again.
+            result.messages.extend(args[index + 1:])
+            break
         if arg in {"--help", "-h"}:
             result.help = True
         elif arg in {"--version", "-v"}:
@@ -257,6 +263,7 @@ Options:
   --export <file>                Export session file to HTML and exit
   --list-models [search]         List available models (with optional fuzzy search)
   --verbose                      Force verbose startup (overrides quietStartup setting)
+  --                             End of options: every remaining argument is a message
   --help, -h                     Show this help
   --version, -v                  Show version number
 
