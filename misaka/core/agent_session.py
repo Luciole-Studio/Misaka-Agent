@@ -68,10 +68,13 @@ from misaka.core.extensions.types import (
     ExtensionCommandContextActions,
     ExtensionError,
     ExtensionErrorListener,
+    ExtensionMode,
     ExtensionUIContext,
+    RegisteredTool,
     ToolDefinition,
     ToolInfo,
 )
+from misaka.core.extensions.wrapper import wrap_registered_tool
 from misaka.core.messages import BashExecutionMessage
 from misaka.core.model_registry import ModelRegistry
 from misaka.core.prompt_templates import PromptTemplate, expand_prompt_template
@@ -90,7 +93,6 @@ from misaka.core.tools import create_all_tool_definitions
 from misaka.core.tools.bash import create_local_bash_operations
 from misaka.core.tools.tool_definition_wrapper import (
     create_tool_definition_from_agent_tool,
-    wrap_tool_definition,
 )
 from misaka.ui.tui.interactive.theme.theme import theme
 from misaka.utils.paths import resolve_path
@@ -150,6 +152,8 @@ class AgentSessionConfig:
 @dataclass(slots=True)
 class ExtensionBindings:
     uiContext: ExtensionUIContext | None = None
+    # Which run mode is driving the session (pi agent-session.ts:234,2421-2423).
+    mode: ExtensionMode | None = None
     commandContextActions: ExtensionCommandContextActions | None = None
     abortHandler: Callable[[], None] | None = None
     shutdownHandler: Callable[[], None] | None = None
@@ -243,17 +247,24 @@ class AgentSession:
         self._extensionShutdownHandler: Callable[[], None] | None = None
         self._extensionBindings: ExtensionBindings | None = None
         self._extensionUIContext: ExtensionUIContext | None = None
+        self._extensionMode: ExtensionMode = "print"
         self._extensionCommandContextActions: ExtensionCommandContextActions | None = None
         self._extensionErrorListener: ExtensionErrorListener | None = None
         self._steeringMessages: list[str] = []
         self._followUpMessages: list[str] = []
         self._pendingNextTurnMessages: list[dict[str, Any]] = []
         self._pendingBashMessages: list[BashExecutionMessage] = []
+        self._pendingCustomMessages: list[dict[str, Any]] = []
         self._bashAbortController: AbortController | None = None
         self._auto_compaction_abort_controller: AbortController | None = None
         self._compactionAbortController: AbortController | None = None
         self._branchSummaryAbortController: AbortController | None = None
         self._overflow_recovery_attempted = False
+        # True for the whole run driven by _run_agent_prompt, not just the inner agent loop:
+        # retries, auto-compaction and every continue_() between them are still "busy"
+        # (pi agent-session.ts _isAgentRunActive).
+        self._isAgentRunActive = False
+        self._idleWaiters: list[asyncio.Future[None]] = []
         self._retryAbortController: AbortController | None = None
         self._retryAttempt = 0
         self._turnIndex = 0
@@ -299,7 +310,25 @@ class AgentSession:
 
     @property
     def isStreaming(self) -> bool:
-        return self.agent.state.isStreaming
+        """Whether the session is processing an agent run or a post-run continuation.
+
+        This is the run-level flag, not ``agent.state.isStreaming``: the inner loop goes
+        idle between two ``continue_()`` calls, during retry backoff and during
+        auto-compaction, and pi reports busy for all of those (agent-session.ts:900-908).
+        """
+        return self._isAgentRunActive
+
+    @property
+    def isIdle(self) -> bool:
+        """No active agent run, retry, auto-compaction or queued continuation."""
+        return not self._isAgentRunActive
+
+    async def waitForIdle(self) -> None:
+        if self.isIdle:
+            return
+        waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._idleWaiters.append(waiter)
+        await waiter
 
     @property
     def systemPrompt(self) -> str:
@@ -402,7 +431,10 @@ class AgentSession:
     async def abort(self) -> None:
         self.abortRetry()
         self.agent.abort()
-        await self.agent.waitForIdle()
+        # Wait for the whole run to settle, not just the inner agent loop: pi
+        # (agent-session.ts:1599-1603) returns only once the post-run continuation,
+        # retry and auto-compaction windows are done too.
+        await self.waitForIdle()
 
     async def _get_required_request_auth(self, model: Model[Any]) -> dict[str, Any]:
         result = await self._modelRegistry.getApiKeyAndHeaders(model)
@@ -457,6 +489,16 @@ class AgentSession:
                 report_preflight(True)
                 return
 
+            # Compaction replaces agent.state.messages wholesale, so a prompt accepted while
+            # it runs would append into a list that is about to be thrown away.  pi refuses
+            # instead of racing (agent-session.ts:1155-1159).  The extension-command branch
+            # above stays reachable, exactly as in pi.
+            if self._compactionAbortController is not None:
+                raise RuntimeError(
+                    "Cannot submit a prompt while compaction is in progress. "
+                    "Wait for compaction to finish and retry."
+                )
+
             current_text = text
             current_images = None if resolved.images is None else list(resolved.images)
             if self._extensionRunner.has_handlers("input"):
@@ -493,6 +535,7 @@ class AgentSession:
                 )
 
             self._flush_pending_bash_messages()
+            self._flush_pending_custom_messages()
 
             if self.model is None:
                 raise RuntimeError(format_no_model_selected_message())
@@ -505,14 +548,13 @@ class AgentSession:
                     )
                 raise RuntimeError(format_no_api_key_found_message(self.model.provider))
 
+            # Catch a response that was aborted or overflowed before the new prompt goes out.
+            # The user's new prompt is sent below, so do not continue the agent here
+            # (pi agent-session.ts:1230-1234): continuing would emit a whole agent run —
+            # agent_start / turn_* / agent_end — that the user never asked for.
             last_assistant = self._find_last_assistant_message()
-            if last_assistant is not None and await self._check_compaction(last_assistant, False):
-                try:
-                    await self.agent.continue_()
-                    while await self._handle_post_agent_run():
-                        await self.agent.continue_()
-                finally:
-                    self._flush_pending_bash_messages()
+            if last_assistant is not None:
+                await self._check_compaction(last_assistant, False)
 
             messages: list[Any] = []
             messages.append(self._build_user_message(current_text, current_images))
@@ -604,7 +646,11 @@ class AgentSession:
 
     def setSessionName(self, name: str) -> None:
         self.sessionManager.appendSessionInfo(name)
-        self._emit({"type": "session_info_changed", "name": self.sessionManager.getSessionName()})
+        event = {"type": "session_info_changed", "name": self.sessionManager.getSessionName()}
+        self._emit(event)
+        # pi agent-session.ts:3063-3068 sends the same event to the extension runner as well;
+        # only the UI half was ported, so `session_info_changed` handlers never ran.
+        self._spawn_background(self._extensionRunner.emit(event))
 
     def clearQueue(self) -> dict[str, list[str]]:
         steering = list(self._steeringMessages)
@@ -621,14 +667,23 @@ class AgentSession:
     def getFollowUpMessages(self) -> list[str]:
         return list(self._followUpMessages)
 
-    async def setModel(self, model: Model[Any]) -> None:
+    async def setModel(self, model: Model[Any], persist: bool = False) -> None:
+        """Switch the session model.
+
+        The switch is session-only unless ``persist`` is set; only then is the global
+        default in settings.json rewritten (pi agent-session.ts:1636-1656
+        ``if (options.persist)``).  Extensions never pass it, so a plugin that swaps the
+        model for a subtask can no longer change the user's default.
+        """
         if not self._modelRegistry.hasConfiguredAuth(model):
             raise RuntimeError(f"No API key for {model.provider}/{model.id}")
         current = self.model
         thinking_level = self._get_thinking_level_for_model_switch()
         self.agent.state.model = model
         self.sessionManager.appendModelChange(model.provider, model.id)
-        self.settingsManager.setDefaultModelAndProvider(model.provider, model.id)
+        if persist:
+            self.settingsManager.setDefaultModelAndProvider(model.provider, model.id)
+        # Persisting the model deliberately does not rewrite the global thinking default.
         self.setThinkingLevel(thinking_level)
         if not models_are_equal(current, model):
             await self._extensionRunner.emit(
@@ -640,16 +695,23 @@ class AgentSession:
                 }
             )
 
-    def setThinkingLevel(self, level: ThinkingLevel) -> None:
+    def setThinkingLevel(self, level: ThinkingLevel, persist: bool = False) -> None:
+        """Set the session thinking level, clamped to what the model supports.
+
+        Like ``setModel`` the change is session-only unless ``persist`` is set
+        (pi agent-session.ts:1771-1794).  pi persists the *requested* level, not the
+        clamped one, and does so even when the effective level does not change, so the
+        write sits ahead of the unchanged early return.
+        """
         model = self.model
         clamped = level if model is None else clamp_thinking_level(model, level)
         previous_level = self.agent.state.thinkingLevel
         self.agent.state.thinkingLevel = clamped
+        if persist:
+            self.settingsManager.setDefaultThinkingLevel(level)
         if clamped == previous_level:
             return
         self.sessionManager.appendThinkingLevelChange(clamped)
-        if self.supportsThinking() or clamped != "off":
-            self.settingsManager.setDefaultThinkingLevel(clamped)
         self._emit({"type": "thinking_level_changed", "level": clamped})
         if self._extensionRunner.has_handlers("thinking_level_select"):
             async def emit_change() -> None:
@@ -677,21 +739,21 @@ class AgentSession:
     def supportsThinking(self) -> bool:
         return bool(self.model and self.model.reasoning)
 
-    def cycleThinkingLevel(self) -> ThinkingLevel | None:
+    def cycleThinkingLevel(self, persist: bool = False) -> ThinkingLevel | None:
         if not self.supportsThinking():
             return None
         levels = self.getAvailableThinkingLevels()
         current_index = levels.index(self.thinkingLevel) if self.thinkingLevel in levels else 0
         next_level = levels[(current_index + 1) % len(levels)]
-        self.setThinkingLevel(next_level)
+        self.setThinkingLevel(next_level, persist)
         return next_level
 
-    async def cycleModel(self, direction: str = "forward") -> ModelCycleResult | None:
+    async def cycleModel(self, direction: str = "forward", persist: bool = False) -> ModelCycleResult | None:
         if self._scopedModels:
-            return await self._cycle_scoped_model(direction)
-        return await self._cycle_available_model(direction)
+            return await self._cycle_scoped_model(direction, persist)
+        return await self._cycle_available_model(direction, persist)
 
-    async def _cycle_scoped_model(self, direction: str) -> ModelCycleResult | None:
+    async def _cycle_scoped_model(self, direction: str, persist: bool = False) -> ModelCycleResult | None:
         scoped_models = [item for item in self._scopedModels if self._modelRegistry.hasConfiguredAuth(item["model"])]
         if len(scoped_models) <= 1:
             return None
@@ -706,7 +768,9 @@ class AgentSession:
         thinking_level = self._get_thinking_level_for_model_switch(scoped_models[next_index].get("thinkingLevel"))
         self.agent.state.model = next_model
         self.sessionManager.appendModelChange(next_model.provider, next_model.id)
-        self.settingsManager.setDefaultModelAndProvider(next_model.provider, next_model.id)
+        if persist:
+            self.settingsManager.setDefaultModelAndProvider(next_model.provider, next_model.id)
+        # Model persistence does not implicitly rewrite the global thinking default.
         self.setThinkingLevel(thinking_level)
         await self._extensionRunner.emit(
             {
@@ -718,7 +782,7 @@ class AgentSession:
         )
         return ModelCycleResult(model=next_model, thinkingLevel=self.thinkingLevel, isScoped=True)
 
-    async def _cycle_available_model(self, direction: str) -> ModelCycleResult | None:
+    async def _cycle_available_model(self, direction: str, persist: bool = False) -> ModelCycleResult | None:
         available_models = self._modelRegistry.getAvailable()
         if len(available_models) <= 1:
             return None
@@ -733,7 +797,9 @@ class AgentSession:
         thinking_level = self._get_thinking_level_for_model_switch()
         self.agent.state.model = next_model
         self.sessionManager.appendModelChange(next_model.provider, next_model.id)
-        self.settingsManager.setDefaultModelAndProvider(next_model.provider, next_model.id)
+        if persist:
+            self.settingsManager.setDefaultModelAndProvider(next_model.provider, next_model.id)
+        # Model persistence does not implicitly rewrite the global thinking default.
         self.setThinkingLevel(thinking_level)
         await self._extensionRunner.emit(
             {
@@ -770,6 +836,7 @@ class AgentSession:
                 description=entry.definition.description,
                 parameters=entry.definition.parameters,
                 sourceInfo=entry.sourceInfo,
+                promptGuidelines=list(getattr(entry.definition, "promptGuidelines", None) or []),
             )
             for entry in self._toolDefinitions.values()
         ]
@@ -843,6 +910,8 @@ class AgentSession:
         self._extensionBindings = resolved
         if resolved.uiContext is not None:
             self._extensionUIContext = resolved.uiContext
+        if resolved.mode is not None:
+            self._extensionMode = resolved.mode
         if resolved.commandContextActions is not None:
             self._extensionCommandContextActions = resolved.commandContextActions
         if resolved.abortHandler is not None:
@@ -916,8 +985,20 @@ class AgentSession:
         deliver_as = resolved_options.get("deliverAs")
         if deliver_as == "nextTurn":
             self._pendingNextTurnMessages.append(app_message)
-        elif self.isStreaming and resolved_options.get("triggerTurn") is not False:
-            # triggerTurn=False: record the message without interrupting the running turn (pi #8022/47b5119d0)
+        elif self.isStreaming and resolved_options.get("triggerTurn") is False:
+            # triggerTurn=False: record the message without interrupting the running turn
+            # (pi #8022/47b5119d0). It cannot go into agent.state.messages from here: a
+            # turn in flight has already appended the assistant message carrying its
+            # toolCalls, so a custom message landing now sits between the calls and their
+            # results -- and convert_to_llm turns it into a user message, which the
+            # Messages API rejects on every later request. Hold it out of the conversation
+            # and let the flush put it in at the next turn boundary, where the toolCalls
+            # are answered. The UI is told there too, not here: the TUI answers a custom
+            # message_end by rebuilding the chat from the transcript, so announcing a
+            # message that has not been written yet only draws it long enough for the next
+            # toolResult to erase it.
+            self._pendingCustomMessages.append(app_message)
+        elif self.isStreaming:
             if deliver_as == "followUp":
                 self.agent.followUp(app_message)
             else:
@@ -1554,6 +1635,20 @@ class AgentSession:
                     )
                     self._retryAttempt = 0
 
+        if event_type == "turn_end":
+            # A turn boundary is the first place a message queued mid-turn can land
+            # safely: every toolCall the turn made has its result by now. Waiting for the
+            # end of the run instead would keep a research run's progress off disk and
+            # off screen for hours. A turn that errored, aborted or was cut at the output
+            # cap is skipped -- its tail is still being rewritten, by _prepare_retry, by
+            # the abort itself, or by the truncated-response recovery in _check_compaction
+            # /_run_auto_compaction, which finds that tail as messages[-1]. A custom
+            # message flushed on top of it would hide the tail and leave it in the
+            # conversation for the retry to re-send.
+            turn_message = _as_assistant_message(_event_field(event, "message"))
+            if turn_message is not None and turn_message.stopReason not in ("error", "aborted", "length"):
+                self._flush_pending_custom_messages()
+
     def _emit(self, event: Any) -> None:
         for listener in self._eventListeners:
             listener(event)
@@ -1594,7 +1689,7 @@ class AgentSession:
             self.sessionManager.appendMessage(_message_dict(message))
 
     def _apply_extension_bindings(self, runner: ExtensionRunner) -> None:
-        runner.set_ui_context(self._extensionUIContext)
+        runner.set_ui_context(self._extensionUIContext, self._extensionMode)
         runner.bind_command_context(self._extensionCommandContextActions)
         if self._extensionErrorUnsubscriber is not None:
             self._extensionErrorUnsubscriber()
@@ -1835,7 +1930,7 @@ class AgentSession:
             },
             {
                 "getModel": lambda: self.model,
-                "isIdle": lambda: not self.isStreaming,
+                "isIdle": lambda: self.isIdle,
                 "getSignal": lambda: self.agent.signal,
                 "abort": lambda: self._extensionAbortHandler() if self._extensionAbortHandler else self._spawn_background(self.abort()),
                 "hasPendingMessages": lambda: self.pendingMessageCount > 0,
@@ -1939,14 +2034,23 @@ class AgentSession:
             )
         self._toolDefinitions = definition_registry
 
+        # pi agent-session.ts:2694-2703 sends built-in and extension tools through the same
+        # wrapper, so a tool of either kind that turns on more tools while it runs tags its
+        # own result with the names that became available (A-15 addedToolNames).
         tool_registry: dict[str, AgentTool] = {}
         for name, definition in self._baseToolDefinitions.items():
             if is_allowed_tool(name):
-                tool_registry[name] = wrap_tool_definition(definition, ctx_factory=self._extensionRunner.create_context)
-        for definition, _source_info in all_custom_tools:
-            tool_registry[definition.name] = wrap_tool_definition(
-                definition,
-                ctx_factory=self._extensionRunner.create_context,
+                tool_registry[name] = wrap_registered_tool(
+                    RegisteredTool(
+                        definition=definition,
+                        sourceInfo=create_synthetic_source_info(f"<builtin:{name}>", {"source": "builtin"}),
+                    ),
+                    self._extensionRunner,
+                )
+        for definition, source_info in all_custom_tools:
+            tool_registry[definition.name] = wrap_registered_tool(
+                RegisteredTool(definition=definition, sourceInfo=source_info),
+                self._extensionRunner,
             )
         self._toolRegistry = tool_registry
 
@@ -2138,6 +2242,7 @@ class AgentSession:
                     "content": _event_field(result, "content"),
                     "details": _event_field(result, "details"),
                     "isError": bool(_event_field(payload, "isError")),
+                    "usage": _event_field(result, "usage"),
                 }
             )
             if not hook_result:
@@ -2146,18 +2251,52 @@ class AgentSession:
                 "content": _event_field(hook_result, "content"),
                 "details": _event_field(hook_result, "details"),
                 "isError": _event_field(hook_result, "isError", _event_field(payload, "isError")),
+                # None here means "hook did not set it"; the agent loop falls back to the
+                # executed result's usage (pi agent-session.ts:537 usage: hookResult?.usage).
+                "usage": _event_field(hook_result, "usage"),
             }
 
         self.agent.beforeToolCall = before_tool_call
         self.agent.afterToolCall = after_tool_call
 
     async def _run_agent_prompt(self, messages: AgentMessage | list[AgentMessage]) -> None:
+        self._isAgentRunActive = True
         try:
             await self.agent.prompt(messages)
             while await self._handle_post_agent_run():
                 await self.agent.continue_()
         finally:
             self._flush_pending_bash_messages()
+            self._flush_pending_custom_messages()
+            await self._emit_agent_settled()
+
+    def _settle_agent_run(self) -> None:
+        """Mark the run finished and release everyone waiting on idle.
+
+        pi's ``_resolveIdleWaitIfIdle`` (agent-session.ts:599-607), reached from the finally
+        of ``_emit_agent_settled``.
+        """
+        self._isAgentRunActive = False
+        waiters, self._idleWaiters = self._idleWaiters, []
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(None)
+
+    async def _emit_agent_settled(self) -> None:
+        """Announce that the run has fully settled (pi agent-session.ts:609-616,1094-1096).
+
+        Reached only once the retry / auto-compaction / queued-continuation loop in
+        ``_handle_post_agent_run`` is done, so this is the "nothing more will run
+        automatically" signal that ``agent_end`` is not.  pi clears the run flag before the
+        handlers observe it and releases the idle waiters in a finally, so a handler that
+        asks ``ctx.isIdle()`` gets the truth and a crashing handler still unblocks waiters.
+        """
+        self._isAgentRunActive = False
+        try:
+            await self._extensionRunner.emit({"type": "agent_settled"})
+            self._emit({"type": "agent_settled"})
+        finally:
+            self._settle_agent_run()
 
     async def _handle_post_agent_run(self) -> bool:
         message = self._lastAssistantMessage
@@ -2268,6 +2407,29 @@ class AgentSession:
             self.agent.state.messages.append(bash_message)
             self.sessionManager.appendMessage(bash_message)
         self._pendingBashMessages = []
+
+    def _flush_pending_custom_messages(self) -> None:
+        # The conversation, the transcript and the UI are all told here rather than at
+        # send time. The transcript replays in file order on resume, so an entry landing
+        # between an assistant message and its toolResults would rebuild the same broken
+        # conversation the queue exists to prevent -- and the UI has to follow the
+        # transcript, because the TUI answers a custom message_end by clearing the chat
+        # and rebuilding it from the session file (interactive_mode renderCurrentSessionState).
+        # Announcing the message before the entry exists shows it for as long as it takes
+        # the next toolResult to arrive, which is the opposite of showing it.
+        if not self._pendingCustomMessages:
+            return
+        for custom_message in self._pendingCustomMessages:
+            self.agent.state.messages.append(custom_message)
+            self.sessionManager.appendCustomMessageEntry(
+                str(custom_message["customType"]),
+                custom_message["content"],
+                bool(custom_message["display"]),
+                custom_message["details"],
+            )
+            self._emit({"type": "message_start", "message": custom_message})
+            self._emit({"type": "message_end", "message": custom_message})
+        self._pendingCustomMessages = []
 
     async def _check_compaction(
         self,
