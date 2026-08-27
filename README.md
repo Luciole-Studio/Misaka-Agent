@@ -61,6 +61,7 @@ Environment variables override the files (all optional):
 | `MISAKA_SMALL_FAST_MODEL` | the provider's own small model | model for cheap internal calls |
 | `MISAKA_FORCE_MODEL` | none | overrides every model choice, card configuration included |
 | `MISAKA_CACHE_RETENTION` | `short` | `long` asks the provider for long prompt-cache retention |
+| `MISAKA_SERPER_KEY` | none — `web_search` is not registered without it | Serper API key for the `web_search` tool |
 
 Paths — each is a directory or file MISAKA owns:
 
