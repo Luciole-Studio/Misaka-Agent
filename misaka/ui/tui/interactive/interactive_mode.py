@@ -735,6 +735,7 @@ class InteractiveMode:
         self.defaultHiddenThinkingLabel = getattr(self, "defaultHiddenThinkingLabel", "Thinking...")
         self.hiddenThinkingLabel = getattr(self, "hiddenThinkingLabel", self.defaultHiddenThinkingLabel)
         self.compactionQueuedMessages = list(getattr(self, "compactionQueuedMessages", []))
+        self.deferredInputMessages = list(getattr(self, "deferredInputMessages", []))
         self.pendingBashComponents = list(getattr(self, "pendingBashComponents", []))
         self.bashComponent = getattr(self, "bashComponent", None)
         self.streamingComponent = getattr(self, "streamingComponent", None)
@@ -905,6 +906,8 @@ class InteractiveMode:
                     for message in self.compactionQueuedMessages
                     if read_field(message, "mode") == "followUp"
                 ],
+                # Held for an unarmed input loop: they go out as their own turn once it re-arms.
+                *[str(message) for message in self.deferredInputMessages],
             ],
         }
 
@@ -923,10 +926,12 @@ class InteractiveMode:
             for message in self.compactionQueuedMessages
             if read_field(message, "mode") == "followUp"
         ]
+        deferred = [str(message) for message in self.deferredInputMessages]
         self.compactionQueuedMessages = []
+        self.deferredInputMessages = []
         return {
             "steering": [*steering, *compaction_steering],
-            "followUp": [*follow_up, *compaction_follow_up],
+            "followUp": [*follow_up, *compaction_follow_up, *deferred],
         }
 
     def getAppKeyDisplay(self, action: str) -> str:
@@ -989,6 +994,23 @@ class InteractiveMode:
         self._set_editor_text("")
         self.updatePendingMessagesDisplay()
         self.showStatus("Queued message for after compaction")
+
+    def queueDeferredInputMessage(self, text: str) -> None:
+        """Hold text submitted while the input loop is not waiting for it.
+
+        The loop arms onInputCallback only inside getUserInput(), and it stays inside
+        session.prompt() for the whole auto-retry countdown -- where isStreaming is already
+        False, so neither busy branch catches the text. Dropping it left the user with a
+        cleared editor and nothing sent; getUserInput() delivers this queue instead.
+        """
+        self.deferredInputMessages.append(text)
+        add_history = _callable_attr(self.editor, "addToHistory")
+        if add_history is not None:
+            add_history(text)
+        self._set_editor_text("")
+        self.updatePendingMessagesDisplay()
+        self.showStatus("Queued message for after the current turn")
+        self._request_render()
 
     def isExtensionCommand(self, text: str) -> bool:
         if not text.startswith("/"):
@@ -2322,6 +2344,15 @@ class InteractiveMode:
             self.showStatus(f"Session compacted {times}")
 
     async def getUserInput(self) -> str:
+        if self.deferredInputMessages:
+            # Submitted while the loop was busy elsewhere -- send it now rather than make the
+            # user retype it. Every retry outcome (success, cancelled, exhausted) ends with the
+            # loop asking for input again, so nothing strands here.
+            text = self.deferredInputMessages.pop(0)
+            self.updatePendingMessagesDisplay()
+            self._request_render()
+            return text
+
         loop = asyncio.get_running_loop()
         future: asyncio.Future[str] = loop.create_future()
         self._pendingUserInputFuture = future
@@ -3195,8 +3226,10 @@ class InteractiveMode:
             return
 
         self.flushPendingBashComponents()
-        if self.onInputCallback is not None:
-            self.onInputCallback(text)
+        if self.onInputCallback is None:
+            self.queueDeferredInputMessage(text)
+            return
+        self.onInputCallback(text)
         add_history = _callable_attr(self.editor, "addToHistory")
         if add_history is not None:
             add_history(text)
