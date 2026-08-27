@@ -365,39 +365,92 @@ _WHITESPACE = re.compile(r"\s+")
 # of a real book; the hyphen belongs to the layout, not to the word.
 _HYPHEN_BREAK = re.compile(r"-[^\S\r\n]*\r?\n")
 
+# NFKC compatibility classes whose folding merges notation onto plain text the page never prints:
+# superscript and subscript footnote markers, circled and parenthesized list numbers, and vulgar
+# fractions all decompose to real digits. Folding them mints numbers ("享年52①" -> "享年521") that
+# verify_quote then swears the document states. Width folds (Ａ -> A, ｶ -> カ) and ligatures
+# (ﬁ -> fi) are genuine extraction artefacts and must keep folding.
+_NOTATION_TAGS = ("<super>", "<sub>", "<circle>", "<fraction>")
 
-def normalize_for_quote_match(text):
+
+@functools.lru_cache(maxsize=4096)
+def _keeps_notation(ch):
+    """True for a character whose NFKC fold would visually change it into other text: it stays
+    unfolded, so a quote has to reproduce it. The tag is the leading ``<...>`` token of the
+    character's compatibility decomposition."""
+    decomp = unicodedata.decomposition(ch)
+    if decomp.startswith(_NOTATION_TAGS):
+        return True
+    # ⑴ and ⒈ carry the generic <compat> tag yet fold to "(1)" and "1." -- "3⒈" would become
+    # "31." and match the quote "31", the same minted-digit bug as the tagged classes. Keep any
+    # <compat> form that folds to a digit; digit-free <compat> folds (ﬁ -> fi, compat jamo ㄱ ->
+    # choseong) are the artefacts the folding exists for and still fold.
+    return decomp.startswith("<compat>") and any(
+        "0" <= c <= "9" for c in unicodedata.normalize("NFKD", ch))
+
+
+def _nfkc_keep_notation(text):
+    """NFKC with the notation classes above left raw. Splitting into runs around the kept
+    characters preserves NFKC's multi-character compositions (``ｶﾞ`` -> ``ガ``) inside each run."""
+    out, run = [], []
+    for ch in text:
+        if _keeps_notation(ch):
+            if run:
+                out.append(unicodedata.normalize("NFKC", "".join(run)))
+                run.clear()
+            out.append(ch)
+        else:
+            run.append(ch)
+    if run:
+        out.append(unicodedata.normalize("NFKC", "".join(run)))
+    return "".join(out)
+
+
+def normalize_for_quote_match(text, keep_break_hyphens=False):
     """Fold the extraction artefacts that make a true quotation fail a literal comparison.
 
     Applied to both sides of every comparison. Stored quotes and claim hashes stay raw -- only the
     matching loosens; nothing here fuzzes, ranks, or stems. In order:
 
     1. hyphen at a line break -- pdftotext hyphenates every word that crosses a line, so
-       ``exam-\\nple`` is the normal shape of a word in any PDF-sourced page;
+       ``exam-\\nple`` is the normal shape of a word in any PDF-sourced page. The same ``-\\n``
+       is also how pdftotext prints a genuinely hyphenated compound ("well-\\nknown"), so
+       ``keep_break_hyphens=True`` gives the other reading: the hyphen stays and only the break
+       goes (with the whitespace rule below). Matchers try the default reading first;
     2. U+00AD soft hyphen -- EPUB and HTML sources carry invisible break opportunities inside
        words, and a model copying the passage will not reproduce them;
     3. NFKC -- folds full-width punctuation and digits onto ASCII (``，`` ``１``, exactly what a
        model transcribing CJK produces), half-width kana onto composed kana, and the ligatures
-       (``ﬁ`` -> ``fi``) that PDF fonts leave sitting in the text layer;
+       (``ﬁ`` -> ``fi``) that PDF fonts leave sitting in the text layer. Notation that folds
+       onto digits (``¹`` ``①`` ``½``) stays raw: folding it would verify numbers the page
+       never states, so a quote must reproduce it;
     4. all whitespace -- extraction inserts spaces between CJK glyphs and breaks lines mid-phrase.
     """
-    folded = _HYPHEN_BREAK.sub("", str(text or "")).replace("\u00ad", "")
-    return _WHITESPACE.sub("", unicodedata.normalize("NFKC", folded))
+    folded = str(text or "")
+    if not keep_break_hyphens:
+        folded = _HYPHEN_BREAK.sub("", folded)
+    folded = folded.replace("\u00ad", "")
+    return _WHITESPACE.sub("", _nfkc_keep_notation(folded))
 
 
 @functools.lru_cache(maxsize=4096)
 def _attaches(ch):
     """True when NFKC can fold ``ch`` into the character before it: a combining mark, a
     compatibility form that decomposes to one (half-width ``ﾞ`` after ``ｶ`` composes to ``ガ``),
-    or a trailing Hangul jamo. Such a character must be normalized together with its predecessor."""
+    or a trailing Hangul jamo -- raw, or reached through a compatibility form (compat vowel jamo
+    NFKD-decompose to jungseong, so whole-string NFKC composes a consonant-vowel jamo pair into
+    one syllable). Such a character must be normalized together with its predecessor."""
+    first = (unicodedata.normalize("NFKD", ch) or ch)[0]
     return (unicodedata.combining(ch) != 0
-            or unicodedata.combining((unicodedata.normalize("NFKD", ch) or ch)[0]) != 0
-            or "\u1160" <= ch <= "\u11ff")      # Hangul jungseong/jongseong
+            or unicodedata.combining(first) != 0
+            or "\u1160" <= ch <= "\u11ff"       # Hangul jungseong/jongseong
+            or "\u1160" <= first <= "\u11ff")
 
 
-def _folded_spans(text):
-    """Return ``(folded, spans)``: ``folded == normalize_for_quote_match(text)``, and ``spans[i]``
-    is the ``(start, end)`` slice of the raw ``text`` that produced ``folded[i]``.
+def _folded_spans(text, keep_break_hyphens=False):
+    """Return ``(folded, spans)``: ``folded == normalize_for_quote_match(text)`` under the same
+    ``keep_break_hyphens`` reading, and ``spans[i]`` is the ``(start, end)`` slice of the raw
+    ``text`` that produced ``folded[i]``.
 
     Normalization is not length preserving -- NFKC turns one ``ﬁ`` into two characters, the hyphen
     rule deletes two, whitespace removal deletes many -- so a position in ``folded`` is not an
@@ -406,7 +459,8 @@ def _folded_spans(text):
     cannot fold backwards, which is precisely where normalizing a piece on its own gives the same
     answer as normalizing the whole string.
     """
-    dropped = {i for m in _HYPHEN_BREAK.finditer(text) for i in range(*m.span())}
+    dropped = (set() if keep_break_hyphens
+               else {i for m in _HYPHEN_BREAK.finditer(text) for i in range(*m.span())})
     segments = []                                    # [start, end, raw characters]
     for i, ch in enumerate(text):
         if i in dropped or ch == "\u00ad":
@@ -417,7 +471,7 @@ def _folded_spans(text):
             segments.append([i, i + 1, ch])
     folded, spans = [], []
     for start, end, raw in segments:
-        piece = _WHITESPACE.sub("", unicodedata.normalize("NFKC", raw))
+        piece = _WHITESPACE.sub("", _nfkc_keep_notation(raw))
         folded.append(piece)
         spans.extend([(start, end)] * len(piece))
     return "".join(folded), spans
@@ -426,14 +480,22 @@ def _folded_spans(text):
 def _locate(text, needle):
     """Return the ``(start, end)`` slice of the raw ``text`` holding an already normalized
     ``needle``, or None. Callers get raw offsets: what is stored and shown is always the page's
-    own text, never the query echoed back."""
-    if needle not in normalize_for_quote_match(text):
-        return None            # cheap reject: one C call per page, the span walk runs only on a hit
-    folded, spans = _folded_spans(text)
-    pos = folded.find(needle)
-    if pos < 0:
-        return None            # the segment walk folded less than the whole-string rule did
-    return spans[pos][0], spans[pos + len(needle) - 1][1]
+    own text, never the query echoed back.
+
+    A line-break hyphen is ambiguous -- pdftotext prints a soft break ("exam-\\nple") and a
+    printed compound ("well-\\nknown") identically -- so when the default reading (hyphen
+    deleted) misses, the walk runs once more with the hyphens kept. The default reading always
+    wins when it matches, keeping today's matches and offsets unchanged."""
+    readings = (False, True) if _HYPHEN_BREAK.search(text) else (False,)
+    for keep in readings:
+        if needle not in normalize_for_quote_match(text, keep_break_hyphens=keep):
+            continue           # cheap reject: one C call per page, the span walk runs only on a hit
+        folded, spans = _folded_spans(text, keep_break_hyphens=keep)
+        pos = folded.find(needle)
+        if pos < 0:
+            continue           # the segment walk folded less than the whole-string rule did
+        return spans[pos][0], spans[pos + len(needle) - 1][1]
+    return None
 
 
 def search_literal(q, limit=10, doc_id=None, workspace=None):
