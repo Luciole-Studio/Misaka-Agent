@@ -11,8 +11,8 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from misaka.extensions.lcm.migrations import migrate
-from misaka.extensions.lcm.search_query import (
+from misaka.extensions.hermes_lcm.migrations import migrate
+from misaka.extensions.hermes_lcm.search_query import (
     AGE_DECAY_RATE,
     build_snippet,
     compute_directness_score,
@@ -27,7 +27,10 @@ from misaka.extensions.lcm.search_query import (
     sanitize_fts5_query,
     sanitize_like_query,
 )
-from misaka.extensions.lcm.tokens import count_message_tokens, normalize_content_value
+from misaka.extensions.hermes_lcm.tokens import (
+    count_message_tokens,
+    normalize_content_value,
+)
 
 _COLUMNS = ("store_id, session_id, source, role, content, tool_call_id, tool_calls,"
             " tool_name, timestamp, token_estimate, pinned, ingested_at,"

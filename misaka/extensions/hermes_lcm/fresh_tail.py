@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-from misaka.extensions.lcm.tokens import count_message_tokens
+from misaka.extensions.hermes_lcm.tokens import count_message_tokens
 
 
 @dataclass

@@ -1,15 +1,15 @@
 """LCM context compaction and summary-chain construction."""
 from dataclasses import dataclass
 
-from misaka.extensions.lcm.dag import SummaryDAG, SummaryNode
-from misaka.extensions.lcm.escalation import (
+from misaka.extensions.hermes_lcm.dag import SummaryDAG, SummaryNode
+from misaka.extensions.hermes_lcm.escalation import (
     SummaryCircuitBreaker,
     SummarySpendGuard,
     summarize_with_escalation,
 )
-from misaka.extensions.lcm.fresh_tail import resolve_fresh_tail_boundary
-from misaka.extensions.lcm.store import MessageStore
-from misaka.extensions.lcm.tokens import (
+from misaka.extensions.hermes_lcm.fresh_tail import resolve_fresh_tail_boundary
+from misaka.extensions.hermes_lcm.store import MessageStore
+from misaka.extensions.hermes_lcm.tokens import (
     count_message_tokens,
     count_messages_tokens,
     count_tokens,
@@ -170,7 +170,7 @@ class LCMCompactor:
         budget = min(max(2000, int(source_tokens * (0.20 if depth == 0 else 0.40))),
                      12_000)
         if self._call_llm is None:
-            from misaka.extensions.lcm.escalation import deterministic_truncate
+            from misaka.extensions.hermes_lcm.escalation import deterministic_truncate
             return deterministic_truncate("\n".join(lines),
                                           self.config.l3_truncate_tokens), 3
         return summarize_with_escalation(

@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from misaka.extensions.lcm.migrations import migrate
+from misaka.extensions.hermes_lcm.migrations import migrate
 
 _NODE_COLUMNS = ("node_id, session_id, depth, summary, token_count, "
                  "source_token_count, source_ids, source_type, created_at, "
@@ -165,7 +165,7 @@ class SummaryDAG:
 
     def search(self, query, session_id=None, limit=10, *, time_from=None, time_to=None):
         """Search summary nodes with FTS5 and a Unicode-safe LIKE fallback."""
-        from misaka.extensions.lcm.search_query import (
+        from misaka.extensions.hermes_lcm.search_query import (
             escape_like,
             extract_search_terms,
             requires_like_fallback,

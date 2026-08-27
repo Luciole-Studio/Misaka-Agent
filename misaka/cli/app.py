@@ -332,7 +332,7 @@ def _cmd_research(args):
 def _cmd_lcm(args):
     import os as _os
 
-    from misaka.extensions.lcm import maintenance as lcm_maint
+    from misaka.extensions.hermes_lcm import maintenance as lcm_maint
     lcm_db = _os.path.expanduser(CFG.get("lcm_db") or "~/.misaka/lcm.db")
     if args.op == "status":
         st = lcm_maint.status(lcm_db)

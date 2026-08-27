@@ -2,7 +2,7 @@
 import threading
 import time
 
-from misaka.extensions.lcm.tokens import count_tokens
+from misaka.extensions.hermes_lcm.tokens import count_tokens
 
 L1_PROMPT = """Summarize the conversation below. Keep the details that matter: decisions and the reasons behind them, constraints, tasks still in progress, file paths, commands, and concrete values and names. Do not invent anything that is not in the record.
 

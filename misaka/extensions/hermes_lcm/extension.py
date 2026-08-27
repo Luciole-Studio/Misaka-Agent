@@ -18,7 +18,7 @@ MAX_TOOL_TEXT = 64_000
 
 
 def _compactor():
-    from misaka.extensions.lcm.compactor import LCMCompactor, LCMConfig
+    from misaka.extensions.hermes_lcm.compactor import LCMCompactor, LCMConfig
 
     path = os.path.expanduser(CFG.get("lcm_db") or "~/.misaka/lcm.db")
     compactor = _COMPACTORS.get(path)
@@ -41,7 +41,7 @@ def _summary_models(cfg=None):
 
 def _record_summary_usage(prompt, result, failed):
     try:
-        from misaka.extensions.lcm.tokens import count_tokens
+        from misaka.extensions.hermes_lcm.tokens import count_tokens
         _compactor().store.record_summary_usage(
             input_tokens=count_tokens(prompt), output_tokens=count_tokens(result or ""),
             failed=failed,
@@ -181,12 +181,12 @@ def _semantic_index():
         return None
     model = str(CFG.get("lcm_embedding_model") or "").strip()
     if not model:
-        from misaka.extensions.lcm.semantic import SemanticUnavailable
+        from misaka.extensions.hermes_lcm.semantic import SemanticUnavailable
         raise SemanticUnavailable("MISAKA_LCM_EMBEDDING_MODEL is not configured.")
     path = os.path.expanduser(CFG.get("lcm_db") or "~/.misaka/lcm.db")
     key = (path, model)
     if key not in _SEMANTICS:
-        from misaka.extensions.lcm.semantic import SemanticIndex
+        from misaka.extensions.hermes_lcm.semantic import SemanticIndex
         _SEMANTICS[key] = SemanticIndex(path, model)
     return _SEMANTICS[key]
 

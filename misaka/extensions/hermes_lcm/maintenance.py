@@ -3,7 +3,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from misaka.extensions.lcm.migrations import LATEST_SCHEMA_VERSION, migrate
+from misaka.extensions.hermes_lcm.migrations import LATEST_SCHEMA_VERSION, migrate
 
 
 def _connect_ro(db_path):
@@ -189,9 +189,9 @@ def repair(db_path):
 def rebuild_from_session_file(db_path, session_file):
     """Rebuild one session's raw store and latest compaction lineage from JSONL."""
     from misaka.core.session_manager import load_entries_from_file
-    from misaka.extensions.lcm.dag import SummaryDAG, SummaryNode
-    from misaka.extensions.lcm.store import MessageStore
-    from misaka.extensions.lcm.tokens import count_tokens
+    from misaka.extensions.hermes_lcm.dag import SummaryDAG, SummaryNode
+    from misaka.extensions.hermes_lcm.store import MessageStore
+    from misaka.extensions.hermes_lcm.tokens import count_tokens
 
     snapshot = None
     if Path(db_path).is_file():
@@ -213,7 +213,7 @@ def rebuild_from_session_file(db_path, session_file):
         leaf = by_id.get(leaf.get("parentId"))
 
     # Reuse the adapter's exact normalization without inventing another message shape.
-    from misaka.extensions.lcm.extension import _entry_message
+    from misaka.extensions.hermes_lcm.extension import _entry_message
     messages, host_ids = [], []
     for entry in branch_entries:
         msg = _entry_message(entry)

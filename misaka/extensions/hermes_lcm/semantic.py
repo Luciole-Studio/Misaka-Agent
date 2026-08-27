@@ -6,7 +6,7 @@ import time
 from array import array
 from pathlib import Path
 
-from misaka.extensions.lcm.migrations import migrate
+from misaka.extensions.hermes_lcm.migrations import migrate
 
 
 class SemanticUnavailable(RuntimeError):
