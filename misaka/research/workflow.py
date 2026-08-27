@@ -124,44 +124,39 @@ def _scope_local_ids(specs, prefix):
 
 
 async def _preflight_specs(run, cfg, worker, node, specs, *, progress):
-    """Plan every spec's approach at once. Returns one ``planner.preflight`` result per spec, in order.
+    """Plan every spec's approach, one session at a time. Returns one ``planner.preflight`` result
+    per spec, in the specs' own order.
 
-    A preflight is a whole model session with a five-minute floor on its timeout, and the specs of
-    one plan share nothing: each has its own session directory and none of them touches the board.
-    Run one after another they were N sessions of dead time before the first Sister opened a page,
-    and every probe round paid the same again. The bound is ``research_parallel`` -- the same number
-    that bounds the cards these sessions are planning.
+    One at a time is not a preference; it is the only thing this process can do, and saying so is
+    the point of this function. A preflight is a whole in-process model session, and
+    ``platform.session.run_session`` opens every one of those inside ``_env_window``, a process-wide
+    lock held for the *entire* session rather than for the ``os.environ`` mutation it is named
+    after. The window cannot simply be narrowed: a session's identity travels through the
+    environment and is read out of it all the way through the turn -- ``budget.record_external_call``
+    reads ``MISAKA_USAGE_DB``/``_TASK_ID``/``_GENERATION`` at every accounted call,
+    ``messages.register`` and ``roster`` read the card and the role, ``extensions.mcp`` reads the
+    profile, a spawned sub-agent re-reads all three -- and ``_run_session`` restores the keys it
+    saved, which two overlapping sessions cannot both do. So overlapping the calls bought no
+    wall-clock at all: they queued on that lock exactly as they had queued on each other.
 
-    The first failure keeps the specs that have not opened a session yet from opening one, the way
-    the serial loop stopped at the spec that raised. A session already open is waited for rather
-    than abandoned: a thread cannot be cancelled, and an orphan session would go on spending the
-    run's budget after the submit that owns it has returned.
+    It was not free, either. ``worker.run_llm_json`` reserves budget capacity *before* it reaches
+    the session, so N overlapping preflights held N reservations while N-1 of them sat waiting for
+    the lock. Under a token cap that is how a run that used to finish starts failing: the
+    reservations cross the Beast threshold, one takes the whole remainder, the next is refused, and
+    ``planner.preflight`` raises "shared token budget exhausted" where the serial pass had simply
+    planned the next card. Serial, exactly one reservation exists at a time and it is settled
+    before the next is asked for.
 
-    What this cannot lift on its own: ``platform/session._env_window`` is held for the whole of every
-    in-process session, so these sessions queue on that one process-wide lock instead of on the
-    network. The structure is the half that has to be right first; the wall clock follows when a
-    preflight runs in its own process -- the same answer headless card dispatch needs -- or when
-    that window narrows to the environment mutation it is named for.
+    Real concurrency here needs a preflight to run in its own process -- the same answer headless
+    card dispatch reached (``research.node.HeadlessRunner``) -- not a thread in this one.
     """
-    gate = asyncio.Semaphore(min(len(specs), max(1, int(cfg.get("research_parallel", 4) or 4))))
-    failed = asyncio.Event()
-
-    async def one(spec):
-        async with gate:
-            if failed.is_set():
-                return None                            # a sibling already failed: this submit is over
-            await _progress(progress, "preflight",
-                            f"Sister {spec['assignee']} is planning its approach for {spec['title']!r}.", run)
-            try:
-                return await asyncio.to_thread(planner.preflight, run, cfg, worker, spec, node=node)
-            except BaseException:                      # re-raised below; the flag only stops the siblings
-                failed.set()
-                raise
-
-    planned = await asyncio.gather(*(one(spec) for spec in specs), return_exceptions=True)
-    for result in planned:
-        if isinstance(result, BaseException):
-            raise result
+    planned = []
+    for spec in specs:
+        await _progress(progress, "preflight",
+                        f"Sister {spec['assignee']} is planning its approach for {spec['title']!r}.", run)
+        # The failure of one spec ends the submit, so the specs behind it never open a session:
+        # the exception leaves this loop before the next preflight is reached.
+        planned.append(await asyncio.to_thread(planner.preflight, run, cfg, worker, spec, node=node))
     return planned
 
 
@@ -171,8 +166,8 @@ async def _submit_tasks(con, run, cfg, worker, node, specs, *, kind, issue_id=No
     (the scoped id when ``local_prefix`` is set).
 
     Three passes, because only the middle one may leave the loop thread: which specs still need a
-    card is read off the board here, their plans are written concurrently, and the cards are then
-    created one at a time in the plan's own order -- so creation, link and output directory stay one
+    card is read off the board here, their plans are written in worker threads, and the cards are
+    then created in the plan's own order -- so creation, link and output directory stay one
     transaction, and the card a dependency points at still exists before the card that needs it.
     """
     root = runs.node_root(run, node)
@@ -220,6 +215,10 @@ async def _submit_tasks(con, run, cfg, worker, node, specs, *, kind, issue_id=No
 
 
 def _release_dependencies(con, run_id):
+    """Promote every waiting card whose dependencies are settled. Blocking, and called from a
+    worker thread for it: ``dependency_state`` reaches ``task_store.parent_ids``, which reads and
+    parses the card *file* of every todo card -- the frontmatter ``needs`` is the executable
+    contract, so there is no table to consult -- and this runs twice per two-second tick."""
     for row in runs.tasks(con, run_id):
         if row["status"] != "todo":
             continue
@@ -229,6 +228,20 @@ def _release_dependencies(con, run_id):
             task_store.add_event(con, row["id"], "dependency_failed", {"parents": parents})
         else:
             task_store.promote_task(con, row["id"])
+
+
+def _stop_pending(con, linked):
+    """Hold back every card of a halted scope that had not started yet.
+
+    Off the loop thread as one hop rather than one per card: ``mark_stopped`` mirrors the card file
+    and commits it, and ``repo.commit`` retries up to four git subprocesses with a growing sleep
+    between them while ``index.lock`` is contended. A stop with fifty linked cards was tens of
+    seconds of frozen loop. A card the reconciler has just accepted is in ``review`` or ``done``
+    and is deliberately not touched here.
+    """
+    for row in linked:
+        if row["status"] in {"ready", "todo"}:
+            task_store.mark_stopped(con, row["id"])
 
 
 async def _stop_active(runner, task_ids, context):
@@ -261,11 +274,21 @@ async def _drive_tasks(con, cfg, runner, run_id, *, scope, context=None,
                 "budget" if budget.status(con, cfg.get("token_cap"))["mode"] == "stop" else None)
         if halt:
             await _stop_active(runner, active, context)
-            for row in linked:
-                if row["status"] in {"ready", "todo"}:
-                    task_store.mark_stopped(con, row["id"])
+            if active:
+                # Those cards were just killed mid-turn, so every one of their rows still reads
+                # ``running`` with its claim on it and half an hour left on the lease -- and
+                # ``db.claim``'s admission counter counts a claimed running row with no expiry
+                # filter at all, host-wide. Left standing they refuse every claim on the machine,
+                # in every project, until a human clears them. ``dispatch.reconcile`` is the one
+                # path that settles a card whose worker is gone -- each under that card's exact
+                # ownership fence -- and it validates reports and can reach git, so it goes off
+                # the loop thread.
+                from misaka.network import dispatch
+                await asyncio.to_thread(dispatch.reconcile, con, cfg)
+                linked = [row for row in runs.tasks(con, run_id) if row["id"] in scope]
+            await asyncio.to_thread(_stop_pending, con, linked)
             return halt
-        _release_dependencies(con, run_id)
+        await asyncio.to_thread(_release_dependencies, con, run_id)
         linked = [row for row in runs.tasks(con, run_id) if row["id"] in scope]
         free = max(0, max(1, int(cfg.get("research_parallel", 4)))
                    - sum(1 for row in linked if row["status"] in ACTIVE_TASKS))
@@ -277,7 +300,7 @@ async def _drive_tasks(con, cfg, runner, run_id, *, scope, context=None,
             await asyncio.sleep(poll_seconds)
             continue
         if any(row["status"] == "todo" for row in linked):
-            _release_dependencies(con, run_id)
+            await asyncio.to_thread(_release_dependencies, con, run_id)
             if any(row["status"] == "todo" and row["id"] in scope for row in runs.tasks(con, run_id)):
                 raise RuntimeError("Research task dependencies cannot advance; the graph may contain a cycle.")
             continue
@@ -526,13 +549,13 @@ async def _expand(con, cfg, runner, worker, run, node, *, spawner, context, tool
                         if not os.path.isdir(probe_dir):             # resume: a fork already forked keeps its session
                             planner.fork_session(planner._lo_session(run, node), probe_dir)
                         runs.set_issue(con, issue["id"], "probing")
-                        _reap_orphan_runner(con, "research_issues", issue)
+                        await asyncio.to_thread(_reap_orphan_runner, con, "research_issues", issue)
                         handle = spawner.spawn(_probe_argv(run, issue), cwd=run["workspace"],
                                                title=f"LO·{nid}·{issue['id']}", place="split")
                         handles[issue["id"]] = handle
                         _record_runner(con, "research_issues", issue["id"], handle)
                 except BaseException:
-                    _stop_all(spawner, handles)
+                    await _stop_all_off_loop(spawner, handles)
                     raise
                 outcome = await _wait_probes(con, cfg, spawner, run, handles, poll_seconds=poll_seconds)
                 if outcome != "done":
@@ -737,13 +760,35 @@ def _stop_all(spawner, handles):
                 pass
 
 
+async def _stop_all_off_loop(spawner, handles):
+    """``_stop_all`` from a coroutine, on a worker thread.
+
+    Both spawners take real time per handle: ``ProcessSpawner.stop`` walks and suspends the whole
+    process tree, then waits out two five-second grace periods, and ``PaneSpawner.stop`` talks to
+    the panel daemon. A four-node level is tens of seconds, and the loop this unwinds on is often
+    not the research driver's own -- ``last_order.research`` starts ``workflow.run`` as a task on
+    Last Order's loop, so this cleanup ran in the middle of her streaming and her inbox.
+
+    Shielded, because the commonest way to arrive here is that very driver being cancelled when
+    her session shuts down: an unshielded await would be cancelled before the executor picked the
+    job up, and the processes would simply be left running. The thread cannot be cancelled once it
+    starts, so a cancelled caller stops waiting while the kill still finishes.
+    """
+    if not handles:
+        return
+    try:
+        await asyncio.shield(asyncio.to_thread(_stop_all, spawner, handles))
+    except asyncio.CancelledError:      # the kill is running in its thread; the caller re-raises
+        pass
+
+
 async def _wait_probes(con, cfg, spawner, run, handles, *, poll_seconds):
     """Wait until every fork has written its verdict (or the run halted). If one fork's process
     dies, the others are stopped before the error propagates."""
     try:
         return await _wait_probes_inner(con, cfg, spawner, run, handles, poll_seconds=poll_seconds)
     except BaseException:
-        _stop_all(spawner, handles)
+        await _stop_all_off_loop(spawner, handles)
         raise
 
 
@@ -865,7 +910,10 @@ def _record_runner(con, table, row_id, handle):
 
 def _reap_orphan_runner(con, table, row):
     """A previous driver's child may still be running this node or probe. Never start a second
-    one beside it: terminate the recorded tree first (its own claim fences any late writes)."""
+    one beside it: terminate the recorded tree first (its own claim fences any late writes).
+
+    Blocking, and called from a worker thread for it: ``processes.terminate`` suspends the whole
+    tree, signals it, and waits out its grace periods before the fallback kill."""
     keys = row.keys() if hasattr(row, "keys") else row
     pid = row["runner_pid"] if "runner_pid" in keys else None
     identity = row["runner_identity"] if "runner_identity" in keys else None
@@ -884,7 +932,7 @@ async def _expand_level(con, cfg, spawner, run, level, *, poll_seconds, progress
     handles = {}
     try:
         for node in level:                              # registered one by one: a failed spawn stops the started ones
-            _reap_orphan_runner(con, "research_branches", node)
+            await asyncio.to_thread(_reap_orphan_runner, con, "research_branches", node)
             handle = spawner.spawn(_node_argv(run, node), cwd=run["workspace"],
                                    title=f"LO·{node['id']}", place="split")
             handles[node["id"]] = handle
@@ -892,7 +940,7 @@ async def _expand_level(con, cfg, spawner, run, level, *, poll_seconds, progress
         return await _wait_level(con, cfg, spawner, run, handles, poll_seconds=poll_seconds, progress=progress,
                                  driver_lock=driver_lock)
     except BaseException:
-        _stop_all(spawner, handles)
+        await _stop_all_off_loop(spawner, handles)
         raise
 
 
