@@ -551,6 +551,9 @@ def task_body(task, preflight_path, evidence=""):
 Method: {task.get('method') or 'See the preflight plan.'}
 Source strategy: {task.get('source_strategy') or 'See the preflight plan.'}
 Potential falsifiers: {task.get('falsifiers') or 'Identify evidence that could overturn the working premise.'}
+Read web pages with `web_fetch`, never `curl`: it saves each page's complete text into the workspace, and a registered file is
+the only thing a quote can be checked against. Two exceptions: a binary document (PDF, dataset, archive) goes through
+`download_file`, and a raw data endpoint that answers JSON or CSV may be called with `curl`.
 
 ## preflight plan
 Read `{preflight_path}` first and work from that plan. Change course when a key premise fails, and record why.

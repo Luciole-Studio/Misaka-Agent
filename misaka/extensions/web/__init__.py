@@ -42,7 +42,9 @@ def activate(spec):
 
     ``web_fetch`` and ``download_file`` need no credentials at all, so a session gets
     them either way: reading a page the model already has a URL for does not depend on
-    anyone's search subscription.
+    anyone's search subscription. Both are rooted at ``spec.workspace``, which is where
+    each leaves what it pulled off the internet -- a downloaded file, or a fetched page's
+    complete text -- so a card can register the path and the ledger can quote it.
     """
     from misaka.core.tools.download_file import create_download_file_tool_definition
     from misaka.core.tools.web_fetch import create_web_fetch_tool_definition
@@ -54,7 +56,7 @@ def activate(spec):
     def register(harn):
         if searchable:
             register_search(harn)
-        harn.registerTool(create_web_fetch_tool_definition())
+        harn.registerTool(create_web_fetch_tool_definition(spec.workspace))
         harn.registerTool(create_download_file_tool_definition(spec.workspace))
 
     return register
