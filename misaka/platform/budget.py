@@ -1,9 +1,13 @@
 """Persistent token budgets and the Beast Mode cutoff."""
+import hashlib
 import json
+import logging
 import os
 import secrets
 import sqlite3
 import time
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_CAP = int(os.environ.get("MISAKA_TOKEN_CAP", "0"))
 BEAST_AT = float(os.environ.get("MISAKA_BEAST_AT", "0.85"))
@@ -247,6 +251,76 @@ def commit_agent_usage(con, token, task_id, generation, total_tokens):
     except BaseException:
         con.rollback()
         raise
+
+
+# Characters of the sha256 kept for the URL or query one external call was made
+# against. Same 16 as the repo's other privacy digests (extensions/mcp.py, the task
+# fingerprints in platform/tasks.py): enough that two different pages never collide in
+# one run's ledger, short enough that the row stays readable.
+_SUBJECT_DIGEST_CHARS = 16
+
+
+def record_external_call(service, *, subject="", **facts):
+    """Charge one outbound third-party call to the ledger this turn is billed to.
+
+    Model tokens are only half of what a research run spends: a search, a page fetch and
+    a download each cost money or quota at somebody's API, and without a row apiece the
+    run's real cost cannot be reconstructed afterwards. The row lands in the same
+    ``events`` table as ``budget_usage`` -- durable, cross-process, exported with the rest
+    of the ledger -- under its own ``kind``, so :func:`spent`'s token arithmetic never
+    sees it. This is accounting only: nothing here throttles or refuses a call.
+
+    *subject* is the URL or query the call was made against and is stored ONLY as a
+    sha256 prefix: a query is whatever the user typed, and a URL routinely carries a
+    session token or a presigned signature that the ledger must not keep. *facts* (a
+    backend name, a result count, a byte count) are stored verbatim, so nothing that
+    identifies a person may be passed as one.
+
+    Addressed by environment rather than by argument because the tools that make these
+    calls hold no board handle: ``MISAKA_USAGE_DB`` / ``_TASK_ID`` / ``_GENERATION`` are
+    what a worker already exports to charge the turn's tokens to a card, and an external
+    call rides the same three. A session with none of them (an interactive chat) has no
+    card to bill and records nothing, exactly as its tokens are not recorded either.
+
+    Never raises: bookkeeping that can fail a tool call is worse than no bookkeeping.
+    """
+
+    path = os.environ.get("MISAKA_USAGE_DB")
+    task_id = os.environ.get("MISAKA_USAGE_TASK_ID")
+    if not path or not task_id:
+        return False
+    generation = os.environ.get("MISAKA_USAGE_GENERATION", "")
+    payload = {"service": str(service), **facts}
+    if subject:
+        payload["subject_sha256"] = hashlib.sha256(
+            str(subject).encode("utf-8", "surrogatepass")
+        ).hexdigest()[:_SUBJECT_DIGEST_CHARS]
+    try:
+        from misaka.platform import tasks
+
+        con = tasks.connect(path)
+        try:
+            # Written straight rather than through ``tasks.add_event``, for the same
+            # reason ``commit_agent_usage`` is: that helper drops any event whose
+            # ``task_id`` has no row in ``tasks``, and a research run charges its usage
+            # to a run id that lives in another database.
+            con.execute(
+                "INSERT INTO events (task_id,kind,payload,generation,created_at) "
+                "VALUES (?,?,?,?,?)",
+                (
+                    str(task_id),
+                    "external_call",
+                    json.dumps(payload, separators=(",", ":"), ensure_ascii=False),
+                    int(generation) if generation.isdigit() else None,
+                    int(time.time()),
+                ),
+            )
+        finally:
+            con.close()
+    except Exception as error:  # noqa: BLE001 - a lost ledger row must never cost the call it accounts for
+        logger.debug("external call not accounted (%s): %s", service, error)
+        return False
+    return True
 
 
 def reserve_agent_path(path, cap, task_id, generation, ttl_seconds=1800):

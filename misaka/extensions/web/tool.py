@@ -30,6 +30,7 @@ from misaka.extensions.web import cache
 from misaka.extensions.web.config import redact_secrets
 from misaka.extensions.web.dispatch import memo_identity, resolve_provider
 from misaka.extensions.web.dispatch import web_search as dispatch_search
+from misaka.platform import budget
 from misaka.platform.prompt_guard import untrusted
 from misaka.utils.values import signal_aborted
 
@@ -178,6 +179,16 @@ async def web_search_tool(query: str, limit: int = 5, *, signal: Any = None) -> 
                 if hit is not None:
                     return hit
                 response = await dispatch_search(query, fetch_limit)
+                # The one place a search is actually paid for: memo hits and the
+                # followers single_flight coalesces cost nothing and are not on the
+                # ledger. ``name`` rather than the raw backend, so the five keyless
+                # vendors are accounted as the one free tier they are.
+                budget.record_external_call(
+                    "web_search",
+                    subject=query,
+                    backend=name,
+                    results=len((response.get("data") or {}).get("web") or []),
+                )
                 # Never cache a rescue-served response: it came from a ring vendor, not
                 # the chosen backend, and caching it would make the one-shot rescue
                 # sticky for this query for a whole TTL -- the next call must attempt the

@@ -34,6 +34,7 @@ from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.tools._web.bounded import UnsafeUrlError, open_checked_stream
 from misaka.core.tools.path_utils import resolve_to_cwd
+from misaka.platform import budget
 from misaka.platform.prompt_guard import untrusted
 from misaka.utils.values import signal_aborted
 
@@ -340,6 +341,10 @@ async def _download(url: str, requested: str, directory: str, signal: Any) -> Ag
         total, sha256, head = await _stream_to_disk(
             response, part, os.fdopen(descriptor, "wb"), deadline, signal
         )
+
+    # Accounted on the transfer, not on the keep: the bytes below may yet be thrown away
+    # for wearing the wrong signature, and they cost the same either way.
+    budget.record_external_call("download_file", subject=url, bytes=total)
 
     if _magic_mismatch(suffix, head):
         # The overwhelmingly common case is a paywall or login page served with a 200
