@@ -28,7 +28,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 # Vendored or ported-generated: not ours to prune.
-SKIP_DIRS = ("misaka/documents/pageindex",)
+SKIP_DIRS = (
+    "misaka/documents/pageindex",
+    # Vendored verbatim from upstream hermes-lcm; pruning it would be a diff
+    # against the very thing the next resync replays. host/ is ours and is checked.
+    "misaka/extensions/hermes_lcm/vendor",
+    # Upstream's own suite, vendored with it: the harness only measures fidelity
+    # while it stays byte-identical to what upstream runs.
+    "tests/hermes_lcm_vendor",
+)
 SKIP_FILES = ("models_generated.py", "image_models_generated.py")
 
 # Names with no textual reader, exempt with the mechanism that reaches them.

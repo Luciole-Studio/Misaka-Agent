@@ -1,0 +1,4 @@
+10cbb78347ec86f3004153b24767324ded9e37b4
+version: 0.21.0-rc2
+source: https://github.com/stephenschoettler/hermes-lcm
+local checkout: ~/.hermes/plugins/hermes-lcm
