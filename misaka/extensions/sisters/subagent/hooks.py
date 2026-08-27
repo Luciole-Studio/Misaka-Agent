@@ -9,18 +9,17 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import ipaddress
 import json
 import os
 import re
 import signal
-import socket
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 import httpx
+
+from misaka.core.tools._web.bounded import vet_public_url
 
 HookResult = dict[str, Any]
 HookEvaluator = Callable[..., Awaitable[Any] | Any]
@@ -345,33 +344,6 @@ def _interpolate_header(value: str, allowed: set[str], environ: Mapping[str, str
     return _ENV_PATTERN.sub(replace, value).replace("\r", "").replace("\n", "").replace("\x00", "")
 
 
-async def _resolve_host(host: str, port: int) -> list[str]:
-    records = await asyncio.to_thread(socket.getaddrinfo, host, port, type=socket.SOCK_STREAM)
-    return sorted({record[4][0] for record in records})
-
-
-async def _validate_public_url(url: str) -> None:
-    parsed = urlsplit(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise ValueError("HTTP hook URL must use http or https")
-    if parsed.username is not None or parsed.password is not None:
-        raise ValueError("HTTP hook URL credentials are not allowed")
-    host = parsed.hostname.rstrip(".").casefold()
-    if host == "localhost" or host.endswith(".localhost"):
-        raise ValueError("HTTP hook URL resolves to a local address")
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    try:
-        addresses = await _resolve_host(host, port)
-    except (OSError, socket.gaierror) as error:
-        raise ValueError(f"HTTP hook host resolution failed: {error}") from error
-    if not addresses:
-        raise ValueError("HTTP hook host did not resolve")
-    for raw in addresses:
-        address = ipaddress.ip_address(raw.split("%", 1)[0])
-        if not address.is_global:
-            raise ValueError("HTTP hook URL resolves to a local or private address")
-
-
 async def _post_http(url: str, body: Mapping[str, Any], headers: Mapping[str, str], timeout: float) -> httpx.Response:
     async with httpx.AsyncClient(follow_redirects=False, trust_env=False, timeout=timeout) as client:
         return await client.post(url, json=dict(body), headers=dict(headers))
@@ -385,7 +357,7 @@ async def _http_hook(
         return _result(reason="HTTP hook is missing url")
     try:
         normalized_payload = json_payload(payload)
-        await _validate_public_url(url)
+        await vet_public_url(url)
         allowed = {str(name) for name in hook.get("allowedEnvVars", []) if isinstance(name, str)}
         headers: dict[str, str] = {"Content-Type": "application/json"}
         configured = hook.get("headers", {})
