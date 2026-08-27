@@ -126,7 +126,13 @@ def _artifact_evidence(artifacts, texts, intact, source_file, quote):
     artifact = artifacts.get(source_file) if isinstance(source_file, str) else None
     if artifact is None:
         return "source_file is not a registered task artifact"
-    if not quote or len(quote) > MAX_QUOTE:
+    # The needle is what containment is checked with below, so it is also what has to be refused
+    # when it is empty: a quote of soft hyphens survives ``.strip()`` (U+00AD is not Python
+    # whitespace) but folds to "", and "" is in every file -- an invisible non-quote must not
+    # verify against anything. The doc shape never had this hole: ``corpus.verify_quote`` refuses
+    # an empty needle itself.
+    needle = normalize_for_quote_match(quote)
+    if not needle or len(quote) > MAX_QUOTE:
         return "has an invalid quotation"
     if artifact["id"] not in texts:
         try:
@@ -147,7 +153,7 @@ def _artifact_evidence(artifacts, texts, intact, source_file, quote):
     # Matching is loosened, storage is not: the same normalizer the corpus verifier uses, so a word
     # the extractor hyphenated across a line break and full-width punctuation do not make a real
     # sentence "not exist" -- the most expensive kind of false accusation this module can make.
-    if normalize_for_quote_match(quote) not in normalize_for_quote_match(texts[artifact["id"]]):
+    if needle not in normalize_for_quote_match(texts[artifact["id"]]):
         return "quotation was not found in the source artifact"
     return {"artifact_id": artifact["id"], "source_file": source_file,
             "evidence_sha": artifact["sha256"]}
@@ -164,6 +170,11 @@ def _doc_evidence(run, doc_id, page, quote):
 
     Nothing model-supplied is echoed into a reason unless it has already been validated as a
     document id or a page number: these reasons travel back into a prompt.
+
+    The roots searched here (``runs.evidence_roots``) and the candidate roots the doc_* tools
+    expand a session cwd into (``extensions/documents.py::_roots``) are one rule in two places:
+    a doc_verify that refuses a citation this function would accept -- or the reverse -- breaks
+    the verify-then-cite contract, so change them together.
     """
     if not isinstance(doc_id, str) or not corpus.DOC_ID_RE.fullmatch(doc_id.strip()):
         return "doc_id is not a document id"

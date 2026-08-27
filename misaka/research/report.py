@@ -206,6 +206,10 @@ def _human_source(source_file):
     The document is in the corpus and ``doc_read`` is how one reaches it, so the row says which
     document and which page instead. Anything that is not exactly that shape is passed through
     untouched: this renames one machine key, it does not reformat paths a Sister wrote.
+
+    Called only for doc claims (``artifact_id`` IS NULL) -- the call site gates on that. An
+    artifact claim's source_file is the card-chosen path from report.json, and ``doc:...#p42``
+    is a legal filename: renaming it would present a card's own text as a corpus-verified page.
     """
     match = _DOC_SOURCE_RE.fullmatch(str(source_file or ""))
     return f"语料文档 {match.group(1)} 第 {match.group(2)} 页" if match else source_file
@@ -242,7 +246,10 @@ def _sources(con, run):
             if claim["artifact_id"] not in urls:
                 urls[claim["artifact_id"]] = _provenance_url(con, claim["artifact_id"])
             url = urls[claim["artifact_id"]]
-            where = _human_source(claim["source_file"])
+            # Only a doc claim earned the corpus rename: see _human_source on why an artifact
+            # claim's source_file must go through verbatim, however doc-shaped it looks.
+            where = (_human_source(claim["source_file"]) if claim["artifact_id"] is None
+                     else claim["source_file"])
             sources.append(citation.Source(evidence=claim["quote"], url=url,
                                            label=f"{finding['id']} {where}"))
             lines.append(f"[{len(sources)}] {_one_line(finding['text'])}\n"

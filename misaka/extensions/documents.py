@@ -24,6 +24,99 @@ def _workspace(ctx):
     return os.path.realpath(getattr(ctx, "cwd", None) or os.getcwd())
 
 
+# -- which folders may own a document this session can cite ---------------------------------------
+#
+# Mirror of ``runs.evidence_roots`` (misaka/research/runs.py): the ledger accepts a doc citation
+# under either the run's project folder or the run home that holds every node worktree, so the
+# doc_* tools must see the same set -- a doc_verify that answers "do not cite it" about a citation
+# ``ledger.ingest_report`` would accept kills the verify-then-cite loop for every below-root card.
+# The tool layer has no run row and no database, so the candidates are derived from the path shape
+# alone; keep the two rules in step when either side changes.
+
+def _linked_worktree_main(root):
+    """The main repository root when ``root`` is a linked git worktree, else None.
+
+    A linked worktree's ``.git`` is a *file* whose first line reads
+    ``gitdir: <main>/.git/worktrees/<name>``; the main repository keeps a ``.git`` directory.
+    """
+    gitfile = os.path.join(root, ".git")
+    try:
+        if not os.path.isfile(gitfile):
+            return None
+        with open(gitfile, encoding="utf-8", errors="replace") as f:
+            first = f.readline().strip()
+    except OSError:
+        return None
+    if not first.startswith("gitdir:"):
+        return None
+    # join() handles both spellings git writes: an absolute gitdir, or one relative to the worktree.
+    gitdir = os.path.normpath(os.path.join(root, first.removeprefix("gitdir:").strip()))
+    worktrees, dotgit = os.path.dirname(gitdir), os.path.dirname(os.path.dirname(gitdir))
+    if os.path.basename(worktrees) != "worktrees" or os.path.basename(dotgit) != ".git":
+        return None
+    return os.path.realpath(os.path.dirname(dotgit))
+
+
+def _run_home(root):
+    """The research run home containing ``root``, or None.
+
+    ``runs.node_worktree`` puts every node's line at ``<runs home>/<run_id>/branches/<node>/
+    worktree``, and ``runs.evidence_roots`` accepts the whole ``<runs home>/<run_id>`` -- that is
+    how one node's card reaches a document a sibling or ancestor node indexed. Recognized purely
+    by that shape: an ancestor named ``worktree`` two levels under one named ``branches``.
+    """
+    current = root
+    while True:
+        parent = os.path.dirname(current)
+        if (os.path.basename(current) == "worktree"
+                and os.path.basename(os.path.dirname(parent)) == "branches"):
+            return os.path.dirname(os.path.dirname(parent))
+        if parent == current:
+            return None
+        current = parent
+
+
+def _roots(ctx):
+    """The candidate roots a document may be owned under, in the ledger's own search order."""
+    out = [_workspace(ctx)]
+    for candidate in (_linked_worktree_main(out[0]), _run_home(out[0])):
+        if candidate and candidate not in out:
+            out.append(candidate)
+    return out
+
+
+def _owning_root(doc_id, ctx):
+    """The first candidate root that owns ``doc_id``, or None (``ledger._doc_evidence``'s search)."""
+    return next((root for root in _roots(ctx) if corpus.resolve_doc(doc_id, workspace=root)), None)
+
+
+def _docs(ctx):
+    """Indexed documents owned by any candidate root, oldest first -- one row per document (a book
+    linked from both the project and a worktree is one document, not two)."""
+    rows, seen = [], set()
+    for root in _roots(ctx):
+        for row in corpus.docs(workspace=root):
+            if row["doc_id"] not in seen:
+                seen.add(row["doc_id"])
+                rows.append(row)
+    rows.sort(key=lambda row: row.get("added_at", 0))
+    return rows
+
+
+def _find(query, doc_id, ctx, limit=10):
+    """Literal search across every candidate root, deduped by (doc, page) where roots overlap."""
+    hits, seen = [], set()
+    for root in _roots(ctx):
+        for hit in corpus.search_literal(query, doc_id=doc_id, workspace=root, limit=limit):
+            key = (hit["doc_id"], hit["page"])
+            if key not in seen:
+                seen.add(key)
+                hits.append(hit)
+        if len(hits) >= limit:
+            break
+    return hits[:limit]
+
+
 def _register(harn, name, label, description, parameters, snippet=None, guidelines=None):
     def deco(fn):
         async def execute(tool_call_id, raw, signal, on_update, ctx):
@@ -48,7 +141,7 @@ def register(harn):
         guidelines=["Check doc_list before fetching or re-reading material: indexed sources and other cards' artifacts are already there."],
         parameters=ListParams)
     async def doc_list(tool_call_id, params, signal, on_update, ctx):
-        rows = await _off_loop(corpus.docs, workspace=_workspace(ctx))
+        rows = await _off_loop(_docs, ctx)
         if signal_aborted(signal):
             return _text("Cancelled.")
         if params.query:
@@ -69,7 +162,9 @@ def register(harn):
         ],
         parameters=OutlineParams)
     async def doc_outline(tool_call_id, params, signal, on_update, ctx):
-        workspace = _workspace(ctx)
+        workspace = await _off_loop(_owning_root, params.doc_id, ctx)
+        if workspace is None:
+            return _text("Document not found. Use doc_list to find its document ID.")
         o = await _off_loop(corpus.tree_outline, params.doc_id, workspace=workspace)
         if signal_aborted(signal):
             return _text("Cancelled.")
@@ -94,7 +189,9 @@ def register(harn):
         snippet="Read original text by outline node or page range",
         parameters=ReadParams)
     async def doc_read(tool_call_id, params, signal, on_update, ctx):
-        workspace = _workspace(ctx)
+        workspace = await _off_loop(_owning_root, params.doc_id, ctx)
+        if workspace is None:
+            return _text("Document not found. Use doc_list to find its document ID.")
         if params.node:
             span = await _off_loop(corpus.node_pages, params.doc_id, params.node,
                                    workspace=workspace)
@@ -127,8 +224,7 @@ def register(harn):
         snippet="Locate exact text in indexed documents",
         parameters=FindParams)
     async def doc_find(tool_call_id, params, signal, on_update, ctx):
-        hits = await _off_loop(corpus.search_literal, params.query, doc_id=params.doc_id or None,
-                               workspace=_workspace(ctx))
+        hits = await _off_loop(_find, params.query, params.doc_id or None, ctx)
         if signal_aborted(signal):
             return _text("Cancelled.")
         if not hits:
@@ -178,10 +274,13 @@ def register(harn):
         ],
         parameters=VerifyParams)
     async def doc_verify(tool_call_id, params, signal, on_update, ctx):
-        v = await _off_loop(corpus.verify_quote, params.doc_id, params.quote,
-                            workspace=_workspace(ctx))
+        root = await _off_loop(_owning_root, params.doc_id, ctx)
+        v = None if root is None else await _off_loop(
+            corpus.verify_quote, params.doc_id, params.quote, workspace=root)
         if signal_aborted(signal):
             return _text("Cancelled.")
+        if root is None:
+            return _text("Document not found. Use doc_list to find its document ID.")
         if not v:
             return _text("❌ The quotation was not found. Do not cite it as a verified quotation.")
         return _text(
