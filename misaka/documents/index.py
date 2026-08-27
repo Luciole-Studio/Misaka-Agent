@@ -3,17 +3,22 @@ import functools
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shutil
 import stat
 import subprocess
+import tempfile
 import threading
 import time
 import unicodedata
+import urllib.parse
+import xml.etree.ElementTree as ET
+import zipfile
 
+from misaka.documents import htmltext
 from misaka.utils import atomic
 
-SCAN_SUFFIXES = {".pdf", ".md", ".markdown", ".txt"}
 DOC_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 
 
@@ -93,15 +98,13 @@ def claim_hash(doc_id, page, offset, quote):
     return hashlib.sha256(f"{doc_id}:{page}:{offset}:{quote}".encode()).hexdigest()
 
 
-def _pdf_pages(p):
+def _pdf_text_layer(p):
+    """The text a PDF already carries, page by page; empty for a scan."""
     try:
         out = subprocess.run(["pdftotext", "-layout", p, "-"], capture_output=True,
                              text=True, timeout=300, check=False)
         if out.returncode == 0 and out.stdout.strip():
-            pages = out.stdout.split("\f")
-            if len(pages) > 1 and not pages[-1].strip():   # pdftotext ends every page with \f: the tail is no page
-                pages.pop()
-            return pages
+            return _form_feed_pages(out.stdout)
     except (OSError, subprocess.SubprocessError):
         pass
     try:
@@ -115,9 +118,424 @@ def _pdf_pages(p):
         return []
 
 
-def _text_pages(p, chars=3000):
-    with open(p, encoding="utf-8", errors="replace") as f:
-        s = f.read()
+def _form_feed_pages(text):
+    """Split page-separated output into pages. pdftotext and ocrmypdf's sidecar both end every
+    page with a form feed, so the tail after the last one is no page."""
+    pages = text.split("\f")
+    if len(pages) > 1 and not pages[-1].strip():
+        pages.pop()
+    return pages
+
+
+def _solid(pages):
+    """How many pages carry more than a caption's worth of text."""
+    return sum(1 for t in pages if len(t.strip()) > 20)
+
+
+def _has_text_layer(pages):
+    """True when extraction found a real text layer rather than a scan's stray page numbers.
+
+    One rule, in one place: this is the check ``ingest`` refuses on, so a PDF is sent to OCR
+    exactly when it would otherwise be turned away -- the two can never disagree.
+    """
+    return bool(pages) and _solid(pages) >= max(1, len(pages) * 0.2)
+
+
+def _note(meta, key, value):
+    """Record one fact an extractor learned about the source, when the caller asked for them."""
+    if meta is not None:
+        meta[key] = value
+
+
+# -- OCR: an optional external binary, fail-closed ------------------------------------------------
+#
+# ingest used to refuse a scan with "run OCR first" -- advice the product could not carry out,
+# because there was no OCR anywhere in it. Archival scans, pre-2000 books and 影印本 therefore
+# could not enter the corpus at all. ocrmypdf is not a dependency and never becomes one: when it
+# is absent the refusal stands, and it now names the install instead of an imperative into thin
+# air.
+OCR_BINARY = "ocrmypdf"
+OCR_LANGS_DEFAULT = "eng+chi_sim+jpn"
+# A book-length scan is minutes of work per hundred pages; the bound is what keeps one stuck OCR
+# from owning an ingest forever (pdftotext above is bounded the same way, smaller).
+OCR_TIMEOUT = 900
+
+
+def _ocr_pages(p, meta=None):
+    """OCR a scanned PDF into pages, or None when that cannot be done.
+
+    ``--skip-text`` leaves any page that already carries text alone: OCR must never be written
+    over a real text layer. ``--sidecar`` is the only output kept -- the corpus stores the
+    original file, whose sha256 is the document's identity, so the OCR'd PDF is discarded.
+
+    A run that fails writes why into ``meta['ocr_error']``, and the refusal quotes it. The most
+    likely failure by far is a language pack that is not installed (``brew install tesseract-lang``
+    for the chi_sim and jpn defaults), and "OCR failed" without the reason would be the same
+    dead end this whole path exists to remove. The key never reaches meta.json: it is only ever
+    set on the way to a raise.
+    """
+    if not shutil.which(OCR_BINARY):
+        return None
+    langs = os.environ.get("MISAKA_OCR_LANGS") or OCR_LANGS_DEFAULT
+    with tempfile.TemporaryDirectory(prefix="misaka-ocr-") as tmp:
+        sidecar = os.path.join(tmp, "sidecar.txt")
+        try:
+            out = subprocess.run(
+                [OCR_BINARY, "--sidecar", sidecar, "--skip-text", "-l", langs,
+                 p, os.path.join(tmp, "ocr.pdf")],
+                capture_output=True, text=True, timeout=OCR_TIMEOUT, check=False)
+            if out.returncode != 0:
+                _note(meta, "ocr_error",
+                      " ".join((out.stderr or "").split())[-200:] or f"exit {out.returncode}")
+                return None
+            with open(sidecar, encoding="utf-8") as f:
+                text = f.read()
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            _note(meta, "ocr_error", str(error)[:200])   # missing or unreadable sidecar, timeout
+            return None
+    return _form_feed_pages(text)
+
+
+def _merge_ocr(pages, ocr):
+    """``(pages, the 1-based numbers of the pages taken from OCR)``.
+
+    A PDF reaches OCR when fewer than a fifth of its pages carry text, so up to a fifth of them
+    *do* -- and ``--skip-text`` deliberately leaves those alone, which means the sidecar's entry
+    for such a page is ocrmypdf's placeholder rather than its words. Taking the sidecar whole
+    therefore wrote a placeholder over the real text of exactly the pages a mostly-scanned book
+    still had: the handful of typeset pages in a scan of a printed book, which are usually the
+    front matter a citation needs.
+
+    So the two are merged page by page, on the same "more than a caption's worth" rule the rest
+    of this module uses. Both sequences are one entry per page of the PDF and align by index;
+    when they do not (pdftotext and ocrmypdf disagreeing about the page count means one of them
+    read a damaged file), OCR is taken as it stands rather than pasted against page numbers it
+    does not belong to -- a citation that lands on the wrong page is worse than a scan.
+    """
+    if len(ocr) != len(pages):
+        return ocr, list(range(1, len(ocr) + 1))
+    merged, ocred = [], []
+    for number, (extracted, scanned) in enumerate(zip(pages, ocr), 1):
+        if len(extracted.strip()) > 20:
+            merged.append(extracted)        # a real text layer: never OCR over it
+        else:
+            merged.append(scanned)
+            ocred.append(number)
+    return merged, ocred
+
+
+def _pdf_pages(p, meta=None):
+    pages = _pdf_text_layer(p)
+    if _has_text_layer(pages):
+        return pages                        # a real text layer: never OCR over it
+    ocr = _ocr_pages(p, meta)
+    if ocr and _has_text_layer(ocr):
+        merged, ocred = _merge_ocr(pages, ocr)
+        # doc_list/doc_outline badge OCR text as lower fidelity, and doc_verify names the page.
+        # ``ocr_pages`` is written only when the text layer survived somewhere, so the common
+        # case -- a scan, every page of it OCR'd -- does not carry a list of every page number.
+        _note(meta, "ocr", True)
+        if len(ocred) < len(merged):
+            _note(meta, "ocr_pages", ocred)
+        return merged
+    return pages                            # ingest turns it away, naming the install
+
+
+def _no_text_error(p, pages, ocr_error=None):
+    """The refusal for a file whose extracted text is not a usable text layer.
+
+    For a PDF the advice has to be one the reader can carry out: with ocrmypdf installed the scan
+    has already been through it by the time this runs, so what is left to say is either why that
+    failed or where to get it -- not the old "run OCR first", which named no way to.
+    """
+    name, solid = os.path.basename(p), _solid(pages)
+    if os.path.splitext(p)[1].lower() != ".pdf":
+        return ValueError(f"No text found in {name}: the file has no readable content.")
+    if ocr_error:
+        tried = f"ocrmypdf failed ({ocr_error})"
+    elif shutil.which(OCR_BINARY):
+        tried = "OCR produced no text either"
+    else:
+        tried = "this is a scan -- install ocrmypdf to index it (brew install ocrmypdf)"
+    if pages and solid:
+        return ValueError(
+            f"Incomplete text layer: only {solid} of {len(pages)} pages contain text "
+            f"({solid / len(pages):.0%}). This is probably a scanned document with a few "
+            f"text pages; {tried}: {name}")
+    return ValueError(f"No text layer found; {tried}: {name}")
+
+
+# -- decoding text that is not UTF-8 --------------------------------------------------------------
+#
+# Strictly, or not at all. Text files used to be opened with errors='replace', which never fails
+# and never says so: a Shift-JIS 青空文庫 book and a GB18030 file both entered the corpus as pages
+# of '��y�͔L�ł���', and passed the text check because replacement characters are characters.
+# Everything downstream -- doc_find, doc_verify, the ledger's quote check -- then operated on
+# garbage in silence, and a ledger that "verifies" a quotation against mojibake is worse than one
+# that cannot read the book at all.
+#
+# The order below is not the obvious one, and the reason is measured rather than theoretical.
+# These encodings are not mutually exclusive: decoding one language's bytes under another's codec
+# usually *succeeds*. Measured on a paragraph of each (the fixtures in
+# tests/test_documents_encoding.py):
+#
+#   bytes \ codec   cp932       cp949            gb18030             cp950
+#   Japanese        correct     refuses          clean, wrong Han    refuses
+#   Korean          refuses     correct          clean, wrong Han    refuses
+#   Chinese         refuses     Hangul/Han mix   correct             clean, wrong Han
+#   Big5            refuses     refuses          private-use junk    correct
+#
+# So first-clean-wins is only as honest as its order, and no order suffices on its own: cp950
+# accepts Chinese and gb18030 accepts Big5, so "must be tried first" has a cycle. Ordering does
+# the work it can (cp932 is the pickiest and goes first; gb18030 accepts nearly any byte stream
+# and goes late), and the coherence rule below catches the two mis-decodes that would otherwise
+# win their slot.
+#
+# The codecs are the vendor supersets, not the bare standards, because the supersets are what the
+# files are actually written in. Python's ``shift_jis`` is JIS X 0208 and *rejects* the NEC/IBM
+# extension rows -- ① № Ⅰ ㈱ ℡ ㍉ 髙 﨑 -- which is to say it rejects what Japanese Windows and
+# 青空文庫 write; the decode then fell through to gb18030, which accepts nearly anything, and a
+# Japanese book entered the corpus as mojibake that the ledger would later "verify" quotations
+# against. Each swap was checked exhaustively over the whole one- and two-byte space (the codecs
+# are two-byte, so that is all of them) and each wide codec accepts every sequence its narrow one
+# accepts -- zero new rejections. They disagree on 6 sequences (shift_jis/cp932), 0 (euc_kr/cp949)
+# and 11 (big5/cp950), and every disagreement is the vendor variant of one glyph (wave dash vs.
+# fullwidth tilde, ¢ vs. ￠), never a different character. big5hkscs was rejected for this: it
+# reassigns 249 sequences in the ETen kana rows to HKSCS characters, so it is not a superset.
+# tests/test_documents_encoding.py re-runs that check.
+#
+# Character *frequency* cannot help, however tempting: two two-byte codecs over the same bytes
+# give the same frequency profile, only different characters. Telling rare Han from common Han
+# needs a per-language character table -- that is a charset detector, and this is not one.
+TEXT_ENCODINGS = ("utf-8", "utf-8-sig", "cp932", "cp949", "gb18030", "cp950")
+
+# The character ranges a document in any of these encodings is made of -- which is to say, what
+# these charsets can actually encode, enumerated from the codecs themselves rather than guessed:
+# ASCII and Latin letters, punctuation and currency, the Greek and Cyrillic rows (JIS X 0208 rows
+# 6-7, KS X 1001, GB 2312 all carry them), arrows and mathematical operators, the enclosed and
+# squared forms 青空文庫 and Japanese Windows are full of (① ㈱ ㍉ Ⅰ), box drawing and the
+# geometric shapes that rule a Japanese table (■ ● ★), Bopomofo, radicals, CJK punctuation and
+# forms, kana, Hangul, Han.
+#
+# Running that census over every one- and two-byte sequence of all four codecs leaves the private
+# use areas as essentially the only thing outside these ranges -- which is the point. Private use
+# is what a wrong codec produces, and control bytes are what any codec produces from a file that
+# is not text. Big5 read as GB18030 is still 39% outside, eight times the rule's bar.
+_TEXT_RANGES = ((0x09, 0x0D), (0x20, 0x7E), (0xA0, 0x24F), (0x370, 0x4FF), (0x1100, 0x11FF),
+                (0x2000, 0x206F), (0x20A0, 0x20CF), (0x2100, 0x22FF), (0x2460, 0x24FF),
+                (0x2500, 0x26FF), (0x2E80, 0x2FDF), (0x3000, 0x30FF), (0x3100, 0x318F),
+                (0x31F0, 0x31FF), (0x3200, 0x33FF), (0x3400, 0x4DBF), (0x4E00, 0x9FFF),
+                (0xAC00, 0xD7A3), (0xF900, 0xFAFF), (0xFE30, 0xFE6F), (0xFF00, 0xFFEF),
+                (0x20000, 0x2FA1F))
+# A wrong codec is wrong on every line, so a sample settles it; a book pays for its decode, not
+# for a second pass over itself to guess the language.
+_COHERENCE_SAMPLE = 64 * 1024
+
+# The half-width katakana block U+FF61-FF9F is where a wrong codec lands most often, because the
+# single bytes 0xA1-0xDF cp932 spends on it are exactly the trail bytes GB 2312, KS X 1001 and Big5
+# spend on ordinary characters -- and cp932 is tried before all three. Quantity cannot separate
+# that from a real half-width file (they exist: old data files, receipt and EDI records), because
+# both are wall-to-wall kana. Orthography can: the syllabary's modifiers attach to a fixed set of
+# bases, and a codec that is scattering bytes attaches them at random. Measured over 910 Chinese
+# samples read as cp932, 786 carry a modifier and 49% of those modifiers are illegally placed;
+# over real half-width Japanese, 47 modifiers and not one violation.
+_KANA_BASE = frozenset(range(0xFF71, 0xFF9E))                       # ｱ..ﾝ, a full kana
+_KANA_DAKUTEN = frozenset({0xFF66, 0xFF73, 0xFF9C}                  # ｦ ｳ ﾜ
+                          | set(range(0xFF76, 0xFF85))              # ｶ..ﾄ
+                          | set(range(0xFF8A, 0xFF8F)))             # ﾊ..ﾎ
+_KANA_HANDAKUTEN = frozenset(range(0xFF8A, 0xFF8F))                 # ﾊ..ﾎ and nothing else
+# How much better a later codec has to look before it takes a document away from an earlier one.
+# The wrong readings measured here score 0.29 to 1.00 against a right reading's 0.00, so the bar
+# can sit low without being reachable by noise -- a Japanese file with a stray gaiji in the private
+# use area scores a thousandth and keeps its own codec.
+_CODEC_MARGIN = 0.05
+
+
+def _mojibake(text, cjk_codec=True):
+    """How much of a decode is evidence that the codec was wrong -- the share of the sample that
+    only a wrong codec produces, ``0.0`` for a decode that reads as writing throughout -- or
+    ``None`` when it is not writing at all and has to be refused outright.
+
+    Refusal comes first. One rule holds for every decode, UTF-8 included:
+
+    0. a NUL is not a character in any document. It is a valid UTF-8 *byte*, though, so a BOM-less
+       UTF-16LE stream of Latin text decodes as UTF-8 without an error and enters the corpus with
+       every second character a NUL. Self-validating means the bytes are well-formed UTF-8, not
+       that the file was UTF-8.
+
+    The other three apply only to a legacy CJK codec (``cjk_codec``), because they are measured
+    against the table above -- the character ranges *those* encodings can express. A UTF-8 file is
+    not a guess and must not be judged by that table: Cyrillic, Greek, Arabic, Devanagari and
+    emoji are all outside it, and a Russian book is not incoherent.
+
+    1. more than 5% of the sample outside the ranges of written text -- Big5 read as GB18030 is
+       39% private-use characters, and a binary file read as anything is mostly control bytes;
+    2. CJK characters that stand alone rather than in runs. This is the one that catches a wrong
+       codec over mostly-ASCII text, where rule 1 sees almost nothing: Latin-1 Swedish read as
+       GB18030 comes out 'H鋜 鋜 gudarnas 鋘gar' -- 13% of the sample, no private-use characters,
+       and 100% of the non-ASCII tail is Han, so counting the tail cannot separate it either. What
+       separates it is that every one of those Han characters is alone between ASCII letters,
+       because each accented byte ate the letter after it. Measured as the fraction of CJK
+       characters with a CJK neighbour: Japanese 1.00, Chinese 1.00, Big5 1.00, Korean 0.97, a
+       Shift-JIS README that is 88% ASCII 1.00, an all-citations Japanese file (every character
+       between digits, the worst real case) 0.50 -- against 0.00 for Swedish under cp932, gb18030
+       and cp950 alike. The bar is half, and a sample that is majority CJK is exempt outright, so
+       no real CJK book can ever be turned away by this rule;
+    3. Hangul beside kana or beside Han, either one in bulk -- Chinese read as EUC-KR comes out
+       58% Hangul and 42% Han, while Korean prose is Hangul with hanja as a garnish. The threshold
+       is a fifth for both, which admits ordinary hanja and the Japanese terms Korean scholarship
+       on Japan quotes in kana -- KS X 1001 encodes kana, and a bare truthiness test on it handed
+       correct EUC-KR documents to GB18030 over a single quoted word.
+
+    A decode that survives all four is still only a candidate, because these encodings overlap:
+    the same bytes read as two of them can both come out looking like writing, and the loser is
+    then decided by whichever codec ``TEXT_ENCODINGS`` happens to try first. So what is left is
+    counted rather than refused -- every character that only a wrong codec would have produced:
+
+    4. private-use characters, the same ones rule 1 counts. Under the 5% bar they were free; two
+       of them in a seven-character sample are not, and that is exactly what Big5 read as GB18030
+       looks like: '第一章 緒論。' comes out as '材?彻 狐阶?' with a U+E5E6 and a U+E4C9
+       standing where the '?' are. This is the only signal that sees the wrong-Han-for-Han theft
+       at all: the rest of that output *is* ordinary Han in U+4E00-9FFF, so no rule about what
+       CJK looks like can tell it from the real thing;
+    5. half-width kana in a decode that also holds full-width script or private use. Real writing
+       does not mix them in that proportion -- a legacy half-width file is half-width throughout,
+       and a modern Japanese document that quotes half-width kana is full-width throughout. A
+       Chinese or Korean sentence read as cp932 is 73%-91% half-width kana studded with a few
+       stray Han, which is neither;
+    6. a character standing where its own script never puts it. Two of those are worth counting:
+       a kana modifier on a base that cannot take it (see ``_KANA_DAKUTEN`` above), which is what
+       is left for the half-width file that carries no other script at all and where rule 5 is
+       blind by construction -- it is what keeps genuine half-width Japanese decodable instead of
+       refused and handed to GB18030 as a wall of Han; and a Han character immediately behind a
+       hangul syllable, which is how Chinese read as cp949 gives itself away when it comes out
+       mostly hangul and rule 3 therefore says nothing.
+
+    What it does not catch, written down rather than papered over: a file too short to carry the
+    evidence (a fragment of two or three characters is decided by codec order and nothing else), a
+    BOM-less UTF-16 file whose text is CJK (its bytes carry no NULs), a two-byte sequence that is
+    also valid UTF-8 ('为 none' in GB18030 is), and a Korean document in heavy 국한문혼용 (a fifth
+    or more hanja), which rule 3 turns away and GB18030 then reads as Han. Those cases buy correct
+    Simplified Chinese and correct modern Korean, which are the common ones; ``meta['encoding']``
+    records the choice on every document, so a reader who sees the wrong one can convert the file
+    and re-ingest.
+    """
+    sample = text[:_COHERENCE_SAMPLE]
+    alien = han = kana = hangul = halfwidth = cjk = alone = run = misplaced = 0
+    prev = 0
+    for ch in sample:
+        o = ord(ch)
+        here = False
+        if 0x20 <= o <= 0x7E or 0x09 <= o <= 0x0D:                      # ASCII, the common case
+            pass
+        elif o == 0:
+            return None                                                 # rule 0
+        elif 0x4E00 <= o <= 0x9FFF or 0x3400 <= o <= 0x4DBF or 0xF900 <= o <= 0xFAFF:
+            han += 1
+            here = True
+            # Korean writes the stem in hanja and the particle after it in hangul, never the other
+            # way round, so a Han character *behind* a hangul syllable is not Korean orthography.
+            # Chinese read as cp949 comes out mostly hangul with hanja wedged in at random: 51% of
+            # its Han sit behind a syllable, against 0 of real Korean's.
+            misplaced += 0xAC00 <= prev <= 0xD7A3                       # rule 6
+        elif 0x3040 <= o <= 0x30FF or 0x31F0 <= o <= 0x31FF:
+            kana += 1
+            here = True
+        elif 0xAC00 <= o <= 0xD7A3 or 0x1100 <= o <= 0x11FF or 0x3130 <= o <= 0x318F:
+            hangul += 1
+            here = True
+        elif 0xFF61 <= o <= 0xFF9F:               # half-width kana
+            halfwidth += 1
+            here = True
+            if 0xFF67 <= o <= 0xFF6F:             # a small kana or ｯ, after a kana or a mark (ｳﾞｧ)
+                misplaced += prev not in _KANA_BASE and prev not in (0xFF9E, 0xFF9F)
+            elif o == 0xFF70:                     # ｰ, after any of them (ﾃﾞｰﾀ, ﾌｧｰｽﾄ)
+                misplaced += not 0xFF67 <= prev <= 0xFF9F
+            elif o == 0xFF9E:
+                misplaced += prev not in _KANA_DAKUTEN
+            elif o == 0xFF9F:
+                misplaced += prev not in _KANA_HANDAKUTEN
+        elif 0xFF00 <= o <= 0xFFEF:               # full-width forms
+            here = True
+        elif not any(lo <= o <= hi for lo, hi in _TEXT_RANGES):
+            alien += 1
+        if here:
+            cjk += 1
+            run += 1                              # how long the CJK run ending here is so far
+        else:
+            alone += run == 1
+            run = 0
+        prev = o
+    alone += run == 1                             # a sample that ends mid-run
+    if not cjk_codec:
+        return 0.0
+    if alien > 2 and alien * 20 > len(sample):
+        return None
+    if cjk and cjk * 2 < len(sample) and (cjk - alone) * 2 < cjk:
+        return None
+    script = han + hangul + kana
+    if hangul and (kana * 5 > script or han * 5 > script):
+        return None
+    wrong = alien + misplaced
+    if halfwidth * 2 > cjk and script + alien:                          # rule 5
+        wrong += halfwidth
+    return wrong / max(1, len(sample))
+
+
+def _decode_bytes(raw, what):
+    """``(text, encoding)`` for bytes that are supposed to be text, decoded strictly -- never with
+    replacements. Every text-shaped format in the corpus comes through here, files and archive
+    members alike, so there is one answer to "what is this written in" and one refusal.
+
+    UTF-8 is self-validating, so it is not a guess; every legacy codec after it is a guess and has
+    to come out looking like writing. When none does, the bytes are refused and ``scan`` reports
+    the file skipped the way it reports a scan that needs OCR.
+
+    Taking the first guess that looked like writing was the bug: these codecs overlap, so a short
+    Chinese sentence is *also* a clean-looking run of half-width katakana and a short Big5 one is
+    *also* clean-looking Simplified Han, and whichever codec came first in ``TEXT_ENCODINGS`` took
+    them. Every candidate is scored instead and the least mojibake-shaped one wins, with the
+    tabulated order left to break ties -- so a document only ever changes hands to a codec that
+    reads it visibly better, never merely later. A file written in the codec tried first still
+    costs exactly one decode: scoring zero ends the loop, and real writing scores zero.
+    """
+    best = best_text = best_encoding = None
+    for encoding in TEXT_ENCODINGS:
+        if encoding == "utf-8" and raw.startswith(b"\xef\xbb\xbf"):
+            continue          # plain utf-8 decodes a BOM into the text; utf-8-sig drops it
+        try:
+            text = raw.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+        wrong = _mojibake(text, cjk_codec=not encoding.startswith("utf-8"))
+        if wrong is None:
+            continue
+        if not wrong:
+            return text, encoding
+        if best is None or wrong < best - _CODEC_MARGIN:
+            best, best_text, best_encoding = wrong, text, encoding
+    if best_text is None:
+        raise ValueError(f"not UTF-8 text; re-encode or name the encoding: {what}")
+    return best_text, best_encoding
+
+
+def _decode_text(p):
+    """``(text, encoding)`` for one text file on disk."""
+    with open(p, "rb") as f:
+        raw = f.read()
+    return _decode_bytes(raw, os.path.basename(p))
+
+
+def _read_text(p, meta=None):
+    """One text file's contents. Every text-shaped format goes through here."""
+    text, encoding = _decode_text(p)
+    _note(meta, "encoding", encoding)
+    return text
+
+
+def _paginate(s, chars=3000):
+    """Cut running text into pages at paragraph breaks -- a format without pages still needs
+    somewhere for a citation to point."""
     if not s.strip():
         return []
     out, buf, size = [], [], 0
@@ -132,9 +550,264 @@ def _text_pages(p, chars=3000):
     return out
 
 
-def extract_pages(p):
+# Every extractor takes the same two arguments: the file, and a dict to record what it learned
+# about the source in (the encoding it had to decode, whether the pages came out of OCR). ingest
+# writes that into meta.json, so what a page is made of stays on the record.
+
+def _text_pages(p, chars=3000, meta=None):
+    return _paginate(_read_text(p, meta), chars)
+
+
+def _html_pages(p, chars=3000, meta=None):
+    """A saved web page or an archival HTML file as the text a reader sees. Tags, scripts and
+    stylesheets are not text anybody quotes, and they used to enter the corpus verbatim."""
+    return _paginate(htmltext.readable(_read_text(p, meta))[0], chars)
+
+
+# -- EPUB ---------------------------------------------------------------------------------------
+#
+# An EPUB is a zip holding XHTML chapters plus a package document that says which of them the
+# book consists of and in what order. Reading it means reading those three things -- the
+# container, the package document, the spine -- with the standard library and nothing else.
+#
+# Every member is read by the name the package document gives, out of the archive; nothing is
+# ever extracted to a path. A crafted href of "../../etc/passwd" is therefore a lookup that
+# misses, not a file on this machine.
+
+# An archive member declares its uncompressed size in the central directory, so a "book" that
+# would decompress to a gigabyte is skipped before it is read -- an EPUB now also arrives by
+# download and is indexed on arrival, and the reader that opens whatever it is handed is the
+# one that gets handed a zip bomb. 16 MiB is several million words of XHTML; a chapter that
+# large is not a chapter.
+_EPUB_MEMBER_BYTES = 16 * 1024 * 1024
+
+# The member cap bounds one chapter; these bound the book, which is the number an archive can
+# multiply. Many manifest items may share one href and the spine may list them all, so a ~250 KB
+# archive holding a single 1 MB member can name it a thousand times: deduplication below removes
+# that amplification, and these two are what remains true when the members are all distinct.
+#
+# 16 Mi characters is the whole book's markup, counted as it is decoded. Every codec here yields
+# at most one character per byte read, so it bounds the decompression too, and markup is a third
+# to a half of a chapter file -- so this is roughly a ten-million-character book. War and Peace is
+# 3.2M characters and the complete Shakespeare 5.5M: the ceiling holds either one twice over, and
+# a "book" that does not fit is not one. 10,000 spine entries is the same judgement about work
+# rather than memory: one archive read each, and a page-per-file scan of a 1,000-page book uses a
+# tenth of it.
+_EPUB_BOOK_CHARS = 16 * 1024 * 1024
+_EPUB_SPINE_MAX = 10_000
+
+# What a spine entry has to be declared as to be read as text. EPUB content documents are
+# XHTML; a spine that points at an image would otherwise render as junk.
+_EPUB_TEXT_TYPES = ("html", "xml")
+
+
+def _zip_read(archive, name, limit=_EPUB_MEMBER_BYTES):
+    """One archive member's bytes, or None when it is missing, oversized, or damaged."""
+    try:
+        if archive.getinfo(name).file_size > limit:
+            return None
+        with archive.open(name) as member:
+            return member.read(limit)       # the declared size is attacker-written; this is not
+    except Exception:  # noqa: BLE001 - a missing or corrupt member is not a chapter; the rest of the book still reads
+        return None
+
+
+def _epub_local(tag):
+    """An XML tag without its namespace. Books in the wild declare the container and package
+    namespaces inconsistently or not at all, and a missing prefix is not a reason to refuse a
+    book every reader opens."""
+    return str(tag).rsplit("}", 1)[-1]
+
+
+def _epub_xml(data, what):
+    """Parse one of the book's own XML documents, or say which one is broken.
+
+    Entity declarations are refused rather than expanded: expat expands internal entities, so
+    a dozen nested ones are a megabyte of memory and thirty are the machine. No package
+    document has ever needed one.
+    """
+    if data is None:
+        raise ValueError(f"Not a readable EPUB: {what} is missing from the archive")
+    if b"<!ENTITY" in data:
+        raise ValueError(f"Not a readable EPUB: {what} declares XML entities")
+    try:
+        return ET.fromstring(data)
+    except ET.ParseError as error:
+        raise ValueError(f"Not a readable EPUB: {what} is malformed XML ({error})") from error
+
+
+def _epub_member(base, href):
+    """The archive member a manifest href names, relative to the package document, or ""."""
+    href = urllib.parse.unquote(href.split("#", 1)[0].strip())
+    if not href or "://" in href:                     # a remote chapter is not part of the book
+        return ""
+    return posixpath.normpath(posixpath.join(base, href)).lstrip("/")
+
+
+def _epub_spine(archive):
+    """``(title, [member names in reading order])`` for an open EPUB.
+
+    Raises ValueError naming what is wrong with anything that is not one: a file renamed to
+    .epub, a zip with no container, a package document that lists nothing readable.
+    """
+    container = _epub_xml(_zip_read(archive, "META-INF/container.xml"), "META-INF/container.xml")
+    opf_path = next((element.get("full-path") for element in container.iter()
+                     if _epub_local(element.tag) == "rootfile" and element.get("full-path")), None)
+    if not opf_path:
+        raise ValueError("Not a readable EPUB: container.xml names no package document")
+    opf_path = opf_path.lstrip("/")
+    package = _epub_xml(_zip_read(archive, opf_path), opf_path)
+    base, title, manifest, spine = posixpath.dirname(opf_path), "", {}, []
+    for element in package.iter():
+        tag = _epub_local(element.tag)
+        if tag == "item" and element.get("id"):
+            manifest[element.get("id")] = (element.get("href") or "",
+                                           (element.get("media-type") or "").lower())
+        elif tag == "itemref" and element.get("idref"):
+            spine.append(element.get("idref"))
+        elif tag == "title" and not title:
+            title = " ".join("".join(element.itertext()).split())
+    present, members, seen = set(archive.namelist()), [], set()
+    for idref in spine:
+        href, media_type = manifest.get(idref, ("", ""))
+        member = _epub_member(base, href)
+        # One member is read once however many manifest items point at it. A book that genuinely
+        # printed a chapter twice reads the same either way; an archive that names one member a
+        # thousand times is multiplying itself, and this is where that stops.
+        if member in seen:
+            continue
+        seen.add(member)
+        # A spine entry the archive does not carry is skipped rather than fatal: half a book is
+        # what a reader gets from a damaged file too, and it is worth more than none of it.
+        if member in present and (not media_type or any(t in media_type for t in _EPUB_TEXT_TYPES)):
+            members.append(member)
+    if not members:
+        raise ValueError("Not a readable EPUB: the spine lists no document the archive carries")
+    if len(members) > _EPUB_SPINE_MAX:
+        raise ValueError(f"Not a readable EPUB: the spine lists {len(members)} documents, "
+                         f"more documents than a book has (at most {_EPUB_SPINE_MAX})")
+    return title, members
+
+
+def _epub_pages(p, chars=3000, meta=None):
+    """An EPUB read as the book it is: chapter after chapter, in spine order.
+
+    ``meta`` goes unused: EPUB content is UTF-8 or UTF-16 by specification, so there is no
+    encoding here that had to be guessed and recorded."""
+    try:
+        with zipfile.ZipFile(p) as archive:
+            _title, members = _epub_spine(archive)
+            pages, budget = [], _EPUB_BOOK_CHARS
+            for name in members:
+                data = _zip_read(archive, name)
+                if data is None:
+                    continue
+                markup = _decode_markup(data)
+                budget -= len(markup)
+                if budget < 0:
+                    # Counted as it is decoded, so the refusal happens before the memory is spent
+                    # rather than after: this is the shape a zip bomb arrives in, and an EPUB is
+                    # downloaded and indexed on arrival without anybody looking at it first.
+                    raise ValueError(
+                        f"Refused {os.path.basename(p)}: its spine expands past "
+                        f"{_EPUB_BOOK_CHARS // (1024 * 1024)} MiB of markup, larger than any book")
+                pages.extend(_paginate(htmltext.readable(markup)[0], chars))
+    except zipfile.BadZipFile as error:
+        raise ValueError(f"Not a readable EPUB: the file is not a zip archive ({error})") from error
+    return pages
+
+
+def _decode_markup(data, what="EPUB chapter"):
+    """One markup document out of an archive, decoded by the same rule as every file on disk.
+
+    EPUB content is UTF-8 or UTF-16 by specification, and the BOM is the only honest signal of
+    the second -- but a specification is not what a file is written in. Japanese e-texts ship as
+    Shift-JIS inside the zip, and this used to decode with errors='replace': the strict door that
+    every other text format goes through had an archive-shaped hole beside it, and a book came
+    through it as pages of mojibake. Markup bytes now go through ``_decode_bytes`` too, so an
+    EPUB chapter is decoded for real or the book is refused by name.
+    """
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        try:
+            return data.decode("utf-16")             # a BOM is a declaration, not a guess
+        except UnicodeDecodeError as error:
+            raise ValueError(
+                f"not UTF-16 text despite its byte order mark: {what} ({error})") from error
+    return _decode_bytes(data, what)[0]
+
+
+# -- what the corpus can read -------------------------------------------------------------------
+#
+# One table, and a suffix with no extractor is refused by name instead of being read as text: a
+# single-file ingest used to accept anything, so an EPUB entered the corpus as pages of
+# "PK\x03\x04..." -- which passed the text check, because the XHTML inside the archive leaks
+# through the compression -- and an HTML page entered with its tags and its <script> counted as
+# prose.
+#
+# The last group is text with no format of its own: a card's analysis.csv, results.json, run.log
+# or paper.tex. These entered the corpus as text before this table existed, and the path that
+# carries them (``documents/workspace.ingest_artifacts``) swallows a ValueError without a word --
+# so refusing a suffix here dropped the card's deliverable in silence. What was actually wrong
+# with reading them as text was never the suffix: it was errors='replace', and _decode_bytes has
+# closed that door for every format at once.
+
+_EXTRACTORS = {
+    ".pdf": _pdf_pages,
+    ".epub": _epub_pages,
+    ".html": _html_pages, ".htm": _html_pages, ".xhtml": _html_pages,
+    ".md": _text_pages, ".markdown": _text_pages, ".txt": _text_pages,
+    ".bib": _text_pages, ".csv": _text_pages, ".tsv": _text_pages, ".rst": _text_pages,
+    ".tex": _text_pages,
+    ".json": _text_pages, ".jsonl": _text_pages, ".ndjson": _text_pages, ".log": _text_pages,
+    ".yaml": _text_pages, ".yml": _text_pages,
+}
+
+# "Can the corpus read this file" and "should a folder walk collect it by itself" are not the
+# same question, and one answer to both is what makes the second one wrong. ``scan`` walks
+# whatever it is pointed at -- ``misaka doc scan`` defaults to the working directory -- and a
+# working tree is full of package.json, config.yml and run.log that nobody meant as materials.
+# Named one by one they are read; swept up by a net they are noise, and download_file indexes
+# arrivals by this set too. Everything else in the table is document-shaped enough for both.
+_NOT_SWEPT = frozenset({".json", ".jsonl", ".ndjson", ".log", ".yaml", ".yml"})
+SCAN_SUFFIXES = frozenset(_EXTRACTORS) - _NOT_SWEPT
+
+
+def _extractor(p):
+    """The extractor for this file's suffix. The refusal names what the corpus does read: a
+    model told only "no" hands the same file back."""
     ext = os.path.splitext(p)[1].lower()
-    return _pdf_pages(p) if ext == ".pdf" else _text_pages(p)
+    extract = _EXTRACTORS.get(ext)
+    if extract is None:
+        raise ValueError(
+            f"Cannot index {ext or os.path.basename(p)}: the corpus reads "
+            f"{' '.join(sorted(_EXTRACTORS))}. Convert the file first."
+        )
+    return extract
+
+
+def extract_pages(p, meta=None):
+    """One file's text pages, dispatched on its suffix; ``meta`` collects what the extractor
+    learned about the source (see the extractor protocol above)."""
+    return _extractor(p)(p, meta=meta)
+
+
+def source_title(p):
+    """The title a document carries inside itself (EPUB ``dc:title``, HTML ``<title>``), or None.
+
+    Preferred over the file name, which for a downloaded book is whatever the URL ended in.
+    """
+    ext = os.path.splitext(p)[1].lower()
+    try:
+        if ext == ".epub":
+            with zipfile.ZipFile(p) as archive:
+                title = _epub_spine(archive)[0]
+        elif _EXTRACTORS.get(ext) is _html_pages:
+            title = htmltext.readable(_read_text(p))[1]
+        else:
+            return None
+    except (ValueError, OSError, zipfile.BadZipFile):
+        return None
+    return htmltext.clip(title.strip(), htmltext.MAX_TITLE_CHARS) or None
 
 
 def build_tree(p):
@@ -219,9 +892,11 @@ def _link(ddir, p, task_id):
 def ingest(p, title=None, with_tree=True, task_id=None):
     """Index a file under its content hash and return ``(doc_id, page_count)``.
 
-    Re-ingesting a known document only links the new ``task_id``.
+    Re-ingesting a known document only links the new ``task_id``. A suffix the corpus has no
+    extractor for raises ValueError naming the formats it does read.
     """
     p = os.path.abspath(os.path.expanduser(p))
+    _extractor(p)          # refuse an unreadable format before hashing, and before extracting
     sha = sha256_file(p)
     doc_id = sha[:12]
     ddir = os.path.join(corpus_root(), doc_id)
@@ -232,16 +907,10 @@ def ingest(p, title=None, with_tree=True, task_id=None):
         return doc_id, _link(existing, p, task_id)
     if os.path.lexists(ddir):
         raise ValueError(f"Invalid or colliding corpus entry: {doc_id}")
-    pages = extract_pages(p)
-    solid = sum(1 for t in pages if len(t.strip()) > 20)
-    if not pages or not solid:
-        raise ValueError(f"No text layer found; run OCR first: {os.path.basename(p)}")
-    if solid < len(pages) * 0.2:
-        raise ValueError(
-            f"Incomplete text layer: only {solid} of {len(pages)} pages contain text "
-            f"({solid / len(pages):.0%}). This is probably a scanned document with a few "
-            f"text pages. Run OCR before indexing: {os.path.basename(p)}"
-        )
+    extracted = {}                          # what the extractor learned: encoding, OCR
+    pages = extract_pages(p, meta=extracted)
+    if not _has_text_layer(pages):
+        raise _no_text_error(p, pages, extracted.pop("ocr_error", None))
     tree = build_tree(p) if (with_tree and len(pages) >= 20) else None
     # Build the document beside its final place and move it in with one rename: the corpus holds
     # a complete document or none, never a half-written directory that reads as "already indexed".
@@ -256,9 +925,11 @@ def ingest(p, title=None, with_tree=True, task_id=None):
         if tree:
             with open(os.path.join(stage, "tree.json"), "w", encoding="utf-8") as f:
                 f.write(tree)
-        meta = {"doc_id": doc_id, "title": title or os.path.basename(p), "orig_path": p, "paths": [p],
+        meta = {"doc_id": doc_id, "title": title or source_title(p) or os.path.basename(p),
+                "orig_path": p, "paths": [p],
                 "sha256": sha, "pages": len(pages), "task_id": task_id,
-                "task_ids": [task_id] if task_id else [], "added_at": int(time.time())}
+                "task_ids": [task_id] if task_id else [], "added_at": int(time.time()),
+                **extracted}
         with open(os.path.join(stage, "meta.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
         try:
@@ -277,7 +948,8 @@ def ingest(p, title=None, with_tree=True, task_id=None):
 
 
 def scan(directory, task_id=None, with_tree=True):
-    """Ingest every PDF / Markdown / text file under ``directory``, skipping hidden entries.
+    """Ingest every file under ``directory`` the corpus can read (``SCAN_SUFFIXES``), skipping
+    hidden entries.
 
     Returns ``(ingested, skipped)`` as ``[(doc_id, path)]`` and ``[(path, reason)]``.
     """

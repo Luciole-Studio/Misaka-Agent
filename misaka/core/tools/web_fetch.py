@@ -18,12 +18,10 @@ import asyncio
 import hashlib
 import json
 import os
-import re
 import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from html.parser import HTMLParser
 from typing import Any
 
 import httpx
@@ -51,6 +49,8 @@ from misaka.core.tools._web.render_check import check_render
 from misaka.core.tools._web.single_flight import single_flight
 from misaka.core.tools.download_file import DOWNLOAD_DIR_NAME
 from misaka.core.tools.path_utils import resolve_to_cwd
+from misaka.documents.htmltext import clip as _clip
+from misaka.documents.htmltext import readable as _readable
 from misaka.platform import budget
 from misaka.platform.prompt_guard import untrusted
 from misaka.utils.values import signal_aborted
@@ -74,16 +74,6 @@ _PAGE_DIR = f"{DOWNLOAD_DIR_NAME}/pages"
 # enough that the model can carry the name back in a report.json entry.
 _PAGE_STEM_CHARS = 12
 
-# A link target longer than this is not a link a model will usefully follow, and the
-# href is attacker-chosen text; the anchor still renders, without the URL.
-_MAX_LINK_CHARS = 500
-
-# A <title> is page-written text that this tool repeats as metadata: into the fenced
-# block, into `details`, and from there into whatever ledger row a caller builds from
-# it. Bounded so one page cannot decide how much of a turn -- or of a database column
-# -- it occupies; a 2 MiB <title> is as easy to serve as a 2 MiB body.
-_MAX_TITLE_CHARS = 200
-
 # A Content-Type is a remote header quoted back at the model in this tool's own voice,
 # outside any fence. Same reasoning as the title, tighter bound: no real media type is
 # anywhere near this long.
@@ -102,8 +92,6 @@ _HEADERS = {
 # off on a single unlucky fetch.
 _NO_CONTENT_STATUS = 422
 
-_BLANK_RUN = re.compile(r"\n{3,}")
-
 
 class WebFetchToolInput(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -112,141 +100,10 @@ class WebFetchToolInput(BaseModel):
 
 
 # --- HTML -> text the model can navigate -------------------------------------------
-
-_HEADINGS = {"h1": 1, "h2": 2, "h3": 3, "h4": 4, "h5": 5, "h6": 6}
-_HIDDEN = frozenset({"script", "style", "noscript", "template", "svg"})
-_BLOCKS = frozenset({
-    "article", "aside", "blockquote", "dd", "div", "dl", "dt", "figcaption", "figure",
-    "footer", "form", "header", "hr", "main", "nav", "ol", "p", "pre", "section",
-    "table", "td", "th", "tr", "ul",
-})
-
-
-@dataclass(slots=True)
-class _Anchor:
-    start: int
-    href: str
-
-
-class _Readable(HTMLParser):
-    """Visible page text with the structure a reader navigates by kept.
-
-    Headings, list items, paragraph breaks and link targets survive, because those are
-    what the next tool call is chosen from: a model that cannot see a page's links has
-    to guess the URL of whatever it wants to read next.
-    """
-
-    def __init__(self, base_url: str) -> None:
-        super().__init__(convert_charrefs=True)
-        try:
-            self._base: httpx.URL | None = httpx.URL(base_url)
-        except httpx.InvalidURL:
-            self._base = None
-        self._hidden = 0
-        self._in_title = False
-        self._title: list[str] = []
-        self._parts: list[str] = []
-        self._anchors: list[_Anchor] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in _HIDDEN:
-            self._hidden += 1
-            return
-        if self._hidden:
-            return
-        if tag == "title":
-            self._in_title = True
-        elif tag == "a":
-            # Only the outermost anchor is tracked. Nested <a> is invalid HTML and a
-            # browser closes the outer one anyway, but the real reason is cost: one
-            # frame per level makes _close_anchor re-flatten the same, ever-longer text
-            # once per level, and each level also re-appends the resolved URL. 40k
-            # nested anchors -- 460 KB, well under the fetch cap -- took 8.5s of blocked
-            # event loop and rendered 1 MB of text out of them.
-            if not self._anchors:
-                href = next((value for name, value in attrs if name == "href"), None)
-                self._anchors.append(_Anchor(len(self._parts), href or ""))
-        elif tag in _HEADINGS:
-            self._parts.append("\n\n" + "#" * _HEADINGS[tag] + " ")
-        elif tag == "li":
-            self._parts.append("\n- ")
-        elif tag == "br":
-            self._parts.append("\n")
-        elif tag in _BLOCKS:
-            self._parts.append("\n\n")
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in _HIDDEN:
-            self._hidden = max(0, self._hidden - 1)
-            return
-        if self._hidden:
-            return
-        if tag == "title":
-            self._in_title = False
-        elif tag == "a" and self._anchors:
-            self._close_anchor(self._anchors.pop())
-        elif tag in _HEADINGS or tag in _BLOCKS:
-            self._parts.append("\n\n")
-
-    def handle_data(self, data: str) -> None:
-        if self._hidden:
-            return
-        if self._in_title:
-            self._title.append(data)
-            return
-        if not data.strip():
-            # Whitespace between two inline elements is a word boundary: dropping it
-            # outright glues "<b>foo</b> <i>bar</i>" into one word.
-            if self._parts and not self._parts[-1].endswith((" ", "\n")):
-                self._parts.append(" ")
-            return
-        self._parts.append(data)
-
-    def _close_anchor(self, anchor: _Anchor) -> None:
-        text = " ".join("".join(self._parts[anchor.start:]).split())
-        del self._parts[anchor.start:]
-        if not text:
-            return
-        target = self._absolute(anchor.href)
-        self._parts.append(f"[{text}]({target})" if target else text)
-
-    def _absolute(self, href: str) -> str:
-        """An absolute http(s) target for *href*, or "" if it is not one worth showing."""
-        href = href.strip()
-        if not href or self._base is None or href.startswith(("#", "javascript:", "data:", "mailto:")):
-            return ""
-        try:
-            target = self._base.join(href)
-        except (httpx.InvalidURL, ValueError, UnicodeError):
-            return ""
-        if target.scheme not in {"http", "https"}:
-            return ""
-        rendered = str(target)
-        return rendered if len(rendered) <= _MAX_LINK_CHARS else ""
-
-    def title(self) -> str:
-        return " ".join("".join(self._title).split())
-
-    def text(self) -> str:
-        lines = (" ".join(line.split()) for line in "".join(self._parts).split("\n"))
-        return _BLANK_RUN.sub("\n\n", "\n".join(lines)).strip()
-
-
-def _clip(value: str, limit: int) -> str:
-    """One remote-written string, short enough to quote. The ellipsis is deliberate:
-    a silently shortened value reads as the whole thing."""
-    return value if len(value) <= limit else value[:limit] + "…"
-
-
-def _readable(markup: str, base_url: str) -> tuple[str, str]:
-    """``(text, title)`` for a markup document."""
-    parser = _Readable(base_url)
-    try:
-        parser.feed(markup)
-        parser.close()
-    except Exception:  # noqa: BLE001, S110 - broken markup: keep whatever parsed first
-        pass
-    return parser.text(), _clip(parser.title(), _MAX_TITLE_CHARS)
+#
+# The extractor itself lives in misaka/documents/htmltext.py: the corpus reads .html files
+# and EPUB chapters with the same parser, and a page fetched here has to render the same way
+# as the same page saved to disk and indexed.
 
 
 def _is_markup(content_type: str | None, text: str) -> bool:
