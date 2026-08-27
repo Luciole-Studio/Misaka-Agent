@@ -36,7 +36,12 @@ misaka chat            # talk to Last Order
 misaka research "..."  # start a research run
 misaka board           # the task board
 misaka doc add x.pdf   # index a document
+misaka web status      # web search: active backend, keyless ring, configured credentials
 ```
+
+Web search works with no configuration at all — a keyless vendor ring serves it. To pin a
+backend or add a vendor key: `misaka web set backend tavily`, `misaka web set env.TAVILY_API_KEY tvly-…`
+(written 0600 to `~/.misaka/web.json`; an exported variable always wins over the file).
 
 ## Configure
 

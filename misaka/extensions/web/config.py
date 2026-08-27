@@ -183,3 +183,98 @@ def use_keyless(name: str, api_key: str) -> bool:
     if tier == "paid":
         return False
     return not api_key and keyless_tier_enabled()
+
+
+# ── Writing the config document ───────────────────────────────────────────────
+# Read-only until here. The CLI (``misaka web``) is the one writer, so a user does not
+# have to hand-edit JSON; the file can hold vendor API keys, so it is written 0600.
+
+_BOOL_KEYS = frozenset({"keyless_fallback", "keyless_rescue"})
+_NESTED_KEYS = frozenset({"env", "provider_tier"})
+_SCALAR_KEYS = frozenset({"backend", "search_backend"})
+_VALID_TIERS = frozenset({"free", "paid", "auto"})
+
+
+def _coerce(key: str, value: str) -> bool | str:
+    if key in _BOOL_KEYS:
+        low = value.strip().lower()
+        if low in ("true", "on", "1", "yes"):
+            return True
+        if low in ("false", "off", "0", "no"):
+            return False
+        raise ValueError(f"{key} takes true/false, not {value!r}")
+    return value
+
+
+def _write(doc: dict) -> str:
+    from misaka.utils import atomic
+
+    path = _config_path()
+    atomic.write_text(path, json.dumps(doc, indent=2, ensure_ascii=False) + "\n", mode=0o600)
+    return path
+
+
+def set_config(dotted_key: str, value: str) -> str:
+    """Write one config value, addressed by ``key`` or ``section.key``. Returns the path.
+
+    ``section.key`` reaches the two nested maps a user needs -- ``env.TAVILY_API_KEY`` for
+    a credential, ``provider_tier.exa`` for a tier pin. Booleans are coerced for the two
+    flag keys so ``misaka web set keyless_rescue off`` does not store the string ``"off"``,
+    which :func:`config_flag` would read as truthy.
+    """
+    parts = dotted_key.split(".")
+    if len(parts) > 2:
+        raise ValueError("a config key nests at most one level (section.key)")
+    if len(parts) == 2 and parts[0] not in _NESTED_KEYS:
+        raise ValueError(f"{parts[0]!r} is not a nested section; try env.<VAR> or provider_tier.<vendor>")
+    if len(parts) == 1 and parts[0] in _NESTED_KEYS:
+        raise ValueError(f"{parts[0]!r} is a section; set {parts[0]}.<name> instead")
+    if len(parts) == 1 and parts[0] not in _SCALAR_KEYS | _BOOL_KEYS:
+        # A misspelt top-level key would otherwise be written and silently never read.
+        known = sorted(_SCALAR_KEYS | _BOOL_KEYS | _NESTED_KEYS)
+        raise ValueError(f"unknown key {parts[0]!r}; known keys: {known}")
+    if parts[0] == "provider_tier" and value.strip().lower() not in _VALID_TIERS:
+        raise ValueError(f"tier must be one of {sorted(_VALID_TIERS)}, not {value!r}")
+
+    doc = web_config()
+    if len(parts) == 1:
+        doc[parts[0]] = _coerce(parts[0], value)
+    else:
+        section = doc.get(parts[0])
+        if not isinstance(section, dict):
+            section = doc[parts[0]] = {}
+        section[parts[1]] = value.strip() if parts[0] == "provider_tier" else value
+    return _write(doc)
+
+
+def unset_config(dotted_key: str) -> str:
+    """Remove one config value. A no-op on an absent key. Returns the path."""
+    parts = dotted_key.split(".")
+    doc = web_config()
+    if len(parts) == 1:
+        doc.pop(parts[0], None)
+    elif len(parts) == 2 and isinstance(doc.get(parts[0]), dict):
+        doc[parts[0]].pop(parts[1], None)
+        if not doc[parts[0]]:
+            doc.pop(parts[0], None)
+    return _write(doc)
+
+
+def credential_status() -> list[tuple[str, bool, str]]:
+    """``(var, is_set, source)`` for every vendor credential, without revealing the value.
+
+    ``source`` is ``env`` when the process environment supplies it (an export wins over the
+    file) or ``web.json`` when the file does, so a user can see why an export is or is not
+    taking effect.
+    """
+    rows: list[tuple[str, bool, str]] = []
+    file_env = web_config().get("env")
+    file_env = file_env if isinstance(file_env, dict) else {}
+    for name in _CREDENTIAL_VARS + _ENDPOINT_VARS:
+        if os.environ.get(name):
+            rows.append((name, True, "env"))
+        elif str(file_env.get(name) or "").strip():
+            rows.append((name, True, "web.json"))
+        else:
+            rows.append((name, False, ""))
+    return rows

@@ -121,6 +121,12 @@ def _parser():
     ac.add_argument("provider", nargs="?", help="Provider ID (default: every configured provider)")
     ac.add_argument("--show", action="store_true", help="Print the resolved credential")
 
+    wb = sub.add_parser("web", help="Show or change web-search configuration (~/.misaka/web.json)")
+    wb.add_argument("op", nargs="?", default="status", choices=["status", "set", "unset"])
+    wb.add_argument("key", nargs="?", help="backend | search_backend | keyless_fallback | "
+                                           "keyless_rescue | env.<VAR> | provider_tier.<vendor>")
+    wb.add_argument("value", nargs="?", help="The value to set (omit for unset)")
+
 
     dc = sub.add_parser("doc", help="Index documents, search them, show their structure, and verify quotes")
     dc.add_argument("action", choices=["add", "scan", "list", "find", "verify", "tree"])
@@ -394,6 +400,46 @@ def _cmd_auth(args):
     sys.exit(1 if bad else 0)
 
 
+def _cmd_web(args):
+    from misaka.extensions.web import config as web_config
+    from misaka.extensions.web import dispatch, registry
+
+    if args.op == "set":
+        if not args.key or args.value is None:
+            print("Usage: misaka web set <key> <value>")
+            sys.exit(2)
+        try:
+            path = web_config.set_config(args.key, args.value)
+        except ValueError as err:
+            print(err)
+            sys.exit(2)
+        print(f"Set {args.key} in {path}")
+        return
+    if args.op == "unset":
+        if not args.key:
+            print("Usage: misaka web unset <key>")
+            sys.exit(2)
+        path = web_config.unset_config(args.key)
+        print(f"Unset {args.key} in {path}")
+        return
+
+    # status (default): what will actually serve a search, and why.
+    registry.ensure_backends_registered()
+    provider, backend, err = dispatch.resolve_provider()
+    if provider is not None:
+        print(f"Backend: {backend}  ({'ready' if registry.provider_is_ready(provider) else 'not ready'})")
+    else:
+        print(f"Backend: {backend or 'none'}  — {err or 'no provider can serve'}")
+    print(f"Keyless ring: {'on' if web_config.keyless_tier_enabled() else 'off'}"
+          f"   rescue: {'on' if web_config.keyless_rescue_enabled() else 'off'}")
+    print(f"Searchable now: {'yes' if registry.web_search_available() else 'no'}")
+    print("Credentials:")
+    for name, is_set, source in web_config.credential_status():
+        mark = "✓" if is_set else "·"
+        print(f"  {mark} {name}" + (f"  ({source})" if is_set else ""))
+    print(f"\nConfig file: {os.path.expanduser(CFG['web_config'])}")
+
+
 def _cmd_moa(args):
     import json as _json
     import os as _os
@@ -621,6 +667,7 @@ COMMANDS = {
     "research": _cmd_research,
     "lcm": _cmd_lcm,
     "auth": _cmd_auth,
+    "web": _cmd_web,
     "moa": _cmd_moa,
     "skills": _cmd_skills,
     "doc": _cmd_doc,
