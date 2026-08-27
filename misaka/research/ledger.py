@@ -1,8 +1,9 @@
 """Evidence-backed findings produced by research tasks.
 
 Sisters record findings while doing the work. This module only checks that each
-source path is a registered artifact and that each quote appears verbatim in it,
-then persists the result; it never scores credibility or merges similar claims.
+source path is a registered artifact, that a fetched page still hashes to the digest
+it was saved with, and that each quote appears verbatim in it, then persists the
+result; it never scores credibility or merges similar claims.
 """
 from __future__ import annotations
 
@@ -59,6 +60,48 @@ def _artifact_map(con, run_id, task_id):
     return out
 
 
+# How far into a file a provenance block may still close. A fetched page carries its block at the
+# very top and closes it within a few lines; a block that never closes is not a header at all.
+_PROVENANCE_LINES = 40
+_HEX = frozenset("0123456789abcdef")
+
+
+def _page_unmodified(text):
+    """Whether a saved page's body still hashes to the ``text_sha256`` its own header records.
+
+    ``None`` means the artifact carries no such digest -- a Sister's own markdown, a page saved
+    before the stamp existed, a header whose value is not a digest -- and those ingest exactly as
+    they did before this check existed. Only ``False`` is an accusation.
+
+    The shape read here is the stable part of what ``web_fetch._save_page`` writes: ``---`` on line
+    one, ``key: value`` scalars, a closing ``---``, then the text that was hashed. It is parsed
+    rather than imported on purpose -- the evidence end of the run must not depend on a tool module
+    -- so it stays deliberately tolerant about everything except the digest itself.
+    """
+    lines = text.split("\n")
+    if lines[0].strip() != "---":
+        return None
+    digest, body = "", None
+    for index, line in enumerate(lines[1:_PROVENANCE_LINES], start=1):
+        if line.strip() == "---":
+            body = "\n".join(lines[index + 1:])
+            break                # past the header is the page's own text, whatever it looks like
+        key, separator, value = line.partition(":")
+        if separator and not digest and key.strip().lower() == "text_sha256":
+            digest = value.strip().strip("\"'").lower()
+    if body is None or len(digest) != 64 or not set(digest) <= _HEX:
+        return None
+    # The writer wraps the text it hashed in the header's own blank line and a trailing newline;
+    # that wrapping is the file's formatting, not the page. ``unwrapped`` undoes exactly it -- one
+    # newline at each end, never more, because a plain-text fetch is saved with its own trailing
+    # newline inside the digest and trimming the body would call every untouched .txt page
+    # modified. The other two candidates only absorb a change to that wrapping; an edit *inside*
+    # the text fails all three.
+    unwrapped = body.removeprefix("\n").removesuffix("\n")
+    return any(hashlib.sha256(candidate.encode()).hexdigest() == digest
+               for candidate in {body, unwrapped, body.strip("\n")})
+
+
 def ingest_report(con, run, task, report):
     """Persist the valid findings from a task report and return a short summary.
 
@@ -82,6 +125,7 @@ def ingest_report(con, run, task, report):
     ).fetchone()
     branch_id = link["branch_id"] if link else None
     made, made_claims, dropped, artifact_texts = 0, 0, [], {}
+    page_intact = {}                 # artifact id -> _page_unmodified verdict, one hash per file
     for index, item in enumerate(raw[:MAX_FINDINGS]):
         if not isinstance(item, dict):
             dropped.append(f"finding[{index}] is not an object")
@@ -105,12 +149,22 @@ def ingest_report(con, run, task, report):
             continue
         if artifact["id"] not in artifact_texts:
             try:
-                artifact_texts[artifact["id"]] = runs.artifact_text(artifact)
+                content = runs.artifact_text(artifact)
             except (OSError, ValueError):
-                artifact_texts[artifact["id"]] = None
+                content = None
+            artifact_texts[artifact["id"]] = content
+            page_intact[artifact["id"]] = None if content is None else _page_unmodified(content)
         artifact_text = artifact_texts[artifact["id"]]
         if artifact_text is None:
             dropped.append(f"finding[{index}] source artifact is not readable")
+            continue
+        # Registration hashes whatever is on disk when the card completes, so the artifact sha
+        # cannot see an edit made between the fetch and the citation: a page's own fetch-time
+        # digest is the only thing that can. Checked before the quotation, because a quote found
+        # in a rewritten page is exactly the case this is about.
+        if page_intact[artifact["id"]] is False:
+            dropped.append(f"finding[{index}] source page was modified after it was fetched: its "
+                           "text no longer matches the text_sha256 in its own provenance header")
             continue
         if _norm(quote) not in _norm(artifact_text):
             dropped.append(f"finding[{index}] quotation was not found in the source artifact")

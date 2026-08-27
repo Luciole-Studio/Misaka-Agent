@@ -154,8 +154,10 @@ def _sub_unmasked(pattern: re.Pattern[str], repl, text: str) -> str:
 def _renumber(text: str, sources: Sequence[Source]) -> tuple[str, tuple[Source, ...]]:
     """Renumber by first appearance and drop the sources the body never cites.
 
-    Reserved for a body whose markers all resolve: rewriting numbers while a dangling one is still
-    in the text would retarget it onto a real source instead of leaving it visibly broken.
+    Reserved for a body that passed clean: rewriting numbers while a dangling one is still in the
+    text would retarget it onto a real source instead of leaving it visibly broken, and rewriting
+    them while a *defect* is still in the text hands the caller a report numbered in one space and
+    a defect list numbered in another (see ``audit_report``).
     """
     limit = len(sources)
 
@@ -477,13 +479,35 @@ def _number_problems(text: str, masked: str,
     return out
 
 
+def cited(body: str, sources: Sequence[Source]) -> set[int]:
+    """The source numbers ``body`` actually resolves against, multi-citation groups included.
+
+    A caller that wants to print the source list cannot re-derive this with a plain ``\\[(\\d+)\\]``
+    scan: only this module's marker reader knows that a subscript in a code span is not a citation
+    and that ``[1, 3]`` is two of them. And it must be read against the body it is delivering --
+    which is numbered in the caller's own space or in the renumbered one, depending on whether the
+    report passed (see ``audit_report``).
+    """
+    limit = len(sources)
+    return {n for n, _s, _e in _markers(_mask(body), limit) if 1 <= n <= limit}
+
+
 def audit_report(body: str, sources: Sequence[Source]) -> Audit:
     """Check a report against the ledger entries it was written from, and repair what is mechanical.
 
-    Repairs (always applied): off-contract citation shapes are normalised to ``[N]``, footnote
-    markers that resolve to nothing are stripped, and -- only when every remaining marker resolves
-    -- citations are renumbered by first appearance and uncited sources are dropped from the
-    returned list, so the numbers climb as the reader reads.
+    Repairs: off-contract citation shapes are normalised to ``[N]`` and footnote markers that
+    resolve to nothing are stripped -- always; and, *only when the report comes back clean*,
+    citations are renumbered by first appearance and uncited sources are dropped from the returned
+    list, so the numbers climb as the reader reads.
+
+    That renumbering waits for a clean pass because it is a change of numbering space, and only one
+    numbering space may ever exist at a time. The caller holds a source listing in its own
+    numbering, and hands the model that listing together with these ``Problem`` messages and this
+    ``body``; if the body and the messages were renumbered while the listing was not, a defect
+    reported as ``[2]`` would name the caller's ``[3]``, the model would obediently move the claim
+    onto the wrong source, and the second audit -- run against the caller's sources again -- would
+    pass the mis-attribution clean. So a report with defects comes back in exactly the numbering it
+    was written in, and only a report with nothing left to say gets renumbered for delivery.
 
     Findings (never repaired, because only the writer knows what was meant): dangling citations,
     URLs that disagree with the ledger, and numbers that are not in the evidence they cite.
@@ -503,15 +527,12 @@ def audit_report(body: str, sources: Sequence[Source]) -> Audit:
         found.append((start, Problem(
             "citation_dangling",
             f"引用 [{number}] 没有对应的台账条目({available})。", line, excerpt)))
-    if not found and sources:
-        if any(1 <= n <= len(sources) for n, _s, _e in _markers(masked, len(sources))):
-            text, sources = _renumber(text, sources)
-            masked = _mask(text)
-        else:
-            found.append((0, Problem(
-                "citation_missing",
-                f"报告里没有任何 [N] 引用,但台账有 {len(sources)} 条可引用的证据。"
-                "每一条有据可依的结论都要标上来源编号。", 1, _locate(text, 0)[1])))
+    resolves = any(1 <= n <= len(sources) for n, _s, _e in _markers(masked, len(sources)))
+    if not found and sources and not resolves:
+        found.append((0, Problem(
+            "citation_missing",
+            f"报告里没有任何 [N] 引用,但台账有 {len(sources)} 条可引用的证据。"
+            "每一条有据可依的结论都要标上来源编号。", 1, _locate(text, 0)[1])))
     found += _url_problems(text, masked, sources)
     found += _number_problems(text, masked, sources)
     found.sort(key=lambda item: item[0])
@@ -520,4 +541,6 @@ def audit_report(body: str, sources: Sequence[Source]) -> Audit:
     unique: dict[tuple[str, int, str], Problem] = {}
     for _offset, problem in found:
         unique.setdefault((problem.kind, problem.line, problem.message), problem)
+    if not unique and resolves:
+        text, sources = _renumber(text, sources)
     return Audit(text, sources, tuple(unique.values()))
