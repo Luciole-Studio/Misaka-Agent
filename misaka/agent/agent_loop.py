@@ -363,20 +363,22 @@ async def stream_assistant_response(
             "toolcall_end",
         }:
             if partial_message is not None:
-                # One snapshot per event, shared by the context and the event. The copy
-                # exists to cut the provider's live ``partial`` loose -- it keeps being
-                # mutated until the stream ends -- and a second copy of the same snapshot
-                # bought nothing: no consumer of message_update mutates the message it is
-                # given (checked across agent_session, the TUI, the extension runner and
-                # jsonl). Two deep copies of everything said so far, per delta, is the
-                # cost this removes.
-                partial_message = event.partial.model_copy(deep=True)
+                # One deep copy per event, and it goes to the event -- not to the context.
+                # The copy exists to isolate consumers, which is where the risk is: the
+                # extension runner hands ``message`` straight to third-party handlers, and
+                # the TUI keeps it as ``streamingMessage`` and passes an inner ``arguments``
+                # dict to a component by reference. What the *context* needs is the message
+                # as it currently stands, which the provider's own ``partial`` already is --
+                # and is what ``response.result()`` puts there at the end of the stream
+                # anyway. So the second copy that used to feed the context is gone, and the
+                # remaining one is the boundary a consumer cannot write through.
+                partial_message = event.partial
                 context.messages[-1] = partial_message
                 await _emit(
                     emit,
                     MessageUpdateEvent(
                         assistantMessageEvent=event,
-                        message=partial_message,
+                        message=event.partial.model_copy(deep=True),
                     ),
                 )
             continue

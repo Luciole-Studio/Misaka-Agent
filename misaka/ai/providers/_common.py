@@ -26,7 +26,17 @@ def _create_abort_wait_task(signal: Any) -> asyncio.Task[None] | None:
     return asyncio.create_task(signal.wait())
 
 
-async def _await_with_signal(awaitable: Any, signal: Any, *, on_abort: Any = None) -> Any:
+async def _await_with_signal(
+    awaitable: Any, signal: Any, *, on_abort: Any = None, abort_task: asyncio.Task[None] | None = None
+) -> Any:
+    """Await ``awaitable``, giving up the moment ``signal`` aborts.
+
+    ``abort_task`` lets a caller that awaits in a loop -- every streaming adapter, once per
+    SSE item -- build the ``signal.wait()`` task *once* for the whole stream and hand it in.
+    Creating and cancelling one per item cost ~56us of pure task churn on the loop thread
+    per line of a response, multiplied by every concurrent stream. A borrowed task is the
+    caller's to cancel; only the one made here is cancelled here.
+    """
     if signal_aborted(signal):
         if isinstance(awaitable, asyncio.Future):
             awaitable.cancel()
@@ -39,7 +49,9 @@ async def _await_with_signal(awaitable: Any, signal: Any, *, on_abort: Any = Non
         raise RuntimeError("Request was aborted")
 
     task = asyncio.ensure_future(awaitable)
-    abort_task = _create_abort_wait_task(signal)
+    borrowed_abort_task = abort_task is not None
+    if abort_task is None:
+        abort_task = _create_abort_wait_task(signal)
     try:
         if abort_task is not None:
             done, _ = await asyncio.wait({task, abort_task}, return_when=asyncio.FIRST_COMPLETED)
@@ -51,7 +63,7 @@ async def _await_with_signal(awaitable: Any, signal: Any, *, on_abort: Any = Non
                 raise RuntimeError("Request was aborted")
         return await task
     finally:
-        if abort_task is not None:
+        if abort_task is not None and not borrowed_abort_task:
             abort_task.cancel()
             await asyncio.gather(abort_task, return_exceptions=True)
 
@@ -81,12 +93,23 @@ async def _close_stream(stream_obj: Any) -> None:
 
 async def _iterate_async_iterable(iterable: Any, signal: Any = None, *, on_abort: Any = None):
     iterator = iterable.__aiter__()
-    while True:
-        try:
-            item = await _await_with_signal(iterator.__anext__(), signal, on_abort=on_abort)
-        except StopAsyncIteration:
-            return
-        yield item
+    # One abort task for the whole stream, not one per item: see _await_with_signal.
+    abort_task = _create_abort_wait_task(signal)
+    try:
+        while True:
+            try:
+                item = await _await_with_signal(
+                    iterator.__anext__(), signal, on_abort=on_abort, abort_task=abort_task
+                )
+            except StopAsyncIteration:
+                return
+            yield item
+    finally:
+        # cancel() with nothing awaited after it: a cancelled ``signal.wait()`` has no
+        # result or error to collect, and this finally also runs when the generator is
+        # closed or finalized, where awaiting is the shape that bites.
+        if abort_task is not None:
+            abort_task.cancel()
 
 
 def _empty_usage() -> Usage:

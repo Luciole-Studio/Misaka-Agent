@@ -27,6 +27,7 @@ from misaka.ai.models import calculate_cost
 from misaka.ai.providers._common import (
     _await_with_signal,
     _close_stream,
+    _create_abort_wait_task,
     _empty_usage,
     _option,
     resolve_cache_retention,
@@ -219,6 +220,10 @@ def stream_bedrock(
         )
         signal = _option(options, "signal")
         response_stream: Any = None
+        # Declared out here so a failure anywhere below can still sweep what arrived.
+        partial_json: dict[int, StreamingArgs] = {}
+        saw_message_start = False
+        saw_message_stop = False
 
         try:
             client = _option(options, "client")
@@ -271,7 +276,6 @@ def stream_bedrock(
 
             response_stream = response.get("stream") if isinstance(response, dict) else None
             block_indices: dict[int, int] = {}
-            partial_json: dict[int, StreamingArgs] = {}
 
             async for item in iterate_stream_events(response_stream, signal):
                 if signal_aborted(signal):
@@ -281,6 +285,7 @@ def stream_bedrock(
                     message_start = item["messageStart"] or {}
                     if message_start.get("role") != "assistant":
                         raise RuntimeError("Unexpected assistant message start but got user message start instead")
+                    saw_message_start = True
                     stream.push(StartEvent(partial=output))
                     continue
 
@@ -298,6 +303,7 @@ def stream_bedrock(
 
                 if "messageStop" in item:
                     message_stop = item["messageStop"] or {}
+                    saw_message_stop = True
                     output.stopReason = map_stop_reason(message_stop.get("stopReason"))
                     continue
 
@@ -317,13 +323,24 @@ def stream_bedrock(
                         exception_name = event_name[0].upper() + event_name[1:]
                         raise BedrockRuntimeServiceException(exception_name, str(payload.get("message") or ""))
 
+            finish_open_tool_arguments(partial_json, output)
+
             if signal_aborted(signal):
                 raise RuntimeError("Request was aborted")
+            # The same structural guard the other four adapters carry (anthropic raises on
+            # "ended before message_stop"; the responses family on "ended before
+            # response.completed"; completions and mistral finish their blocks
+            # unconditionally after the loop). Without it a stream cut mid-tool-call still
+            # carried the constructor's "stop", so a truncated call was pushed as a clean
+            # DoneEvent and ran.
+            if saw_message_start and not saw_message_stop:
+                raise RuntimeError("Bedrock stream ended before messageStop")
             if output.stopReason in {"error", "aborted"}:
                 raise RuntimeError("An unknown error occurred")
 
             stream.push(DoneEvent(reason=output.stopReason, message=output))
         except Exception as error:  # noqa: BLE001
+            finish_open_tool_arguments(partial_json, output)
             output.stopReason = "aborted" if signal_aborted(signal) else "error"
             output.errorMessage = format_bedrock_error(error)
             stream.push(ErrorEvent(reason=output.stopReason, error=output))
@@ -392,44 +409,55 @@ def stream_simple_bedrock(
 async def iterate_stream_events(response_stream: Any, signal: Any = None):
     if response_stream is None:
         return
-    if hasattr(response_stream, "__aiter__"):
-        iterator = response_stream.__aiter__()
-        while True:
+    # One abort task for the whole stream, not one per event: creating and cancelling a
+    # ``signal.wait()`` task per item put ~56us of task churn on the loop thread for every
+    # line of every concurrent response. Cancelled in the finally, with nothing awaited
+    # after it -- see _iterate_async_iterable, which does the same for the other adapters.
+    abort_task = _create_abort_wait_task(signal)
+    try:
+        if hasattr(response_stream, "__aiter__"):
+            iterator = response_stream.__aiter__()
+            while True:
+                try:
+                    item = await _await_with_signal(
+                        iterator.__anext__(),
+                        signal,
+                        on_abort=lambda: _close_stream(response_stream),
+                        abort_task=abort_task,
+                    )
+                except StopAsyncIteration:
+                    return
+                yield item
+
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[Any] = asyncio.Queue()
+
+        def worker() -> None:
             try:
-                item = await _await_with_signal(
-                    iterator.__anext__(),
-                    signal,
-                    on_abort=lambda: _close_stream(response_stream),
-                )
-            except StopAsyncIteration:
+                for event in response_stream:
+                    loop.call_soon_threadsafe(queue.put_nowait, event)
+            except Exception as error:  # noqa: BLE001 - any stream failure is delivered to the consumer as an item
+                loop.call_soon_threadsafe(queue.put_nowait, error)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, _STREAM_SENTINEL)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        while True:
+            item = await _await_with_signal(
+                queue.get(),
+                signal,
+                on_abort=lambda: _close_stream(response_stream),
+                abort_task=abort_task,
+            )
+            if item is _STREAM_SENTINEL:
                 return
+            if isinstance(item, Exception):
+                raise item
             yield item
-
-    loop = asyncio.get_running_loop()
-    queue: asyncio.Queue[Any] = asyncio.Queue()
-
-    def worker() -> None:
-        try:
-            for event in response_stream:
-                loop.call_soon_threadsafe(queue.put_nowait, event)
-        except Exception as error:  # noqa: BLE001 - any stream failure is delivered to the consumer as an item
-            loop.call_soon_threadsafe(queue.put_nowait, error)
-        finally:
-            loop.call_soon_threadsafe(queue.put_nowait, _STREAM_SENTINEL)
-
-    threading.Thread(target=worker, daemon=True).start()
-
-    while True:
-        item = await _await_with_signal(
-            queue.get(),
-            signal,
-            on_abort=lambda: _close_stream(response_stream),
-        )
-        if item is _STREAM_SENTINEL:
-            return
-        if isinstance(item, Exception):
-            raise item
-        yield item
+    finally:
+        if abort_task is not None:
+            abort_task.cancel()
 
 
 def format_bedrock_error(error: Any) -> str:
@@ -442,6 +470,24 @@ def format_bedrock_error(error: Any) -> str:
     name = getattr(error, "name", None) or error.__class__.__name__
     prefix = BEDROCK_ERROR_PREFIXES.get(name)
     return f"{prefix}: {message}" if prefix else message
+
+
+def finish_open_tool_arguments(partial_json: dict[int, StreamingArgs], output: AssistantMessage) -> None:
+    """Parse the buffer of every tool block the stream never closed.
+
+    ``StreamingArgs`` skips re-parsing while the unparsed tail is under
+    ``max(2048, len//8)`` bytes, and the exact parse happens in ``finish()`` -- which only
+    the block-stop handler calls. A block left open by a cut stream would otherwise keep
+    the last throttled view and silently drop everything that arrived after it. The raw
+    buffer is always exact; this is the one parse that makes the block match it.
+    """
+    for content_index, accumulated in partial_json.items():
+        if not accumulated.raw or content_index >= len(output.content):
+            continue
+        block = output.content[content_index]
+        if block.type == "toolCall":
+            block.arguments = accumulated.finish()
+    partial_json.clear()
 
 
 def handle_content_block_start(
