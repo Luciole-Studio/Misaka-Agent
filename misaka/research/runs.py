@@ -592,8 +592,10 @@ def resume(con, run_id):
         raise ValueError(f"Research run not found: {run_id}")
     if current["status"] == "done":
         raise ValueError(f"Research run {run_id} is done; start a new run instead of resuming it.")
+    # A failed card is retried like a stopped one: without this the node it killed replays the
+    # identical failure on every resume, and the only way out is editing this database by hand.
     for row in tasks(con, run_id):
-        if row["status"] != "stopped":
+        if row["status"] not in ("stopped", "failed"):
             continue
         target = "todo" if task_store.parent_ids(con, row["id"]) else "ready"
         if task_store.reopen_task(
@@ -604,9 +606,13 @@ def resume(con, run_id):
                 con, row["id"], "research_resumed",
                 {"from_generation": row["generation"]}, generation=int(row["generation"]) + 1,
             )
+    # A failed node replans: every phase of ``_expand`` is idempotent over what it already
+    # produced (a saved plan is reused, cards are deduped by their link, and the node's worktree
+    # was deliberately kept), so it picks up its own work. ``conflict`` is not cleared here: it
+    # waits for a human to resolve the branch.
     con.execute(
         "UPDATE research_branches SET status='planning',updated_at=? "
-        "WHERE run_id=? AND status='waiting_input'", (int(time.time()), run_id),
+        "WHERE run_id=? AND status IN ('waiting_input','failed')", (int(time.time()), run_id),
     )
     con.execute(
         "UPDATE research_runs SET stop_requested=0,status='active',phase='active',last_error='',"

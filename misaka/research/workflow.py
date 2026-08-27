@@ -292,11 +292,17 @@ def _done(con, run, node, kind):
 
 
 def _ingest_critique(con, run, node, task):
+    """Register the red team's material issues. Returns None, or why the critique could not be
+    read: a card that came back done without a usable critique.json fails its node, because an
+    exception here escapes to the driver and takes the whole run down with the node."""
     rows = [a for a in runs.artifacts(con, run["id"], kind="critique", task_id=task["id"])
             if a["path"].endswith(".json")]
     if not rows:
-        raise RuntimeError(f"The red team card {task['id']} delivered no critique.json.")
-    data = json.loads(runs.artifact_text(rows[-1]))
+        return f"The red team card {task['id']} delivered no critique.json."
+    try:
+        data = json.loads(runs.artifact_text(rows[-1]))
+    except (OSError, ValueError) as error:
+        return f"The red team card {task['id']} delivered an unreadable critique.json: {error}"
     for item in (data.get("issues") if isinstance(data, dict) else None) or []:
         if not isinstance(item, dict) or not item.get("material"):
             continue
@@ -306,6 +312,7 @@ def _ingest_critique(con, run, node, task):
             priority = 0
         runs.add_issue(con, run["id"], node=node, kind=item.get("kind"),
                        question=item.get("question"), rationale=item.get("rationale"), priority=priority)
+    return None
 
 
 def _children_settled(con, run, node):
@@ -439,13 +446,21 @@ async def _expand(con, cfg, runner, worker, run, node, *, spawner, context, tool
                                         plan["red_team"]["assignee"], timeout_seconds=runs.call_timeout(cfg, 1800))
                 runs.link_task(con, run["id"], tid, kind="red_team", node=node, local_id="red-team")
             outcome = await drive("red_team")
+            # Terminal, as in the executing phase: a node left non-terminal by a process that has
+            # already exited is what the driver turns into a dead run.
+            if outcome == "failed":
+                return _close(con, run, node, "failed")
             if outcome != "done":
                 return outcome
             settle_done_tasks(con, run_id=run["id"])
             red = _done(con, run, node, "red_team")
             if not red:
                 return _close(con, run, node, "failed")
-            _ingest_critique(con, run, node, red[-1])
+            unusable = _ingest_critique(con, run, node, red[-1])
+            if unusable:
+                task_store.add_event(con, red[-1]["id"], "research_critique_unusable", {"reason": unusable})
+                runs.set_state(con, run["id"], error=f"node {nid}: {unusable}")
+                return _close(con, run, node, "failed")
             runs.set_node(con, nid, status="probing")
 
         elif status == "probing":
@@ -603,6 +618,14 @@ async def expand_node(con, cfg, runner, worker, *, run_id, node_id, spawner, pro
                          progress=progress)
 
 
+def _probe_gave_up(con, issue_id, reason):
+    """A fork whose cards failed still leaves a verdict. Its node waits on the issue's status, so
+    a verdict-less fork whose process is gone kills that node -- and with it the run."""
+    verdict = {"verdict": "inconclusive", "reason": reason}
+    runs.set_issue(con, issue_id, verdict["verdict"], reason=verdict["reason"])
+    return verdict["verdict"]
+
+
 def _probe_rounds_done(con, run_id, issue_id):
     """How many rounds this fork already opened cards for, read off the scoped local ids."""
     rounds = 0
@@ -629,6 +652,8 @@ async def probe(con, cfg, runner, worker, *, run_id, issue_id, progress=None, po
         outcome = await _drive_tasks(con, dict(cfg), runner, run_id, scope=unfinished,
                                      tool_call_id=f"research:{run_id}:{issue_id}", poll_seconds=poll_seconds,
                                      progress=progress)
+        if outcome == "failed":
+            return _probe_gave_up(con, issue_id, "The fork's open cards failed; no verdict could be reached.")
         if outcome != "done":
             return outcome
         settle_done_tasks(con, run_id=run_id)
@@ -647,6 +672,9 @@ async def probe(con, cfg, runner, worker, *, run_id, issue_id, progress=None, po
         outcome = await _drive_tasks(con, dict(cfg), runner, run_id, scope=set(opened.values()),
                                      tool_call_id=f"research:{run_id}:{issue_id}", poll_seconds=poll_seconds,
                                      progress=progress)
+        if outcome == "failed":
+            return _probe_gave_up(con, issue_id,
+                                  f"Round {round_no}'s cards failed; no verdict could be reached.")
         if outcome != "done":
             return outcome
         settle_done_tasks(con, run_id=run_id)
