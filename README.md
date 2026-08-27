@@ -110,7 +110,7 @@ Context engine:
 | `MISAKA_CONTEXT_ENGINE` | `lcm` | `lcm` (lossless compaction), `hermes-lcm` (the ported upstream engine, see below), or `native` (the engine's one-shot summary) |
 | `MISAKA_LCM_SUMMARY_PROVIDER` / `MISAKA_LCM_SUMMARY_MODEL` / `MISAKA_LCM_SUMMARY_FALLBACK_MODELS` | the product provider / model | the summariser; fallbacks are comma-separated |
 | `MISAKA_LCM_SUMMARY_TIMEOUT` | `60` | seconds per summary |
-| `MISAKA_LCM_RETRIEVAL_MODE` / `MISAKA_LCM_EMBEDDING_MODEL` | `fts` / none | retrieval over compacted history |
+| `MISAKA_LCM_RETRIEVAL_MODE` / `MISAKA_LCM_EMBEDDING_MODEL` | `fts` / none | retrieval over compacted history; `hybrid` plus a model name is also the on-switch for the ported engine's semantic retrieval, as a local `fastembed` provider (`uv sync --extra lcm-semantic`, then `misaka lcm embed warmup` and `misaka lcm embed backfill --apply`). Upstream's `LCM_EMBEDDING_PROVIDER`/`LCM_EMBEDDING_MODEL` reach `voyage` and `ollama` instead |
 
 `hermes-lcm` selects the ported upstream engine (`misaka/extensions/hermes_lcm/vendor/`,
 pinned in `UPSTREAM_COMMIT`) instead of misaka's own smaller one. It reads upstream's

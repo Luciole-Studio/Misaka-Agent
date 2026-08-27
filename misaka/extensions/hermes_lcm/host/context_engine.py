@@ -31,7 +31,7 @@ from contextlib import contextmanager
 from misaka.platform.prompt_guard import untrusted
 from misaka.utils.values import read_field
 
-from . import config_bridge, fence, ingest, llm, switch
+from . import config_bridge, fence, ingest, llm, rollups, switch
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +191,10 @@ def compact(event, ctx) -> dict | None:
         )
         return None
     summary = _guarded_summary(built, summary)
+    # This round published a summary node, which stales every rollup covering the days it
+    # spans. Upstream only ever schedules that repair at session bind, and a misaka
+    # session binds once and then runs for hours -- see `host/rollups.py`.
+    rollups.nudge(built)
 
     details = None
     try:

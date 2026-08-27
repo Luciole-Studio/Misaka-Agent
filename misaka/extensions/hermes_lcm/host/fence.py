@@ -52,6 +52,11 @@ _NODE_KEYS = frozenset({"node_id", "node_ids"})
 # `lcm_recent` in rollup mode returns a period summary and cites it by rollup id alone --
 # no store row, no node. `lcm_rollup_sources` maps it back to the nodes it was built from.
 _ROLLUP_KEYS = frozenset({"rollup_id", "rollup_ids"})
+# The side file an externalized payload moved to, cited by its own file name. Three tool
+# answers reach that file without naming any row or node -- `lcm_expand` and
+# `lcm_describe` in `externalized_ref` mode, and `lcm_grep(content_scope='externalized')`
+# in each match -- so these keys are the only trace of the material they return.
+_REF_KEYS = frozenset({"externalized_ref", "externalized_refs", "ref"})
 
 # SQLite's default parameter ceiling is 999; a tool result never cites near that many
 # rows, but a chunked IN list costs one loop and removes the ceiling as a failure mode.
@@ -64,6 +69,15 @@ _MAX_PARAMS = 500
 # `[Externalized LCM ingest payload: ...]` variants) and the real text moves to a side
 # file. The dye leaves the row with it, so the row stops answering the question -- and a
 # row that cannot answer is not a row to call clean.
+#
+# The side file the dye left *for* is opaque in the same way and for a stronger reason:
+# it is not in the database at all, so no lineage query reaches it, and the tools that
+# read it hand back a caller-chosen slice -- `lcm_expand(content_offset=...)` and
+# `lcm_grep`'s match snippet both return the middle of a payload, where a fence's two
+# sentinels are not. Reading the file to look would only move the guess: a bounded read
+# can miss a marker past its bound, and missing one is the direction that costs the
+# prompt its voice. So a cited ref is untrusted on sight, which is also the only answer
+# consistent with the stub row that points at it already being one.
 _STUB_HEAD = "xternalized "
 _STUB_REF = "; ref="
 _OPAQUE_ARGS = (MARKER, _STUB_HEAD, _STUB_REF)
@@ -122,8 +136,17 @@ def _integers(value) -> list[int]:
     return []
 
 
-def _collect(payload, stores: set[int], nodes: set[int], rollups: set[int]) -> None:
-    """Every store row, summary node and rollup one tool payload cites, at any nesting."""
+def _strings(value) -> list[str]:
+    """The names under one payload field, whether it holds one or a list of them."""
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, list):
+        return [name for item in value for name in _strings(item)]
+    return []
+
+
+def _collect(payload, stores: set[int], nodes: set[int], rollups: set[int], refs: set[str]) -> None:
+    """Every store row, node, rollup and payload ref one tool answer cites, at any nesting."""
     if isinstance(payload, dict):
         for key, item in payload.items():
             if key in _STORE_KEYS:
@@ -133,10 +156,15 @@ def _collect(payload, stores: set[int], nodes: set[int], rollups: set[int]) -> N
             elif key in _ROLLUP_KEYS:
                 rollups.update(_integers(item))
             else:
-                _collect(item, stores, nodes, rollups)
+                # A ref key is not a stopping point: `lcm_inspect` spells its inventory
+                # as `externalized_refs: [{externalized_ref, store_id, ...}]`, and those
+                # rows are worth reaching even though the ref alone already decides.
+                if key in _REF_KEYS:
+                    refs.update(_strings(item))
+                _collect(item, stores, nodes, rollups, refs)
     elif isinstance(payload, list):
         for item in payload:
-            _collect(item, stores, nodes, rollups)
+            _collect(item, stores, nodes, rollups, refs)
 
 
 def _chunks(ids: set[int]) -> list[list[int]]:
@@ -170,14 +198,17 @@ def _reader(engine) -> tuple[sqlite3.Connection, AbstractContextManager] | None:
     return conn, lock
 
 
-def is_tainted(engine, *, store_ids=(), node_ids=(), rollup_ids=()) -> bool:
+def is_tainted(engine, *, store_ids=(), node_ids=(), rollup_ids=(), externalized_refs=()) -> bool:
     """Whether any of these rows, or any row any of these nodes was summarised from, is fenced.
 
     Fails closed: a question that cannot be answered is answered "untrusted", because the
     alternative is vouching for material nobody checked. "Cannot be answered" covers a
-    missing database, a failing query, and -- since the answer lives in the source rows --
-    a node or rollup whose sources are no longer there to read.
+    missing database, a failing query, an externalized payload that left the database
+    entirely, and -- since the answer lives in the source rows -- a node or rollup whose
+    sources are no longer there to read.
     """
+    if any(externalized_refs):
+        return True
     stores = {int(value) for value in store_ids}
     nodes = {int(value) for value in node_ids}
     rollups = {int(value) for value in rollup_ids}
@@ -240,7 +271,8 @@ def refence(output: str, *, engine, tool_name: str) -> str:
     stores: set[int] = set()
     nodes: set[int] = set()
     rollups: set[int] = set()
-    _collect(payload, stores, nodes, rollups)
-    if is_tainted(engine, store_ids=stores, node_ids=nodes, rollup_ids=rollups):
+    refs: set[str] = set()
+    _collect(payload, stores, nodes, rollups, refs)
+    if is_tainted(engine, store_ids=stores, node_ids=nodes, rollup_ids=rollups, externalized_refs=refs):
         return untrusted(f"lcm:{tool_name}", output)
     return output

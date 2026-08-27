@@ -99,10 +99,16 @@ def _parser():
 
     lc = sub.add_parser("lcm", help="Inspect, back up, repair, rebuild, or migrate the LCM context database")
     lc.add_argument("op", nargs="?", default="status",
-                    choices=["status", "doctor", "backup", "repair", "rebuild", "migrate"])
-    lc.add_argument("target", nargs="?", help="Session JSONL path for rebuild")
+                    choices=["status", "doctor", "backup", "repair", "rebuild", "migrate", "embed",
+                             "rollups", "externalize-backfill"])
+    lc.add_argument("target", nargs="?",
+                    help="Session JSONL path for rebuild; warmup|backfill for embed")
     lc.add_argument("--apply", action="store_true",
-                    help="migrate: rebuild the database for real (the default only prints the plan)")
+                    help="migrate/embed/externalize backfill: do it for real (the default only prints the plan)")
+    lc.add_argument("--limit", type=int,
+                    help="embed/externalize backfill: how many rows to move in this run")
+    lc.add_argument("--rebuild", action="store_true",
+                    help="rollups: re-seed and rebuild every temporal rollup (calls the summariser)")
 
     sk = sub.add_parser("skills", help="Discover, review, approve, and manage skills")
     sk.add_argument("op", nargs="?", default="list",
@@ -387,6 +393,67 @@ def _cmd_lcm(args):
             print(f"Migrated. Backup: {result['backup']}")
         else:
             print(f"Not migrated: {result['note']}  Backup: {result['backup']}")
+    elif args.op == "externalize-backfill":
+        # Old rows do not benefit from switching externalization on; this is how they
+        # catch up. Dry run first, like migrate: `--apply` is what rewrites anything.
+        from misaka.extensions.hermes_lcm.host import externalize as lcm_externalize
+        result = (lcm_externalize.run(args.limit) if args.apply
+                  else lcm_externalize.plan(args.limit))
+        print(f"Database {result['database'] or lcm_db}")
+        if result["note"]:
+            print(result["note"])
+        print(f"Payload directory {result['directory'] or '(unset)'} | threshold "
+              f"{result['threshold_chars']:,} chars")
+        if result.get("applied"):
+            print(f"{result['moved']} tool result(s) moved to payload files; "
+                  f"{result['chars_moved']:,} characters left the database, "
+                  f"{result['bytes']:,} bytes reclaimed on disk.")
+        else:
+            print(f"{result['rows']} tool result(s) totalling {result['chars']:,} characters "
+                  "would move to payload files.")
+            if not args.apply:
+                print("Dry run; nothing was written. Re-run with --apply to externalize.")
+    elif args.op == "embed":
+        # Upstream's own `/lcm embed` implementation, forwarded whole: the dry run is the
+        # default and `--apply` is what spends anything.
+        from misaka.extensions.hermes_lcm.host import embed as lcm_embed
+        if args.target not in {"warmup", "backfill"}:
+            print("Usage: misaka lcm embed warmup|backfill [--apply] [--limit N]")
+            sys.exit(2)
+        print(lcm_embed.run(args.target, apply=args.apply, limit=args.limit))
+    elif args.op == "rollups":
+        from misaka.extensions.hermes_lcm.host import rollups as lcm_rollups
+        # The engine resolves its database through `switch.database_path()`, which lets
+        # upstream's own `LCM_DATABASE_PATH` win. Reporting on `lcm_db` instead would
+        # answer "nothing has been built" about a file the engine never opened -- and
+        # `--rebuild` would build into one database and print a status from another.
+        rollup_db = lcm_switch.database_path()
+        if args.rebuild:
+            outcome = lcm_rollups.rebuild(rollup_db)
+            if outcome.get("error"):
+                print(f"Database {rollup_db}\n{outcome['error']}")
+                sys.exit(2)
+            print(f"Seeded {sum(outcome['seeded'].values())} periods in "
+                  f"{len(outcome['seeded'])} scopes; built {outcome['built']}.")
+            for scope in outcome["exhausted"]:
+                print(f"  {scope}: still had work when the pass budget ran out; run it again.")
+            report = outcome["status"]
+        else:
+            report = lcm_rollups.status(rollup_db)
+        state = "enabled" if report["enabled"] else "disabled (set LCM_TEMPORAL_ROLLUPS_ENABLED=true)"
+        print(f"Database {report['database']} | temporal rollups {state} | "
+              f"{report['pending_invalidations']} pending invalidations")
+        if not report["installed"]:
+            print("No rollup tables in this database yet; nothing has been built.")
+        for scope, kinds in sorted(report["scopes"].items()):
+            counted = " | ".join(
+                f"{kind}: " + ", ".join(f"{state} {count}" for state, count in sorted(states.items()))
+                for kind, states in sorted(kinds.items())
+            )
+            oldest = report["oldest_stale"].get(scope)
+            print(f"  {scope}  {counted}" + (f"  (oldest stale {oldest})" if oldest else ""))
+        if report["last_error"]:
+            print(f"Last build error: {report['last_error']}")
     elif args.op == "repair":
         result = lcm_maint.repair(lcm_db)
         print(

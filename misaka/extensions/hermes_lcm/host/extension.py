@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 
-from . import context_engine, tools
+from . import context_engine, externalize, tools
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,16 @@ def register(harn):
             logger.warning("LCM could not reset its ingest cursor after a discarded "
                            "compaction; the store may take duplicate rows.", exc_info=True)
 
+    async def transform_context(event, ctx):
+        # The last seam before the provider, and the only one that can rewrite a message
+        # `pi` is keeping -- which is what active-replay stubbing is. Off unless
+        # LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED says otherwise.
+        try:
+            return externalize.stub_replay(event, ctx)
+        except Exception:
+            logger.warning("LCM could not stub the live context; it goes out in full.", exc_info=True)
+            return None
+
     try:
         tools.register(harn)
     except Exception:
@@ -64,3 +74,4 @@ def register(harn):
     harn.on("session_before_compact", before_compact)
     harn.on("session_compact", sync_event)
     harn.on("session_compact_failed", compact_failed)
+    harn.on("context", transform_context)

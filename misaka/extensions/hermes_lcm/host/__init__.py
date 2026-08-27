@@ -9,8 +9,13 @@ concern lives:
     llm.py             upstream's auxiliary-model calls -> misaka's provider stack
     config_bridge.py   MISAKA_LCM_* (the existing user contract) -> upstream LCM_*
     ingest.py          misaka message/session shapes -> upstream ingest
-    (tools.py)         upstream tool schemas -> misaka ToolDefinition: not yet ported
+    tools.py           upstream tool schemas -> misaka ToolDefinition, one dispatch
+    fence.py           misaka's untrusted-data fence, put back on what LCM hands over
+    rollups.py         temporal rollups: the build nudge misaka's session shape needs
+    externalize.py     large-output refs in the live prompt, and a backfill for old rows
+    embed.py           upstream's own `/lcm embed`, on `misaka lcm embed`
     migrate.py         the existing mini-implementation database -> upstream schema
+    extension.py       the event subscriptions all of the above are reached through
 
 Keeping the two apart is what makes "port" mean something: an upstream release changes
 only `vendor/`, and a misaka refactor changes only `host/`.

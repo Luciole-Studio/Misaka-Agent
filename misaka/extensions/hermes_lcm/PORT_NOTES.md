@@ -74,8 +74,13 @@
 | `llm.py` | `agent.auxiliary_client.call_llm` 桩 → `misaka.platform.session.run_text`;缺席时上游各处自带确定性回退 |
 | `ingest.py` | misaka `AgentMessage` → 上游 OpenAI 形状(内容拉平成文本、时间戳 ms→s、`tool_calls` 缺省给 `[]` 而不是 `None`) |
 | `context_engine.py` | 压缩缝:pi 定边界,引擎按边界摘要 |
-| `extension.py` | 事件订阅(ingest + 压缩);P1 不注册任何工具 |
+| `extension.py` | 事件订阅(ingest + 压缩 + P3 的 `context`);工具从 P2 起由 `tools.py` 注册 |
 | `migrate.py` | D4 迁移器,挂在 `misaka lcm migrate [--apply]` |
+| `tools.py` | P2:上游 15 个 `lcm_*` schema → misaka `ToolDefinition`,统一走 `handle_tool_call` + `fence.refence` |
+| `fence.py` | P2:misaka 的不可信围栏,重新盖回 LCM 交给模型的东西上 |
+| `externalize.py` | P3 保护层的两条 misaka 专属缝:活动上下文换 stub(`context` 事件)+ 老库补外部化(`misaka lcm externalize-backfill`) |
+| `rollups.py` | P4 时间记忆的两件事:每轮压缩后的 `nudge`(misaka 一次会话只绑一次)+ `misaka lcm rollups [--rebuild]` |
+| `embed.py` | P5:把上游自己的 `/lcm embed warmup\|backfill` 转发到 `misaka lcm embed` |
 
 **压缩缝的关键决定**:pi 给的是「要被替换的那一段 + `firstKeptEntryId`」,上游给的是「整张消息表进、整张出」。
 桥接方式是**把引擎的 fresh tail 钉死成 pi 保留的那一段**(`fresh_tail_count = 保留条数`,同时临时把
@@ -131,13 +136,215 @@ D3 双进程压测已补:`tests/test_hermes_lcm_host.py::test_two_processes_inge
 不过围栏(仓主决策:给每轮压缩摘要加围栏 = 模型对自己的历史长期降级信任);以及 fence.py 只能
 恢复围栏、不能发明围栏——misaka 侧没过 `untrusted()` 就进模型的外部内容它无从知道。
 
+### P3 补的第五个洞:旁路文件本身
+
+外部化把内容搬出数据库之后,**引用它的工具答案里既没有 store 行也没有节点**——
+`lcm_expand(externalized_ref=...)`、`lcm_describe(externalized_ref=...)`、
+`lcm_grep(content_scope='externalized')` 三处都只报一个 `ref` 文件名。P2 的 `_collect`
+只认 store/node/rollup 三类 id,于是这三条路径整个绕过围栏判定。
+
+`MARKER in output` 这条捷径挡不住它:`untrusted()` 的哨兵在文本**两端**,而这两个工具
+返回的是调用方选定的一个切片——`lcm_expand(content_offset=5000)` 与 grep 的 match 片段
+都取自正文中段。实测:一个被围栏的页面外部化后,`content_offset=5000` 取回的 100 token
+里既没有哨兵也没有任何 id,`refence` 原样放行。
+
+修法(host 侧,vendor 未动):`_REF_KEYS = {externalized_ref, externalized_refs, ref}`
+进 `_collect`,`is_tainted` 见到任一 ref 直接判脏。**不读旁路文件去看有没有哨兵**——
+有界读会漏掉界外的哨兵,而漏判正是要防的方向;何况指向它的那一行 stub 早就被 P2 判脏了,
+ref 判干净会自相矛盾。代价是外部化载荷取回一律带围栏,而这一族默认关。
+
+新增依赖(与上表同类,再同步时要复核):
+
+| 依赖 | 位置 | 变了会怎样 |
+|---|---|---|
+| 工具答案用 `externalized_ref` / `externalized_refs` / `ref` 命名旁路载荷 | `tools.py:2680`、`:5248`、`:5362`、`:5436` | 换个键名 → 三条路径重新绕过围栏 |
+
+**这条判据的已知代价(P3/P4/P5 合流审查实测,未改)**:`lcm_inspect` 的清单里有
+`externalized_refs`(`tools.py:6377`),那是一份**只有文件名与字节数、不含任何载荷内容**的
+盘点。于是一旦这一族开着且库里有过外部化,`lcm_inspect` 的整个答案就永远带围栏——不是
+"某一次结果降级",而是一个纯诊断工具长期降级。fence.py 自己的文案说过这正是要避的成本。
+放着不动是**故意的**:收窄一条 fail-closed 的安全判据去换一个诊断工具的观感,不是合流
+审查该单方面做的取舍,留给仓主定。`lcm_status` 不引用任何 id,实测仍然干净。
+
+## 保护层(P3,host 侧,vendor 未动)
+
+`ingest_protection` 与 `externalize` 全部在 `store.append` / `engine._ingest_messages`
+内部自洽:`MessageStore` 构造时收下 `ingest_protection_config`,每条消息进
+`messages.content` 之前先过 `redact_sensitive_value` 再过外部化。host 不需要接任何写路径,
+只需要三件上游宿主替它做、misaka 没有的事。
+
+| 处 | 上游怎么来的 | misaka 怎么办 |
+|---|---|---|
+| 旁路文件放哪 | `hermes_home` | **`config_bridge` 显式给 `LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH` = `<lcm.db 所在目录>/lcm-large-outputs`** |
+| 活动上下文里换成 stub | `ContextEngine.compress` 返回整张表,宿主照单替换 | `host/externalize.stub_replay` 挂 `context` 事件(`transformContext`) |
+| 老库补外部化 | `scripts/backfill_externalized_tool_outputs.py`(未 vendored) | `host/externalize.plan/run` + `misaka lcm externalize-backfill [--apply] [--limit N]` |
+
+**落盘路径这一条是个真缺陷,不只是配置口味**:`hermes_home` 留空时,
+`LCMEngine` 走 `~/.hermes/lcm-large-outputs`(**另一个 install 的数据目录**,本机上真有 315 个
+文件),而 `MessageStore.__init__` 的回退是 `str(self.db_path.parent)`。两边不一致 = 写的人
+和读的人找的不是同一个目录,`lcm_expand(externalized_ref=...)` 对着确实存在的载荷报
+"not found"。实测复现过(载荷落进 `~/.hermes/`,已清理)。配置里显式给出的路径在
+`get_large_output_storage_dir` 里优先级高于 `hermes_home` 两侧,所以一处设置同时按住两头。
+
+`stub_replay` 的决策整个是上游 `_stub_large_tool_results_for_active_replay` 的:两个开关、
+token 阈值、受保护的 fresh tail(默认 32 条)、"模型刚要求展开的那个载荷不动"的豁免、
+结构化内容保持块形状。host 只做**按 `toolCallId` 回接**(不按下标——`convert_to_llm` 会丢掉
+`excludeFromContext` 的消息,两张表不等长),并且**故意留在事件循环上**:上游从 live config
+读受保护尾长,而 `context_engine._host_driven_boundary` 会在一次压缩期间钉住那个字段——
+那个窗口里没有 `await`,挪到线程里才会让别人看见钉住的值。
+
+`externalize-backfill` 复用 `store.gc_externalized_tool_result`(上游自己缩写已外部化行的
+那个写),它自带 role/pinned/幂等三道判据,并且在同一个事务里 `before_commit` 归档 chunk
+偏移。`--apply` 成功后跑一次 `VACUUM`:不跑的话行确实缩了,但 SQLite 把腾出来的页留着自用,
+文件大小不变、备份照样拷那几兆——命令的卖点就没兑现。前后都要先
+`wal_checkpoint(TRUNCATE)` 再量文件,否则"之前"量到的是空壳、算出来是负数。
+
+### 上游 `api_key` 模式的一个已知缺口(未修,vendor 不动)
+
+`_SENSITIVE_PATTERN_CATALOG["api_key"]` 用 `\b(?:api[_-]?key|...)\b` 开头。下划线是词字符,
+所以 `ANTHROPIC_API_KEY=sk-...` 里 `API_KEY` 前面没有词边界,**这条形式不脱敏**。实测五种写法:
+`api_key = "..."` ✅、`"api_key": "..."` ✅、`Authorization: Bearer ...` ✅、
+`password = "..."` ✅、`export ANTHROPIC_API_KEY="..."` ❌。
+这是上游缺陷(D6 第④类的候选),值得给上游提 issue;在上游修好之前 misaka 不自己改
+vendored 目录,`tests/test_hermes_lcm_externalize.py` 只对已覆盖的写法立断言。
+
+## 时间记忆(P4,host 侧,vendor 未动)
+
+rollup 四件套(`rollup_store` `rollup_builder` `rollup_periods` `occurrence_time`)、
+`lcm_recent` 工具、`lcm_rollups` 一族的表与触发器全在 vendor 里,`engine.py` 自己就会
+按开关调用它们。所以 P4 接的东西只有一处半:
+
+| 处 | 做了什么 |
+|---|---|
+| `host/rollups.py::nudge` | **上游只在 `_bind_lifecycle_state`(即 `on_session_start`)里排一次维护 pass,没有第二个钩子。** Hermes 网关频繁重绑;misaka 一个会话绑一次然后跑几小时,期间每轮压缩都发布新 summary 节点、把覆盖那些天的 rollup 打成 stale,却没有任何东西去消费。所以 `host/context_engine.compact()` 出摘要之后补一次 `nudge`(上游自己的 `_schedule_rollup_maintenance`,按 (库, scope) 去重、受 `LCM_ROLLUP_BUILDS_PER_PASS` / `LCM_ROLLUP_MAINTENANCE_BUDGET_MS` 限额)。关的时候是 no-op |
+| `host/rollups.py::status` / `rebuild` | `misaka lcm rollups` / `--rebuild`。status 走**只读连接**(`RollupStore` 一构造就建表,查状态不能是"表出现"的原因);rebuild 按 summary 节点覆盖的 UTC 天播种(`upsert_stale_many`,一个 scope 一个事务)再循环 `run_rollup_maintenance` 直到没有 stale |
+
+`rebuild` 存在的理由是**在已有历史的库上打开这一族**:触发器是打开后才装的,之前发布的
+summary 节点没有留下 invalidation 事件,没有任何东西会自己排队 —— 不 rebuild 就永远回退 leaf。
+
+**`rebuild` 的循环按"这一轮有没有改变什么"收尾,不按"这一轮有没有开工"**(合流审查改的)。
+`run_rollup_maintenance` 返回的是 **builds_started**,而一个日 rollup 还没 ready 的聚合期
+会被**每一轮**挑中、开工、再 defer —— 所以"这轮开工数为 0 才停"永远停不下来,只能撞
+`_MAX_PASSES=400` 的上限,路上每轮最多两次辅助模型调用。改成比对 `status != 'ready'` 的
+行数:健康库答案不变,卡住的库一轮就收手并把 scope 报进 `exhausted`(CLI 打
+"still had work when the pass budget ran out; run it again")。
+`tests/test_hermes_lcm_rollups.py::test_rebuild_gives_up_on_a_period_that_will_never_build`
+守着这条,断言的是**尝试次数的上限**,因为那是有价钱的那个数。
+
+### 依赖的上游形状(再同步时复核)
+
+| 依赖 | 位置 | 变了会怎样 |
+|---|---|---|
+| `_bind_lifecycle_state` 里那段 `temporal_rollups_enabled` 判断 + `_schedule_rollup_maintenance` | `engine.py:1748-1755` | 上游若改成"压缩后也排一次",`nudge` 就多余了(仍然无害,scheduler 去重);若改名,`nudge` 会静默失效 —— 那时 rollup 只在会话绑定时更新 |
+| `LCMEngine._config` / `._dag` | 全 host 层已依赖 | 同 P1 |
+| `lcm_rollups` / `lcm_rollup_sources` / `lcm_rollup_invalidations` 的列名 | `db_bootstrap.py:711-760` | `status` 的只读查询和压测断言按名字读 |
+| `summary_nodes.earliest_at/latest_at` = **入库时钟**(`messages.timestamp` 即 `ingested_at`),不是宿主消息时间戳 | `store.append:402`、`store.get_time_bounds:987` | rollup 按"这段历史是哪天**入的库**"归档,不是"消息自称哪天"。misaka 的测试要造跨天历史,唯一办法就是把 store 的时钟拨过去 |
+
+### 多进程复核(D3):三条加固机制逐条的结论
+
+上游这一族过了对抗审查,但审查的是**一个进程若干线程**。misaka 是多进程写同一个
+`lcm.db`,所以逐条重看"跨进程还成立吗":
+
+| 机制 | 跨进程结论 | 依据 |
+|---|---|---|
+| 构建令牌带不可重用 nonce | **成立**。`upsert_building` 的 `INSERT ... ON CONFLICT DO UPDATE` 在一个写事务里递增 `generation` 并换 `lease_nonce`,两个进程拿到的令牌必然不同 | 全部状态在库里,没有一个字节在进程内 |
+| 迟到的构建者不能覆盖更新的状态 | **成立**。`mark_ready` / `mark_failed` / `defer_incomplete` / `resolve_no_source` 的 `WHERE` 全带 (`rollup_id`, `generation`, `lease_nonce`, `status='building'`) 四元 CAS,`rowcount==0` 即被抢占 | 同上;`reclaim_stale_building` 也递增 generation,所以崩溃进程回来也发布不了 |
+| 删源致所有覆盖期 stale | **成立,而且比进程内更强**。invalidation 是 `summary_nodes` 上的**触发器 + 表**,装一次全库有效:一个**把这一族关掉**的姐妹进程删/改节点,事件照样入 outbox,开着的那个进程下一次 pass 会消费 | `db_bootstrap.ensure_temporal_rollup_invalidation_triggers` |
+| 读侧不越过未消费的变更 | **成立**。`_recent_ready_rollups` 先查 `has_pending_invalidations(scope)`,有就整窗回退 leaf | `tools.py:2005-2011` |
+| 进程内 scheduler / `try_acquire_rollup_operator_lease` | **不跨进程**(`_ROLLUP_MAINTENANCE_SCHEDULER` 是模块级)。两个进程会重复构建同一期 → **重复花一次辅助模型的钱**,不产生错数据(上面的 CAS 兜底)。所以 `host/rollups.rebuild` 干脆不去拿那把 operator lease:它只能把本进程挡在本进程外面 | — |
+
+### 复核中发现的一个上游缺陷(可用性,非正确性;未修,vendor 不动)
+
+`RollupStore.mark_ready` 是**这一族唯一一个"事务内先读后写"的路径**:Python `sqlite3` 的
+隐式 `BEGIN` 落在那句 `DELETE FROM temp.lcm_rollup_publish_sources` 上(实测
+`in_transaction` 从 False 变 True),之后的 `LEFT JOIN summary_nodes` 取的是 DEFERRED 快照,
+最后那句 `UPDATE lcm_rollups` 要把读事务升级成写事务 —— 期间只要**另一个连接提交过**,
+SQLite 立刻返回 `SQLITE_BUSY_SNAPSHOT`(`database is locked`),**`busy_timeout` 对快照冲突
+不生效**,所以 30 秒的 `busy_timeout` 一点忙都帮不上。
+
+后果:`build_day` 捕获后走 `mark_failed`,该期变 `failed` 并吃 30 秒退避,下一轮 pass 重建。
+**没有脏写、没有错数据、没有丢历史,只是那一期晚 30 秒**;`lcm_recent` 期间照常回退 leaf。
+
+实测(两进程 × 各三个构建者疯狂 hammer,无思考时间):6 轮里 3 轮出现,每轮 1-2 期。
+真实使用是"每轮压缩排一次、彼此隔几秒",触发面小得多。
+
+上游修法是一行:`RollupStore._init_db` 里给自己的连接 `isolation_level="IMMEDIATE"`
+(或把校验查询挪进一个 `BEGIN IMMEDIATE` 事务)。**值得给上游提 issue**;misaka 不自己改
+vendored 文件 —— 它是自愈的可用性问题,不值得为它打破 `vendor/` 零差异。
+
+压测:`tests/test_hermes_lcm_rollups.py::test_two_processes_building_one_batch_of_rollups_leave_it_self_consistent`
+(两进程 × 各三个并发构建者抢同一批 rollup;先断言竞态**当场**留下的状态自洽 —— 无 `building`
+残留、无租约泄漏、`summary` 必是某一个进程的整句而非拼接、失败只可能是锁竞争或聚合等日;
+再让竞争结束后的单进程收尾,断言每期 `ready`、血统与库里现存节点完全一致、日 rollup 的源集
+恰好等于那天的节点、无孤儿 `lcm_rollup_sources`、outbox 排空)。
+
 ## 刻意不接线的 vendored 文件
 
 | 文件 | 原因 |
 |---|---|
 | P2–P7 那 26 个闭包外溢文件 | 依赖闭包要求它们**可导入**,不要求它们**被接线**。host 适配层按分期做:P2 工具面、P3 保护层、P4 时间记忆、P5 语义、P6 证据层、P7 运维面 |
 | `codex_routing.py` | 蓝图 §5.4:misaka 的模型目录负责上下文窗,永久 vendored-inert |
-| `command.py` | Hermes 的 `/lcm` 斜杠命令实现;misaka 走 `misaka lcm` CLI(P7) |
+| `command.py` | Hermes 的 `/lcm` 斜杠命令实现;misaka 走 `misaka lcm` CLI(P7)。**P5 起有一个例外**:`handle_lcm_command("embed ...")` 被 `host/embed.py` 转发,见下 |
+
+## 语义检索(P5,host 侧,vendor 未动)
+
+上游这一族的实现整个在 `vendor/embedding_provider.py` + `vendor/vector_store.py` 里,
+`lcm_grep` 的 `semantic` / `hybrid` 两条路也整个在 `vendor/tools.py` 里 —— P2 已经把
+`engine.handle_tool_call` 接上了,所以 P5 要接的**只有开关和运维口**,检索路径一行没写。
+
+| 处 | 接了什么 |
+|---|---|
+| `host/config_bridge.py` | `MISAKA_LCM_RETRIEVAL_MODE=hybrid` → `LCM_EMBEDDINGS_ENABLED=true`;`MISAKA_LCM_EMBEDDING_MODEL` → `LCM_EMBEDDING_MODEL` + `LCM_EMBEDDING_PROVIDER=fastembed` |
+| `host/embed.py` | `misaka lcm embed warmup\|backfill [--apply] [--limit N]` → `vendor/command.handle_lcm_command("embed ...")` |
+| `misaka/cli/app.py` | `lcm` 子命令加一个 op(`embed`)和一个旗标(`--limit`) |
+
+三条决定:
+
+1. **provider 名和 model 名捆绑迁移。** 迷你实现只有 FastEmbed 一个后端,`MISAKA_LCM_EMBEDDING_MODEL`
+   写的必然是 FastEmbed 模型名,所以别名同时补 `LCM_EMBEDDING_PROVIDER=fastembed`——但**只在
+   `LCM_EMBEDDING_MODEL` 本身缺席时**。否则用户设了 `LCM_EMBEDDING_MODEL=voyage-4-lite` 却忘了
+   provider,上游本该报"两个都要设",别名却会把它变成一个错的 provider。voyage / ollama 走上游名。
+2. **默认仍是关的。** `lcm_retrieval_mode` 的默认值是 `fts`、`lcm_embedding_model` 的默认值是空,
+   两半都映射到"什么都不加"。实测:默认配置下 `mode=semantic`/`hybrid` 返回
+   `degraded_to_fts=true, degraded_reason="semantic retrieval is disabled"`,
+   `misaka lcm embed warmup` 答 `status: disabled`,`backfill` 答 `status: refused`。
+3. **`command.py` 只转发 `embed`。** 其余运维口(`status` `doctor` `rotate` `preset` ...)是 P7 的,
+   `misaka lcm` 在那之前维持自己那几个 op。转发而不重写的理由是估算:dry-run 打的是
+   token 数和费用,自己写一版算错了是钱。
+
+`host/embed.py` 依赖两条上游形状,再同步时复核:`handle_lcm_command` 的 `"embed warmup"` /
+`"embed backfill [flags]"` 词法,以及 `engine._config` / `engine._store.db_path` 两个属性名
+(`command.py` 全篇都从这两个取)。
+
+### 迷你实现的 `semantic.py` 与将来的收敛
+
+迷你实现自带 137 行 `semantic.py`(FastEmbed + 自建 `summary_embeddings` 表 + Python 里
+逐行余弦扫描),**没有删**:迷你实现仍是 `context_engine=lcm` 的默认实现,删了它默认路径就瘸了。
+两者不共存于同一个库——`host/switch.py` 用 `messages.conversation_id` 一列判 schema,
+一个库只可能是其中一版,所以不存在"两套向量表打架"。
+
+| | 迷你 `semantic.py` | 上游 `vector_store.py` |
+|---|---|---|
+| 表 | `summary_embeddings(node_id, model, vector, norm)` | `lcm_embedding_meta` + 按 identity 分档的向量表 |
+| 身份 | 一个 `model` 字符串 | `(provider, model, revision, dim, dtype, byteorder, task)` 七元组 |
+| 后端 | 只有 FastEmbed | voyage / ollama / fastembed |
+| 检索 | 全表扫,Python 循环算余弦 | 有界候选窗 + numpy 可选加速 + 二值预筛 + 两段 KNN |
+| 写入 | 查询时顺手 backfill | 独立的 `embed backfill`,带租约、可续跑、对"远端是否收下"诚实 |
+| 降级 | 抛 `SemanticUnavailable` | `degraded_to_fts` + 原因,永远还是给得出全文结果 |
+
+收敛路径:P7 把 `misaka lcm` 的运维口整个换成上游的之后,`context_engine=lcm` 这个值本身
+就没有存在理由了(它唯一的作用是保住旧库不被上游 schema 撞坏,而那时 `migrate` 已经跑过)。
+那一步里 12 个迷你文件连同 `semantic.py` 一起删,`CFG["lcm_retrieval_mode"]`/
+`CFG["lcm_embedding_model"]` 退化成纯别名(现在已经是了)。**在那之前不要动它。**
+
+### 可选依赖 `lcm-semantic`
+
+`pyproject` 的 `lcm-semantic = ["fastembed"]` 正好对上上游的 `fastembed` provider,
+装上即通,不新增任何 misaka 依赖。它顺带把 **numpy** 带进环境——上游 `vector_store.py`
+在有 numpy 时走矩阵路径、没有时走纯 stdlib 的有界扫描,两条路上游都测。副作用是
+vendored 套件里 8 个「缺 numpy」的跳过变成了通过(见"vendored 测试"一节的新数字)。
+`fastembed` 的模型下载只在 `misaka lcm embed warmup` 里发生,查询路径永远
+`local_files_only=True`——没 warmup 过就 `degraded_to_fts`,不会在一轮对话中间下 130 MB。
 
 ## 刻意不移植的上游文件
 
@@ -150,7 +357,9 @@ D3 双进程压测已补:`tests/test_hermes_lcm_host.py::test_two_processes_inge
 ## vendored 测试
 
 `tests/hermes_lcm_vendor/` 有上游 84 个 `test_*.py` 里的 **60 个**(逐字节,`cmp -s` 验证),
-外加上游的 `tests/fixtures/`。结果:**2357 passed / 35 skipped / 12 xfailed,零红。**
+外加上游的 `tests/fixtures/`。结果:**2371 passed / 21 skipped / 12 xfailed,零红。**
+(P5 装上可选 extra `lcm-semantic` 之后的数字;numpy 随 fastembed 进来,原先 8 个
+「缺 numpy」的跳过变成了通过——见下。没装 extra 时是 2357 passed / 35 skipped。)
 
 `tests/hermes_lcm_vendor/conftest.py` 是 misaka 的文件(不是上游拷贝),做三件事:
 
@@ -166,6 +375,10 @@ D3 双进程压测已补:`tests/test_hermes_lcm_host.py::test_two_processes_inge
    缺 numpy 6、macOS `/var`→`/private/var` 2。后 8 个在上游自己的检出里也是红的
    (同一 venv、同一 8 个 node id,已核对)。
 
+   **其中「缺 numpy」那 6 个是有条件的**(P5 改):numpy 不是 misaka 的依赖,但可选 extra
+   `lcm-semantic` 的 fastembed 会把它带进来。带进来了,那 6 条就不再是关于环境的论断,
+   无条件跳过就成了藏红——所以 conftest 先 `import numpy` 再决定跳不跳。其余 19 条无条件。
+
 ### 再同步时怎么证明"一个测试都没被藏起来"
 
 跳过一个测试和改一个测试是同一件事,所以 `SKIP_UPSTREAM_TESTS` 需要一条能重跑的证明,
@@ -178,16 +391,17 @@ D3 双进程压测已补:`tests/test_hermes_lcm_host.py::test_two_processes_inge
      <misaka>/.venv/bin/python -m pytest -q $(那 60 个文件)
    ```
 
-   当前 pin 上的结果:**8 failed / 2374 passed / 10 skipped / 12 xfailed**,
-   那 8 个 node id 正是 `_NUMPY`(6)+ `_SYMLINK`(2)——即"上游在这个环境里也红"的那一类。
+   当前 pin 上、装了 `lcm-semantic` 的结果:**2 failed / 2388 passed / 2 skipped / 12 xfailed**,
+   那 2 个 node id 正是 `_SYMLINK`——即"上游在这个环境里也红"的那一类。
+   (没装 extra 时是 **8 failed / 2374 passed / 10 skipped / 12 xfailed**,多出来的 6 个红是 `_NUMPY`。)
 
-2. **对账**:上游 `2374 passed + 8 failed = 2382`;这里 `2357 passed + 25 skipped = 2382`。
-   两边的 `10 skipped` / `12 xfailed` 也逐项相同。**总数相等**就是"没有测试凭空消失"的证明;
-   对不上就是有文件或用例被悄悄丢了。
+2. **对账**:上游 `2388 passed + 2 failed = 2390`;这里 `2371 passed + 19 skipped = 2390`。
+   两边的 `2 skipped` / `12 xfailed` 也逐项相同。**总数相等**就是"没有测试凭空消失"的证明;
+   对不上就是有文件或用例被悄悄丢了。(没装 extra 时两边都是 2382 = 2374+8 = 2357+25。)
 
 把 `SKIP_UPSTREAM_TESTS` 整个停用再跑一遍(临时插件把 skip marker 摘掉即可),应当**恰好**
-红 25 个、且 node id 与表里逐条对齐:一个都不多(说明没有藏红),一个都不少(说明没有
-多跳过本来能过的测试)。上游修好某条后,对应条目会从"红"变"绿",那时删掉它。
+红 19 个(没装 extra 时 25 个)、且 node id 与表里逐条对齐:一个都不多(说明没有藏红),
+一个都不少(说明没有多跳过本来能过的测试)。上游修好某条后,对应条目会从"红"变"绿",那时删掉它。
 
 **暂缓的 24 个上游测试文件**:
 
@@ -210,5 +424,5 @@ collect 阶段就 `ImportError`(缺模块),11 个能 collect 但**全部**用例
 | `test_threshold_full_sweep_benchmark.py`(1) | `scripts/benchmark_threshold_full_sweep.py`——同样**不是** `benchmarking/` |
 | `test_benchmarking_fixtures/replay/report/steady_state/types.py`(5 个) | `import benchmarking`(P7 可选) |
 | `test_h3_composition_replay.py` `test_h5_state_semantic_replay.py` `test_longmemeval_harness.py` `test_state_embedding_backfill_cli.py` | `import benchmarking` |
-| `test_int8_two_stage_knn.py` | `import numpy`,misaka 不新增第三方依赖(P5 决定) |
+| `test_int8_two_stage_knn.py` | `import numpy`;P5 的决定是**不为它新增依赖**——numpy 只在可选 extra `lcm-semantic` 里搭 fastembed 的车进来,不是 misaka 的依赖,所以这个文件仍然暂缓 |
 | `test_host_supplied_evidence.py` `test_preanswer_evidence.py` `test_selective_compiler.py` `test_selective_session_bundle.py` | 分别 import `host_evidence` / `preanswer_evidence` / `selective_compiler` / `selective_recall`——正好是上面"没有 vendored 的 4 个"。P6 一并拷入即解锁 |
