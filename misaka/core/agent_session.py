@@ -36,10 +36,11 @@ from misaka.core.auth_guidance import (
 )
 from misaka.core.bash_executor import BashResult, execute_bash_with_operations
 from misaka.core.compaction import (
-    CompactionResult as SessionCompactionResult,
+    CompactionPreparation,
+    CompactionSettings,
 )
 from misaka.core.compaction import (
-    CompactionSettings,
+    CompactionResult as SessionCompactionResult,
 )
 from misaka.core.compaction import (
     calculateContextTokens as calculate_compaction_context_tokens,
@@ -1058,7 +1059,7 @@ class AgentSession:
             settings = CompactionSettings(**self.settingsManager.getCompactionSettings())
             branch_entries = self.sessionManager.getBranch()
             preparation = prepare_compaction(branch_entries, settings)
-            if preparation is None:
+            if preparation is None or _is_noop_compaction(preparation):
                 last_entry = branch_entries[-1] if branch_entries else None
                 if isinstance(last_entry, dict) and last_entry.get("type") == "compaction":
                     raise RuntimeError("Already compacted")
@@ -1738,12 +1739,23 @@ class AgentSession:
             return
         target_dict = getattr(target, "__dict__", None)
         if isinstance(target_dict, dict):
+            # The caller keeps using `target` right after this - agent_loop reads
+            # block.type on every content block of the message it just ended - so the
+            # target has to stay a usable model. Copying model_dump()'s plain dicts
+            # into __dict__ would leave .content full of dicts and kill the turn with
+            # unanswered toolCalls, so re-validate into the target's own type first.
+            validated = _validate_as(type(target), replacement_dict)
+            source = replacement_dict if validated is None else validated.__dict__
             target_dict.clear()
-            target_dict.update(replacement_dict)
+            target_dict.update(source)
             fields_set = getattr(target, "__pydantic_fields_set__", None)
             if isinstance(fields_set, set):
                 fields_set.clear()
-                fields_set.update(replacement_dict.keys())
+                fields_set.update(
+                    replacement_dict.keys()
+                    if validated is None
+                    else getattr(validated, "__pydantic_fields_set__", replacement_dict.keys())
+                )
             return
         for key, value in replacement_dict.items():
             setattr(target, key, value)
@@ -2399,7 +2411,7 @@ class AgentSession:
             settings = CompactionSettings(**self.settingsManager.getCompactionSettings())
             branch_entries = self.sessionManager.getBranch()
             preparation = prepare_compaction(branch_entries, settings)
-            if preparation is None:
+            if preparation is None or _is_noop_compaction(preparation):
                 self._emit(
                     {
                         "type": "compaction_end",
@@ -2593,6 +2605,27 @@ def _message_role(message: Any) -> str | None:
 
 def _message_content(message: Any) -> Any:
     return read_field(message, "content")
+
+
+def _validate_as(model_type: type, data: Any) -> Any | None:
+    """Re-validate `data` as `model_type`, or None when it is not that shape."""
+    validate = getattr(model_type, "model_validate", None)
+    if not callable(validate):
+        return None
+    try:
+        return validate(data)
+    except Exception:  # noqa: BLE001 - a replacement of another shape falls back to the raw mapping
+        return None
+
+
+def _is_noop_compaction(preparation: CompactionPreparation) -> bool:
+    """True when the preparation would summarize nothing at all.
+
+    Such a compaction pays for a summarization request over an empty conversation,
+    appends a summary entry that only grows the context, and re-fires next turn. A
+    split turn with a prefix is not a no-op: its prefix is what gets summarized.
+    """
+    return not preparation.messagesToSummarize and not preparation.turnPrefixMessages
 
 
 def _content_type(block: Any) -> str | None:

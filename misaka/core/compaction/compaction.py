@@ -294,7 +294,13 @@ def find_cut_point(
         return CutPointResult(firstKeptEntryIndex=start_index, turnStartIndex=-1, isSplitTurn=False)
 
     accumulated_tokens = 0
-    cut_index = cut_points[0]
+    # Fall back to the LAST valid cut point, not the first: toolResult entries are not
+    # valid cut points, so a tail made of them (exactly the shape a truncate-then-
+    # compact-and-retry leaves behind) fills the keepRecentTokens window without any
+    # candidate inside it. Keeping everything there summarizes nothing, pays for an
+    # empty summarization, appends a summary that only grows the context, and repeats
+    # every turn. "Cannot keep a full keepRecentTokens window" must mean keep less.
+    cut_index = cut_points[-1]
 
     for index in range(end_index - 1, start_index - 1, -1):
         entry = entries[index]
