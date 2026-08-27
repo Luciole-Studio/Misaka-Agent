@@ -1179,6 +1179,24 @@ class _Sock:
         return line
 
 
+def _send_pane_input(control, pane_id, data, note):
+    """Forward one keystroke batch to a pane; a refusal costs the batch, not the network.
+
+    An error *reply* means this pane would not take this batch — its PTY queue is full
+    because a raw-mode program stopped reading stdin (an ordinary paste is enough), or it
+    exited between the keypress and the send. The daemon is still there, but letting the
+    error out ends the panel, and the daemon reads the last panel leaving as its cue to
+    close every pane: Last Order, every Sister, every running research card. So drop the
+    batch and say so, the way pane.close already tolerates a pane that is already gone.
+    ConnectionError is not this case — the daemon really is gone — so it propagates.
+    """
+    try:
+        control.request("pane.input", {
+            "id": pane_id, "data": base64.b64encode(bytes(data)).decode()})
+    except RuntimeError as error:
+        note(f"{hui.sgr_fg(hui.OVERLAY1)}Input dropped: {error}")
+
+
 def _write_all(data):
     """Write everything to stdout. os.write to a terminal may write only part of the buffer,
     cutting an escape sequence in half; the terminal then prints the tail as text
@@ -3093,8 +3111,7 @@ def launch():
                         help_open = True
                         draw_help_overlay()
                 if plain:
-                    control.request("pane.input", {
-                        "id": focused, "data": base64.b64encode(bytes(plain)).decode()})
+                    _send_pane_input(control, focused, plain, bottom_note)
                     repaint_after_typing = now + 0.9   # Repaint after typing stops to erase IME leftovers.
                 if quitting:
                     return
