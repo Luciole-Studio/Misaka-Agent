@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 
-from . import context_engine, externalize, tools
+from . import context_engine, externalize, preanswer, tools
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +62,16 @@ def register(harn):
             logger.warning("LCM could not stub the live context; it goes out in full.", exc_info=True)
             return None
 
+    async def preanswer_context(event, ctx):
+        # The same seam again, and second on purpose: the runner threads each handler's
+        # messages into the next, and the stubber's protected fresh tail is counted from
+        # the end of the list. Appending the brief first would move that boundary.
+        try:
+            return preanswer.inject(event, ctx)
+        except Exception:
+            logger.warning("LCM pre-answer evidence failed; the turn goes out unchanged.", exc_info=True)
+            return None
+
     try:
         tools.register(harn)
     except Exception:
@@ -75,3 +85,4 @@ def register(harn):
     harn.on("session_compact", sync_event)
     harn.on("session_compact_failed", compact_failed)
     harn.on("context", transform_context)
+    harn.on("context", preanswer_context)

@@ -14,9 +14,16 @@ engine installs it when it builds an engine.
 
 Model routing: upstream hands us whatever ``LCM_SUMMARY_MODEL`` (and the per-task model
 overrides) contain, after ``model_routing`` has tried and failed to split a Hermes
-provider prefix off it. So a ``provider/model`` value arrives whole and is split here
-against misaka's own provider names; anything else is a model id for the configured
-provider.
+provider prefix off it. Nothing here re-splits that value -- misaka names its provider
+separately, in ``MISAKA_LCM_SUMMARY_PROVIDER``, so what arrives is a model id for that
+one provider whatever it looks like. A ``provider/model`` value therefore reaches the
+provider whole, as a model id.
+
+The consequence is worth stating because it is a cost decision: there is one provider
+for all four auxiliary tasks. ``LCM_ASSERTION_EXTRACTION_MODEL`` can name a cheaper
+*model*, but it cannot route assertion extraction to a cheaper *provider* while the
+summariser stays where it is. Giving each task its own provider means a second config
+key, not a change here.
 """
 
 from __future__ import annotations

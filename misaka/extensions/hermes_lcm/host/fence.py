@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 from contextlib import AbstractContextManager
 
@@ -58,9 +59,29 @@ _ROLLUP_KEYS = frozenset({"rollup_id", "rollup_ids"})
 # in each match -- so these keys are the only trace of the material they return.
 _REF_KEYS = frozenset({"externalized_ref", "externalized_refs", "ref"})
 
+# The V4 evidence family's own citation, and the one form of provenance that does not
+# come with a `store_id` beside it: `lcm:<store_id>:<start>-<end>` names a character span
+# inside one stored row. `evidence_compiler` delivers its `direct_fact`, its `evidence`
+# entries and its rendered brief citing rows by this string *only* -- the hydrated dict
+# that did carry `store_id` is filtered down to five keys on the way out
+# (`requirements_compiler._deliver`) -- so `_collect`'s key list reaches none of it.
+#
+# Read out of the rendered text rather than out of named fields, because the text is
+# where the spelling stops varying: `direct_fact.exact_ref`, `novel_exact_refs[]`,
+# `computation.citations[]` and the `- exact evidence: [lcm:2:63-111] ...` line of the
+# brief are four shapes of one citation, and a fifth arrives with the next upstream
+# release. Over-reading is the safe direction here: a ref that a hostile row merely
+# *quotes* resolves to that row, which the check then has to vouch for anyway.
+_EXACT_REF = re.compile(r"\blcm:([1-9][0-9]{0,17}):[0-9]+-[0-9]+\b")
+
 # SQLite's default parameter ceiling is 999; a tool result never cites near that many
 # rows, but a chunked IN list costs one loop and removes the ceiling as a failure mode.
 _MAX_PARAMS = 500
+
+
+def cited_rows(text: str) -> set[int]:
+    """The store rows one piece of LCM output cites by exact ref alone."""
+    return {int(store_id) for store_id in _EXACT_REF.findall(text or "")}
 
 # Content this check cannot see through, and therefore will not vouch for. The sentinel
 # is the fence itself. The other half is upstream's externalization placeholder: with
@@ -268,7 +289,7 @@ def refence(output: str, *, engine, tool_name: str) -> str:
     except ValueError:
         logger.warning("LCM tool %s returned something other than JSON; fencing it unread.", tool_name)
         return untrusted(f"lcm:{tool_name}", output)
-    stores: set[int] = set()
+    stores: set[int] = cited_rows(output)
     nodes: set[int] = set()
     rollups: set[int] = set()
     refs: set[str] = set()

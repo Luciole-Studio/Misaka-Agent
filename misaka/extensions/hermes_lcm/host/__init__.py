@@ -13,6 +13,7 @@ concern lives:
     fence.py           misaka's untrusted-data fence, put back on what LCM hands over
     rollups.py         temporal rollups: the build nudge misaka's session shape needs
     externalize.py     large-output refs in the live prompt, and a backfill for old rows
+    preanswer.py       V4 pre-answer evidence: one bounded cited brief before the answer
     embed.py           upstream's own `/lcm embed`, on `misaka lcm embed`
     assertions.py      upstream's own `/lcm assertions rebuild`, on `misaka lcm assertions`
     migrate.py         the existing mini-implementation database -> upstream schema

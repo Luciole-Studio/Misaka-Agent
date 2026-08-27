@@ -85,6 +85,7 @@
 | `externalize.py` | P3 保护层的两条 misaka 专属缝:活动上下文换 stub(`context` 事件)+ 老库补外部化(`misaka lcm externalize-backfill`) |
 | `rollups.py` | P4 时间记忆的两件事:每轮压缩后的 `nudge`(misaka 一次会话只绑一次)+ `misaka lcm rollups [--rebuild]` |
 | `embed.py` | P5:把上游自己的 `/lcm embed warmup\|backfill` 转发到 `misaka lcm embed` |
+| `preanswer.py` | P6:上游 `pre_llm_call` 的预答证据钩子 → `context` 事件的第二个处理器 |
 
 **压缩缝的关键决定**:pi 给的是「要被替换的那一段 + `firstKeptEntryId`」,上游给的是「整张消息表进、整张出」。
 桥接方式是**把引擎的 fresh tail 钉死成 pi 保留的那一段**(`fresh_tail_count = 保留条数`,同时临时把
@@ -349,6 +350,124 @@ vendored 文件 —— 它是自愈的可用性问题,不值得为它打破 `ven
 vendored 套件里 8 个「缺 numpy」的跳过变成了通过(见"vendored 测试"一节的新数字)。
 `fastembed` 的模型下载只在 `misaka lcm embed warmup` 里发生,查询路径永远
 `local_files_only=True`——没 warmup 过就 `degraded_to_fts`,不会在一轮对话中间下 130 MB。
+
+## 证据层与预答钩子(P6/B,host 侧,vendor 未动)
+
+V4 的编译器族(`answer_contract` `requirements_compiler` `evidence_compiler` `evidence_pack`
+`selective_recall` `selective_compiler` `query_view_store` `reasoning` `adaptive_retrieval`
+`trajectory_store`)全在 vendor 里,`lcm_compile_evidence` / `lcm_evidence_pack` /
+`lcm_compute` / `lcm_query_state` / `lcm_retrieve` 五个工具 P2 就已经经
+`engine.handle_tool_call` 接上了。所以 P6/B 要接的只有**上游插件入口里那段
+`pre_llm_call` 钩子**,外加它暴露出来的一个围栏洞。
+
+### 实测:五个工具在开关打开后确实工作
+
+| 工具 | 开关 | 实测结果 |
+|---|---|---|
+| `lcm_compile_evidence` | 无(纯确定性,读调用方给的 ref) | `mode=auto` 出 `direct_fact {value: 4200, unit: "usd", exact_ref: "lcm:2:93-101"}` |
+| `lcm_evidence_pack` | 同上 | `evidence[]` 带 `exact_ref` + `store_id` + `span_start/end` + `quote` + 观察时间/发生时间两套 |
+| `lcm_compute` | 同上 | 缺 `operands` 时 `status=fallback`,`provenance.stages` 完整 |
+| `lcm_query_state` | `LCM_ASSERTIONS_ENABLED` | 关:`{"status": "disabled", ...}`;开:正常应答 |
+| `lcm_retrieve` | `LCM_ADAPTIVE_RETRIEVAL_ENABLED` | 关:`{"status": "disabled", "enable_with": ...}`;开:`start` 正常开一次 episode |
+
+前三个**没有开关**,因为它们不检索、不调模型:只读调用方已经引用了的行。这不是遗漏。
+
+### `host/preanswer.py`:上游 `__init__.py:91-311` 在 misaka 侧的重建
+
+上游钩子返回 `{"context": recall_policy + "\n\n" + brief}`,宿主拿它当 system context。
+misaka 的对应缝 `harn.on("context", ...)`(`transformContext`)拿到的是**消息表**,所以
+brief 作为**一条追加的 user 消息**落地,表里其它对象一个不动(`is` 相同)。
+
+四处**故意不照抄**,理由都在模块文档串里:
+
+| 上游 | misaka | 为什么 |
+|---|---|---|
+| 恒返回 `recall_policy` 字节 | 关的时候返回 `None` | 这条缝上没有 policy blob;返回 `None` = 消息表原样,连对象都不换 |
+| `enabled_toolsets` 里有没有 `context_engine` | 不判 | Hermes 的 payload 键;misaka 按卡权限词汇表管工具,引擎要么注册了要么没有 |
+| `_engine_bound_session_id` / `_ensure_engine_bound_to_session` | `context_engine.start(ctx)` | 绑定归 `host/ingest` + `host/context_engine` 管,和 `externalize.stub_replay` 一个写法 |
+| `payload["question_date"]` / `["question_as_of"]` | 只有回退那一半 | 见下 |
+
+### question_date 的来源(决定)
+
+上游 `_hook_question_date` 两条路:先取 payload 的 `question_date`/`question_as_of`,
+取不到就用 `conversation_history` 里**最后一条 user 消息的 timestamp**,按 UTC 折成
+`YYYY-MM-DD`。misaka 的 `context` 事件只有 `{"type", "messages"}`,**没有 payload 键**,
+所以只有第二条路 —— 而那正好是描述"活的一轮"的那一半:显式 anchor 在上游也只有 benchmark
+桥会喂(冻结日期复现搜索字节)。
+
+实现:`ingest.upstream_messages(messages)` 反向找第一条 `role == "user"`,
+`datetime.fromtimestamp(ts, tz=UTC).date().isoformat()`。**UTC 而不是本地时区**是被
+`answer_contract.normalize_question_date` 逼的:它拒绝时区含糊的日期,anchor 和 contract
+不同步 = 编不出 brief。时间戳缺席/不可读时 anchor 留空,**不拿墙钟兜底** —— 相对时间的问题
+(「昨天」)在没有 anchor 时上游会拒答,拿墙钟兜底等于把一轮旧对话悄悄改了日期。
+
+### 两个处理器共用 `context` 缝:顺序是硬约束
+
+`extension.register` 现在往 `harn.on("context", ...)` 挂两个:
+`transform_context`(P3 的 `externalize.stub_replay`)在前,`preanswer_context` 在后。
+
+`ExtensionRunner.emit_context` 按注册顺序把每个处理器的 `messages` 串给下一个,而上游的
+active-replay stubbing 受保护的 fresh tail 是**从给它的那张表的末尾数回来的**
+(`engine.py:5294`:`eligible_end = len(messages) - protected_tail_count`)。所以先追加
+brief 会把那条边界往前推一位,**掀开一条本该受保护的真消息**。
+`tests/test_hermes_lcm_preanswer.py::test_appending_first_would_push_a_message_out_of_the_protected_tail`
+把这条实测出来:同一张表,`fresh_tail_count=2` 时 stub 不动;末尾多一条,index 2 的
+tool result 就被换成 `[Externalized tool output: ...]`。
+
+反向不成立(brief 只追加、不改已有条目),所以正确顺序只有一个,并且有测试守着。
+
+### 围栏交互:P6 打开的第五个洞(已修,host 侧)
+
+**洞**:`requirements_compiler._deliver` 把水合过的候选**过滤成五个键**
+(`exact_ref` `quote` `role` `session_date` `origin`)—— `store_id` 不在其中。于是
+`lcm_compile_evidence` 的整个答案(`direct_fact`、`evidence[]`、`novel_exact_refs[]`、
+`computation.citations[]`)以及预答 brief 的正文,**只用 `lcm:<store_id>:<start>-<end>`
+字符串指认来源**,`fence._collect` 的键表一个也够不着。`MARKER in output` 这条捷径同样挡不住:
+quote 是行正文**中段**的一个切片,围栏的两个哨兵不在里面。
+
+实测(修之前):一个被围栏的页面入库,`lcm_compile_evidence(mode=auto)` 返回
+`direct_fact {value: 4200, unit: "usd", exact_ref: "lcm:2:93-101"}`,`refence` **原样放行** ——
+从敌意页面里抽出来的一个数,穿着系统自己的嗓音进模型。
+
+**修法**(host 侧,vendor 未动):`fence.cited_rows(text)` 用一条正则
+`\blcm:(\d+):\d+-\d+\b` 从**渲染后的文本**里读回 store 行,`refence` 把它并进 `stores`,
+`preanswer._guarded` 用同一个函数守 brief。
+
+从文本读而不是从字段读,是因为**文本是拼写唯一稳定的地方**:上面四种键名是同一条引用的四个
+形状,下一个上游版本会有第五个。多读的代价是安全方向的 —— 一条被敌意行**引用**的 ref 会解析
+到那一行,而那一行本来就得被担保。
+
+实测(修之后):被围栏页面 → brief 带围栏;干净行 → brief 不带围栏(`lcm_evidence_pack`
+本来就带 `store_id`,行为不变)。
+
+| 新增依赖(再同步时复核) | 位置 | 变了会怎样 |
+|---|---|---|
+| exact ref 拼作 `lcm:<store_id>:<start>-<end>` | `requirements_compiler.py:354`、`evidence_pack.py:428`、`selective_recall.py` | 换格式 → 证据族的答案重新绕过围栏 |
+| `_deliver` 过滤掉 `store_id` | `requirements_compiler.py:1953` | 上游哪天把 `store_id` 加回去,这条正则就成了冗余(仍无害) |
+
+### 成本安全
+
+`LCM_PREANSWER_EVIDENCE_ENABLED` 是 `inject` 读的**第一个**东西,关的时候连一次
+`handle_tool_call` 都不发(`test_the_switch_is_read_before_anything_is_looked_up` 用一个
+会抛的 `handle_tool_call` 桩证明)。整个测试文件的辅助模型桥是**一个会抛 `AssertionError`
+的 `call_llm`**,29 条测试全绿即"这条缝一次模型都没调"。
+
+这一族里唯一会调辅助模型的是 `selective_compiler` 的 selector(`vendor` 里全文 grep
+`auxiliary_client`,证据族只有 `selective_compiler.py:288` 和未接线的 `host_evidence.py:245`),
+它自己有 `LCM_SELECTIVE_COMPILER_ENABLED`,默认关,而且只在 `legacy_selective` 模式下、
+路由已经判定这一问需要超出 baseline 之后才可能被调到。开启后 fail-open:selector 超时
+只丢 brief,不丢这一轮。
+
+开着的时候成本也是有界的:baseline 是**一次** `lcm_recall`(`limit=25`),
+`requirements_compiler` 的 `max_retrieval_calls=2`、`max_added_context_tokens=850`,
+超预算上游宁可丢 brief 也不截断。
+
+### 研究流接缝(本期不实现)
+
+misaka 的研究台账和这一族回答的是同一个问题(手上到底有什么在案的东西),整合要先定
+「引用格式谁说了算」「研究 claim 要不要变成 LCM 断言」——都不是接缝问题,蓝图 §4 P6 明写
+本期不做。注释落在 `host/preanswer.py` 模块文档串末尾:`_brief` 是唯一产出文本的地方
+(台账段落将来并在它旁边),`_baseline` 是唯一决定编译器能看见什么的地方。
 
 ## 刻意不移植的上游文件
 
