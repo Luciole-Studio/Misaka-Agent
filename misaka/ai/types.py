@@ -182,6 +182,13 @@ class ToolResultMessage(SchemaModel):
     toolName: str
     content: list[UserContent]
     details: Any | None = None
+    # Usage from the tool execution itself, if available.  Not part of main LLM context
+    # accounting (pi packages/ai/src/types.ts ToolResultMessage.usage).
+    usage: Usage | None = None
+    # Names from the tool list that became available after this result.  Providers with
+    # native deferred tool loading use this as the load point; other providers ignore it
+    # (pi ToolResultMessage.addedToolNames).
+    addedToolNames: list[str] | None = None
     isError: bool
     timestamp: int
 

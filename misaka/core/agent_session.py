@@ -2271,12 +2271,16 @@ class AgentSession:
             await self._emit_agent_settled()
 
     def _settle_agent_run(self) -> None:
-        """Mark the run finished and release everyone waiting on idle.
+        """Release everyone waiting on idle, but only if the session really is idle.
 
-        pi's ``_resolveIdleWaitIfIdle`` (agent-session.ts:599-607), reached from the finally
-        of ``_emit_agent_settled``.
+        pi's ``_resolveIdleWaitIfIdle`` (agent-session.ts:599-607): it reads the run flag,
+        it never clears it.  The guard matters because an ``agent_settled`` handler may
+        start the next run while ``_emit_agent_settled`` is still awaiting handlers -- the
+        finally then runs with a fresh run in flight, and clearing the flag there would
+        report an active run as idle and wake ``waitForIdle`` callers early.
         """
-        self._isAgentRunActive = False
+        if self._isAgentRunActive:
+            return
         waiters, self._idleWaiters = self._idleWaiters, []
         for waiter in waiters:
             if not waiter.done():

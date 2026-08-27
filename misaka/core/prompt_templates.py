@@ -54,23 +54,52 @@ def parse_command_args(args_string: str) -> list[str]:
     return args
 
 
+# One alternation covering every placeholder form, so a single pass over the template
+# rewrites each one exactly once.  Sequential passes would re-scan text that an earlier
+# pass had already substituted, letting an argument value that happens to contain
+# "$ARGUMENTS" expand a second time.
+_SUBSTITUTE_ARGS_RE = re.compile(
+    r"\$\{(\d+|ARGUMENTS|@):-([^}]*)\}"  # ${N:-default} / ${@:-default} / ${ARGUMENTS:-default}
+    r"|\$\{@:(\d+)(?::(\d+))?\}"  # ${@:N} / ${@:N:L}
+    r"|\$(ARGUMENTS|@|\d+)"  # $ARGUMENTS / $@ / $N
+)
+
+
 def substitute_args(content: str, args: list[str]) -> str:
-    def replace_index(match: re.Match[str]) -> str:
-        index = int(match.group(1)) - 1
+    """Substitute argument placeholders in template content.
+
+    Supports ``$1``/``$2``..., ``$@`` and ``$ARGUMENTS`` for all args, ``${N:-default}``
+    for a positional arg with a default when missing or empty, ``${@:-default}`` /
+    ``${ARGUMENTS:-default}`` for all args with a default when empty, and the bash-style
+    slices ``${@:N}`` and ``${@:N:L}``.
+
+    Replacement happens on the template string only: argument and default values that
+    themselves contain ``$1``, ``$@`` or ``$ARGUMENTS`` are NOT recursively substituted.
+    """
+    all_args = " ".join(args)
+
+    def positional(raw_index: str) -> str:
+        index = int(raw_index) - 1
         return args[index] if 0 <= index < len(args) else ""
 
-    def replace_slice(match: re.Match[str]) -> str:
-        start = max(int(match.group(1)) - 1, 0)
-        length = match.group(2)
-        if length is not None:
-            return " ".join(args[start : start + int(length)])
-        return " ".join(args[start:])
+    def replace(match: re.Match[str]) -> str:
+        default_target, default_value, slice_start, slice_length, simple = match.groups()
 
-    result = re.sub(r"\$(\d+)", replace_index, content)
-    result = re.sub(r"\$\{@:(\d+)(?::(\d+))?\}", replace_slice, result)
-    all_args = " ".join(args)
-    result = result.replace("$ARGUMENTS", all_args)
-    return result.replace("$@", all_args)
+        if default_target is not None:
+            value = all_args if default_target in ("@", "ARGUMENTS") else positional(default_target)
+            return value if value else default_value
+
+        if slice_start is not None:
+            start = max(int(slice_start) - 1, 0)
+            if slice_length is not None:
+                return " ".join(args[start : start + int(slice_length)])
+            return " ".join(args[start:])
+
+        if simple in ("ARGUMENTS", "@"):
+            return all_args
+        return positional(simple)
+
+    return _SUBSTITUTE_ARGS_RE.sub(replace, content)
 
 
 def load_prompt_templates(options: LoadPromptTemplatesOptions) -> list[PromptTemplate]:

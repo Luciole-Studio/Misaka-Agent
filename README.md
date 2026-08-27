@@ -26,7 +26,7 @@ misaka chat                           # or, inside the chat: /login stores an OA
 misaka auth check                     # ✓/✗ per provider, through the same resolver every session uses
 ```
 
-Change provider and model with `/model` inside the chat; the choice is saved as `defaultProvider` / `defaultModel` in `~/.misaka/agent/settings.json` and becomes the default for every Sister.
+Change provider and model with `/model` inside the chat. Picking one from the selector saves it as `defaultProvider` / `defaultModel` in `~/.misaka/agent/settings.json`, where it becomes the default for every Sister; `/model <name>` switches only the session in front of you.
 
 ## Run
 

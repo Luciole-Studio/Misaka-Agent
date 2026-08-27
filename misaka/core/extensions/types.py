@@ -34,6 +34,7 @@ from misaka.ai.types import (
     SimpleStreamOptions,
     TextContent,
     ToolResultMessage,
+    Usage,
 )
 from misaka.ai.utils.oauth.types import OAuthCredentials, OAuthLoginCallbacks
 from misaka.ai.utils.typebox_helpers import Static, TSchema
@@ -197,6 +198,7 @@ type ToolResultRenderer = Callable[
     Component,
 ]
 type ToolRenderShell = Literal["default", "self"]
+type ExtensionMode = Literal["tui", "json", "print"]
 
 
 class _ThemeInfo(TypedDict):
@@ -278,6 +280,8 @@ class ToolInfo:
     description: str
     parameters: Any
     sourceInfo: SourceInfo
+    # pi types.ts:1639-1641 picks promptGuidelines off ToolDefinition too.
+    promptGuidelines: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -335,7 +339,10 @@ class ProviderModelConfig(TypedDict):
 class OAuthProviderConfig(TypedDict):
     name: str
     login: Callable[[OAuthLoginCallbacks], Awaitable[OAuthCredentials]]
-    refreshToken: Callable[[OAuthCredentials], Awaitable[OAuthCredentials]]
+    # Called as refreshToken(credentials, signal). A provider that declares only the
+    # credentials parameter is still called with one argument, matching how upstream's
+    # JavaScript drops the extra argument.
+    refreshToken: Callable[..., Awaitable[OAuthCredentials]]
     getApiKey: Callable[[OAuthCredentials], str]
     modifyModels: NotRequired[Callable[[list[Model[Any]], OAuthCredentials], list[Model[Any]]]]
 
@@ -575,6 +582,17 @@ class BeforeProviderRequestEvent(TypedDict):
     payload: Any
 
 
+class BeforeProviderHeadersEvent(TypedDict):
+    """Fired after request headers are assembled, before the provider HTTP call.
+
+    Handlers mutate ``headers`` in place (e.g. to inject tracing/session headers); the
+    return value is ignored.  A ``None`` value deletes that header.
+    """
+
+    type: Literal["before_provider_headers"]
+    headers: dict[str, str | None]
+
+
 class AfterProviderResponseEvent(TypedDict):
     type: Literal["after_provider_response"]
     status: int
@@ -596,6 +614,13 @@ class AgentStartEvent(TypedDict):
 class AgentEndEvent(TypedDict):
     type: Literal["agent_end"]
     messages: list[AgentMessage]
+
+
+class AgentSettledEvent(TypedDict):
+    """Fired after an agent run has fully settled: no automatic retry, compaction, or
+    queued continuation will run."""
+
+    type: Literal["agent_settled"]
 
 
 class AgentEndEventResult(TypedDict, total=False):
@@ -762,6 +787,8 @@ class ToolResultEventBase(TypedDict):
     input: dict[str, Any]
     content: list[TextContent | ImageContent]
     isError: bool
+    # Usage from the tool execution itself, if available (pi types.ts ToolResultEventBase).
+    usage: NotRequired[Usage]
 
 
 class BashToolResultEvent(ToolResultEventBase):
@@ -821,10 +848,12 @@ type ExtensionEvent = (
     | SessionEvent
     | ContextEvent
     | BeforeProviderRequestEvent
+    | BeforeProviderHeadersEvent
     | AfterProviderResponseEvent
     | BeforeAgentStartEvent
     | AgentStartEvent
     | AgentEndEvent
+    | AgentSettledEvent
     | TurnStartEvent
     | TurnEndEvent
     | MessageStartEvent
@@ -853,6 +882,9 @@ class ToolCallEventResult(TypedDict, total=False):
     block: bool
     reason: str
     updatedInput: dict[str, Any]
+    # Hint that the agent should stop after the current tool batch when this call is blocked.
+    # Early termination only happens when every finalized tool result in the batch sets it.
+    terminate: bool
 
 
 class UserBashEventResult(TypedDict, total=False):
@@ -864,6 +896,7 @@ class ToolResultEventResult(TypedDict, total=False):
     content: list[TextContent | ImageContent]
     details: Any
     isError: bool
+    usage: Usage
 
 
 class MessageEndEventResult(TypedDict, total=False):
@@ -968,6 +1001,9 @@ class ExtensionError:
 
 class ExtensionContext(Protocol):
     ui: ExtensionUIContext
+    # Current run mode. Guard terminal-only UI on `mode == "tui"` (pi types.ts:307,312-313).
+    # pi's fourth value "rpc" has no counterpart: misaka removed RPC mode outright.
+    mode: ExtensionMode
     hasUI: bool
     cwd: str
     sessionManager: ReadonlySessionManager
@@ -1092,6 +1128,9 @@ class ExtensionAPI(Protocol):
     def on(self, event: Literal["before_provider_request"], handler: ExtensionHandler[BeforeProviderRequestEvent, BeforeProviderRequestEventResult]) -> None: ...
 
     @overload
+    def on(self, event: Literal["before_provider_headers"], handler: ExtensionHandler[BeforeProviderHeadersEvent, None]) -> None: ...
+
+    @overload
     def on(self, event: Literal["after_provider_response"], handler: ExtensionHandler[AfterProviderResponseEvent, None]) -> None: ...
 
     @overload
@@ -1102,6 +1141,9 @@ class ExtensionAPI(Protocol):
 
     @overload
     def on(self, event: Literal["agent_end"], handler: ExtensionHandler[AgentEndEvent, AgentEndEventResult]) -> None: ...
+
+    @overload
+    def on(self, event: Literal["agent_settled"], handler: ExtensionHandler[AgentSettledEvent, None]) -> None: ...
 
     @overload
     def on(self, event: Literal["turn_start"], handler: ExtensionHandler[TurnStartEvent, None]) -> None: ...
@@ -1294,6 +1336,7 @@ __all__ = [
     "AfterProviderResponseEvent",
     "AgentEndEvent",
     "AgentEndEventResult",
+    "AgentSettledEvent",
     "AgentStartEvent",
     "AgentToolResult",
     "AgentToolUpdateCallback",
@@ -1304,6 +1347,7 @@ __all__ = [
     "BashToolResultEvent",
     "BeforeAgentStartEvent",
     "BeforeAgentStartEventResult",
+    "BeforeProviderHeadersEvent",
     "BeforeProviderRequestEvent",
     "BeforeProviderRequestEventResult",
     "BuildSystemPromptOptions",
@@ -1330,6 +1374,7 @@ __all__ = [
     "ExtensionFactory",
     "ExtensionFlag",
     "ExtensionHandler",
+    "ExtensionMode",
     "ExtensionRuntime",
     "ExtensionShortcut",
     "ExtensionUIContext",

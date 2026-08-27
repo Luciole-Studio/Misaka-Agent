@@ -247,6 +247,13 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
         provider_retry_settings = settings_manager.getProviderRetrySettings()
         resolved_stream_options = _to_dict(stream_options)
         headers = _merge_headers(auth.get("headers"), resolved_stream_options.get("headers"))
+        # pi sdk.ts:330-339 hands the merged headers to `before_provider_headers` handlers right
+        # here (models.ts:657, after mergeHeaders and before the provider call). Handlers mutate
+        # the mapping in place; a None value deletes that header (pi utils/headers.ts).
+        header_runner = extension_runner_ref.get("current")
+        if header_runner is not None and header_runner.has_handlers("before_provider_headers"):
+            transformed = await header_runner.emit_before_provider_headers(dict(headers or {}))
+            headers = {key: str(value) for key, value in transformed.items() if value is not None} or None
         final_options = dict(resolved_stream_options)
         final_options["apiKey"] = auth.get("apiKey")
         if final_options.get("timeoutMs") is None:

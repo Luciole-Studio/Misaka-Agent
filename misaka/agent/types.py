@@ -21,6 +21,7 @@ from misaka.ai.types import (
     ToolCall,
     ToolResultMessage,
     Transport,
+    Usage,
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream
 
@@ -59,6 +60,9 @@ class AfterToolCallResult:
     content: list[TextContent | ImageContent] | None = None
     details: Any | None = None
     isError: bool | None = None
+    # Replaces the tool result usage when provided (pi packages/agent/src/types.ts
+    # AfterToolCallResult.usage).  There is no deep merge.
+    usage: Usage | None = None
     terminate: bool | None = None
 
 
@@ -66,6 +70,12 @@ class AfterToolCallResult:
 class AgentToolResult:
     content: list[TextContent | ImageContent]
     details: Any
+    # Usage from the final tool execution itself, if available.  Not used for main LLM
+    # context accounting (pi packages/agent/src/types.ts AgentToolResult.usage).
+    usage: Usage | None = None
+    # Names of tools introduced by this result and available from this transcript point
+    # onward (pi AgentToolResult.addedToolNames).
+    addedToolNames: list[str] | None = None
     terminate: bool | None = None
 
 

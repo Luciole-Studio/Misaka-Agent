@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import inspect
 import time
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from misaka.ai.utils.oauth.anthropic import (
     anthropicOAuthProvider,
@@ -77,9 +78,36 @@ def get_oauth_providers() -> list[OAuthProviderInterface]:
     return list(_oauth_provider_registry.values())
 
 
+def _call_refresh_token(refresh_token: Any, credentials: OAuthCredentials, signal: Any) -> Any:
+    """Invoke a provider's ``refreshToken`` with the upstream two-argument contract.
+
+    Upstream is JavaScript, where a handler declared with one parameter simply ignores
+    the second argument. Python raises instead, so a provider that still takes only the
+    credentials is called with one argument -- the same observable behaviour, and the
+    same shape ``misaka.core.extensions.runner`` uses for extension handlers.
+    """
+    try:
+        signature = inspect.signature(refresh_token)
+    except (TypeError, ValueError):
+        return refresh_token(credentials, signal)
+
+    parameters = signature.parameters.values()
+    if any(parameter.kind == inspect.Parameter.VAR_POSITIONAL for parameter in parameters):
+        return refresh_token(credentials, signal)
+    positional = [
+        parameter
+        for parameter in parameters
+        if parameter.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    if len(positional) >= 2:
+        return refresh_token(credentials, signal)
+    return refresh_token(credentials)
+
+
 async def get_oauth_api_key(
     provider_id: OAuthProviderId,
     credentials: dict[str, OAuthCredentials],
+    signal: Any | None = None,
 ) -> _OAuthApiKeyResult | None:
     provider = get_oauth_provider(provider_id)
     if provider is None:
@@ -91,7 +119,7 @@ async def get_oauth_api_key(
 
     if int(time.time() * 1000) >= creds.expires:
         try:
-            creds = await provider.refreshToken(creds)
+            creds = await _call_refresh_token(provider.refreshToken, creds, signal)
         except Exception as error:
             raise RuntimeError(f"Failed to refresh OAuth token for {provider_id}") from error
 

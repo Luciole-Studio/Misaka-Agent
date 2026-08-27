@@ -347,7 +347,8 @@ class _OpenAICodexOAuthProvider:
             }
         )
 
-    async def refreshToken(self, credentials: OAuthCredentials) -> OAuthCredentials:
+    async def refreshToken(self, credentials: OAuthCredentials, signal: Any | None = None) -> OAuthCredentials:
+        del signal  # the built-in refresh has no cancellation point; the parameter is the upstream contract
         return await refresh_openai_codex_token(credentials.refresh)
 
     def getApiKey(self, credentials: OAuthCredentials) -> str:

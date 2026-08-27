@@ -16,6 +16,7 @@ from misaka.core.extensions.types import (
     Extension,
     ExtensionError,
     ExtensionFlag,
+    ExtensionMode,
     ExtensionRuntime,
     ExtensionShortcut,
     ProviderConfig,
@@ -154,6 +155,11 @@ class _ContextBase:
     def ui(self) -> Any:
         self._runner._assert_active()
         return self._extra("ui", self._runner.uiContext)
+
+    @property
+    def mode(self) -> Any:
+        self._runner._assert_active()
+        return self._extra("mode", self._runner.mode)
 
     @property
     def hasUI(self) -> bool:
@@ -348,6 +354,9 @@ class ExtensionRunner:
     sessionManager: Any
     modelRegistry: Any
     uiContext: Any = field(default_factory=_NoUIContext)
+    # Which run mode the host is driving (pi runner.ts:273). Extensions guard TUI-only
+    # features on it; "print" is the safe default for hosts that never bind a mode.
+    mode: ExtensionMode = "print"
     errorListeners: list[Any] = field(default_factory=list)
     getModel: Any = field(default=lambda: None)
     isIdleFn: Any = field(default=lambda: True)
@@ -454,8 +463,9 @@ class ExtensionRunner:
         self.switchSessionHandler = _required_action(actions, "switchSession")
         self.reloadHandler = _required_action(actions, "reload")
 
-    def set_ui_context(self, uiContext: Any | None = None) -> None:
+    def set_ui_context(self, uiContext: Any | None = None, mode: ExtensionMode = "print") -> None:
         self.uiContext = uiContext if uiContext is not None else _NoUIContext()
+        self.mode = mode
 
     def get_ui_context(self) -> Any:
         return self.uiContext
@@ -465,6 +475,11 @@ class ExtensionRunner:
 
     def get_extension_paths(self) -> list[str]:
         return [extension.path for extension in self.extensions]
+
+    def get_active_tools(self) -> list[str]:
+        """Names of the tools the agent currently exposes (pi runner.ts:714)."""
+        self._assert_active()
+        return self.runtime.getActiveTools()
 
     def get_all_registered_tools(self) -> list[RegisteredTool]:
         tools_by_name: dict[str, RegisteredTool] = {}
@@ -715,7 +730,7 @@ class ExtensionRunner:
                         handler_result = await handler_result
                     if handler_result is None:
                         continue
-                    for field_name in ("content", "details", "isError"):
+                    for field_name in ("content", "details", "isError", "usage"):
                         value = _result_flag(handler_result, field_name, _MISSING)
                         if value is not _MISSING:
                             if isinstance(current_event, Mapping):
@@ -731,6 +746,7 @@ class ExtensionRunner:
             "content": _event_field(current_event, "content"),
             "details": _event_field(current_event, "details"),
             "isError": _event_field(current_event, "isError"),
+            "usage": _event_field(current_event, "usage"),
         }
 
     async def emit_tool_call(self, event: Any) -> Any:
@@ -806,6 +822,26 @@ class ExtensionRunner:
                 except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception
                     self._emit_extension_exception(extension.path, "before_provider_request", error)
         return current_payload
+
+    async def emit_before_provider_headers(self, headers: dict[str, str | None]) -> dict[str, str | None]:
+        """Let extensions mutate the assembled request headers in place (pi runner.ts:1100-1127).
+
+        The handler return value is ignored; a ``None`` value deletes that header.
+        """
+        ctx = self.create_context()
+        for extension in self.extensions:
+            for handler in extension.handlers.get("before_provider_headers", []):
+                try:
+                    handler_result = _invoke_handler(
+                        handler,
+                        {"type": "before_provider_headers", "headers": headers},
+                        ctx,
+                    )
+                    if hasattr(handler_result, "__await__"):
+                        await handler_result
+                except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception
+                    self._emit_extension_exception(extension.path, "before_provider_headers", error)
+        return headers
 
     async def emit_before_agent_start(
         self,
@@ -965,6 +1001,7 @@ class ExtensionRunner:
     emitUserBash = emit_user_bash
     emitContext = emit_context
     emitBeforeProviderRequest = emit_before_provider_request
+    emitBeforeProviderHeaders = emit_before_provider_headers
     emitBeforeAgentStart = emit_before_agent_start
     emitAgentEnd = emit_agent_end
     emitResourcesDiscover = emit_resources_discover

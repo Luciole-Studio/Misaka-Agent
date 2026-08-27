@@ -36,6 +36,9 @@ from misaka.ai.utils.oauth.types import OAuthCredentials
 from misaka.config import get_agent_dir
 from misaka.core.provider_display_names import BUILT_IN_PROVIDER_DISPLAY_NAMES
 from misaka.core.resolve_config_value import (
+    get_config_value_env_var_names,
+    is_command_config_value,
+    is_config_value_configured,
     resolveConfigValueOrThrow,
     resolveConfigValueUncached,
     resolveHeadersOrThrow,
@@ -690,10 +693,18 @@ class ModelRegistry:
         provider_api_key = self._providerRequestConfigs.get(provider, _ProviderRequestConfig()).apiKey
         if not provider_api_key:
             return auth_status
-        if provider_api_key.startswith("!"):
+        # pi provider-composer.ts:558-571 `configuredRequestAuthStatus`: the status has to be
+        # read with the same template grammar `resolve_config_value` uses, or the two disagree.
+        # A bare name is a literal key, `$NAME`/`${NAME}` is a reference, and a reference whose
+        # variable is unset is *not* configured -- reporting it as configured is what turns a
+        # typo'd models.json into an upstream 401 instead of a config error.
+        if is_command_config_value(provider_api_key):
             return AuthStatus(configured=True, source="models_json_command")
-        if os.environ.get(provider_api_key):
-            return AuthStatus(configured=True, source="environment", label=provider_api_key)
+        env_var_names = get_config_value_env_var_names(provider_api_key)
+        if env_var_names:
+            if not is_config_value_configured(provider_api_key):
+                return AuthStatus(configured=False)
+            return AuthStatus(configured=True, source="environment", label=", ".join(env_var_names))
         return AuthStatus(configured=True, source="models_json_key")
 
     def getProviderDisplayName(self, provider: str) -> str:

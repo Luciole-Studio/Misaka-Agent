@@ -41,7 +41,10 @@ type EditPreview = EditDiffResult | EditDiffError
 
 
 class ReplaceEditInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # Upstream's schema does not set additionalProperties: false, and neither do the
+    # other built-in tools.  Rejecting unknown keys would refuse arguments that
+    # extensions legitimately annotate on a tool call.
+    model_config = ConfigDict(extra="ignore")
 
     oldText: str = Field(
         description=(
@@ -53,7 +56,7 @@ class ReplaceEditInput(BaseModel):
 
 
 class EditToolInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     path: str = Field(description="Path to the file to edit (relative or absolute)")
     edits: list[ReplaceEditInput] = Field(
@@ -161,7 +164,18 @@ def prepare_edit_arguments(input_value: Any) -> Any:
     elif _single_edit(edits_value):
         args["edits"] = [edits_value]
 
-    return args
+    # Legacy single-edit format: a top-level oldText/newText pair instead of edits[].
+    # Fold it onto the end of edits[] and strip it, so replayed transcripts and older
+    # callers still execute.  The pair only counts when both halves are strings.
+    old_text = args.get("oldText")
+    new_text = args.get("newText")
+    if not isinstance(old_text, str) or not isinstance(new_text, str):
+        return args
+
+    edits = list(args["edits"]) if isinstance(args.get("edits"), list) else []
+    edits.append({"oldText": old_text, "newText": new_text})
+    rest = {key: value for key, value in args.items() if key not in ("oldText", "newText", "edits")}
+    return {**rest, "edits": edits}
 
 
 def _validate_edit_input(input_value: EditToolInput) -> tuple[str, list[Edit]]:

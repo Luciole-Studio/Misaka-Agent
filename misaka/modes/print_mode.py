@@ -87,8 +87,11 @@ async def run_print_mode(runtime_host: Any, options: PrintModeOptions | dict[str
 
         await session.bindExtensions(
             {
+                # pi print-mode.ts:76-77 tells extensions which non-interactive wire form is live.
+                "mode": "json" if resolved.mode == "json" else "print",
                 "commandContextActions": {
-                    "waitForIdle": lambda: session.agent.waitForIdle(),
+                    # Session-level, not agent-level (pi print-mode.ts:79).
+                    "waitForIdle": lambda: session.waitForIdle(),
                     "newSession": lambda new_session_options=None: runtime_host.newSession(new_session_options),
                     "fork": _fork,
                     "navigateTree": _navigate_tree,

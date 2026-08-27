@@ -380,15 +380,22 @@ class AuthStorage:
         return bool(self.fallbackResolver and self.fallbackResolver(provider))
 
     def getAuthStatus(self, provider: str) -> AuthStatus:
+        # pi model-runtime.ts:561-571: every branch that finds a usable credential reports
+        # `configured: true`; only the no-credential fall-through is false. Reporting `False`
+        # alongside a `source` contradicted `hasAuth` right above and made env-var-only setups
+        # look unconfigured to extensions.
+        # The runtime override is checked first, as pi does and as `getApiKey` below already
+        # did: with both `--api-key` and a stored credential present the request uses the
+        # runtime key, so reporting "stored" named the wrong source.
+        if provider in self.runtimeOverrides:
+            return AuthStatus(configured=True, source="runtime", label="--api-key")
         if _coerce_storage_object(self.data).get(provider):
             return AuthStatus(configured=True, source="stored")
-        if provider in self.runtimeOverrides:
-            return AuthStatus(configured=False, source="runtime", label="--api-key")
         env_keys = find_env_keys(provider)
         if env_keys and env_keys[0]:
-            return AuthStatus(configured=False, source="environment", label=env_keys[0])
+            return AuthStatus(configured=True, source="environment", label=env_keys[0])
         if self.fallbackResolver and self.fallbackResolver(provider):
-            return AuthStatus(configured=False, source="fallback", label="custom provider config")
+            return AuthStatus(configured=True, source="fallback", label="custom provider config")
         return AuthStatus(configured=False)
 
     def getAll(self) -> AuthStorageData:

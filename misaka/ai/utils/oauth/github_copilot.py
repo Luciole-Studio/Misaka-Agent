@@ -269,7 +269,8 @@ class _GitHubCopilotOAuthProvider:
             }
         )
 
-    async def refreshToken(self, credentials: OAuthCredentials) -> OAuthCredentials:
+    async def refreshToken(self, credentials: OAuthCredentials, signal: Any | None = None) -> OAuthCredentials:
+        del signal  # the built-in refresh has no cancellation point; the parameter is the upstream contract
         enterprise_url = getattr(credentials, "enterpriseUrl", None)
         return await refresh_github_copilot_token(credentials.refresh, enterprise_url)
 

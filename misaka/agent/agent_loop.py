@@ -746,6 +746,9 @@ async def finalize_executed_tool_call(
             )
             if after_result is not None:
                 normalized_after_result = _coerce_after_tool_call_result(after_result)
+                # pi spreads the executed result first ({...result, content, details, usage,
+                # terminate}), so every field the hook leaves undefined survives — including
+                # addedToolNames, which the hook cannot set at all.
                 result = AgentToolResult(
                     content=(
                         normalized_after_result.content
@@ -757,6 +760,12 @@ async def finalize_executed_tool_call(
                         if normalized_after_result.details is not None
                         else result.details
                     ),
+                    usage=(
+                        normalized_after_result.usage
+                        if normalized_after_result.usage is not None
+                        else result.usage
+                    ),
+                    addedToolNames=result.addedToolNames,
                     terminate=(
                         normalized_after_result.terminate
                         if normalized_after_result.terminate is not None
@@ -796,11 +805,16 @@ async def emit_tool_execution_end(finalized: FinalizedToolCallOutcome, emit: Age
 
 
 def create_tool_result_message(finalized: FinalizedToolCallOutcome) -> ToolResultMessage:
+    added_tool_names = finalized.result.addedToolNames
     return ToolResultMessage(
         toolCallId=finalized.toolCall.id,
         toolName=finalized.toolCall.name,
         content=[validate_user_content(_model_dump(block)) for block in finalized.result.content],
         details=finalized.result.details,
+        usage=finalized.result.usage,
+        # pi only spreads the key when the list is non-empty, so an empty diff leaves the
+        # transcript entry exactly as it was before addedToolNames existed.
+        addedToolNames=list(added_tool_names) if added_tool_names else None,
         isError=finalized.isError,
         timestamp=int(time.time() * 1000),
     )
@@ -878,9 +892,12 @@ def _coerce_agent_tool_result(value: AgentToolResult | dict[str, Any]) -> AgentT
         validate_user_content(_model_dump(block))
         for block in value.get("content", [])
     ]
+    added_tool_names = value.get("addedToolNames")
     return AgentToolResult(
         content=content,
         details=value.get("details"),
+        usage=value.get("usage"),
+        addedToolNames=list(added_tool_names) if added_tool_names else None,
         terminate=value.get("terminate"),
     )
 
@@ -896,6 +913,7 @@ def _coerce_after_tool_call_result(value: AfterToolCallResult | dict[str, Any]) 
         content=normalized_content,
         details=value.get("details"),
         isError=value.get("isError"),
+        usage=value.get("usage"),
         terminate=value.get("terminate"),
     )
 
@@ -909,6 +927,9 @@ def _coerce_before_tool_call_result(
         block=value.get("block"),
         reason=value.get("reason"),
         updatedInput=value.get("updatedInput"),
+        # pi agent-loop.ts:637-644 honours `terminate` on a blocked call regardless of how
+        # the hook spelled its result; dropping it here silently disarmed dict-returning hooks.
+        terminate=value.get("terminate"),
     )
 
 

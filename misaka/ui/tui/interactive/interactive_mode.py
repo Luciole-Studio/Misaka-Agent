@@ -559,7 +559,7 @@ class InteractiveMode:
                 setModel=_noop_async,
                 cycleModel=_noop_async,
                 cycleThinkingLevel=lambda: None,
-                setThinkingLevel=lambda _level: None,
+                setThinkingLevel=lambda _level, _persist=False: None,
                 getAvailableThinkingLevels=lambda: ["off", "minimal", "low", "medium", "high"],
                 executeBash=_noop_async,
                 navigateTree=_cancelled_async_result,
@@ -3545,7 +3545,10 @@ class InteractiveMode:
                     )
                 else:
                     try:
-                        await maybe_await(self.session.setModel(selected_model))
+                        # Finishing a login and adopting that provider's default model is
+                        # the one interactive path pi persists (interactive-mode.ts:5665
+                        # `{ persist: true }`).
+                        await maybe_await(self.session.setModel(selected_model, persist=True))
                     except Exception as error:  # noqa: BLE001
                         selected_model = None
                         selection_error = (
@@ -4176,6 +4179,7 @@ class InteractiveMode:
         await self.session.bindExtensions(
             {
                 "uiContext": self.createExtensionUIContext(),
+                "mode": "tui",
                 "abortHandler": lambda: self.restoreQueuedMessagesToEditor({"abort": True}),
                 "commandContextActions": self._build_command_context_actions(),
                 "shutdownHandler": self.requestShutdown,
@@ -5180,11 +5184,12 @@ class InteractiveMode:
         self._apply_thinking_level(level, persist=parsed.persist)
 
     def _apply_thinking_level(self, level: str, *, persist: bool = False) -> None:
-        self.session.setThinkingLevel(level)
+        # `--default` is the only interactive path that writes the global default; the
+        # session passes it through now instead of persisting every switch
+        # (pi interactive-mode.ts:4775 `setThinkingLevel(level, { persist })`).
+        self.session.setThinkingLevel(level, persist)
         self.footer.invalidate()
         self.updateEditorBorderColor()
-        if persist:
-            self.settingsManager.setDefaultThinkingLevel(level)
         self.showStatus(f"Thinking level: {level}" + (" (saved as default)" if persist else ""))
 
     def showThinkingSelector(self, *, persist: bool = False) -> None:
@@ -5382,8 +5387,16 @@ class InteractiveMode:
                             _callable_attr(self.session, "setFollowUpMode") and self.session.setFollowUpMode(mode)
                         ),
                         onTransportChange=_on_transport_change,
+                        # The settings panel is the defaults panel: every other item here
+                        # writes through to settings.json (setSteeringMode, setFollowUpMode,
+                        # setTransport, ...), so this one persists too. pi has no global
+                        # thinking-level item in its panel -- its :4624/:4635 handlers are the
+                        # per-model overrides, already persisted by setModelThinkingLevel one
+                        # line above -- so the persist gate that pi puts on setThinkingLevel
+                        # says nothing about this control.
                         onThinkingLevelChange=lambda level: (
-                            _callable_attr(self.session, "setThinkingLevel") and self.session.setThinkingLevel(level),
+                            _callable_attr(self.session, "setThinkingLevel")
+                            and self.session.setThinkingLevel(level, True),
                             self.footer.invalidate(),
                             self.updateEditorBorderColor(),
                         ),
@@ -5684,7 +5697,9 @@ class InteractiveMode:
 
     def _build_command_context_actions(self) -> dict[str, Any]:
         return {
-            "waitForIdle": lambda: self.session.agent.waitForIdle() if getattr(self.session, "agent", None) else None,
+            # Session-level, not agent-level: the inner loop is idle between continuations
+            # while the run is still going (pi interactive-mode.ts:1914).
+            "waitForIdle": lambda: self.session.waitForIdle(),
             "newSession": self._new_session_from_command_context,
             "fork": self._fork_from_command_context,
             "navigateTree": self._navigate_tree_from_command_context,

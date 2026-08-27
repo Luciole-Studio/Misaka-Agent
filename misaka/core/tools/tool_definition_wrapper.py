@@ -27,13 +27,6 @@ def wrap_tool_definition[TDetails](
     )
 
 
-def wrap_tool_definitions(
-    definitions: list[ToolDefinition[Any, Any]],
-    ctx_factory: Callable[[], ExtensionContext] | None = None,
-) -> list[AgentTool]:
-    return [wrap_tool_definition(definition, ctx_factory) for definition in definitions]
-
-
 def create_tool_definition_from_agent_tool(tool: Any) -> ToolDefinition[Any, Any]:
     async def execute(tool_call_id: str, params: Any, signal: Any | None, on_update: Any | None, _ctx: Any) -> Any:
         return await tool.execute(tool_call_id, params, signal, on_update)
