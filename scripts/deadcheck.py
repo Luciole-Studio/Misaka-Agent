@@ -64,7 +64,7 @@ _TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 def sources() -> list[Path]:
     out: list[Path] = []
-    for base in ("misaka", "tests", "scripts"):
+    for base in ("misaka", "tests", "scripts", "bench"):
         for path in sorted((ROOT / base).rglob("*.py")):
             rel = path.relative_to(ROOT).as_posix()
             if any(rel.startswith(skip) for skip in SKIP_DIRS) or path.name in SKIP_FILES:

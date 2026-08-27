@@ -2,3 +2,7 @@
 __pycache__/
 *.pyc
 .DS_Store
+.coverage
+# Benchmark runs are local artefacts; the frozen baseline is not.
+bench/results/*
+!bench/results/golden/
