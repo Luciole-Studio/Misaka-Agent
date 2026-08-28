@@ -21,7 +21,7 @@ from collections.abc import AsyncIterable, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from misaka.ai.types import AssistantMessage, ErrorEvent, Model
+from misaka.ai.types import AssistantMessage, DeferredHandle, ErrorEvent, Model
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 
 
@@ -147,7 +147,9 @@ class LazyApi:
         module = await self._load()
         return getattr(module, name)(*args)
 
-    def _fetch_deferred(self, model: Model, handle: Any, options: Any = None) -> AssistantMessageEventStream:
+    def _fetch_deferred(
+        self, model: Model, handle: DeferredHandle, options: Any = None
+    ) -> AssistantMessageEventStream:
         async def setup() -> AsyncIterable[Any]:
             module = await self._load()
             fetch = getattr(module, "fetchDeferred", None)
@@ -157,7 +159,9 @@ class LazyApi:
 
         return lazy_stream(model, setup)
 
-    async def _cancel_deferred(self, model: Model, handle: Any, options: Any = None) -> None:
+    async def _cancel_deferred(
+        self, model: Model, handle: DeferredHandle, options: Any = None
+    ) -> None:
         module = await self._load()
         cancel = getattr(module, "cancelDeferred", None)
         if cancel is None:

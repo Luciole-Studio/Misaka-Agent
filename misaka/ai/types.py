@@ -97,6 +97,34 @@ class ProviderImagesOptions(ImagesOptions):
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
 
 
+class DeferredHandle(SchemaModel):
+    """A ticket for a response the provider parked, to be collected later.
+
+    The provider identity travels with it because a handle outlives the call that made it:
+    a batch fetched tomorrow has to reach the same api on the same provider, and a handle
+    read back from disk carries no other context.
+    """
+
+    provider: str
+    modelId: str
+    api: str
+    # The provider's own token: a response id, or a batch id plus a row id.
+    id: str
+    expiresAt: int | None = None
+    pollAfterMs: int | None = None
+    # Whatever the provider needs to rebuild the final assistant message from its own side.
+    data: Any | None = None
+
+
+class DeferredFetchOptions(StreamOptions):
+    # How long the provider may long-poll, in milliseconds. Zero -- the default -- makes
+    # one status check and returns whatever is there.
+    wait: int | None = None
+
+
+DeferredCancelOptions: TypeAlias = StreamOptions
+
+
 class SimpleStreamOptions(StreamOptions):
     reasoning: ThinkingLevel | None = None
     thinkingBudgets: ThinkingBudgets | None = None
@@ -661,6 +689,9 @@ __all__ = [
     "AssistantMessageEventStream",
     "CacheRetention",
     "Context",
+    "DeferredCancelOptions",
+    "DeferredFetchOptions",
+    "DeferredHandle",
     "ImageContent",
     "ImagesApi",
     "ImagesContext",

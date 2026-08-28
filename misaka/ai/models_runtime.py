@@ -55,7 +55,15 @@ from misaka.ai.auth.types import (
     ProviderHeaders,
 )
 from misaka.ai.models_store import InMemoryModelsStore, ModelsStoreEntry
-from misaka.ai.types import AssistantMessage, Context, Model, ProviderStreamOptions
+from misaka.ai.types import (
+    AssistantMessage,
+    Context,
+    DeferredCancelOptions,
+    DeferredFetchOptions,
+    DeferredHandle,
+    Model,
+    ProviderStreamOptions,
+)
 from misaka.ai.utils.abort import (
     AbortController,
     combine_abort_signals,
@@ -640,7 +648,9 @@ class ModelsImpl:
     async def completeSimple(self, model: Model, context: Context, options: Any = None):
         return await self.streamSimple(model, context, options).result()
 
-    async def fetchDeferred(self, model: Model, handle: Any, options: Any = None) -> AssistantMessage:
+    async def fetchDeferred(
+        self, model: Model, handle: DeferredHandle, options: DeferredFetchOptions | Any = None
+    ) -> AssistantMessage:
         """Collect a response the provider parked earlier.
 
         Deferred (batch) responses are fetched, not streamed, but the fetch still runs
@@ -661,7 +671,9 @@ class ModelsImpl:
 
         return await lazy_stream(model, setup).result()
 
-    async def cancelDeferred(self, model: Model, handle: Any, options: Any = None) -> None:
+    async def cancelDeferred(
+        self, model: Model, handle: DeferredHandle, options: DeferredCancelOptions | Any = None
+    ) -> None:
         """Abandon a parked response. Not a stream, so failures raise rather than terminate one."""
         provider = self._requireProvider(model)
         cancel = getattr(provider, "cancelDeferred", None)
