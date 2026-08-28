@@ -444,6 +444,18 @@ async def process_stream(
     )
 
 
+WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE = "websocket_connection_limit_reached"
+PREVIOUS_RESPONSE_NOT_FOUND_CODE = "previous_response_not_found"
+
+
+def _is_websocket_connection_limit_reached_error(error: Any) -> bool:
+    return isinstance(error, CodexApiError) and error.code == WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE
+
+
+def _is_previous_response_not_found_error(error: Any) -> bool:
+    return isinstance(error, CodexApiError) and error.code == PREVIOUS_RESPONSE_NOT_FOUND_CODE
+
+
 def is_codex_non_transport_error(error: BaseException | Any) -> bool:
     return isinstance(error, (CodexApiError, CodexProtocolError))
 
@@ -485,6 +497,36 @@ async def map_codex_events(events: AsyncIterable[dict[str, Any]]) -> AsyncIterat
             return
 
         yield event
+
+
+def websocket_failure_action(
+    error: Any,
+    *,
+    aborted: bool,
+    stream_started: bool,
+    retried_connection_limit: bool,
+    retried_continuation: bool,
+) -> str:
+    """What a failed WebSocket attempt earns: another try, a raise, or the SSE fallback.
+
+    Its own function because the loop that calls it cannot be reached without a live Codex
+    endpoint, and the decision is the part worth pinning. Returns one of
+    ``retry-continuation`` / ``retry-connection-limit`` / ``raise`` / ``fallback``.
+
+    Falling back is not free -- the connection cache is what makes a follow-up turn cheap,
+    and a session marked fallen-back stays that way -- so two transient failures each earn
+    one more attempt first.
+    """
+    connection_limit_before_start = not stream_started and (
+        _is_websocket_connection_limit_reached_error(error)
+    )
+    if not aborted and _is_previous_response_not_found_error(error) and not retried_continuation:
+        return "retry-continuation"
+    if not aborted and connection_limit_before_start and not retried_connection_limit:
+        return "retry-connection-limit"
+    if aborted or (is_codex_non_transport_error(error) and not connection_limit_before_start):
+        return "raise"
+    return "raise" if stream_started else "fallback"
 
 
 def normalize_codex_status(status: Any) -> str | None:
@@ -910,6 +952,39 @@ def create_codex_request_id() -> str:
     return str(uuid.uuid4())
 
 
+REQUEST_COMPRESSION_ZSTD_LEVEL = 3
+
+
+def _compress_request_body_zstd(body_json: str) -> bytes | None:
+    """The SSE body, zstd-compressed, or ``None`` when this runtime cannot.
+
+    The Codex backend decodes ``Content-Encoding: zstd``; the WebSocket transport sends
+    the uncompressed frame, matching the official client. Upstream reaches this through
+    ``node:zlib``, which ships zstd. Python's ``zlib`` does not: the codec arrives in the
+    stdlib at 3.14 (``compression.zstd``) and is otherwise a third-party package. Both are
+    tried and neither is required -- upstream's own path returns null when its zlib lacks
+    the codec, so an uncompressed body is a shape the backend already accepts.
+    """
+    try:
+        from compression import zstd  # type: ignore[import-not-found]
+
+        return zstd.compress(body_json.encode("utf-8"), level=REQUEST_COMPRESSION_ZSTD_LEVEL)
+    except ImportError:
+        pass
+    except Exception:  # noqa: BLE001 - compression is best effort; the plain body still works
+        return None
+    try:
+        import zstandard  # type: ignore[import-not-found]
+
+        return zstandard.ZstdCompressor(level=REQUEST_COMPRESSION_ZSTD_LEVEL).compress(
+            body_json.encode("utf-8")
+        )
+    except ImportError:
+        return None
+    except Exception:  # noqa: BLE001 - as above
+        return None
+
+
 def build_sse_headers(
     model_headers: Mapping[str, str] | None,
     option_headers: Mapping[str, str] | None,
@@ -1088,7 +1163,13 @@ def stream_openai_codex_responses(
             body_json = json.dumps(body)
             websocket_disabled_for_session = transport != "sse" and session_id in _websocket_fallback_sessions
 
-            if transport != "sse" and not websocket_disabled_for_session:
+            # Two failures earn one more websocket attempt each before the SSE fallback:
+            # the connection limit is transient, and a continuation the server has forgotten
+            # is fixed by rebuilding the request without it. Falling back on either one
+            # abandons the connection cache for the rest of the session.
+            retried_websocket_connection_limit = False
+            retried_missing_websocket_continuation = False
+            while transport != "sse" and not websocket_disabled_for_session:
                 websocket_state = {"started": False}
                 try:
                     await process_websocket_stream(
@@ -1098,7 +1179,10 @@ def stream_openai_codex_responses(
                         output,
                         stream,
                         model,
-                        lambda: websocket_state.__setitem__("started", True),
+                        # Bound explicitly: `websocket_state` is a loop variable now that
+                        # a failed attempt can retry, and a late-bound closure would report
+                        # the wrong attempt's state.
+                        lambda state=websocket_state: state.__setitem__("started", True),
                         options,
                     )
                     if signal_aborted(_option(options, "signal")):
@@ -1107,8 +1191,24 @@ def stream_openai_codex_responses(
                     stream.end()
                     return
                 except Exception as error:
-                    aborted = signal_aborted(_option(options, "signal"))
-                    if aborted or is_codex_non_transport_error(error):
+                    action = websocket_failure_action(
+                        error,
+                        aborted=signal_aborted(_option(options, "signal")),
+                        stream_started=bool(websocket_state["started"]),
+                        retried_connection_limit=retried_websocket_connection_limit,
+                        retried_continuation=retried_missing_websocket_continuation,
+                    )
+                    if action == "retry-continuation":
+                        retried_missing_websocket_continuation = True
+                        # The cached entry holds the continuation the server forgot; keeping
+                        # it would rebuild the same rejected request.
+                        if session_id:
+                            _websocket_session_cache.pop(session_id, None)
+                        continue
+                    if action == "retry-connection-limit":
+                        retried_websocket_connection_limit = True
+                        continue
+                    if action == "raise":
                         raise
                     append_assistant_message_diagnostic(
                         output,
@@ -1130,8 +1230,7 @@ def stream_openai_codex_responses(
                         _websocket_fallback_sessions.add(session_id)
                         _record_websocket_failure(session_id, error)
                         _record_websocket_sse_fallback(session_id)
-                    if websocket_state["started"]:
-                        raise
+                    break
 
             url = resolve_codex_url(model.baseUrl)
             signal = _option(options, "signal")
@@ -1142,7 +1241,17 @@ def stream_openai_codex_responses(
                     if signal_aborted(signal):
                         raise RuntimeError("Request was aborted")
                     try:
-                        request = client.build_request("POST", url, headers=sse_headers, json=body)
+                        compressed_body = _compress_request_body_zstd(body_json)
+                        if compressed_body is not None:
+                            request = client.build_request(
+                                "POST",
+                                url,
+                                headers={**sse_headers, "content-encoding": "zstd",
+                                         "content-type": "application/json"},
+                                content=compressed_body,
+                            )
+                        else:
+                            request = client.build_request("POST", url, headers=sse_headers, json=body)
                         response = await _await_with_abort(client.send(request, stream=True), signal)
                         on_response = _option(options, "onResponse")
                         if callable(on_response):
