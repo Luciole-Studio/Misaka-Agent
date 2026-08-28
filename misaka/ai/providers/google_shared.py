@@ -7,6 +7,7 @@ from __future__ import annotations
 import base64
 import copy
 import re
+from collections.abc import Mapping
 from typing import Any, Literal, TypeAlias
 
 from misaka.ai.providers.constrained_sampling import (
@@ -15,6 +16,7 @@ from misaka.ai.providers.constrained_sampling import (
 )
 from misaka.ai.providers.transform_messages import transform_messages
 from misaka.ai.types import Context, ImageContent, Model, StopReason, Tool
+from misaka.ai.utils.provider_retry import retry_provider_request
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
 
 GoogleThinkingLevel: TypeAlias = Literal["THINKING_LEVEL_UNSPECIFIED", "MINIMAL", "LOW", "MEDIUM", "HIGH"]
@@ -267,6 +269,58 @@ def map_tool_choice(choice: str) -> str:
     if choice == "any":
         return "ANY"
     return "AUTO"
+
+
+def _option(options: Any, name: str) -> Any:
+    if options is None:
+        return None
+    if isinstance(options, Mapping):
+        return options.get(name)
+    return getattr(options, name, None)
+
+
+def supports_google_strict_tool_sampling(model_id: str) -> bool:
+    """Gemini 3 and later accept a constrained tool schema; earlier versions reject it."""
+    major = _get_gemini_major_version(model_id)
+    return major is not None and major >= 3
+
+
+def resolve_google_function_calling_mode(
+    tools: list[Tool], tool_choice: str | None, supports_strict_mode: bool
+) -> str | None:
+    """Which function-calling mode this request asks Google for.
+
+    ``VALIDATED`` is Google's side of strict sampling: sending the constrained schema is
+    only half of it, the mode has to ask for validation too. An explicit ``none``/``any``
+    from the caller wins over that, as upstream's does.
+    """
+    use_strict_mode = any(
+        resolve_json_schema_strict_sampling(tool, supports_strict_mode) is True for tool in tools
+    )
+    if tool_choice in ("none", "any"):
+        return map_tool_choice(tool_choice)
+    if use_strict_mode:
+        return "VALIDATED"
+    return map_tool_choice(tool_choice) if tool_choice else None
+
+
+async def retry_google_request(request, options: Any = None):
+    """Run a Google request under the shared retry policy.
+
+    Upstream wraps this same call in ``retryProviderRequest`` and normalizes the error
+    first: the Google SDK's ``ApiError`` carries ``status`` but no ``headers``, and pi's
+    gate requires literally both property names. This port's gate asks
+    ``provider_error_status`` instead -- because the Python SDKs raise ``status_code`` and
+    keep headers on ``response``, so a name check was never going to work here -- and that
+    already recognises the Google shape. The normalization has nothing left to do, so it
+    is not carried over; the retry is the part that was missing.
+    """
+    return await retry_provider_request(
+        request,
+        max_retries=_option(options, "maxRetries") or 0,
+        max_retry_delay_ms=_option(options, "maxRetryDelayMs"),
+        signal=_option(options, "signal"),
+    )
 
 
 def map_stop_reason(reason: Any) -> StopReason:

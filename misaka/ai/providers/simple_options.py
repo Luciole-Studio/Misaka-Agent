@@ -90,24 +90,37 @@ class AdjustedThinkingTokens:
     thinkingBudget: int
 
 
+DEFAULT_THINKING_BUDGETS = ThinkingBudgets(minimal=1024, low=2048, medium=8192, high=16384)
+
+
+def thinking_budget_for_level(
+    reasoning_level: ThinkingLevel, custom_budgets: ThinkingBudgets | None = None
+) -> int:
+    """The token budget one thinking level asks for, before any clamping.
+
+    Its own function, as upstream's ``thinkingBudgetForLevel`` is: two callers need it --
+    the Anthropic-style adjustment below and openai-completions' ``thinking_token_budget``
+    field -- and the table has to be the same one for both.
+    """
+    budgets = DEFAULT_THINKING_BUDGETS.model_dump()
+    if custom_budgets is not None:
+        budgets.update({key: value for key, value in custom_budgets.model_dump().items() if value is not None})
+    level = clamp_reasoning(reasoning_level)
+    if level is None:
+        raise ValueError("reasoning_level must not be None")
+    budget = budgets[level]
+    if budget is None:
+        raise ValueError(f"No thinking budget configured for reasoning level {reasoning_level}")
+    return budget
+
+
 def adjust_max_tokens_for_thinking(
     base_max_tokens: int | None,
     model_max_tokens: int,
     reasoning_level: ThinkingLevel,
     custom_budgets: ThinkingBudgets | None = None,
 ) -> AdjustedThinkingTokens:
-    default_budgets = ThinkingBudgets(minimal=1024, low=2048, medium=8192, high=16384)
-    budgets = default_budgets.model_dump()
-    if custom_budgets is not None:
-        budgets.update({key: value for key, value in custom_budgets.model_dump().items() if value is not None})
-
-    level = clamp_reasoning(reasoning_level)
-    if level is None:
-        raise ValueError("reasoning_level must not be None")
-
-    thinking_budget = budgets[level]
-    if thinking_budget is None:
-        raise ValueError(f"No thinking budget configured for reasoning level {reasoning_level}")
+    thinking_budget = thinking_budget_for_level(reasoning_level, custom_budgets)
 
     max_tokens = model_max_tokens if base_max_tokens is None else min(base_max_tokens + thinking_budget, model_max_tokens)
     if max_tokens <= thinking_budget:
@@ -117,4 +130,6 @@ def adjust_max_tokens_for_thinking(
 
 
 __all__ = [
+    "DEFAULT_THINKING_BUDGETS",
+    "thinking_budget_for_level",
     ]

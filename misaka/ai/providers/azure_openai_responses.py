@@ -45,6 +45,7 @@ from misaka.ai.types import (
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
+from misaka.ai.utils.provider_retry import retry_provider_request
 from misaka.ai.utils.user_agent import get_misaka_user_agent
 from misaka.utils.values import maybe_await, signal_aborted
 
@@ -253,9 +254,10 @@ async def _create_responses_stream(client: Any, params: dict[str, Any], options:
     timeout_ms = _option(options, "timeoutMs")
     if timeout_ms is not None:
         request_client_options["timeout"] = timeout_ms / 1000
-    max_retries = _option(options, "maxRetries")
-    if max_retries is not None:
-        request_client_options["max_retries"] = max_retries
+    # Upstream disables the SDK's own retry and retries the request itself
+    # (`maxRetries: 0` in its requestOptions), so the policy that decides *what* is
+    # worth retrying is `utils/provider_retry`, not whichever heuristic the SDK ships.
+    request_client_options["max_retries"] = 0
     if request_client_options and hasattr(client, "with_options"):
         request_client = client.with_options(**request_client_options)
     else:
@@ -321,7 +323,12 @@ def stream_azure_openai_responses(
                 next_params = await maybe_await(on_payload(params, model))
                 if next_params is not None:
                     params = next_params
-            openai_stream = await _create_responses_stream(client, params, options, model)
+            openai_stream = await retry_provider_request(
+                lambda: _create_responses_stream(client, params, options, model),
+                max_retries=_option(options, "maxRetries") or 0,
+                max_retry_delay_ms=_option(options, "maxRetryDelayMs"),
+                signal=_option(options, "signal"),
+            )
             stream.push(StartEvent(partial=output))
             signal = _option(options, "signal")
             await process_responses_stream(

@@ -26,6 +26,7 @@ from misaka.ai.types import (
     Usage,
 )
 from misaka.ai.utils.headers import headers_to_record
+from misaka.ai.utils.provider_retry import retry_provider_request
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
 from misaka.utils.values import maybe_await, signal_aborted
 
@@ -68,12 +69,17 @@ async def generate_images_openrouter(
             if next_params is not None:
                 params = next_params
 
-        raw_response = await _await_with_signal(
-            lambda: client.chat.completions.with_raw_response.create(
-                **params,
-                timeout=(options.timeoutMs / 1000) if options and options.timeoutMs is not None else None,
+        raw_response = await retry_provider_request(
+            lambda: _await_with_signal(
+                lambda: client.chat.completions.with_raw_response.create(
+                    **params,
+                    timeout=(options.timeoutMs / 1000) if options and options.timeoutMs is not None else None,
+                ),
+                options.signal if options else None,
             ),
-            options.signal if options else None,
+            max_retries=(options.maxRetries if options and options.maxRetries is not None else 0),
+            max_retry_delay_ms=options.maxRetryDelayMs if options else None,
+            signal=options.signal if options else None,
         )
         response = raw_response.parse()
         if options and options.onResponse is not None:

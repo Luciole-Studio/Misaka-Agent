@@ -30,9 +30,10 @@ from misaka.ai.providers.google_shared import (
     convert_tools,
     is_thinking_part,
     map_stop_reason,
-    map_tool_choice,
+    resolve_google_function_calling_mode,
     resolve_google_thinking_level,
     retain_thought_signature,
+    supports_google_strict_tool_sampling,
 )
 from misaka.ai.providers.sdk import require
 from misaka.ai.providers.simple_options import build_base_options
@@ -195,20 +196,20 @@ def build_params(
     config: dict[str, Any] = dict(generation_config)
     if context.systemPrompt:
         config["systemInstruction"] = sanitize_surrogates(context.systemPrompt)
+    supports_strict_mode = supports_google_strict_tool_sampling(model.id)
     if context.tools:
-        converted_tools = convert_tools(context.tools)
+        converted_tools = convert_tools(context.tools, supports_strict_mode=supports_strict_mode)
         if converted_tools is not None:
             config["tools"] = converted_tools
 
-    tool_choice = _option(options, "toolChoice")
-    if context.tools and tool_choice:
-        config["toolConfig"] = {
-            "functionCallingConfig": {
-                "mode": map_tool_choice(tool_choice),
-            },
-        }
-    else:
-        config["toolConfig"] = None
+    # `VALIDATED` is Google's half of strict sampling: sending the constrained schema
+    # without asking for the mode leaves the constraint unenforced.
+    mode = resolve_google_function_calling_mode(
+        list(context.tools or []), _option(options, "toolChoice"), supports_strict_mode
+    )
+    config["toolConfig"] = (
+        {"functionCallingConfig": {"mode": mode}} if context.tools and mode else None
+    )
 
     thinking = _option(options, "thinking")
     if _nested_option(thinking, "enabled") and model.reasoning:

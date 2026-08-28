@@ -37,7 +37,11 @@ from misaka.ai.providers.github_copilot_headers import (
 )
 from misaka.ai.providers.openai_prompt_cache import clamp_openai_prompt_cache_key
 from misaka.ai.providers.sdk import require
-from misaka.ai.providers.simple_options import build_base_options
+from misaka.ai.providers.simple_options import (
+    build_base_options,
+    clamp_thinking_budget_to_answer_room,
+    thinking_budget_for_level,
+)
 from misaka.ai.providers.transform_messages import transform_messages
 from misaka.ai.types import (
     AssistantMessage,
@@ -73,6 +77,7 @@ from misaka.ai.utils.headers import (
     provider_headers_to_record,
 )
 from misaka.ai.utils.json_parse import StreamingArgs
+from misaka.ai.utils.provider_retry import retry_provider_request
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
 from misaka.ai.utils.user_agent import get_misaka_user_agent
 from misaka.utils.values import maybe_await, read_field, signal_aborted
@@ -87,6 +92,79 @@ def _set_extra(params: dict[str, Any], key: str, value: Any) -> None:
     if "extra_body" not in params:
         params["extra_body"] = {}
     params["extra_body"][key] = value
+
+
+def _resolve_thinking_token_budget_field(compat: Mapping[str, Any]) -> str | None:
+    """Which top-level field carries the thinking budget, if any."""
+    field = compat.get("thinkingTokenBudgetField")
+    if field:
+        return field
+    return "thinking_token_budget" if compat.get("supportsThinkingTokenBudget") else None
+
+
+def _resolve_clamped_thinking_budget(model: Model, options: Any, params: Mapping[str, Any]) -> int | None:
+    """The budget this request may spend on thinking, clamped to leave room for an answer."""
+    reasoning_effort = _option(options, "reasoningEffort")
+    if not reasoning_effort or not model.reasoning:
+        return None
+    ceiling = params.get("max_tokens")
+    if ceiling is None:
+        ceiling = params.get("max_completion_tokens")
+    if ceiling is None:
+        ceiling = model.maxTokens
+    budget = clamp_thinking_budget_to_answer_room(
+        thinking_budget_for_level(reasoning_effort, _option(options, "thinkingBudgets")), ceiling
+    )
+    return budget if budget > 0 else None
+
+
+_OMIT = object()  # "do not send this key", which `None` cannot express
+
+
+def _resolve_chat_template_value(model: Model, reasoning_effort: Any, value: Any, thinking_budget: Any) -> Any:
+    """One ``chat_template_kwargs`` entry, with ``{"$var": ...}`` placeholders resolved.
+
+    A literal passes through. An object is a placeholder: ``thinking.enabled`` becomes the
+    boolean, ``thinking.budget`` the token budget, anything else the mapped thinking level.
+    ``omitWhenOff`` drops the entry entirely when thinking is off, which is how a template
+    that has no "off" spelling stays silent instead of sending a wrong one.
+
+    Returns ``_OMIT`` for "do not send this key" -- distinct from ``None``, which is a
+    value a template may legitimately want.
+    """
+    if not isinstance(value, Mapping):
+        return value
+    if not reasoning_effort and value.get("omitWhenOff"):
+        return _OMIT
+    variable = value.get("$var")
+    if variable == "thinking.enabled":
+        return bool(reasoning_effort)
+    if variable == "thinking.budget":
+        return thinking_budget
+    mapped = _mapped_thinking_effort(model, reasoning_effort) if reasoning_effort else (
+        model.thinkingLevelMap.get("off") if model.thinkingLevelMap else None
+    )
+    if reasoning_effort:
+        # `mapped === undefined ? reasoningEffort : typeof mapped === "string" ? mapped : undefined`
+        return mapped if isinstance(mapped, str) else (reasoning_effort if mapped is reasoning_effort else _OMIT)
+    return mapped if isinstance(mapped, str) else _OMIT
+
+
+def _build_chat_template_values(
+    model: Model, reasoning_effort: Any, values: Any, thinking_budget: Any
+) -> dict[str, Any] | None:
+    """Every entry resolved; ``None`` when nothing survives, so the key is not sent at all."""
+    if not isinstance(values, Mapping):
+        return None
+    resolved = {
+        key: value
+        for key, value in (
+            (key, _resolve_chat_template_value(model, reasoning_effort, raw, thinking_budget))
+            for key, raw in values.items()
+        )
+        if value is not _OMIT
+    }
+    return resolved or None
 
 
 def _mapped_thinking_effort(model: Model, level: str) -> Any:
@@ -186,7 +264,12 @@ def stream_openai_completions(
                 if next_params is not None:
                     params = next_params
 
-            openai_stream = await _create_completion_stream(client, params, options, model)
+            openai_stream = await retry_provider_request(
+                lambda: _create_completion_stream(client, params, options, model),
+                max_retries=_option(options, "maxRetries") or 0,
+                max_retry_delay_ms=_option(options, "maxRetryDelayMs"),
+                signal=_option(options, "signal"),
+            )
             stream.push(StartEvent(partial=output))
 
             text_block: TextContent | None = None
@@ -570,6 +653,9 @@ def build_params(
         params["tool_choice"] = tool_choice
 
     reasoning_effort = _option(options, "reasoningEffort")
+    thinking_token_budget_field = _resolve_thinking_token_budget_field(compat)
+    thinking_budget = _resolve_clamped_thinking_budget(model, options, params)
+
     if compat.get("thinkingFormat") == "zai" and model.reasoning:
         # z.ai speaks `thinking: {type, clear_thinking}`; `enable_thinking` is qwen's field.
         _set_extra(
@@ -589,6 +675,38 @@ def build_params(
                 params["reasoning_effort"] = effort
     elif compat.get("thinkingFormat") == "qwen-chat-template" and model.reasoning:
         _set_extra(params, "chat_template_kwargs", {"enable_thinking": bool(reasoning_effort), "preserve_thinking": True})
+    elif compat.get("thinkingFormat") == "chat-template" and model.reasoning:
+        chat_template_kwargs = _build_chat_template_values(
+            model, reasoning_effort, compat.get("chatTemplateKwargs"), thinking_budget
+        )
+        if chat_template_kwargs:
+            _set_extra(params, "chat_template_kwargs", chat_template_kwargs)
+    elif compat.get("thinkingFormat") == "baseten" and model.reasoning:
+        chat_template_args = _build_chat_template_values(
+            model, reasoning_effort, compat.get("chatTemplateArgs"), thinking_budget
+        )
+        if chat_template_args:
+            _set_extra(params, "chat_template_args", chat_template_args)
+        if compat.get("supportsReasoningEffort"):
+            effort = (
+                _mapped_thinking_effort(model, reasoning_effort)
+                if reasoning_effort
+                else (model.thinkingLevelMap.get("off") if model.thinkingLevelMap else None)
+            )
+            if effort is None and reasoning_effort and not model.thinkingLevelMap:
+                effort = reasoning_effort
+            if isinstance(effort, str):
+                params["reasoning_effort"] = effort
+    elif compat.get("thinkingFormat") == "ant-ling" and model.reasoning and reasoning_effort:
+        effort = model.thinkingLevelMap.get(reasoning_effort) if model.thinkingLevelMap else None
+        if isinstance(effort, str):
+            _set_extra(params, "reasoning", {"effort": effort})
+    elif compat.get("thinkingFormat") == "string-thinking" and model.reasoning:
+        if reasoning_effort:
+            _set_extra(params, "thinking", _coalesced_thinking_effort(model, reasoning_effort))
+        elif not _thinking_off_is_suppressed(model):
+            off_value = model.thinkingLevelMap.get("off") if model.thinkingLevelMap else None
+            _set_extra(params, "thinking", "none" if off_value is None else off_value)
     elif compat.get("thinkingFormat") == "deepseek" and model.reasoning:
         if reasoning_effort:
             _set_extra(params, "thinking", {"type": "enabled"})
@@ -617,6 +735,11 @@ def build_params(
         off_value = model.thinkingLevelMap.get("off") if model.thinkingLevelMap else None
         if isinstance(off_value, str):
             params["reasoning_effort"] = off_value
+
+    # A server that caps reasoning by token count wants it as a top-level field, whichever
+    # name it spells it with.
+    if thinking_token_budget_field and thinking_budget is not None:
+        _set_extra(params, thinking_token_budget_field, thinking_budget)
 
     if "openrouter.ai" in model.baseUrl and read_field(model.compat, "openRouterRouting"):
         _set_extra(params, "provider", _dump_model(read_field(model.compat, "openRouterRouting")))
@@ -979,6 +1102,13 @@ def detect_compat(model: Model) -> dict[str, Any]:
         "cacheControlFormat": cache_control_format,
         "sendSessionAffinityHeaders": False,
         "sessionAffinityFormat": "openrouter" if is_openrouter else "openai",
+        "chatTemplateKwargs": {},
+        "chatTemplateArgs": {},
+        "supportsThinkingTokenBudget": False,
+        "thinkingTokenBudgetField": None,
+        "supportsOpenAIGrammarTools": False,
+        "deferredToolsMode": None,
+        "supportsFinishReason": True,
         "supportsLongCacheRetention": not (
             is_together or is_cloudflare_workers_ai or is_cloudflare_ai_gateway or is_nvidia
         ),
@@ -1016,6 +1146,19 @@ def get_compat(model: Model) -> dict[str, Any]:
         "sessionAffinityFormat": read_field(
             compat, "sessionAffinityFormat", detected["sessionAffinityFormat"]
         ),
+        "chatTemplateKwargs": read_field(compat, "chatTemplateKwargs", detected["chatTemplateKwargs"]),
+        "chatTemplateArgs": read_field(compat, "chatTemplateArgs", detected["chatTemplateArgs"]),
+        "supportsThinkingTokenBudget": read_field(
+            compat, "supportsThinkingTokenBudget", detected["supportsThinkingTokenBudget"]
+        ),
+        "thinkingTokenBudgetField": read_field(
+            compat, "thinkingTokenBudgetField", detected["thinkingTokenBudgetField"]
+        ),
+        "supportsOpenAIGrammarTools": read_field(
+            compat, "supportsOpenAIGrammarTools", detected["supportsOpenAIGrammarTools"]
+        ),
+        "deferredToolsMode": read_field(compat, "deferredToolsMode", detected["deferredToolsMode"]),
+        "supportsFinishReason": read_field(compat, "supportsFinishReason", detected["supportsFinishReason"]),
         "sendSessionAffinityHeaders": read_field(
             compat, "sendSessionAffinityHeaders", detected["sendSessionAffinityHeaders"]
         ),
@@ -1032,9 +1175,10 @@ async def _create_completion_stream(client: Any, params: dict[str, Any], options
     timeout_ms = _option(options, "timeoutMs")
     if timeout_ms is not None:
         request_client_kwargs["timeout"] = timeout_ms / 1000
-    max_retries = _option(options, "maxRetries")
-    if max_retries is not None:
-        request_client_kwargs["max_retries"] = max_retries
+    # Upstream disables the SDK's own retry and retries the request itself
+    # (`maxRetries: 0` in its requestOptions), so the policy that decides *what* is
+    # worth retrying is `utils/provider_retry`, not whichever heuristic the SDK ships.
+    request_client_kwargs["max_retries"] = 0
     if request_client_kwargs and hasattr(client, "with_options"):
         request_client = client.with_options(**request_client_kwargs)
 

@@ -71,6 +71,7 @@ from misaka.ai.utils.deferred_tools import split_deferred_tools
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
 from misaka.ai.utils.json_parse import StreamingArgs, parse_json_with_repair
+from misaka.ai.utils.provider_retry import retry_provider_request
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
 from misaka.ai.utils.user_agent import get_misaka_user_agent
 from misaka.utils.values import maybe_await, signal_aborted
@@ -924,7 +925,10 @@ async def _create_raw_response(
     if _option(options, "timeoutMs") is not None:
         request_client_options["timeout"] = _option(options, "timeoutMs") / 1000
     if _option(options, "maxRetries") is not None:
-        request_client_options["max_retries"] = _option(options, "maxRetries")
+        # Upstream disables the SDK's own retry and retries the request itself
+        # (`maxRetries: 0` in its requestOptions), so the policy that decides *what* is
+        # worth retrying is `utils/provider_retry`, not whichever heuristic the SDK ships.
+        request_client_options["max_retries"] = 0
     if request_client_options and hasattr(client, "with_options"):
         request_client = client.with_options(**request_client_options)
     else:
@@ -1070,7 +1074,12 @@ def stream_anthropic(
                 if next_params is not None:
                     params = next_params
 
-            raw_response = await _create_raw_response(client, params, options, auth_extra_headers)
+            raw_response = await retry_provider_request(
+                lambda: _create_raw_response(client, params, options, auth_extra_headers),
+                max_retries=_option(options, "maxRetries") or 0,
+                max_retry_delay_ms=_option(options, "maxRetryDelayMs"),
+                signal=_option(options, "signal"),
+            )
             await _emit_response_metadata(raw_response, options, model)
             stream.push(StartEvent(partial=output))
             provider_indexes: dict[int, int] = {}

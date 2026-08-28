@@ -20,10 +20,16 @@ def read_field(source: Any, name: str, default: Any = None) -> Any:
     ``Mapping`` rather than ``dict`` on purpose: several of the merged copies tested for
     ``dict``, so a Mapping that was not a dict silently fell through to ``getattr`` and
     returned the default.
+
+    A ``None`` reads as absent, because this stands in for upstream's ``a.b ?? default``
+    and ``??`` falls back on null. It matters most where the source is a pydantic model:
+    every optional field exists with the value ``None``, so returning it would mean that a
+    catalog entry carrying *any* compat key lost the detected default for every key it did
+    not set. Measured on the shipped catalog that was 655 of 1312 models -- among them
+    ``maxTokensField`` on 499 and ``supportsReasoningEffort`` on 486.
     """
-    if isinstance(source, Mapping):
-        return source.get(name, default)
-    return getattr(source, name, default)
+    value = source.get(name, default) if isinstance(source, Mapping) else getattr(source, name, default)
+    return default if value is None else value
 
 
 async def maybe_await(value: Any) -> Any:
