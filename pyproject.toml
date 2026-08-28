@@ -21,7 +21,6 @@ dependencies = [
     "pydantic>=2.10",
     "jsonschema>=4.23",
     "httpx>=0.28",
-    "json-repair>=0.30",
     # engine/agent (formerly harn_agent)
     "ruamel.yaml>=0.18",
     "pathspec>=0.12",
