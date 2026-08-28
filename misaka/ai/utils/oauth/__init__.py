@@ -34,6 +34,7 @@ from misaka.ai.utils.oauth.kimi_coding import (
 )
 from misaka.ai.utils.oauth.openai_codex import (
     loginOpenAICodex,
+    loginOpenAICodexDeviceCode,
     openaiCodexOAuthProvider,
     refreshOpenAICodexToken,
 )
@@ -194,6 +195,7 @@ __all__ = [
     "loginGitHubCopilot",
     "loginKimiCoding",
     "loginOpenAICodex",
+    "loginOpenAICodexDeviceCode",
     "loginOpenRouter",
     "loginXai",
     "normalizeDomain",

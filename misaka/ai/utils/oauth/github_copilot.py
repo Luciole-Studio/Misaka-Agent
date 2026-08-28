@@ -40,6 +40,21 @@ def normalize_domain(input_text: str) -> str | None:
         return None
 
 
+def copilot_enterprise_domain(credentials: Any) -> str | None:
+    """The host an enterprise seat answers on, from whatever the credential stored.
+
+    The field is called ``enterpriseUrl`` and is filled from what the person typed, so it
+    can be a URL, a host, or a host with a trailing slash. Everything downstream builds
+    ``https://{domain}/...`` out of it, and interpolating a URL there produces
+    ``https://https://github.acme.com//login/...``: a refresh that cannot succeed. One
+    normalisation, used by every reader, is what upstream does.
+    """
+    enterprise_url = getattr(credentials, "enterpriseUrl", None)
+    if not isinstance(enterprise_url, str) or not enterprise_url:
+        return None
+    return normalize_domain(enterprise_url)
+
+
 def _get_urls(domain: str) -> dict[str, str]:
     return {
         "deviceCodeUrl": f"https://{domain}/login/device/code",
@@ -420,8 +435,7 @@ class _GitHubCopilotOAuthProvider:
 
     async def refreshToken(self, credentials: OAuthCredentials, signal: Any | None = None) -> OAuthCredentials:
         del signal  # the built-in refresh has no cancellation point; the parameter is the upstream contract
-        enterprise_url = getattr(credentials, "enterpriseUrl", None)
-        return await refresh_github_copilot_token(credentials.refresh, enterprise_url)
+        return await refresh_github_copilot_token(credentials.refresh, copilot_enterprise_domain(credentials))
 
     def getApiKey(self, credentials: OAuthCredentials) -> str:
         return credentials.access
@@ -442,14 +456,10 @@ class _GitHubCopilotOAuthProvider:
         ``core/model_registry`` path does not go through here: it reaches ``modifyModels``
         below, which stamps the same per-credential URL onto the models themselves.
         """
-        enterprise_url = getattr(credentials, "enterpriseUrl", None)
-        domain = normalize_domain(enterprise_url) if isinstance(enterprise_url, str) and enterprise_url else None
-        return get_github_copilot_base_url(credentials.access, domain)
+        return get_github_copilot_base_url(credentials.access, copilot_enterprise_domain(credentials))
 
     def modifyModels(self, models: list[Any], credentials: OAuthCredentials) -> list[Any]:
-        enterprise_url = getattr(credentials, "enterpriseUrl", None)
-        domain = normalize_domain(enterprise_url) if enterprise_url else None
-        base_url = get_github_copilot_base_url(credentials.access, domain)
+        base_url = get_github_copilot_base_url(credentials.access, copilot_enterprise_domain(credentials))
         return [model.model_copy(update={"baseUrl": base_url}) if model.provider == "github-copilot" else model for model in models]
 
 
@@ -462,6 +472,7 @@ refreshGitHubCopilotToken = refresh_github_copilot_token
 githubCopilotOAuthProvider = github_copilot_oauth_provider
 
 __all__ = [
+    "copilot_enterprise_domain",
     "getGitHubCopilotBaseUrl",
     "get_github_copilot_base_url",
     "githubCopilotOAuthProvider",

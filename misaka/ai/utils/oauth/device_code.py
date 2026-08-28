@@ -38,7 +38,12 @@ class OAuthDeviceCodeSlowDownResult(TypedDict):
 
 class OAuthDeviceCodeCompleteResult(TypedDict):
     status: Literal["complete"]
-    accessToken: str
+    # Upstream's poll result is generic in what a completed flow yields. Most flows yield
+    # an access token and name the field for it; OpenAI Codex's device endpoint yields an
+    # authorization code and the verifier that goes with it, which is a pair. `value` is
+    # that generic slot, and `accessToken` is the shorthand the token flows already use.
+    accessToken: NotRequired[str]
+    value: NotRequired[Any]
 
 
 class OAuthDeviceCodeFailedResult(TypedDict):
@@ -102,7 +107,7 @@ async def poll_oauth_device_code_flow(
     poll: Callable[[], Awaitable[OAuthDeviceCodePollResult]] | None = None,
     signal: Any | None = None,
     waitBeforeFirstPoll: bool = False,
-) -> str:
+) -> Any:
     if options is not None:
         intervalSeconds = options.get("intervalSeconds", intervalSeconds)
         expiresInSeconds = options.get("expiresInSeconds", expiresInSeconds)
@@ -133,7 +138,7 @@ async def poll_oauth_device_code_flow(
 
         result = await poll()
         if result["status"] == "complete":
-            return result["accessToken"]
+            return result["value"] if "value" in result else result["accessToken"]
         if result["status"] == "pending":
             if not await _sleep_until_next_poll(deadline, interval_ms, signal):
                 break
