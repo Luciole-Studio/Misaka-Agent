@@ -11,7 +11,7 @@ import re
 import time
 import uuid
 from collections.abc import AsyncIterable, AsyncIterator, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from email.utils import parsedate_to_datetime
 from typing import Any, Literal, TypedDict
 from urllib.parse import urlparse
@@ -245,6 +245,76 @@ def _run_socket_close_nowait(socket: Any, code: int = 1000, reason: str = "done"
         asyncio.run(result)
     else:
         loop.create_task(result)
+
+
+@dataclass(slots=True)
+class OpenAICodexWebSocketDebugStats:
+    """Counters for one session's websocket usage.
+
+    The connection cache is the reason this file has a socket registry at all, and nothing
+    could see whether it was working: a cache that silently reconnects every turn behaves
+    correctly and costs what no cache would. These are the counters upstream keeps, and
+    they are what a test can assert reuse against.
+    """
+
+    requests: int = 0
+    connectionsCreated: int = 0
+    connectionsReused: int = 0
+    cachedContextRequests: int = 0
+    storeTrueRequests: int = 0
+    fullContextRequests: int = 0
+    deltaRequests: int = 0
+    lastInputItems: int = 0
+    lastDeltaInputItems: int | None = None
+    lastPreviousResponseId: str | None = None
+    websocketFailures: int = 0
+    sseFallbacks: int = 0
+    websocketFallbackActive: bool | None = None
+    lastWebSocketError: str | None = None
+
+
+_websocket_debug_stats: dict[str, OpenAICodexWebSocketDebugStats] = {}
+
+
+def _get_or_create_websocket_debug_stats(session_id: str) -> OpenAICodexWebSocketDebugStats:
+    stats = _websocket_debug_stats.get(session_id)
+    if stats is None:
+        stats = OpenAICodexWebSocketDebugStats()
+        _websocket_debug_stats[session_id] = stats
+    return stats
+
+
+def get_openai_codex_websocket_debug_stats(session_id: str) -> OpenAICodexWebSocketDebugStats | None:
+    """A copy of one session's counters, or ``None`` if it never used a websocket."""
+    stats = _websocket_debug_stats.get(session_id)
+    return replace(stats) if stats is not None else None
+
+
+def reset_openai_codex_websocket_debug_stats(session_id: str | None = None) -> None:
+    """Forget one session's counters, or every session's."""
+    if session_id:
+        _websocket_debug_stats.pop(session_id, None)
+        _websocket_fallback_sessions.discard(session_id)
+        return
+    _websocket_debug_stats.clear()
+    _websocket_fallback_sessions.clear()
+
+
+def _record_websocket_sse_fallback(session_id: str | None) -> None:
+    if not session_id:
+        return
+    stats = _get_or_create_websocket_debug_stats(session_id)
+    stats.sseFallbacks += 1
+    stats.websocketFallbackActive = session_id in _websocket_fallback_sessions
+
+
+def _record_websocket_failure(session_id: str | None, error: Any) -> None:
+    if not session_id:
+        return
+    stats = _get_or_create_websocket_debug_stats(session_id)
+    stats.websocketFailures += 1
+    stats.lastWebSocketError = str(error)
+    stats.websocketFallbackActive = True
 
 
 def close_openai_codex_websocket_sessions(session_id: str | None = None) -> None:
@@ -886,7 +956,7 @@ async def process_websocket_stream(
     options: StreamOptions | dict[str, Any] | None = None,
 ) -> None:
     session_id = _option(options, "sessionId")
-    socket, entry, _, release = await _acquire_websocket(
+    socket, entry, reused, release = await _acquire_websocket(
         url,
         headers,
         session_id,
@@ -897,6 +967,27 @@ async def process_websocket_stream(
     use_cached_context = _option(options, "transport") in {"websocket-cached", "auto"}
     full_body = body
     request_body = _build_cached_websocket_request_body(entry, full_body) if use_cached_context and entry else full_body
+
+    if session_id:
+        stats = _get_or_create_websocket_debug_stats(session_id)
+        stats.requests += 1
+        if reused:
+            stats.connectionsReused += 1
+        else:
+            stats.connectionsCreated += 1
+        if use_cached_context:
+            stats.cachedContextRequests += 1
+        if request_body.get("store") is True:
+            stats.storeTrueRequests += 1
+        stats.lastInputItems = len(request_body.get("input") or [])
+        if request_body.get("previous_response_id"):
+            stats.deltaRequests += 1
+            stats.lastDeltaInputItems = len(request_body.get("input") or [])
+            stats.lastPreviousResponseId = request_body["previous_response_id"]
+        else:
+            stats.fullContextRequests += 1
+            stats.lastDeltaInputItems = None
+            stats.lastPreviousResponseId = None
     try:
         await maybe_await(socket.send(json.dumps({"type": "response.create", **request_body})))
         await process_responses_stream(
@@ -1037,6 +1128,8 @@ def stream_openai_codex_responses(
                     )
                     if session_id:
                         _websocket_fallback_sessions.add(session_id)
+                        _record_websocket_failure(session_id, error)
+                        _record_websocket_sse_fallback(session_id)
                     if websocket_state["started"]:
                         raise
 

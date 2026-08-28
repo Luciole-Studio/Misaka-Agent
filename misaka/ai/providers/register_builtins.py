@@ -153,6 +153,17 @@ async def _load_openai_responses_provider_module() -> LazyProviderModule:
     )
 
 
+def set_bedrock_provider_module(module: LazyProviderModule | None) -> None:
+    """Replace the dynamically imported bedrock implementation.
+
+    Upstream exports this for its standalone-binary build, where the variable-specifier
+    import cannot be bundled. Here it is the only writer of the override the loader below
+    reads -- without it that branch was unreachable and the module-level variable dead.
+    """
+    global _bedrock_provider_module_override
+    _bedrock_provider_module_override = module
+
+
 async def _load_bedrock_provider_module() -> LazyProviderModule:
     if _bedrock_provider_module_override is not None:
         return _bedrock_provider_module_override

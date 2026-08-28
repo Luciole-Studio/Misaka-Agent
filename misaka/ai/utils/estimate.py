@@ -46,6 +46,17 @@ def calculate_context_tokens(usage: Usage) -> int:
     return usage.totalTokens or (usage.input + usage.output + usage.cacheRead + usage.cacheWrite)
 
 
+def _utf16_length(text: str) -> int:
+    """The length JavaScript's ``String.length`` reports.
+
+    Every measurement here feeds a token estimate that upstream computes from
+    ``text.length`` -- a count of UTF-16 code units, where a character outside the Basic
+    Multilingual Plane counts as two. Python's ``len`` counts code points and gives one,
+    so an emoji-heavy context read as half its real size and compaction fired late.
+    """
+    return len(text) + sum(1 for char in text if ord(char) > 0xFFFF)
+
+
 def _safe_json(value: Any) -> str:
     # Compact and unescaped, like `JSON.stringify`: the result is measured by length, and
     # both Python defaults inflate it -- separator spacing pads every comma, and ASCII
@@ -59,16 +70,16 @@ def _safe_json(value: Any) -> str:
 
 def _content_chars(content: Any) -> int:
     if isinstance(content, str):
-        return len(content)
+        return _utf16_length(content)
     chars = 0
     for block in content:
         kind = getattr(block, "type", None)
-        chars += len(block.text) if kind == "text" else ESTIMATED_IMAGE_CHARS
+        chars += _utf16_length(block.text) if kind == "text" else ESTIMATED_IMAGE_CHARS
     return chars
 
 
 def estimate_text_tokens(text: str) -> int:
-    return math.ceil(len(text) / CHARS_PER_TOKEN)
+    return math.ceil(_utf16_length(text) / CHARS_PER_TOKEN)
 
 
 def estimate_text_and_image_content_tokens(content: Any) -> int:
@@ -85,11 +96,11 @@ def estimate_message_tokens(message: Any) -> int:
     for block in message.content:
         kind = getattr(block, "type", None)
         if kind == "text":
-            chars += len(block.text)
+            chars += _utf16_length(block.text)
         elif kind == "thinking":
-            chars += len(block.thinking)
+            chars += _utf16_length(block.thinking)
         else:
-            chars += len(block.name) + len(_safe_json(block.arguments))
+            chars += _utf16_length(block.name) + _utf16_length(_safe_json(block.arguments))
     return math.ceil(chars / CHARS_PER_TOKEN)
 
 

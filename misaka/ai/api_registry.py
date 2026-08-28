@@ -66,6 +66,22 @@ def get_api_provider(api: Api) -> ApiProvider | None:
     return entry.provider if entry else None
 
 
+def get_api_providers() -> list[ApiProvider]:
+    """Every registered api provider, in registration order."""
+    return [entry.provider for entry in _api_provider_registry.values()]
+
+
+def unregister_api_providers(source_id: str) -> None:
+    """Remove only what ``source_id`` registered.
+
+    ``register_api_provider`` has always recorded the source; nothing read it, so an
+    extension that registered an api had no way to take just its own back out -- the only
+    lever was ``clear_api_providers``, which takes everyone's.
+    """
+    for api in [api for api, entry in _api_provider_registry.items() if entry.source_id == source_id]:
+        del _api_provider_registry[api]
+
+
 def clear_api_providers() -> None:
     _api_provider_registry.clear()
 

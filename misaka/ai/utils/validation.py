@@ -271,10 +271,57 @@ def _validate_pydantic_tool_arguments(tool: Tool, tool_call: ToolCall) -> Any:
     return validated.model_dump(mode="python")
 
 
+def _normalize_optional_nulls(value: Any, schema: Any) -> None:
+    """Drop a ``null`` sent for an optional property that cannot hold one.
+
+    Models emit ``{"limit": null}`` to mean "I am not passing limit". Upstream deletes the
+    key before validating, so the tool sees no ``limit`` at all. Without this the null
+    reaches the coercion pass instead, which turns it into that type's zero value -- a
+    search told ``limit=0`` returns nothing, where the same call in pi would have used the
+    tool's own default. The value is edited in place, as upstream's is.
+
+    Only *optional* properties, and only where the property's own schema rejects null: a
+    field declared nullable keeps its null, and a required one is left to fail validation
+    with a message that names it.
+    """
+    if isinstance(value, list):
+        items = schema.get("items") if _is_json_schema_object(schema) else None
+        if isinstance(items, list):
+            for index, item_schema in enumerate(items):
+                if index < len(value) and _is_json_schema_object(item_schema):
+                    _normalize_optional_nulls(value[index], item_schema)
+        elif _is_json_schema_object(items):
+            for item in value:
+                _normalize_optional_nulls(item, items)
+        return
+
+    if not isinstance(value, dict) or not _is_json_schema_object(schema):
+        return
+    properties = schema.get("properties")
+    if not isinstance(properties, Mapping):
+        return
+
+    required = set(schema.get("required") or [])
+    for key, property_schema in properties.items():
+        if key not in value:
+            continue
+        if (
+            value[key] is None
+            and key not in required
+            and not (_is_json_schema_object(property_schema) and isinstance(property_schema.get("$ref"), str))
+            and _is_json_schema_object(property_schema)
+            and not _schema_validates(None, property_schema)
+        ):
+            del value[key]
+        else:
+            _normalize_optional_nulls(value[key], property_schema)
+
+
 def _validate_json_schema_tool_arguments(tool: Tool, tool_call: ToolCall) -> Any:
     assert isinstance(tool.parameters, Mapping)
     schema = tool.parameters
     args = deepcopy(tool_call.arguments)
+    _normalize_optional_nulls(args, schema)
     coerced = _coerce_with_json_schema(args, schema)
     validator = _get_validator(schema)
     errors = sorted(validator.iter_errors(coerced), key=lambda error: list(error.absolute_path))
