@@ -28,7 +28,12 @@ from misaka.ai.providers.cloudflare import (
     resolve_cloudflare_base_url,
 )
 from misaka.ai.providers.constrained_sampling import (
+    GrammarToolInputJsonBuffer,
+    append_grammar_tool_input_json_delta,
+    create_grammar_tool_input_properties,
+    get_grammar_tool_input,
     get_json_schema_tool_parameters,
+    resolve_grammar_constrained_sampling,
     resolve_json_schema_strict_sampling,
 )
 from misaka.ai.providers.github_copilot_headers import (
@@ -278,6 +283,11 @@ def stream_openai_completions(
             tool_call_index_by_stream_index: dict[int, int] = {}
             tool_call_index_by_id: dict[str, int] = {}
             tool_call_partial_args: dict[int, StreamingArgs] = {}
+            # One JSON re-encoder per grammar tool call in flight.
+            tool_call_custom_buffers: dict[int, GrammarToolInputJsonBuffer] = {}
+            grammar_tool_input_properties = create_grammar_tool_input_properties(
+                context.tools, bool(get_compat(model).get("supportsOpenAIGrammarTools"))
+            )
 
             def content_index_for(block: TextContent | ThinkingContent | ToolCall) -> int:
                 return output.content.index(block)
@@ -418,11 +428,38 @@ def stream_openai_completions(
                         if not block.id and isinstance(tool_id, str):
                             block.id = tool_id
                             tool_call_index_by_id[tool_id] = content_index
-                        if not block.name and isinstance(function, Mapping) and isinstance(function.get("name"), str):
-                            block.name = function["name"]
+                        custom = tool_call.get("custom")
+                        is_custom = isinstance(custom, Mapping) and not isinstance(function, Mapping)
+                        if not block.name:
+                            for source in (function, custom):
+                                if isinstance(source, Mapping) and isinstance(source.get("name"), str):
+                                    block.name = source["name"]
+                                    break
 
                         tool_delta = ""
-                        if isinstance(function, Mapping) and isinstance(function.get("arguments"), str):
+                        if is_custom:
+                            # A grammar tool streams free text, not JSON. It is surfaced as an
+                            # ordinary tool call whose single argument is that text, and the
+                            # delta is re-encoded as the growing JSON of that one property --
+                            # consumers of `toolcall_delta` are fed JSON either way.
+                            property_name = grammar_tool_input_properties.get(block.name) or "input"
+                            buffer = tool_call_custom_buffers.get(content_index)
+                            if buffer is None:
+                                buffer = GrammarToolInputJsonBuffer()
+                                tool_call_custom_buffers[content_index] = buffer
+                                block.arguments = {property_name: ""}
+                            existing = block.arguments.get(property_name)
+                            next_input = (existing if isinstance(existing, str) else "") + str(
+                                custom.get("input") or ""
+                            )
+                            tool_delta = (
+                                append_grammar_tool_input_json_delta(
+                                    buffer, property_name, next_input, False
+                                )
+                                or ""
+                            )
+                            block.arguments = {property_name: next_input}
+                        elif isinstance(function, Mapping) and isinstance(function.get("arguments"), str):
                             tool_delta = function["arguments"]
                             accumulated = tool_call_partial_args.setdefault(content_index, StreamingArgs())
                             accumulated.append(tool_delta)
@@ -588,7 +625,10 @@ def build_params(
 ) -> dict[str, Any]:
     compat = compat or get_compat(model)
     resolved_cache_retention = resolve_cache_retention(_option(options, "cacheRetention") if cache_retention is None else cache_retention)
-    messages = convert_messages(model, context, compat)
+    grammar_tool_input_properties = create_grammar_tool_input_properties(
+        context.tools, bool(compat.get("supportsOpenAIGrammarTools"))
+    )
+    messages = convert_messages(model, context, compat, grammar_tool_input_properties)
     cache_control = get_compat_cache_control(compat, resolved_cache_retention)
 
     params: dict[str, Any] = {
@@ -813,10 +853,37 @@ def add_cache_control_to_text_content(message: dict[str, Any], cache_control: di
     return False
 
 
+def _replay_tool_call(tool_call: ToolCall, grammar_properties: Mapping[str, str]) -> dict[str, Any]:
+    """One prior tool call, on whichever channel it came back from.
+
+    A grammar tool's call carried free text, not JSON arguments, and has to be replayed the
+    same way -- sending it back as a `function` call with stringified arguments is not the
+    message the model produced.
+    """
+    custom_input_property = grammar_properties.get(tool_call.name)
+    if custom_input_property is not None:
+        return {
+            "id": tool_call.id,
+            "type": "custom",
+            "custom": {
+                "name": tool_call.name,
+                "input": sanitize_surrogates(
+                    get_grammar_tool_input(tool_call.name, tool_call.arguments, custom_input_property)
+                ),
+            },
+        }
+    return {
+        "id": tool_call.id,
+        "type": "function",
+        "function": {"name": tool_call.name, "arguments": json.dumps(tool_call.arguments)},
+    }
+
+
 def convert_messages(
     model: Model,
     context: Context,
     compat: Mapping[str, Any],
+    grammar_tool_input_properties: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     params: list[dict[str, Any]] = []
 
@@ -893,11 +960,7 @@ def convert_messages(
             tool_calls = [block for block in message.content if block.type == "toolCall"]
             if tool_calls:
                 assistant_message["tool_calls"] = [
-                    {
-                        "id": tool_call.id,
-                        "type": "function",
-                        "function": {"name": tool_call.name, "arguments": json.dumps(tool_call.arguments)},
-                    }
+                    _replay_tool_call(tool_call, grammar_tool_input_properties or {})
                     for tool_call in tool_calls
                 ]
                 reasoning_details = []
@@ -981,6 +1044,29 @@ def convert_messages(
 def convert_tools(tools: list[Tool], compat: Mapping[str, Any]) -> list[dict[str, Any]]:
     converted: list[dict[str, Any]] = []
     for tool in tools:
+        grammar = resolve_grammar_constrained_sampling(
+            tool, bool(compat.get("supportsOpenAIGrammarTools"))
+        )
+        if grammar:
+            # A grammar tool is not a function tool: the model emits free text the grammar
+            # constrains, and it comes back as a `custom` tool call rather than JSON
+            # arguments. Note the extra nesting -- completions wraps the grammar one level
+            # deeper than the responses API does.
+            converted.append(
+                {
+                    "type": "custom",
+                    "custom": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "format": {
+                            "type": "grammar",
+                            "grammar": {"syntax": grammar.format, "definition": grammar.definition},
+                        },
+                    },
+                }
+            )
+            continue
+
         strict = resolve_json_schema_strict_sampling(tool, compat.get("supportsStrictMode") is not False)
         function_spec: dict[str, Any] = {
             "name": tool.name,
