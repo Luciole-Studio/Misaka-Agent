@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
 from typing import Any, Literal, TypedDict
 
 try:
@@ -312,6 +312,10 @@ def stream_openai_completions(
                     stream.push(TextStartEvent(contentIndex=content_index_for(text_block), partial=output))
                 return text_block
 
+            # Every `reasoning_details` entry this stream carried, merged as upstream merges
+            # them, and stashed on the thinking block's signature when the stream ends.
+            streamed_reasoning_details: list[dict[str, Any]] = []
+
             def ensure_thinking_block(thinking_signature: str) -> ThinkingContent:
                 nonlocal thinking_block
                 if thinking_block is None:
@@ -469,15 +473,28 @@ def stream_openai_completions(
                 reasoning_details = delta.get("reasoning_details")
                 if isinstance(reasoning_details, list):
                     for detail in reasoning_details:
-                        if not isinstance(detail, Mapping):
+                        if not _is_openai_reasoning_detail(detail):
                             continue
-                        if detail.get("type") == "reasoning.encrypted" and isinstance(detail.get("id"), str) and detail.get("data"):
+                        # Provider replay data lives in the thinking block's signature slot.
+                        # These arrive as deltas, so they are merged rather than appended --
+                        # see `append_openai_reasoning_detail`.
+                        ensure_thinking_block("")
+                        append_openai_reasoning_detail(streamed_reasoning_details, detail)
+                        if (
+                            detail.get("type") == "reasoning.encrypted"
+                            and isinstance(detail.get("id"), str)
+                            and detail.get("data")
+                        ):
                             tool_index = tool_call_index_by_id.get(detail["id"])
-                            if tool_index is None:
-                                continue
-                            block = output.content[tool_index]
-                            if isinstance(block, ToolCall):
-                                block.thoughtSignature = json.dumps(detail, separators=(",", ":"))
+                            if tool_index is not None:
+                                block = output.content[tool_index]
+                                if isinstance(block, ToolCall):
+                                    block.thoughtSignature = json.dumps(detail, separators=(",", ":"))
+
+            if streamed_reasoning_details and thinking_block is not None:
+                thinking_block.thinkingSignature = json.dumps(
+                    streamed_reasoning_details, separators=(",", ":")
+                )
 
             for block in list(output.content):
                 finish_block(block)
@@ -678,8 +695,16 @@ def build_params(
         if value is not None and key not in params:
             params[key] = value
 
-    if context.tools:
-        params["tools"] = convert_tools(context.tools, compat)
+    # Kimi delivers a deferred tool by declaring it in a system message next to the result
+    # that made it available, so it must not also appear in the request's own tool list.
+    deferred_tool_names = (
+        _deferred_tool_names(context.messages)
+        if compat.get("deferredToolsMode") == "kimi"
+        else set()
+    )
+    active_tools = [tool for tool in (context.tools or []) if tool.name not in deferred_tool_names]
+    if active_tools:
+        params["tools"] = convert_tools(active_tools, compat)
         if compat.get("zaiToolStream"):
             _set_extra(params, "tool_stream", True)
     elif has_tool_history(context.messages):
@@ -853,6 +878,112 @@ def add_cache_control_to_text_content(message: dict[str, Any], cache_control: di
     return False
 
 
+OPENAI_COMPLETIONS_REASONING_FIELDS = ("reasoning", "reasoning_content", "reasoning_text")
+
+
+def _has_valid_common_reasoning_detail_fields(candidate: Mapping[str, Any]) -> bool:
+    return (
+        candidate.get("id") is None or isinstance(candidate.get("id"), str)
+    ) and (
+        "format" not in candidate or isinstance(candidate.get("format"), str)
+    ) and (
+        "index" not in candidate or isinstance(candidate.get("index"), (int, float))
+    )
+
+
+def _is_openai_reasoning_detail(detail: Any) -> bool:
+    """One entry of OpenRouter's ``reasoning_details``, in any of its three shapes."""
+    if not isinstance(detail, Mapping) or not _has_valid_common_reasoning_detail_fields(detail):
+        return False
+    kind = detail.get("type")
+    if kind == "reasoning.summary":
+        return isinstance(detail.get("summary"), str)
+    if kind == "reasoning.encrypted":
+        return isinstance(detail.get("data"), str)
+    if kind == "reasoning.text":
+        return isinstance(detail.get("text"), str) and (
+            detail.get("signature") is None or isinstance(detail.get("signature"), str)
+        )
+    return False
+
+
+def _fill_missing_common_reasoning_detail_fields(target: dict[str, Any], source: Mapping[str, Any]) -> None:
+    if target.get("id") is None and source.get("id") is not None:
+        target["id"] = source["id"]
+    if not target.get("format") and source.get("format"):
+        target["format"] = source["format"]
+    if target.get("index") is None and source.get("index") is not None:
+        target["index"] = source["index"]
+
+
+def append_openai_reasoning_detail(details: list[dict[str, Any]], detail: Mapping[str, Any]) -> None:
+    """Merge a streamed detail into the run, the way upstream's replay expects to read it.
+
+    OpenRouter streams these as deltas: consecutive text or summary entries are one logical
+    entry arriving in pieces, while an encrypted entry is opaque and stays discrete. Pushing
+    every delta as its own entry would replay the reasoning as hundreds of fragments.
+    """
+    last = details[-1] if details else None
+    kind = detail.get("type")
+    if kind == "reasoning.text" and last is not None and last.get("type") == "reasoning.text":
+        last["text"] = last.get("text", "") + detail.get("text", "")
+        if not last.get("signature") and detail.get("signature"):
+            last["signature"] = detail["signature"]
+        _fill_missing_common_reasoning_detail_fields(last, detail)
+        return
+    if kind == "reasoning.summary" and last is not None and last.get("type") == "reasoning.summary":
+        last["summary"] = last.get("summary", "") + detail.get("summary", "")
+        _fill_missing_common_reasoning_detail_fields(last, detail)
+        return
+    details.append(dict(detail))
+
+
+def parse_openai_reasoning_details(signature: str | None) -> list[dict[str, Any]] | None:
+    """A whole run of details, as stashed on a thinking block's signature."""
+    if not signature:
+        return None
+    try:
+        parsed = json.loads(signature)
+    except ValueError:
+        return None
+    if isinstance(parsed, list) and parsed and all(_is_openai_reasoning_detail(d) for d in parsed):
+        return parsed
+    return None
+
+
+def parse_legacy_encrypted_reasoning_detail(signature: str | None) -> dict[str, Any] | None:
+    """The older single-encrypted-entry form, stashed on a tool call instead."""
+    if not signature:
+        return None
+    try:
+        parsed = json.loads(signature)
+    except ValueError:
+        return None
+    if (
+        _is_openai_reasoning_detail(parsed)
+        and parsed.get("type") == "reasoning.encrypted"
+        and isinstance(parsed.get("id"), str)
+        and parsed["id"]
+        and parsed.get("data")
+    ):
+        return parsed
+    return None
+
+
+def _deferred_tool_names(messages: list[Any]) -> set[str]:
+    """Tool names the transcript says became available part-way through."""
+    names: set[str] = set()
+    for message in messages:
+        if getattr(message, "role", None) == "toolResult":
+            names.update(message.addedToolNames or [])
+    return names
+
+
+def _tools_by_name(tools: list[Tool] | None, names: Iterable[str]) -> list[Tool]:
+    by_name = {tool.name: tool for tool in tools or []}
+    return [by_name[name] for name in names if name in by_name]
+
+
 def _replay_tool_call(tool_call: ToolCall, grammar_properties: Mapping[str, str]) -> dict[str, Any]:
     """One prior tool call, on whichever channel it came back from.
 
@@ -957,22 +1088,41 @@ def convert_messages(
             elif assistant_text:
                 assistant_message["content"] = assistant_text
 
+            thinking_blocks = [block for block in message.content if block.type == "thinking"]
             tool_calls = [block for block in message.content if block.type == "toolCall"]
+            # A whole run stashed on a thinking block wins over the older per-tool-call
+            # single encrypted entry, which is what upstream falls back to.
+            preserved_reasoning_details: list[dict[str, Any]] | None = next(
+                (
+                    parsed
+                    for parsed in (
+                        parse_openai_reasoning_details(block.thinkingSignature)
+                        for block in thinking_blocks
+                    )
+                    if parsed is not None
+                ),
+                None,
+            )
+            if preserved_reasoning_details is None:
+                legacy = [
+                    detail
+                    for detail in (
+                        parse_legacy_encrypted_reasoning_detail(tool_call.thoughtSignature)
+                        for tool_call in tool_calls
+                    )
+                    if detail is not None
+                ]
+                preserved_reasoning_details = legacy or None
             if tool_calls:
                 assistant_message["tool_calls"] = [
                     _replay_tool_call(tool_call, grammar_tool_input_properties or {})
                     for tool_call in tool_calls
                 ]
-                reasoning_details = []
-                for tool_call in tool_calls:
-                    if not tool_call.thoughtSignature:
-                        continue
-                    try:
-                        reasoning_details.append(json.loads(tool_call.thoughtSignature))
-                    except ValueError:
-                        continue
-                if reasoning_details:
-                    assistant_message["reasoning_details"] = reasoning_details
+
+            # Outside the tool-call branch, as upstream is: a turn that only thought and
+            # answered still has reasoning to replay.
+            if preserved_reasoning_details:
+                assistant_message["reasoning_details"] = preserved_reasoning_details
 
             if (
                 compat.get("requiresReasoningContentOnAssistantMessages")
@@ -993,6 +1143,7 @@ def convert_messages(
 
         if message.role == "toolResult":
             image_blocks: list[dict[str, Any]] = []
+            turn_deferred_tool_names: set[str] = set()
             lookahead = index
             while lookahead < len(transformed_messages) and transformed_messages[lookahead].role == "toolResult":
                 tool_message = transformed_messages[lookahead]
@@ -1009,6 +1160,9 @@ def convert_messages(
                 if compat.get("requiresToolResultName") and tool_message.toolName:
                     tool_result_message["name"] = tool_message.toolName
                 params.append(tool_result_message)
+
+                if compat.get("deferredToolsMode") == "kimi":
+                    turn_deferred_tool_names.update(tool_message.addedToolNames or [])
 
                 if has_images and "image" in model.input:
                     for block in tool_message.content:
@@ -1033,6 +1187,13 @@ def convert_messages(
                 last_role = "user"
             else:
                 last_role = "toolResult"
+
+            if turn_deferred_tool_names:
+                deferred_tools = _tools_by_name(context.tools, turn_deferred_tool_names)
+                if deferred_tools:
+                    # Kimi takes a system message carrying tools and no content field --
+                    # that is how a tool that became available mid-conversation is declared.
+                    params.append({"role": "system", "tools": convert_tools(deferred_tools, compat)})
             index = lookahead
             continue
 
