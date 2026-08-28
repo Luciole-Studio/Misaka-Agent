@@ -16,6 +16,7 @@ import httpx
 from misaka.ai.utils.oauth.oauth_page import oauth_error_html, oauth_success_html
 from misaka.ai.utils.oauth.pkce import generate_pkce
 from misaka.ai.utils.oauth.types import OAuthCredentials, OAuthLoginCallbacks
+from misaka.core.provider_attribution import CLIENT_NAME
 
 CALLBACK_HOST = os.environ.get("MISAKA_OAUTH_CALLBACK_HOST", "127.0.0.1")
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -132,7 +133,7 @@ async def _refresh_access_token(refresh_token: str) -> dict[str, Any]:
     }
 
 
-async def _create_authorization_flow(originator: str = "harn") -> dict[str, str]:
+async def _create_authorization_flow(originator: str = CLIENT_NAME) -> dict[str, str]:
     pkce = await generate_pkce()
     verifier = pkce.verifier
     challenge = pkce.challenge
@@ -241,7 +242,7 @@ def _get_account_id(access_token: str) -> str | None:
 
 
 async def login_openai_codex(options: dict[str, Any]) -> OAuthCredentials:
-    auth_flow = await _create_authorization_flow(options.get("originator", "harn"))
+    auth_flow = await _create_authorization_flow(options.get("originator", CLIENT_NAME))
     verifier = auth_flow["verifier"]
     state = auth_flow["state"]
     url = auth_flow["url"]

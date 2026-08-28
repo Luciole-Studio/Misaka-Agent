@@ -27,11 +27,21 @@ from misaka.ai.utils.oauth.github_copilot import (
     normalizeDomain,
     refreshGitHubCopilotToken,
 )
+from misaka.ai.utils.oauth.kimi_coding import (
+    kimiCodingOAuthProvider,
+    loginKimiCoding,
+    refreshKimiCodingToken,
+)
 from misaka.ai.utils.oauth.openai_codex import (
     loginOpenAICodex,
     openaiCodexOAuthProvider,
     refreshOpenAICodexToken,
 )
+from misaka.ai.utils.oauth.openrouter import (
+    loginOpenRouter,
+    openrouterOAuthProvider,
+)
+from misaka.ai.utils.oauth.radius import radius_oauth_provider
 from misaka.ai.utils.oauth.types import (
     OAuthAuthInfo,
     OAuthCredentials,
@@ -45,14 +55,34 @@ from misaka.ai.utils.oauth.types import (
     OAuthSelectOption,
     OAuthSelectPrompt,
 )
+from misaka.ai.utils.oauth.xai import (
+    loginXai,
+    refreshXaiToken,
+    xaiOAuthProvider,
+)
 
 _BUILT_IN_OAUTH_PROVIDERS: list[OAuthProviderInterface] = [
     anthropicOAuthProvider,
     githubCopilotOAuthProvider,
+    kimiCodingOAuthProvider,
     openaiCodexOAuthProvider,
+    openrouterOAuthProvider,
+    radius_oauth_provider,
+    xaiOAuthProvider,
 ]
 
 _oauth_provider_registry: dict[str, OAuthProviderInterface] = {provider.id: provider for provider in _BUILT_IN_OAUTH_PROVIDERS}
+
+
+# pi auth/resolve.ts:117 DEFAULT_OAUTH_MINIMUM_VALIDITY_MS -- a token with under five
+# minutes of validity left is refreshed now, rather than handed to a request that would
+# outlive it.
+OAUTH_MINIMUM_VALIDITY_MS = 5 * 60 * 1000
+
+
+def oauth_credentials_expire_soon(credentials: OAuthCredentials) -> bool:
+    """Whether a stored OAuth token is inside the refresh window."""
+    return int(time.time() * 1000) + OAUTH_MINIMUM_VALIDITY_MS >= credentials.expires
 
 
 class _OAuthApiKeyResult(TypedDict):
@@ -117,7 +147,7 @@ async def get_oauth_api_key(
     if creds is None:
         return None
 
-    if int(time.time() * 1000) >= creds.expires:
+    if oauth_credentials_expire_soon(creds):
         try:
             creds = await _call_refresh_token(provider.refreshToken, creds, signal)
         except Exception as error:
@@ -132,8 +162,10 @@ registerOAuthProvider = register_oauth_provider
 resetOAuthProviders = reset_oauth_providers
 getOAuthProviders = get_oauth_providers
 getOAuthApiKey = get_oauth_api_key
+oauthCredentialsExpireSoon = oauth_credentials_expire_soon
 
 __all__ = [
+    "OAUTH_MINIMUM_VALIDITY_MS",
     "OAuthAuthInfo",
     "OAuthCredentials",
     "OAuthDeviceCodeCompleteResult",
@@ -157,15 +189,25 @@ __all__ = [
     "getOAuthProvider",
     "getOAuthProviders",
     "githubCopilotOAuthProvider",
+    "kimiCodingOAuthProvider",
     "loginAnthropic",
     "loginGitHubCopilot",
+    "loginKimiCoding",
     "loginOpenAICodex",
+    "loginOpenRouter",
+    "loginXai",
     "normalizeDomain",
+    "oauthCredentialsExpireSoon",
     "openaiCodexOAuthProvider",
+    "openrouterOAuthProvider",
     "pollOAuthDeviceCodeFlow",
+    "radius_oauth_provider",
     "refreshAnthropicToken",
     "refreshGitHubCopilotToken",
+    "refreshKimiCodingToken",
     "refreshOpenAICodexToken",
+    "refreshXaiToken",
     "registerOAuthProvider",
     "resetOAuthProviders",
+    "xaiOAuthProvider",
     ]

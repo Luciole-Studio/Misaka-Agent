@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import math
+import time
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urlencode, urlparse
 
@@ -86,7 +89,7 @@ async def _start_device_flow(domain: str) -> dict[str, Any]:
         content=urlencode({"client_id": CLIENT_ID, "scope": "read:user"}).encode(),
     )
     if not isinstance(data, dict):
-        raise RuntimeError("Invalid device code response")  # noqa: TRY004 - callers treat bad input as ValueError
+        raise RuntimeError("Invalid device code response")  # noqa: TRY004 - a malformed remote response is a runtime failure, not a caller type error
     device_code = data.get("device_code")
     user_code = data.get("user_code")
     verification_uri = data.get("verification_uri")
@@ -147,6 +150,9 @@ async def _poll_for_github_access_token(domain: str, device: dict[str, Any], sig
         expiresInSeconds=device.get("expires_in"),
         poll=poll,
         signal=signal,
+        # Upstream sets this: the endpoint rejects a poll that arrives before the
+        # device code is registered (device-code.ts callers).
+        waitBeforeFirstPoll=True,
     )
 
 
@@ -162,9 +168,9 @@ async def refresh_github_copilot_token(refresh_token: str, enterprise_domain: st
         },
     )
     if not isinstance(raw, dict):
-        raise RuntimeError("Invalid Copilot token response")  # noqa: TRY004 - callers treat bad input as ValueError
+        raise RuntimeError("Invalid Copilot token response")  # noqa: TRY004 - a malformed remote response is a runtime failure, not a caller type error
     if not isinstance(raw.get("token"), str) or not isinstance(raw.get("expires_at"), (int, float)):
-        raise RuntimeError("Invalid Copilot token response fields")  # noqa: TRY004 - callers treat bad input as ValueError
+        raise RuntimeError("Invalid Copilot token response fields")  # noqa: TRY004 - a malformed remote response is a runtime failure, not a caller type error
     return OAuthCredentials(
         refresh=refresh_token,
         access=raw["token"],
@@ -194,28 +200,158 @@ async def _enable_github_copilot_model(token: str, model_id: str, enterprise_dom
         return False
 
 
-_ENABLE_CONCURRENCY = 5    # one request per catalog model; do not open them all at once
+COPILOT_API_VERSION = "2025-05-01"
+_MODEL_FETCH_MAX_RETRIES = 2
+_MODEL_FETCH_MAX_ELAPSED_MS = 5000
+_REQUEST_TIMEOUT_SECONDS = 5.0
 
 
-async def _enable_all_github_copilot_models(
-    token: str,
+def _as_record(value: Any) -> dict[str, Any] | None:
+    return value if isinstance(value, dict) else None
+
+
+def parse_github_copilot_model_catalog(
+    raw: Any, allow_policy_fallback: bool
+) -> tuple[list[str], list[str]]:
+    """Split the seat's ``/models`` answer into what it can use and what it could enable.
+
+    Returns ``(availableModelIds, policyModelIds)``. A model whose ``tool_calls`` support
+    is explicitly false is dropped outright -- this agent cannot use one.
+    """
+    data = (_as_record(raw) or {}).get("data")
+    if not isinstance(data, list):
+        # A malformed server answer is a protocol failure, not a caller type error, and
+        # every other failure in this module is reported the same way.
+        raise RuntimeError("Invalid Copilot models response")  # noqa: TRY004
+
+    account_models: list[dict[str, Any]] = []
+    for raw_item in data:
+        item = _as_record(raw_item)
+        model_id = item.get("id") if item else None
+        if not item or not isinstance(model_id, str):
+            continue
+        supports = _as_record((_as_record(item.get("capabilities")) or {}).get("supports"))
+        if supports is not None and supports.get("tool_calls") is False:
+            continue
+        account_models.append(
+            {
+                "id": model_id,
+                "pickerEnabled": item.get("model_picker_enabled") is True,
+                "policyState": (_as_record(item.get("policy")) or {}).get("state"),
+            }
+        )
+
+    picker_model_ids = [
+        model["id"]
+        for model in account_models
+        if model["pickerEnabled"] and model["policyState"] != "disabled"
+    ]
+    use_policy_fallback = allow_policy_fallback and not picker_model_ids
+    if picker_model_ids or not allow_policy_fallback:
+        available_model_ids = picker_model_ids
+    else:
+        # Some Individual accounts report every picker flag false despite explicit enabled
+        # policies; only that endpoint gets the fallback.
+        available_model_ids = [
+            model["id"] for model in account_models if model["policyState"] == "enabled"
+        ]
+
+    catalog_ids = {model.id for model in get_models("github-copilot")}
+    policy_model_ids = [
+        model["id"]
+        for model in account_models
+        if model["policyState"] == "unconfigured"
+        and model["id"] in catalog_ids
+        and (model["pickerEnabled"] or use_policy_fallback)
+    ]
+    return available_model_ids, policy_model_ids
+
+
+async def _fetch_with_rate_limit_retry(
+    url: str,
+    headers: dict[str, str],
+    signal: Any,
+    max_retries: int,
+    max_elapsed_ms: int,
+) -> httpx.Response:
+    """GET with 429 backoff, bounded by both a retry count and a wall-clock budget."""
+    deadline = (
+        time.monotonic() + max_elapsed_ms / 1000 if max_retries > 0 and max_elapsed_ms > 0 else None
+    )
+    async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_SECONDS) as client:
+        for retry in range(max_retries + 1):
+            response = await client.get(url, headers=headers)
+            if response.status_code != 429 or retry == max_retries:
+                return response
+
+            delay_ms: float = 500 * 2**retry
+            retry_after = response.headers.get("retry-after")
+            if retry_after:
+                try:
+                    delay_ms = float(retry_after) * 1000
+                except ValueError:
+                    parsed = parsedate_to_datetime(retry_after)
+                    if parsed is None:
+                        return response
+                    delay_ms = (parsed.timestamp() - time.time()) * 1000
+                if not math.isfinite(delay_ms):
+                    return response
+            delay_ms = max(0.0, delay_ms)
+            if deadline is not None and delay_ms / 1000 >= deadline - time.monotonic():
+                return response
+            if signal_aborted(signal):
+                raise RuntimeError("Login cancelled")
+            await asyncio.sleep(delay_ms / 1000)
+    raise RuntimeError("unreachable")  # pragma: no cover - the loop always returns
+
+
+async def fetch_github_copilot_models(
+    copilot_token: str,
     enterprise_domain: str | None = None,
-    on_progress: Any = None,
-) -> None:
-    models = get_models("github-copilot")
-    limit = asyncio.Semaphore(_ENABLE_CONCURRENCY)
+    signal: Any = None,
+    max_retries: int = _MODEL_FETCH_MAX_RETRIES,
+    max_elapsed_ms: int = _MODEL_FETCH_MAX_ELAPSED_MS,
+) -> tuple[list[str], list[str]]:
+    base_url = get_github_copilot_base_url(copilot_token, enterprise_domain)
+    allow_policy_fallback = base_url == "https://api.individual.githubcopilot.com"
+    response = await _fetch_with_rate_limit_retry(
+        f"{base_url}/models",
+        {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {copilot_token}",
+            **COPILOT_HEADERS,
+            "X-GitHub-Api-Version": COPILOT_API_VERSION,
+        },
+        signal,
+        max_retries,
+        max_elapsed_ms,
+    )
+    if not response.is_success:
+        raise RuntimeError(f"{response.status_code} {response.reason_phrase}: {response.text}")
+    return parse_github_copilot_model_catalog(response.json(), allow_policy_fallback)
 
-    async def enable(model_id: str) -> None:
-        async with limit:
-            await _enable_and_report(model_id, token, enterprise_domain, on_progress)
 
-    await asyncio.gather(*[enable(model.id) for model in models])
+async def _enable_github_copilot_models(
+    token: str,
+    model_ids: list[str],
+    enterprise_domain: str | None,
+    signal: Any = None,
+) -> list[str]:
+    """Enable each model in turn, stopping at the first failure.
 
-
-async def _enable_and_report(model_id: str, token: str, enterprise_domain: str | None, on_progress: Any) -> None:
-    success = await _enable_github_copilot_model(token, model_id, enterprise_domain)
-    if on_progress is not None:
-        on_progress(model_id, success)
+    Sequential and fail-fast, as upstream is: the policy endpoint is rate limited, and a
+    failure part-way usually means the whole burst would fail too.
+    """
+    enabled: list[str] = []
+    for model_id in model_ids:
+        if signal_aborted(signal):
+            raise RuntimeError("Login cancelled")
+        try:
+            if await _enable_github_copilot_model(token, model_id, enterprise_domain):
+                enabled.append(model_id)
+        except Exception:  # noqa: BLE001 - one refusal ends the batch, it does not fail login
+            break
+    return enabled
 
 
 async def login_github_copilot(options: dict[str, Any]) -> OAuthCredentials:
@@ -249,10 +385,23 @@ async def login_github_copilot(options: dict[str, Any]) -> OAuthCredentials:
 
     github_access_token = await _poll_for_github_access_token(domain, device, signal)
     credentials = await refresh_github_copilot_token(github_access_token, enterprise_domain)
-    if options.get("onProgress") is not None:
-        options["onProgress"]("Enabling models...")
-    await _enable_all_github_copilot_models(credentials.access, enterprise_domain)
-    return credentials
+
+    # Ask the seat what it actually has rather than enabling every catalog model blindly:
+    # the list is what `filterModels` narrows the provider's models to, and enabling only
+    # the unconfigured ones turns a burst of one request per catalog entry into a few.
+    available_model_ids, policy_model_ids = await fetch_github_copilot_models(
+        credentials.access, enterprise_domain, signal
+    )
+    enabled_model_ids: list[str] = []
+    if policy_model_ids:
+        if options.get("onProgress") is not None:
+            options["onProgress"]("Enabling models...")
+        enabled_model_ids = await _enable_github_copilot_models(
+            credentials.access, policy_model_ids, enterprise_domain, signal
+        )
+    return credentials.model_copy(
+        update={"availableModelIds": list(dict.fromkeys([*available_model_ids, *enabled_model_ids]))}
+    )
 
 
 class _GitHubCopilotOAuthProvider:
@@ -276,6 +425,26 @@ class _GitHubCopilotOAuthProvider:
 
     def getApiKey(self, credentials: OAuthCredentials) -> str:
         return credentials.access
+
+    def getBaseUrl(self, credentials: OAuthCredentials) -> str:
+        """The endpoint this particular seat has to talk to.
+
+        Copilot hands each seat its proxy in the token itself (``proxy-ep=``), and an
+        enterprise install answers on its own host entirely. Upstream returns it from
+        ``toAuth`` alongside the key (``auth/oauth/github-copilot.ts:501-506``); misaka's
+        older flow contract has no slot for it, so this optional method is that slot --
+        ``ai/auth/oauth_bridge.py`` uses it when a flow offers one.
+
+        This covers the ``ai/auth`` path only. Without it, ``toAuth`` there reports no
+        base URL and the request falls back to the provider's static
+        ``api.individual.githubcopilot.com`` (``ai/provider_definitions.py:625``), which is
+        right for personal accounts and silently wrong for the rest. The legacy
+        ``core/model_registry`` path does not go through here: it reaches ``modifyModels``
+        below, which stamps the same per-credential URL onto the models themselves.
+        """
+        enterprise_url = getattr(credentials, "enterpriseUrl", None)
+        domain = normalize_domain(enterprise_url) if isinstance(enterprise_url, str) and enterprise_url else None
+        return get_github_copilot_base_url(credentials.access, domain)
 
     def modifyModels(self, models: list[Any], credentials: OAuthCredentials) -> list[Any]:
         enterprise_url = getattr(credentials, "enterpriseUrl", None)
