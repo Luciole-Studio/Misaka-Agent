@@ -46,6 +46,12 @@ async def generate_images_openrouter(
     output.timestamp = time.time_ns() // 1_000_000
 
     try:
+        # Upstream reads only `options.apiKey` (ai/src/api/openrouter-images.ts:55, no env
+        # fallback). Both codebases have the same two entry points: the collection resolves
+        # auth and merges it into the options (`ai/images_models_runtime.py`, pi
+        # `images-models.ts`), while the bare facade dispatches straight through the registry
+        # with whatever options it was handed (`ai/images.py`, pi `images.ts`). Upstream lets
+        # the bare path fail; the env fallback here is what keeps it able to generate.
         api_key = options.apiKey if options and options.apiKey else get_env_api_key(model.provider)
         if not api_key:
             raise ValueError(f"No API key available for provider: {model.provider}")
@@ -144,11 +150,18 @@ def _create_client(
     option_headers: dict[str, str] | None = None,
     max_retries: int | None = None,
 ) -> AsyncOpenAI:
-    headers = {}
-    if model.headers:
-        headers.update(model.headers)
-    if option_headers:
-        headers.update(option_headers)
+    # A null header value means "remove this header", not "send None" -- upstream merges
+    # both sources and drops the nulls (`providerHeadersToRecord`, ai/src/utils/headers.ts;
+    # `api/openrouter-images.ts:128`). Passing a None through builds a client fine and then
+    # fails on the first request with `TypeError: Header value must be str or bytes, not
+    # <class 'NoneType'>`.
+    headers: dict[str, str] = {}
+    for source in (model.headers, option_headers):
+        for name, value in (source or {}).items():
+            if value is None:
+                headers.pop(name, None)
+            else:
+                headers[name] = value
     client_kwargs: dict[str, Any] = {
         "api_key": api_key,
         "base_url": model.baseUrl,
