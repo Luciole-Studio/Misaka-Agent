@@ -2305,7 +2305,7 @@ class SubagentManager:
             pass
 
         effort = task.definition.effort
-        if isinstance(effort, str) and effort in {"low", "medium", "high", "xhigh"}:
+        if isinstance(effort, str) and effort in {"low", "medium", "high", "xhigh", "max"}:
             thinking = effort
         elif effort == "max" or isinstance(effort, int):
             thinking = "xhigh"

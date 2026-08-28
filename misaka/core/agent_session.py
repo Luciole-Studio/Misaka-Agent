@@ -30,6 +30,7 @@ from misaka.ai.types import (
     validate_message,
 )
 from misaka.ai.utils.overflow import is_context_overflow, is_recoverable_length
+from misaka.ai.utils.retry import RetryPolicy, is_retryable_assistant_error
 from misaka.core.auth_guidance import (
     format_no_api_key_found_message,
     format_no_model_selected_message,
@@ -107,16 +108,8 @@ _STALE_CONTEXT_MESSAGE = (
     "switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For "
     "reload, do not use the old ctx after await ctx.reload()."
 )
-_THINKING_LEVELS: tuple[ThinkingLevel, ...] = ("off", "minimal", "low", "medium", "high", "xhigh")
-_RETRYABLE_ERROR_PATTERN = re.compile(
-    r"overloaded|provider.?returned.?error|exceeded request buffer limit while retrying upstream|"  # pi fe10558
-    r"rate.?limit|too many requests|429|500|502|503|504|"
-    r"service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|"
-    r"connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|"
-    r"fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|"
-    r"stream ended before message_stop|http2 request did not get a response|timed? out|timeout|"
-    r"terminated|retry delay",
-    re.IGNORECASE,
+_THINKING_LEVELS: tuple[ThinkingLevel, ...] = (
+    "off", "minimal", "low", "medium", "high", "xhigh", "max",
 )
 
 
@@ -1180,6 +1173,7 @@ class AgentSession:
                     self._compactionAbortController.signal,
                     self.thinkingLevel,
                     self.agent.streamFn,
+                    self._summarization_retry_policy(),
                 )
 
             if self._compactionAbortController.signal.aborted:
@@ -1930,6 +1924,7 @@ class AgentSession:
             },
             {
                 "getModel": lambda: self.model,
+                "getScopedModels": lambda: self.scopedModels,
                 "isIdle": lambda: self.isIdle,
                 "getSignal": lambda: self.agent.signal,
                 "abort": lambda: self._extensionAbortHandler() if self._extensionAbortHandler else self._spawn_background(self.abort()),
@@ -2341,15 +2336,29 @@ class AgentSession:
                 return self._is_retryable_error(assistant_message)
         return False
 
-    def _is_retryable_error(self, message: AssistantMessage) -> bool:
-        if message.stopReason != "error" or not message.errorMessage:
-            return False
+    def _summarization_retry_policy(self) -> RetryPolicy:
+        """The retry budget summarization borrows from agent turns (pi #6647).
 
+        pi threads the same `settings.retry` into summarization so one transient stream
+        drop no longer throws away a whole compaction. Only compaction is wired here;
+        branch summaries live in another module and are left to its owner.
+        """
+        settings = self.settingsManager.getRetrySettings()
+        return RetryPolicy(
+            enabled=bool(settings.get("enabled")),
+            maxRetries=int(settings.get("maxRetries", 0) or 0),
+            baseDelayMs=int(settings.get("baseDelayMs", 0) or 0),
+        )
+
+    def _is_retryable_error(self, message: AssistantMessage) -> bool:
+        # Context overflow is handled by compaction, not retry. Everything else is the
+        # shared classifier's call -- the private copy that used to live here predated the
+        # exclusion table, so an out-of-quota 429 was retried three times for nothing.
         context_window = self.model.contextWindow if self.model is not None else 0
         if is_context_overflow(message, context_window):
             return False
 
-        return bool(_RETRYABLE_ERROR_PATTERN.search(message.errorMessage))
+        return is_retryable_assistant_error(message)
 
     async def _prepare_retry(self, message: AssistantMessage) -> bool:
         settings = self.settingsManager.getRetrySettings()
@@ -2634,6 +2643,7 @@ class AgentSession:
                     self._auto_compaction_abort_controller.signal,
                     self.thinkingLevel,
                     self.agent.streamFn,
+                    self._summarization_retry_policy(),
                 )
 
             if self._auto_compaction_abort_controller.signal.aborted:

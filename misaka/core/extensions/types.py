@@ -1009,6 +1009,11 @@ class ExtensionContext(Protocol):
     sessionManager: ReadonlySessionManager
     modelRegistry: ModelRegistry
     model: Model[Any] | None
+    # Models scoped to this session (resolved from `--models` / `enabledModels`), a
+    # read-only snapshot; empty when no scoping is configured (pi types.ts:328).
+    scopedModels: list[Any]
+    # The session's current thinking level (pi types.ts:330).
+    thinkingLevel: Any
     signal: AbortSignal | None
 
     def isIdle(self) -> bool: ...
@@ -1069,6 +1074,7 @@ class ExtensionActions(Protocol):
 
 class ExtensionContextActions(Protocol):
     getModel: Callable[[], Model[Any] | None]
+    getScopedModels: Callable[[], list[Any]]
     isIdle: Callable[[], bool]
     getSignal: Callable[[], AbortSignal | None]
     abort: Callable[[], None]

@@ -157,7 +157,11 @@ def _truncate_for_summary(text: str, max_chars: int) -> str:
 
 def _safe_json_stringify(value: Any) -> str:
     try:
-        serialized = json.dumps(value)
+        # Compact and unescaped, like `JSON.stringify`: the result is measured by length
+        # for the chars/4 token estimate, and default ASCII escaping turns every CJK
+        # character into six -- inflating estimates on non-ASCII content by 2-3x, which
+        # made compaction fire far too early for those sessions.
+        serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     except (TypeError, ValueError):
         return "[unserializable]"
     return serialized if serialized is not None else "undefined"

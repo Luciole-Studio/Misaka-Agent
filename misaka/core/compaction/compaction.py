@@ -18,6 +18,7 @@ from misaka.ai.types import (
     Usage,
     UserMessage,
 )
+from misaka.ai.utils.retry import RetryPolicy, retry_assistant_call
 from misaka.core.compaction.utils import (
     SUMMARIZATION_SYSTEM_PROMPT as _SUMMARIZATION_SYSTEM_PROMPT,
 )
@@ -218,10 +219,17 @@ def estimate_tokens(message: AgentMessage) -> int:
             chars = len(content)
         elif isinstance(content, list):
             for block in content:
-                if read_field(block, "type") == "text":
+                block_type = read_field(block, "type")
+                if block_type == "text":
                     text = read_field(block, "text")
                     if isinstance(text, str):
                         chars += len(text)
+                elif block_type == "image":
+                    # Same flat allowance the toolResult branch below applies (and
+                    # upstream's estimateTextAndImageContentChars, compaction.ts:246-260).
+                    # Counting user images as zero made an image-heavy prefix look small,
+                    # so compaction fired later than the window could actually afford.
+                    chars += 4800
         return max(0, math.ceil(chars / 4))
 
     if role == "assistant":
@@ -353,13 +361,25 @@ async def _complete_summarization(
     context: dict[str, Any],
     options: SimpleStreamOptions,
     stream_fn: StreamFn | None = None,
+    retry: RetryPolicy | None = None,
 ) -> AssistantMessage:
-    if stream_fn is None:
-        return await complete_simple(model, context, options)
-    stream = stream_fn(model, context, options)
-    if inspect.isawaitable(stream):
-        stream = await stream
-    return await stream.result()
+    """The one choke point every summarization call goes through (pi #6647).
+
+    Compaction used to make a single un-retried call, so one transient mid-stream socket
+    death ("terminated") failed the whole compaction and the session kept its full
+    context. Wrapping the call in the shared retry policy makes transient drops cost a
+    backoff instead; deterministic errors and aborts still return on the first attempt.
+    """
+
+    async def produce() -> AssistantMessage:
+        if stream_fn is None:
+            return await complete_simple(model, context, options)
+        stream = stream_fn(model, context, options)
+        if inspect.isawaitable(stream):
+            stream = await stream
+        return await stream.result()
+
+    return await retry_assistant_call(produce, retry, options.signal)
 
 
 async def generate_summary(
@@ -373,6 +393,7 @@ async def generate_summary(
     previous_summary: str | None = None,
     thinking_level: ThinkingLevel | None = None,
     stream_fn: StreamFn | None = None,
+    retry: RetryPolicy | None = None,
 ) -> str:
     max_tokens = min(
         math.floor(0.8 * reserve_tokens),
@@ -397,6 +418,7 @@ async def generate_summary(
         },
         _create_summarization_options(model, int(max_tokens), api_key, headers, signal, thinking_level),
         stream_fn,
+        retry,
     )
     if response.stopReason == "error":
         raise RuntimeError(f"Summarization failed: {response.errorMessage or 'Unknown error'}")
@@ -477,6 +499,7 @@ async def compact(
     signal: Any | None = None,
     thinking_level: ThinkingLevel | None = None,
     stream_fn: StreamFn | None = None,
+    retry: RetryPolicy | None = None,
 ) -> CompactionResult:
     if preparation.isSplitTurn and preparation.turnPrefixMessages:
         history_result, turn_prefix_result = await asyncio.gather(
@@ -491,6 +514,7 @@ async def compact(
                 preparation.previousSummary,
                 thinking_level,
                 stream_fn,
+                retry,
             )
             if preparation.messagesToSummarize
             else _resolved("No prior history."),
@@ -503,6 +527,7 @@ async def compact(
                 signal,
                 thinking_level,
                 stream_fn,
+                retry,
             ),
         )
         summary = f"{history_result}\n\n---\n\n**Turn Context (split turn):**\n\n{turn_prefix_result}"
@@ -518,6 +543,7 @@ async def compact(
             preparation.previousSummary,
             thinking_level,
             stream_fn,
+            retry,
         )
 
     file_lists = compute_file_lists(preparation.fileOps)
@@ -618,6 +644,7 @@ async def _generate_turn_prefix_summary(
     signal: Any | None = None,
     thinking_level: ThinkingLevel | None = None,
     stream_fn: StreamFn | None = None,
+    retry: RetryPolicy | None = None,
 ) -> str:
     max_tokens = min(
         math.floor(0.5 * reserve_tokens),
@@ -633,6 +660,7 @@ async def _generate_turn_prefix_summary(
         },
         _create_summarization_options(model, int(max_tokens), api_key, headers, signal, thinking_level),
         stream_fn,
+        retry,
     )
     if response.stopReason == "error":
         raise RuntimeError(f"Turn prefix summarization failed: {response.errorMessage or 'Unknown error'}")

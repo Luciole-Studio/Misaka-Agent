@@ -19,7 +19,8 @@ LEVEL_DESCRIPTIONS: dict[ThinkingLevel, str] = {
     "low": "Light reasoning (~2k tokens)",
     "medium": "Moderate reasoning (~8k tokens)",
     "high": "Deep reasoning (~16k tokens)",
-    "xhigh": "Maximum reasoning (budget clamps to high, ~16k)",
+    "xhigh": "Extra-high reasoning (budget clamps to high, ~16k)",
+    "max": "Maximum reasoning (budget clamps to high, ~16k)",
 }
 
 # Adaptive models send an `output_config.effort` keyword instead of a budget,
@@ -31,6 +32,7 @@ ADAPTIVE_LEVEL_DESCRIPTIONS: dict[ThinkingLevel, str] = {
     "medium": 'Adaptive effort "medium"',
     "high": 'Adaptive effort "high"',
     "xhigh": "Adaptive effort from model map",
+    "max": "Adaptive effort from model map",
 }
 
 

@@ -155,6 +155,9 @@ class Theme:
             "medium": "thinkingMedium",
             "high": "thinkingHigh",
             "xhigh": "thinkingXhigh",
+            # `max` shares xhigh's colour rather than introducing a token every theme
+            # would have to define; it is the strongest level either way.
+            "max": "thinkingXhigh",
         }
         color = mapping.get(level, "thinkingOff")
         return lambda text: self.fg(color, text)

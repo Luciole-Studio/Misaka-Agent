@@ -58,7 +58,9 @@ class Args:
     diagnostics: list[ArgDiagnostic] = field(default_factory=list)
 
 
-VALID_THINKING_LEVELS: tuple[ModelThinkingLevel, ...] = ("off", "minimal", "low", "medium", "high", "xhigh")
+VALID_THINKING_LEVELS: tuple[ModelThinkingLevel, ...] = (
+    "off", "minimal", "low", "medium", "high", "xhigh", "max",
+)
 
 
 def is_valid_thinking_level(level: str) -> bool:

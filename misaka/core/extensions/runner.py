@@ -187,6 +187,18 @@ class _ContextBase:
         return self._extra("model", self._runner.getModel())
 
     @property
+    def scopedModels(self) -> list[Any]:
+        """Read-only snapshot of the session's scoped models (pi runner.ts:756)."""
+        self._runner._assert_active()
+        return self._extra("scopedModels", self._runner.getScopedModels())
+
+    @property
+    def thinkingLevel(self) -> Any:
+        """The session's current thinking level (pi runner.ts:760)."""
+        self._runner._assert_active()
+        return self._extra("thinkingLevel", self._runner.runtime.getThinkingLevel())
+
+    @property
     def signal(self) -> Any | None:
         self._runner._assert_active()
         return self._extra("signal", self._runner.getSignalFn())
@@ -359,6 +371,7 @@ class ExtensionRunner:
     mode: ExtensionMode = "print"
     errorListeners: list[Any] = field(default_factory=list)
     getModel: Any = field(default=lambda: None)
+    getScopedModels: Any = field(default=list)
     isIdleFn: Any = field(default=lambda: True)
     getSignalFn: Any = field(default=lambda: None)
     waitForIdleFn: Any = field(default=lambda: _completed_future())
@@ -399,6 +412,7 @@ class ExtensionRunner:
         self.runtime.setThinkingLevel = _required_action(actions, "setThinkingLevel")
 
         self.getModel = _required_action(context_actions, "getModel")
+        self.getScopedModels = _resolve_action(context_actions, "getScopedModels", self.getScopedModels)
         self.isIdleFn = _required_action(context_actions, "isIdle")
         self.getSignalFn = _required_action(context_actions, "getSignal")
         self.abortFn = _required_action(context_actions, "abort")

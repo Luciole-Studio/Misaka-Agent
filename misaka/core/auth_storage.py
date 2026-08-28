@@ -21,6 +21,7 @@ from misaka.ai.utils.oauth import (
     getOAuthApiKey,
     getOAuthProvider,
     getOAuthProviders,
+    oauthCredentialsExpireSoon,
 )
 from misaka.config import get_auth_path
 from misaka.core.resolve_config_value import resolveConfigValue
@@ -411,6 +412,19 @@ class AuthStorage:
     def logout(self, provider: str) -> None:
         self.remove(provider)
 
+    @staticmethod
+    def _oauthExpiresSoon(credentials: OAuthCredentials) -> bool:
+        """Whether an OAuth token is inside pi's five-minute refresh window.
+
+        pi auth/resolve.ts DEFAULT_OAUTH_MINIMUM_VALIDITY_MS: refreshing only once the
+        token has already expired hands a token to a request that may outlive it, and
+        every in-flight request then fails together. The optimistic check, the
+        authoritative one under the lock and ``getOAuthApiKey`` itself all use this one
+        window -- a narrower check anywhere in the chain would make the lock decide to
+        refresh and the refresher decline to.
+        """
+        return oauthCredentialsExpireSoon(credentials)
+
     async def refreshOAuthTokenWithLock(self, providerId: str) -> dict[str, Any] | None:
         provider = getOAuthProvider(providerId)
         if provider is None:
@@ -426,7 +440,7 @@ class AuthStorage:
                 return LockResult(result=None)
 
             oauth_credential = _coerce_oauth_credentials(credential)
-            if int(time.time() * 1000) < oauth_credential.expires:
+            if not self._oauthExpiresSoon(oauth_credential):
                 return LockResult(
                     result={
                         "apiKey": provider.getApiKey(oauth_credential),
@@ -469,7 +483,7 @@ class AuthStorage:
                 return None
 
             oauth_credential = _coerce_oauth_credentials(credential)
-            needs_refresh = int(time.time() * 1000) >= oauth_credential.expires
+            needs_refresh = self._oauthExpiresSoon(oauth_credential)
             if needs_refresh:
                 try:
                     refreshed = await self.refreshOAuthTokenWithLock(providerId)
@@ -480,7 +494,7 @@ class AuthStorage:
                     updated = _coerce_storage_object(self.data).get(providerId)
                     if isinstance(updated, dict) and updated.get("type") == "oauth":
                         updated_credentials = _coerce_oauth_credentials(updated)
-                        if int(time.time() * 1000) < updated_credentials.expires:
+                        if not self._oauthExpiresSoon(updated_credentials):
                             return provider.getApiKey(updated_credentials)
                     return None
             return provider.getApiKey(oauth_credential)

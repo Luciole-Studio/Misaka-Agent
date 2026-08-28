@@ -124,7 +124,7 @@ def _coerce_fanout(value) -> str:
     return "user_turn"
 
 
-_THINKING_LEVELS = {"minimal", "low", "medium", "high", "xhigh"}
+_THINKING_LEVELS = {"minimal", "low", "medium", "high", "xhigh", "max"}
 
 
 def _clean_slot(slot, *, include_enabled=False):
