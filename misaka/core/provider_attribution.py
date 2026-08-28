@@ -60,13 +60,13 @@ def _is_openrouter(model: Any) -> bool:
 
 
 def _is_nvidia_nim(model: Any) -> bool:
-    return _matches_host(_field(model, "baseUrl"), NVIDIA_NIM_HOST)
+    return _field(model, "provider") == "nvidia" or _matches_host(_field(model, "baseUrl"), NVIDIA_NIM_HOST)
 
 
 def _is_cloudflare(model: Any) -> bool:
     base_url = _field(model, "baseUrl")
     return (
-        _field(model, "provider") == "cloudflare-ai-gateway"
+        _field(model, "provider") in ("cloudflare-workers-ai", "cloudflare-ai-gateway")
         or _matches_host(base_url, CLOUDFLARE_API_HOST)
         or _matches_host(base_url, CLOUDFLARE_AI_GATEWAY_HOST)
     )
