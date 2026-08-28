@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
+import math
 import time
 from collections.abc import AsyncIterable, Mapping
+from functools import lru_cache
 from typing import Any, Literal, TypedDict
 
 from misaka.ai.env_api_keys import get_env_api_key
@@ -409,24 +412,116 @@ def _prepare_sdk_request_kwargs(request_options: Mapping[str, Any]) -> dict[str,
     return sdk_request_kwargs
 
 
+# The names the payload is built under, and what Mistral calls them on the wire. Upstream
+# builds its payload in the SDK's camelCase shape and renames on the way out; this is the
+# same table, applied at the same point.
+_MISTRAL_WIRE_KEYS = (
+    ("topP", "top_p"),
+    ("maxTokens", "max_tokens"),
+    ("randomSeed", "random_seed"),
+    ("responseFormat", "response_format"),
+    ("toolChoice", "tool_choice"),
+    ("presencePenalty", "presence_penalty"),
+    ("frequencyPenalty", "frequency_penalty"),
+    ("parallelToolCalls", "parallel_tool_calls"),
+    ("reasoningEffort", "reasoning_effort"),
+    ("promptMode", "prompt_mode"),
+    ("promptCacheKey", "prompt_cache_key"),
+    ("safePrompt", "safe_prompt"),
+)
+_MISTRAL_WIRE_CHUNK_KEYS = (
+    ("imageUrl", "image_url"),
+    ("documentUrl", "document_url"),
+    ("documentName", "document_name"),
+    ("fileId", "file_id"),
+    ("referenceIds", "reference_ids"),
+    ("inputAudio", "input_audio"),
+)
+_MISTRAL_WIRE_MESSAGE_KEYS = (
+    ("toolCalls", "tool_calls"),
+    ("toolCallId", "tool_call_id"),
+)
+
+
+def get_mistral_cached_prompt_tokens(usage: Any, prompt_tokens: int) -> int:
+    """How many of the prompt tokens Mistral served from its cache.
+
+    Six spellings because the field has moved and the SDK and the raw wire disagree on
+    case; upstream reads all six. Getting this wrong is not cosmetic -- ``cacheRead`` is
+    what the cost calculation bills at the cached rate, so a hardcoded zero charges every
+    cached prompt at full price. It cannot exceed the prompt itself.
+    """
+    for holder, field in (
+        ("promptTokensDetails", "cachedTokens"),
+        ("prompt_tokens_details", "cached_tokens"),
+        ("promptTokenDetails", "cachedTokens"),
+        ("prompt_token_details", "cached_tokens"),
+    ):
+        details = _coalesce_attr(usage, holder)
+        if details is None:
+            continue
+        raw = _coalesce_attr(details, field)
+        if raw is not None:
+            break
+    else:
+        raw = _coalesce_attr(usage, "numCachedTokens", "num_cached_tokens")
+
+    if not isinstance(raw, (int, float)) or isinstance(raw, bool) or not math.isfinite(raw):
+        return 0
+    return min(prompt_tokens, max(0, int(raw)))
+
+
+@lru_cache(maxsize=1)
+def _sdk_chat_stream_fields() -> frozenset[str]:
+    """What the SDK's generated ``stream_async`` will accept as a keyword.
+
+    Upstream POSTs the payload as JSON and every field reaches Mistral untouched. Here it
+    goes through a generated method with a fixed keyword list, so a field it does not
+    declare is a ``TypeError`` raised before the request is sent rather than something
+    the server can ignore. Asking the SDK what it takes keeps the passthrough as wide as
+    the SDK allows instead of as wide as a hand-written list happened to be.
+    """
+    try:
+        # `chat` is bound on the instance, not the class, so the method has to come from
+        # the module that defines it rather than from the client we would construct.
+        from mistralai.client.chat import Chat
+
+        return frozenset(inspect.signature(Chat.stream_async).parameters) - {"self"}
+    except Exception:  # noqa: BLE001
+        # No SDK, or a version that moved the method: fall back to sending everything and
+        # let the SDK complain, which is what upstream's untyped POST does anyway.
+        return frozenset()
+
+
+def _remap_mistral_property(record: dict[str, Any], source: str, target: str) -> None:
+    if source not in record:
+        return
+    record[target] = record.pop(source)
+
+
 def _prepare_sdk_chat_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
-    sdk_payload: dict[str, Any] = {
-        "model": payload["model"],
-        "stream": payload["stream"],
-        "messages": [_prepare_sdk_chat_message(message) for message in payload["messages"]],
-    }
-    if "tools" in payload:
-        sdk_payload["tools"] = payload["tools"]
-    if "temperature" in payload:
-        sdk_payload["temperature"] = payload["temperature"]
-    if "maxTokens" in payload:
-        sdk_payload["max_tokens"] = payload["maxTokens"]
-    if "toolChoice" in payload:
-        sdk_payload["tool_choice"] = payload["toolChoice"]
-    if "promptMode" in payload:
-        sdk_payload["prompt_mode"] = payload["promptMode"]
-    if "reasoningEffort" in payload:
-        sdk_payload["reasoning_effort"] = payload["reasoningEffort"]
+    # Everything the caller put on the payload, not a hand-picked six: `onPayload` exists
+    # so a call site can set a field the builder does not, and an allowlist here silently
+    # dropped every one of them.
+    sdk_payload: dict[str, Any] = dict(payload)
+    for source, target in _MISTRAL_WIRE_KEYS:
+        _remap_mistral_property(sdk_payload, source, target)
+    sdk_payload["messages"] = [_prepare_sdk_chat_message(message) for message in payload["messages"]]
+
+    response_format = sdk_payload.get("response_format")
+    if isinstance(response_format, Mapping):
+        wire_response_format = dict(response_format)
+        _remap_mistral_property(wire_response_format, "jsonSchema", "json_schema")
+        json_schema = wire_response_format.get("json_schema")
+        if isinstance(json_schema, Mapping):
+            wire_json_schema = dict(json_schema)
+            _remap_mistral_property(wire_json_schema, "schemaDefinition", "schema")
+            wire_response_format["json_schema"] = wire_json_schema
+        sdk_payload["response_format"] = wire_response_format
+
+    accepted = _sdk_chat_stream_fields()
+    if accepted:
+        sdk_payload = {key: value for key, value in sdk_payload.items() if key in accepted}
     return sdk_payload
 
 
@@ -438,26 +533,28 @@ def _prepare_sdk_chat_message(message: Mapping[str, Any]) -> dict[str, Any]:
             sdk_message["content"] = [_prepare_sdk_content_chunk(item) for item in content]
         else:
             sdk_message["content"] = content
-    if "toolCalls" in message:
+    for key, value in message.items():
+        if key not in ("role", "content"):
+            sdk_message[key] = value
+    for source, target in _MISTRAL_WIRE_MESSAGE_KEYS:
+        _remap_mistral_property(sdk_message, source, target)
+    if "tool_calls" in sdk_message:
         sdk_message["tool_calls"] = [
             {
                 "id": tool_call["id"],
                 "type": tool_call["type"],
                 "function": dict(tool_call["function"]),
             }
-            for tool_call in message["toolCalls"]
+            for tool_call in sdk_message["tool_calls"]
         ]
-    if "toolCallId" in message:
-        sdk_message["tool_call_id"] = message["toolCallId"]
-    if "name" in message:
-        sdk_message["name"] = message["name"]
     return sdk_message
 
 
 def _prepare_sdk_content_chunk(item: Mapping[str, Any]) -> dict[str, Any]:
-    if item["type"] == "image_url" and "imageUrl" in item:
-        return {"type": "image_url", "image_url": item["imageUrl"]}
-    return dict(item)
+    chunk = dict(item)
+    for source, target in _MISTRAL_WIRE_CHUNK_KEYS:
+        _remap_mistral_property(chunk, source, target)
+    return chunk
 
 
 async def consume_chat_stream(
@@ -488,12 +585,15 @@ async def consume_chat_stream(
 
         usage = _coalesce_attr(chunk, "usage")
         if usage is not None:
-            output.usage.input = int(_coalesce_attr(usage, "prompt_tokens", "promptTokens") or 0)
+            prompt_tokens = int(_coalesce_attr(usage, "prompt_tokens", "promptTokens") or 0)
+            cached_prompt_tokens = get_mistral_cached_prompt_tokens(usage, prompt_tokens)
+            output.usage.input = max(0, prompt_tokens - cached_prompt_tokens)
             output.usage.output = int(_coalesce_attr(usage, "completion_tokens", "completionTokens") or 0)
-            output.usage.cacheRead = 0
+            output.usage.cacheRead = cached_prompt_tokens
             output.usage.cacheWrite = 0
             output.usage.totalTokens = int(
-                _coalesce_attr(usage, "total_tokens", "totalTokens") or (output.usage.input + output.usage.output)
+                _coalesce_attr(usage, "total_tokens", "totalTokens")
+                or (output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite)
             )
             calculate_cost(model, output.usage)
 
