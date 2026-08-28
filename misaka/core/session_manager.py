@@ -1257,7 +1257,26 @@ def _jsonable(value: Any) -> Any:
 
 
 def _dump_json(value: Any) -> str:
-    return json.dumps(_jsonable(value), ensure_ascii=False, separators=(",", ":"))
+    r"""Serialize one entry, keeping non-ASCII readable but never failing to write.
+
+    A provider can stream a lone surrogate: OpenAI-compatible endpoints emit one when an
+    emoji is split across token boundaries, which is why every request builder here runs
+    `sanitize_surrogates` on the way out. Nothing sanitizes on the way *in*, and upstream
+    does not either -- `JSON.stringify` escapes a lone surrogate to `\udXXX` and the write
+    succeeds. Python's `ensure_ascii=False` leaves it in the str, and encoding that to
+    UTF-8 raises, so a single bad chunk used to take down the whole session file.
+
+    Falling back to escaped output for just that entry reproduces upstream's result: the
+    character survives the round trip (`json.loads` gives it back), and every other entry
+    keeps its unescaped CJK.
+    """
+    jsonable = _jsonable(value)
+    dumped = json.dumps(jsonable, ensure_ascii=False, separators=(",", ":"))
+    try:
+        dumped.encode("utf-8")
+    except UnicodeEncodeError:
+        return json.dumps(jsonable, ensure_ascii=True, separators=(",", ":"))
+    return dumped
 
 
 def _dump_jsonl(entries: list[FileEntry]) -> str:
