@@ -3,14 +3,23 @@
 from __future__ import annotations
 
 from misaka.ai.models_generated import MODELS
-from misaka.ai.types import Model, ModelThinkingLevel, Usage, UsageCost
+from misaka.ai.types import (
+    Model,
+    ModelCost,
+    ModelCostTier,
+    ModelThinkingLevel,
+    Usage,
+    UsageCost,
+)
 
 _model_registry: dict[str, dict[str, Model]] = {
     provider: dict(models)
     for provider, models in MODELS.items()
 }
 
-_EXTENDED_THINKING_LEVELS: tuple[ModelThinkingLevel, ...] = ("off", "minimal", "low", "medium", "high", "xhigh")
+_EXTENDED_THINKING_LEVELS: tuple[ModelThinkingLevel, ...] = (
+    "off", "minimal", "low", "medium", "high", "xhigh", "max",
+)
 _MISSING = object()
 
 
@@ -31,10 +40,30 @@ def get_models(provider: str) -> list[Model]:
 
 
 def calculate_cost(model: Model, usage: Usage) -> UsageCost:
-    usage.cost.input = (model.cost.input / 1_000_000) * usage.input
-    usage.cost.output = (model.cost.output / 1_000_000) * usage.output
-    usage.cost.cacheRead = (model.cost.cacheRead / 1_000_000) * usage.cacheRead
-    usage.cost.cacheWrite = (model.cost.cacheWrite / 1_000_000) * usage.cacheWrite
+    """Price one response, honouring pricing bands and Anthropic's 1h cache split.
+
+    Two things here are not obvious from the arithmetic:
+
+    * A tier applies to the **whole** request once its threshold is crossed, not just to
+      the tokens above it -- so the loop picks the single highest matching band rather
+      than accumulating. The comparison counts cached reads and writes as input.
+    * A cache entry written with 1h retention is priced at **2x the base input rate**, not
+      at the cache-write rate.
+    """
+    input_tokens = usage.input + usage.cacheRead + usage.cacheWrite
+    rates: ModelCost | ModelCostTier = model.cost
+    matched_threshold = -1
+    for tier in model.cost.tiers or []:
+        if input_tokens > tier.inputTokensAbove and tier.inputTokensAbove > matched_threshold:
+            rates = tier
+            matched_threshold = tier.inputTokensAbove
+
+    long_write = usage.cacheWrite1h or 0
+    short_write = usage.cacheWrite - long_write
+    usage.cost.input = (rates.input / 1_000_000) * usage.input
+    usage.cost.output = (rates.output / 1_000_000) * usage.output
+    usage.cost.cacheRead = (rates.cacheRead / 1_000_000) * usage.cacheRead
+    usage.cost.cacheWrite = (rates.cacheWrite * short_write + rates.input * 2 * long_write) / 1_000_000
     usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite
     return usage.cost
 
@@ -52,7 +81,8 @@ def get_supported_thinking_levels(model: Model) -> list[ModelThinkingLevel]:
         )
         if mapped is None:
             continue
-        if level == "xhigh":
+        # xhigh and max are opt-in: a model offers them only when its map names one.
+        if level in ("xhigh", "max"):
             if mapped is not _MISSING:
                 supported.append(level)
             continue

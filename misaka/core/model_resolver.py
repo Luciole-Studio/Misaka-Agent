@@ -15,25 +15,29 @@ from misaka.cli.args import isValidThinkingLevel as _isValidThinkingLevel
 from misaka.core.defaults import DEFAULT_THINKING_LEVEL
 from misaka.utils.values import maybe_await
 
-type ResolvedThinkingLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh"]
+type ResolvedThinkingLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 _MINIMATCH_FLAGS = glob.IGNORECASE | glob.GLOBSTAR | glob.BRACE | glob.EXTMATCH | glob.FORCEUNIX
 
 defaultModelPerProvider: dict[str, str] = {
     "amazon-bedrock": "us.anthropic.claude-opus-4-6-v1",
-    "anthropic": "claude-opus-4-7",
-    "openai": "gpt-5.4",
+    "ant-ling": "Ring-2.6-1T",
+    "anthropic": "claude-opus-4-8",
+    "openai": "gpt-5.5",
     "azure-openai-responses": "gpt-5.4",
     "openai-codex": "gpt-5.5",
+    "radius": "auto",
+    "nvidia": "nvidia/nemotron-3-super-120b-a12b",
     "deepseek": "deepseek-v4-pro",
     "google": "gemini-3.1-pro-preview",
     "google-vertex": "gemini-3.1-pro-preview",
     "github-copilot": "gpt-5.4",
     "openrouter": "moonshotai/kimi-k2.6",
     "vercel-ai-gateway": "zai/glm-5.1",
-    "xai": "grok-4.20-0309-reasoning",
+    "xai": "grok-4.6",
     "groq": "openai/gpt-oss-120b",
-    "cerebras": "zai-glm-4.7",
-    "zai": "glm-5.1",
+    "cerebras": "gpt-oss-120b",
+    "zai": "glm-5.3",
+    "zai-coding-cn": "glm-5.3",
     "mistral": "devstral-medium-latest",
     "minimax": "MiniMax-M2.7",
     "minimax-cn": "MiniMax-M2.7",
@@ -42,11 +46,15 @@ defaultModelPerProvider: dict[str, str] = {
     "huggingface": "moonshotai/Kimi-K2.6",
     "fireworks": "accounts/fireworks/models/kimi-k2p6",
     "together": "moonshotai/Kimi-K2.6",
+    "baseten": "zai-org/GLM-5.2",
     "opencode": "kimi-k2.6",
     "opencode-go": "kimi-k2.6",
     "kimi-coding": "kimi-for-coding",
     "cloudflare-workers-ai": "@cf/moonshotai/kimi-k2.6",
     "cloudflare-ai-gateway": "workers-ai/@cf/moonshotai/kimi-k2.6",
+    "qwen-token-plan": "qwen3.7-max",
+    "qwen-token-plan-cn": "qwen3.7-max",
+    "qwen-token-plan-individual": "qwen3.8-max",
     "xiaomi": "mimo-v2.5-pro",
     "xiaomi-token-plan-cn": "mimo-v2.5-pro",
     "xiaomi-token-plan-ams": "mimo-v2.5-pro",
@@ -399,8 +407,11 @@ async def findInitialModel(options: dict[str, Any]) -> InitialModelResult:
         )
 
     if default_provider and default_model_id:
+        # pi model-resolver.ts:673-676 -- the saved default only wins while its auth is still
+        # configured; otherwise fall through to the available list instead of handing back a
+        # model whose first request would 401.
         found = model_registry.find(default_provider, default_model_id)
-        if found is not None:
+        if found is not None and model_registry.hasConfiguredAuth(found):
             return InitialModelResult(
                 model=found,
                 thinkingLevel=default_thinking_level or DEFAULT_THINKING_LEVEL,

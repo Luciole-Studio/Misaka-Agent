@@ -87,7 +87,13 @@ _COMPAT_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "forceAdaptiveThinking",
         "sendSessionAffinityHeaders",
     )),
-    ("openai-responses", ("sendSessionIdHeader",)),
+    # Keys only OpenAIResponsesCompat declares. `sessionAffinityFormat` and the other
+    # shared names cannot mark it: openai-completions carries them too.
+    ("openai-responses", (
+        "supportsAdditionalTools",
+        "supportsToolSearch",
+        "supportsExplicitPromptCacheMode",
+    )),
 )
 
 
@@ -135,6 +141,7 @@ class _ModelDefinitionSchema(_ConfigModel):
     cost: _ModelCostSchema | None = None
     contextWindow: float | None = None
     maxTokens: float | None = None
+    samplingParams: dict[str, Any] | None = None
     headers: dict[str, str] | None = None
     compat: _CompatBlock = None
 
@@ -147,6 +154,7 @@ class _ModelOverrideSchema(_ConfigModel):
     cost: _PartialModelCostSchema | None = None
     contextWindow: float | None = None
     maxTokens: float | None = None
+    samplingParams: dict[str, Any] | None = None
     headers: dict[str, str] | None = None
     compat: _CompatBlock = None
 
@@ -288,6 +296,8 @@ def _apply_model_override(model: Model, override: dict[str, Any]) -> Model:
                 "cacheWrite": override["cost"].get("cacheWrite", model.cost.cacheWrite),
             }
         )
+    if override.get("samplingParams"):
+        update["samplingParams"] = {**(model.samplingParams or {}), **override["samplingParams"]}
     update["compat"] = _merge_compat(model.compat, override.get("compat"))
     return model.model_copy(update=update)
 
@@ -378,6 +388,7 @@ class ModelRegistry:
         self._providerRequestConfigs: dict[str, _ProviderRequestConfig] = {}
         self._modelRequestHeaders: dict[str, dict[str, str]] = {}
         self._registeredProviders: dict[str, ProviderConfigInput] = {}
+        self._modelOverrides: dict[str, dict[str, dict[str, Any]]] = {}
         self._loadError: str | None = None
         self.authStorage = authStorage
         self._modelsJsonPath = normalize_path(modelsJsonPath) if modelsJsonPath else None
@@ -394,6 +405,7 @@ class ModelRegistry:
     def refresh(self) -> None:
         self._providerRequestConfigs.clear()
         self._modelRequestHeaders.clear()
+        self._modelOverrides.clear()
         self._loadError = None
         resetApiProviders()
         resetOAuthProviders()
@@ -409,7 +421,8 @@ class ModelRegistry:
         if custom.error:
             self._loadError = custom.error
 
-        built_in_models = self._loadBuiltInModels(custom.overrides, custom.modelOverrides)
+        self._modelOverrides = custom.modelOverrides
+        built_in_models = self._loadBuiltInModels(custom.overrides)
         combined = self._mergeCustomModels(built_in_models, custom.models)
 
         for oauth_provider in self.authStorage.getOAuthProviders():
@@ -424,18 +437,25 @@ class ModelRegistry:
                     OAuthCredentials.model_validate({key: value for key, value in credential.items() if key != "type"}),
                 )
 
-        self._models = combined
+        # pi provider-composer.ts:431 -- modelOverrides are the topmost user-config layer:
+        # they apply once, after custom-model upserts and the legacy OAuth projection.
+        # Applying them to the built-in models instead let a same-id custom model, or a
+        # provider that rewrites its models on login, drop them silently.
+        self._models = self._applyModelOverrides(combined)
 
-    def _loadBuiltInModels(
-        self,
-        overrides: dict[str, _ProviderOverride],
-        modelOverrides: dict[str, dict[str, dict[str, Any]]],
-    ) -> list[Model]:
+    def _applyModelOverrides(self, models: list[Model], provider: str | None = None) -> list[Model]:
+        result: list[Model] = []
+        for model in models:
+            per_model = self._modelOverrides.get(model.provider, {})
+            override = per_model.get(model.id) if (provider is None or model.provider == provider) else None
+            result.append(_apply_model_override(model, override) if override is not None else model)
+        return result
+
+    def _loadBuiltInModels(self, overrides: dict[str, _ProviderOverride]) -> list[Model]:
         result: list[Model] = []
         for provider in get_providers():
             models = list(get_models(provider))
             provider_override = overrides.get(provider)
-            per_model_overrides = modelOverrides.get(provider, {})
             for model in models:
                 updated = model
                 if provider_override is not None:
@@ -445,9 +465,6 @@ class ModelRegistry:
                             "compat": _merge_compat(updated.compat, provider_override.compat),
                         }
                     )
-                model_override = per_model_overrides.get(model.id)
-                if model_override is not None:
-                    updated = _apply_model_override(updated, model_override)
                 result.append(updated)
         return result
 
@@ -482,8 +499,20 @@ class ModelRegistry:
                 rendered = "\n".join(f"  - {message}" for message in errors)
                 return _empty_custom_models_result(f"Invalid models.json schema:\n{rendered}\n\nFile: {modelsJsonPath}")
 
-            providers = parsed["providers"]
-            self._validateConfig(providers)
+            # pi keeps a `compositionErrors` map keyed by provider (provider-composer):
+            # a provider that fails to compose falls back to its built-in definition and
+            # the rest of the file still loads. Validating the whole document as one unit
+            # threw away every other provider's models over one typo.
+            providers: dict[str, Any] = {}
+            provider_errors: list[str] = []
+            for provider_name, provider_config in parsed["providers"].items():
+                try:
+                    self._validateProviderConfig(provider_name, provider_config)
+                except ValueError as error:
+                    provider_errors.append(str(error))
+                    continue
+                providers[provider_name] = provider_config
+
             overrides: dict[str, _ProviderOverride] = {}
             model_overrides: dict[str, dict[str, dict[str, Any]]] = {}
 
@@ -503,53 +532,57 @@ class ModelRegistry:
                         if isinstance(model_override, dict):
                             self._storeModelHeaders(provider_name, model_id, model_override.get("headers"))
 
+            error: str | None = None
+            if provider_errors:
+                rendered = "\n".join(f"  - {message}" for message in provider_errors)
+                error = f"Invalid models.json providers (ignored):\n{rendered}\n\nFile: {modelsJsonPath}"
+
             return _CustomModelsResult(
                 models=self._parseModels(providers),
                 overrides=overrides,
                 modelOverrides=model_overrides,
-                error=None,
+                error=error,
             )
         except json.JSONDecodeError as error:
             return _empty_custom_models_result(f"Failed to parse models.json: {error}\n\nFile: {modelsJsonPath}")
         except Exception as error:  # noqa: BLE001
             return _empty_custom_models_result(f"Failed to load models.json: {error}\n\nFile: {modelsJsonPath}")
 
-    def _validateConfig(self, providers: dict[str, Any]) -> None:
-        built_in_providers = set(get_providers())
-        for provider_name, provider_config in providers.items():
-            is_built_in = provider_name in built_in_providers
-            has_provider_api = bool(provider_config.get("api"))
-            models = provider_config.get("models") or []
-            has_model_overrides = bool(provider_config.get("modelOverrides")) and len(provider_config["modelOverrides"]) > 0
+    def _validateProviderConfig(self, provider_name: str, provider_config: dict[str, Any]) -> None:
+        """Structural checks for one provider block; raises ValueError naming the provider."""
+        is_built_in = provider_name in set(get_providers())
+        has_provider_api = bool(provider_config.get("api"))
+        models = provider_config.get("models") or []
+        has_model_overrides = bool(provider_config.get("modelOverrides")) and len(provider_config["modelOverrides"]) > 0
 
-            if len(models) == 0:
-                if (
-                    provider_config.get("baseUrl") is None
-                    and provider_config.get("headers") is None
-                    and provider_config.get("compat") is None
-                    and not has_model_overrides
-                ):
-                    raise ValueError(
-                        f'Provider {provider_name}: must specify "baseUrl", "headers", "compat", "modelOverrides", or "models".'
-                    )
-            elif not is_built_in:
-                if not provider_config.get("baseUrl"):
-                    raise ValueError(f'Provider {provider_name}: "baseUrl" is required when defining custom models.')
-                if not provider_config.get("apiKey"):
-                    raise ValueError(f'Provider {provider_name}: "apiKey" is required when defining custom models.')
+        if len(models) == 0:
+            if (
+                provider_config.get("baseUrl") is None
+                and provider_config.get("headers") is None
+                and provider_config.get("compat") is None
+                and not has_model_overrides
+            ):
+                raise ValueError(
+                    f'Provider {provider_name}: must specify "baseUrl", "headers", "compat", "modelOverrides", or "models".'
+                )
+        elif not is_built_in:
+            if not provider_config.get("baseUrl"):
+                raise ValueError(f'Provider {provider_name}: "baseUrl" is required when defining custom models.')
+            if not provider_config.get("apiKey"):
+                raise ValueError(f'Provider {provider_name}: "apiKey" is required when defining custom models.')
 
-            for model_def in models:
-                has_model_api = bool(model_def.get("api"))
-                if not has_provider_api and not has_model_api and not is_built_in:
-                    raise ValueError(
-                        f'Provider {provider_name}, model {model_def.get("id")}: no "api" specified. Set at provider or model level.'
-                    )
-                if not model_def.get("id"):
-                    raise ValueError(f'Provider {provider_name}: model missing "id"')
-                if model_def.get("contextWindow") is not None and model_def["contextWindow"] <= 0:
-                    raise ValueError(f'Provider {provider_name}, model {model_def["id"]}: invalid contextWindow')
-                if model_def.get("maxTokens") is not None and model_def["maxTokens"] <= 0:
-                    raise ValueError(f'Provider {provider_name}, model {model_def["id"]}: invalid maxTokens')
+        for model_def in models:
+            has_model_api = bool(model_def.get("api"))
+            if not has_provider_api and not has_model_api and not is_built_in:
+                raise ValueError(
+                    f'Provider {provider_name}, model {model_def.get("id")}: no "api" specified. Set at provider or model level.'
+                )
+            if not model_def.get("id"):
+                raise ValueError(f'Provider {provider_name}: model missing "id"')
+            if model_def.get("contextWindow") is not None and model_def["contextWindow"] <= 0:
+                raise ValueError(f'Provider {provider_name}, model {model_def["id"]}: invalid contextWindow')
+            if model_def.get("maxTokens") is not None and model_def["maxTokens"] <= 0:
+                raise ValueError(f'Provider {provider_name}, model {model_def["id"]}: invalid maxTokens')
 
     def _parseModels(self, providers: dict[str, Any]) -> list[Model]:
         models: list[Model] = []
@@ -607,6 +640,7 @@ class ModelRegistry:
                         cost=ModelCost.model_validate(cost),
                         contextWindow=_coalesce(model_def.get("contextWindow"), 128000),
                         maxTokens=_coalesce(model_def.get("maxTokens"), 16384),
+                        samplingParams=model_def.get("samplingParams"),
                         headers=None,
                         compat=compat,
                     )
@@ -623,9 +657,16 @@ class ModelRegistry:
         return next((model for model in self._models if model.provider == provider and model.id == modelId), None)
 
     def hasConfiguredAuth(self, model: Model) -> bool:
-        return self.authStorage.hasAuth(model.provider) or (
-            self._providerRequestConfigs.get(model.provider, _ProviderRequestConfig()).apiKey is not None
-        )
+        if self.authStorage.hasAuth(model.provider):
+            return True
+        api_key = self._providerRequestConfigs.get(model.provider, _ProviderRequestConfig()).apiKey
+        if api_key is None:
+            return False
+        # Same template grammar as `getProviderAuthStatus` (pi provider-composer.ts:558-571):
+        # a `$VAR` key whose variable is unset is *not* configured. Answering "yes" here while
+        # the status line says "no" is what put unusable models in the picker and turned a
+        # typo'd models.json into an upstream 401.
+        return is_command_config_value(api_key) or is_config_value_configured(api_key)
 
     @staticmethod
     def _getModelRequestKey(provider: str, modelId: str) -> str:
@@ -821,6 +862,11 @@ class ModelRegistry:
                         self._models,
                         OAuthCredentials.model_validate({key: value for key, value in credential.items() if key != "type"}),
                     )
+
+            # This provider's models were just replaced wholesale, so the models.json
+            # modelOverrides layer has to be re-applied on top of them (pi
+            # provider-composer.ts:431-446 re-runs it after extension replacement).
+            self._models = self._applyModelOverrides(self._models, providerName)
         elif config.get("baseUrl") or config.get("headers"):
             self._models = [
                 model.model_copy(update={"baseUrl": _coalesce(config.get("baseUrl"), model.baseUrl)})

@@ -94,7 +94,11 @@ def _get_api_key_env_vars(provider: str) -> tuple[str, ...] | None:
         return ("COPILOT_GITHUB_TOKEN",)
 
     if provider == "anthropic":
-        return ("ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY")
+        # ANTHROPIC_AUTH_TOKEN participates in discovery and status, but `get_env_api_key`
+        # skips it: requests must send it as `Authorization: Bearer`, never as an api key
+        # (pi env-api-keys.ts:73-77, :149). Leaving it out of discovery made an install
+        # configured only that way read as unconfigured.
+        return ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY")
 
     env_var = _ENV_MAP.get(provider)
     return (env_var,) if env_var else None
@@ -111,8 +115,14 @@ def find_env_keys(provider: str) -> list[str] | None:
 
 def get_env_api_key(provider: str) -> str | None:
     env_keys = find_env_keys(provider)
-    if env_keys and env_keys[0]:
-        return _get_env_value(env_keys[0])
+    if env_keys:
+        # The auth token is not an api key; sending it as one gets a 401 with a valid
+        # credential. It stays in `find_env_keys` for status display only.
+        api_key_env = next(
+            (key for key in env_keys if key != "ANTHROPIC_AUTH_TOKEN"), None
+        ) if provider == "anthropic" else env_keys[0]
+        if api_key_env:
+            return _get_env_value(api_key_env)
 
     if provider == "google-vertex":
         has_project = bool(_get_env_value("GOOGLE_CLOUD_PROJECT") or _get_env_value("GCLOUD_PROJECT"))

@@ -1,4 +1,4 @@
-# ruff: noqa: UP040 - these aliases are read at runtime (pydantic fields, isinstance); PEP 695 aliases are lazy
+# ruff: noqa: UP040 - this module spells its aliases with the explicit TypeAlias form.
 
 """Pydantic schema surface for the harn AI runtime."""
 
@@ -20,8 +20,8 @@ Provider: TypeAlias = str
 
 ImagesProvider: TypeAlias = str
 
-ThinkingLevel: TypeAlias = Literal["minimal", "low", "medium", "high", "xhigh"]
-ModelThinkingLevel: TypeAlias = Literal["off", "minimal", "low", "medium", "high", "xhigh"]
+ThinkingLevel: TypeAlias = Literal["minimal", "low", "medium", "high", "xhigh", "max"]
+ModelThinkingLevel: TypeAlias = Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 ThinkingLevelMap: TypeAlias = dict[ModelThinkingLevel, str | None]
 
 CacheRetention: TypeAlias = Literal["none", "short", "long"]
@@ -61,18 +61,19 @@ class StreamOptions(RuntimeModel):
     sessionId: str | None = None
     onPayload: Any | None = None
     onResponse: Any | None = None
-    headers: dict[str, str] | None = None
+    # A ``None`` value means "do not send this header" -- resolved auth uses it to
+    # displace a provider's own credential header (the Cloudflare AI Gateway nulls out
+    # ``Authorization`` and ``x-api-key``). Each SDK seam drops the ``None`` entries
+    # before handing headers to an HTTP client; typing them away here instead made every
+    # request through the gateway fail validation before it went out.
+    headers: dict[str, str | None] | None = None
     timeoutMs: int | None = None
     maxRetries: int | None = None
     maxRetryDelayMs: int | None = None
     metadata: dict[str, Any] | None = None
-    # Arbitrary OpenAI-compatible sampling params (pi #7568): Model.samplingParams
-    # provides defaults, this field overrides per key.
+    # Arbitrary OpenAI-compatible sampling params: Model.samplingParams provides
+    # defaults, this field overrides per key.
     samplingParams: dict[str, Any] | None = None
-
-
-class ProviderStreamOptions(StreamOptions):
-    model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
 
 
 class ImagesOptions(RuntimeModel):
@@ -80,7 +81,12 @@ class ImagesOptions(RuntimeModel):
     apiKey: str | None = None
     onPayload: Any | None = None
     onResponse: Any | None = None
-    headers: dict[str, str] | None = None
+    # A ``None`` value means "do not send this header" -- resolved auth uses it to
+    # displace a provider's own credential header (the Cloudflare AI Gateway nulls out
+    # ``Authorization`` and ``x-api-key``). Each SDK seam drops the ``None`` entries
+    # before handing headers to an HTTP client; typing them away here instead made every
+    # request through the gateway fail validation before it went out.
+    headers: dict[str, str | None] | None = None
     timeoutMs: int | None = None
     maxRetries: int | None = None
     maxRetryDelayMs: int | None = None
@@ -94,6 +100,23 @@ class ProviderImagesOptions(ImagesOptions):
 class SimpleStreamOptions(StreamOptions):
     reasoning: ThinkingLevel | None = None
     thinkingBudgets: ThinkingBudgets | None = None
+
+
+class ProviderStreamOptions(SimpleStreamOptions):
+    """The options object the model runtime hands a provider implementation.
+
+    Extends ``SimpleStreamOptions`` rather than ``StreamOptions`` because that is what the
+    providers dereference: ``stream_simple_*`` reads ``options.reasoning`` and
+    ``options.thinkingBudgets`` with plain attribute access, and upstream's merged type is
+    ``SimpleStreamOptions & ModelsRequestTransforms`` (``models.ts:84``). With the narrower
+    base, a ``streamSimple`` call that passed no options at all died with
+    ``AttributeError: reasoning`` on seven of the ten registered APIs.
+
+    ``extra="allow"`` carries the fields no options model declares -- ``env``, transform
+    hooks -- through to whichever seam reads them.
+    """
+
+    model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
 
 
 class TextSignatureV1(SchemaModel):
@@ -151,14 +174,39 @@ class Usage(SchemaModel):
     output: int
     cacheRead: int
     cacheWrite: int
+    # Subset of `cacheWrite` written with 1h retention, priced differently -- see
+    # `calculate_cost`. Upstream reads `cache_creation.ephemeral_1h_input_tokens`
+    # (pi api/anthropic-messages.ts:606); no misaka adapter reads that field yet, so
+    # today nothing ever sets this.
+    cacheWrite1h: int | None = None
+    # Reasoning tokens, when the provider reports them. A *subset* of `output`, not an
+    # addition to it: adding the two would double-count. Optional rather than zero because
+    # providers that expose no breakdown leave it unset -- and no misaka adapter fills it
+    # in yet either, so it is currently always unset.
+    reasoning: int | None = None
     totalTokens: int
     cost: UsageCost
+
+
+def _content_never_null(value: Any) -> Any:
+    """A stored ``content: null`` reads back as an empty list.
+
+    Upstream normalizes the same shape at the top of ``transformMessages``, for "untyped
+    callers (custom tools, hand-built histories, old session files)". Those callers exist
+    here too, but they cannot reach that function: pydantic rejects the null first, so an
+    old session row containing one fails to load at all rather than arriving empty. Doing
+    it during validation puts the normalization where this port actually needs it, and
+    leaves the rest of the pipeline with the same guarantee upstream gives it.
+    """
+    return [] if value is None else value
 
 
 class UserMessage(SchemaModel):
     role: Literal["user"] = "user"
     content: str | list[UserContent]
     timestamp: int
+
+    _normalize_null_content = field_validator("content", mode="before")(_content_never_null)
 
 
 class AssistantMessage(SchemaModel):
@@ -174,6 +222,8 @@ class AssistantMessage(SchemaModel):
     stopReason: StopReason
     errorMessage: str | None = None
     timestamp: int
+
+    _normalize_null_content = field_validator("content", mode="before")(_content_never_null)
 
 
 class ToolResultMessage(SchemaModel):
@@ -191,6 +241,8 @@ class ToolResultMessage(SchemaModel):
     addedToolNames: list[str] | None = None
     isError: bool
     timestamp: int
+
+    _normalize_null_content = field_validator("content", mode="before")(_content_never_null)
 
 
 MessageValue: TypeAlias = UserMessage | AssistantMessage | ToolResultMessage
@@ -221,10 +273,65 @@ def _is_json_schema_mapping(value: Any) -> bool:
     return isinstance(value, Mapping)
 
 
+GrammarFormat: TypeAlias = Literal["openai_lark", "openai_regex"]
+
+
+class JsonSchemaConstrainedSamplingConfig(SchemaModel):
+    """``{ type: "json_schema", strict: "prefer" | "require" }``."""
+
+    # `extra="ignore"`, overriding the repo-wide `extra="forbid"` base. TypeScript erases
+    # object types, so a config carrying a field this port does not model reaches pi and is
+    # simply not read; forbidding it here turns a forward-compatible caller into a
+    # ValidationError raised from the middle of request construction.
+    model_config = ConfigDict(extra="ignore")
+
+    type: Literal["json_schema"] = "json_schema"
+    # Optional here: a config that omits `strict` validates instead of raising. The value is
+    # read by `resolve_json_schema_strict_sampling` below, which compares it against
+    # "require" (`config.strict != "require"`, `config.strict == "require"`).
+    strict: str | None = None
+
+
+class GrammarConstrainedSamplingConfig(SchemaModel):
+    """``{ type: "grammar", variants: { openai_lark?, openai_regex? } }``.
+
+    Variants are provider-specific encodings of one intended language; the caller supplies
+    whichever it has and the resolver picks one the target provider understands.
+    """
+
+    # `extra="ignore"`, overriding the repo-wide `extra="forbid"` base. TypeScript erases
+    # object types, so a config carrying a field this port does not model reaches pi and is
+    # simply not read; forbidding it here turns a forward-compatible caller into a
+    # ValidationError raised from the middle of request construction.
+    model_config = ConfigDict(extra="ignore")
+
+    type: Literal["grammar"] = "grammar"
+    # pi's declared type is `Partial<Record<GrammarFormat, string>>`, but the resolver re-tests
+    # each value at runtime with `typeof === "string"` and reads only the two keys it knows
+    # (constrained-sampling.ts:243-246): an unknown key is ignored and a non-string definition
+    # falls back to the other variant. Declaring `dict[GrammarFormat, str]` would instead reject
+    # both at validation time -- and would make the `isinstance(..., str)` guards in
+    # :func:`_grammar_variant` vacuously true.
+    # `Any`, not `dict`: pi reads `config.variants.openai_lark` / `.openai_regex` with no
+    # shape check of its own (constrained-sampling.ts:243-244), so keeping this field
+    # unvalidated lets a caller that sent a non-mapping fall through to this module's own
+    # "no supported grammar variant" error rather than to a ValidationError raised out of
+    # request construction. The reader below already tests each value it pulls.
+    variants: Any = Field(default_factory=dict)
+
+
+ConstrainedSamplingConfig: TypeAlias = JsonSchemaConstrainedSamplingConfig | GrammarConstrainedSamplingConfig
+
+
 class Tool(RuntimeModel):
     name: str
     description: str
     parameters: Any
+    # ``False`` is upstream's explicit opt-out and reads the same as an absent config.
+    # Declared here, as upstream declares it: while it was only reachable by attribute
+    # lookup, every resolver in ``providers/constrained_sampling.py`` was inert, because
+    # ``extra="forbid"`` meant no caller could set it in the first place.
+    constrainedSampling: Literal[False] | ConstrainedSamplingConfig | None = None
 
     @field_validator("parameters")
     @classmethod
@@ -295,6 +402,20 @@ class VercelGatewayRouting(SchemaModel):
     order: list[str] | None = None
 
 
+ThinkingTokenBudgetField: TypeAlias = Literal[
+    "thinking_token_budget", "thinking_budget", "thinking_budget_tokens"
+]
+SessionAffinityFormat: TypeAlias = Literal["openai", "openai-nosession", "openrouter"]
+
+
+class AnthropicAllowedFallbackModel(SchemaModel):
+    """A model Anthropic permits in ``fallbacks``, with local pricing for its responses."""
+
+    provider: Provider
+    model: str
+    cost: ModelCost
+
+
 class OpenAICompletionsCompat(SchemaModel):
     supportsStore: bool | None = None
     supportsDeveloperRole: bool | None = None
@@ -305,15 +426,28 @@ class OpenAICompletionsCompat(SchemaModel):
     requiresAssistantAfterToolResult: bool | None = None
     requiresThinkingAsText: bool | None = None
     requiresReasoningContentOnAssistantMessages: bool | None = None
+    # All ten values upstream defines (types.ts:579-590). The four added last -- baseten,
+    # chat-template, string-thinking, ant-ling -- were missing, so any catalog entry using
+    # one failed `Model.model_validate` outright rather than being sent the way its
+    # provider expects.
     thinkingFormat: Literal[
         "openai",
         "openrouter",
         "deepseek",
         "together",
+        "baseten",
         "zai",
         "qwen",
         "qwen-chat-template",
+        "chat-template",
+        "string-thinking",
+        "ant-ling",
     ] | None = None
+    # Sent as `chat_template_kwargs` when thinkingFormat is `chat-template`, and as
+    # `chat_template_args` when it is `baseten`. Values may be literals or a `{"$var": ...}`
+    # reference to a thinking value the caller controls.
+    chatTemplateKwargs: dict[str, Any] | None = None
+    chatTemplateArgs: dict[str, Any] | None = None
     openRouterRouting: OpenRouterRouting | None = None
     vercelGatewayRouting: VercelGatewayRouting | None = None
     zaiToolStream: bool | None = None
@@ -321,11 +455,23 @@ class OpenAICompletionsCompat(SchemaModel):
     cacheControlFormat: Literal["anthropic"] | None = None
     sendSessionAffinityHeaders: bool | None = None
     supportsLongCacheRetention: bool | None = None
+    supportsFinishReason: bool | None = None
+    thinkingTokenBudgetField: ThinkingTokenBudgetField | None = None
+    supportsThinkingTokenBudget: bool | None = None
+    supportsOpenAIGrammarTools: bool | None = None
+    deferredToolsMode: Literal["kimi"] | None = None
+    sessionAffinityFormat: SessionAffinityFormat | None = None
 
 
 class OpenAIResponsesCompat(SchemaModel):
-    sendSessionIdHeader: bool | None = None
     supportsLongCacheRetention: bool | None = None
+    supportsDeveloperRole: bool | None = None
+    sessionAffinityFormat: SessionAffinityFormat | None = None
+    supportsStrictMode: bool | None = None
+    supportsOpenAIGrammarTools: bool | None = None
+    supportsAdditionalTools: bool | None = None
+    supportsToolSearch: bool | None = None
+    supportsExplicitPromptCacheMode: bool | None = None
 
 
 class AnthropicMessagesCompat(SchemaModel):
@@ -334,9 +480,31 @@ class AnthropicMessagesCompat(SchemaModel):
     sendSessionAffinityHeaders: bool | None = None
     supportsCacheControlOnTools: bool | None = None
     forceAdaptiveThinking: bool | None = None
+    supportsTemperature: bool | None = None
+    allowEmptySignature: bool | None = None
+    supportsStrictTools: bool | None = None
+    allowedFallbackModels: list[AnthropicAllowedFallbackModel] | None = None
+    supportsToolReferences: bool | None = None
 
 
-ModelCompat: TypeAlias = OpenAICompletionsCompat | OpenAIResponsesCompat | AnthropicMessagesCompat
+class BedrockCompat(SchemaModel):
+    """Compatibility settings for Amazon Bedrock models (pi ``BedrockCompat``)."""
+
+    supportsStrictMode: bool | None = None
+
+
+ModelCompat: TypeAlias = OpenAICompletionsCompat | OpenAIResponsesCompat | AnthropicMessagesCompat | BedrockCompat
+
+
+class ModelCostTier(SchemaModel):
+    """One pricing band. Rates are $/million tokens, as everywhere else in the catalog."""
+
+    input: float
+    output: float
+    cacheRead: float
+    cacheWrite: float
+    # Use this tier for requests whose total input usage exceeds this token count.
+    inputTokensAbove: int
 
 
 class ModelCost(SchemaModel):
@@ -344,6 +512,10 @@ class ModelCost(SchemaModel):
     output: float
     cacheRead: float
     cacheWrite: float
+    # Request-wide pricing bands: the highest matching threshold applies to the *whole*
+    # request, not just the tokens above it. No model in the generated catalog carries
+    # bands today; they only arrive with user-supplied model definitions.
+    tiers: list[ModelCostTier] | None = None
 
 
 class Model(SchemaModel):
@@ -360,7 +532,7 @@ class Model(SchemaModel):
     maxTokens: int
     headers: dict[str, str] | None = None
     compat: ModelCompat | None = None
-    samplingParams: dict[str, Any] | None = None   # sampling params configurable in models.json (pi #7568)
+    samplingParams: dict[str, Any] | None = None   # sampling params configurable in models.json
 
 
 class ImagesModel(SchemaModel):
