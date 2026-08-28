@@ -16,6 +16,18 @@ from typing import Final
 
 from misaka.ai.types import Model
 
+# Provenance of the transcription. Upstream ships these in `providers/data/.manifest.json`
+# and reads `generatedAt` back through `getBuiltinModelDataGeneratedAt`, so a remote
+# catalog overlay can tell whether what it fetched is newer than what shipped.
+#
+# `CONTENT_HASH` is this file's own, not upstream's: it covers `_RAW_MODELS` as transcribed,
+# so a hand edit to an entry is visible. That matters because there is no generator here --
+# the previous drift (497 models missing, 253 priced wrong) was undetectable for exactly
+# this reason, and nothing but a full re-comparison against upstream would have found it.
+BUILTIN_MODEL_DATA_GENERATED_AT = "2026-08-24T10:56:49.141Z"
+BUILTIN_MODEL_DATA_SCHEMA_VERSION = 3
+BUILTIN_MODEL_DATA_CONTENT_HASH = "f6fb86b2af5a7989282c5cec6c96203823ac85ae400b7d1b5b70bc8f31f64e93"
+
 _RAW_MODELS: Final[dict[str, dict[str, dict[str, object]]]] = {'amazon-bedrock': {'amazon.nova-2-lite-v1:0': {'id': 'amazon.nova-2-lite-v1:0',
                                                 'name': 'Nova 2 Lite',
                                                 'api': 'bedrock-converse-stream',

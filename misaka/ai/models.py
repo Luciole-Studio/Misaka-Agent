@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from misaka.ai.models_generated import MODELS
+from datetime import datetime
+
+from misaka.ai.models_generated import BUILTIN_MODEL_DATA_GENERATED_AT, MODELS
 from misaka.ai.types import (
     Model,
     ModelCost,
@@ -21,6 +23,20 @@ _EXTENDED_THINKING_LEVELS: tuple[ModelThinkingLevel, ...] = (
     "off", "minimal", "low", "medium", "high", "xhigh", "max",
 )
 _MISSING = object()
+
+
+def get_builtin_model_data_generated_at() -> int | None:
+    """When the built-in catalog was generated upstream, in Unix milliseconds.
+
+    A remote catalog overlay compares what it fetched against this: data no newer than
+    what shipped is not worth applying. ``None`` when the stamp is unparseable, which is
+    upstream's answer too -- an unknown generation must not make everything look stale.
+    """
+    try:
+        stamp = datetime.fromisoformat(BUILTIN_MODEL_DATA_GENERATED_AT)
+    except ValueError:
+        return None
+    return int(stamp.timestamp() * 1000)
 
 
 def get_model(provider: str, model_id: str) -> Model | None:
