@@ -27,6 +27,10 @@ from misaka.ai.providers.cloudflare import (
     is_cloudflare_provider,
     resolve_cloudflare_base_url,
 )
+from misaka.ai.providers.constrained_sampling import (
+    get_json_schema_tool_parameters,
+    resolve_json_schema_strict_sampling,
+)
 from misaka.ai.providers.github_copilot_headers import (
     build_copilot_dynamic_headers,
     has_copilot_vision_input,
@@ -63,9 +67,14 @@ from misaka.ai.types import (
     UsageCost,
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
-from misaka.ai.utils.headers import headers_to_record
+from misaka.ai.utils.headers import (
+    apply_provider_headers,
+    headers_to_record,
+    provider_headers_to_record,
+)
 from misaka.ai.utils.json_parse import StreamingArgs
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
+from misaka.ai.utils.user_agent import get_misaka_user_agent
 from misaka.utils.values import maybe_await, read_field, signal_aborted
 
 
@@ -78,6 +87,24 @@ def _set_extra(params: dict[str, Any], key: str, value: Any) -> None:
     if "extra_body" not in params:
         params["extra_body"] = {}
     params["extra_body"][key] = value
+
+
+def _mapped_thinking_effort(model: Model, level: str) -> Any:
+    """pi's ``mapped === undefined ? level : mapped``: an explicit null suppresses the field."""
+    if model.thinkingLevelMap is None or level not in model.thinkingLevelMap:
+        return level
+    return model.thinkingLevelMap[level]
+
+
+def _coalesced_thinking_effort(model: Model, level: str) -> Any:
+    """pi's ``mapped ?? level``: a null mapping falls back to the requested level."""
+    mapped = model.thinkingLevelMap.get(level) if model.thinkingLevelMap else None
+    return level if mapped is None else mapped
+
+
+def _thinking_off_is_suppressed(model: Model) -> bool:
+    """pi's ``model.thinkingLevelMap?.off !== null`` guard: an explicit null means "send nothing"."""
+    return model.thinkingLevelMap is not None and model.thinkingLevelMap.get("off", "") is None
 
 
 def _dump_model(value: Any) -> Any:
@@ -97,7 +124,7 @@ class OpenAICompletionsOptions(TypedDict, total=False):
     timeoutMs: int
     maxRetries: int
     toolChoice: Literal["auto", "none", "required"] | OpenAICompletionsToolChoiceObject
-    reasoningEffort: Literal["minimal", "low", "medium", "high", "xhigh"]
+    reasoningEffort: Literal["minimal", "low", "medium", "high", "xhigh", "max"]
 
 
 class OpenAICompletionsToolChoiceFunction(TypedDict):
@@ -373,7 +400,7 @@ def stream_simple_openai_completions(
     if not api_key:
         raise RuntimeError(f"No API key for provider: {model.provider}")
 
-    base = build_base_options(model, options, api_key)
+    base = build_base_options(model, context, options, api_key)
     clamped_reasoning = clamp_thinking_level(model, options.reasoning) if options and options.reasoning else None
     reasoning_effort = None if clamped_reasoning == "off" else clamped_reasoning
     tool_choice = _option(options, "toolChoice")
@@ -382,6 +409,49 @@ def stream_simple_openai_completions(
         context,
         {**base.model_dump(), "reasoningEffort": reasoning_effort, "toolChoice": tool_choice},
     )
+
+
+def build_request_headers(
+    model: Model,
+    compat: Mapping[str, Any],
+    context: Context | None = None,
+    options_headers: Mapping[str, str] | None = None,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """The headers one request carries, in upstream's precedence order.
+
+    Its own function, as upstream's ``buildRequestHeaders`` is: session affinity has three
+    shapes and no test could reach any of them while this was inlined in client
+    construction behind an SDK call.
+    """
+    # Upstream seeds the same base and lets `model.headers` spread over it
+    # (openai-completions.ts:751), so a catalog entry can still replace it.
+    headers: dict[str, Any] = {"User-Agent": get_misaka_user_agent()}
+    apply_provider_headers(headers, model.headers)
+    if model.provider == "github-copilot" and context is not None:
+        headers.update(
+            build_copilot_dynamic_headers(
+                messages=context.messages,
+                hasImages=has_copilot_vision_input(context.messages),
+            )
+        )
+
+    if session_id and compat.get("sendSessionAffinityHeaders"):
+        # Three shapes, not one: OpenRouter threads a conversation with its own header and
+        # accepts none of the others, and an endpoint that is neither still wants the
+        # request/affinity pair without OpenAI's `session_id`.
+        if compat.get("sessionAffinityFormat") == "openrouter":
+            headers["x-session-id"] = session_id
+        else:
+            if compat.get("sessionAffinityFormat") == "openai":
+                headers["session_id"] = session_id
+            headers["x-client-request-id"] = session_id
+            headers["x-session-affinity"] = session_id
+
+    # Caller headers last, so they override anything above -- and a `None` among them
+    # removes the header rather than becoming its value.
+    apply_provider_headers(headers, options_headers)
+    return headers
 
 
 def create_client(
@@ -401,30 +471,21 @@ def create_client(
         api_key = env_key
 
     compat = compat or get_compat(model)
-    headers = dict(model.headers or {})
-    if model.provider == "github-copilot":
-        headers.update(
-            build_copilot_dynamic_headers(
-                messages=context.messages,
-                hasImages=has_copilot_vision_input(context.messages),
-            )
-        )
-
-    if session_id and compat.get("sendSessionAffinityHeaders"):
-        headers["session_id"] = session_id
-        headers["x-client-request-id"] = session_id
-        headers["x-session-affinity"] = session_id
-
-    if options_headers:
-        headers.update(dict(options_headers))
+    headers = build_request_headers(model, compat, context, options_headers, session_id)
 
     default_headers: dict[str, Any]
     if model.provider == "cloudflare-ai-gateway":
-        default_headers = {
-            **headers,
-            "Authorization": headers.get("Authorization"),
-            "cf-aig-authorization": f"Bearer {api_key}",
-        }
+        # The gateway's own header replaces the provider's, and resolved auth marks the
+        # displaced ones with `None`. httpx refuses a `None` header value outright, so the
+        # merge is filtered rather than passed through -- upstream's
+        # `providerHeadersToRecord` drops them for the same reason.
+        default_headers = provider_headers_to_record(
+            {
+                **headers,
+                "Authorization": headers.get("Authorization"),
+                "cf-aig-authorization": f"Bearer {api_key}",
+            }
+        ) or {}
     else:
         default_headers = headers
 
@@ -479,8 +540,10 @@ def build_params(
     if _option(options, "temperature") is not None:
         params["temperature"] = _option(options, "temperature")
 
-    # Sampling passthrough (pi #7568): model-level defaults, request-level overrides.
-    # Keys already set explicitly above (temperature, max_tokens, ...) win.
+    # Sampling passthrough: model-level defaults, request-level overrides.
+    # Keys already set explicitly above (temperature, max_tokens, ...) win here -- upstream
+    # goes the other way (`Object.assign` last, "so custom keys override the named request
+    # fields", api/openai-completions.ts:980-983).
     sampling: dict[str, Any] = {}
     model_sampling = getattr(model, "samplingParams", None)
     if isinstance(model_sampling, dict):
@@ -507,25 +570,35 @@ def build_params(
         params["tool_choice"] = tool_choice
 
     reasoning_effort = _option(options, "reasoningEffort")
-    if compat.get("thinkingFormat") in {"zai", "qwen"} and model.reasoning:
+    if compat.get("thinkingFormat") == "zai" and model.reasoning:
+        # z.ai speaks `thinking: {type, clear_thinking}`; `enable_thinking` is qwen's field.
+        _set_extra(
+            params,
+            "thinking",
+            {"type": "enabled", "clear_thinking": False} if reasoning_effort else {"type": "disabled"},
+        )
+        if reasoning_effort and compat.get("supportsReasoningEffort"):
+            effort = _mapped_thinking_effort(model, reasoning_effort)
+            if isinstance(effort, str):
+                params["reasoning_effort"] = effort
+    elif compat.get("thinkingFormat") == "qwen" and model.reasoning:
         _set_extra(params, "enable_thinking", bool(reasoning_effort))
+        if reasoning_effort and compat.get("supportsReasoningEffort"):
+            effort = _coalesced_thinking_effort(model, reasoning_effort)
+            if isinstance(effort, str):
+                params["reasoning_effort"] = effort
     elif compat.get("thinkingFormat") == "qwen-chat-template" and model.reasoning:
         _set_extra(params, "chat_template_kwargs", {"enable_thinking": bool(reasoning_effort), "preserve_thinking": True})
     elif compat.get("thinkingFormat") == "deepseek" and model.reasoning:
-        _set_extra(params, "thinking", {"type": "enabled" if reasoning_effort else "disabled"})
         if reasoning_effort:
-            params["reasoning_effort"] = (
-                model.thinkingLevelMap.get(reasoning_effort, reasoning_effort)
-                if model.thinkingLevelMap
-                else reasoning_effort
-            )
+            _set_extra(params, "thinking", {"type": "enabled"})
+        elif not _thinking_off_is_suppressed(model):
+            _set_extra(params, "thinking", {"type": "disabled"})
+        if reasoning_effort and compat.get("supportsReasoningEffort"):
+            params["reasoning_effort"] = _coalesced_thinking_effort(model, reasoning_effort)
     elif compat.get("thinkingFormat") == "openrouter" and model.reasoning:
         if reasoning_effort:
-            _set_extra(params, "reasoning", {
-                "effort": model.thinkingLevelMap.get(reasoning_effort, reasoning_effort)
-                if model.thinkingLevelMap
-                else reasoning_effort
-            })
+            _set_extra(params, "reasoning", {"effort": _coalesced_thinking_effort(model, reasoning_effort)})
         else:
             has_off_override = False
             off_value: Any = None
@@ -537,17 +610,9 @@ def build_params(
     elif compat.get("thinkingFormat") == "together" and model.reasoning:
         _set_extra(params, "reasoning", {"enabled": bool(reasoning_effort)})
         if reasoning_effort and compat.get("supportsReasoningEffort"):
-            params["reasoning_effort"] = (
-                model.thinkingLevelMap.get(reasoning_effort, reasoning_effort)
-                if model.thinkingLevelMap
-                else reasoning_effort
-            )
+            params["reasoning_effort"] = _coalesced_thinking_effort(model, reasoning_effort)
     elif reasoning_effort and model.reasoning and compat.get("supportsReasoningEffort"):
-        params["reasoning_effort"] = (
-            model.thinkingLevelMap.get(reasoning_effort, reasoning_effort)
-            if model.thinkingLevelMap
-            else reasoning_effort
-        )
+        params["reasoning_effort"] = _coalesced_thinking_effort(model, reasoning_effort)
     elif not reasoning_effort and model.reasoning and compat.get("supportsReasoningEffort"):
         off_value = model.thinkingLevelMap.get("off") if model.thinkingLevelMap else None
         if isinstance(off_value, str):
@@ -793,13 +858,15 @@ def convert_messages(
 def convert_tools(tools: list[Tool], compat: Mapping[str, Any]) -> list[dict[str, Any]]:
     converted: list[dict[str, Any]] = []
     for tool in tools:
+        strict = resolve_json_schema_strict_sampling(tool, compat.get("supportsStrictMode") is not False)
         function_spec: dict[str, Any] = {
             "name": tool.name,
             "description": tool.description,
-            "parameters": tool.parameters_json_schema(),
+            "parameters": get_json_schema_tool_parameters(tool, strict),
         }
+        # Only sent where the provider understands it; some reject unknown fields.
         if compat.get("supportsStrictMode") is not False:
-            function_spec["strict"] = False
+            function_spec["strict"] = strict if strict is not None else False
         converted.append({"type": "function", "function": function_spec})
     return converted
 
@@ -845,19 +912,23 @@ def detect_compat(model: Model) -> dict[str, Any]:
     provider = model.provider
     base_url = model.baseUrl
 
-    is_zai = provider == "zai" or "api.z.ai" in base_url
+    is_zai = provider in {"zai", "zai-coding-cn"} or "api.z.ai" in base_url or "open.bigmodel.cn" in base_url
     is_together = provider == "together" or "api.together.ai" in base_url or "api.together.xyz" in base_url
     is_moonshot = provider in {"moonshotai", "moonshotai-cn"} or "api.moonshot." in base_url
+    is_openrouter = provider == "openrouter" or "openrouter.ai" in base_url
     is_cloudflare_workers_ai = provider == "cloudflare-workers-ai" or "api.cloudflare.com" in base_url
     is_cloudflare_ai_gateway = provider == "cloudflare-ai-gateway" or "gateway.ai.cloudflare.com" in base_url
+    is_nvidia = provider == "nvidia" or "integrate.api.nvidia.com" in base_url
+    is_deepseek = provider == "deepseek" or "deepseek.com" in base_url.lower()
     is_non_standard = (
-        provider == "cerebras"
+        is_nvidia
+        or provider == "cerebras"
         or "cerebras.ai" in base_url
         or provider == "xai"
         or "api.x.ai" in base_url
         or is_together
         or "chutes.ai" in base_url
-        or "deepseek.com" in base_url
+        or is_deepseek
         or is_zai
         or is_moonshot
         or provider == "opencode"
@@ -865,15 +936,25 @@ def detect_compat(model: Model) -> dict[str, Any]:
         or is_cloudflare_workers_ai
         or is_cloudflare_ai_gateway
     )
-    use_max_tokens = "chutes.ai" in base_url or is_moonshot or is_cloudflare_ai_gateway or is_together
+    use_max_tokens = (
+        "chutes.ai" in base_url
+        or is_deepseek
+        or is_moonshot
+        or is_cloudflare_ai_gateway
+        or is_together
+        or is_nvidia
+        or is_zai
+    )
     is_grok = provider == "xai" or "api.x.ai" in base_url
-    is_deepseek = provider == "deepseek" or "deepseek.com" in base_url
+    is_openrouter_developer_role_model = is_openrouter and model.id.startswith(("anthropic/", "openai/"))
     cache_control_format = "anthropic" if provider == "openrouter" and model.id.startswith("anthropic/") else None
 
     return {
         "supportsStore": not is_non_standard,
-        "supportsDeveloperRole": not is_non_standard,
-        "supportsReasoningEffort": not (is_grok or is_zai or is_moonshot or is_together or is_cloudflare_ai_gateway),
+        "supportsDeveloperRole": is_openrouter_developer_role_model or (not is_non_standard and not is_openrouter),
+        "supportsReasoningEffort": not (
+            is_grok or is_zai or is_moonshot or is_together or is_cloudflare_ai_gateway or is_nvidia
+        ),
         "supportsUsageInStreaming": True,
         "maxTokensField": "max_tokens" if use_max_tokens else "max_completion_tokens",
         "requiresToolResultName": False,
@@ -888,16 +969,19 @@ def detect_compat(model: Model) -> dict[str, Any]:
             else "together"
             if is_together
             else "openrouter"
-            if provider == "openrouter" or "openrouter.ai" in base_url
+            if is_openrouter
             else "openai"
         ),
         "openRouterRouting": {},
         "vercelGatewayRouting": {},
         "zaiToolStream": False,
-        "supportsStrictMode": not (is_moonshot or is_together or is_cloudflare_ai_gateway),
+        "supportsStrictMode": not (is_moonshot or is_together or is_cloudflare_ai_gateway or is_nvidia),
         "cacheControlFormat": cache_control_format,
         "sendSessionAffinityHeaders": False,
-        "supportsLongCacheRetention": not (is_together or is_cloudflare_workers_ai or is_cloudflare_ai_gateway),
+        "sessionAffinityFormat": "openrouter" if is_openrouter else "openai",
+        "supportsLongCacheRetention": not (
+            is_together or is_cloudflare_workers_ai or is_cloudflare_ai_gateway or is_nvidia
+        ),
     }
 
 
@@ -929,6 +1013,9 @@ def get_compat(model: Model) -> dict[str, Any]:
         "zaiToolStream": read_field(compat, "zaiToolStream", detected["zaiToolStream"]),
         "supportsStrictMode": read_field(compat, "supportsStrictMode", detected["supportsStrictMode"]),
         "cacheControlFormat": read_field(compat, "cacheControlFormat", detected["cacheControlFormat"]),
+        "sessionAffinityFormat": read_field(
+            compat, "sessionAffinityFormat", detected["sessionAffinityFormat"]
+        ),
         "sendSessionAffinityHeaders": read_field(
             compat, "sendSessionAffinityHeaders", detected["sendSessionAffinityHeaders"]
         ),

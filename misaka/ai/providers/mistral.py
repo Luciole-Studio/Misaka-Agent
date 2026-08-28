@@ -48,7 +48,13 @@ except ImportError:  # optional extra: misaka[mistral]
     _MistralClient = None
 
 from misaka.ai.providers._common import _empty_usage, _option, safe_json_stringify
+from misaka.ai.providers.constrained_sampling import (
+    get_json_schema_tool_parameters,
+    resolve_json_schema_strict_sampling,
+)
 from misaka.ai.providers.sdk import require
+from misaka.ai.utils.headers import apply_provider_headers
+from misaka.ai.utils.user_agent import get_misaka_user_agent
 from misaka.utils.values import maybe_await, signal_aborted
 
 MISTRAL_TOOL_CALL_ID_LENGTH = 9
@@ -231,7 +237,7 @@ def stream_simple_mistral(
     if not api_key:
         raise RuntimeError(f"No API key for provider: {model.provider}")
 
-    base = build_base_options(model, options, api_key)
+    base = build_base_options(model, context, options, api_key)
     clamped_reasoning = clamp_thinking_level(model, options.reasoning) if options and options.reasoning else None
     reasoning = None if clamped_reasoning == "off" else clamped_reasoning
     should_use_reasoning = bool(model.reasoning and reasoning is not None)
@@ -317,16 +323,32 @@ def truncate_error_text(text: str, max_chars: int) -> str:
     return f"{text[:max_chars]}... [truncated {len(text) - max_chars} chars]"
 
 
+def _has_header_override(overrides: Mapping[str, Any] | None, target: str) -> bool:
+    """Whether this layer named ``target`` at all -- setting it or deleting it."""
+    return bool(overrides) and any(str(name).lower() == target for name in overrides)
+
+
+def _should_use_prompt_caching(options: Any) -> bool:
+    return _option(options, "cacheRetention") != "none" and bool(_option(options, "sessionId"))
+
+
 def build_request_kwargs(model: Model, options: StreamOptions | Mapping[str, Any] | None = None) -> dict[str, Any]:
     request_kwargs: dict[str, Any] = {
         "retries": {"strategy": "none"},
     }
-    headers: dict[str, str] = {}
-    if model.headers:
-        headers.update(model.headers)
-    if _option(options, "headers"):
-        headers.update(_option(options, "headers"))
-    if _option(options, "sessionId") and "x-affinity" not in headers:
+    headers: dict[str, str] = {"User-Agent": get_misaka_user_agent()}
+    model_headers = model.headers
+    option_headers = _option(options, "headers")
+    apply_provider_headers(headers, model_headers)
+    apply_provider_headers(headers, option_headers)
+
+    # Affinity is only added when neither side spoke about it -- including a side that
+    # *deleted* it. Testing the merged dict instead would re-add the header a caller had
+    # just removed, because the deletion leaves no trace to find.
+    has_explicit_affinity = _has_header_override(model_headers, "x-affinity") or _has_header_override(
+        option_headers, "x-affinity"
+    )
+    if _should_use_prompt_caching(options) and not has_explicit_affinity:
         headers["x-affinity"] = _option(options, "sessionId")
     if headers:
         request_kwargs["headers"] = headers
@@ -596,7 +618,11 @@ def to_function_tools(tools: list[Tool]) -> list[dict[str, Any]]:
             "function": {
                 "name": tool.name,
                 "description": tool.description,
-                "parameters": strip_symbol_keys(tool.parameters_json_schema()),
+                # Upstream passes `true` here unconditionally: the Mistral conversations
+                # API always accepts a strict schema (mistral-conversations.ts:755).
+                "parameters": strip_symbol_keys(
+                    get_json_schema_tool_parameters(tool, resolve_json_schema_strict_sampling(tool, True))
+                ),
                 "strict": False,
             },
         }

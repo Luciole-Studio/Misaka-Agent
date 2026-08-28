@@ -26,6 +26,9 @@ from misaka.ai.providers._common import (
     apply_service_tier_pricing,
     resolve_cache_retention,
 )
+from misaka.ai.providers.constrained_sampling import (
+    create_grammar_tool_input_properties,
+)
 from misaka.ai.providers.openai_prompt_cache import clamp_openai_prompt_cache_key
 from misaka.ai.providers.openai_responses_shared import (
     convert_responses_messages,
@@ -46,7 +49,11 @@ from misaka.ai.types import (
     StreamOptions,
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
-from misaka.ai.utils.headers import headers_to_record
+from misaka.ai.utils.headers import (
+    apply_provider_headers,
+    headers_to_record,
+    provider_headers_to_record,
+)
 from misaka.utils.values import maybe_await, read_field, signal_aborted
 
 OPENAI_TOOL_CALL_PROVIDERS = {"openai", "openai-codex", "opencode"}
@@ -68,15 +75,22 @@ class OpenAIResponsesOptions(TypedDict, total=False):
     maxRetries: int
     maxTokens: int
     temperature: float
-    reasoningEffort: Literal["minimal", "low", "medium", "high", "xhigh"]
+    reasoningEffort: Literal["minimal", "low", "medium", "high", "xhigh", "max"]
     reasoningSummary: Literal["auto", "detailed", "concise"] | None
     serviceTier: Literal["auto", "default", "flex", "scale", "priority"]
 
 
-def get_compat(model: Model) -> dict[str, bool]:
+def _detect_session_affinity_format(model: Model) -> str:
+    base_url = getattr(model, "baseUrl", "") or ""
+    return "openrouter" if model.provider == "openrouter" or "openrouter.ai" in base_url else "openai"
+
+
+def get_compat(model: Model) -> dict[str, Any]:
     compat = model.compat if getattr(model, "compat", None) is not None else None
     return {
-        "sendSessionIdHeader": read_field(compat, "sendSessionIdHeader", True),
+        "sessionAffinityFormat": read_field(
+            compat, "sessionAffinityFormat", _detect_session_affinity_format(model)
+        ),
         "supportsLongCacheRetention": read_field(compat, "supportsLongCacheRetention", True),
     }
 
@@ -127,22 +141,29 @@ def create_client(
         headers.update(copilot_headers)
 
     if session_id:
-        if compat["sendSessionIdHeader"]:
-            headers["session_id"] = session_id
-        headers["x-client-request-id"] = session_id
+        if compat["sessionAffinityFormat"] == "openrouter":
+            headers["x-session-id"] = session_id
+        else:
+            if compat["sessionAffinityFormat"] == "openai":
+                headers["session_id"] = session_id
+            headers["x-client-request-id"] = session_id
 
-    if options_headers:
-        headers.update(options_headers)
+    apply_provider_headers(headers, options_headers)
 
-    default_headers = (
-        {
-            **headers,
-            "Authorization": headers.get("Authorization"),
-            "cf-aig-authorization": f"Bearer {api_key}",
-        }
-        if model.provider == "cloudflare-ai-gateway"
-        else headers
-    )
+    if model.provider == "cloudflare-ai-gateway":
+        # The gateway's own header replaces the provider's, and resolved auth marks the
+        # displaced ones with `None`. httpx refuses a `None` header value outright, so the
+        # merge is filtered rather than passed through -- upstream's
+        # `providerHeadersToRecord` drops them for the same reason.
+        default_headers = provider_headers_to_record(
+            {
+                **headers,
+                "Authorization": headers.get("Authorization"),
+                "cf-aig-authorization": f"Bearer {api_key}",
+            }
+        ) or {}
+    else:
+        default_headers = headers
 
     return require(AsyncOpenAI, "openai")(
         api_key=api_key,
@@ -152,7 +173,15 @@ def create_client(
 
 
 def build_params(model: Model, context: Context, options: Any = None) -> dict[str, Any]:
-    messages = convert_responses_messages(model, context, OPENAI_TOOL_CALL_PROVIDERS)
+    messages = convert_responses_messages(
+        model,
+        context,
+        OPENAI_TOOL_CALL_PROVIDERS,
+        {"grammarToolInputProperties": create_grammar_tool_input_properties(
+        context.tools,
+        bool(getattr(getattr(model, "compat", None), "supportsOpenAIGrammarTools", None)),
+    )},
+    )
 
     cache_retention = resolve_cache_retention(_option(options, "cacheRetention"))
     compat = get_compat(model)
@@ -174,7 +203,11 @@ def build_params(model: Model, context: Context, options: Any = None) -> dict[st
     if _option(options, "serviceTier") is not None:
         params["service_tier"] = _option(options, "serviceTier")
     if context.tools:
-        params["tools"] = convert_responses_tools(context.tools)
+        params["tools"] = convert_responses_tools(
+            context.tools,
+            {"supportsStrictMode": bool(getattr(getattr(model, "compat", None), "supportsStrictMode", None) if getattr(getattr(model, "compat", None), "supportsStrictMode", None) is not None else True),
+             "supportsOpenAIGrammarTools": bool(getattr(getattr(model, "compat", None), "supportsOpenAIGrammarTools", None))},
+        )
 
     reasoning_effort = _option(options, "reasoningEffort")
     reasoning_summary = _option(options, "reasoningSummary")
@@ -195,6 +228,14 @@ def build_params(model: Model, context: Context, options: Any = None) -> dict[st
                 off_value = model.thinkingLevelMap.get("off")
             if model.thinkingLevelMap is None or not has_off_override or off_value is not None:
                 params["reasoning"] = {"effort": "none" if off_value is None else off_value}
+
+    # Upstream applies samplingParams last with `Object.assign` (openai-responses.ts:342-343),
+    # so custom keys override the named request fields above. openai_completions carries a
+    # declared deviation in the other direction; this file follows upstream until the owner
+    # unifies the two.
+    sampling = _option(options, "samplingParams")
+    if isinstance(sampling, dict) and sampling:
+        params.update(sampling)
 
     return params
 
@@ -292,6 +333,10 @@ def stream_openai_responses(
                 stream,
                 model,
                 {
+                    "grammarToolInputProperties": create_grammar_tool_input_properties(
+                        context.tools,
+                        bool(getattr(getattr(model, "compat", None), "supportsOpenAIGrammarTools", None)),
+                    ),
                     "serviceTier": _option(options, "serviceTier"),
                     "applyServiceTierPricing": lambda usage, tier: apply_service_tier_pricing(usage, tier, model),
                 },
@@ -328,7 +373,7 @@ def stream_simple_openai_responses(
     if not api_key:
         raise RuntimeError(f"No API key for provider: {model.provider}")
 
-    base = build_base_options(model, options, api_key)
+    base = build_base_options(model, context, options, api_key)
     clamped_reasoning = clamp_thinking_level(model, options.reasoning) if options and options.reasoning else None
     reasoning_effort = None if clamped_reasoning == "off" else clamped_reasoning
 

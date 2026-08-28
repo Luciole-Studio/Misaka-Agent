@@ -22,6 +22,9 @@ from misaka.ai.providers._common import (
     _empty_usage,
     _option,
 )
+from misaka.ai.providers.constrained_sampling import (
+    create_grammar_tool_input_properties,
+)
 from misaka.ai.providers.openai_prompt_cache import clamp_openai_prompt_cache_key
 from misaka.ai.providers.openai_responses_shared import (
     convert_responses_messages,
@@ -42,6 +45,7 @@ from misaka.ai.types import (
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
+from misaka.ai.utils.user_agent import get_misaka_user_agent
 from misaka.utils.values import maybe_await, signal_aborted
 
 DEFAULT_AZURE_API_VERSION = "v1"
@@ -58,7 +62,7 @@ class AzureOpenAIResponsesOptions(TypedDict, total=False):
     onResponse: Any
     timeoutMs: int
     maxRetries: int
-    reasoningEffort: Literal["minimal", "low", "medium", "high", "xhigh"]
+    reasoningEffort: Literal["minimal", "low", "medium", "high", "xhigh", "max"]
     reasoningSummary: Literal["auto", "detailed", "concise"] | None
     azureApiVersion: str
     azureResourceName: str
@@ -103,15 +107,28 @@ def format_azure_openai_error(error: Any) -> str:
 def normalize_azure_base_url(base_url: str) -> str:
     trimmed = base_url.strip().rstrip("/")
     parsed = urlparse(trimmed)
-    if not parsed.scheme or not parsed.netloc:
+    try:
+        hostname, port = parsed.hostname, parsed.port
+    except ValueError as error:
+        # `new URL()` refuses an out-of-range port outright; `urlparse` defers the
+        # complaint to `.port`. Surfacing it here keeps the two implementations
+        # rejecting the same inputs instead of letting a typo through to the SDK.
+        raise RuntimeError(f"Invalid Azure OpenAI base URL: {base_url}") from error
+    del port
+    if not parsed.scheme or not parsed.netloc or hostname is None:
         raise RuntimeError(f"Invalid Azure OpenAI base URL: {base_url}")
 
-    is_azure_host = parsed.hostname is not None and (
-        parsed.hostname.endswith(".openai.azure.com") or parsed.hostname.endswith(".cognitiveservices.azure.com")
+    # `.ai.azure.com` is Azure AI Foundry: those endpoints need the same base path, or the
+    # SDK appends /deployments/... to the bare host and every request 404s
+    # (azure-openai-responses.ts:196-198).
+    is_azure_host = hostname.endswith(
+        (".openai.azure.com", ".ai.azure.com", ".cognitiveservices.azure.com")
     )
     normalized_path = parsed.path.rstrip("/")
 
-    if is_azure_host and normalized_path in {"", "/", "/openai"}:
+    # `/openai/v1/responses` is what someone copies out of the portal's sample request;
+    # upstream folds it back to the base path (azure-openai-responses.ts:203-210).
+    if is_azure_host and normalized_path in {"", "/", "/openai", "/openai/v1/responses"}:
         parsed = parsed._replace(path="/openai/v1", query="")
 
     return urlunparse(parsed).rstrip("/")
@@ -148,7 +165,7 @@ def create_client(model: Model, api_key: str, options: Any = None) -> AsyncAzure
             )
         api_key = env_key
 
-    headers = dict(model.headers or {})
+    headers = {"User-Agent": get_misaka_user_agent(), **(model.headers or {})}
     if _option(options, "headers"):
         headers.update(_option(options, "headers"))
 
@@ -162,7 +179,15 @@ def create_client(model: Model, api_key: str, options: Any = None) -> AsyncAzure
 
 
 def build_params(model: Model, context: Context, options: Any, deployment_name: str) -> dict[str, Any]:
-    messages = convert_responses_messages(model, context, AZURE_TOOL_CALL_PROVIDERS)
+    messages = convert_responses_messages(
+        model,
+        context,
+        AZURE_TOOL_CALL_PROVIDERS,
+        {"grammarToolInputProperties": create_grammar_tool_input_properties(
+        context.tools,
+        bool(getattr(getattr(model, "compat", None), "supportsOpenAIGrammarTools", None)),
+    )},
+    )
     params: dict[str, Any] = {
         "model": deployment_name,
         "input": messages,
@@ -175,7 +200,11 @@ def build_params(model: Model, context: Context, options: Any, deployment_name: 
     if _option(options, "temperature") is not None:
         params["temperature"] = _option(options, "temperature")
     if context.tools:
-        params["tools"] = convert_responses_tools(context.tools)
+        params["tools"] = convert_responses_tools(
+            context.tools,
+            {"supportsStrictMode": bool(getattr(getattr(model, "compat", None), "supportsStrictMode", None) if getattr(getattr(model, "compat", None), "supportsStrictMode", None) is not None else True),
+             "supportsOpenAIGrammarTools": bool(getattr(getattr(model, "compat", None), "supportsOpenAIGrammarTools", None))},
+        )
 
     reasoning_effort = _option(options, "reasoningEffort")
     reasoning_summary = _option(options, "reasoningSummary")
@@ -189,6 +218,13 @@ def build_params(model: Model, context: Context, options: Any, deployment_name: 
             off_is_explicitly_null = isinstance(thinking_level_map, dict) and "off" in thinking_level_map and thinking_level_map["off"] is None
             if not off_is_explicitly_null:
                 params["reasoning"] = {"effort": thinking_level_map.get("off") or "none"}
+
+    # Upstream applies samplingParams last with `Object.assign` (azure-openai-responses.ts:333-334);
+    # custom keys override the named request fields above. Same note as openai_responses:
+    # openai_completions deviates the other way, by declared choice.
+    sampling = _option(options, "samplingParams")
+    if isinstance(sampling, dict) and sampling:
+        params.update(sampling)
 
     return params
 
@@ -288,7 +324,18 @@ def stream_azure_openai_responses(
             openai_stream = await _create_responses_stream(client, params, options, model)
             stream.push(StartEvent(partial=output))
             signal = _option(options, "signal")
-            await process_responses_stream(_iterate_stream(openai_stream, signal), output, stream, model)
+            await process_responses_stream(
+                _iterate_stream(openai_stream, signal),
+                output,
+                stream,
+                model,
+                {
+                    "grammarToolInputProperties": create_grammar_tool_input_properties(
+                        context.tools,
+                        bool(getattr(getattr(model, "compat", None), "supportsOpenAIGrammarTools", None)),
+                    ),
+                },
+            )
 
             if signal_aborted(signal):
                 raise RuntimeError("Request was aborted")
@@ -319,7 +366,7 @@ def stream_simple_azure_openai_responses(
     if not api_key:
         raise RuntimeError(f"No API key for provider: {model.provider}")
 
-    base = build_base_options(model, options, api_key)
+    base = build_base_options(model, context, options, api_key)
     clamped_reasoning = clamp_thinking_level(model, options.reasoning) if options and options.reasoning else None
     reasoning_effort = None if clamped_reasoning == "off" else clamped_reasoning
     return stream_azure_openai_responses(

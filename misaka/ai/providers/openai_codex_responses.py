@@ -7,7 +7,6 @@ import base64
 import importlib
 import json
 import math
-import platform
 import re
 import time
 import uuid
@@ -26,6 +25,9 @@ from misaka.ai.providers._common import (
     _option,
     apply_service_tier_pricing,
     get_service_tier_cost_multiplier,
+)
+from misaka.ai.providers.constrained_sampling import (
+    create_grammar_tool_input_properties,
 )
 from misaka.ai.providers.openai_prompt_cache import clamp_openai_prompt_cache_key
 from misaka.ai.providers.openai_responses_shared import (
@@ -52,6 +54,8 @@ from misaka.ai.utils.diagnostics import (
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
+from misaka.ai.utils.user_agent import get_misaka_user_agent
+from misaka.core.provider_attribution import CLIENT_NAME
 from misaka.utils.values import maybe_await, signal_aborted
 
 DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api"
@@ -81,7 +85,7 @@ class OpenAICodexResponsesOptions(TypedDict, total=False):
     onResponse: Any
     timeoutMs: int
     maxRetries: int
-    reasoningEffort: Literal["none", "minimal", "low", "medium", "high", "xhigh"]
+    reasoningEffort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
     reasoningSummary: Literal["auto", "concise", "detailed", "off", "on"] | None
     serviceTier: str
     textVerbosity: Literal["low", "medium", "high"]
@@ -272,7 +276,18 @@ def build_request_body(
     options: StreamOptions | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     text_verbosity = _option(options, "textVerbosity") or "low"
-    messages = convert_responses_messages(model, context, CODEX_TOOL_CALL_PROVIDERS, {"includeSystemPrompt": False})
+    messages = convert_responses_messages(
+        model,
+        context,
+        CODEX_TOOL_CALL_PROVIDERS,
+        {
+            "includeSystemPrompt": False,
+            "grammarToolInputProperties": create_grammar_tool_input_properties(
+        context.tools,
+        bool(getattr(getattr(model, "compat", None), "supportsOpenAIGrammarTools", None)),
+    ),
+        },
+    )
     body: dict[str, Any] = {
         "model": model.id,
         "store": False,
@@ -291,7 +306,12 @@ def build_request_body(
     if _option(options, "serviceTier") is not None:
         body["service_tier"] = _option(options, "serviceTier")
     if context.tools:
-        body["tools"] = convert_responses_tools(context.tools, {"strict": None})
+        body["tools"] = convert_responses_tools(
+            context.tools,
+            {"strict": None,
+             "supportsStrictMode": bool(getattr(getattr(model, "compat", None), "supportsStrictMode", None) if getattr(getattr(model, "compat", None), "supportsStrictMode", None) is not None else True),
+             "supportsOpenAIGrammarTools": bool(getattr(getattr(model, "compat", None), "supportsOpenAIGrammarTools", None))},
+        )
 
     reasoning_effort = _option(options, "reasoningEffort")
     if reasoning_effort is not None:
@@ -439,23 +459,6 @@ async def parse_sse(response: httpx.Response, signal: Any = None) -> AsyncIterat
                 yield parsed
 
 
-def _get_codex_user_agent() -> str:
-    try:
-        system = platform.system().lower()
-        platform_name = "win32" if system == "windows" else system
-        arch = platform.machine().lower()
-        arch = {
-            "x86_64": "x64",
-            "amd64": "x64",
-            "i386": "ia32",
-            "i686": "ia32",
-            "aarch64": "arm64",
-        }.get(arch, arch)
-        return f"harn ({platform_name} {platform.release()}; {arch})"
-    except Exception:  # noqa: BLE001 - a user-agent string is cosmetic
-        return "harn (browser)"
-
-
 def _build_base_codex_headers(
     model_headers: Mapping[str, str] | None,
     option_headers: Mapping[str, str] | None,
@@ -466,8 +469,10 @@ def _build_base_codex_headers(
     headers.update(dict(option_headers or {}))
     headers["authorization"] = f"Bearer {api_key}"
     headers["chatgpt-account-id"] = account_id
-    headers["originator"] = "harn"
-    headers["User-Agent"] = _get_codex_user_agent()
+    # Upstream sends its own name in both; sending harn's would credit this traffic to
+    # the project misaka was forked from, which is what CLIENT_NAME exists to prevent.
+    headers["originator"] = CLIENT_NAME
+    headers["User-Agent"] = get_misaka_user_agent()
     return headers
 
 
@@ -1117,7 +1122,7 @@ def stream_simple_openai_codex_responses(
     if not api_key:
         raise RuntimeError(f"No API key for provider: {model.provider}")
 
-    base = build_base_options(model, options, api_key)
+    base = build_base_options(model, context, options, api_key)
     clamped_reasoning = clamp_thinking_level(model, options.reasoning) if options and options.reasoning else None
     reasoning_effort = None if clamped_reasoning == "off" else clamped_reasoning
     return stream_openai_codex_responses(

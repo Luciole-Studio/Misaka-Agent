@@ -40,6 +40,7 @@ from misaka.ai.providers.google_shared import (
     is_thinking_part,
     map_stop_reason,
     map_tool_choice,
+    resolve_google_thinking_level,
     retain_thought_signature,
 )
 from misaka.ai.providers.sdk import require
@@ -66,7 +67,9 @@ from misaka.ai.types import (
     UsageCost,
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
+from misaka.ai.utils.headers import provider_headers_to_record
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
+from misaka.ai.utils.user_agent import get_misaka_user_agent
 from misaka.utils.values import signal_aborted
 
 ClampedThinkingLevel = Literal["minimal", "low", "medium", "high"]
@@ -306,7 +309,7 @@ def stream_simple_google_vertex(
     context: Context,
     options: SimpleStreamOptions | None = None,
 ) -> AssistantMessageEventStream:
-    base = build_base_options(model, options, None)
+    base = build_base_options(model, context, options, None)
     reasoning = _option(options, "reasoning")
     if not reasoning:
         return stream_google_vertex(
@@ -319,7 +322,7 @@ def stream_simple_google_vertex(
         )
 
     clamped_reasoning = clamp_thinking_level(model, reasoning)
-    effort: ClampedThinkingLevel = "high" if clamped_reasoning in {"off", "xhigh"} else clamped_reasoning
+    effort: ClampedThinkingLevel = resolve_google_thinking_level(model, clamped_reasoning)
 
     if is_gemini3_pro_model(model) or is_gemini3_flash_model(model):
         return stream_google_vertex(
@@ -389,8 +392,15 @@ def build_http_options(
         if base_url_includes_api_version(base_url):
             http_options["apiVersion"] = ""
 
-    if model.headers or options_headers:
-        http_options["headers"] = {**(model.headers or {}), **dict(options_headers or {})}
+    # Unconditional, as upstream is: the client string goes out even when neither the
+    # catalog entry nor the caller contributes a header (google-generative-ai.ts:348).
+    http_options["headers"] = provider_headers_to_record(
+        {
+            "User-Agent": get_misaka_user_agent(),
+            **(model.headers or {}),
+            **dict(options_headers or {}),
+        }
+    )
 
     return http_options or None
 

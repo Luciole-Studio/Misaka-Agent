@@ -33,6 +33,10 @@ from misaka.ai.providers._common import (
     resolve_cache_retention,
     safe_json_stringify,
 )
+from misaka.ai.providers.constrained_sampling import (
+    get_json_schema_tool_parameters,
+    resolve_json_schema_strict_sampling,
+)
 from misaka.ai.providers.sdk import require
 from misaka.ai.providers.simple_options import (
     adjust_max_tokens_for_thinking,
@@ -245,7 +249,11 @@ def stream_bedrock(
                     **({"maxTokens": inference_max_tokens} if inference_max_tokens is not None else {}),
                     **({"temperature": _option(options, "temperature")} if _option(options, "temperature") is not None else {}),
                 },
-                "toolConfig": convert_tool_config(context.tools, _option(options, "toolChoice")),
+                "toolConfig": convert_tool_config(
+                    context.tools,
+                    _option(options, "toolChoice"),
+                    bool(getattr(getattr(model, "compat", None), "supportsStrictMode", None)),
+                ),
                 "additionalModelRequestFields": build_additional_model_request_fields(model, options),
                 **({"requestMetadata": _option(options, "requestMetadata")} if _option(options, "requestMetadata") is not None else {}),
             }
@@ -357,7 +365,7 @@ def stream_simple_bedrock(
     context: Context,
     options: SimpleStreamOptions | None = None,
 ) -> AssistantMessageEventStream:
-    base = build_base_options(model, options, None)
+    base = build_base_options(model, context, options, None)
     if options is None or options.reasoning is None:
         return stream_bedrock(model, context, {**base.model_dump(), "reasoning": None})
 
@@ -830,20 +838,24 @@ def convert_messages(
 def convert_tool_config(
     tools: list[Tool] | None,
     tool_choice: str | dict[str, Any] | None,
+    supports_strict_mode: bool = False,
 ) -> dict[str, Any] | None:
     if not tools or tool_choice == "none":
         return None
 
-    bedrock_tools = [
-        {
-            "toolSpec": {
-                "name": tool.name,
-                "description": tool.description,
-                "inputSchema": {"json": tool.parameters_json_schema()},
+    bedrock_tools: list[dict[str, Any]] = []
+    for tool in tools:
+        strict = resolve_json_schema_strict_sampling(tool, supports_strict_mode)
+        bedrock_tools.append(
+            {
+                "toolSpec": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "inputSchema": {"json": get_json_schema_tool_parameters(tool, strict)},
+                    **({"strict": True} if strict is True else {}),
+                }
             }
-        }
-        for tool in tools
-    ]
+        )
 
     bedrock_tool_choice: dict[str, Any] | None = None
     if tool_choice == "auto":

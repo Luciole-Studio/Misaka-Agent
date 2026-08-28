@@ -1,4 +1,4 @@
-# ruff: noqa: UP040 - these aliases are read at runtime (pydantic fields, isinstance); PEP 695 aliases are lazy
+# ruff: noqa: UP040 - TypeAlias spelling kept in step with misaka/ai/types.py.
 
 """Shared Google Generative AI and Vertex request helpers."""
 
@@ -9,6 +9,10 @@ import copy
 import re
 from typing import Any, Literal, TypeAlias
 
+from misaka.ai.providers.constrained_sampling import (
+    get_json_schema_tool_parameters,
+    resolve_json_schema_strict_sampling,
+)
 from misaka.ai.providers.transform_messages import transform_messages
 from misaka.ai.types import Context, ImageContent, Model, StopReason, Tool
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
@@ -39,8 +43,11 @@ def is_thinking_part(part: dict[str, Any] | Any) -> bool:
 def coerce_thought_signature(value: object) -> str | None:
     """Coerce a thought_signature to str.
 
-    google-genai sometimes returns it as raw bytes while ToolCall declares str;
-    base64 preserves it losslessly (it is only ever echoed back, never read).
+    google-genai declares `Part.thought_signature` as `bytes` while ToolCall declares str,
+    so what comes off an SDK part needs converting; a value that is already a str is kept
+    as-is. Google's field is TYPE_BYTES, i.e. base64 on the wire, so base64 both round-trips
+    losslessly and is the shape `_is_valid_thought_signature` demands before a signature is
+    echoed back.
     """
     if isinstance(value, (bytes, bytearray)):
         return base64.b64encode(bytes(value)).decode("ascii")
@@ -66,8 +73,26 @@ def _resolve_thought_signature(is_same_provider_and_model: bool, signature: str 
     return signature if is_same_provider_and_model and _is_valid_thought_signature(signature) else None
 
 
+ResolvedGoogleThinkingLevel: TypeAlias = Literal["minimal", "low", "medium", "high"]
+
+
+def resolve_google_thinking_level(model: Model, level: str) -> ResolvedGoogleThinkingLevel:
+    """Resolve a supported thinking level (or the model's own mapping) to a Google level."""
+    if level == "off":
+        return "high"
+
+    mapped = model.thinkingLevelMap.get(level) if model.thinkingLevelMap else None
+    resolved = mapped.lower() if isinstance(mapped, str) else level
+    if resolved in {"minimal", "low", "medium", "high"}:
+        return resolved  # type: ignore[return-value]
+    raise ValueError(
+        f"Unsupported Google thinking level mapping for {model.provider}/{model.id}: {level} -> {mapped}"
+    )
+
+
 def requires_tool_call_id(model_id: str) -> bool:
-    return model_id.startswith(("claude-", "gpt-oss-"))
+    major = _get_gemini_major_version(model_id)
+    return model_id.startswith(("claude-", "gpt-oss-")) or (major is not None and major >= 3)
 
 
 def _get_gemini_major_version(model_id: str) -> int | None:
@@ -214,20 +239,23 @@ def sanitize_for_openapi(schema: Any) -> Any:
 def convert_tools(
     tools: list[Tool],
     use_parameters: bool = False,
+    supports_strict_mode: bool = True,
 ) -> list[dict[str, Any]] | None:
     if not tools:
         return None
 
     declarations: list[dict[str, Any]] = []
     for tool in tools:
+        strict = resolve_json_schema_strict_sampling(tool, supports_strict_mode)
+        parameters = get_json_schema_tool_parameters(tool, strict)
         declaration: dict[str, Any] = {
             "name": tool.name,
             "description": tool.description,
         }
         if use_parameters:
-            declaration["parameters"] = sanitize_for_openapi(copy.deepcopy(tool.parameters_json_schema()))
+            declaration["parameters"] = sanitize_for_openapi(copy.deepcopy(parameters))
         else:
-            declaration["parametersJsonSchema"] = copy.deepcopy(tool.parameters_json_schema())
+            declaration["parametersJsonSchema"] = copy.deepcopy(parameters)
         declarations.append(declaration)
 
     return [{"functionDeclarations": declarations}]

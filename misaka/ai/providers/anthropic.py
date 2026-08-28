@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import AsyncIterator, Iterable, Mapping
+from collections.abc import Set as AbstractSet
 from typing import Any, Literal, TypedDict
 
 try:
@@ -23,6 +25,10 @@ from misaka.ai.providers._common import (
     resolve_cache_retention,
 )
 from misaka.ai.providers.cloudflare import resolve_cloudflare_base_url
+from misaka.ai.providers.constrained_sampling import (
+    get_json_schema_tool_parameters,
+    resolve_json_schema_strict_sampling,
+)
 from misaka.ai.providers.github_copilot_headers import (
     build_copilot_dynamic_headers,
     has_copilot_vision_input,
@@ -31,6 +37,7 @@ from misaka.ai.providers.sdk import require
 from misaka.ai.providers.simple_options import (
     adjust_max_tokens_for_thinking,
     build_base_options,
+    clamp_thinking_budget_to_answer_room,
 )
 from misaka.ai.providers.transform_messages import transform_messages
 from misaka.ai.types import (
@@ -60,10 +67,12 @@ from misaka.ai.types import (
     ToolCallStartEvent,
     ToolResultMessage,
 )
+from misaka.ai.utils.deferred_tools import split_deferred_tools
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
 from misaka.ai.utils.json_parse import StreamingArgs, parse_json_with_repair
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
+from misaka.ai.utils.user_agent import get_misaka_user_agent
 from misaka.utils.values import maybe_await, signal_aborted
 
 AnthropicEffort = Literal["low", "medium", "high", "xhigh", "max"]
@@ -130,6 +139,15 @@ class ServerSentEvent(dict[str, Any]):
 
 
 def _merge_headers(*header_sources: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Later sources win, matching header names case-insensitively.
+
+    Upstream merges these with `Object.assign`, which is case-sensitive, and relies on the
+    `Headers` object downstream to collapse `User-Agent` and `user-agent` into one. A dict
+    handed to httpx collapses nothing: both spellings go out as separate headers, and the
+    OAuth path -- which deliberately overrides the client string with `claude-cli/...` --
+    would send its own identity *and* misaka's. Replacing case-insensitively here, the way
+    `models_runtime._mergeHeaders` already does, produces what upstream puts on the wire.
+    """
     merged: dict[str, Any] = {}
     for headers in header_sources:
         if not headers:
@@ -137,13 +155,36 @@ def _merge_headers(*header_sources: Mapping[str, Any] | None) -> dict[str, Any]:
         for key, value in headers.items():
             if value is None:
                 continue
-            merged[str(key)] = value
+            name = str(key)
+            lowered = name.lower()
+            for existing in [k for k in merged if k.lower() == lowered]:
+                del merged[existing]
+            merged[name] = value
     return merged
 
 
 def _force_adaptive_thinking(model: Model) -> bool | None:
     compat = getattr(model, "compat", None)
     return getattr(compat, "forceAdaptiveThinking", None)
+
+
+def _default_supports_tool_references(model: Model) -> bool:
+    """First-party Anthropic models from 4.5 on, Haiku excepted.
+
+    Haiku rejects client-side ``tool_reference`` blocks, and models older than tool search
+    do not understand them. The minor group is only a minor version when it is short: an
+    id like ``claude-opus-4-20250514`` puts a date where a point release would go, and
+    upstream tells them apart by length rather than by shape.
+    """
+    if model.provider != "anthropic" or "haiku" in model.id:
+        return False
+    version = re.match(r"^claude-(?:opus|sonnet|fable)-(\d+)(?:-(\d+))?(?:-|$)", model.id)
+    if not version:
+        return False
+    major = int(version.group(1))
+    minor_group = version.group(2)
+    minor = int(minor_group) if minor_group and len(minor_group) < 8 else 0
+    return major > 4 or (major == 4 and minor >= 5)
 
 
 def get_anthropic_compat(model: Model) -> dict[str, bool]:
@@ -170,6 +211,12 @@ def get_anthropic_compat(model: Model) -> dict[str, bool]:
             getattr(compat, "supportsCacheControlOnTools", None)
             if getattr(compat, "supportsCacheControlOnTools", None) is not None
             else not is_fireworks
+        ),
+        "supportsStrictTools": bool(getattr(compat, "supportsStrictTools", None)),
+        "supportsToolReferences": (
+            getattr(compat, "supportsToolReferences", None)
+            if getattr(compat, "supportsToolReferences", None) is not None
+            else _default_supports_tool_references(model)
         ),
     }
 
@@ -231,13 +278,18 @@ def convert_content_blocks(
     return blocks
 
 
-def is_oauth_token(api_key: str) -> bool:
+def is_oauth_token(api_key: str | None) -> bool:
+    # `None` is a real case, not a caller error: upstream's `createClient` takes
+    # `apiKey: string | undefined`, and a provider whose auth resolves to headers only
+    # (Kimi's OAuth returns `Authorization: Bearer ...` and no key) arrives that way.
+    if not api_key:
+        return False
     return "sk-ant-oat" in api_key
 
 
 def create_client(
     model: Model,
-    api_key: str,
+    api_key: str | None,
     interleaved_thinking: bool,
     use_fine_grained_tool_streaming_beta: bool,
     options_headers: Mapping[str, str] | None = None,
@@ -253,12 +305,17 @@ def create_client(
 
     if model.provider == "cloudflare-ai-gateway":
         client = require(AsyncAnthropic, "anthropic")(
-            api_key=None,
+            # The real credential is `cf-aig-authorization` in default_headers. The Python
+            # SDK, unlike the TS one pi builds on, refuses to send a request with neither
+            # api_key nor auth_token -- so a placeholder satisfies that check, and the
+            # `X-Api-Key: omit` below guarantees it never reaches the wire.
+            api_key=api_key or "header-auth-placeholder",
             auth_token=None,
             base_url=resolve_cloudflare_base_url(model),
             default_headers=_merge_headers(
                 {
-                    "accept": "application/json",
+                    "User-Agent": get_misaka_user_agent(),
+                "accept": "application/json",
                     "anthropic-dangerous-direct-browser-access": "true",
                     "cf-aig-authorization": f"Bearer {api_key}",
                     "X-Api-Key": omit,
@@ -278,7 +335,8 @@ def create_client(
             base_url=model.baseUrl,
             default_headers=_merge_headers(
                 {
-                    "accept": "application/json",
+                    "User-Agent": get_misaka_user_agent(),
+                "accept": "application/json",
                     "anthropic-dangerous-direct-browser-access": "true",
                     **({"anthropic-beta": ",".join(beta_features)} if beta_features else {}),
                 },
@@ -296,7 +354,8 @@ def create_client(
             base_url=model.baseUrl,
             default_headers=_merge_headers(
                 {
-                    "accept": "application/json",
+                    "User-Agent": get_misaka_user_agent(),
+                "accept": "application/json",
                     "anthropic-dangerous-direct-browser-access": "true",
                     "anthropic-beta": ",".join(("claude-code-20250219", "oauth-2025-04-20", *beta_features)),
                     "user-agent": f"claude-cli/{CLAUDE_CODE_VERSION}",
@@ -313,14 +372,23 @@ def create_client(
         if session_id and get_anthropic_compat(model)["sendSessionAffinityHeaders"]
         else None
     )
+    # A header-only configuration (ANTHROPIC_AUTH_TOKEN, Kimi's bearer token) arrives with
+    # no api key at all: the credential rides in options_headers. The TS SDK accepts
+    # `apiKey: null` and simply sends what defaultHeaders carries; the Python SDK raises
+    # "Could not resolve authentication method" at request time. The placeholder passes
+    # that check and `X-Api-Key: omit` strips the header the SDK would mint from it, so
+    # the only auth on the wire is the one the caller supplied.
+    header_only_auth = api_key is None
     client = require(AsyncAnthropic, "anthropic")(
-        api_key=api_key,
+        api_key=api_key if api_key is not None else "header-auth-placeholder",
         auth_token=None,
         base_url=model.baseUrl,
         default_headers=_merge_headers(
             {
+                "User-Agent": get_misaka_user_agent(),
                 "accept": "application/json",
                 "anthropic-dangerous-direct-browser-access": "true",
+                **({"X-Api-Key": omit} if header_only_auth else {}),
                 **({"anthropic-beta": ",".join(beta_features)} if beta_features else {}),
             },
             session_headers,
@@ -339,9 +407,31 @@ def build_params(
 ) -> dict[str, Any]:
     cache_state = get_cache_control(model, _option(options, "cacheRetention"))
     cache_control = cache_state.get("cacheControl")
+    compat = get_anthropic_compat(model)
+
+    # Tools whose definitions the transcript will deliver are declared with
+    # `defer_loading` and their bodies arrive later, as `tool_reference` blocks in the
+    # result of the call that made them available. The split has to happen against the
+    # *transformed* messages, because that is where tool call ids and names are settled.
+    normalize_tool_name = to_claude_code_name if is_oauth else (lambda name: name)
+    placement = split_deferred_tools(
+        context.model_copy(update={"messages": transform_messages(context.messages, model, normalize_tool_call_id)}),
+        bool(compat["supportsToolReferences"]),
+        normalize_tool_name,
+    )
+    immediate_tools = list(placement.immediate)
+    deferred_tools = list(placement.deferred.values())
+    if not immediate_tools and deferred_tools:
+        # Nothing to send now would leave the request with no tools at all; upstream
+        # promotes the whole deferred set rather than send an empty list.
+        immediate_tools, deferred_tools = deferred_tools, []
+    deferred_tool_names = {normalize_tool_name(tool.name) for tool in deferred_tools}
+
     params: dict[str, Any] = {
         "model": model.id,
-        "messages": convert_messages(context.messages, model, is_oauth, cache_control),
+        "messages": convert_messages(
+            context.messages, model, is_oauth, cache_control, deferred_tool_names
+        ),
         "max_tokens": _option(options, "maxTokens", model.maxTokens),
         "stream": True,
     }
@@ -375,14 +465,24 @@ def build_params(
     if _option(options, "temperature") is not None and not _option(options, "thinkingEnabled"):
         params["temperature"] = _option(options, "temperature")
 
-    if context.tools:
-        compat = get_anthropic_compat(model)
-        params["tools"] = convert_tools(
-            context.tools,
-            is_oauth,
-            bool(compat["supportsEagerToolInputStreaming"]),
-            cache_control if compat["supportsCacheControlOnTools"] else None,
-        )
+    if immediate_tools or deferred_tools:
+        params["tools"] = [
+            *convert_tools(
+                immediate_tools,
+                is_oauth,
+                bool(compat["supportsEagerToolInputStreaming"]),
+                bool(compat["supportsStrictTools"]),
+                cache_control if compat["supportsCacheControlOnTools"] else None,
+            ),
+            *convert_tools(
+                deferred_tools,
+                is_oauth,
+                bool(compat["supportsEagerToolInputStreaming"]),
+                bool(compat["supportsStrictTools"]),
+                None,
+                defer_loading=True,
+            ),
+        ]
 
     if model.reasoning:
         thinking_enabled = _option(options, "thinkingEnabled")
@@ -413,9 +513,53 @@ def build_params(
     return params
 
 
-def normalize_tool_call_id(tool_call_id: str) -> str:
+def normalize_tool_call_id(
+    tool_call_id: str, _target_model: Model | None = None, _source: Any = None
+) -> str:
+    """Anthropic ids must match ``^[a-zA-Z0-9_-]+$`` and stay under 65 characters.
+
+    ``transform_messages`` calls this with three arguments, which is upstream's declared
+    callback shape; upstream's own implementation takes one and JavaScript discards the
+    rest. Python does not -- passing this a three-argument call raised ``TypeError``, and
+    only on a cross-provider handoff, which is the one path no test exercised. The extra
+    parameters are accepted and ignored, as upstream's are.
+    """
     normalized = "".join(char if char.isalnum() or char in {"_", "-"} else "_" for char in tool_call_id)
     return normalized[:64]
+
+
+def _convert_tool_result(
+    message: ToolResultMessage,
+    is_oauth: bool,
+    deferred_tool_names: AbstractSet[str],
+    loaded_tool_names: set[str],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """One tool result, plus whatever its own content was displaced by tool references.
+
+    A deferred tool's definition is delivered by naming it in the result of the call that
+    made it available. Anthropic rejects a result that mixes references with ordinary
+    content, so the references take the result body and the real content is returned
+    separately, to be re-attached after every ``tool_result`` in the same user turn.
+    """
+    references: list[dict[str, Any]] = []
+    for name in message.addedToolNames or []:
+        normalized = to_claude_code_name(name) if is_oauth else name
+        if normalized not in deferred_tool_names or normalized in loaded_tool_names:
+            continue
+        loaded_tool_names.add(normalized)
+        references.append({"type": "tool_reference", "tool_name": normalized})
+    converted_content = convert_content_blocks(message.content)
+    tool_result = {
+        "type": "tool_result",
+        "tool_use_id": message.toolCallId,
+        "content": references if references else converted_content,
+        "is_error": message.isError,
+    }
+    if not references:
+        return tool_result, []
+    if isinstance(converted_content, str):
+        return tool_result, [{"type": "text", "text": converted_content}]
+    return tool_result, list(converted_content)
 
 
 def convert_messages(
@@ -423,9 +567,12 @@ def convert_messages(
     model: Model,
     is_oauth: bool,
     cache_control: dict[str, Any] | None = None,
+    deferred_tool_names: AbstractSet[str] | None = None,
 ) -> list[dict[str, Any]]:
     params: list[dict[str, Any]] = []
     transformed_messages = transform_messages(messages, model, normalize_tool_call_id)
+    deferred_names: AbstractSet[str] = deferred_tool_names or frozenset()
+    loaded_tool_names: set[str] = set()
 
     index = 0
     while index < len(transformed_messages):
@@ -501,31 +648,24 @@ def convert_messages(
             continue
 
         if message.role == "toolResult":
-            tool_results: list[dict[str, Any]] = [
-                {
-                    "type": "tool_result",
-                    "tool_use_id": message.toolCallId,
-                    "content": convert_content_blocks(message.content),
-                    "is_error": message.isError,
-                }
-            ]
-
-            lookahead = index + 1
+            # Consecutive tool results are collected into one user turn, which the z.ai
+            # Anthropic endpoint requires.
+            tool_results: list[dict[str, Any]] = []
+            sibling_content: list[dict[str, Any]] = []
+            lookahead = index
             while lookahead < len(transformed_messages) and transformed_messages[lookahead].role == "toolResult":
                 next_message = transformed_messages[lookahead]
                 if not isinstance(next_message, ToolResultMessage):
                     break
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": next_message.toolCallId,
-                        "content": convert_content_blocks(next_message.content),
-                        "is_error": next_message.isError,
-                    }
+                converted, siblings = _convert_tool_result(
+                    next_message, is_oauth, deferred_names, loaded_tool_names
                 )
+                tool_results.append(converted)
+                sibling_content.extend(siblings)
                 lookahead += 1
 
-            params.append({"role": "user", "content": tool_results})
+            # Displaced content must follow every tool_result block, not sit between them.
+            params.append({"role": "user", "content": [*tool_results, *sibling_content]})
             index = lookahead
             continue
 
@@ -553,20 +693,29 @@ def convert_tools(
     tools: list[Tool],
     is_oauth: bool,
     supports_eager_tool_input_streaming: bool,
+    supports_strict_tools: bool = False,
     cache_control: dict[str, Any] | None = None,
+    defer_loading: bool = False,
 ) -> list[dict[str, Any]]:
     converted: list[dict[str, Any]] = []
     for index, tool in enumerate(tools):
-        schema = tool.parameters_json_schema()
+        strict = resolve_json_schema_strict_sampling(tool, supports_strict_tools)
+        parameters = get_json_schema_tool_parameters(tool, strict)
+        # The legacy pair is always sent; a strict tool sends the full schema *around* it,
+        # which is what lets Anthropic constrain sampling without losing the old fields.
+        legacy_input_schema = {
+            "type": "object",
+            "properties": parameters.get("properties", {}),
+            "required": parameters.get("required", []),
+        }
+        input_schema = {**parameters, **legacy_input_schema} if strict is True else legacy_input_schema
         converted_tool = {
             "name": to_claude_code_name(tool.name) if is_oauth else tool.name,
             "description": tool.description,
             **({"eager_input_streaming": True} if supports_eager_tool_input_streaming else {}),
-            "input_schema": {
-                "type": "object",
-                "properties": schema.get("properties", {}),
-                "required": schema.get("required", []),
-            },
+            **({"strict": True} if strict is True else {}),
+            "input_schema": input_schema,
+            **({"defer_loading": True} if defer_loading else {}),
         }
         if cache_control and index == len(tools) - 1:
             converted_tool["cache_control"] = cache_control
@@ -750,7 +899,10 @@ async def iterate_anthropic_events(source: Any, signal: Any = None) -> AsyncIter
             ) from error
 
         if not isinstance(event, dict):
-            raise RuntimeError(f"Could not parse Anthropic SSE event {event_name}: parsed payload was not an object")  # noqa: TRY004 - callers treat bad input as ValueError
+            # TRY004 waived below: the sole caller (the stream loop in this module) catches
+            # every exception and turns it into an error event, so a malformed payload stays
+            # a RuntimeError like the parse failure just above instead of a TypeError.
+            raise RuntimeError(f"Could not parse Anthropic SSE event {event_name}: parsed payload was not an object")  # noqa: TRY004
 
         if event.get("type") == "message_start":
             saw_message_start = True
@@ -762,7 +914,9 @@ async def iterate_anthropic_events(source: Any, signal: Any = None) -> AsyncIter
         raise RuntimeError("Anthropic stream ended before message_stop")
 
 
-async def _create_raw_response(client: Any, params: dict[str, Any], options: Any = None) -> Any:
+async def _create_raw_response(
+    client: Any, params: dict[str, Any], options: Any = None, auth_extra_headers: dict[str, Any] | None = None
+) -> Any:
     signal = _option(options, "signal")
     request_client = client
     request_client_options: dict[str, Any] = {}
@@ -775,6 +929,18 @@ async def _create_raw_response(client: Any, params: dict[str, Any], options: Any
         request_client = client.with_options(**request_client_options)
     else:
         request_call_options = request_client_options
+    if auth_extra_headers:
+        # The Python SDK's auth check only honours an `Omit` in the *per-request*
+        # extra_headers -- one placed in the client's default_headers is folded away before
+        # the check runs. Injected after the branch above, because the else-arm reassigns
+        # request_call_options wholesale and silently dropped an earlier injection.
+        request_call_options = {
+            **request_call_options,
+            "extra_headers": {
+                **(request_call_options.get("extra_headers") or {}),
+                **auth_extra_headers,
+            },
+        }
 
     if hasattr(getattr(request_client, "messages", None), "with_raw_response"):
         return await _await_maybe_with_signal(
@@ -867,9 +1033,16 @@ def stream_anthropic(
         raw_response: Any = None
 
         try:
+            auth_extra_headers: dict[str, Any] | None = None
             client = _option(options, "client")
             if client is None:
                 api_key = _option(options, "apiKey") or get_env_api_key(model.provider) or ""
+                if model.provider == "cloudflare-ai-gateway" or not api_key:
+                    # Gateway requests authenticate with `cf-aig-authorization`; header-only
+                    # configurations (ANTHROPIC_AUTH_TOKEN, Kimi's bearer token) carry theirs
+                    # in options headers. Either way the SDK's own `X-Api-Key` must not go
+                    # out, and the SDK only accepts that declaration per request.
+                    auth_extra_headers = {"X-Api-Key": omit}
                 copilot_dynamic_headers: dict[str, str] | None = None
                 if model.provider == "github-copilot":
                     copilot_dynamic_headers = build_copilot_dynamic_headers(
@@ -897,7 +1070,7 @@ def stream_anthropic(
                 if next_params is not None:
                     params = next_params
 
-            raw_response = await _create_raw_response(client, params, options)
+            raw_response = await _create_raw_response(client, params, options, auth_extra_headers)
             await _emit_response_metadata(raw_response, options, model)
             stream.push(StartEvent(partial=output))
             provider_indexes: dict[int, int] = {}
@@ -928,7 +1101,7 @@ def stream_anthropic(
                         continue
                     block_type = content_block.get("type")
                     # content_block_start may already carry initial text/thinking;
-                    # dropping it would lose content (pi #7358/59ad3dead).
+                    # dropping it would lose content (pi #7358).
                     if block_type == "text":
                         block = TextContent(text=str(content_block.get("text") or ""))
                         output.content.append(block)
@@ -1055,16 +1228,28 @@ def map_thinking_level_to_effort(model: Model, level: str | None) -> AnthropicEf
     return "high"
 
 
+def _has_request_auth_header(headers) -> bool:
+    if not headers:
+        return False
+    names = {str(name).lower() for name, value in headers.items() if value is not None}
+    return bool(names & {"authorization", "x-api-key", "cf-aig-authorization"})
+
+
 def stream_simple_anthropic(
     model: Model,
     context: Context,
     options: SimpleStreamOptions | None = None,
 ) -> AssistantMessageEventStream:
     api_key = _option(options, "apiKey") or get_env_api_key(model.provider)
-    if not api_key:
+    if not api_key and not _has_request_auth_header(_option(options, "headers")):
+        # Mirrors upstream's assertRequestAuth (anthropic-messages.ts:297-307): a request
+        # is authenticated by an api key *or* by a header the resolved auth supplied --
+        # `Authorization` (ANTHROPIC_AUTH_TOKEN, Kimi's bearer token), `x-api-key`, or the
+        # gateway's `cf-aig-authorization`. Requiring the key alone rejected both
+        # header-only configurations this repo actually ships.
         raise RuntimeError(f"No API key for provider: {model.provider}")
 
-    base = build_base_options(model, options, api_key)
+    base = build_base_options(model, context, options, api_key)
     if not options or not options.reasoning:
         return stream_anthropic(model, context, {**base.model_dump(), "thinkingEnabled": False})
 
@@ -1092,7 +1277,10 @@ def stream_simple_anthropic(
             **base.model_dump(),
             "maxTokens": adjusted.maxTokens,
             "thinkingEnabled": True,
-            "thinkingBudgetTokens": adjusted.thinkingBudget,
+            # Thinking and the answer share max_tokens: always leave the answer its room.
+            "thinkingBudgetTokens": clamp_thinking_budget_to_answer_room(
+                adjusted.thinkingBudget, adjusted.maxTokens
+            ),
         },
     )
 

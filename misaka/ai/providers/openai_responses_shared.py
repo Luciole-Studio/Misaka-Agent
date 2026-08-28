@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncIterable, Iterable
+from collections.abc import AsyncIterable, Iterable, Mapping
 from typing import Any, TypedDict
 
 from misaka.ai.models import calculate_cost
 from misaka.ai.providers._common import _empty_usage
+from misaka.ai.providers.constrained_sampling import (
+    GrammarToolInputJsonBuffer,
+    append_grammar_tool_input_json_delta,
+    get_grammar_tool_input,
+    get_json_schema_tool_parameters,
+    resolve_grammar_constrained_sampling,
+    resolve_json_schema_strict_sampling,
+)
 from misaka.ai.providers.transform_messages import transform_messages
 from misaka.ai.types import (
     AssistantMessage,
@@ -44,14 +52,24 @@ class OpenAIResponsesStreamOptions(TypedDict, total=False):
     serviceTier: Any
     resolveServiceTier: Any
     applyServiceTierPricing: Any
+    # Tool name -> the property a grammar tool's free-text output is encoded into. Used to
+    # rebuild `custom_tool_call` items into ordinary tool calls with one string argument.
+    grammarToolInputProperties: Mapping[str, str]
 
 
 class ConvertResponsesMessagesOptions(TypedDict, total=False):
     includeSystemPrompt: bool
+    # Tool name -> the property its grammar output is encoded into. A tool listed here is
+    # a grammar tool: it is replayed as a `custom_tool_call` carrying free text rather
+    # than a `function_call` carrying JSON arguments.
+    grammarToolInputProperties: Mapping[str, str]
 
 
 class ConvertResponsesToolsOptions(TypedDict, total=False):
     strict: bool | None
+    supportsStrictMode: bool
+    supportsOpenAIGrammarTools: bool
+    deferLoading: bool
 
 
 def encode_text_signature_v1(text_id: str, phase: TextSignatureV1 | str | None = None) -> str:
@@ -124,6 +142,9 @@ def convert_responses_messages(
     )
 
     include_system_prompt = True if options is None else options.get("includeSystemPrompt", True)
+    grammar_tool_input_properties: Mapping[str, str] = (
+        {} if options is None else options.get("grammarToolInputProperties") or {}
+    )
     if include_system_prompt and context.systemPrompt:
         messages.append(
             {
@@ -190,17 +211,38 @@ def convert_responses_messages(
                     call_id = parts[0]
                     item_id_raw = parts[1] if len(parts) > 1 else ""
                     item_id: str | None = item_id_raw or None
-                    if is_different_model and item_id and item_id.startswith("fc_"):
+                    custom_input_property = grammar_tool_input_properties.get(block.name)
+                    # A `function_call` item id must be an `fc_` one. Replaying a
+                    # custom-tool call as a function call carries a `ctc_` id, which the
+                    # endpoint rejects, so it is dropped along with the cross-model case.
+                    if (is_different_model and item_id and item_id.startswith("fc_")) or (
+                        custom_input_property is None and not (item_id or "").startswith("fc_")
+                    ):
                         item_id = None
-                    output.append(
-                        {
-                            "type": "function_call",
-                            "id": item_id,
-                            "call_id": call_id,
-                            "name": block.name,
-                            "arguments": json.dumps(block.arguments),
-                        }
-                    )
+                    if custom_input_property is not None:
+                        output.append(
+                            {
+                                "type": "custom_tool_call",
+                                "id": item_id,
+                                "call_id": call_id,
+                                "name": block.name,
+                                "input": sanitize_surrogates(
+                                    get_grammar_tool_input(
+                                        block.name, block.arguments, custom_input_property
+                                    )
+                                ),
+                            }
+                        )
+                    else:
+                        output.append(
+                            {
+                                "type": "function_call",
+                                "id": item_id,
+                                "call_id": call_id,
+                                "name": block.name,
+                                "arguments": json.dumps(block.arguments),
+                            }
+                        )
             if output:
                 messages.extend(output)
         elif message.role == "toolResult":
@@ -226,7 +268,18 @@ def convert_responses_messages(
             else:
                 output_value = sanitize_surrogates(text_result if has_text else "(see attached image)")
 
-            messages.append({"type": "function_call_output", "call_id": call_id, "output": output_value})
+            # A grammar tool's result goes back on the custom-tool channel it came from.
+            messages.append(
+                {
+                    "type": (
+                        "custom_tool_call_output"
+                        if message.toolName in grammar_tool_input_properties
+                        else "function_call_output"
+                    ),
+                    "call_id": call_id,
+                    "output": output_value,
+                }
+            )
 
     return messages
 
@@ -235,17 +288,46 @@ def convert_responses_tools(
     tools: Iterable[Tool],
     options: ConvertResponsesToolsOptions | None = None,
 ) -> list[dict[str, Any]]:
-    strict = False if options is None or "strict" not in options else options["strict"]
-    return [
-        {
+    options = options or {}
+    default_strict = options.get("strict", False)
+    supports_strict_mode = options.get("supportsStrictMode", True)
+    supports_grammar_tools = options.get("supportsOpenAIGrammarTools", False)
+    defer_loading = bool(options.get("deferLoading"))
+
+    converted: list[dict[str, Any]] = []
+    for tool in tools:
+        grammar = resolve_grammar_constrained_sampling(tool, bool(supports_grammar_tools))
+        if grammar:
+            # A grammar tool is not a function tool: the model emits free text that the
+            # grammar constrains, and it comes back as a `custom_tool_call`.
+            converted.append(
+                {
+                    "type": "custom",
+                    "name": tool.name,
+                    "description": tool.description,
+                    "format": {
+                        "type": "grammar",
+                        "syntax": grammar.format,
+                        "definition": grammar.definition,
+                    },
+                    **({"defer_loading": True} if defer_loading else {}),
+                }
+            )
+            continue
+
+        constrained = resolve_json_schema_strict_sampling(tool, bool(supports_strict_mode))
+        strict = default_strict if constrained is None else constrained
+        function_tool: dict[str, Any] = {
             "type": "function",
             "name": tool.name,
             "description": tool.description,
-            "parameters": tool.parameters_json_schema(),
-            "strict": strict,
+            "parameters": get_json_schema_tool_parameters(tool, strict is True),
+            **({"defer_loading": True} if defer_loading else {}),
         }
-        for tool in tools
-    ]
+        if supports_strict_mode:
+            function_tool["strict"] = strict
+        converted.append(function_tool)
+    return converted
 
 
 def _map_stop_reason(status: str | None) -> StopReason:
@@ -260,6 +342,29 @@ def _map_stop_reason(status: str | None) -> StopReason:
     if status in {"in_progress", "queued"}:
         return "stop"
     raise RuntimeError(f"Unhandled stop reason: {status}")
+
+
+def _custom_tool_call_input(block: ToolCall, property_name: str) -> str:
+    value = block.arguments.get(property_name)
+    return value if isinstance(value, str) else ""
+
+
+def _append_custom_tool_call_input(
+    block: ToolCall,
+    property_name: str,
+    buffer: GrammarToolInputJsonBuffer,
+    next_input: str,
+    close: bool,
+) -> str | None:
+    """Advance a grammar tool's text and report the JSON delta a consumer would see.
+
+    Consumers of ``toolcall_delta`` are fed JSON, because that is what a function tool
+    streams. A grammar tool streams raw text, so the buffer re-encodes it as the growing
+    JSON of ``{"<property>": "<text>"}`` and hands back only the newly added slice.
+    """
+    delta = append_grammar_tool_input_json_delta(buffer, property_name, next_input, close)
+    block.arguments = {property_name: next_input}
+    return delta
 
 
 async def process_responses_stream(
@@ -277,6 +382,12 @@ async def process_responses_stream(
 
     def block_index() -> int:
         return len(blocks) - 1
+
+    custom_input_property = "input"
+    custom_input_buffer: GrammarToolInputJsonBuffer | None = None
+    grammar_tool_input_properties: Mapping[str, str] = (
+        {} if options is None else options.get("grammarToolInputProperties") or {}
+    )
 
     async for event in openai_stream:
         event_type = event.get("type")
@@ -310,6 +421,21 @@ async def process_responses_stream(
                     id=f"{item.get('call_id', '')}|{item.get('id', '')}",
                     name=item.get("name", ""),
                     arguments={},
+                )
+                blocks.append(current_block)
+                stream.push(ToolCallStartEvent(contentIndex=block_index(), partial=output))
+            elif item_type == "custom_tool_call":
+                # A grammar tool answers with free text, not JSON. It is surfaced as an
+                # ordinary tool call whose single argument is that text, so nothing
+                # downstream needs to know the difference.
+                current_item = item
+                current_tool_args = StreamingArgs()
+                custom_input_property = grammar_tool_input_properties.get(item.get("name", ""), "input")
+                custom_input_buffer = GrammarToolInputJsonBuffer()
+                current_block = ToolCall(
+                    id=f"{item.get('call_id', '')}|{item.get('id', '')}",
+                    name=item.get("name", ""),
+                    arguments={custom_input_property: item.get("input") or ""},
                 )
                 blocks.append(current_block)
                 stream.push(ToolCallStartEvent(contentIndex=block_index(), partial=output))
@@ -393,6 +519,31 @@ async def process_responses_stream(
                     delta = current_tool_args.raw[len(previous_partial_json) :]
                     if delta:
                         stream.push(ToolCallDeltaEvent(contentIndex=block_index(), delta=delta, partial=output))
+        elif event_type == "response.custom_tool_call_input.delta":
+            if (
+                isinstance(current_item, dict)
+                and current_item.get("type") == "custom_tool_call"
+                and isinstance(current_block, ToolCall)
+                and custom_input_buffer is not None
+            ):
+                next_input = _custom_tool_call_input(current_block, custom_input_property) + event.get("delta", "")
+                delta = _append_custom_tool_call_input(
+                    current_block, custom_input_property, custom_input_buffer, next_input, False
+                )
+                if delta:
+                    stream.push(ToolCallDeltaEvent(contentIndex=block_index(), delta=delta, partial=output))
+        elif event_type == "response.custom_tool_call_input.done":
+            if (
+                isinstance(current_item, dict)
+                and current_item.get("type") == "custom_tool_call"
+                and isinstance(current_block, ToolCall)
+                and custom_input_buffer is not None
+            ):
+                delta = _append_custom_tool_call_input(
+                    current_block, custom_input_property, custom_input_buffer, event.get("input", ""), True
+                )
+                if delta:
+                    stream.push(ToolCallDeltaEvent(contentIndex=block_index(), delta=delta, partial=output))
         elif event_type == "response.output_item.done":
             item = event.get("item")
             if not isinstance(item, dict):
@@ -432,6 +583,21 @@ async def process_responses_stream(
                         name=item.get("name", ""),
                         arguments=parse_streaming_json(item.get("arguments") or "{}"),
                     )
+                current_tool_args = StreamingArgs()
+                current_block = None
+                stream.push(ToolCallEndEvent(contentIndex=block_index(), toolCall=tool_call, partial=output))
+            elif item_type == "custom_tool_call" and isinstance(current_block, ToolCall):
+                final_input = item.get("input")
+                if final_input is None:
+                    final_input = _custom_tool_call_input(current_block, custom_input_property)
+                if custom_input_buffer is not None:
+                    delta = _append_custom_tool_call_input(
+                        current_block, custom_input_property, custom_input_buffer, final_input, True
+                    )
+                    if delta:
+                        stream.push(ToolCallDeltaEvent(contentIndex=block_index(), delta=delta, partial=output))
+                tool_call = current_block
+                custom_input_buffer = None
                 current_tool_args = StreamingArgs()
                 current_block = None
                 stream.push(ToolCallEndEvent(contentIndex=block_index(), toolCall=tool_call, partial=output))
