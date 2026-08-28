@@ -4,25 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import time
 from collections.abc import AsyncIterable, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from misaka.ai.api_lazy import lazy_api
 from misaka.ai.api_registry import (
     ApiProvider,
     clear_api_providers,
     register_api_provider,
 )
 from misaka.ai.types import (
-    AssistantMessage,
     Context,
-    ErrorEvent,
     Model,
     SimpleStreamOptions,
     StreamOptions,
 )
-from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 
 ProviderStreamCallable = Callable[[Model, Context, StreamOptions | None], AsyncIterable[Any]]
 ProviderSimpleStreamCallable = Callable[[Model, Context, SimpleStreamOptions | None], AsyncIterable[Any]]
@@ -43,92 +40,14 @@ def _error_message(error: Exception) -> str:
     return message if isinstance(message, str) else str(error)
 
 
-def _forward_stream(target: AssistantMessageEventStream, source: AsyncIterable[Any]) -> None:
-    async def run() -> None:
-        async for event in source:
-            target.push(event)
-        target.end()
-
-    spawn_stream_task(run())
-
-
-def _create_lazy_load_error_message(model: Model, error: Any) -> AssistantMessage:
-    error_message = _error_message(error) if isinstance(error, Exception) else str(error)
-    return AssistantMessage(
-        content=[],
-        api=model.api,
-        provider=model.provider,
-        model=model.id,
-        usage={
-            "input": 0,
-            "output": 0,
-            "cacheRead": 0,
-            "cacheWrite": 0,
-            "totalTokens": 0,
-            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0},
-        },
-        stopReason="error",
-        errorMessage=error_message,
-        timestamp=time.time_ns() // 1_000_000,
-    )
-
-
 def _create_lazy_stream(load_module: Callable[[], Awaitable[LazyProviderModule]]) -> ProviderStreamCallable:
-    def stream(model: Model, context: Context, options: StreamOptions | None = None) -> AssistantMessageEventStream:
-        outer = AssistantMessageEventStream()
-
-        async def load_and_forward() -> None:
-            try:
-                module = await load_module()
-            except Exception as error:  # noqa: BLE001
-                message = _create_lazy_load_error_message(model, error)
-                outer.push(ErrorEvent(reason="error", error=message))
-                outer.end(message)
-                return
-
-            try:
-                inner = module.stream(model, context, options)
-            except Exception as error:  # noqa: BLE001
-                message = _create_lazy_load_error_message(model, error)
-                outer.push(ErrorEvent(reason="error", error=message))
-                outer.end(message)
-                return
-
-            _forward_stream(outer, inner)
-
-        spawn_stream_task(load_and_forward())
-        return outer
-
-    return stream
+    """The provider's ``stream``, deferred behind its module import."""
+    return lazy_api(load_module).stream
 
 
 def _create_lazy_simple_stream(load_module: Callable[[], Awaitable[LazyProviderModule]]) -> ProviderSimpleStreamCallable:
-    def stream(model: Model, context: Context, options: SimpleStreamOptions | None = None) -> AssistantMessageEventStream:
-        outer = AssistantMessageEventStream()
-
-        async def load_and_forward() -> None:
-            try:
-                module = await load_module()
-            except Exception as error:  # noqa: BLE001
-                message = _create_lazy_load_error_message(model, error)
-                outer.push(ErrorEvent(reason="error", error=message))
-                outer.end(message)
-                return
-
-            try:
-                inner = module.streamSimple(model, context, options)
-            except Exception as error:  # noqa: BLE001
-                message = _create_lazy_load_error_message(model, error)
-                outer.push(ErrorEvent(reason="error", error=message))
-                outer.end(message)
-                return
-
-            _forward_stream(outer, inner)
-
-        spawn_stream_task(load_and_forward())
-        return outer
-
-    return stream
+    """The provider's ``streamSimple``, deferred behind its module import."""
+    return lazy_api(load_module).streamSimple
 
 
 async def _load_provider_module(
@@ -189,6 +108,15 @@ async def _load_google_vertex_provider_module() -> LazyProviderModule:
     )
 
 
+async def _load_pi_messages_provider_module() -> LazyProviderModule:
+    return await _load_provider_module(
+        "pi-messages",
+        "misaka.ai.providers.pi_messages",
+        "stream_pi_messages",
+        "stream_simple_pi_messages",
+    )
+
+
 async def _load_mistral_provider_module() -> LazyProviderModule:
     return await _load_provider_module(
         "mistral-conversations",
@@ -244,6 +172,8 @@ stream_google = _create_lazy_stream(_load_google_provider_module)
 stream_simple_google = _create_lazy_simple_stream(_load_google_provider_module)
 stream_google_vertex = _create_lazy_stream(_load_google_vertex_provider_module)
 stream_simple_google_vertex = _create_lazy_simple_stream(_load_google_vertex_provider_module)
+stream_pi_messages = _create_lazy_stream(_load_pi_messages_provider_module)
+stream_simple_pi_messages = _create_lazy_simple_stream(_load_pi_messages_provider_module)
 stream_mistral = _create_lazy_stream(_load_mistral_provider_module)
 stream_simple_mistral = _create_lazy_simple_stream(_load_mistral_provider_module)
 stream_openai_codex_responses = _create_lazy_stream(_load_openai_codex_responses_provider_module)
@@ -266,6 +196,12 @@ def register_built_in_api_providers() -> None:
         )
     )
     register_api_provider(ApiProvider(api="mistral-conversations", stream=stream_mistral, streamSimple=stream_simple_mistral))
+    # pi's own wire protocol rather than a vendor's: the whole context goes out as-is and
+    # comes back as pi's event stream. The Radius gateway speaks it, and so does anything a
+    # models.json custom provider points at with `"api": "pi-messages"`.
+    register_api_provider(
+        ApiProvider(api="pi-messages", stream=stream_pi_messages, streamSimple=stream_simple_pi_messages)
+    )
     register_api_provider(ApiProvider(api="openai-responses", stream=stream_openai_responses, streamSimple=stream_simple_openai_responses))
     register_api_provider(
         ApiProvider(
