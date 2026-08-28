@@ -881,6 +881,17 @@ def add_cache_control_to_text_content(message: dict[str, Any], cache_control: di
 OPENAI_COMPLETIONS_REASONING_FIELDS = ("reasoning", "reasoning_content", "reasoning_text")
 
 
+def is_openai_completions_reasoning_field(field: str | None) -> bool:
+    """``True`` only for a name that is a reasoning field on an assistant message.
+
+    ``thinkingSignature`` is a slot with several tenants: on llama.cpp and gpt-oss it
+    names the field the reasoning came out of, but everywhere else it holds a provider's
+    opaque signature. Without this check that signature becomes a top-level key on the
+    request, which is a member the endpoint never declared.
+    """
+    return field in OPENAI_COMPLETIONS_REASONING_FIELDS
+
+
 def _has_valid_common_reasoning_detail_fields(candidate: Mapping[str, Any]) -> bool:
     return (
         candidate.get("id") is None or isinstance(candidate.get("id"), str)
@@ -1070,24 +1081,6 @@ def convert_messages(
             ]
             assistant_text = "".join(part["text"] for part in assistant_text_parts)
 
-            non_empty_thinking_blocks = [
-                block for block in message.content if block.type == "thinking" and block.thinking.strip()
-            ]
-            if non_empty_thinking_blocks:
-                if compat.get("requiresThinkingAsText"):
-                    thinking_text = "\n\n".join(sanitize_surrogates(block.thinking) for block in non_empty_thinking_blocks)
-                    assistant_message["content"] = [{"type": "text", "text": thinking_text}, *assistant_text_parts]
-                else:
-                    if assistant_text:
-                        assistant_message["content"] = assistant_text
-                    signature = non_empty_thinking_blocks[0].thinkingSignature
-                    if model.provider == "opencode-go" and signature == "reasoning":
-                        signature = "reasoning_content"
-                    if signature:
-                        assistant_message[signature] = "\n".join(block.thinking for block in non_empty_thinking_blocks)
-            elif assistant_text:
-                assistant_message["content"] = assistant_text
-
             thinking_blocks = [block for block in message.content if block.type == "thinking"]
             tool_calls = [block for block in message.content if block.type == "toolCall"]
             # A whole run stashed on a thinking block wins over the older per-tool-call
@@ -1113,6 +1106,29 @@ def convert_messages(
                     if detail is not None
                 ]
                 preserved_reasoning_details = legacy or None
+
+            non_empty_thinking_blocks = [block for block in thinking_blocks if block.thinking.strip()]
+            if non_empty_thinking_blocks:
+                if compat.get("requiresThinkingAsText"):
+                    thinking_text = "\n\n".join(sanitize_surrogates(block.thinking) for block in non_empty_thinking_blocks)
+                    assistant_message["content"] = [{"type": "text", "text": thinking_text}, *assistant_text_parts]
+                else:
+                    if assistant_text:
+                        assistant_message["content"] = assistant_text
+                    # The structured `reasoning_details` is the alternative to a raw
+                    # reasoning field, not a companion to it: sending both replays the
+                    # same reasoning twice, once in a shape the endpoint cannot match up.
+                    if not preserved_reasoning_details:
+                        signature = non_empty_thinking_blocks[0].thinkingSignature
+                        if model.provider == "opencode-go" and signature == "reasoning":
+                            signature = "reasoning_content"
+                        if is_openai_completions_reasoning_field(signature):
+                            assistant_message[signature] = "\n".join(
+                                block.thinking for block in non_empty_thinking_blocks
+                            )
+            elif assistant_text:
+                assistant_message["content"] = assistant_text
+
             if tool_calls:
                 assistant_message["tool_calls"] = [
                     _replay_tool_call(tool_call, grammar_tool_input_properties or {})

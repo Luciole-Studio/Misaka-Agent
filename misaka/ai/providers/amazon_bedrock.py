@@ -72,12 +72,33 @@ from misaka.ai.types import (
     ToolCallStartEvent,
     ToolResultMessage,
 )
+from misaka.ai.utils.diagnostics import (
+    AssistantMessageDiagnostic,
+    append_assistant_message_diagnostic,
+)
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
 from misaka.ai.utils.json_parse import StreamingArgs
 from misaka.ai.utils.node_http_proxy import create_http_proxy_agents_for_target
+from misaka.ai.utils.provider_env import get_provider_env_value
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
 from misaka.utils.values import maybe_await, signal_aborted
+
+# Bedrock rejects a text block whose text is empty, and rejects a message whose content
+# list is empty. Upstream substitutes this placeholder rather than dropping the message,
+# because dropping one breaks the strict user/assistant alternation the API also requires.
+EMPTY_TEXT_PLACEHOLDER = "<empty>"
+# What a redacted reasoning block reads as in the transcript. Same string the anthropic
+# adapter uses, so a redacted turn looks the same whichever provider produced it.
+REDACTED_THINKING_PLACEHOLDER = "[Reasoning redacted]"
+# A diagnostic is a breadcrumb, not a payload: anything longer than this is not an id.
+MAX_BEDROCK_DIAGNOSTIC_VALUE_CHARS = 200
+# SigV4 computes over these, and the bearer path owns Authorization. A caller header that
+# lands on one of them either invalidates the signature or replaces the credential.
+_RESERVED_HEADER_EXACT = frozenset({"authorization", "host"})
+# An inference-profile ARN names its own region; it must beat AWS_REGION, which is
+# usually set for some other service entirely.
+_ARN_REGION_PATTERN = re.compile(r"^arn:aws(?:-[a-z0-9-]+)?:bedrock:([a-z0-9-]+):")
 
 BedrockThinkingDisplay = Literal["summarized", "omitted"]
 
@@ -117,6 +138,13 @@ _STREAM_SENTINEL = object()
 
 
 @dataclass(frozen=True, slots=True)
+class BedrockCredentials:
+    accessKeyId: str
+    secretAccessKey: str
+    sessionToken: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class BedrockClientSettings:
     profile_name: str | None
     region_name: str | None
@@ -124,6 +152,7 @@ class BedrockClientSettings:
     config_kwargs: dict[str, Any]
     default_headers: dict[str, str]
     bearer_token: str | None
+    credentials: BedrockCredentials | None = None
 
 
 class BedrockRuntimeServiceException(RuntimeError):
@@ -140,6 +169,11 @@ def create_client(model: Model, options: StreamOptions | dict[str, Any] | None =
         client_kwargs["region_name"] = settings.region_name
     if settings.endpoint_url is not None:
         client_kwargs["endpoint_url"] = settings.endpoint_url
+    if settings.credentials is not None:
+        client_kwargs["aws_access_key_id"] = settings.credentials.accessKeyId
+        client_kwargs["aws_secret_access_key"] = settings.credentials.secretAccessKey
+        if settings.credentials.sessionToken:
+            client_kwargs["aws_session_token"] = settings.credentials.sessionToken
     if settings.config_kwargs:
         client_kwargs["config"] = Config(**settings.config_kwargs)
 
@@ -148,8 +182,30 @@ def create_client(model: Model, options: StreamOptions | dict[str, Any] | None =
     return client
 
 
+def get_configured_bedrock_credentials(env: Any = None) -> BedrockCredentials | None:
+    """Explicit AWS keys, or ``None`` to leave resolution to the SDK's own chain.
+
+    Both halves of the pair are required: an access key without its secret is a
+    half-configured environment, and handing it to the SDK replaces a working default
+    chain with one that cannot sign.
+    """
+    access_key_id = get_provider_env_value("AWS_ACCESS_KEY_ID", env)
+    secret_access_key = get_provider_env_value("AWS_SECRET_ACCESS_KEY", env)
+    if not access_key_id or not secret_access_key:
+        return None
+    return BedrockCredentials(
+        accessKeyId=access_key_id,
+        secretAccessKey=secret_access_key,
+        sessionToken=get_provider_env_value("AWS_SESSION_TOKEN", env),
+    )
+
+
 def build_client_settings(model: Model, options: StreamOptions | dict[str, Any] | None = None) -> BedrockClientSettings:
+    env = _option(options, "env")
     configured_region = get_configured_bedrock_region(options)
+    # Deliberately ambient-only, like upstream: this asks whether the *machine* is set up
+    # around a profile, which is what decides between pinning a catalog endpoint and
+    # letting the SDK resolve one. A request-scoped profile does not answer that.
     has_configured_profile = has_configured_bedrock_profile()
     endpoint_region = get_standard_bedrock_endpoint_region(model.baseUrl)
     use_explicit_endpoint = should_use_explicit_bedrock_endpoint(
@@ -165,10 +221,38 @@ def build_client_settings(model: Model, options: StreamOptions | dict[str, Any] 
             "http": proxy_agents.httpAgent,
             "https": proxy_agents.httpsAgent,
         }
+    # AWS_BEDROCK_FORCE_HTTP1 has no counterpart here and needs none: upstream sets it to
+    # swap the SDK's default HTTP/2 handler for an HTTP/1.1 one, and botocore only ever
+    # speaks HTTP/1.1. The endpoints that switch it on already get what they asked for.
 
-    bearer_token = _option(options, "bearerToken") or os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
-    if bearer_token:
+    # A profile configured through the auth flow -- the option, or AWS_PROFILE scoped to
+    # the stored credential -- must beat ambient access keys, so it also suppresses the
+    # explicit-credentials branch below. The SDK's own chain already prefers a profile,
+    # but only while `credentials` is left unset.
+    options_profile = _option(options, "profile") or (env.get("AWS_PROFILE") if env else None)
+    profile_name = options_profile or get_provider_env_value("AWS_PROFILE", env)
+
+    skip_auth = get_provider_env_value("AWS_BEDROCK_SKIP_AUTH", env) == "1"
+    bearer_token = (
+        _option(options, "bearerToken")
+        or _option(options, "apiKey")
+        or get_provider_env_value("AWS_BEARER_TOKEN_BEDROCK", env)
+    )
+    if bearer_token and not skip_auth:
         config_kwargs["signature_version"] = UNSIGNED
+    else:
+        bearer_token = None
+
+    credentials: BedrockCredentials | None = None
+    if skip_auth:
+        # A proxy that fronts Bedrock without authenticating still makes the SDK sign,
+        # and the SDK refuses to sign with no credentials at all. These are the throwaway
+        # ones upstream sends for exactly that case.
+        credentials = BedrockCredentials(accessKeyId="dummy-access-key", secretAccessKey="dummy-secret-key")
+    else:
+        configured = get_configured_bedrock_credentials(env)
+        if configured is not None and not options_profile:
+            credentials = configured
 
     # Custom headers from models.json and from the call site: declared, and until now dropped.
     default_headers: dict[str, str] = {}
@@ -176,20 +260,46 @@ def build_client_settings(model: Model, options: StreamOptions | dict[str, Any] 
         if source:
             default_headers.update(headers_to_record(source))
 
-    region_name = configured_region
+    # An ARN carries its own region and wins over everything: AWS_REGION is usually set
+    # for some other service, and signing an ARN request for the wrong region just fails.
+    arn_region = _ARN_REGION_PATTERN.match(model.id)
+    region_name = arn_region.group(1) if arn_region else configured_region
     if region_name is None and endpoint_region is not None and use_explicit_endpoint:
         region_name = endpoint_region
     if region_name is None and not has_configured_profile:
         region_name = "us-east-1"
 
     return BedrockClientSettings(
-        profile_name=_option(options, "profile"),
+        profile_name=profile_name,
         region_name=region_name,
         endpoint_url=model.baseUrl if use_explicit_endpoint else None,
         config_kwargs=config_kwargs,
         default_headers=default_headers,
         bearer_token=bearer_token,
+        credentials=credentials,
     )
+
+
+def is_reserved_bedrock_header(key: str) -> bool:
+    """``True`` for a header the caller must not be allowed to set.
+
+    ``x-amz-*`` carries the request's own date and content hash, ``host`` is what the
+    signature binds the request to, and ``authorization`` *is* the signature. Overwriting
+    any of them turns a valid request into a 403, so upstream drops them silently rather
+    than letting a stray header from models.json break every call to the provider.
+    """
+    lower = key.lower()
+    return lower.startswith("x-amz-") or lower in _RESERVED_HEADER_EXACT
+
+
+def _set_header(request: Any, key: str, value: str) -> None:
+    # botocore's header container is multi-valued (an email.message.Message underneath),
+    # so a plain assignment appends a second copy instead of replacing the first.
+    try:
+        del request.headers[key]
+    except (KeyError, TypeError):
+        pass
+    request.headers[key] = value
 
 
 def _register_request_overrides(client: Any, headers: dict[str, str], bearer_token: str | None) -> None:
@@ -198,11 +308,17 @@ def _register_request_overrides(client: Any, headers: dict[str, str], bearer_tok
 
     def apply(request: Any, **_kwargs: Any) -> None:
         for key, value in headers.items():
-            request.headers[key] = value
+            if is_reserved_bedrock_header(key):
+                continue
+            _set_header(request, key, value)
         if bearer_token:
-            request.headers["Authorization"] = f"Bearer {bearer_token}"
+            _set_header(request, "Authorization", f"Bearer {bearer_token}")
 
-    client.meta.events.register("before-send.bedrock-runtime.ConverseStream", apply)
+    # `before-sign`, not `before-send`: SigV4 signs over the headers, so one added after
+    # signing that collides with a signed name invalidates the signature. Upstream hooks
+    # the SDK's `build` step for the same reason. botocore emits this event even under
+    # UNSIGNED, so the bearer-token path still gets its Authorization header.
+    client.meta.events.register("before-sign.bedrock-runtime.ConverseStream", apply)
 
 
 def stream_bedrock(
@@ -226,8 +342,12 @@ def stream_bedrock(
         response_stream: Any = None
         # Declared out here so a failure anywhere below can still sweep what arrived.
         partial_json: dict[int, StreamingArgs] = {}
+        redacted_chunks: dict[int, list[bytes]] = {}
         saw_message_start = False
         saw_message_stop = False
+        # Kept out here so the catch can still correlate a mid-stream failure: an
+        # exception delivered as a stream event carries no HTTP metadata of its own.
+        response_request_id: str | None = None
 
         try:
             client = _option(options, "client")
@@ -236,6 +356,7 @@ def stream_bedrock(
                 # off disk; on the loop that blocks every other stream, the TUI and the
                 # lease heartbeats along with it.
                 client = await asyncio.to_thread(create_client, model, options)
+            env = _option(options, "env")
             cache_retention = resolve_cache_retention(_option(options, "cacheRetention"))
             inference_max_tokens = _option(options, "maxTokens")
             if inference_max_tokens is None and is_anthropic_claude_model(model):
@@ -243,8 +364,8 @@ def stream_bedrock(
 
             command_input: dict[str, Any] = {
                 "modelId": model.id,
-                "messages": convert_messages(context, model, cache_retention),
-                "system": build_system_prompt(context.systemPrompt, model, cache_retention),
+                "messages": convert_messages(context, model, cache_retention, env),
+                "system": build_system_prompt(context.systemPrompt, model, cache_retention, env),
                 "inferenceConfig": {
                     **({"maxTokens": inference_max_tokens} if inference_max_tokens is not None else {}),
                     **({"temperature": _option(options, "temperature")} if _option(options, "temperature") is not None else {}),
@@ -273,6 +394,7 @@ def stream_bedrock(
             # already off it; only the request that opens the stream was left behind.
             response = await _await_with_signal(asyncio.to_thread(client.converse_stream, **request_input), signal)
             response_metadata = response.get("ResponseMetadata", {}) if isinstance(response, dict) else {}
+            response_request_id = normalize_bedrock_diagnostic_value(response_metadata.get("RequestId"))
             on_response = _option(options, "onResponse")
             if callable(on_response) and response_metadata.get("HTTPStatusCode") is not None:
                 headers: dict[str, str] = {}
@@ -302,11 +424,15 @@ def stream_bedrock(
                     continue
 
                 if "contentBlockDelta" in item:
-                    handle_content_block_delta(item["contentBlockDelta"], block_indices, partial_json, output, stream)
+                    handle_content_block_delta(
+                        item["contentBlockDelta"], block_indices, partial_json, output, stream, redacted_chunks
+                    )
                     continue
 
                 if "contentBlockStop" in item:
-                    handle_content_block_stop(item["contentBlockStop"], block_indices, partial_json, output, stream)
+                    handle_content_block_stop(
+                        item["contentBlockStop"], block_indices, partial_json, output, stream, redacted_chunks
+                    )
                     continue
 
                 if "messageStop" in item:
@@ -331,7 +457,7 @@ def stream_bedrock(
                         exception_name = event_name[0].upper() + event_name[1:]
                         raise BedrockRuntimeServiceException(exception_name, str(payload.get("message") or ""))
 
-            finish_open_tool_arguments(partial_json, output)
+            finish_open_tool_arguments(partial_json, output, redacted_chunks)
 
             if signal_aborted(signal):
                 raise RuntimeError("Request was aborted")
@@ -348,9 +474,11 @@ def stream_bedrock(
 
             stream.push(DoneEvent(reason=output.stopReason, message=output))
         except Exception as error:  # noqa: BLE001
-            finish_open_tool_arguments(partial_json, output)
+            finish_open_tool_arguments(partial_json, output, redacted_chunks)
             output.stopReason = "aborted" if signal_aborted(signal) else "error"
             output.errorMessage = format_bedrock_error(error)
+            if output.stopReason == "error":
+                append_bedrock_failure_diagnostic(output, error, response_request_id)
             stream.push(ErrorEvent(reason=output.stopReason, error=output))
         finally:
             await _close_stream(response_stream)
@@ -468,6 +596,86 @@ async def iterate_stream_events(response_stream: Any, signal: Any = None):
             abort_task.cancel()
 
 
+def normalize_bedrock_diagnostic_value(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    if not trimmed or len(trimmed) > MAX_BEDROCK_DIAGNOSTIC_VALUE_CHARS:
+        return None
+    return trimmed
+
+
+def _bedrock_error_metadata(error: Any) -> dict[str, Any]:
+    response = getattr(error, "response", None)
+    if isinstance(response, dict):
+        metadata = response.get("ResponseMetadata")
+        if isinstance(metadata, dict):
+            return metadata
+    return {}
+
+
+def extract_bedrock_error_code(error: Any) -> str | None:
+    """The service exception's own name, e.g. ``ThrottlingException``.
+
+    Upstream reads ``error.name``, which the JS SDK sets to the modelled exception. The
+    three shapes here are the same fact in botocore's vocabulary: the stream-event
+    exception carries ``name``, a client error carries the code in its response body, and
+    a modelled exception class is named after itself. The ``Exception`` suffix is the
+    guard in all three -- a plain ``RuntimeError`` is not a service error code.
+    """
+    if not isinstance(error, BaseException):
+        return None
+    name = getattr(error, "name", None)
+    if not isinstance(name, str) or not name:
+        response = getattr(error, "response", None)
+        if isinstance(response, dict) and isinstance(response.get("Error"), dict):
+            name = response["Error"].get("Code")
+    if not isinstance(name, str) or not name:
+        name = type(error).__name__
+    if not name.endswith("Exception"):
+        return None
+    return normalize_bedrock_diagnostic_value(name)
+
+
+def append_bedrock_failure_diagnostic(
+    output: AssistantMessage,
+    error: Any,
+    fallback_request_id: str | None,
+) -> None:
+    """Attach whatever correlates this failure with AWS's own record of it.
+
+    Nothing here is the error message -- that is already on the message. This is the
+    status, the service's code for it, and the request id, which is the only handle a
+    user has when they take a Bedrock failure to AWS support.
+    """
+    metadata = _bedrock_error_metadata(error)
+    details: dict[str, Any] = {}
+
+    status = metadata.get("HTTPStatusCode")
+    if isinstance(status, int) and not isinstance(status, bool):
+        details["status"] = status
+
+    error_code = extract_bedrock_error_code(error)
+    if error_code is not None:
+        details["errorCode"] = error_code
+
+    request_id = normalize_bedrock_diagnostic_value(metadata.get("RequestId")) or fallback_request_id
+    if request_id is not None:
+        details["requestId"] = request_id
+
+    if not details:
+        return
+
+    append_assistant_message_diagnostic(
+        output,
+        AssistantMessageDiagnostic(
+            type="bedrock_response_failure",
+            timestamp=int(time.time() * 1000),
+            details=details,
+        ),
+    )
+
+
 def format_bedrock_error(error: Any) -> str:
     if isinstance(error, ClientError):
         name = error.response.get("Error", {}).get("Code", "ClientError")
@@ -480,7 +688,32 @@ def format_bedrock_error(error: Any) -> str:
     return f"{prefix}: {message}" if prefix else message
 
 
-def finish_open_tool_arguments(partial_json: dict[int, StreamingArgs], output: AssistantMessage) -> None:
+def flush_redacted_content(
+    output: AssistantMessage,
+    content_index: int,
+    redacted_chunks: dict[int, list[bytes]] | None,
+) -> None:
+    """Encode the buffered encrypted reasoning into ``thinkingSignature`` and drop the buffer.
+
+    The buffer is raw bytes and must never reach a persisted message; encoding has to
+    happen once over the whole run, because base64 of two chunks is not the two chunks'
+    base64 concatenated unless every chunk length happens to be a multiple of three.
+    """
+    if not redacted_chunks:
+        return
+    chunks = redacted_chunks.pop(content_index, None)
+    if not chunks or content_index >= len(output.content):
+        return
+    block = output.content[content_index]
+    if block.type == "thinking":
+        block.thinkingSignature = base64.b64encode(b"".join(chunks)).decode("ascii")
+
+
+def finish_open_tool_arguments(
+    partial_json: dict[int, StreamingArgs],
+    output: AssistantMessage,
+    redacted_chunks: dict[int, list[bytes]] | None = None,
+) -> None:
     """Parse the buffer of every tool block the stream never closed.
 
     ``StreamingArgs`` skips re-parsing while the unparsed tail is under
@@ -496,6 +729,11 @@ def finish_open_tool_arguments(partial_json: dict[int, StreamingArgs], output: A
         if block.type == "toolCall":
             block.arguments = accumulated.finish()
     partial_json.clear()
+    # A stream can settle without stopping every block, so sweep the redacted buffers too:
+    # what is left here belongs to blocks the stream never closed.
+    if redacted_chunks:
+        for content_index in list(redacted_chunks):
+            flush_redacted_content(output, content_index, redacted_chunks)
 
 
 def handle_content_block_start(
@@ -529,6 +767,7 @@ def handle_content_block_delta(
     partial_json: dict[int, StreamingArgs],
     output: AssistantMessage,
     stream: AssistantMessageEventStream,
+    redacted_chunks: dict[int, list[bytes]] | None = None,
 ) -> None:
     content_block_index = int(event.get("contentBlockIndex") or 0)
     delta = event.get("delta") or {}
@@ -574,9 +813,28 @@ def handle_content_block_delta(
             if text_delta:
                 block.thinking += str(text_delta)
                 stream.push(ThinkingDeltaEvent(contentIndex=content_index, delta=str(text_delta), partial=output))
-            if reasoning_content.get("signature"):
+            # `thinkingSignature` holds either an Anthropic signature or an opaque
+            # redacted payload, never both: mixing them corrupts whichever arrived first.
+            if reasoning_content.get("signature") and not block.redacted:
                 existing = block.thinkingSignature or ""
                 block.thinkingSignature = existing + str(reasoning_content["signature"])
+            redacted_content = reasoning_content.get("redactedContent")
+            if redacted_content and redacted_chunks is not None:
+                # Encrypted reasoning from a non-Anthropic model on Bedrock. The payload is
+                # opaque, so it is kept verbatim the way the Anthropic path keeps redacted
+                # thinking, and replayed on the next turn.
+                if not block.redacted:
+                    block.redacted = True
+                    block.thinkingSignature = ""
+                    block.thinking += REDACTED_THINKING_PLACEHOLDER
+                    stream.push(
+                        ThinkingDeltaEvent(
+                            contentIndex=content_index,
+                            delta=REDACTED_THINKING_PLACEHOLDER,
+                            partial=output,
+                        )
+                    )
+                redacted_chunks.setdefault(content_index, []).append(bytes(redacted_content))
 
 
 def handle_metadata(event: dict[str, Any], model: Model, output: AssistantMessage) -> None:
@@ -598,6 +856,7 @@ def handle_content_block_stop(
     partial_json: dict[int, StreamingArgs],
     output: AssistantMessage,
     stream: AssistantMessageEventStream,
+    redacted_chunks: dict[int, list[bytes]] | None = None,
 ) -> None:
     content_block_index = int(event.get("contentBlockIndex") or 0)
     content_index = block_indices.pop(content_block_index, None)
@@ -610,6 +869,7 @@ def handle_content_block_stop(
         return
 
     if block.type == "thinking":
+        flush_redacted_content(output, content_index, redacted_chunks)
         stream.push(ThinkingEndEvent(contentIndex=content_index, content=block.thinking, partial=output))
         return
 
@@ -678,11 +938,15 @@ def is_anthropic_claude_model(model: Model) -> bool:
     )
 
 
-def supports_prompt_caching(model: Model) -> bool:
+def supports_prompt_caching(model: Model, env: Any = None) -> bool:
     candidates = get_model_match_candidates(model.id, model.name)
     has_claude_ref = any("claude" in value for value in candidates)
     if not has_claude_ref:
-        return False
+        # An application inference profile's ARN carries no model name, so nothing here
+        # can tell a Claude behind one from a Nova. This is the manual override for it.
+        return get_provider_env_value("AWS_BEDROCK_FORCE_CACHE", env) == "1"
+    if any(("fable-5" in value or "opus-5" in value or "sonnet-5" in value) for value in candidates):
+        return True
     if any("-4-" in value for value in candidates):
         return True
     if any("claude-3-7-sonnet" in value for value in candidates):
@@ -698,12 +962,13 @@ def build_system_prompt(
     system_prompt: str | None,
     model: Model,
     cache_retention: CacheRetention,
+    env: Any = None,
 ) -> list[dict[str, Any]] | None:
     if not system_prompt:
         return None
 
     blocks: list[dict[str, Any]] = [{"text": sanitize_surrogates(system_prompt)}]
-    if cache_retention != "none" and supports_prompt_caching(model):
+    if cache_retention != "none" and supports_prompt_caching(model, env):
         cache_point: dict[str, Any] = {"type": "default"}
         if cache_retention == "long":
             cache_point["ttl"] = "1h"
@@ -716,10 +981,65 @@ def normalize_tool_call_id(tool_call_id: str) -> str:
     return sanitized[:64] if len(sanitized) > 64 else sanitized
 
 
+def create_non_blank_text_block(text: str) -> dict[str, Any] | None:
+    """A Bedrock text block, or ``None`` when there is nothing left to send.
+
+    Sanitising first is what makes this different from a bare ``strip()``: a string of
+    nothing but lone surrogates is non-blank until the sanitiser removes them, and the
+    empty block that survives is the one Bedrock rejects.
+    """
+    sanitized = sanitize_surrogates(text)
+    return None if not sanitized.strip() else {"text": sanitized}
+
+
+def create_required_text_block(text: str) -> dict[str, Any]:
+    """The same, for a slot that must hold a block: blank becomes the placeholder."""
+    return create_non_blank_text_block(text) or {"text": EMPTY_TEXT_PLACEHOLDER}
+
+
+def sanitize_bedrock_document(value: Any) -> Any:
+    """Drop empty-string keys, recursively. Bedrock's document type has no name for them.
+
+    A model that emits ``{"": 1}`` in a tool call would otherwise fail the whole request
+    with a validation error naming a field the user cannot see.
+    """
+    if isinstance(value, list):
+        return [sanitize_bedrock_document(item) for item in value]
+    if isinstance(value, dict):
+        return {key: sanitize_bedrock_document(nested) for key, nested in value.items() if key != ""}
+    return value
+
+
+def convert_tool_result_content(content: list[Any]) -> list[dict[str, Any]]:
+    """Blank text parts are dropped; a result that empties out keeps the placeholder."""
+    result: list[dict[str, Any]] = []
+    for part in content:
+        if part.type == "image":
+            result.append({"image": create_image_block(part.mimeType, part.data)})
+            continue
+        block = create_non_blank_text_block(part.text)
+        if block is not None:
+            result.append(block)
+    if not result:
+        result.append({"text": EMPTY_TEXT_PLACEHOLDER})
+    return result
+
+
+def decode_redacted_content(signature: str | None) -> bytes | None:
+    """The stored opaque reasoning payload, or ``None`` if it is not replayable."""
+    if not signature:
+        return None
+    try:
+        return base64.b64decode(signature, validate=True)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def convert_messages(
     context: Context,
     model: Model,
     cache_retention: CacheRetention,
+    env: Any = None,
 ) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     transformed_messages = transform_messages(context.messages, model, lambda tool_call_id, _target_model, _source: normalize_tool_call_id(tool_call_id))
@@ -730,15 +1050,21 @@ def convert_messages(
         if message.role == "user":
             content: list[dict[str, Any]] = []
             if isinstance(message.content, str):
-                content.append({"text": sanitize_surrogates(message.content)})
+                content.append(create_required_text_block(message.content))
             else:
                 for item in message.content:
                     if item.type == "text":
-                        content.append({"text": sanitize_surrogates(item.text)})
+                        block = create_non_blank_text_block(item.text)
+                        if block is not None:
+                            content.append(block)
                     elif item.type == "image":
                         content.append({"image": create_image_block(item.mimeType, item.data)})
-            if content:
-                result.append({"role": "user", "content": content})
+                # A user turn is never dropped for being empty. Bedrock requires the roles
+                # to alternate, so removing one leaves two assistant turns adjacent and
+                # fails the whole request instead of the one blank message.
+                if not content:
+                    content.append({"text": EMPTY_TEXT_PLACEHOLDER})
+            result.append({"role": "user", "content": content})
             index += 1
             continue
 
@@ -750,8 +1076,9 @@ def convert_messages(
             content_blocks: list[dict[str, Any]] = []
             for block in message.content:
                 if block.type == "text":
-                    if block.text.strip():
-                        content_blocks.append({"text": sanitize_surrogates(block.text)})
+                    text_block = create_non_blank_text_block(block.text)
+                    if text_block is not None:
+                        content_blocks.append(text_block)
                     continue
 
                 if block.type == "toolCall":
@@ -760,14 +1087,22 @@ def convert_messages(
                             "toolUse": {
                                 "toolUseId": block.id,
                                 "name": block.name,
-                                "input": block.arguments,
+                                "input": sanitize_bedrock_document(block.arguments),
                             }
                         }
                     )
                     continue
 
                 if block.type == "thinking":
-                    if not block.thinking.strip():
+                    # Encrypted reasoning is opaque: replay the stored payload as the
+                    # `redactedContent` member rather than lowering it to reasoning text,
+                    # which is what the placeholder in `thinking` would become.
+                    if block.redacted:
+                        redacted_content = decode_redacted_content(block.thinkingSignature)
+                        if redacted_content:
+                            content_blocks.append({"reasoningContent": {"redactedContent": redacted_content}})
+                        continue
+                    if not sanitize_surrogates(block.thinking).strip():
                         continue
                     if supports_thinking_signature(model):
                         if not block.thinkingSignature or not block.thinkingSignature.strip():
@@ -807,12 +1142,7 @@ def convert_messages(
                     {
                         "toolResult": {
                             "toolUseId": tool_message.toolCallId,
-                            "content": [
-                                {"image": create_image_block(part.mimeType, part.data)}
-                                if part.type == "image"
-                                else {"text": sanitize_surrogates(part.text)}
-                                for part in tool_message.content
-                            ],
+                            "content": convert_tool_result_content(tool_message.content),
                             "status": "error" if tool_message.isError else "success",
                         }
                     }
@@ -824,7 +1154,7 @@ def convert_messages(
 
         index += 1
 
-    if cache_retention != "none" and supports_prompt_caching(model) and result:
+    if cache_retention != "none" and supports_prompt_caching(model, env) and result:
         last_message = result[-1]
         if last_message.get("role") == "user" and isinstance(last_message.get("content"), list):
             cache_point: dict[str, Any] = {"type": "default"}
@@ -879,7 +1209,12 @@ def map_stop_reason(reason: str | None) -> StopReason:
 
 
 def get_configured_bedrock_region(options: StreamOptions | dict[str, Any] | None = None) -> str | None:
-    return _option(options, "region") or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    env = _option(options, "env")
+    return (
+        _option(options, "region")
+        or get_provider_env_value("AWS_REGION", env)
+        or get_provider_env_value("AWS_DEFAULT_REGION", env)
+    )
 
 
 def has_configured_bedrock_profile() -> bool:
