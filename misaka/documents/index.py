@@ -8,6 +8,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -17,6 +18,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 from misaka.documents import htmltext
+from misaka.documents.pageindex import PageIndexUnavailable
 from misaka.utils import atomic
 
 DOC_ID_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -846,16 +848,83 @@ def source_title(p):
 # A caller that owns the whole machine passes its own `workers`.
 TREE_WORKERS = 2
 
+# Below this a document is short enough to navigate by page, so ingestion does not pay for an
+# outline. The backfill on re-ingest uses the same threshold, or it would keep retrying for
+# documents the first pass deliberately skipped.
+TREE_MIN_PAGES = 20
 
-def build_tree(p, *, workers=TREE_WORKERS):
-    """Return the PageIndex outline of a PDF as JSON text, or None for other formats or on failure."""
+_warned_no_pageindex = False
+
+
+def pageindex_available():
+    """Whether this install can do structure extraction at all (the ``pageindex`` extra)."""
+    from .pageindex import available
+    return available()
+
+
+def _warn_no_pageindex(p):
+    """Say once, out loud, that every outline in this run was skipped for the same reason.
+
+    Without this the extra's absence is invisible: ingestion succeeds, the corpus gets pages
+    and no `tree.json`, and the only trace is a `(pages)` marker in `doc tree` three commands
+    later. Once per process, because a scan hits it for every PDF in the folder.
+    """
+    global _warned_no_pageindex
+    if _warned_no_pageindex:
+        return
+    _warned_no_pageindex = True
+    from .pageindex import INSTALL_HINT
+    print(f"Warning: no PageIndex structure extraction for {os.path.basename(p)} (and any other "
+          f"document in this run): the optional extra is not installed, so documents are split "
+          f"into pages only, with no outline.\n         Install it with: {INSTALL_HINT}\n"
+          f"         Then re-run the same `misaka doc add`/`doc scan` to backfill the outline.",
+          file=sys.stderr)
+
+
+def _build_tree_with_reason(p, reason):
+    """`build_tree(p, reason=...)`, tolerating a stand-in that predates the keyword.
+
+    Tests monkeypatch `build_tree` with plain `lambda p: ...`, and so may callers outside this
+    module. Requiring the keyword would turn those into TypeErrors during ingestion, which is
+    the one thing outline extraction must never do; a stand-in that cannot report simply
+    reports nothing, and an unknown reason is treated as unsettled.
+    """
+    try:
+        return build_tree(p, reason=reason)
+    except TypeError:
+        return build_tree(p)
+
+
+def build_tree(p, *, workers=TREE_WORKERS, reason=None):
+    """Return the PageIndex outline of a PDF as JSON text, or None for other formats or on failure.
+
+    None has four meanings and the caller needs them apart: re-ingest should stop asking a
+    document that genuinely has no outline, but must keep asking one that was skipped because
+    the extra was missing -- installing it is exactly how a user repairs their corpus. Pass a
+    dict as ``reason`` to be told which happened, the way ``extract_pages`` reports what it
+    learned through ``meta``.
+
+    ``reason["tree"]`` is one of ``not_pdf``, ``none_found``, ``extra_missing``, ``failed``,
+    and is absent when an outline was returned. Only ``none_found`` is settled: the others can
+    all change without the document changing.
+    """
     if os.path.splitext(p)[1].lower() != ".pdf":
+        _note(reason, "tree", "not_pdf")
         return None
     try:
         from .pageindex import build_tree as pageindex_tree
         nodes = pageindex_tree(os.path.abspath(p), workers=workers)
-        return json.dumps(nodes, ensure_ascii=False) if nodes else None
+        if nodes:
+            return json.dumps(nodes, ensure_ascii=False)
+        _note(reason, "tree", "none_found")
+        return None
+    except PageIndexUnavailable:
+        # Actionable and identical for every document, unlike a parse failure: name it.
+        _warn_no_pageindex(p)
+        _note(reason, "tree", "extra_missing")
+        return None
     except Exception:  # noqa: BLE001 - outline extraction must not block ingestion
+        _note(reason, "tree", "failed")
         return None
 
 
@@ -864,6 +933,11 @@ def build_tree(p, *, workers=TREE_WORKERS):
 def _page_path(ddir, page):
     # ponytail: four digits keep the names aligned up to 9,999 pages; readers sort by number, so more still works.
     return os.path.join(ddir, "pages", f"p{page:04d}.txt")
+
+
+# Bumping this re-asks `build_tree` for every document that had no outline last time. Raise it
+# when the extractor gains the ability to find one where it previously could not.
+TREE_ATTEMPT_VERSION = 1
 
 
 def _read_meta_at(ddir):
@@ -991,8 +1065,9 @@ def _link(ddir, p, task_id):
 def ingest(p, title=None, with_tree=True, task_id=None):
     """Index a file under its content hash and return ``(doc_id, page_count)``.
 
-    Re-ingesting a known document only links the new ``task_id``. A suffix the corpus has no
-    extractor for raises ValueError naming the formats it does read.
+    Re-ingesting a known document links the new ``task_id`` and backfills an outline the first
+    pass could not build. A suffix the corpus has no extractor for raises ValueError naming the
+    formats it does read.
     """
     p = os.path.abspath(os.path.expanduser(p))
     _extractor(p)          # refuse an unreadable format before hashing, and before extracting
@@ -1003,14 +1078,41 @@ def ingest(p, title=None, with_tree=True, task_id=None):
     if existing:
         if (_read_meta_at(existing) or {}).get("sha256") != sha:
             raise ValueError(f"Document ID collision: {doc_id}")
-        return doc_id, _link(existing, p, task_id)
+        count = _link(existing, p, task_id)
+        # Without this, installing the pageindex extra repairs nothing: every document already
+        # in the corpus stays outline-less forever, because re-ingest used to stop at the link.
+        #
+        # "No tree.json" is not the same as "not tried yet". Plenty of PDFs have no outline to
+        # extract, and for those `build_tree` returns None however many times it is asked --
+        # so keying the backfill on the file's absence alone re-ran the whole PageIndex parse
+        # on every scan. That is 14 seconds for a 758-page document, and a process pool past 64
+        # pages. The attempt is recorded the way this module already records what an extractor
+        # learned (`meta['ocr_error']`), and only a newer extractor changes the answer.
+        meta = _read_meta_at(existing) or {}
+        if (with_tree and count >= TREE_MIN_PAGES
+                and not _real_file(os.path.join(existing, "tree.json"), existing)
+                and meta.get("tree_attempted_version") != TREE_ATTEMPT_VERSION):
+            why = {}
+            tree = _build_tree_with_reason(p, why)
+            if tree:
+                atomic.write_text(os.path.join(existing, "tree.json"), tree)
+            elif why.get("tree") == "none_found":
+                # Settled: this document has no outline to find. A missing extra or a failed
+                # parse is not settled -- installing the extra is how a corpus gets repaired,
+                # so those keep asking.
+                meta["tree_attempted_version"] = TREE_ATTEMPT_VERSION
+                atomic.write_text(os.path.join(existing, "meta.json"),
+                                  json.dumps(meta, ensure_ascii=False, indent=1))
+        return doc_id, count
     if os.path.lexists(ddir):
         raise ValueError(f"Invalid or colliding corpus entry: {doc_id}")
     extracted = {}                          # what the extractor learned: encoding, OCR
     pages = extract_pages(p, meta=extracted)
     if not _has_text_layer(pages):
         raise _no_text_error(p, pages, extracted.pop("ocr_error", None))
-    tree = build_tree(p) if (with_tree and len(pages) >= 20) else None
+    tree_wanted = with_tree and len(pages) >= TREE_MIN_PAGES
+    tree_reason = {}
+    tree = _build_tree_with_reason(p, tree_reason) if tree_wanted else None
     # Build the document beside its final place and move it in with one rename: the corpus holds
     # a complete document or none, never a half-written directory that reads as "already indexed".
     _sweep_stale_stages(corpus_root())      # whatever a killed ingest left behind, before adding ours
@@ -1025,8 +1127,12 @@ def ingest(p, title=None, with_tree=True, task_id=None):
         if tree:
             with open(os.path.join(stage, "tree.json"), "w", encoding="utf-8") as f:
                 f.write(tree)
+        # Asked for an outline and got none: record that, so re-ingest links the document
+        # instead of paying for the same parse again (see the backfill branch above).
+        attempted = ({"tree_attempted_version": TREE_ATTEMPT_VERSION}
+                     if tree_reason.get("tree") == "none_found" else {})
         meta = {"doc_id": doc_id, "title": title or source_title(p) or os.path.basename(p),
-                "orig_path": p, "paths": [p],
+                "orig_path": p, "paths": [p], **attempted,
                 "sha256": sha, "pages": len(pages), "task_id": task_id,
                 "task_ids": [task_id] if task_id else [], "added_at": int(time.time()),
                 **extracted}
@@ -1380,5 +1486,13 @@ def structure(doc_id, workspace=None):
     tree = _tree(doc_id, workspace=workspace)
     if tree:
         return {"mode": "tree", "title": m["title"], "tree": tree}
-    return {"mode": "pages", "title": m["title"],
+    # ``mode`` is a display string -- its only reader prints it -- so the reason the outline is
+    # missing rides along with it. "(pages)" on its own reads as a property of the document
+    # rather than as "structure extraction never ran on this machine".
+    mode = "pages only, no structure tree"
+    if not pageindex_available():
+        from .pageindex import INSTALL_HINT
+        mode += (f": the pageindex extra is not installed. {INSTALL_HINT}, "
+                 "then re-run `misaka doc add <file>` to build it")
+    return {"mode": mode, "title": m["title"],
             "pages": page_heads(doc_id, limit=10000, workspace=workspace)}

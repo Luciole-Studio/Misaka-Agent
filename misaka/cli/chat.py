@@ -64,6 +64,13 @@ def resolve_session(session, who):
 def launch(who, model=None, cont=False, pick=False, session=None):
     """Assemble the session and run interactive mode until it exits. ``who=None`` means Last Order."""
     from misaka.core.session_manager import get_session_dir_for_cwd, read_session_header
+    # The session picker is a full-screen TUI: it registers stdin with the event loop, which
+    # fails with a bare OSError(EINVAL) when stdin is a pipe or /dev/null. Refuse early and
+    # name the two ways to resume without a terminal.
+    if pick and not sys.stdin.isatty():
+        sys.exit("--pick needs a terminal; stdin is not a TTY.\n"
+                 "Resume a known session with --session <id>, the last one with -c, "
+                 "or run misaka chat --pick in a terminal.")
     resumed_session_id = None
     if session:
         session = resolve_session(session, who)

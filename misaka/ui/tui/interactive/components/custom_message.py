@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from misaka.core.extensions.types import MessageRenderer
 from misaka.core.messages import CustomMessage
 from misaka.ui.tui import Box, Container, DefaultTextStyle, Markdown, Spacer, Text
 from misaka.ui.tui.interactive.theme.theme import get_markdown_theme, theme
+from misaka.utils.values import read_field
 
 
 class CustomMessageComponent(Container):
     def __init__(
         self,
-        message: CustomMessage[object],
+        message: CustomMessage[object] | Mapping[str, Any],
         customRenderer: MessageRenderer[Any] | None = None,
         markdownTheme=None,
         outputPad: int = 1,
@@ -65,15 +67,25 @@ class CustomMessageComponent(Container):
 
         self.addChild(self.box)
         self.box.clear()
-        label = theme.fg("customMessageLabel", f"\x1b[1m[{self.message.customType}]\x1b[22m")
+        # A custom message reaches the default renderer in either shape: the CustomMessage the
+        # type hint promises, or the plain dict an extension handed to ``sendMessage`` (see
+        # misaka/network/messages.py's agent-messages payload). Every other reader of this
+        # message -- interactive_mode's dispatch immediately above this component -- already
+        # uses read_field for exactly that reason; attribute access here raised a bare
+        # AttributeError that the pane surfaced to the user verbatim.
+        custom_type = str(read_field(self.message, "customType", ""))
+        label = theme.fg("customMessageLabel", f"\x1b[1m[{custom_type}]\x1b[22m")
         self.box.addChild(Text(label, 0, 0))
         self.box.addChild(Spacer(1))
 
-        if isinstance(self.message.content, str):
-            text = self.message.content
+        content = read_field(self.message, "content", "")
+        if isinstance(content, str):
+            text = content
         else:
             text = "\n".join(
-                block.text for block in self.message.content if getattr(block, "type", None) == "text"
+                str(read_field(block, "text", ""))
+                for block in content
+                if read_field(block, "type") == "text"
             )
         self.box.addChild(
             Markdown(

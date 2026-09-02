@@ -11,6 +11,9 @@ pip install 'misaka[anthropic]'   # a user install picks its provider SDKs: anth
                                   # (misaka[providers] = all five; misaka[pageindex] = PDF outline extraction)
 ```
 
+`git` is required: `misaka init` creates the project repository, and accepted results are
+committed into it. Install it first (`xcode-select --install`, `apt install git`).
+
 The `grep` and `find` tools shell out to [ripgrep](https://github.com/BurntSushi/ripgrep)
 and [fd](https://github.com/sharkdp/fd). MISAKA does not fetch them for you — install them
 (`brew install ripgrep fd`, `apt install ripgrep fd-find`), or drop the binaries in

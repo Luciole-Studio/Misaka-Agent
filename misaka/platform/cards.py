@@ -388,6 +388,13 @@ def remove(con, workspace, task_id):
             return False, f"Card {task_id} was deleted but its attachments remain ({error}): {attachments}"
     if tracked and not repo.commit(workspace, git_paths, f"card {task_id}: delete"):
         return False, f"Card {task_id} was deleted but the deletion could not be committed to git; commit it by hand."
+    # Only say the file survives in git when git actually had it. `misaka add` never commits
+    # cards/, so for a card created from the CLI the file is simply gone -- say so rather than
+    # send the user to a history that holds nothing.
+    msg += (" Its file, log, and attachments stay in the project repository's history."
+            if tracked else
+            " Its file, log, and attachments were deleted from disk; they were never committed "
+            "to git, so there is no copy left.")
     return ok, msg
 
 
@@ -619,6 +626,25 @@ PROJECT_TEMPLATE = """# {name}
 """
 
 
+def _git(folder, *args):
+    """Run one git command for :func:`init_project`, reporting a missing or failing git as
+    a readable RuntimeError. ``misaka init`` is usually the first command a new user runs,
+    and git is a hard prerequisite the installer cannot supply: a subprocess traceback here
+    tells them nothing about what to install."""
+    try:
+        subprocess.run(["git", *args], cwd=folder, check=True)
+    except FileNotFoundError:
+        raise RuntimeError(
+            "misaka init needs git, but no git was found on PATH. Install git first "
+            "(macOS: xcode-select --install; Debian/Ubuntu: apt install git), "
+            "then run misaka init again."
+        ) from None
+    except subprocess.CalledProcessError as err:
+        raise RuntimeError(
+            f"git {' '.join(args)} failed in {folder} (exit {err.returncode})."
+        ) from None
+
+
 def init_project(folder):
     """Make a folder a MISAKA project: a git repository with the skeleton (PROJECT.md,
     cards/) and its cards indexed. Only a repository this call itself created gets the
@@ -627,7 +653,7 @@ def init_project(folder):
     actions = []
     fresh = not repo.enabled(folder)  # a worktree's .git is a file, not a directory
     if fresh:
-        subprocess.run(["git", "init", "-q"], cwd=folder, check=True)
+        _git(folder, "init", "-q")
         actions.append("git repository created")
     os.makedirs(os.path.join(folder, "cards"), exist_ok=True)
     project_md = os.path.join(folder, "PROJECT.md")
@@ -642,10 +668,9 @@ def init_project(folder):
     if restored:
         actions.append(f"{restored} card(s) indexed from cards/")
     if fresh:
-        subprocess.run(["git", "add", "-A"], cwd=folder, check=True)
-        subprocess.run(["git", "-c", "user.name=misaka", "-c", "user.email=misaka@local",
-                        "commit", "-q", "-m", "misaka init: project skeleton"],
-                       cwd=folder, check=True)
+        _git(folder, "add", "-A")
+        _git(folder, "-c", "user.name=misaka", "-c", "user.email=misaka@local",
+             "commit", "-q", "-m", "misaka init: project skeleton")
         actions.append("initial commit")
     return actions or ["already initialized"]
 

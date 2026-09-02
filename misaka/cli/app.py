@@ -3,7 +3,7 @@ import argparse
 import os
 import sys
 
-from misaka.config import CFG, current_config
+from misaka.config import CFG, VERSION, current_config
 from misaka.documents import index as corpus
 from misaka.observability import board as tail
 from misaka.platform import budget
@@ -21,6 +21,9 @@ class _ExactArgumentParser(argparse.ArgumentParser):
 
 def _parser():
     p = _ExactArgumentParser(prog="misaka")
+    # The first thing anyone types after installing. Without it argparse answers the version
+    # question with a usage error and exit 2, which reads as "this install is broken".
+    p.add_argument("--version", "-V", action="version", version=VERSION)
     sub = p.add_subparsers(dest="cmd", required=True)
 
     a = sub.add_parser("add", help="Create a task card")
@@ -259,7 +262,12 @@ def _cmd_init(args):
         for warning in result["deprecationWarnings"]:
             print(f"warning: {warning}")
     else:
-        for line in cards.init_project(os.getcwd()):
+        try:
+            lines = cards.init_project(os.getcwd())
+        except RuntimeError as err:
+            # Missing or failing git: a prerequisite the user has to install, not a bug.
+            sys.exit(str(err))
+        for line in lines:
             print(line)
     print("board:", os.path.expanduser(CFG["db"]))
 
@@ -275,11 +283,32 @@ def _cmd_remove(args):
 
 
 def _cmd_add(args):
+    from misaka.config.product import sisters
     from misaka.platform import cards
+    # A card addressed to nobody is dispatched by nobody: it sits at ready forever with no
+    # diagnosis anywhere. The check lives here rather than in create_task because Last Order
+    # and the research workflow pick their assignees from the roster already, and the board
+    # library is also how tests and repairs put rows back for Sisters that have since retired.
+    roster = sisters()
+    if args.assignee not in roster:
+        if roster:
+            sys.exit(f'No Sister named "{args.assignee}"; the card would sit at ready forever. '
+                     f"Registered Sisters: {', '.join(sorted(roster))}.")
+        sys.exit(f'No Sister named "{args.assignee}": the roster is empty. '
+                 "Create one with `misaka create <id>` first.")
     body = args.body
     if args.body_file:
-        with open(args.body_file, encoding="utf-8") as f:
-            body = f.read()
+        # A card body that cannot be read is a user mistake (typo, wrong folder), not a
+        # bug: report the path and the reason instead of a traceback.
+        try:
+            with open(args.body_file, encoding="utf-8") as f:
+                body = f.read()
+        except OSError as err:
+            sys.exit(f"Cannot read --body-file {args.body_file}: {err.strerror or err}")
+        except UnicodeDecodeError:
+            # Not an OSError: the file opened fine and is simply not text. Pointing a card body
+            # at a binary is the same class of mistake as pointing it at nothing.
+            sys.exit(f"Cannot read --body-file {args.body_file}: not UTF-8 text")
     tid = cards.create(db.connect(CFG["db"]), os.getcwd(), args.title, body, args.assignee,
                        model=args.model, priority=args.priority,
                        timeout_seconds=args.timeout)
@@ -326,6 +355,13 @@ def _cmd_research(args):
     if args.probe:
         sys.exit(research_node.main_probe(*args.probe))
     cfg = current_config()
+    # Preflight before anything is written: a run with no Sister to assign to dies deep
+    # inside the workflow (planner._roster), after the workspace has been git-initialised
+    # and committed into, and the message that surfaces there names neither the roster nor
+    # the command that fills it.
+    if not planner.sister_catalog(cfg.get("profiles_root")):
+        sys.exit("The Sister roster is empty; research tasks cannot be assigned.\n"
+                 "Create at least one Sister first, for example: misaka create 10032")
     con = db.connect(cfg["db"])
     runs.init(con)
     if args.resume:
@@ -336,16 +372,27 @@ def _cmd_research(args):
     else:
         if not args.goal:
             sys.exit("A new research run requires a question; use --resume RUN_ID to continue one.")
-        brief = planner.ensure_project_brief(cfg, worker_mod, args.goal, os.getcwd())
+        try:
+            brief = planner.ensure_project_brief(cfg, worker_mod, args.goal, os.getcwd())
+        except RuntimeError as err:
+            # The intake step needs a model; its own text says which credential is missing
+            # and where it is kept, so print that rather than a traceback around it.
+            sys.exit(f"{err}\n\n(/login is typed inside `misaka chat`; "
+                     f"`misaka auth check --provider {cfg['provider']}` verifies the result.)")
         from misaka.platform import cards as card_files
         card_files.init_project(os.getcwd())
         run = runs.create(con, workspace=os.getcwd(), question=args.goal,
                           limits={"max_depth": args.depth},
                           token_start=budget.spent(con))
         print(f"Project brief: {brief}\nResearch run {run['id']}: {runs.run_dir(run)}")
-    out = _asyncio.run(workflow.run(
-        con, cfg, research_node.spawner(), worker_mod,
-        run_id=run["id"], poll_seconds=1.0))
+    try:
+        out = _asyncio.run(workflow.run(
+            con, cfg, research_node.spawner(), worker_mod,
+            run_id=run["id"], poll_seconds=1.0))
+    except RuntimeError as err:
+        # Node failures already print their own reason above; the workflow's own summary is
+        # the useful part, and a traceback of the event loop is not.
+        sys.exit(f"Research run {run['id']} stopped: {err}")
     print(f"Research run {run['id']}: {out['reason']}")
     final = out.get("final") or {}
     if final.get("path"):
@@ -514,6 +561,14 @@ def _cmd_moa(args):
             pass
         presets = raw.get("presets") if isinstance(raw.get("presets"), dict) else {}
         if args.name not in presets:
+            # `moa list` prints load_moa_config(), which invents one preset when the file has
+            # none; delete can only touch presets the file actually declares. Naming a preset
+            # the listing shows but the file does not hold used to report it as unknown and
+            # then list it as available in the same sentence.
+            if args.name in cfg["presets"]:
+                sys.exit(f'"{args.name}" is the built-in MoA preset, not one this file defines, '
+                         f"so there is nothing to delete. Write your own presets into {path} "
+                         "to replace it.")
             known = ", ".join(cfg["presets"]) or "none"
             sys.exit(f'Unknown preset "{args.name}". Available presets: {known}.')
         if len(presets) <= 1:

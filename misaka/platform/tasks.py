@@ -707,8 +707,11 @@ def delete_task(con, task_id, *, allow_active=False):
     )
     con.execute("DELETE FROM tasks WHERE id=?", (task_id,))
     shutil.rmtree(task_state_dir(task_id), ignore_errors=True)
+    # Nothing here touches the card *file*; only cards.remove does, and only it knows whether
+    # git was ever given a copy. Claiming anything about the file from in here was a lie for
+    # every card `misaka add` created, because nothing commits cards/ on the way in.
     message = (f"Card {task_id} and its runs, dependencies, events, budget, and to-do items "
-               "were deleted. Its file, log, and attachments live in the project repository.")
+               "were deleted.")
     if skipped:
         message += (" These cards still name it in needs and could not be rewritten: "
                     + "; ".join(f"{child} ({reason})" for child, reason in skipped) + ".")
@@ -840,9 +843,25 @@ def _mirror_status(con, task_id, *, commit=False):
     if row is None or not row["workspace"]:
         return
     from misaka.platform import cards, repo
-    cards.set_fields(
-        row["workspace"], task_id, status=row["status"], generation=int(row["generation"])
-    )
+    try:
+        cards.set_fields(
+            row["workspace"], task_id, status=row["status"], generation=int(row["generation"])
+        )
+    except FileNotFoundError:
+        # The card file is not merely unwritable, it is gone -- the project directory was
+        # deleted or moved. There is no at-rest truth left to protect, so aborting here only
+        # means the lease outlives its worker: `reclaim_abandoned` mirrors, so a reconciler
+        # could never release such a card and every card behind it in the loop kept its
+        # expired lease too. `board()` already models this row as `missing_file`; let the
+        # transition commit, and record that the mirror did not land.
+        #
+        # Every other write failure still aborts the transition, which is the rule this
+        # function exists to enforce: a file that exists and could not be written means the
+        # database must not claim a state the file does not show.
+        add_event(con, task_id, "card_file_missing",
+                  {"status": row["status"], "workspace": row["workspace"]},
+                  generation=row["generation"])
+        return
     if commit and repo.enabled(row["workspace"]) and not repo.commit(
             row["workspace"], [os.path.join("cards", f"{task_id}.md")], f"card {task_id}: {row['status']}"):
         add_event(

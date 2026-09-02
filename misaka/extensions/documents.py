@@ -310,7 +310,13 @@ def register(harn):
         if not st:
             return _text("Document not found. Use doc_list to find its document ID.")
         heads = "\n".join(f"  p{p['page']}  {p['head']}" for p in st.get("pages", [])[:80])
-        return _text(note + untrusted(
+        # Why there is no outline is our note, not the document's, so it stays outside the fence.
+        # Silence here reads as "this document has no structure", which for a book is a lie.
+        why = "" if await _off_loop(corpus.pageindex_available) else (
+            "This install cannot extract document structure (the pageindex extra is missing), so "
+            "every document here is page-navigable only. Report that rather than concluding the "
+            "document is unstructured.\n")
+        return _text(note + why + untrusted(
             params.doc_id, f"# {st['title']} (no structure tree; navigate by page)\n{heads}"))
 
     class ReadParams(BaseModel):

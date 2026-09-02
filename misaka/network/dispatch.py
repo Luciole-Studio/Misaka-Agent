@@ -130,7 +130,19 @@ def reconcile(con, cfg):
             # Also the Sister path's rule: a recorded identity is checked against the PID that
             # holds it now, so a reused PID does not read as the original worker.
             continue
-        finish_abandoned(con, t)
+        try:
+            finish_abandoned(con, t)
+        except Exception as error:  # noqa: BLE001 - one card must not strand the rest
+            # A card whose workspace has gone (project deleted or moved) cannot have its file
+            # rewritten, so settling it raises. Without this guard that exception leaves the
+            # loop and every card after it keeps its expired lease forever -- which is how two
+            # cards on this author's board sat `running` for 111 hours behind one card whose
+            # directory no longer existed. The lease is the thing that must not outlive its
+            # worker, so release it in the database even when the file cannot be updated, and
+            # record why. `board()` already models this shape as `missing_file`.
+            db.add_event(con, t["id"], "reconcile_failed",
+                         {"error": f"{type(error).__name__}: {error}"[:500]},
+                         generation=t["generation"])
 
 
 

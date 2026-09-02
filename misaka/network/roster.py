@@ -5,6 +5,7 @@ import re
 import shutil
 import sys
 
+from misaka.config import profiles
 from misaka.config.product import CFG, current_config
 
 ROOT = CFG["profiles_root"]
@@ -38,6 +39,29 @@ Last Order reads this file to decide which tasks fit this Sister. Put personalit
 
 ## Good and poor task fits
 - Add concrete routing guidance here.
+"""
+
+
+# The only key `misaka/extensions/mcp.py:load_profile_config` reads out of a role's
+# config.yaml is `mcp_servers`, and the only keys it reads out of one server entry are
+# command/args/env/cwd/disabled -- so those are the only keys the skeleton documents.
+# It is commented out end to end on purpose: an all-comment file parses to None, `_clean`
+# turns that into no servers, and the Sister behaves exactly as she did when the file did
+# not exist. Deleting the leading '#' from the block leaves valid YAML, which is why there
+# is no live `mcp_servers: {}` line -- that would make the uncommented block a duplicate
+# key, and PyYAML resolves duplicates last-wins, silently discarding the servers.
+CONFIG_YAML_TEMPLATE = """# Misaka {sid} · MCP servers
+#
+# Every server listed here is started for this Sister, and its tools are registered as
+# mcp__<server>__<tool>. To enable one, delete the leading '#' from the block below.
+#
+# mcp_servers:
+#   camofox:                      # the <server> half of the tool name
+#     command: npx                # executable; must be on PATH, or an absolute path
+#     args: ["-y", "camofox-mcp"] # optional argument list
+#     env: {{}}                     # optional extra environment variables
+#     cwd: null                   # optional working directory
+#     disabled: false             # true keeps the entry but does not start it
 """
 
 
@@ -85,15 +109,18 @@ def create_sister(sid, root=None, specialty=None, model=None):
     with open(os.path.join(prof, "DESCRIBE.md"), "w", encoding="utf-8") as f:
         f.write(DESCRIBE_TEMPLATE.format(
             sid=sid, specialty=specialty, specialty_line=specialty or "Not specified yet."))
+    with open(profiles.config_yaml(prof), "w", encoding="utf-8") as f:
+        f.write(CONFIG_YAML_TEMPLATE.format(sid=sid))
     pinned = ""
     if model:
         with open(os.path.join(prof, "config.json"), "w", encoding="utf-8") as f:
             json.dump({"model": model}, f, ensure_ascii=False, indent=2)
         pinned = f"Pinned model: {model}. "
     return True, (
-        f"Sister {sid} was added to the roster. {pinned}"
-        f"Profile: {prof}/DESCRIBE.md; optionally configure mcp_servers in config.yaml "
-        f"and link skills under skills/. Use /sister {sid} to switch to this Sister."
+        f"Sister {sid} was added to the roster. {pinned}Profile: {prof} -- "
+        f"DESCRIBE.md (what Last Order routes to her), SOUL.md (her voice), "
+        f"config.yaml (MCP servers; a commented skeleton is there to edit), "
+        f"skills/ (link skills here). Use /sister {sid} to switch to this Sister."
     )
 
 
