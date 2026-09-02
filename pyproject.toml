@@ -74,6 +74,14 @@ dev = ["misaka[providers,pageindex]", "pytest>=8", "pytest-asyncio>=1", "ruff>=0
 # Every importable package at the repo root (exposed by the editable install; replaces a hand-written .pth)
 packages = ["misaka"]
 
+[tool.ruff.lint]
+# 默认集（E4/E7/E9/F）之外，只加"今天就是零命中"的阻塞调用棘轮：它挡不住我们自己的
+# 函数在内部阻塞（没有 linter 能知道），但能挡住新代码在 async 里直接调标准库的阻塞
+# 接口。既有的 `# noqa: ASYNC2xx - 原因` 注释因此从失效变为真正生效。
+# 刻意不启用：ASYNC240（要求改用 trio/anyio 的 Path，本仓库不用，55 处纯噪声）；
+# ASYNC110（4 处轮询循环改 Event 会改变唤醒语义，留给第二波逐个判断）。
+extend-select = ["ASYNC210", "ASYNC220", "ASYNC221", "ASYNC222", "ASYNC230", "ASYNC251"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

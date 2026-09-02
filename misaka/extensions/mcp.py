@@ -34,6 +34,7 @@ from pydantic import BaseModel
 from misaka.core.extensions import startup_sections
 from misaka.core.extensions.types import ToolDefinition
 from misaka.platform.prompt_guard import untrusted
+from misaka.utils.streams import STREAM_LIMIT
 
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -43,7 +44,7 @@ PROTOCOL_VERSION = "2025-06-18"
 # One JSON-RPC message is one line, and MCP tools routinely return file or page contents:
 # asyncio's default 64 KiB StreamReader limit would turn a run-of-the-mill result into a
 # ValueError out of readline(). 32 MiB is far past any sane tool result.
-STREAM_LIMIT = 32 * 1024 * 1024
+
 
 
 @dataclass(frozen=True, slots=True)

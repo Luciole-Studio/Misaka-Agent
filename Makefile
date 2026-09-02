@@ -1,8 +1,8 @@
 PY ?= .venv/bin/python
 
-.PHONY: check test lint dead vendor-test build bench
+.PHONY: check test lint dead streams vendor-test build bench
 
-check: test lint dead vendor-test build
+check: test lint dead streams vendor-test build
 
 test:
 	$(PY) -m pytest -q -W error
@@ -15,6 +15,9 @@ lint:
 # A module-level name nobody reads is rot; catching it here is cheaper than an audit.
 dead:
 	$(PY) scripts/deadcheck.py
+
+streams:
+	$(PY) scripts/streamcheck.py
 
 # Upstream hermes-lcm's own suite, run against the vendored copy: the fidelity
 # harness for the port. Outside `test` because upstream does not write to -W error.
