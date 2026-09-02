@@ -27,7 +27,7 @@ class _GitPaths:
     headPath: str
 
 
-def _find_git_paths(cwd: str) -> _GitPaths | None:
+def find_git_paths(cwd: str) -> _GitPaths | None:
     dir_path = cwd
     while True:
         git_path = os.path.join(dir_path, ".git")
@@ -89,7 +89,7 @@ class FooterDataProvider:
         self.cwd = cwd
         self.extensionStatuses: dict[str, str] = {}
         self.cachedBranch: object | str | None = _UNSET
-        self.gitPaths: _GitPaths | None = _find_git_paths(cwd)
+        self.gitPaths: _GitPaths | None = find_git_paths(cwd)
         self.headWatcher: FSWatcher | None = None
         self.reftableWatcher: FSWatcher | None = None
         self.reftableTablesListWatcher: FSWatcher | None = None
@@ -151,7 +151,7 @@ class FooterDataProvider:
                 self.refreshTimer = None
         self.clearGitWatchers()
         self.cachedBranch = _UNSET
-        self.gitPaths = _find_git_paths(cwd)
+        self.gitPaths = find_git_paths(cwd)
         self.setupGitWatcher()
         self.notifyBranchChange()
 
@@ -267,13 +267,15 @@ class FooterDataProvider:
         if self.gitPaths is None:
             return
 
-        def on_head_directory_change(_event_type: str, filename: str | None = None) -> None:
+        def on_head_change(_event_type: str, filename: str | None = None) -> None:
             if filename is None or filename == "HEAD":
                 self.scheduleRefresh()
 
+        # The polling watcher resolves this path again on every tick, so it follows
+        # Git's atomic HEAD replacement without binding to the previous inode.
         self.headWatcher = watch_with_error_handler(
-            os.path.dirname(self.gitPaths.headPath),
-            on_head_directory_change,
+            self.gitPaths.headPath,
+            on_head_change,
             lambda: self.handleGitWatcherError(),
         )
         if self.headWatcher is None:
@@ -338,4 +340,5 @@ class FooterDataProvider:
 
 __all__ = [
     "FooterDataProvider",
+    "find_git_paths",
 ]

@@ -6,9 +6,9 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, TypedDict
 
+from misaka.utils.child_process import ChildProcess, spawn_child_process
 from misaka.utils.values import signal_aborted
 
-_EXIT_STDIO_GRACE_SECONDS = 0.1
 _FORCE_KILL_DELAY_SECONDS = 5.0
 
 
@@ -37,14 +37,21 @@ async def _wait_for_abort(signal: Any) -> None:
         await asyncio.sleep(0.01)
 
 
-async def _read_stream(stream: asyncio.StreamReader | None, chunks: list[bytes]) -> None:
-    if stream is None:
-        return
-    while True:
-        chunk = await stream.read(4096)
-        if not chunk:
-            return
-        chunks.append(chunk)
+async def _drain_task(task: asyncio.Task[Any]) -> bool:
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+        except BaseException:  # noqa: BLE001 - cleanup must outlive its caller
+            break
+    if task.done():
+        try:
+            task.result()
+        except BaseException:  # noqa: BLE001, S110 - observing cleanup is sufficient
+            pass
+    return cancelled
 
 
 def _resolve_timeout_seconds(options: ExecOptions) -> float | None:
@@ -54,41 +61,7 @@ def _resolve_timeout_seconds(options: ExecOptions) -> float | None:
     return float(timeout) / 1000
 
 
-def _destroy_stream(stream: asyncio.StreamReader | None) -> None:
-    if stream is None:
-        return
-    transport = getattr(stream, "_transport", None)
-    if transport is None:
-        return
-    abort = getattr(transport, "abort", None)
-    if callable(abort):
-        abort()
-        return
-    close = getattr(transport, "close", None)
-    if callable(close):
-        close()
-
-
-async def _wait_for_streams(
-    stdout_task: asyncio.Task[None],
-    stderr_task: asyncio.Task[None],
-    stdout: asyncio.StreamReader | None,
-    stderr: asyncio.StreamReader | None,
-) -> None:
-    try:
-        await asyncio.wait_for(
-            asyncio.gather(stdout_task, stderr_task),
-            timeout=_EXIT_STDIO_GRACE_SECONDS,
-        )
-    except TimeoutError:
-        _destroy_stream(stdout)
-        _destroy_stream(stderr)
-        stdout_task.cancel()
-        stderr_task.cancel()
-        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
-
-
-async def _force_kill_after_delay(process: asyncio.subprocess.Process) -> None:
+async def _force_kill_after_delay(process: ChildProcess) -> None:
     await asyncio.sleep(_FORCE_KILL_DELAY_SECONDS)
     if process.returncode is None:
         process.kill()
@@ -115,23 +88,29 @@ async def exec_command(
     signal = resolved_options.get("signal")
 
     try:
-        process = await asyncio.create_subprocess_exec(
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+
+        def collect_output(fd: int, data: bytes) -> None:
+            (stdout_chunks if fd == 1 else stderr_chunks).append(data)
+
+        process = await spawn_child_process(
             command,
             *args,
             cwd=cwd,
             stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            on_data=collect_output,
         )
     except OSError:
         return ExecResult(stdout="", stderr="", code=1, killed=False)
 
-    stdout_chunks: list[bytes] = []
-    stderr_chunks: list[bytes] = []
-    stdout_task = asyncio.create_task(_read_stream(process.stdout, stdout_chunks))
-    stderr_task = asyncio.create_task(_read_stream(process.stderr, stderr_chunks))
     wait_task = asyncio.create_task(process.wait())
     abort_task = asyncio.create_task(_wait_for_abort(signal)) if signal is not None else None
+    timeout_task = (
+        asyncio.create_task(asyncio.sleep(timeout))
+        if timeout is not None and timeout > 0
+        else None
+    )
     force_kill_task: asyncio.Task[None] | None = None
     killed = False
     wait_failed = False
@@ -154,13 +133,16 @@ async def exec_command(
         pending = [wait_task]
         if abort_task is not None:
             pending.append(abort_task)
+        if timeout_task is not None:
+            pending.append(timeout_task)
         done, _ = await asyncio.wait(
             pending,
-            timeout=timeout if timeout and timeout > 0 else None,
             return_when=asyncio.FIRST_COMPLETED,
         )
 
-        if wait_task not in done:
+        abort_won = abort_task is not None and abort_task in done
+        timeout_won = timeout_task is not None and timeout_task in done
+        if abort_won or timeout_won or signal_aborted(signal):
             kill_process()
 
         try:
@@ -168,25 +150,31 @@ async def exec_command(
         except Exception:  # noqa: BLE001 - the process is being torn down; a failed wait is recorded as wait_failed
             wait_failed = True
 
-        await _wait_for_streams(stdout_task, stderr_task, process.stdout, process.stderr)
         return ExecResult(
             stdout=b"".join(stdout_chunks).decode("utf-8", errors="replace"),
             stderr=b"".join(stderr_chunks).decode("utf-8", errors="replace"),
             code=_normalize_exit_code(process.returncode, killed=killed, failed=wait_failed),
             killed=killed,
         )
+    except asyncio.CancelledError:
+        try:
+            kill_process()
+        finally:
+            process.close()
+        raise
     finally:
-        if abort_task is not None:
-            abort_task.cancel()
-            await asyncio.gather(abort_task, return_exceptions=True)
-        if force_kill_task is not None:
-            force_kill_task.cancel()
-            await asyncio.gather(force_kill_task, return_exceptions=True)
-        if not stdout_task.done():
-            stdout_task.cancel()
-        if not stderr_task.done():
-            stderr_task.cancel()
-        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        async def cleanup() -> None:
+            tasks: list[asyncio.Task[Any]] = [wait_task]
+            for task in (abort_task, timeout_task, force_kill_task):
+                if task is None:
+                    continue
+                if not task.done():
+                    task.cancel()
+                tasks.append(task)
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        if await _drain_task(asyncio.create_task(cleanup())):
+            raise asyncio.CancelledError
 
 
 __all__ = [

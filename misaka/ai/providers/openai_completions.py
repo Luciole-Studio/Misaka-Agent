@@ -503,9 +503,15 @@ def stream_openai_completions(
                 raise RuntimeError("Request was aborted")
             if output.stopReason == "aborted":
                 raise RuntimeError("Request was aborted")
+            if not has_finish_reason and not compat["supportsFinishReason"]:
+                output.stopReason = (
+                    "toolUse"
+                    if any(isinstance(block, ToolCall) for block in output.content)
+                    else "stop"
+                )
             if output.stopReason == "error":
                 raise RuntimeError(output.errorMessage or "Provider returned an error stop reason")
-            if not has_finish_reason:
+            if compat["supportsFinishReason"] and not has_finish_reason:
                 raise RuntimeError("Stream ended without finish_reason")
 
             stream.push(DoneEvent(reason=output.stopReason, message=output))

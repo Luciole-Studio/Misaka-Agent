@@ -6,11 +6,10 @@ for one provider happen one at a time, because ``Models.getAuth()`` runs OAuth r
 inside ``modify`` and two concurrent requests must not both spend the same refresh token.
 
 Upstream serializes by chaining promises per provider id and hands the caller a race
-between its own chain entry and the signal, so giving up on the wait neither runs the
-task (the chain re-checks the signal before calling it) nor breaks the chain for whoever
-queued behind. Here that is an ``asyncio.Lock`` per provider id, which gives the same
-mutual exclusion, plus the same race in ``_acquire``: an aborted caller stops waiting,
-and the lock it no longer wants is released as soon as the acquisition lands.
+between its own chain entry and the signal, so giving up on the wait neither breaks the
+chain nor publishes an active task's late result. Here that is an ``asyncio.Lock`` per
+provider id plus the same outer race: ``_acquire`` removes an aborted queued waiter,
+while an active callback keeps the lock until it settles and then fails its write guard.
 """
 
 from __future__ import annotations
@@ -23,13 +22,16 @@ from misaka.ai.auth.types import (
     CredentialInfo,
     CredentialValue,
 )
-from misaka.ai.utils.abort import wait_for_abort
+from misaka.ai.utils.abort import race_with_abort_signal, wait_for_abort
 from misaka.utils.values import signal_aborted
 
 
 def _throwIfAborted(options: AuthOperationOptions | None) -> None:
     if options is not None and signal_aborted(options.signal):
         raise RuntimeError("Request was aborted")
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        raise asyncio.CancelledError
 
 
 class InMemoryCredentialStore:
@@ -61,15 +63,26 @@ class InMemoryCredentialStore:
         acquisition = asyncio.ensure_future(lock.acquire())
         aborted = asyncio.ensure_future(wait_for_abort(signal))
 
+        def _release_acquisition(task: asyncio.Task[bool]) -> None:
+            if task.cancelled():
+                return
+            try:
+                acquired = task.result()
+            except Exception:  # noqa: BLE001 - failed acquisition owns no lock to release
+                return
+            if acquired:
+                lock.release()
+
         def _abandon_acquisition() -> None:
             # Whatever ends this wait without the lock must not leave `acquisition`
             # running: it would win the lock later with nobody left to release it,
             # wedging every subsequent writer for this provider. `Lock.acquire` is
             # cancellation-safe (a cancelled acquire wakes the next waiter), and the
             # callback covers the race where it completed before the cancel landed.
-            acquisition.add_done_callback(
-                lambda task: lock.release() if not task.cancelled() else None
-            )
+            if acquisition.done():
+                _release_acquisition(acquisition)
+                return
+            acquisition.add_done_callback(_release_acquisition)
             acquisition.cancel()
 
         try:
@@ -84,7 +97,11 @@ class InMemoryCredentialStore:
             raise
         finally:
             aborted.cancel()
+        if signal_aborted(signal) or aborted in done:
+            _abandon_acquisition()
+            raise RuntimeError("Request was aborted")
         if acquisition in done:
+            acquisition.result()
             return lock
         # The signal won.
         _abandon_acquisition()
@@ -109,18 +126,22 @@ class InMemoryCredentialStore:
         fn: Callable[[CredentialValue | None], Awaitable[CredentialValue | None]],
         options: AuthOperationOptions | None = None,
     ) -> CredentialValue | None:
-        lock = await self._acquire(providerId, options)
-        try:
-            current = self._credentials.get(providerId)
-            produced = await fn(current)
-            _throwIfAborted(options)
-            if produced is not None:
-                self._credentials[providerId] = produced
-            # `next ?? current`: declining to write returns what is still stored, so a
-            # caller cannot tell "I wrote this" from "someone else's write stands".
-            return produced if produced is not None else current
-        finally:
-            lock.release()
+        async def operation() -> CredentialValue | None:
+            lock = await self._acquire(providerId, options)
+            try:
+                current = self._credentials.get(providerId)
+                produced = await fn(current)
+                _throwIfAborted(options)
+                if produced is not None:
+                    self._credentials[providerId] = produced
+                # `next ?? current`: declining to write returns what is still stored, so a
+                # caller cannot tell "I wrote this" from "someone else's write stands".
+                return produced if produced is not None else current
+            finally:
+                lock.release()
+
+        signal = options.signal if options is not None else None
+        return await race_with_abort_signal(operation(), signal)
 
     async def delete(self, providerId: str, options: AuthOperationOptions | None = None) -> None:
         lock = await self._acquire(providerId, options)

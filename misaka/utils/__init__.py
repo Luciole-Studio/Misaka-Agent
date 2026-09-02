@@ -25,7 +25,12 @@ from misaka.utils.paths import (
     resolve_path,
     resolvePath,
 )
-from misaka.utils.shell import sanitize_binary_output, sanitizeBinaryOutput
+from misaka.utils.shell import (
+    get_powershell_config,
+    getPowerShellConfig,
+    sanitize_binary_output,
+    sanitizeBinaryOutput,
+)
 
 # image_resize re-exports are lazy (PEP 562): the module imports misaka.ai.types, whose
 # package __init__ boots every provider SDK. In pi (TypeScript) importing utils/paths
@@ -71,7 +76,9 @@ __all__ = [
     "format_dimension_note",
     "format_path_relative_to_cwd_or_absolute",
     "getCwdRelativePath",
+    "getPowerShellConfig",
     "get_cwd_relative_path",
+    "get_powershell_config",
     "isLocalPath",
     "is_local_path",
     "markPathIgnoredByCloudSync",

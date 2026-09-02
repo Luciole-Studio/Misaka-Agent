@@ -122,10 +122,30 @@ async def race_with_abort_signal[T](operation: Awaitable[T], signal: Any) -> T:
 
     aborting = asyncio.ensure_future(wait_for_abort(signal))
     try:
-        await asyncio.wait({task, aborting}, return_when=asyncio.FIRST_COMPLETED)
+        done, _ = await asyncio.wait(
+            {task, aborting}, return_when=asyncio.FIRST_COMPLETED
+        )
+    except asyncio.CancelledError:
+        # asyncio.wait() does not propagate caller cancellation to its children.  Cancel
+        # this wrapper explicitly; for asyncio.shield() that leaves the shared operation
+        # alive while preventing its abandoned wrapper from leaking a late exception.
+        task.cancel()
+        task.add_done_callback(
+            lambda finished: finished.exception() if not finished.cancelled() else None
+        )
+        raise
     finally:
         aborting.cancel()
 
+    if signal_aborted(signal) or aborting in done:
+        if task.done():
+            if not task.cancelled():
+                task.exception()
+        else:
+            task.add_done_callback(
+                lambda finished: finished.exception() if not finished.cancelled() else None
+            )
+        raise RuntimeError("Request was aborted")
     if task.done():
         return task.result()
     # The signal won. Keep observing the task so its eventual failure is not "never

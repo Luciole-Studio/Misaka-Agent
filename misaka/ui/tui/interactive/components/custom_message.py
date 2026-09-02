@@ -16,11 +16,13 @@ class CustomMessageComponent(Container):
         message: CustomMessage[object],
         customRenderer: MessageRenderer[Any] | None = None,
         markdownTheme=None,
+        outputPad: int = 1,
     ) -> None:
         super().__init__()
         self.message = message
         self.customRenderer = customRenderer
         self.markdownTheme = get_markdown_theme() if markdownTheme is None else markdownTheme
+        self.outputPad = outputPad
         self.customComponent: Any | None = None
         self._expanded = False
         self.addChild(Spacer(1))
@@ -30,6 +32,11 @@ class CustomMessageComponent(Container):
     def setExpanded(self, expanded: bool) -> None:
         if self._expanded != expanded:
             self._expanded = expanded
+            self.rebuild()
+
+    def setOutputPad(self, outputPad: int) -> None:
+        if self.outputPad != outputPad:
+            self.outputPad = outputPad
             self.rebuild()
 
     def invalidate(self) -> None:
@@ -44,7 +51,11 @@ class CustomMessageComponent(Container):
 
         if self.customRenderer is not None:
             try:
-                component = self.customRenderer(self.message, {"expanded": self._expanded}, theme)
+                component = self.customRenderer(
+                    self.message,
+                    {"expanded": self._expanded, "outputPad": self.outputPad},
+                    theme,
+                )
             except Exception:  # noqa: BLE001 - a failing custom renderer falls back to the default
                 component = None
             if component is not None:

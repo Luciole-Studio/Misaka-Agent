@@ -81,6 +81,11 @@ from misaka.ui.tui.interactive.components.tool_execution import (
 from misaka.ui.tui.interactive.components.tree_selector import (
     TreeSelectorComponent,
 )
+from misaka.ui.tui.interactive.components.trust_selector import (
+    TrustSelection,
+    TrustSelectorComponent,
+    TrustSelectorOptions,
+)
 from misaka.ui.tui.interactive.components.user_message import (
     UserMessageComponent,
 )
@@ -124,6 +129,9 @@ __all__ = [
     "ToolExecutionComponent",
     "ToolExecutionOptions",
     "TreeSelectorComponent",
+    "TrustSelection",
+    "TrustSelectorComponent",
+    "TrustSelectorOptions",
     "UserMessageComponent",
     "UserMessageSelectorComponent",
     "VisualTruncateResult",

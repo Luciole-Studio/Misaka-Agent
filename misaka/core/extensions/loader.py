@@ -18,6 +18,7 @@ from misaka.config import get_agent_dir
 from misaka.core.event_bus import EventBusController, createEventBus
 from misaka.core.exec import exec_command
 from misaka.core.extensions.types import (
+    EntryRenderer,
     ExecOptions,
     ExecResult,
     Extension,
@@ -26,6 +27,8 @@ from misaka.core.extensions.types import (
     ExtensionRuntime,
     ExtensionShortcut,
     LoadExtensionsResult,
+    MarkdownTransformer,
+    PendingNativeProviderRegistration,
     PendingProviderRegistration,
     ProviderConfig,
     RegisteredCommand,
@@ -34,8 +37,12 @@ from misaka.core.extensions.types import (
     ToolInfo,
     _LoadedExtension,
 )
+from misaka.core.pi_manifest import read_pi_manifest
 from misaka.core.source_info import create_synthetic_source_info
+from misaka.core.timings import time
 from misaka.utils.paths import resolve_path
+
+_ENTRY_DATA_UNSET = object()
 
 
 @dataclass(slots=True)
@@ -45,19 +52,71 @@ class _RuntimeState:
 
 
 @dataclass(slots=True)
+class _FactoryLoad:
+    extension: Extension
+    runtime: ExtensionRuntime
+    state: str = "loading"
+    pendingFlagValues: dict[str, bool | str] = field(default_factory=dict)
+    pendingRuntimeChanges: list[Callable[[], None]] = field(default_factory=list)
+    loadingUnsubscribers: list[Callable[[], None]] = field(default_factory=list)
+
+    def assert_active(self) -> None:
+        if self.state == "failed":
+            raise RuntimeError(
+                f'Extension "{self.extension.path}" failed to load and its API is no longer active.'
+            )
+        self.runtime.assertActive()
+
+    def apply_runtime_change(self, change: Callable[[], None]) -> None:
+        if self.state == "loading":
+            self.pendingRuntimeChanges.append(change)
+        else:
+            change()
+
+    def commit(self) -> None:
+        if self.state != "loading":
+            return
+        self.runtime.assertActive()
+        for name, value in self.pendingFlagValues.items():
+            self.runtime.flagValues.setdefault(name, value)
+        for apply in self.pendingRuntimeChanges:
+            apply()
+        self.state = "active"
+        self._clear_pending()
+
+    def discard(self) -> None:
+        if self.state != "loading":
+            return
+        self.state = "failed"
+        for unsubscribe in self.loadingUnsubscribers:
+            unsubscribe()
+        self._clear_pending()
+
+    def _clear_pending(self) -> None:
+        self.pendingFlagValues.clear()
+        self.pendingRuntimeChanges.clear()
+        self.loadingUnsubscribers.clear()
+
+
+@dataclass(slots=True)
 class _TrackedEventBus:
     """Extension-facing event bus: subscriptions are recorded on the runtime and
     unsubscribed together on invalidate (pi #7656 leak fix)."""
-    runtime: ExtensionRuntime
+    load: _FactoryLoad
     bus: Any
 
     def emit(self, channel: str, data: Any) -> None:
-        self.runtime.assertActive()
+        self.load.assert_active()
         self.bus.emit(channel, data)
 
     def on(self, channel: str, handler: Any) -> Callable[[], None]:
-        self.runtime.assertActive()
-        return self.runtime.trackEventBusSubscription(self.bus.on(channel, handler))
+        self.load.assert_active()
+        unsubscribe = self.load.runtime.trackEventBusSubscription(
+            self.bus.on(channel, handler)
+        )
+        if self.load.state == "loading":
+            self.load.loadingUnsubscribers.append(unsubscribe)
+        return unsubscribe
 
 
 @dataclass(slots=True)
@@ -65,14 +124,15 @@ class _ExtensionAPI:
     extension: Extension
     cwd: str
     runtime: ExtensionRuntime
+    load: _FactoryLoad
     events: Any
 
     def on(self, event: str, handler: Any) -> None:
-        self.runtime.assertActive()
+        self.load.assert_active()
         self.extension.handlers.setdefault(event, []).append(handler)
 
     def registerTool(self, definition: ToolDefinition[Any, Any]) -> None:
-        self.runtime.assertActive()
+        self.load.assert_active()
         self.extension.tools[definition.name] = RegisteredTool(
             definition=definition,
             sourceInfo=self.extension.sourceInfo,
@@ -80,7 +140,7 @@ class _ExtensionAPI:
         self.runtime.refreshTools()
 
     def registerCommand(self, name: str, options: dict[str, Any]) -> None:
-        self.runtime.assertActive()
+        self.load.assert_active()
         self.extension.commands[name] = RegisteredCommand(
             name=name,
             sourceInfo=self.extension.sourceInfo,
@@ -90,7 +150,7 @@ class _ExtensionAPI:
         )
 
     def registerShortcut(self, shortcut: str, options: dict[str, Any]) -> None:
-        self.runtime.assertActive()
+        self.load.assert_active()
         self.extension.shortcuts[shortcut] = ExtensionShortcut(
             shortcut=shortcut,
             extensionPath=self.extension.path,
@@ -99,7 +159,21 @@ class _ExtensionAPI:
         )
 
     def registerFlag(self, name: str, options: dict[str, Any]) -> None:
-        self.runtime.assertActive()
+        self.load.assert_active()
+        if "default" in options:
+            default = options["default"]
+            expected_type = {"boolean": bool, "string": str}.get(options["type"])
+            if expected_type is None or not isinstance(default, expected_type):
+                actual_type = (
+                    "boolean"
+                    if isinstance(default, bool)
+                    else "string"
+                    if isinstance(default, str)
+                    else type(default).__name__
+                )
+                raise TypeError(
+                    f'Invalid default for flag "{name}": expected {options["type"]}, got {actual_type}'
+                )
         self.extension.flags[name] = ExtensionFlag(
             name=name,
             extensionPath=self.extension.path,
@@ -107,21 +181,34 @@ class _ExtensionAPI:
             description=options.get("description"),
             default=options.get("default"),
         )
-        if options.get("default") is not None and name not in self.runtime.flagValues:
-            self.runtime.flagValues[name] = options["default"]
+        if "default" in options and name not in self.runtime.flagValues:
+            if self.load.state == "loading":
+                self.load.pendingFlagValues.setdefault(name, options["default"])
+            else:
+                self.runtime.flagValues[name] = options["default"]
 
     def registerMessageRenderer(self, customType: str, renderer: Any) -> None:
-        self.runtime.assertActive()
+        self.load.assert_active()
         self.extension.messageRenderers[customType] = renderer
 
+    def registerMarkdownTransformer(self, transformer: MarkdownTransformer) -> None:
+        self.load.assert_active()
+        self.extension.markdownTransformer = transformer
+
+    def registerEntryRenderer(self, customType: str, renderer: EntryRenderer[Any]) -> None:
+        self.load.assert_active()
+        self.extension.entryRenderers[customType] = renderer
+
     def getFlag(self, name: str) -> bool | str | None:
-        self.runtime.assertActive()
+        self.load.assert_active()
         if name not in self.extension.flags:
             return None
-        return self.runtime.flagValues.get(name)
+        if name in self.runtime.flagValues:
+            return self.runtime.flagValues[name]
+        return self.load.pendingFlagValues.get(name)
 
     def sendMessage(self, message: Any, options: dict[str, Any] | None = None) -> None:
-        self.runtime.assertActive()
+        self.load.assert_active()
         self.runtime.sendMessage(message, options)
 
     def sendUserMessage(
@@ -129,67 +216,87 @@ class _ExtensionAPI:
         content: str | list[Any],
         options: dict[str, Any] | None = None,
     ) -> None:
-        self.runtime.assertActive()
+        self.load.assert_active()
         self.runtime.sendUserMessage(content, options)
 
-    def appendEntry(self, customType: str, data: Any = None) -> None:
-        self.runtime.assertActive()
-        self.runtime.appendEntry(customType, data)
+    def appendEntry(self, customType: str, data: Any = _ENTRY_DATA_UNSET) -> None:
+        self.load.assert_active()
+        if data is _ENTRY_DATA_UNSET:
+            self.runtime.appendEntry(customType)
+        else:
+            self.runtime.appendEntry(customType, data)
 
     def setSessionName(self, name: str) -> None:
-        self.runtime.assertActive()
+        self.load.assert_active()
         self.runtime.setSessionName(name)
 
     def getSessionName(self) -> str | None:
-        self.runtime.assertActive()
+        self.load.assert_active()
         return self.runtime.getSessionName()
 
     def setLabel(self, entryId: str, label: str | None) -> None:
-        self.runtime.assertActive()
+        self.load.assert_active()
         self.runtime.setLabel(entryId, label)
 
     async def exec(self, command: str, args: list[str], options: ExecOptions | None = None) -> ExecResult:
-        self.runtime.assertActive()
+        self.load.assert_active()
         resolved_options: ExecOptions = dict(options or {})
         cwd_override = resolved_options.get("cwd")
         resolved_cwd = self.cwd if cwd_override is None else str(cwd_override)
         return await exec_command(command, args, resolved_cwd, resolved_options)
 
     def getActiveTools(self) -> list[str]:
-        self.runtime.assertActive()
+        self.load.assert_active()
         return self.runtime.getActiveTools()
 
     def getAllTools(self) -> list[ToolInfo]:
-        self.runtime.assertActive()
+        self.load.assert_active()
         return self.runtime.getAllTools()
 
     def setActiveTools(self, toolNames: list[str]) -> None:
-        self.runtime.assertActive()
+        self.load.assert_active()
         self.runtime.setActiveTools(toolNames)
 
     def getCommands(self) -> list[dict[str, Any]]:
-        self.runtime.assertActive()
+        self.load.assert_active()
         return self.runtime.getCommands()
 
     async def setModel(self, model: Any) -> bool:
-        self.runtime.assertActive()
+        self.load.assert_active()
         return await self.runtime.setModel(model)
 
     def getThinkingLevel(self) -> str:
-        self.runtime.assertActive()
+        self.load.assert_active()
         return self.runtime.getThinkingLevel()
 
     def setThinkingLevel(self, level: str) -> None:
-        self.runtime.assertActive()
+        self.load.assert_active()
         self.runtime.setThinkingLevel(level)
 
-    def registerProvider(self, name: str, config: ProviderConfig) -> None:
-        self.runtime.assertActive()
-        self.runtime.registerProvider(name, config, self.extension.path)
+    def registerProvider(
+        self, providerOrName: Any, config: ProviderConfig | None = None
+    ) -> None:
+        self.load.assert_active()
+        _validate_provider_registration(providerOrName, config)
+        if isinstance(providerOrName, str):
+            assert config is not None
+            self.load.apply_runtime_change(
+                lambda: self.runtime.registerProvider(
+                    providerOrName, config, self.extension.path
+                )
+            )
+            return
+        self.load.apply_runtime_change(
+            lambda: self.runtime.registerNativeProvider(
+                providerOrName, self.extension.path
+            )
+        )
 
     def unregisterProvider(self, name: str) -> None:
-        self.runtime.assertActive()
-        self.runtime.unregisterProvider(name, self.extension.path)
+        self.load.assert_active()
+        self.load.apply_runtime_change(
+            lambda: self.runtime.unregisterProvider(name, self.extension.path)
+        )
 
 
 def _not_initialized(*_args: Any, **_kwargs: Any) -> Any:
@@ -198,6 +305,16 @@ def _not_initialized(*_args: Any, **_kwargs: Any) -> Any:
 
 async def _set_model_not_initialized(*_args: Any, **_kwargs: Any) -> Any:
     raise RuntimeError("Extension runtime not initialized")
+
+
+def _validate_provider_registration(
+    provider_or_name: Any,
+    config: ProviderConfig | None,
+) -> None:
+    if isinstance(provider_or_name, str) and config is None:
+        raise TypeError("config is required for legacy provider registration")
+    if not isinstance(provider_or_name, str) and config is not None:
+        raise TypeError("native provider registration takes one provider object")
 
 
 def create_extension_runtime() -> ExtensionRuntime:
@@ -238,6 +355,42 @@ def create_extension_runtime() -> ExtensionRuntime:
         state.eventBusUnsubscribers.add(tracked_unsubscribe)
         return tracked_unsubscribe
 
+    def queue_provider(
+        name: str,
+        config: ProviderConfig,
+        extension_path: str | None = None,
+    ) -> None:
+        source = "<unknown>" if extension_path is None else extension_path
+        runtime.pendingProviderRegistrations.append(
+            PendingProviderRegistration(
+                name=name,
+                config=config,
+                extensionPath=source,
+            )
+        )
+
+    def queue_native_provider(
+        provider: Any,
+        extension_path: str | None = None,
+    ) -> None:
+        source = "<unknown>" if extension_path is None else extension_path
+        runtime.pendingNativeProviderRegistrations.append(
+            PendingNativeProviderRegistration(
+                provider=provider,
+                extensionPath=source,
+            )
+        )
+
+    def unqueue_provider(name: str, _extension_path: str | None = None) -> None:
+        runtime.pendingProviderRegistrations[:] = [
+            entry for entry in runtime.pendingProviderRegistrations if entry.name != name
+        ]
+        runtime.pendingNativeProviderRegistrations[:] = [
+            entry
+            for entry in runtime.pendingNativeProviderRegistrations
+            if getattr(entry.provider, "id", None) != name
+        ]
+
     runtime = ExtensionRuntime(
         sendMessage=_not_initialized,
         sendUserMessage=_not_initialized,
@@ -255,20 +408,13 @@ def create_extension_runtime() -> ExtensionRuntime:
         setThinkingLevel=_not_initialized,
         flagValues={},
         pendingProviderRegistrations=[],
+        pendingNativeProviderRegistrations=[],
         assertActive=assert_active,
         invalidate=invalidate,
         trackEventBusSubscription=track_event_bus_subscription,
-        registerProvider=lambda name, config, extension_path=None: runtime.pendingProviderRegistrations.append(
-            PendingProviderRegistration(
-                name=name,
-                config=config,
-                extensionPath="<unknown>" if extension_path is None else extension_path,
-            )
-        ),
-        unregisterProvider=lambda name, _extension_path=None: runtime.pendingProviderRegistrations.__setitem__(
-            slice(None),
-            [entry for entry in runtime.pendingProviderRegistrations if entry.name != name],
-        ),
+        registerProvider=queue_provider,
+        registerNativeProvider=queue_native_provider,
+        unregisterProvider=unqueue_provider,
     )
     return runtime
 
@@ -284,27 +430,27 @@ async def load_extension_from_factory(
     runtime: ExtensionRuntime,
     extension_path: str = "<inline>",
 ) -> Extension:
-    extension = _create_extension(extension_path, extension_path)
-    api = _ExtensionAPI(
-        extension=extension,
-        cwd=resolve_path(cwd),
-        runtime=runtime,
-        events=_TrackedEventBus(runtime=runtime, bus=event_bus),
+    return await _initialize_extension(
+        factory,
+        extension_path,
+        extension_path,
+        resolve_path(cwd),
+        event_bus,
+        runtime,
     )
-    await _invoke_factory(factory, api)
-    return extension
 
 
 async def load_extensions(
     paths: list[str],
     cwd: str,
     event_bus: Any | None = None,
+    runtime: ExtensionRuntime | None = None,
 ) -> LoadExtensionsResult:
     extensions: list[Extension] = []
     errors: list[dict[str, str]] = []
     resolved_cwd = resolve_path(cwd)
     resolved_event_bus = event_bus if event_bus is not None else _default_event_bus()
-    runtime = create_extension_runtime()
+    runtime = runtime or create_extension_runtime()
 
     for ext_path in paths:
         extension, error = await _load_extension(ext_path, resolved_cwd, resolved_event_bus, runtime)
@@ -373,6 +519,9 @@ async def discover_and_load_extensions(
 
 def resolve_extension_entries(dir_path: str) -> list[str] | None:
     manifest = _read_harn_manifest(dir_path)
+    package_json_path = os.path.join(dir_path, "package.json")
+    if manifest is None and os.path.exists(package_json_path):
+        manifest = read_pi_manifest(package_json_path)
     if manifest and manifest.get("extensions"):
         entries = [
             os.path.abspath(os.path.join(dir_path, candidate))
@@ -401,23 +550,38 @@ def _read_harn_manifest(dir_path: str) -> dict[str, list[str]] | None:
     return None
 
 
-def _read_harn_package_json_manifest(package_json_path: str) -> dict[str, list[str]] | None:
+def _read_harn_package_json_manifest(
+    package_json_path: str,
+) -> dict[str, list[str]] | None:
     try:
-        package = json.loads(Path(package_json_path).read_text(encoding="utf-8"))
+        package = json.loads(
+            Path(package_json_path).read_text(encoding="utf-8").removeprefix("\ufeff")
+        )
     except (OSError, ValueError):
         return None
-    harn_section = package.get("harn")
-    return harn_section if isinstance(harn_section, dict) else None
+    harn_section = package.get("harn") if isinstance(package, dict) else None
+    return _validate_harn_manifest(harn_section)
 
 
 def _read_harn_pyproject_manifest(pyproject_path: str) -> dict[str, list[str]] | None:
     try:
-        package = tomllib.loads(Path(pyproject_path).read_text(encoding="utf-8"))
+        package = tomllib.loads(
+            Path(pyproject_path).read_text(encoding="utf-8").removeprefix("\ufeff")
+        )
     except (OSError, ValueError):
         return None
     tool_section = package.get("tool")
     harn_section = tool_section.get("harn") if isinstance(tool_section, dict) else None
-    return harn_section if isinstance(harn_section, dict) else None
+    return _validate_harn_manifest(harn_section)
+
+
+def _validate_harn_manifest(value: Any) -> dict[str, list[str]] | None:
+    if not isinstance(value, dict):
+        return None
+    entries = value.get("extensions")
+    if isinstance(entries, list) and all(isinstance(entry, str) for entry in entries):
+        return {"extensions": entries}
+    return {}
 
 
 async def _load_extension(
@@ -429,11 +593,17 @@ async def _load_extension(
     resolved_path = resolve_path(path, cwd, normalize_unicode_spaces=True)
     try:
         factory = _load_extension_module(resolved_path)
+        time(f"{path} module import", "extensions")
         if factory is None:
             return None, f"Extension does not export a valid factory function: {path}"
-        extension = _create_extension(path, resolved_path)
-        api = _ExtensionAPI(extension=extension, cwd=cwd, runtime=runtime, events=_TrackedEventBus(runtime=runtime, bus=event_bus))
-        await _invoke_factory(factory, api)
+        extension = await _initialize_extension(
+            factory,
+            path,
+            resolved_path,
+            cwd,
+            event_bus,
+            runtime,
+        )
         return extension, None
     except Exception as error:  # noqa: BLE001 - extension code: a failing factory is reported as a load error
         return None, f"Failed to load extension: {error}"
@@ -464,6 +634,33 @@ async def _invoke_factory(factory: ExtensionFactory, api: _ExtensionAPI) -> None
     result = factory(api)
     if inspect.isawaitable(result):
         await result
+
+
+async def _initialize_extension(
+    factory: ExtensionFactory,
+    extension_path: str,
+    resolved_path: str,
+    cwd: str,
+    event_bus: Any,
+    runtime: ExtensionRuntime,
+) -> Extension:
+    extension = _create_extension(extension_path, resolved_path)
+    load = _FactoryLoad(extension=extension, runtime=runtime)
+    api = _ExtensionAPI(
+        extension=extension,
+        cwd=cwd,
+        runtime=runtime,
+        load=load,
+        events=_TrackedEventBus(load=load, bus=event_bus),
+    )
+    try:
+        await _invoke_factory(factory, api)
+        load.commit()
+    except BaseException:
+        load.discard()
+        raise
+    time(f"{extension_path} factory", "extensions")
+    return extension
 
 
 def _create_extension(path: str, resolved_path: str) -> Extension:

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable, Sequence
+from typing import Any, Literal
 
+from misaka.core.extensions.types import MarkdownTransformer
 from misaka.ui.tui import (
     Container,
     DefaultTextStyle,
@@ -11,6 +13,9 @@ from misaka.ui.tui import (
     MarkdownTheme,
     Spacer,
     Text,
+)
+from misaka.ui.tui.interactive.components.markdown_transform import (
+    create_markdown_transform,
 )
 from misaka.ui.tui.interactive.theme.theme import get_markdown_theme, theme
 from misaka.utils.values import read_field
@@ -38,14 +43,19 @@ class AssistantMessageComponent(Container):
         hideThinkingBlock: bool = False,
         markdownTheme: MarkdownTheme | None = None,
         hiddenThinkingLabel: str = "Thinking...",
+        outputPad: int = 1,
+        markdownTransformers: Sequence[MarkdownTransformer] = (),
     ) -> None:
         super().__init__()
         self.contentContainer = Container()
         self.hideThinkingBlock = hideThinkingBlock
         self.markdownTheme = markdownTheme or get_markdown_theme()
         self.hiddenThinkingLabel = hiddenThinkingLabel
+        self.outputPad = outputPad
+        self.markdownTransformers = tuple(markdownTransformers)
         self.lastMessage: Any | None = None
         self.hasToolCalls = False
+        self.isStreaming = False
         self.addChild(self.contentContainer)
         if message is not None:
             self.updateContent(message)
@@ -65,6 +75,12 @@ class AssistantMessageComponent(Container):
         if self.lastMessage is not None:
             self.updateContent(self.lastMessage)
 
+    def setOutputPad(self, padding: int) -> None:
+        self.outputPad = padding
+        self._fast_markdown = None
+        if self.lastMessage is not None:
+            self.updateContent(self.lastMessage)
+
     def render(self, width: int) -> list[str]:
         lines = list(super().render(width))
         if self.hasToolCalls or not lines:
@@ -73,8 +89,20 @@ class AssistantMessageComponent(Container):
         lines[-1] = OSC133_ZONE_END + OSC133_ZONE_FINAL + lines[-1]
         return lines
 
-    def updateContent(self, message: Any) -> None:
+    def _markdown_transform(
+        self,
+        message_type: Literal["user", "assistant", "assistant-thinking"],
+    ) -> Callable[[str, int], str]:
+        return create_markdown_transform(
+            message_type,
+            lambda: self.isStreaming,
+            self.markdownTransformers,
+        )
+
+    def updateContent(self, message: Any, isStreaming: bool | None = None) -> None:
         self.lastMessage = message
+        if isStreaming is not None:
+            self.isStreaming = isStreaming
 
         content = list(read_field(message, "content", []) or [])
 
@@ -103,7 +131,13 @@ class AssistantMessageComponent(Container):
                 else:
                     # First update -- create persistent children.
                     self.contentContainer.clear()
-                    self._fast_markdown = Markdown(text, 1, 0, self.markdownTheme)
+                    self._fast_markdown = Markdown(
+                        text,
+                        self.outputPad,
+                        0,
+                        self.markdownTheme,
+                        transform=self._markdown_transform("assistant"),
+                    )
                     self.contentContainer.addChild(Spacer(1))
                     self.contentContainer.addChild(self._fast_markdown)
                     return
@@ -118,37 +152,60 @@ class AssistantMessageComponent(Container):
         if has_visible_content:
             self.contentContainer.addChild(Spacer(1))
 
-        for index, block in enumerate(content):
+        index = 0
+        while index < len(content):
+            block = content[index]
             block_type = read_field(block, "type")
             if block_type == "text":
                 text_value = read_field(block, "text", "")
                 text = text_value.strip() if isinstance(text_value, str) else ""
                 if text:
-                    self.contentContainer.addChild(Markdown(text, 1, 0, self.markdownTheme))
+                    self.contentContainer.addChild(
+                        Markdown(
+                            text,
+                            self.outputPad,
+                            0,
+                            self.markdownTheme,
+                            transform=self._markdown_transform("assistant"),
+                        )
+                    )
             elif block_type == "thinking":
-                thinking_value = read_field(block, "thinking", "")
-                thinking = thinking_value.strip() if isinstance(thinking_value, str) else ""
-                if thinking:
-                    has_visible_after = any(_visible_content(item) for item in content[index + 1 :])
-                    if self.hideThinkingBlock:
-                        self.contentContainer.addChild(
-                            Text(theme.italic(theme.fg("thinkingText", self.hiddenThinkingLabel)), 1, 0)
+                thinking_blocks: list[str] = []
+                while index < len(content) and read_field(content[index], "type") == "thinking":
+                    thinking_value = read_field(content[index], "thinking", "")
+                    thinking = thinking_value.strip() if isinstance(thinking_value, str) else ""
+                    if thinking:
+                        thinking_blocks.append(thinking)
+                    index += 1
+                if not thinking_blocks:
+                    continue
+                has_visible_after = any(_visible_content(item) for item in content[index:])
+                if self.hideThinkingBlock:
+                    self.contentContainer.addChild(
+                        Text(
+                            theme.italic(theme.fg("thinkingText", self.hiddenThinkingLabel)),
+                            self.outputPad,
+                            0,
                         )
-                    else:
-                        self.contentContainer.addChild(
-                            Markdown(
-                                thinking,
-                                1,
-                                0,
-                                self.markdownTheme,
-                                DefaultTextStyle(
-                                    color=lambda value: theme.fg("thinkingText", value),
-                                    italic=True,
-                                ),
-                            )
+                    )
+                else:
+                    self.contentContainer.addChild(
+                        Markdown(
+                            "\n\n".join(thinking_blocks),
+                            self.outputPad,
+                            0,
+                            self.markdownTheme,
+                            DefaultTextStyle(
+                                color=lambda value: theme.fg("thinkingText", value),
+                                italic=True,
+                            ),
+                            transform=self._markdown_transform("assistant-thinking"),
                         )
-                    if has_visible_after:
-                        self.contentContainer.addChild(Spacer(1))
+                    )
+                if has_visible_after:
+                    self.contentContainer.addChild(Spacer(1))
+                continue
+            index += 1
 
         self.hasToolCalls = any(read_field(block, "type") == "toolCall" for block in content)
         if self.hasToolCalls:
@@ -163,10 +220,16 @@ class AssistantMessageComponent(Container):
                 else "Operation aborted"
             )
             self.contentContainer.addChild(Spacer(1))
-            self.contentContainer.addChild(Text(theme.fg("error", abort_message), 1, 0))
+            self.contentContainer.addChild(Text(theme.fg("error", abort_message), self.outputPad, 0))
         elif stop_reason == "error":
             self.contentContainer.addChild(Spacer(1))
-            self.contentContainer.addChild(Text(theme.fg("error", f"Error: {error_message or 'Unknown error'}"), 1, 0))
+            self.contentContainer.addChild(
+                Text(
+                    theme.fg("error", f"Error: {error_message or 'Unknown error'}"),
+                    self.outputPad,
+                    0,
+                )
+            )
 
 
 __all__ = ["AssistantMessageComponent"]

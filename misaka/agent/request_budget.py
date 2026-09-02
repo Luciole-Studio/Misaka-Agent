@@ -1,10 +1,8 @@
 """Per-provider-request hard token ceiling.
 
-The agent loop snapshots ``Agent.maxTokens`` when a turn starts, so changing
-that attribute from a ``turn_end`` listener is too late for tool continuations.
-This limiter instead wraps ``streamFn`` itself: every provider request is
-bounded from the exact context that will be sent (system prompt, messages and
-tool schemas) and from usage already reported by earlier requests.
+This limiter wraps ``streamFn`` itself: every provider request is bounded from
+the exact context that will be sent (system prompt, messages and tool schemas)
+and from usage already reported by earlier requests.
 """
 
 from __future__ import annotations

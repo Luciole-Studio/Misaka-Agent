@@ -155,6 +155,7 @@ def create_client(
     model: Model,
     api_key: str | None = None,
     options_headers: Mapping[str, str] | None = None,
+    timeout_ms: int | None = None,
 ) -> GoogleGenAI:
     http_options: dict[str, Any] = {}
     if model.baseUrl:
@@ -169,6 +170,8 @@ def create_client(
             **dict(options_headers or {}),
         }
     )
+    if timeout_ms is not None:
+        http_options["timeout"] = timeout_ms
 
     return require(GoogleGenAI, "google-genai")(
         api_key=api_key,
@@ -258,6 +261,7 @@ def stream_google(
                 model,
                 api_key,
                 _option(options, "headers"),
+                _option(options, "timeoutMs"),
             )
             params = build_params(model, context, options)
             on_payload = _option(options, "onPayload")

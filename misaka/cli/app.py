@@ -1,7 +1,6 @@
 """MISAKA command-line entry point."""
 import argparse
 import os
-import signal
 import sys
 
 from misaka.config import CFG, current_config
@@ -12,8 +11,16 @@ from misaka.platform import tasks as db
 from misaka.utils import atomic
 
 
+class _ExactArgumentParser(argparse.ArgumentParser):
+    """Require documented option names instead of accepting ambiguous prefixes."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("allow_abbrev", False)
+        super().__init__(*args, **kwargs)
+
+
 def _parser():
-    p = argparse.ArgumentParser(prog="misaka")
+    p = _ExactArgumentParser(prog="misaka")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     a = sub.add_parser("add", help="Create a task card")
@@ -131,10 +138,8 @@ def _parser():
     mo.add_argument("op", nargs="?", default="list", choices=["list", "delete"])
     mo.add_argument("name", nargs="?", help="Preset name (for delete)")
 
-    ac = sub.add_parser("auth", help="Check provider credentials")
-    ac.add_argument("op", nargs="?", default="check", choices=["check"])
-    ac.add_argument("provider", nargs="?", help="Provider ID (default: every configured provider)")
-    ac.add_argument("--show", action="store_true", help="Print the resolved credential")
+    ac = sub.add_parser("auth", help="Check or print provider credentials")
+    ac.add_argument("auth_args", nargs=argparse.REMAINDER)
 
     wb = sub.add_parser("web", help="Show or change web-search configuration (~/.misaka/web.json)")
     wb.add_argument("op", nargs="?", default="status", choices=["status", "set", "unset"])
@@ -444,32 +449,9 @@ def _cmd_lcm(args):
 
 
 def _cmd_auth(args):
-    # Verify credentials up front so a run does not fail halfway through.
-    import asyncio as _asyncio
+    from misaka.cli.auth import run_auth_command
 
-    from misaka.core.auth_storage import AuthStorage
-    from misaka.core.model_registry import ModelRegistry
-    registry = ModelRegistry.create(AuthStorage.create())        # the resolver every session uses: env, models.json, stored
-    known = {m.provider for m in registry.getAvailable()} | set(registry.authStorage.getAll())
-    targets = [args.provider] if args.provider else sorted(known)
-    if not targets:
-        print("No provider credentials are configured. See ~/.misaka/auth.json.")
-        sys.exit(1)
-    bad = 0
-    for provider in targets:
-        status = registry.getProviderAuthStatus(provider)
-        mark = "✓" if status.configured or status.source else "✗"
-        detail = status.source or "not configured"
-        if status.label:
-            detail += f" ({status.label})"
-        line = f"{mark} {provider}  {detail}"
-        if args.show and (status.configured or status.source):
-            key = _asyncio.run(registry.getApiKeyForProvider(provider))
-            line += f"  {key}" if key else " (credential could not be resolved)"
-        print(line)
-        if not (status.configured or status.source):
-            bad += 1
-    sys.exit(1 if bad else 0)
+    return run_auth_command(args.auth_args)
 
 
 def _cmd_web(args):
@@ -749,10 +731,15 @@ COMMANDS = {
 def main(argv=None):
     """The CLI entry point: one handler per sub-command (``COMMANDS``), each opening the board only
     if it uses it; ``argv`` defaults to the process arguments so tests can drive it directly."""
-    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
         # No arguments: open the panel in a terminal, plain chat when piped.
         argv = ["panel"] if sys.stdin.isatty() and sys.stdout.isatty() else ["chat"]
+    if argv[0] == "auth":
+        # Auth has its own Pi-compatible grammar; preserve the raw option order instead
+        # of sending it through the product CLI's unrelated parser.
+        from misaka.cli.auth import run_auth_command
+
+        return run_auth_command(argv[1:])
     args = _parser().parse_args(argv)
     return COMMANDS[args.cmd](args)

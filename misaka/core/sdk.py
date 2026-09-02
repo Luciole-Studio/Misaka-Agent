@@ -7,9 +7,15 @@ from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict
 
 from misaka.agent.agent import Agent
 from misaka.agent.types import AgentMessage, ThinkingLevel
+from misaka.ai.auth.resolve import AuthResolutionOverrides
 from misaka.ai.models import clamp_thinking_level
-from misaka.ai.stream import stream_simple
-from misaka.ai.types import Model, SimpleStreamOptions, TextContent, validate_message
+from misaka.ai.types import (
+    Model,
+    ProviderStreamOptions,
+    TextContent,
+    validate_message,
+)
+from misaka.ai.utils.headers import provider_headers_to_record
 from misaka.config import get_agent_dir
 from misaka.core.agent_session import AgentSession
 from misaka.core.auth_guidance import format_no_models_available_message
@@ -26,6 +32,7 @@ from misaka.core.extensions import (
     SlashCommandSource,
     ToolDefinition,
 )
+from misaka.core.http_dispatcher import applyHttpProxySettings
 from misaka.core.messages import convertToLlm
 from misaka.core.model_registry import ModelRegistry
 from misaka.core.model_resolver import findInitialModel
@@ -34,14 +41,18 @@ from misaka.core.provider_attribution import merge_provider_attribution_headers
 from misaka.core.resource_loader import DefaultResourceLoader, ResourceLoader
 from misaka.core.session_manager import SessionManager, get_default_session_dir
 from misaka.core.settings_manager import SettingsManager
+from misaka.core.timings import time
 from misaka.core.tools import (
     Tool,
     ToolName,
     create_bash_tool,
+    create_coding_tools,
     create_edit_tool,
     create_find_tool,
     create_grep_tool,
     create_ls_tool,
+    create_powershell_tool,
+    create_read_only_tools,
     create_read_tool,
     create_write_tool,
     with_file_mutation_queue,
@@ -95,6 +106,7 @@ class CreateAgentSessionOptions(TypedDict, total=False):
     scopedModels: list[ScopedModel]
     noTools: Literal["all", "builtin"]
     tools: list[str]
+    excludeTools: list[str]
     customTools: list[ToolDefinition[Any, Any]]
     resourceLoader: ResourceLoader
     sessionManager: SessionManager
@@ -132,8 +144,9 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
     auth_path = os.path.join(agent_dir, "auth.json") if resolved_options.get("agentDir") else None
     models_path = os.path.join(agent_dir, "models.json") if resolved_options.get("agentDir") else None
     auth_storage = resolved_options.get("authStorage") or AuthStorage.create(auth_path)
-    model_registry = resolved_options.get("modelRegistry") or ModelRegistry.create(auth_storage, models_path)
     settings_manager = resolved_options.get("settingsManager") or SettingsManager.create(cwd, agent_dir)
+    applyHttpProxySettings(settings_manager.getGlobalSettings().get("httpProxy"))
+    model_registry = resolved_options.get("modelRegistry") or ModelRegistry.create(auth_storage, models_path)
     session_manager = explicit_session_manager or SessionManager.create(cwd, get_default_session_dir(cwd, agent_dir))
 
     if resource_loader is None:
@@ -141,6 +154,7 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
             {"cwd": cwd, "agentDir": agent_dir, "settingsManager": settings_manager}
         )
         await resource_loader.reload()
+        time("resourceLoader.reload")
 
     existing_session = session_manager.buildSessionContext()
     has_existing_session = len(existing_session.messages) > 0
@@ -165,6 +179,7 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
                 "defaultProvider": settings_manager.getDefaultProvider(),
                 "defaultModelId": settings_manager.getDefaultModel(),
                 "defaultThinkingLevel": settings_manager.getDefaultThinkingLevel(),
+                "modelThinkingLevels": settings_manager.getAllModelThinkingLevels(),
                 "modelRegistry": model_registry,
             }
         )
@@ -181,19 +196,24 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
             if has_thinking_entry
             else settings_manager.getDefaultThinkingLevel() or DEFAULT_THINKING_LEVEL
         )
+    if thinking_level is None and model is not None:
+        thinking_level = settings_manager.getModelThinkingLevel(model.provider, model.id)
     if thinking_level is None:
         thinking_level = settings_manager.getDefaultThinkingLevel() or DEFAULT_THINKING_LEVEL
     thinking_level = "off" if model is None else clamp_thinking_level(model, thinking_level)
 
     default_active_tool_names: list[ToolName] = ["read", "bash", "edit", "write", "grep", "find", "ls"]
-    # defaultTools setting = startup tool allowlist when --tools/-nt is not given explicitly (pi 4d9aa837c)
+    # defaultTools selects initial built-ins; it does not populate the registry allowlist (pi 541045ae0).
     configured_default_tools = settings_manager.getDefaultTools()
     allowed_tool_names = resolved_options.get("tools")
-    if allowed_tool_names is None:
-        if resolved_options.get("noTools") == "all":
-            allowed_tool_names = []
-        elif resolved_options.get("noTools") is None:
-            allowed_tool_names = configured_default_tools
+    if allowed_tool_names is None and resolved_options.get("noTools") == "all":
+        allowed_tool_names = []
+    excluded_tool_names = (
+        list(resolved_options["excludeTools"])
+        if resolved_options.get("excludeTools") is not None
+        else []
+    )
+    excluded_tool_name_set = set(excluded_tool_names)
     initial_active_tool_names = (
         list(resolved_options["tools"])
         if resolved_options.get("tools") is not None
@@ -201,6 +221,9 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
               else (list(configured_default_tools) if configured_default_tools is not None
                     else default_active_tool_names))
     )
+    initial_active_tool_names = [
+        name for name in initial_active_tool_names if name not in excluded_tool_name_set
+    ]
 
     extension_runner_ref: dict[str, Any] = {}
 
@@ -241,19 +264,32 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
         return filtered_messages
 
     async def stream_fn(model_value: Model[Any], context: Any, stream_options: Any = None) -> Any:
-        auth = await model_registry.getApiKeyAndHeaders(model_value)
-        if not auth.get("ok"):
-            raise RuntimeError(auth["error"])
+        resolved_stream_options = _to_dict(stream_options)
+        resolution = await model_registry.getAuth(
+            model_value,
+            AuthResolutionOverrides(signal=resolved_stream_options.get("signal")),
+        )
+        if resolution is None:
+            raise RuntimeError(f"Provider is not configured: {model_value.provider}")
+        request_model = (
+            model_value.model_copy(update={"baseUrl": resolution.auth.baseUrl})
+            if resolution.auth.baseUrl
+            else model_value
+        )
 
         provider_retry_settings = settings_manager.getProviderRetrySettings()
-        resolved_stream_options = _to_dict(stream_options)
+        http_idle_timeout_ms = settings_manager.getHttpIdleTimeoutMs()
+        effective_timeout_ms = 2_147_483_647 if http_idle_timeout_ms == 0 else http_idle_timeout_ms
         # pi sdk.ts:337 merges attribution over the auth headers before the caller's own,
         # so an explicit header always wins over one of ours.
         headers = merge_provider_attribution_headers(
             model_value,
             settings_manager,
             session_manager.getSessionId(),
-            _merge_headers(auth.get("headers"), resolved_stream_options.get("headers")),
+            _merge_headers(
+                provider_headers_to_record(resolution.auth.headers),
+                resolved_stream_options.get("headers"),
+            ),
         )
         # pi sdk.ts:330-339 hands the merged headers to `before_provider_headers` handlers right
         # here (models.ts:657, after mergeHeaders and before the provider call). Handlers mutate
@@ -263,22 +299,31 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
             transformed = await header_runner.emit_before_provider_headers(dict(headers or {}))
             headers = {key: str(value) for key, value in transformed.items() if value is not None} or None
         final_options = dict(resolved_stream_options)
-        final_options["apiKey"] = auth.get("apiKey")
+        final_options["apiKey"] = resolution.auth.apiKey
+        request_env = {
+            **(resolution.env or {}),
+            **(resolved_stream_options.get("env") or {}),
+        }
+        if request_env:
+            final_options["env"] = request_env
         if final_options.get("timeoutMs") is None:
-            final_options["timeoutMs"] = provider_retry_settings.get("timeoutMs")
+            provider_timeout_ms = provider_retry_settings.get("timeoutMs")
+            final_options["timeoutMs"] = (
+                provider_timeout_ms
+                if provider_timeout_ms is not None
+                else effective_timeout_ms
+            )
         if final_options.get("maxRetries") is None:
             final_options["maxRetries"] = provider_retry_settings.get("maxRetries")
         if final_options.get("maxRetryDelayMs") is None:
             final_options["maxRetryDelayMs"] = provider_retry_settings.get("maxRetryDelayMs")
         if headers is not None:
             final_options["headers"] = headers
-        # Filter to only SimpleStreamOptions-known fields before validation.
-        # In the TypeScript original, `{ ...options, ... }` creates a plain object
-        # with extra AgentLoopConfig keys that are silently ignored by JS runtime.
-        # Python's Pydantic extra="forbid" rejects unknown keys, so we must strip them.
-        allowed_keys = SimpleStreamOptions.model_fields.keys()
-        filtered_options = {k: v for k, v in final_options.items() if k in allowed_keys}
-        return stream_simple(model_value, context, SimpleStreamOptions.model_validate(filtered_options))
+        return model_registry.streamSimple(
+            request_model,
+            context,
+            ProviderStreamOptions.model_validate(final_options),
+        )
 
     async def on_payload(payload: dict[str, Any], _model: Model[Any]) -> Any:
         runner = extension_runner_ref.get("current")
@@ -350,6 +395,7 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
             "modelRegistry": model_registry,
             "initialActiveToolNames": initial_active_tool_names,
             "allowedToolNames": allowed_tool_names,
+            "excludedToolNames": excluded_tool_names,
             "extensionRunnerRef": extension_runner_ref,
             "sessionStartEvent": resolved_options.get("sessionStartEvent"),
         }
@@ -428,10 +474,13 @@ def _content_text(block: Any) -> str | None:
 
 
 createBashTool = create_bash_tool
+createCodingTools = create_coding_tools
 createEditTool = create_edit_tool
 createFindTool = create_find_tool
 createGrepTool = create_grep_tool
 createLsTool = create_ls_tool
+createPowerShellTool = create_powershell_tool
+createReadOnlyTools = create_read_only_tools
 createReadTool = create_read_tool
 createWriteTool = create_write_tool
 withFileMutationQueue = with_file_mutation_queue
@@ -468,10 +517,13 @@ __all__ = [
     "createAgentSessionRuntime",
     "createAgentSessionServices",
     "createBashTool",
+    "createCodingTools",
     "createEditTool",
     "createFindTool",
     "createGrepTool",
     "createLsTool",
+    "createPowerShellTool",
+    "createReadOnlyTools",
     "createReadTool",
     "createWriteTool",
     "withFileMutationQueue",

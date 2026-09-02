@@ -12,7 +12,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, NotRequired, Protocol, TypedDict, runtime_checkable
 
 from misaka.agent.harness.messages import (
     BashExecutionMessage,
@@ -24,7 +24,7 @@ from misaka.agent.harness.messages import (
 from misaka.agent.harness.session.uuid import uuidv7
 from misaka.agent.harness.types import SessionContext
 from misaka.agent.types import AgentMessage
-from misaka.ai.types import ImageContent, MessageValue, TextContent
+from misaka.ai.types import ImageContent, MessageValue, TextContent, Usage
 from misaka.config import get_agent_dir, get_sessions_dir
 from misaka.utils import atomic
 from misaka.utils.paths import canonicalize_path, normalize_path, resolve_path
@@ -38,7 +38,20 @@ type SessionMessageEntry = dict[str, Any]
 type ThinkingLevelChangeEntry = dict[str, Any]
 type ModelChangeEntry = dict[str, Any]
 type CompactionEntry = dict[str, Any]
-type BranchSummaryEntry = dict[str, Any]
+
+
+class BranchSummaryEntry(TypedDict):
+    type: Literal["branch_summary"]
+    id: str
+    parentId: str | None
+    timestamp: str
+    fromId: str
+    summary: str
+    details: NotRequired[Any]
+    usage: NotRequired[Usage | Mapping[str, Any]]
+    fromHook: NotRequired[bool | None]
+
+
 type CustomEntry = dict[str, Any]
 type LabelEntry = dict[str, Any]
 type SessionInfoEntry = dict[str, Any]
@@ -125,6 +138,8 @@ class ReadonlySessionManager(Protocol):
 
     def getBranch(self, fromId: str | None = None) -> list[SessionEntry]: ...
 
+    def buildContextEntries(self) -> list[SessionEntry]: ...
+
     def getHeader(self) -> SessionHeader | None: ...
 
     def getEntries(self) -> list[SessionEntry]: ...
@@ -203,11 +218,60 @@ def get_latest_compaction_entry(entries: list[SessionEntry]) -> SessionEntry | N
     return None
 
 
-def build_session_context(
+def session_entry_to_context_messages(entry: SessionEntry) -> list[AgentMessage]:
+    """Project one session entry into the messages consumed by the active context."""
+    entry_type = entry.get("type")
+    if entry_type == "message":
+        message = entry.get("message")
+        if message is None:
+            return []
+        # Session files are parsed without message validation; old versions, forks, or
+        # hand-edited files can contain standard messages with null/missing content.
+        if (
+            _message_role(message) in {"user", "assistant", "toolResult"}
+            and read_field(message, "content") is None
+        ):
+            if isinstance(message, Mapping):
+                return [{**message, "content": []}]
+            model_copy = getattr(message, "model_copy", None)
+            if callable(model_copy):
+                return [model_copy(update={"content": []})]
+        return [message]
+    if entry_type == "custom_message":
+        content = entry.get("content")
+        return [
+            create_custom_message(
+                str(entry.get("customType")),
+                [] if content is None else content,
+                bool(entry.get("display")),
+                entry.get("details"),
+                entry.get("timestamp"),
+            )
+        ]
+    if entry_type == "branch_summary" and entry.get("summary"):
+        return [
+            create_branch_summary_message(
+                str(entry.get("summary")),
+                str(entry.get("fromId")),
+                entry.get("timestamp"),
+            )
+        ]
+    if entry_type == "compaction":
+        return [
+            create_compaction_summary_message(
+                str(entry.get("summary")),
+                int(entry.get("tokensBefore", 0)),
+                entry.get("timestamp"),
+            )
+        ]
+    return []
+
+
+def _build_session_path(
     entries: list[SessionEntry],
     leaf_id: str | None | object = _LEAF_UNSET,
     by_id: Mapping[str, SessionEntry] | None = None,
-) -> SessionContext:
+) -> list[SessionEntry]:
     if by_id is None:
         by_id = {
             entry_id: entry
@@ -216,7 +280,7 @@ def build_session_context(
         }
 
     if leaf_id is None:
-        return SessionContext(messages=[], thinkingLevel="off", model=None)
+        return []
 
     leaf: SessionEntry | None = None
     if isinstance(leaf_id, str):
@@ -224,18 +288,60 @@ def build_session_context(
     if leaf is None and entries:
         leaf = entries[-1]
     if leaf is None:
-        return SessionContext(messages=[], thinkingLevel="off", model=None)
+        return []
 
     path: list[SessionEntry] = []
     current: SessionEntry | None = leaf
     while current is not None:
-        path.insert(0, current)
+        path.append(current)
         parent_id = current.get("parentId")
         current = by_id.get(parent_id) if isinstance(parent_id, str) else None
+    path.reverse()
+    return path
+
+
+def _context_entries_from_path(path: list[SessionEntry]) -> list[SessionEntry]:
+    compaction = next(
+        (entry for entry in reversed(path) if entry.get("type") == "compaction"),
+        None,
+    )
+    if compaction is None:
+        return path
+
+    compaction_id = compaction.get("id")
+    compaction_index = next(
+        index for index, entry in enumerate(path) if entry.get("id") == compaction_id
+    )
+    context_entries = [compaction]
+    first_kept_entry_id = compaction.get("firstKeptEntryId")
+    found_first_kept = False
+    for entry in path[:compaction_index]:
+        if entry.get("id") == first_kept_entry_id:
+            found_first_kept = True
+        if found_first_kept:
+            context_entries.append(entry)
+    context_entries.extend(path[compaction_index + 1 :])
+    return context_entries
+
+
+def build_context_entries(
+    entries: list[SessionEntry],
+    leaf_id: str | None | object = _LEAF_UNSET,
+    by_id: Mapping[str, SessionEntry] | None = None,
+) -> list[SessionEntry]:
+    """Return the active leaf path after applying the latest compaction boundary."""
+    return _context_entries_from_path(_build_session_path(entries, leaf_id, by_id))
+
+
+def build_session_context(
+    entries: list[SessionEntry],
+    leaf_id: str | None | object = _LEAF_UNSET,
+    by_id: Mapping[str, SessionEntry] | None = None,
+) -> SessionContext:
+    path = _build_session_path(entries, leaf_id, by_id)
 
     thinking_level = "off"
     model: SessionModelInfo | None = None
-    compaction: SessionEntry | None = None
     for entry in path:
         entry_type = entry.get("type")
         if entry_type == "thinking_level_change":
@@ -250,65 +356,11 @@ def build_session_context(
             model_id = read_field(entry.get("message"), "model")
             if isinstance(provider, str) and isinstance(model_id, str):
                 model = {"provider": provider, "modelId": model_id}
-        elif entry_type == "compaction":
-            compaction = entry
-
-    messages: list[AgentMessage] = []
-
-    def append_message(entry: SessionEntry) -> None:
-        entry_type = entry.get("type")
-        if entry_type == "message":
-            message = entry.get("message")
-            if message is not None:
-                messages.append(message)
-        elif entry_type == "custom_message":
-            messages.append(
-                create_custom_message(
-                    str(entry.get("customType")),
-                    entry.get("content"),
-                    bool(entry.get("display")),
-                    entry.get("details"),
-                    str(entry.get("timestamp")),
-                )
-            )
-        elif entry_type == "branch_summary" and entry.get("summary"):
-            messages.append(
-                create_branch_summary_message(
-                    str(entry.get("summary")),
-                    str(entry.get("fromId")),
-                    str(entry.get("timestamp")),
-                )
-            )
-
-    if compaction is not None:
-        messages.append(
-            create_compaction_summary_message(
-                str(compaction.get("summary")),
-                int(compaction.get("tokensBefore", 0)),
-                str(compaction.get("timestamp")),
-            )
-        )
-        compaction_id = compaction.get("id")
-        compaction_index = next(
-            (
-                index
-                for index, entry in enumerate(path)
-                if entry.get("type") == "compaction" and entry.get("id") == compaction_id
-            ),
-            -1,
-        )
-        first_kept_entry_id = compaction.get("firstKeptEntryId")
-        found_first_kept = False
-        for entry in path[:compaction_index]:
-            if entry.get("id") == first_kept_entry_id:
-                found_first_kept = True
-            if found_first_kept:
-                append_message(entry)
-        for entry in path[compaction_index + 1 :]:
-            append_message(entry)
-    else:
-        for entry in path:
-            append_message(entry)
+    messages = [
+        message
+        for entry in _context_entries_from_path(path)
+        for message in session_entry_to_context_messages(entry)
+    ]
 
     return SessionContext(messages=messages, thinkingLevel=thinking_level, model=model)
 
@@ -357,7 +409,13 @@ def read_session_header(file_path: str) -> dict[str, Any]:
     return entry if isinstance(entry, dict) and entry.get("type") == "session" else {}
 
 
-def load_entries_from_file(file_path: str, *, strict: bool = False) -> list[FileEntry]:
+def load_entries_from_file(
+    file_path: str,
+    *,
+    strict: bool = False,
+    repair_unterminated: bool = False,
+) -> list[FileEntry]:
+    """Load a session, optionally terminating a fully validated writable JSONL file."""
     resolved_file_path = normalize_path(file_path)
     path = Path(resolved_file_path)
     if not path.exists():
@@ -378,6 +436,9 @@ def load_entries_from_file(file_path: str, *, strict: bool = False) -> list[File
         if strict:
             raise InvalidSessionFileError(resolved_file_path, "missing session header")
         return []
+    if strict and repair_unterminated and not content.endswith("\n"):
+        with path.open("ab") as handle:
+            handle.write(b"\n")
     return entries
 
 
@@ -437,7 +498,11 @@ class SessionManager:
     def setSessionFile(self, sessionFile: str) -> None:
         self.sessionFile = resolve_path(sessionFile)
         if os.path.exists(self.sessionFile):
-            self.fileEntries = load_entries_from_file(self.sessionFile, strict=True)
+            self.fileEntries = load_entries_from_file(
+                self.sessionFile,
+                strict=True,
+                repair_unterminated=True,
+            )
             if not self.fileEntries:
                 raise InvalidSessionFileError(self.sessionFile)
 
@@ -528,35 +593,43 @@ class SessionManager:
     def getSessionFile(self) -> str | None:
         return self.sessionFile
 
-    def _persist(self, entry: SessionEntry) -> None:
+    def _persist(self, entry: SessionEntry) -> bool:
+        """Persist a candidate entry without changing the live session state."""
         if not self.persist or not self.sessionFile:
-            return
+            return self.flushed
 
-        has_assistant = any(
-            file_entry.get("type") == "message" and _message_role(file_entry.get("message")) == "assistant"
+        serialized_entry = _dump_json(entry)
+
+        has_assistant = (
+            entry.get("type") == "message" and _message_role(entry.get("message")) == "assistant"
+        ) or any(
+            file_entry.get("type") == "message"
+            and _message_role(file_entry.get("message")) == "assistant"
             for file_entry in self.fileEntries
         )
         if not has_assistant:
-            self.flushed = False
-            return
+            return False
 
         if not self.flushed:
-            self._rewriteFile()
-            self.flushed = True
-            return
+            payload = f"{_dump_jsonl(self.fileEntries)}{serialized_entry}\n"
+            atomic.write_text(self.sessionFile, payload, mode=0o600)
+            return True
 
         if not os.path.exists(self.sessionFile):
-            atomic.write_text(self.sessionFile, "", mode=0o600)   # the transcript is born private
-        with Path(self.sessionFile).open("a", encoding="utf-8") as handle:
-            handle.write(f"{_dump_json(entry)}\n")
+            atomic.write_text(self.sessionFile, f"{serialized_entry}\n", mode=0o600)
+        else:
+            with Path(self.sessionFile).open("a", encoding="utf-8") as handle:
+                handle.write(f"{serialized_entry}\n")
+        return True
 
     def _appendEntry(self, entry: SessionEntry) -> None:
+        flushed = self._persist(entry)
         self.fileEntries.append(entry)
         entry_id = entry.get("id")
         if isinstance(entry_id, str):
             self.byId[entry_id] = entry
             self.leafId = entry_id
-        self._persist(entry)
+        self.flushed = flushed
 
     def appendMessage(self, message: MessageValue | dict[str, Any] | CustomMessage[Any] | BashExecutionMessage) -> str:
         entry: SessionEntry = {
@@ -599,6 +672,7 @@ class SessionManager:
         tokensBefore: int,
         details: Any = _UNSET,
         fromHook: bool | None | object = _UNSET,
+        usage: Usage | Mapping[str, Any] | None | object = _UNSET,
     ) -> str:
         entry: SessionEntry = {
             "type": "compaction",
@@ -613,6 +687,8 @@ class SessionManager:
             entry["details"] = details
         if fromHook is not _UNSET:
             entry["fromHook"] = fromHook
+        if usage is not _UNSET and usage is not None:
+            entry["usage"] = usage
         self._appendEntry(entry)
         return str(entry["id"])
 
@@ -713,6 +789,9 @@ class SessionManager:
             current = self.byId.get(parent_id) if isinstance(parent_id, str) else None
         return path
 
+    def buildContextEntries(self) -> list[SessionEntry]:
+        return build_context_entries(self.getEntries(), self.leafId, self.byId)
+
     def buildSessionContext(self) -> SessionContext:
         return build_session_context(self.getEntries(), self.leafId, self.byId)
 
@@ -775,22 +854,25 @@ class SessionManager:
         summary: str,
         details: Any = _UNSET,
         fromHook: bool | None | object = _UNSET,
+        usage: Usage | Mapping[str, Any] | None | object = _UNSET,
     ) -> str:
         if branchFromId is not None and branchFromId not in self.byId:
             raise ValueError(f"Entry {branchFromId} not found")
-        self.leafId = branchFromId
+        from_id = self.leafId if self.leafId is not None else "root"
         entry: SessionEntry = {
             "type": "branch_summary",
             "id": generate_id(self.byId),
             "parentId": branchFromId,
             "timestamp": _iso_now(),
-            "fromId": branchFromId or "root",
+            "fromId": from_id,
             "summary": summary,
         }
         if details is not _UNSET:
             entry["details"] = details
         if fromHook is not _UNSET:
             entry["fromHook"] = fromHook
+        if usage is not _UNSET and usage is not None:
+            entry["usage"] = usage
         self._appendEntry(entry)
         return str(entry["id"])
 
@@ -885,6 +967,37 @@ class SessionManager:
         return cls(cwd, directory, resolved_path, True)
 
     @classmethod
+    def openInMemory(
+        cls,
+        path: str,
+        cwdOverride: str | None = None,
+    ) -> SessionManager:
+        """Load a session snapshot without retaining or modifying its source file."""
+        resolved_path = resolve_path(path)
+        if not os.path.isfile(resolved_path):
+            raise FileNotFoundError(resolved_path)
+        try:
+            entries = load_entries_from_file(
+                resolved_path,
+                strict=True,
+                repair_unterminated=False,
+            )
+        except UnicodeError as error:
+            raise InvalidSessionFileError(resolved_path, str(error)) from error
+        header = entries[0]
+        cwd = (
+            cwdOverride
+            if cwdOverride is not None
+            else (str(header.get("cwd")) if isinstance(header.get("cwd"), str) else os.getcwd())
+        )
+        manager = cls.inMemory(cwd)
+        manager.fileEntries = entries
+        manager.sessionId = str(header["id"]) if header.get("id") else create_session_id()
+        _migrate_to_current_version(manager.fileEntries)
+        manager._buildIndex()
+        return manager
+
+    @classmethod
     def continueRecent(cls, cwd: str, sessionDir: str | None = None) -> SessionManager:
         directory = normalize_path(sessionDir) if sessionDir else get_default_session_dir(cwd)
         most_recent = find_most_recent_session(directory)
@@ -897,7 +1010,13 @@ class SessionManager:
         return cls(os.getcwd() if cwd is None else cwd, "", None, False)
 
     @classmethod
-    def forkFrom(cls, sourcePath: str, targetCwd: str, sessionDir: str | None = None) -> SessionManager:
+    def forkFrom(
+        cls,
+        sourcePath: str,
+        targetCwd: str,
+        sessionDir: str | None = None,
+        options: NewSessionOptions | None = None,
+    ) -> SessionManager:
         resolved_source_path = resolve_path(sourcePath)
         resolved_target_cwd = resolve_path(targetCwd)
         try:
@@ -915,7 +1034,7 @@ class SessionManager:
 
         directory = normalize_path(sessionDir) if sessionDir else get_default_session_dir(resolved_target_cwd)
         os.makedirs(directory, exist_ok=True)
-        new_session_id = create_session_id()
+        new_session_id = options.id if options and options.id else create_session_id()
         timestamp = _iso_now()
         file_timestamp = timestamp.replace(":", "-").replace(".", "-")
         new_session_file = os.path.join(directory, f"{file_timestamp}_{new_session_id}.jsonl")
@@ -1283,6 +1402,7 @@ def _dump_jsonl(entries: list[FileEntry]) -> str:
     return "".join(f"{_dump_json(entry)}\n" for entry in entries)
 
 
+buildContextEntries = build_context_entries
 buildSessionContext = build_session_context
 
 __all__ = [
@@ -1307,5 +1427,8 @@ __all__ = [
     "SessionMessageEntry",
     "SessionTreeNode",
     "ThinkingLevelChangeEntry",
+    "buildContextEntries",
     "buildSessionContext",
+    "build_context_entries",
+    "session_entry_to_context_messages",
 ]

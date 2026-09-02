@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypedDict
 
-from misaka.agent.types import AgentMessage
-from misaka.ai.stream import complete_simple
-from misaka.ai.types import Model, SimpleStreamOptions, UserMessage
-from misaka.core.compaction.compaction import estimate_tokens
+from misaka.agent.harness.session.uuid import uuidv7
+from misaka.agent.types import AgentMessage, StreamFn
+from misaka.ai.types import Model, SimpleStreamOptions, Usage, UserMessage
+from misaka.ai.utils.retry import RetryCallbacks, RetryPolicy
+from misaka.core.compaction.compaction import (
+    complete_summarization,
+    estimate_tokens,
+    get_summarization_failure,
+)
 from misaka.core.compaction.utils import (
     SUMMARIZATION_SYSTEM_PROMPT,
     FileOperations,
@@ -67,10 +72,16 @@ Keep each section concise. Preserve exact file paths, function names, and error 
 @dataclass(slots=True)
 class BranchSummaryResult:
     summary: str | None = None
+    usage: Usage | None = None
     readFiles: list[str] | None = None
     modifiedFiles: list[str] | None = None
     aborted: bool | None = None
     error: str | None = None
+
+
+class BranchSummaryDetails(TypedDict):
+    readFiles: list[str]
+    modifiedFiles: list[str]
 
 
 @dataclass(slots=True)
@@ -89,12 +100,16 @@ class CollectEntriesResult:
 @dataclass(slots=True)
 class GenerateBranchSummaryOptions:
     model: Model[Any]
-    apiKey: str
+    apiKey: str | None
     signal: Any
     headers: dict[str, str] | None = None
+    env: dict[str, str] | None = None
     customInstructions: str | None = None
     replaceInstructions: bool | None = None
     reserveTokens: int | None = None
+    streamFn: StreamFn | None = None
+    retry: RetryPolicy | None = None
+    callbacks: RetryCallbacks | None = None
 
 
 def collect_entries_for_branch_summary(
@@ -192,7 +207,7 @@ async def generate_branch_summary(
         f"{serialize_conversation(convertToLlm(preparation.messages))}\n"
         f"</conversation>\n\n{instructions}"
     )
-    response = await complete_simple(
+    response = await complete_summarization(
         options.model,
         {
             "systemPrompt": SUMMARIZATION_SYSTEM_PROMPT,
@@ -201,20 +216,30 @@ async def generate_branch_summary(
         SimpleStreamOptions(
             apiKey=options.apiKey,
             headers=options.headers,
+            env=options.env,
             signal=options.signal,
             maxTokens=2048,
+            cacheRetention="none",
+            sessionId=uuidv7(),
         ),
+        options.streamFn,
+        options.retry,
+        options.callbacks,
     )
     if response.stopReason == "aborted":
         return BranchSummaryResult(aborted=True)
-    if response.stopReason == "error":
-        return BranchSummaryResult(error=response.errorMessage or "Summarization failed")
+    failure = get_summarization_failure(response, "Branch summarization")
+    if failure:
+        return BranchSummaryResult(error=failure)
+    if any(read_field(block, "type") == "toolCall" for block in response.content):
+        return BranchSummaryResult(error="Branch summarization attempted to call a tool")
 
     summary = _BRANCH_SUMMARY_PREAMBLE + _assistant_text(response)
     file_lists = compute_file_lists(preparation.fileOps)
     summary += format_file_operations(file_lists["readFiles"], file_lists["modifiedFiles"])
     return BranchSummaryResult(
         summary=summary or "No summary generated",
+        usage=response.usage,
         readFiles=file_lists["readFiles"],
         modifiedFiles=file_lists["modifiedFiles"],
     )
@@ -254,10 +279,21 @@ def _timestamp_ms() -> int:
     return int(time.time() * 1000)
 
 
+collectEntriesForBranchSummary = collect_entries_for_branch_summary
+generateBranchSummary = generate_branch_summary
+prepareBranchEntries = prepare_branch_entries
+
 __all__ = [
     "BranchPreparation",
+    "BranchSummaryDetails",
     "BranchSummaryResult",
     "CollectEntriesResult",
     "FileOperations",
     "GenerateBranchSummaryOptions",
-    ]
+    "collectEntriesForBranchSummary",
+    "collect_entries_for_branch_summary",
+    "generateBranchSummary",
+    "generate_branch_summary",
+    "prepareBranchEntries",
+    "prepare_branch_entries",
+]

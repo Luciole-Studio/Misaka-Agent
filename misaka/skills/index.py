@@ -1,41 +1,49 @@
 """The skill index: what a session can load, and how it is advertised.
 
 Port of hermes ``build_skills_system_prompt`` / ``skills_list`` / ``skill_view``
-lookups. Like pi and hermes, only each SKILL.md's frontmatter is read -- the body
-loads on demand through ``skill_view``. The engine's own skill loading is off for
-every MISAKA session: the extension in
+lookups. The prompt reads only frontmatter; ``skills_list`` reads the first prose
+line only when a description is missing, and the full body otherwise loads on
+demand through ``skill_view``. The engine's own skill loading is off for every
+MISAKA session: the extension in
 :mod:`misaka.extensions.skills` is the one consumer of this index, so a session's
 skills are decided in exactly one place.
 
 Caching, as hermes: an in-process cache per roots and disabled list (dropped by
 ``invalidate()``), and for the personal layers a disk snapshot validated by an
 mtime/size manifest of every SKILL.md and DESCRIPTION.md, so a cold start never
-re-reads an unchanged tree. Project and external layers are scanned directly.
+re-reads an unchanged tree. Project entries pass the quarantine scanner after a
+whole-bundle fingerprint changes; external layers are scanned directly.
 """
 import hashlib
 import json
 import os
 import re
+import sys
 from pathlib import Path
 
 from misaka.skills.layers import (
     PERSONAL_LAYERS,
     disabled_skill_names,
     home,
+    iter_project_skill_files,
     iter_skill_files,
+    project_skill_tree_fingerprint,
     walk_skill_tree,
 )
-from misaka.utils.frontmatter import parse_frontmatter
 
 _INVALID = re.compile(r"[^a-z0-9-]")
 _MULTI_HYPHEN = re.compile(r"-{2,}")
-_CACHE = {}                 # (roots, disabled) -> (entries, categories, candidates)
-SNAPSHOT_VERSION = 1
+_FRONTMATTER_END = re.compile(r"\n---\s*\n")
+_CACHE = {}                 # (roots, disabled) -> (prompt entries, categories, all, runtime entries)
+_CACHE_MAX = 32
+SNAPSHOT_VERSION = 2
 
 # Cap on description length in the system-prompt skill index (hermes SKILL_PROMPT_DESC_LIMIT).
 # The index lives in every session, so longer descriptions are truncated; learn_prompt's hard
 # "<= 60 characters" rule comes from this limit.
 SKILL_PROMPT_DESC_LIMIT = 60
+SKILL_LIST_DESC_LIMIT = 1024
+_PLATFORM_MAP = {"macos": "darwin", "linux": "linux", "windows": "win32"}
 
 
 def truncate_skill_description(description):
@@ -49,6 +57,64 @@ def truncate_skill_description(description):
 def is_skill_description_truncated(description):
     """Whether this description would be truncated in the index (used by the linter and /learn)."""
     return len(str(description or "").strip().strip("'\"")) > SKILL_PROMPT_DESC_LIMIT
+
+
+def parse_skill_markdown(content):
+    """Hermes' runtime SKILL.md parser: BOM-safe YAML with a key:value fallback.
+
+    Mutation and lint paths deliberately keep using the strict global parser; this
+    lenient parser is only for advertising and loading already-present skills.
+    """
+    content = content.removeprefix("\ufeff")
+    body = content
+    if not content.startswith("---"):
+        return {}, body
+    end = _FRONTMATTER_END.search(content, 3)
+    if end is None:
+        return {}, body
+    yaml_content = content[3:end.start()]
+    body = content[end.end():]
+    try:
+        import yaml
+        parsed = yaml.load(yaml_content, Loader=getattr(yaml, "CSafeLoader", None) or yaml.SafeLoader)
+        return (parsed if isinstance(parsed, dict) else {}), body
+    except Exception:  # noqa: BLE001 - Hermes recovers useful metadata from malformed YAML
+        frontmatter = {}
+        for line in yaml_content.strip().split("\n"):
+            if ":" in line:
+                key, value = line.split(":", 1)
+                frontmatter[key.strip()] = value.strip()
+        return frontmatter, body
+
+
+def list_skill_description(frontmatter, body):
+    """Hermes ``skills_list`` description: frontmatter, then first prose line."""
+    description = frontmatter.get("description", "")
+    if not description:
+        description = next((line for raw in body.strip().split("\n")
+                            if (line := raw.strip()) and not line.startswith("#")), "")
+    description = str(description or "")
+    if len(description) > SKILL_LIST_DESC_LIMIT:
+        return description[: SKILL_LIST_DESC_LIMIT - 3] + "..."
+    return description
+
+
+def skill_matches_platform(frontmatter):
+    """Hermes' top-level ``platforms`` offer/load filter."""
+    platforms = frontmatter.get("platforms")
+    if not platforms:
+        return True
+    if not isinstance(platforms, list):
+        platforms = [platforms]
+    termux = bool(os.environ.get("TERMUX_VERSION")
+                  or "com.termux/files/usr" in os.environ.get("PREFIX", ""))
+    for platform in platforms:
+        mapped = _PLATFORM_MAP.get(str(platform).lower().strip(), str(platform).lower().strip())
+        if sys.platform.startswith(mapped):
+            return True
+        if termux and mapped in ("linux", "termux", "android"):
+            return True
+    return False
 
 
 def _snapshot_dir():
@@ -73,11 +139,22 @@ def invalidate():
 
 # ── one layer ──────────────────────────────────────────────────────────────
 
-def _frontmatter(path):
+def _documents(path):
+    """Return strict prompt metadata and tolerant runtime metadata from one read."""
     try:
-        return parse_frontmatter(Path(path).read_text(encoding="utf-8")).frontmatter or {}
-    except Exception:  # noqa: BLE001 - an unreadable or malformed skill still lists by its directory name
-        return {}
+        data = Path(path).read_bytes()
+    except OSError:
+        return ({}, ""), ({}, "")
+    try:
+        prompt = parse_skill_markdown(data.decode("utf-8"))
+    except UnicodeDecodeError:
+        prompt = ({}, "")              # prompt_builder is strict UTF-8: advertise only the directory name
+    runtime = parse_skill_markdown(data.decode("utf-8-sig", errors="replace"))
+    return prompt, runtime
+
+
+def _frontmatter(path):
+    return _documents(path)[0][0]
 
 
 def _category(parts):
@@ -85,15 +162,19 @@ def _category(parts):
     return "/".join(parts[:-2]) if len(parts) > 2 else "general"
 
 
-def _scan_root(root):
+def _scan_root(root, skill_files=None):
     """Every skill under one layer root, plus the layer's category descriptions, as stored
     in a snapshot: ``{"skills": [...], "categories": {...}}``."""
     skills, categories = [], {}
-    for skill_md in iter_skill_files(root):
-        fm = _frontmatter(skill_md)
+    for skill_md in iter_skill_files(root) if skill_files is None else skill_files:
+        (prompt_fm, _), (runtime_fm, runtime_body) = _documents(skill_md)
         rel = skill_md.relative_to(root).parts
-        skills.append({"name": str(fm.get("name") or skill_md.parent.name).strip(),
-                       "description": truncate_skill_description(str(fm.get("description") or "")),
+        skills.append({"name": str(prompt_fm.get("name") or skill_md.parent.name).strip(),
+                       "runtime_name": str(runtime_fm.get("name") or skill_md.parent.name).strip(),
+                       "description": truncate_skill_description(str(prompt_fm.get("description") or "")),
+                       "list_description": list_skill_description(runtime_fm, runtime_body),
+                       "prompt_compatible": skill_matches_platform(prompt_fm),
+                       "runtime_compatible": skill_matches_platform(runtime_fm),
                        "category": _category(rel), "rel": "/".join(rel[:-1]),
                        "dir": str(skill_md.parent), "path": str(skill_md)})
     for desc_md in iter_skill_files(root, "DESCRIPTION.md"):      # a category's own one-liner
@@ -152,6 +233,8 @@ def _write_snapshot(root, manifest, scanned):
 def _layer(layer, root):
     """A layer's skills: from its snapshot when the tree is unchanged (personal layers), else
     a scan -- written back as the new snapshot."""
+    if layer == "project":
+        return _scan_root(root, iter_project_skill_files(root))
     if layer not in PERSONAL_LAYERS:
         return _scan_root(root)
     manifest = _manifest(root)
@@ -165,37 +248,51 @@ def _layer(layer, root):
 # ── the index ─────────────────────────────────────────────────────────────
 
 def _assemble(roots, disabled):
-    entries, categories, candidates = [], {}, {}
+    entries, runtime_entries, categories, all_entries = [], [], {}, []
+    prompt_names, runtime_names = set(), set()
     for layer, root in roots:
         scanned = _layer(layer, root)
         for skill in scanned["skills"]:
             entry = {**skill, "layer": layer}
-            if entry["name"] in disabled or Path(entry["dir"]).name in disabled:
+            if ({entry["name"], entry.get("runtime_name", entry["name"]), Path(entry["dir"]).name}
+                    & disabled):
                 continue
-            candidates.setdefault(entry["name"], []).append(entry)
-            if len(candidates[entry["name"]]) == 1:
+            all_entries.append(entry)
+            if entry.get("prompt_compatible", True) and entry["name"] not in prompt_names:
+                prompt_names.add(entry["name"])
                 entries.append(entry)
+            runtime_name = entry.get("runtime_name", entry["name"])
+            if entry.get("runtime_compatible", True) and runtime_name not in runtime_names:
+                runtime_names.add(runtime_name)
+                runtime_entries.append(entry)
         for category, text in scanned["categories"].items():
             categories.setdefault(category, text)
-    return entries, categories, candidates
+    return entries, categories, all_entries, runtime_entries
 
 
 def _key(roots):
-    return tuple(roots), tuple(sorted(disabled_skill_names()))
+    return tuple((str(layer), str(root)) for layer, root in roots), tuple(sorted(disabled_skill_names()))
 
 
 def _cached(roots):
     """Assemble once per (roots, disabled, on-disk state).
 
-    The manifest is the same mtime/size fingerprint the disk snapshots use, so an edit made
-    outside this process invalidates the entry by changing the key, and an unchanged tree
-    costs one stat per skill file instead of a full re-scan.
+    Personal/external roots use the metadata-file manifest; project roots fingerprint the
+    whole bundle so a support-file edit re-runs quarantine. An unchanged tree pays only
+    filesystem metadata reads instead of YAML parsing and security scans.
     """
-    key = (*_key(roots), tuple(sorted((layer, _manifest_digest(root)) for layer, root in roots)))
+    normalized_roots, disabled = _key(roots)
+    key = (normalized_roots, disabled,
+           tuple(sorted((layer, _root_fingerprint(layer, root))
+                        for layer, root in normalized_roots)))
     entry = _CACHE.get(key)
     if entry is None:
-        _CACHE.clear()                       # only the current state is worth keeping
-        entry = _CACHE[key] = _assemble(roots, set(key[1]))
+        entry = _CACHE[key] = _assemble(normalized_roots, set(disabled))
+        while len(_CACHE) > _CACHE_MAX:
+            _CACHE.pop(next(iter(_CACHE)))
+    else:
+        _CACHE.pop(key)
+        _CACHE[key] = entry
     return entry
 
 
@@ -204,6 +301,12 @@ def _manifest_digest(root):
     return hashlib.sha256(
         json.dumps(_manifest(root), sort_keys=True).encode()
     ).hexdigest()
+
+
+def _root_fingerprint(layer, root):
+    """Project quarantine tracks whole bundles; other indexes need metadata files only."""
+    return (project_skill_tree_fingerprint(root) if layer == "project"
+            else _manifest_digest(root))
 
 
 def build(roots):
@@ -215,15 +318,14 @@ def build(roots):
     return _cached(roots)[0]
 
 
+def runtime_build(roots):
+    """Entries for list/view/invocation, decoded like Hermes' runtime tools."""
+    return _cached(roots)[3]
+
+
 def categories(roots):
     """``{category: description}`` from the layers' DESCRIPTION.md files (hermes)."""
     return _cached(roots)[1]
-
-
-def _matches(entry, wanted, key):
-    """A skill answers to its frontmatter name, its directory path inside the layer
-    (``finance/fmp-data``, the unambiguous handle), or the slug of its name."""
-    return wanted in (entry["name"], entry["rel"]) or (key and slug(entry["name"]) == key)
 
 
 def candidates(roots, name):
@@ -232,20 +334,29 @@ def candidates(roots, name):
     keeps the first."""
     wanted = (name or "").strip()
     key = slug(wanted)
-    return [entry for group in _cached(roots)[2].values() for entry in group
-            if _matches(entry, wanted, key)]
+    all_entries = _cached(roots)[2]
+    exact = [entry for entry in all_entries
+             if wanted in (entry["name"], entry.get("runtime_name", entry["name"]), entry["rel"])]
+    return exact or [entry for entry in all_entries
+                     if key and any(slug(candidate) == key for candidate in
+                                    (entry["name"], entry.get("runtime_name", entry["name"])))]
 
 
 def find(entries, name):
     """The index entry a name refers to."""
     wanted = (name or "").strip()
     key = slug(wanted)
-    return next((entry for entry in entries if _matches(entry, wanted, key)), None)
+    exact = next((entry for entry in entries
+                  if wanted in (entry["name"], entry.get("runtime_name", entry["name"]), entry["rel"])), None)
+    return exact or next((entry for entry in entries if key and any(
+        slug(candidate) == key for candidate in
+        (entry["name"], entry.get("runtime_name", entry["name"])))), None)
 
 
 # ── the system-prompt section ─────────────────────────────────────────────
 
-def index_lines(entries, category_descriptions=None, compact=()):
+def index_lines(entries, category_descriptions=None, compact=(), *,
+                name_key="name", description_key="description"):
     """The ``<available_skills>`` body, categories sorted, skills sorted inside each
     (hermes: ``  category: desc`` then ``    - name: description``); a project skill's
     description wears ``[project]``. A category whose top-level segment is in ``compact``
@@ -256,16 +367,17 @@ def index_lines(entries, category_descriptions=None, compact=()):
     lines = []
     for category in sorted(by_category):
         if category.split("/", 1)[0] in compact:
-            names = sorted({entry["name"] for entry in by_category[category]})
+            names = sorted({entry.get(name_key, entry["name"]) for entry in by_category[category]})
             lines.append(f"  {category} [names only]: {', '.join(names)}")
             continue
         text = (category_descriptions or {}).get(category, "")
         lines.append(f"  {category}: {text}" if text else f"  {category}:")
-        for entry in sorted(by_category[category], key=lambda e: e["name"]):
-            desc = entry["description"]
+        for entry in sorted(by_category[category], key=lambda e: e.get(name_key, e["name"])):
+            name = entry.get(name_key, entry["name"])
+            desc = entry.get(description_key, entry["description"])
             if entry["layer"] == "project":
                 desc = f"[project] {desc}".strip()
-            lines.append(f"    - {entry['name']}: {desc}" if desc else f"    - {entry['name']}")
+            lines.append(f"    - {name}: {desc}" if desc else f"    - {name}")
     return lines
 
 
@@ -306,4 +418,4 @@ def render_prompt(entries, category_descriptions=None, compact=()):
 
 
 __all__ = ["build", "candidates", "categories", "find", "index_lines", "invalidate",
-           "render_prompt", "slug"]
+           "parse_skill_markdown", "render_prompt", "runtime_build", "skill_matches_platform", "slug"]

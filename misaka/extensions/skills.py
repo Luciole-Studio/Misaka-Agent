@@ -15,18 +15,43 @@ from misaka.skills.manage import lookup_path_error
 
 _SKILL_INVOCATION_PREFIX = "[IMPORTANT: The user has invoked the "
 _SINGLE_SKILL_MARKER = "The full skill content is loaded below.]"
+_SINGLE_SKILL_ACTIVATION_SUFFIX = (
+    " skill, indicating they want you to follow its instructions. "
+    + _SINGLE_SKILL_MARKER
+)
 _SINGLE_SKILL_INSTRUCTION = (
     "The user has provided the following instruction alongside the skill invocation: "
 )
+_SKILL_DIRECTORY_PREFIX = "[Skill directory: "
+_SKILL_DIRECTORY_INSTRUCTION = (
+    "Resolve any relative paths in this skill (e.g. `scripts/foo.js`, "
+    "`templates/config.yaml`) against that directory, then run them "
+    "with the terminal tool using the absolute path."
+)
+
+
+def _runtime_name(entry):
+    return entry.get("runtime_name", entry["name"])
+
+
+def _slash_entries(entries):
+    """Hermes auto-command view: normalized handles are first-wins."""
+    out, seen = [], set()
+    for entry in entries:
+        handle = skill_index.slug(_runtime_name(entry))
+        if handle and handle not in seen:
+            seen.add(handle)
+            out.append(entry)
+    return out
 
 
 def _body(entry, session_id=None):
     """SKILL.md's body with template variables and inline shell applied."""
     from misaka.skills.preprocessing import preprocess_skill_content
-    from misaka.utils.frontmatter import parse_frontmatter
 
-    raw = Path(entry["path"]).read_text(encoding="utf-8")
-    body = (parse_frontmatter(raw).body or "").strip()
+    raw = Path(entry["path"]).read_text(encoding="utf-8-sig", errors="replace")
+    _, body = skill_index.parse_skill_markdown(raw)
+    body = (body or "").strip()
     return preprocess_skill_content(body, Path(entry["dir"]), session_id=session_id).strip()
 
 
@@ -83,11 +108,9 @@ def skill_content(entry, session_id=None):
 def build_skill_message(entry, *, user_instruction="", session_id=None):
     """The ``/skill`` activation message: the processed skill plus the user's instruction."""
     skill_dir = Path(entry["dir"])
-    parts = [f'{_SKILL_INVOCATION_PREFIX}"{entry["name"]}" skill. {_SINGLE_SKILL_MARKER}',
-             "", _body(entry, session_id), "", f"[Skill directory: {skill_dir}]",
-             ("Resolve any relative paths in this skill (e.g. `scripts/foo.js`, "
-             "`templates/config.yaml`) against that directory, then run them "
-             "with the terminal tool using the absolute path.")]
+    parts = [f'{_SKILL_INVOCATION_PREFIX}"{_runtime_name(entry)}"{_SINGLE_SKILL_ACTIVATION_SUFFIX}',
+             "", _body(entry, session_id), "", f"{_SKILL_DIRECTORY_PREFIX}{skill_dir}]",
+             _SKILL_DIRECTORY_INSTRUCTION]
     supporting = [f for files in collect_linked_files(skill_dir).values() for f in files]
     if supporting:
         parts += ["", "[This skill has supporting files:]"]
@@ -95,6 +118,31 @@ def build_skill_message(entry, *, user_instruction="", session_id=None):
     if user_instruction:
         parts += ["", f"{_SINGLE_SKILL_INSTRUCTION}{user_instruction}"]
     return "\n".join(parts)
+
+
+def parse_skill_invocation_message(text):
+    """Parse the Hermes single-skill scaffold for the Pi-derived TUI adapter."""
+    if not isinstance(text, str):
+        return None
+    first, separator, rest = text.partition("\n\n")
+    prefix = f'{_SKILL_INVOCATION_PREFIX}"'
+    suffix = '"' + _SINGLE_SKILL_ACTIVATION_SUFFIX
+    if not separator or not first.startswith(prefix) or not first.endswith(suffix):
+        return None
+    name = first[len(prefix):-len(suffix)]
+
+    directory_marker = "\n\n" + _SKILL_DIRECTORY_PREFIX
+    content, marker, tail = rest.rpartition(directory_marker)
+    location, end, after = tail.partition("]\n")
+    if not marker or not end or not after.startswith(_SKILL_DIRECTORY_INSTRUCTION):
+        return None
+    instruction = None
+    instruction_marker = "\n\n" + _SINGLE_SKILL_INSTRUCTION
+    if instruction_marker in after:
+        _, _, instruction = after.partition(instruction_marker)
+        instruction = instruction.strip() or None
+    return {"name": name, "location": location, "content": content,
+            "user_instruction": instruction}
 
 
 def register_for(roots, profile_dir, cwd=None, kind="foreground"):
@@ -110,6 +158,9 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
     workspace = cwd or os.getcwd()
 
     def entries():
+        return skill_index.runtime_build(roots)
+
+    def prompt_entries():
         return skill_index.build(roots)
 
     def session_id(ctx):
@@ -144,8 +195,15 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
     def register(harn):
         # ── the index in the system prompt (hermes build_skills_system_prompt) ──
         async def advertise(event, _ctx):
-            skill_index.invalidate()          # skills edited outside this session (git, an editor) show next turn
-            section = skill_index.render_prompt(entries(), skill_index.categories(roots),
+            get_active = getattr(harn, "getActiveTools", None)
+            if callable(get_active):
+                try:
+                    active = set(get_active())
+                except Exception:  # noqa: BLE001 - old/simple harnesses fail open
+                    active = None
+                if active is not None and not ({"skills_list", "skill_view", "skill_manage"} & active):
+                    return None
+            section = skill_index.render_prompt(prompt_entries(), skill_index.categories(roots),
                                                 compact_skill_categories(workspace))
             if section:
                 return {"systemPrompt": event["systemPrompt"].rstrip() + "\n\n" + section}
@@ -167,7 +225,7 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
             if tool in ("write", "edit"):
                 target = os.path.realpath(os.path.join(workspace, os.path.expanduser(str(args.get("path") or ""))))
                 return any(target == root or target.startswith(root + os.sep) for root in live_roots)
-            if tool == "bash":
+            if tool in {"bash", "powershell"}:
                 command = str(args.get("command") or "")
                 return any(root in command for root in live_roots)   # ponytail: a text match; the shell is not parsed
             return False
@@ -178,8 +236,8 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
             if _touches_live_skills(str(tool or ""), args if isinstance(args, dict) else {}):
                 return {"block": True, "reason": (
                     "Live skill trees change only through skill_manage (approval, scan, ledger). "
-                    "write and edit are refused on paths inside them; bash is refused whenever the "
-                    "command mentions one at all, reads included -- use skill_view to read a skill."
+                    "write and edit are refused on paths inside them; bash and powershell are refused "
+                    "whenever the command mentions one at all, reads included -- use skill_view to read a skill."
                 )}
             return None
 
@@ -197,9 +255,11 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
 
         startup_sections.register(
             "Skills",
-            lambda: _dim("  " + (", ".join(sorted(e["name"] for e in entries())) or "(none)")),
+            lambda: _dim("  " + (", ".join(sorted(_runtime_name(e) for e in entries())) or "(none)")),
             lambda: "\n".join(_dim(line) for line in
-                              skill_index.index_lines(entries(), skill_index.categories(roots))
+                              skill_index.index_lines(
+                                  entries(), skill_index.categories(roots),
+                                  name_key="runtime_name", description_key="list_description")
                               ) or _dim("  (none)"))
 
         # ── tools ──
@@ -210,7 +270,9 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
                 return {"content": [{"type": "text", "text": "No skills are available."}],
                         "details": {"count": 0, "categories": []}}
             text = ("Available skills (use skill_view(name) to load full content):\n"
-                    + "\n".join(skill_index.index_lines(found, skill_index.categories(roots))))
+                    + "\n".join(skill_index.index_lines(
+                        found, skill_index.categories(roots),
+                        name_key="runtime_name", description_key="list_description")))
             return {"content": [{"type": "text", "text": text}],
                     "details": {"count": len(found),
                                 "categories": sorted({e["category"] for e in found})}}
@@ -241,19 +303,23 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
                         "isError": True}
             entry = found[0] if found else None
             if entry is None:
-                names = ", ".join(sorted(e["name"] for e in entries())) or "none"
+                names = ", ".join(sorted(_runtime_name(e) for e in entries())) or "none"
                 return {"content": [{"type": "text",
                                      "text": f"Unknown skill '{args.name}'. Available: {names}"}],
+                        "isError": True}
+            if not entry.get("runtime_compatible", True):
+                return {"content": [{"type": "text",
+                                     "text": f"Skill '{_runtime_name(entry)}' is not supported on this platform."}],
                         "isError": True}
             if args.file_path:
                 content, err = read_support_file(entry["dir"], args.file_path)
                 if err:
                     return {"content": [{"type": "text", "text": err}], "isError": True}
                 return {"content": [{"type": "text", "text": content}],
-                        "details": {"skill": entry["name"], "file": args.file_path}}
+                        "details": {"skill": _runtime_name(entry), "file": args.file_path}}
             text, linked = skill_content(entry, session_id(ctx))
             return {"content": [{"type": "text", "text": text}],
-                    "details": {"skill": entry["name"], "linked_files": linked}}
+                    "details": {"skill": _runtime_name(entry), "linked_files": linked}}
 
         harn.registerTool(ToolDefinition(
             name="skill_view", label="View skill",
@@ -272,9 +338,8 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
                 old_string=args.old_string or None,
                 new_string=args.new_string if args.action == "patch" else None,
                 replace_all=args.replace_all,
-                absorbed_into=args.absorbed_into if args.action == "delete" else None)
-            if result.get("success"):
-                skill_index.invalidate()        # the tree changed: the next turn advertises the new state
+                absorbed_into=args.absorbed_into if args.action == "delete" else None,
+                visible_roots=roots)
             lines = [result.get("message") or result.get("error") or ""]
             for key in ("gist", "description_preview", "hint", "lint_hint"):
                 if result.get(key):
@@ -300,19 +365,20 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
         # ── commands ──
         async def skill_cmd(args, ctx):
             raw = (args or "").strip()
-            found = entries()
+            found = _slash_entries(entries())
             if not raw:
                 if not found:
                     ctx.ui.notify("No skills are available in the current skill stack.", "info")
                     return
-                lines = [f"/skill {skill_index.slug(e['name'])} — {e['description']}"
-                         for e in sorted(found, key=lambda e: e["name"])]
+                lines = [f"/skill {skill_index.slug(_runtime_name(e))}"
+                         + (f" — {e['list_description']}" if e.get("list_description") else "")
+                         for e in sorted(found, key=_runtime_name)]
                 ctx.ui.notify('Available skills:\n' + "\n".join(lines), "info")
                 return
             name, _, instruction = raw.partition(" ")
             entry = skill_index.find(found, name)
             if entry is None:
-                available = ", ".join(sorted(skill_index.slug(e["name"]) for e in found))
+                available = ", ".join(sorted(skill_index.slug(_runtime_name(e)) for e in found))
                 ctx.ui.notify(f"Unknown skill '{name}'. Available: {available}", "error")
                 return
             await ctx.sendUserMessage(build_skill_message(

@@ -40,7 +40,7 @@ READ_ONLY_TOOLS = frozenset({"find", "grep", "glob", "ls", "read"})
 # Tools that carry their own per-action classification further down
 # ``_permission_action``.  Inheriting one of these names from the parent
 # session must never short-circuit that classification.
-CLASSIFIED_TOOLS = frozenset({"bash", "edit", "write"})
+CLASSIFIED_TOOLS = frozenset({"bash", "powershell", "edit", "write"})
 ACCEPT_EDITS_COMMANDS = frozenset({"cp", "mkdir", "mv", "rm", "rmdir", "sed", "touch"})
 SENSITIVE_DIRECTORIES = frozenset({".claude", ".git", ".idea", ".ssh", ".vscode"})
 SENSITIVE_FILES = frozenset(
@@ -116,7 +116,7 @@ def normalize_rule(spec: str) -> str:
 
 
 def _rule_value(tool_name: str, tool_input: Mapping[str, Any]) -> str:
-    if tool_name == "bash":
+    if tool_name in {"bash", "powershell"}:
         return str(tool_input.get("command") or "")
     for key in ("path", "file_path", "pattern", "query", "subagent_type"):
         if tool_input.get(key) is not None:
@@ -197,6 +197,10 @@ def _plan_denial(tool_name: str, tool_input: Mapping[str, Any]) -> str | None:
     name = _tool_name(tool_name)
     if name in {"edit", "write"}:
         return f"permissionMode=plan denied mutating tool {tool_name}"
+    # PowerShell has different tokenization, aliases and pipelines.  Until its
+    # own read-only classifier exists, plan mode cannot prove a command safe.
+    if name == "powershell":
+        return "permissionMode=plan denied an unclassified PowerShell command"
     if name != "bash":
         return None
     command = str(tool_input.get("command") or "").strip()
@@ -1160,7 +1164,6 @@ class AgentPolicy:
                         "decision": "passthrough",
                         "additional_context": None,
                         "reason": None,
-                        "updated_input": None,
                     },
                     True,
                 )
@@ -1202,7 +1205,6 @@ class AgentPolicy:
                     "decision": "passthrough",
                     "additional_context": None,
                     "reason": None,
-                    "updated_input": None,
                 },
                 True,
             )
@@ -1300,7 +1302,6 @@ class AgentPolicy:
         name = str(read_field(event, "toolName", ""))
         tool_input = read_field(event, "input", {})
         tool_input = tool_input if isinstance(tool_input, Mapping) else {}
-        original_input = dict(tool_input)
         workspace = str(getattr(self.context, "workspace", "") or os.getcwd())
         payload = self._payload(
             "PreToolUse",
@@ -1319,8 +1320,6 @@ class AgentPolicy:
                     "block": True,
                     "reason": result["reason"] or "PreToolUse hook blocked",
                 }
-            if result["updated_input"] is not None:
-                tool_input = dict(result["updated_input"])
             if decision == "ask":
                 hook_decision = "ask"
             elif decision == "allow" and hook_decision != "ask":
@@ -1385,49 +1384,8 @@ class AgentPolicy:
                         "block": True,
                         "reason": result["reason"] or "PermissionRequest hook denied the action",
                     }
-                if result["updated_input"] is not None:
-                    tool_input = dict(result["updated_input"])
                 if decision == "allow":
                     permission_allow = True
-
-            if tool_input != original_input:
-                action, reason = _permission_action(
-                    self.permission_mode,
-                    self.layers,
-                    name,
-                    tool_input,
-                    workspace,
-                    self.vocabulary,
-                )
-                restriction = _permission_restriction(
-                    self.layers, name, tool_input, workspace, self.vocabulary
-                )
-                if action == "deny":
-                    return {
-                        "block": True,
-                        "reason": reason or "Updated hook input was denied",
-                    }
-                if action == "classify":
-                    try:
-                        classifier_allowed = await classify_permission(
-                            {
-                                "toolName": name,
-                                "toolInput": dict(tool_input),
-                                "toolCallId": read_field(event, "toolCallId"),
-                                "mode": "auto",
-                            }
-                        )
-                    except Exception as error:  # noqa: BLE001
-                        return {
-                            "block": True,
-                            "reason": f"Auto-mode classifier failed: {error}",
-                        }
-                    if not classifier_allowed:
-                        return {
-                            "block": True,
-                            "reason": "permissionMode=auto transcript classifier denied updated input",
-                        }
-                    action, reason = "allow", None
             if permission_allow and not restriction:
                 action = "allow"
 
@@ -1459,7 +1417,7 @@ class AgentPolicy:
                         "block": True,
                         "reason": reason or "Parent denied agent permission",
                     }
-        return {"updatedInput": tool_input} if tool_input != original_input else None
+        return None
 
     async def after_tool(self, event: Any) -> None:
         name = str(read_field(event, "toolName", ""))

@@ -46,7 +46,7 @@ from misaka.ai.auth.types import (
     SelectPrompt,
     TextPrompt,
 )
-from misaka.ai.utils.oauth import get_oauth_provider
+from misaka.ai.utils.oauth import _call_refresh_token, get_oauth_provider
 from misaka.ai.utils.oauth.types import OAuthCredentials
 from misaka.utils.values import read_field
 
@@ -141,7 +141,9 @@ def oauth_auth_from_flow(
         return _from_flow_credentials(credentials)
 
     async def refresh(credential: OAuthCredential, signal: Any) -> OAuthCredential:
-        refreshed = await flow.refreshToken(_to_flow_credentials(credential), signal)
+        refreshed = await _call_refresh_token(
+            flow.refreshToken, _to_flow_credentials(credential), signal
+        )
         return _from_flow_credentials(refreshed)
 
     async def toAuth(credential: OAuthCredential) -> ModelAuth:

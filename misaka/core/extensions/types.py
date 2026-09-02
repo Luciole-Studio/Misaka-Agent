@@ -24,10 +24,12 @@ from misaka.agent.types import (
     ThinkingLevel,
     ToolExecutionMode,
 )
+from misaka.ai.models_runtime import Provider as RuntimeProvider
 from misaka.ai.types import (
     Api,
     AssistantMessageEvent,
     AssistantMessageEventStream,
+    ConstrainedSamplingConfig,
     Context,
     ImageContent,
     Model,
@@ -45,6 +47,7 @@ from misaka.core.exec import ExecOptions, ExecResult
 from misaka.core.keybindings import KeybindingsManager
 from misaka.core.model_registry import ModelRegistry
 from misaka.core.session_manager import (
+    CustomEntry,
     ReadonlySessionManager,
     SessionEntry,
     SessionManager,
@@ -71,6 +74,7 @@ if TYPE_CHECKING:
     from misaka.core.tools.find import FindToolDetails, FindToolInput
     from misaka.core.tools.grep import GrepToolDetails, GrepToolInput
     from misaka.core.tools.ls import LsToolDetails, LsToolInput
+    from misaka.core.tools.powershell import PowerShellToolDetails, PowerShellToolInput
     from misaka.core.tools.read import ReadToolDetails, ReadToolInput
     from misaka.core.tools.write import WriteToolInput
 
@@ -165,7 +169,10 @@ type ReloadHandler = Callable[[], Awaitable[None]]
 type ShutdownHandler = Callable[[], None]
 type ModelSelectSource = Literal["set", "cycle", "restore"]
 type InputSource = Literal["interactive", "extension"]
+type UIPromptKind = Literal["select", "confirm", "input", "editor", "custom"]
 type MessageRenderer[TDetails] = Callable[[CustomMessage[TDetails], "MessageRenderOptions", Theme], Component | None]
+type MarkdownTransformer = Callable[[str, "MarkdownTransformContext"], str]
+type EntryRenderer[TData] = Callable[[CustomEntry, "EntryRenderOptions", Theme], Component | None]
 type ExtensionHandler[TEvent, TResult] = Callable[
     [TEvent, "ExtensionContext"],
     Awaitable[TResult | None] | TResult | None,
@@ -178,7 +185,16 @@ type SendUserMessageHandler = Callable[
     [str | list[TextContent | ImageContent], _SendUserMessageOptions | None],
     None,
 ]
-type AppendEntryHandler = Callable[[str, Any], None]
+
+
+class AppendEntryHandler(Protocol):
+    @overload
+    def __call__(self, customType: str) -> None: ...
+
+    @overload
+    def __call__(self, customType: str, data: Any) -> None: ...
+
+
 type SetSessionNameHandler = Callable[[str], None]
 type GetSessionNameHandler = Callable[[], str | None]
 type SetLabelHandler = Callable[[str, str | None], None]
@@ -191,6 +207,7 @@ type SetModelHandler = Callable[[Model[Any]], Awaitable[bool]]
 type GetThinkingLevelHandler = Callable[[], ThinkingLevel]
 type SetThinkingLevelHandler = Callable[[ThinkingLevel], None]
 type RegisterProviderHandler = Callable[[str, "ProviderConfig", str | None], None]
+type RegisterNativeProviderHandler = Callable[[RuntimeProvider, str | None], None]
 type UnregisterProviderHandler = Callable[[str, str | None], None]
 type ToolCallRenderer[TArgs] = Callable[[TArgs, Theme, "ToolRenderContext"], Component]
 type ToolResultRenderer = Callable[
@@ -231,6 +248,7 @@ class _SendMessageOptions(TypedDict, total=False):
 
 class _SendUserMessageOptions(TypedDict, total=False):
     deliverAs: Literal["steer", "followUp"]
+    expandPromptTemplates: bool
 
 
 class _NewSessionOptions(TypedDict, total=False):
@@ -265,6 +283,7 @@ class ToolDefinition[TArgs, TDetails]:
         [str, TArgs, AbortSignal | None, AgentToolUpdateCallback | None, ExtensionContext],
         Awaitable[AgentToolResult],
     ]
+    constrainedSampling: Literal[False] | ConstrainedSamplingConfig | None = None
     prepareArguments: Callable[[Any], Static] | None = None
     executionMode: ToolExecutionMode | None = None
     promptSnippet: str | None = None
@@ -304,6 +323,18 @@ class ResolvedCommand(RegisteredCommand):
     invocationName: str = ""
 
 
+class _BooleanExtensionFlagOptions(TypedDict):
+    type: Literal["boolean"]
+    description: NotRequired[str]
+    default: NotRequired[bool]
+
+
+class _StringExtensionFlagOptions(TypedDict):
+    type: Literal["string"]
+    description: NotRequired[str]
+    default: NotRequired[str]
+
+
 @dataclass(slots=True)
 class ExtensionFlag:
     name: str
@@ -338,6 +369,7 @@ class ProviderModelConfig(TypedDict):
 
 class OAuthProviderConfig(TypedDict):
     name: str
+    isSubscription: NotRequired[bool]
     login: Callable[[OAuthLoginCallbacks], Awaitable[OAuthCredentials]]
     # Called as refreshToken(credentials, signal). A provider that declares only the
     # credentials parameter is still called with one argument, matching how upstream's
@@ -366,6 +398,12 @@ class PendingProviderRegistration:
     extensionPath: str
 
 
+@dataclass(slots=True)
+class PendingNativeProviderRegistration:
+    provider: RuntimeProvider
+    extensionPath: str
+
+
 class ContextUsage(TypedDict):
     tokens: int | None
     contextWindow: int
@@ -379,6 +417,17 @@ class CompactOptions(TypedDict, total=False):
 
 
 class MessageRenderOptions(TypedDict):
+    expanded: bool
+    outputPad: int
+
+
+class MarkdownTransformContext(TypedDict):
+    messageType: Literal["user", "assistant", "assistant-thinking"]
+    isStreaming: bool
+    availableWidth: int
+
+
+class EntryRenderOptions(TypedDict):
     expanded: bool
 
 
@@ -475,6 +524,39 @@ class ExtensionUIContext(Protocol):
     def setToolsExpanded(self, expanded: bool) -> None: ...
 
 
+class _ProjectTrustUIContext(TypedDict):
+    select: Callable[..., Awaitable[str | None]]
+    confirm: Callable[..., Awaitable[bool]]
+    input: Callable[..., Awaitable[str | None]]
+    notify: Callable[..., None]
+
+
+class ProjectTrustEvent(TypedDict):
+    type: Literal["project_trust"]
+    cwd: str
+
+
+type ProjectTrustEventDecision = Literal["yes", "no", "undecided"]
+
+
+class ProjectTrustEventResult(TypedDict):
+    trusted: ProjectTrustEventDecision
+    remember: NotRequired[bool]
+
+
+class ProjectTrustContext(TypedDict):
+    cwd: str
+    mode: ExtensionMode
+    hasUI: bool
+    ui: _ProjectTrustUIContext
+
+
+type ProjectTrustHandler = Callable[
+    [ProjectTrustEvent, ProjectTrustContext],
+    Awaitable[ProjectTrustEventResult] | ProjectTrustEventResult,
+]
+
+
 class ResourcesDiscoverEvent(TypedDict):
     type: Literal["resources_discover"]
     cwd: str
@@ -490,6 +572,11 @@ class SessionStartEvent(TypedDict):
     type: Literal["session_start"]
     reason: Literal["startup", "reload", "new", "resume", "fork"]
     previousSessionFile: NotRequired[str]
+
+
+class SessionInfoChangedEvent(TypedDict):
+    type: Literal["session_info_changed"]
+    name: str | None
 
 
 class SessionBeforeSwitchEvent(TypedDict):
@@ -509,6 +596,8 @@ class SessionBeforeCompactEvent(TypedDict):
     preparation: CompactionPreparation
     branchEntries: list[SessionEntry]
     customInstructions: NotRequired[str]
+    reason: Literal["manual", "threshold", "overflow"]
+    willRetry: bool
     signal: AbortSignal
 
 
@@ -516,6 +605,8 @@ class SessionCompactEvent(TypedDict):
     type: Literal["session_compact"]
     compactionEntry: CompactionEntry
     fromExtension: bool
+    reason: Literal["manual", "threshold", "overflow"]
+    willRetry: bool
 
 
 class SessionCompactFailedEvent(TypedDict):
@@ -561,6 +652,7 @@ class SessionTreeEvent(TypedDict):
 
 type SessionEvent = (
     SessionStartEvent
+    | SessionInfoChangedEvent
     | SessionBeforeSwitchEvent
     | SessionBeforeForkEvent
     | SessionBeforeCompactEvent
@@ -705,6 +797,21 @@ class InputEvent(TypedDict):
     text: str
     images: NotRequired[list[ImageContent]]
     source: InputSource
+    streamingBehavior: NotRequired[Literal["steer", "followUp"]]
+
+
+class UIPromptStartEvent(TypedDict):
+    type: Literal["ui_prompt_start"]
+    reason: Literal["ui_prompt"]
+    kind: UIPromptKind
+    title: NotRequired[str]
+
+
+class UIPromptEndEvent(TypedDict):
+    type: Literal["ui_prompt_end"]
+    reason: Literal["ui_prompt"]
+    kind: UIPromptKind
+    title: NotRequired[str]
 
 
 class InputEventContinueResult(TypedDict):
@@ -732,6 +839,11 @@ class ToolCallEventBase(TypedDict):
 class BashToolCallEvent(ToolCallEventBase):
     toolName: Literal["bash"]
     input: BashToolInput
+
+
+class PowerShellToolCallEvent(ToolCallEventBase):
+    toolName: Literal["powershell"]
+    input: PowerShellToolInput
 
 
 class ReadToolCallEvent(ToolCallEventBase):
@@ -771,6 +883,7 @@ class CustomToolCallEvent(ToolCallEventBase):
 
 type ToolCallEvent = (
     BashToolCallEvent
+    | PowerShellToolCallEvent
     | ReadToolCallEvent
     | EditToolCallEvent
     | WriteToolCallEvent
@@ -794,6 +907,11 @@ class ToolResultEventBase(TypedDict):
 class BashToolResultEvent(ToolResultEventBase):
     toolName: Literal["bash"]
     details: BashToolDetails | None
+
+
+class PowerShellToolResultEvent(ToolResultEventBase):
+    toolName: Literal["powershell"]
+    details: PowerShellToolDetails | None
 
 
 class ReadToolResultEvent(ToolResultEventBase):
@@ -833,6 +951,7 @@ class CustomToolResultEvent(ToolResultEventBase):
 
 type ToolResultEvent = (
     BashToolResultEvent
+    | PowerShellToolResultEvent
     | ReadToolResultEvent
     | EditToolResultEvent
     | WriteToolResultEvent
@@ -844,7 +963,8 @@ type ToolResultEvent = (
 
 
 type ExtensionEvent = (
-    ResourcesDiscoverEvent
+    ProjectTrustEvent
+    | ResourcesDiscoverEvent
     | SessionEvent
     | ContextEvent
     | BeforeProviderRequestEvent
@@ -866,6 +986,8 @@ type ExtensionEvent = (
     | ThinkingLevelSelectEvent
     | UserBashEvent
     | InputEvent
+    | UIPromptStartEvent
+    | UIPromptEndEvent
     | ToolCallEvent
     | ToolResultEvent
 )
@@ -879,9 +1001,10 @@ type BeforeProviderRequestEventResult = Any
 
 
 class ToolCallEventResult(TypedDict, total=False):
+    # To change arguments, mutate event["input"] in place. Later handlers see the
+    # mutation, and execution does not revalidate it (pi extensions/types.ts).
     block: bool
     reason: str
-    updatedInput: dict[str, Any]
     # Hint that the agent should stop after the current tool batch when this call is blocked.
     # Early termination only happens when every finalized tool result in the batch sets it.
     terminate: bool
@@ -927,6 +1050,7 @@ class SessionBeforeCompactResult(TypedDict, total=False):
 class BranchSummaryPayload(TypedDict):
     summary: str
     details: NotRequired[Any]
+    usage: NotRequired[Usage]
 
 
 class SessionBeforeTreeResult(TypedDict, total=False):
@@ -955,10 +1079,14 @@ class ExtensionRuntime:
     setThinkingLevel: SetThinkingLevelHandler
     flagValues: dict[str, bool | str] = field(default_factory=dict)
     pendingProviderRegistrations: list[PendingProviderRegistration] = field(default_factory=list)
+    pendingNativeProviderRegistrations: list[PendingNativeProviderRegistration] = field(
+        default_factory=list
+    )
     assertActive: Callable[[], None] = lambda: None
     invalidate: Callable[[str | None], None] = lambda _message=None: None
     trackEventBusSubscription: Callable[[Callable[[], None]], Callable[[], None]] = lambda unsubscribe: unsubscribe
     registerProvider: RegisterProviderHandler = lambda _name, _config, _extension_path=None: None
+    registerNativeProvider: RegisterNativeProviderHandler = lambda _provider, _extension_path=None: None
     unregisterProvider: UnregisterProviderHandler = lambda _name, _extension_path=None: None
 
 
@@ -970,6 +1098,8 @@ class Extension:
     handlers: dict[str, list[Callable[..., Any]]] = field(default_factory=dict)
     tools: dict[str, RegisteredTool] = field(default_factory=dict)
     messageRenderers: dict[str, MessageRenderer[Any]] = field(default_factory=dict)
+    markdownTransformer: MarkdownTransformer | None = None
+    entryRenderers: dict[str, EntryRenderer[Any]] = field(default_factory=dict)
     commands: dict[str, RegisteredCommand] = field(default_factory=dict)
     flags: dict[str, ExtensionFlag] = field(default_factory=dict)
     shortcuts: dict[KeyId, ExtensionShortcut] = field(default_factory=dict)
@@ -1018,6 +1148,8 @@ class ExtensionContext(Protocol):
 
     def isIdle(self) -> bool: ...
 
+    def isProjectTrusted(self) -> bool: ...
+
     def abort(self) -> None: ...
 
     def hasPendingMessages(self) -> bool: ...
@@ -1032,6 +1164,8 @@ class ExtensionContext(Protocol):
 
 
 class ExtensionCommandContext(ExtensionContext, Protocol):
+    def getSystemPromptOptions(self) -> BuildSystemPromptOptions: ...
+
     async def waitForIdle(self) -> None: ...
 
     async def newSession(self, options: _NewSessionOptions | None = None) -> dict[str, bool]: ...
@@ -1076,6 +1210,7 @@ class ExtensionContextActions(Protocol):
     getModel: Callable[[], Model[Any] | None]
     getScopedModels: Callable[[], list[Any]]
     isIdle: Callable[[], bool]
+    isProjectTrusted: Callable[[], bool]
     getSignal: Callable[[], AbortSignal | None]
     abort: Callable[[], None]
     hasPendingMessages: Callable[[], bool]
@@ -1083,6 +1218,7 @@ class ExtensionContextActions(Protocol):
     getContextUsage: Callable[[], ContextUsage | None]
     compact: Callable[[CompactOptions | None], None]
     getSystemPrompt: Callable[[], str]
+    getSystemPromptOptions: Callable[[], BuildSystemPromptOptions] | None
 
 
 class ExtensionCommandContextActions(Protocol):
@@ -1098,10 +1234,16 @@ class ExtensionAPI(Protocol):
     events: EventBus
 
     @overload
+    def on(self, event: Literal["project_trust"], handler: ProjectTrustHandler) -> None: ...
+
+    @overload
     def on(self, event: Literal["resources_discover"], handler: ExtensionHandler[ResourcesDiscoverEvent, ResourcesDiscoverResult]) -> None: ...
 
     @overload
     def on(self, event: Literal["session_start"], handler: ExtensionHandler[SessionStartEvent, None]) -> None: ...
+
+    @overload
+    def on(self, event: Literal["session_info_changed"], handler: ExtensionHandler[SessionInfoChangedEvent, None]) -> None: ...
 
     @overload
     def on(self, event: Literal["session_before_switch"], handler: ExtensionHandler[SessionBeforeSwitchEvent, SessionBeforeSwitchResult]) -> None: ...
@@ -1193,6 +1335,12 @@ class ExtensionAPI(Protocol):
     @overload
     def on(self, event: Literal["input"], handler: ExtensionHandler[InputEvent, InputEventResult]) -> None: ...
 
+    @overload
+    def on(self, event: Literal["ui_prompt_start"], handler: ExtensionHandler[UIPromptStartEvent, None]) -> None: ...
+
+    @overload
+    def on(self, event: Literal["ui_prompt_end"], handler: ExtensionHandler[UIPromptEndEvent, None]) -> None: ...
+
     def on(self, event: str, handler: Callable[..., Any]) -> None: ...
 
     def registerTool(self, tool: ToolDefinition[Any, Any]) -> None: ...
@@ -1212,10 +1360,14 @@ class ExtensionAPI(Protocol):
     def registerFlag(
         self,
         name: str,
-        options: dict[str, Any],
+        options: _BooleanExtensionFlagOptions | _StringExtensionFlagOptions,
     ) -> None: ...
 
     def registerMessageRenderer(self, customType: str, renderer: MessageRenderer[Any]) -> None: ...
+
+    def registerMarkdownTransformer(self, transformer: MarkdownTransformer) -> None: ...
+
+    def registerEntryRenderer(self, customType: str, renderer: EntryRenderer[Any]) -> None: ...
 
     def getFlag(self, name: str) -> bool | str | None: ...
 
@@ -1227,7 +1379,11 @@ class ExtensionAPI(Protocol):
         options: _SendUserMessageOptions | None = None,
     ) -> None: ...
 
-    def appendEntry(self, customType: str, data: Any = None) -> None: ...
+    @overload
+    def appendEntry(self, customType: str) -> None: ...
+
+    @overload
+    def appendEntry(self, customType: str, data: Any) -> None: ...
 
     def setSessionName(self, name: str) -> None: ...
 
@@ -1251,7 +1407,17 @@ class ExtensionAPI(Protocol):
 
     def setThinkingLevel(self, level: ThinkingLevel) -> None: ...
 
+    @overload
+    def registerProvider(self, provider: RuntimeProvider) -> None: ...
+
+    @overload
     def registerProvider(self, name: str, config: ProviderConfig) -> None: ...
+
+    def registerProvider(
+        self,
+        providerOrName: RuntimeProvider | str,
+        config: ProviderConfig | None = None,
+    ) -> None: ...
 
     def unregisterProvider(self, name: str) -> None: ...
 
@@ -1269,6 +1435,12 @@ def define_tool[TTool: ToolDefinition[Any, Any]](tool: TTool) -> TTool:
 
 def is_bash_tool_result(event: ToolResultEvent) -> TypeGuard[BashToolResultEvent]:
     return event["toolName"] == "bash"
+
+
+def is_powershell_tool_result(
+    event: ToolResultEvent,
+) -> TypeGuard[PowerShellToolResultEvent]:
+    return event["toolName"] == "powershell"
 
 
 def is_read_tool_result(event: ToolResultEvent) -> TypeGuard[ReadToolResultEvent]:
@@ -1297,6 +1469,12 @@ def is_ls_tool_result(event: ToolResultEvent) -> TypeGuard[LsToolResultEvent]:
 
 @overload
 def is_tool_call_event_type(tool_name: Literal["bash"], event: ToolCallEvent) -> TypeGuard[BashToolCallEvent]: ...
+
+
+@overload
+def is_tool_call_event_type(
+    tool_name: Literal["powershell"], event: ToolCallEvent
+) -> TypeGuard[PowerShellToolCallEvent]: ...
 
 
 @overload
@@ -1329,6 +1507,7 @@ def is_tool_call_event_type(tool_name: str, event: ToolCallEvent) -> bool:
 
 defineTool = define_tool
 isBashToolResult = is_bash_tool_result
+isPowerShellToolResult = is_powershell_tool_result
 isReadToolResult = is_read_tool_result
 isEditToolResult = is_edit_tool_result
 isWriteToolResult = is_write_tool_result
@@ -1366,6 +1545,8 @@ __all__ = [
     "EditToolCallEvent",
     "EditToolResultEvent",
     "EditorFactory",
+    "EntryRenderOptions",
+    "EntryRenderer",
     "ExecOptions",
     "ExecResult",
     "Extension",
@@ -1403,6 +1584,8 @@ __all__ = [
     "LoadExtensionsResult",
     "LsToolCallEvent",
     "LsToolResultEvent",
+    "MarkdownTransformContext",
+    "MarkdownTransformer",
     "MessageEndEvent",
     "MessageEndEventResult",
     "MessageRenderOptions",
@@ -1411,6 +1594,13 @@ __all__ = [
     "MessageUpdateEvent",
     "ModelSelectEvent",
     "ModelSelectSource",
+    "PowerShellToolCallEvent",
+    "PowerShellToolResultEvent",
+    "ProjectTrustContext",
+    "ProjectTrustEvent",
+    "ProjectTrustEventDecision",
+    "ProjectTrustEventResult",
+    "ProjectTrustHandler",
     "ProviderConfig",
     "ProviderModelConfig",
     "ReadToolCallEvent",
@@ -1434,6 +1624,7 @@ __all__ = [
     "SessionBeforeTreeResult",
     "SessionCompactEvent",
     "SessionEvent",
+    "SessionInfoChangedEvent",
     "SessionShutdownEvent",
     "SessionStartEvent",
     "SessionTreeEvent",
@@ -1459,6 +1650,9 @@ __all__ = [
     "TreePreparation",
     "TurnEndEvent",
     "TurnStartEvent",
+    "UIPromptEndEvent",
+    "UIPromptKind",
+    "UIPromptStartEvent",
     "UserBashEvent",
     "UserBashEventResult",
     "WidgetPlacement",
@@ -1471,6 +1665,7 @@ __all__ = [
     "isFindToolResult",
     "isGrepToolResult",
     "isLsToolResult",
+    "isPowerShellToolResult",
     "isReadToolResult",
     "isToolCallEventType",
     "isWriteToolResult",

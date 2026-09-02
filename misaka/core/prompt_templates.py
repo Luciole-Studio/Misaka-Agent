@@ -31,6 +31,13 @@ class LoadPromptTemplatesOptions(TypedDict):
     includeDefaults: bool
 
 
+_ECMASCRIPT_WHITESPACE = frozenset(
+    "\t\n\v\f\r \u00a0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+
 def parse_command_args(args_string: str) -> list[str]:
     args: list[str] = []
     current = ""
@@ -43,7 +50,7 @@ def parse_command_args(args_string: str) -> list[str]:
                 current += char
         elif char in {'"', "'"}:
             in_quote = char
-        elif char.isspace():
+        elif char in _ECMASCRIPT_WHITESPACE:
             if current:
                 args.append(current)
                 current = ""
@@ -59,10 +66,19 @@ def parse_command_args(args_string: str) -> list[str]:
 # pass had already substituted, letting an argument value that happens to contain
 # "$ARGUMENTS" expand a second time.
 _SUBSTITUTE_ARGS_RE = re.compile(
-    r"\$\{(\d+|ARGUMENTS|@):-([^}]*)\}"  # ${N:-default} / ${@:-default} / ${ARGUMENTS:-default}
-    r"|\$\{@:(\d+)(?::(\d+))?\}"  # ${@:N} / ${@:N:L}
-    r"|\$(ARGUMENTS|@|\d+)"  # $ARGUMENTS / $@ / $N
+    r"\$\{([0-9]+|ARGUMENTS|@):-([^}]*)\}"  # ${N:-default} / ${@:-default} / ${ARGUMENTS:-default}
+    r"|\$\{@:([0-9]+)(?::([0-9]+))?\}"  # ${@:N} / ${@:N:L}
+    r"|\$(ARGUMENTS|@|[0-9]+)"  # $ARGUMENTS / $@ / $N
 )
+
+
+def _parse_decimal_capped(raw: str, cap: int) -> int:
+    """Parse a decimal only as far as the caller can observe."""
+    normalized = raw.lstrip("0") or "0"
+    limit = str(cap)
+    if len(normalized) > len(limit) or (len(normalized) == len(limit) and normalized > limit):
+        return cap
+    return int(normalized)
 
 
 def substitute_args(content: str, args: list[str]) -> str:
@@ -79,7 +95,7 @@ def substitute_args(content: str, args: list[str]) -> str:
     all_args = " ".join(args)
 
     def positional(raw_index: str) -> str:
-        index = int(raw_index) - 1
+        index = _parse_decimal_capped(raw_index, len(args) + 1) - 1
         return args[index] if 0 <= index < len(args) else ""
 
     def replace(match: re.Match[str]) -> str:
@@ -90,9 +106,10 @@ def substitute_args(content: str, args: list[str]) -> str:
             return value if value else default_value
 
         if slice_start is not None:
-            start = max(int(slice_start) - 1, 0)
+            start = max(_parse_decimal_capped(slice_start, len(args) + 1) - 1, 0)
             if slice_length is not None:
-                return " ".join(args[start : start + int(slice_length)])
+                length = _parse_decimal_capped(slice_length, len(args) - start)
+                return " ".join(args[start : start + length])
             return " ".join(args[start:])
 
         if simple in ("ARGUMENTS", "@"):
@@ -100,6 +117,23 @@ def substitute_args(content: str, args: list[str]) -> str:
         return positional(simple)
 
     return _SUBSTITUTE_ARGS_RE.sub(replace, content)
+
+
+def parse_prompt_template_invocation(text: str) -> tuple[str, str] | None:
+    """Return the template name and raw argument text using Pi's JavaScript whitespace rules."""
+    if not text.startswith("/"):
+        return None
+
+    name_end = 1
+    while name_end < len(text) and text[name_end] not in _ECMASCRIPT_WHITESPACE:
+        name_end += 1
+    if name_end == 1:
+        return None
+
+    args_start = name_end
+    while args_start < len(text) and text[args_start] in _ECMASCRIPT_WHITESPACE:
+        args_start += 1
+    return text[1:name_end], text[args_start:]
 
 
 def load_prompt_templates(options: LoadPromptTemplatesOptions) -> list[PromptTemplate]:
@@ -159,13 +193,10 @@ def load_prompt_templates(options: LoadPromptTemplatesOptions) -> list[PromptTem
 
 
 def expand_prompt_template(text: str, templates: list[PromptTemplate]) -> str:
-    if not text.startswith("/"):
+    invocation = parse_prompt_template_invocation(text)
+    if invocation is None:
         return text
-    match = re.match(r"^/([^\s]+)(?:\s+([\s\S]*))?$", text)
-    if match is None:
-        return text
-    template_name = match.group(1)
-    args_string = match.group(2) or ""
+    template_name, args_string = invocation
     template = next((candidate for candidate in templates if candidate.name == template_name), None)
     if template is None:
         return text

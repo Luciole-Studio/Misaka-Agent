@@ -9,11 +9,8 @@ stored, and never as a quiet fallback after a refresh fails or when a stored cre
 has no matching handler. Falling back there would sign the user in as somebody else --
 a personal API key silently standing in for the work subscription they logged into.
 
-One upstream mechanism is deliberately not reproduced: pi wraps the whole resolution in
-``raceWithAbortSignal`` so an aborted caller stops waiting (``auth/resolve.ts:57-60``).
-Here ``InMemoryCredentialStore`` races its own lock acquisition against the signal
-(``credential_store.py``), and the abort check below sits where upstream calls
-``signal.throwIfAborted()`` -- once, on entry.
+The whole resolution races the caller's signal, while the credential store keeps any
+abandoned refresh observed until it settles and refuses a late write.
 """
 
 from __future__ import annotations
@@ -36,6 +33,7 @@ from misaka.ai.auth.types import (
     ProviderAuth,
     ProviderEnv,
 )
+from misaka.ai.utils.abort import race_with_abort_signal
 from misaka.ai.utils.diagnostics import format_thrown_value
 from misaka.utils.values import signal_aborted
 
@@ -116,6 +114,21 @@ async def resolveProviderAuth(
 ) -> AuthResult | None:
     """Auth resolution shared by the ``Models`` and images collections."""
     signal = overrides.signal if overrides is not None else None
+    return await race_with_abort_signal(
+        _resolveProviderAuthWithSignal(
+            provider, credentials, authContext, overrides, signal
+        ),
+        signal,
+    )
+
+
+async def _resolveProviderAuthWithSignal(
+    provider: _ResolvableProvider,
+    credentials: CredentialStore,
+    authContext: AuthContext,
+    overrides: AuthResolutionOverrides | None,
+    signal: Any,
+) -> AuthResult | None:
     _throwIfAborted(signal)
 
     requestAuthContext: AuthContext = authContext

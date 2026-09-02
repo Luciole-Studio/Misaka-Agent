@@ -12,6 +12,7 @@ from typing import Any
 from misaka.ai.types import ImageContent
 from misaka.core.output_guard import (
     flushRawStdout,
+    waitForRawStdoutBackpressure,
     writeRawStdout,
 )
 from misaka.utils.shell import killTrackedDetachedChildren
@@ -49,21 +50,25 @@ async def run_print_mode(runtime_host: Any, options: PrintModeOptions | dict[str
     resolved = options if isinstance(options, PrintModeOptions) else PrintModeOptions(**dict(options or {}))
     session = runtime_host.session
     unsubscribe = None
+    unsubscribe_backpressure = None
     disposed = False
     signal_cleanup_handlers: list[tuple[int, Any]] = []
 
     async def dispose_runtime() -> None:
-        nonlocal disposed, unsubscribe
+        nonlocal disposed, unsubscribe, unsubscribe_backpressure
         if disposed:
             return
         disposed = True
         if callable(unsubscribe):
             unsubscribe()
             unsubscribe = None
+        if callable(unsubscribe_backpressure):
+            unsubscribe_backpressure()
+            unsubscribe_backpressure = None
         await runtime_host.dispose()
 
     async def rebind_session(_session=None) -> None:   # the runtime passes the new session; we read runtime_host.session
-        nonlocal session, unsubscribe
+        nonlocal session, unsubscribe, unsubscribe_backpressure
         session = runtime_host.session
 
         async def _fork(entry_id: str, fork_options: Any = None) -> dict[str, Any]:
@@ -110,8 +115,16 @@ async def run_print_mode(runtime_host: Any, options: PrintModeOptions | dict[str
         )
         if callable(unsubscribe):
             unsubscribe()
+        if callable(unsubscribe_backpressure):
+            unsubscribe_backpressure()
         unsubscribe = session.subscribe(
             lambda event: writeRawStdout(_serialize_json_line(event)) if resolved.mode == "json" else None
+        )
+        # pi print-mode.ts:113-118: the low-level agent waits for stdout to drain between events.
+        unsubscribe_backpressure = (
+            session.agent.subscribe(lambda _event, _signal=None: waitForRawStdoutBackpressure())
+            if resolved.mode == "json"
+            else None
         )
 
     def register_signal_handlers() -> None:

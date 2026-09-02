@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -9,8 +10,15 @@ from typing import Any, Literal
 from misaka.ai.models import modelsAreEqual
 from misaka.ai.types import Model
 from misaka.core.model_registry import ModelRegistry
-from misaka.core.settings_manager import SettingsManager
-from misaka.ui.tui import Container, Input, Spacer, Text, fuzzyFilter, getKeybindings
+from misaka.ui.tui import (
+    Container,
+    Input,
+    Spacer,
+    Text,
+    fuzzyFilter,
+    getKeybindings,
+    matchesKey,
+)
 from misaka.ui.tui.interactive.theme.theme import theme
 
 from .dynamic_border import DynamicBorder
@@ -37,29 +45,32 @@ class ModelSelectorComponent(Container):
         self,
         tui: Any,
         currentModel: Model | None,
-        settingsManager: SettingsManager,
         modelRegistry: ModelRegistry,
         scopedModels: list[ScopedModelItem],
         onSelect: Callable[[Model], None],
         onCancel: Callable[[], None],
         initialSearchInput: str | None = None,
+        onSelectAsDefault: Callable[[Model], None] | None = None,
+        defaultModel: tuple[str, str] | None = None,
     ) -> None:
         super().__init__()
         self._focused = False
         self.tui = tui
         self.currentModel = currentModel
-        self.settingsManager = settingsManager
         self.modelRegistry = modelRegistry
         self.scopedModels = list(scopedModels)
         self.scope: ModelScope = "scoped" if scopedModels else "all"
         self.onSelectCallback = onSelect
+        self.onSelectAsDefaultCallback = onSelectAsDefault
         self.onCancelCallback = onCancel
+        self.defaultModel = defaultModel
         self.errorMessage: str | None = None
         self.allModels: list[ModelItem] = []
         self.scopedModelItems: list[ModelItem] = []
         self.activeModels: list[ModelItem] = []
         self.filteredModels: list[ModelItem] = []
         self.selectedIndex = 0
+        self._refreshTask: asyncio.Task[None] | None = None
 
         self.addChild(DynamicBorder())
         self.addChild(Spacer(1))
@@ -91,6 +102,8 @@ class ModelSelectorComponent(Container):
         self.listContainer = Container()
         self.addChild(self.listContainer)
         self.addChild(Spacer(1))
+        if self.onSelectAsDefaultCallback is not None:
+            self.addChild(Text(theme.fg("dim", "  Enter to select · Ctrl+S to set as default · Esc to cancel"), 0, 0))
         self.addChild(DynamicBorder())
 
         self.loadModels()
@@ -99,6 +112,12 @@ class ModelSelectorComponent(Container):
         else:
             self.updateList()
         self._request_render()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            self._refreshTask = loop.create_task(self._refreshModels())
 
     @property
     def focused(self) -> bool:
@@ -115,7 +134,6 @@ class ModelSelectorComponent(Container):
             request_render()
 
     def loadModels(self) -> None:
-        self.modelRegistry.refresh()
         self.errorMessage = self.modelRegistry.getError()
 
         try:
@@ -154,6 +172,36 @@ class ModelSelectorComponent(Container):
             if current_index >= 0
             else min(self.selectedIndex, max(0, len(self.filteredModels) - 1))
         )
+
+    async def _refreshModels(self) -> None:
+        try:
+            result = await asyncio.wait_for(self.modelRegistry.refresh(), timeout=15)
+            refresh_error: str | None = None
+            if result.errors:
+                providers = ", ".join(result.errors)
+                refresh_error = f"Could not refresh {providers}; showing cached models."
+            elif result.aborted:
+                refresh_error = "Model refresh aborted; showing cached models."
+            self.loadModels()
+            if refresh_error is not None:
+                self.errorMessage = refresh_error
+            self.filterModels(self.searchInput.getValue())
+            self._request_render()
+        except TimeoutError:
+            self.errorMessage = "Model refresh timed out; showing cached models."
+            self.updateList()
+            self._request_render()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 - catalog failures stay in the selector
+            self.errorMessage = f"Could not refresh model catalogs: {error}"
+            self.updateList()
+            self._request_render()
+
+    def dispose(self) -> None:
+        if self._refreshTask is not None:
+            self._refreshTask.cancel()
+            self._refreshTask = None
 
     def sortModels(self, models: list[ModelItem]) -> list[ModelItem]:
         return sorted(
@@ -211,12 +259,14 @@ class ModelSelectorComponent(Container):
             item = self.filteredModels[index]
             isSelected = index == self.selectedIndex
             isCurrent = modelsAreEqual(self.currentModel, item.model)
+            isDefault = self.defaultModel == (item.provider, item.id)
             providerBadge = theme.fg("muted", f"[{item.provider}]")
+            defaultBadge = theme.fg("muted", " · default") if isDefault else ""
             checkmark = theme.fg("success", " ✓") if isCurrent else ""
             line = (
-                f"{theme.fg('accent', '→ ')}{theme.fg('accent', item.id)} {providerBadge}{checkmark}"
+                f"{theme.fg('accent', '→ ')}{theme.fg('accent', item.id)} {providerBadge}{defaultBadge}{checkmark}"
                 if isSelected
-                else f"  {item.id} {providerBadge}{checkmark}"
+                else f"  {item.id} {providerBadge}{defaultBadge}{checkmark}"
             )
             self.listContainer.addChild(Text(line, 0, 0))
 
@@ -267,11 +317,15 @@ class ModelSelectorComponent(Container):
         if kb.matches(keyData, "tui.select.cancel"):
             self.onCancelCallback()
             return
+        if matchesKey(keyData, "ctrl+s") and self.onSelectAsDefaultCallback is not None:
+            selected = self.filteredModels[self.selectedIndex] if self.filteredModels else None
+            if selected is not None:
+                self.onSelectAsDefaultCallback(selected.model)
+            return
         self.searchInput.handleInput(keyData)
         self.filterModels(self.searchInput.getValue())
 
     def handleSelect(self, model: Model) -> None:
-        self.settingsManager.setDefaultModelAndProvider(model.provider, model.id)
         self.onSelectCallback(model)
 
     def getSearchInput(self) -> Input:

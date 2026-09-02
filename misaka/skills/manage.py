@@ -12,6 +12,7 @@ MAX_SKILL_CONTENT_CHARS = 40_000
 MAX_DESCRIPTION_LENGTH = 1024
 
 _bypass = contextvars.ContextVar("misaka_skill_gate_bypass", default=False)
+_VISIBLE_ROOTS_UNSET = object()
 
 
 def lookup_path_error(name):
@@ -166,10 +167,58 @@ def _invalidate_index():
     index.invalidate()
 
 
-def _create(profile_dir, name, content):
+def _normalize_visible_roots(profile_dir, roots):
+    """Freeze session roots into the JSON shape carried by pending creates."""
+    if roots is _VISIBLE_ROOTS_UNSET:
+        from misaka.skills.layers import skill_roots
+        roots = skill_roots(profile_dir)
+    if not isinstance(roots, (list, tuple)):
+        return None, "visible_roots must be a list of [layer, absolute path] pairs."
+    normalized = []
+    for item in roots:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            return None, "visible_roots must contain [layer, absolute path] pairs."
+        layer, root = item
+        if not isinstance(layer, str) or not layer.strip():
+            return None, "Each visible skill root must have a non-empty layer name."
+        try:
+            root = os.fspath(root)
+        except TypeError:
+            return None, "Each visible skill root path must be a string or path-like value."
+        if not isinstance(root, str) or not root or "\0" in root:
+            return None, "Each visible skill root path must be a non-empty filesystem path."
+        normalized.append((layer, os.path.abspath(os.path.expanduser(root))))
+    return tuple(normalized), None
+
+
+def _visible_skill_conflict(name, visible_roots):
+    """Return the visible skill that already claims ``name``, if any."""
+    from misaka.skills import index
+
+    matches = index.candidates(visible_roots, name)
+    return matches[0] if matches else None
+
+
+def _create_conflict_error(name, visible_roots):
+    """Creating a shadowed or ambiguous skill is not a successful create."""
+    existing = _visible_skill_conflict(name, visible_roots)
+    if existing:
+        return (
+            f"A visible skill named '{name}' already exists in the {existing['layer']} "
+            f"layer: {existing['dir']}"
+        )
+    return None
+
+
+def _create(profile_dir, name, content, visible_roots=_VISIBLE_ROOTS_UNSET):
+    roots_error = None
+    if visible_roots is _VISIBLE_ROOTS_UNSET:
+        visible_roots, roots_error = _normalize_visible_roots(profile_dir, visible_roots)
     skill_dir, err = _skill_dir(profile_dir, name)
     err = err or validate_frontmatter(content, new_skill=True)
     err = err or name_mismatch(name, content) or validate_content_size(content)
+    err = err or roots_error
+    err = err or _create_conflict_error(name, visible_roots)
     if err:
         return {"success": False, "error": err}
 
@@ -444,27 +493,38 @@ def _precheck(action, skill_dir, name, content, file_path, file_content, old_str
 
 
 def _pending_payload(action, name, profile_dir, content, file_path, file_content,
-                     old_string, new_string, replace_all, absorbed_into, base):
+                     old_string, new_string, replace_all, absorbed_into, base,
+                     visible_roots=_VISIBLE_ROOTS_UNSET):
     """The exact payload whose canonical hash is reviewed and later executed."""
-    return {"action": action, "name": name, "profile_dir": profile_dir,
-            "content": content, "file_path": file_path,
-            "file_content": file_content, "old_string": old_string,
-            "new_string": new_string, "replace_all": replace_all,
-            "absorbed_into": absorbed_into, "base": base}
+    payload = {"action": action, "name": name, "profile_dir": profile_dir,
+               "content": content, "file_path": file_path,
+               "file_content": file_content, "old_string": old_string,
+               "new_string": new_string, "replace_all": replace_all,
+               "absorbed_into": absorbed_into, "base": base}
+    if visible_roots is not _VISIBLE_ROOTS_UNSET:
+        payload["visible_roots"] = visible_roots
+    return payload
 
 
 def manage(action, name, *, profile_dir, content=None, file_path=None,
            file_content=None, old_string=None, new_string=None,
            replace_all=False, absorbed_into=None, base=None,
-           approved_payload_hash=None):
+           approved_payload_hash=None, visible_roots=_VISIBLE_ROOTS_UNSET):
     """Apply one validated skill mutation through the write gate, under the skill lock, into the
     ledger; ``base`` is the digest of the live tree an approved pending write was reviewed against."""
     if action not in _ACTIONS:
         return {"success": False,
                 "error": f"Unknown action {action!r}. Available: {', '.join(_ACTIONS)}"}
+    roots_supplied = visible_roots is not _VISIBLE_ROOTS_UNSET
+    bound_roots, roots_error = (None, None)
+    if action == "create":
+        bound_roots, roots_error = _normalize_visible_roots(profile_dir, visible_roots)
     skill_dir, err = _skill_dir(profile_dir, name)
     err = err or _precheck(action, skill_dir, name, content or "", file_path or "",
                            file_content, old_string or "", new_string)
+    err = err or roots_error
+    if not err and action == "create":
+        err = _create_conflict_error(name, bound_roots)
     if err:
         return {"success": False, "error": err}
 
@@ -476,7 +536,9 @@ def manage(action, name, *, profile_dir, content=None, file_path=None,
             payload = _pending_payload(
                 action, name, profile_dir, content, file_path, file_content,
                 old_string, new_string, replace_all, absorbed_into,
-                skill_write.digest(skill_dir))                       # what the reviewer will look at
+                skill_write.digest(skill_dir),
+                bound_roots if roots_supplied and action == "create"
+                else _VISIBLE_ROOTS_UNSET)                            # what the reviewer will look at
             gist = _gist(action, name, content or "", file_path or "", old_string or "")
             try:
                 record = skill_write.stage(payload, summary=gist)
@@ -490,7 +552,9 @@ def manage(action, name, *, profile_dir, content=None, file_path=None,
         if approved_payload_hash is not None:
             execution_payload = _pending_payload(
                 action, name, profile_dir, content, file_path, file_content,
-                old_string, new_string, replace_all, absorbed_into, base)
+                old_string, new_string, replace_all, absorbed_into, base,
+                bound_roots if roots_supplied and action == "create"
+                else _VISIBLE_ROOTS_UNSET)
             try:
                 execution_hash = skill_write.payload_sha256(execution_payload)
             except (TypeError, ValueError):
@@ -505,7 +569,7 @@ def manage(action, name, *, profile_dir, content=None, file_path=None,
         before = skill_write.snapshot(skill_dir)
 
         if action == "create":
-            result = _create(profile_dir, name, content or "")
+            result = _create(profile_dir, name, content or "", bound_roots)
         elif action == "edit":
             result = _edit_skill(profile_dir, name, content or "")
         elif action == "patch":
@@ -541,6 +605,8 @@ def apply_pending(record):
     payload = dict(record["payload"])
     token = _bypass.set(True)
     try:
+        root_args = ({"visible_roots": payload["visible_roots"]}
+                     if "visible_roots" in payload else {})
         return manage(payload.get("action", ""), payload.get("name", ""),
                       profile_dir=payload.get("profile_dir", ""),
                       content=payload.get("content"),
@@ -551,7 +617,8 @@ def apply_pending(record):
                       replace_all=bool(payload.get("replace_all")),
                       absorbed_into=payload.get("absorbed_into"),
                       base=payload.get("base"),
-                      approved_payload_hash=record["payload_sha256"])
+                      approved_payload_hash=record["payload_sha256"],
+                      **root_args)
     finally:
         _bypass.reset(token)
 

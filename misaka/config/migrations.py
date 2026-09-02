@@ -31,13 +31,13 @@ def migrate_auth_to_auth_json() -> list[str]:
     settings: dict | None = None
     if oauth_path.exists():
         try:
-            for provider, credential in json.loads(oauth_path.read_text(encoding="utf-8")).items():
+            for provider, credential in json.loads(oauth_path.read_text(encoding="utf-8-sig")).items():
                 migrated[str(provider)] = {"type": "oauth", **credential}
         except Exception:  # noqa: BLE001, S110 - an unreadable oauth.json is left in place
             pass
     if settings_path.exists():
         try:
-            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+            settings = json.loads(settings_path.read_text(encoding="utf-8-sig"))
             api_keys = settings.get("apiKeys") if isinstance(settings, dict) else None
             for provider, key in (api_keys or {}).items():
                 if provider not in migrated and isinstance(key, str):
@@ -75,7 +75,7 @@ def migrate_sessions_from_agent_root() -> None:
 
     for session_file in files:
         try:
-            first_line = session_file.read_text(encoding="utf-8").splitlines()[0]
+            first_line = session_file.read_text(encoding="utf-8-sig").splitlines()[0]
             header = json.loads(first_line)
             if header.get("type") != "session" or not isinstance(header.get("cwd"), str):
                 continue
@@ -139,17 +139,17 @@ def migrate_legacy_session_buckets() -> int:
 
 
 def migrate_settings_file() -> bool:
-    """Fold pre-release settings shapes into the current ones, once.
+    """Persist pre-release global settings shapes proactively.
 
-    ``SettingsManager`` used to apply these on every read *and* every write, so a session
-    replacement or ``/reload`` re-ran the whole table. Nothing outside this machine ever
-    wrote the old keys.
+    Runtime loading applies them only to the in-memory view. An already-requested
+    settings write canonicalizes the locked latest file. This command remains the only
+    path that rewrites an otherwise untouched global settings file; startup never invokes it.
     """
     from misaka.core.settings_manager import SettingsManager
 
     path = Path(get_agent_dir()) / "settings.json"
     try:
-        current = json.loads(path.read_text(encoding="utf-8"))
+        current = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return False
     if not isinstance(current, dict):
@@ -179,7 +179,7 @@ def migrate_keybindings_config_file() -> None:
     if not config_path.exists():
         return
     try:
-        parsed = json.loads(config_path.read_text(encoding="utf-8"))
+        parsed = json.loads(config_path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return
     if not isinstance(parsed, dict):

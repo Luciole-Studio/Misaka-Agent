@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import subprocess
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
 
 UNICODE_SPACES = re.compile(r"[\u00A0\u2000-\u200A\u202F\u205F\u3000]")
+_WINDOWS_SHELL_DRIVE = re.compile(r"^/(?:mnt/|cygdrive/)?([a-zA-Z])(?:/(.*))?$")
 
 
 def canonicalize_path(path: str) -> str:
@@ -23,9 +25,30 @@ def canonicalize_path(path: str) -> str:
     return path
 
 
+def get_file_revision(path: str) -> tuple[int, int, int, int, int] | None:
+    try:
+        stats = os.lstat(path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(stats.st_mode) or stats.st_nlink != 1 or stats.st_size == 0:
+        return None
+    return stats.st_dev, stats.st_ino, stats.st_size, stats.st_mtime_ns, stats.st_ctime_ns
+
+
 def is_local_path(value: str) -> bool:
     trimmed = value.strip()
     return not trimmed.startswith(("npm:", "git:", "github:", "http:", "https:", "ssh:"))
+
+
+def normalize_windows_shell_path(file_path: str) -> str:
+    """Git Bash, MSYS, Cygwin and WSL drive paths in the form native Windows APIs accept (pi paths.ts:66-73)."""
+    if not file_path.startswith("/") or file_path.startswith("//") or "\\" in file_path:
+        return file_path
+    match = _WINDOWS_SHELL_DRIVE.match(file_path)
+    if match is None:
+        return file_path
+    suffix = (match[2] or "").replace("/", "\\")
+    return f"{match[1].upper()}:\\{suffix}"
 
 
 def normalize_path(
@@ -42,6 +65,8 @@ def normalize_path(
         normalized = UNICODE_SPACES.sub(" ", normalized)
     if strip_at_prefix and normalized.startswith("@"):
         normalized = normalized[1:]
+    if os.name == "nt":                       # on POSIX /mnt/c and /c are real directories
+        normalized = normalize_windows_shell_path(normalized)
 
     if expand_tilde:
         home = home_dir or str(Path.home())
@@ -115,6 +140,7 @@ __all__ = [
     "canonicalizePath",
     "formatPathRelativeToCwdOrAbsolute",
     "getCwdRelativePath",
+    "get_file_revision",
     "isLocalPath",
     "markPathIgnoredByCloudSync",
     "normalizePath",

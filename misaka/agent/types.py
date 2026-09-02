@@ -48,7 +48,6 @@ type AgentMessage = MessageValue | CustomAgentMessage
 class BeforeToolCallResult:
     block: bool | None = None
     reason: str | None = None
-    updatedInput: Any | None = None
     # Hint that the agent should stop after the current tool batch when this call is
     # blocked.  Early termination only happens when every finalized tool result in the
     # batch sets this to true.  (pi 1eb988c #7715)

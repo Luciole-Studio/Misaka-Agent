@@ -12,11 +12,13 @@ from misaka.ai.types import Model
 from misaka.config import get_agent_dir
 from misaka.core.auth_storage import AuthStorage
 from misaka.core.extensions.types import ToolDefinition
+from misaka.core.http_dispatcher import applyHttpProxySettings
 from misaka.core.model_registry import ModelRegistry
 from misaka.core.resource_loader import (
     DefaultResourceLoader,
     DefaultResourceLoaderOptions,
     ResourceLoaderLike,
+    ResourceLoaderReloadOptions,
 )
 from misaka.core.sdk import CreateAgentSessionResult, create_agent_session
 from misaka.core.session_manager import SessionManager
@@ -38,6 +40,7 @@ class CreateAgentSessionServicesOptions(TypedDict):
     modelRegistry: NotRequired[ModelRegistry]
     extensionFlagValues: NotRequired[Mapping[str, bool | str]]
     resourceLoaderOptions: NotRequired[DefaultResourceLoaderOptions]
+    resourceLoaderReloadOptions: NotRequired[ResourceLoaderReloadOptions]
 
 
 @dataclass(slots=True)
@@ -59,6 +62,7 @@ class CreateAgentSessionFromServicesOptions(TypedDict):
     thinkingLevel: NotRequired[ThinkingLevel]
     scopedModels: NotRequired[list[dict[str, Any]]]
     tools: NotRequired[list[str]]
+    excludeTools: NotRequired[list[str]]
     noTools: NotRequired[Literal["all", "builtin"]]
     customTools: NotRequired[list[ToolDefinition[Any, Any] | Any]]
 
@@ -116,6 +120,7 @@ async def create_agent_session_services(
     agent_dir = resolve_path(options["agentDir"]) if options.get("agentDir") else get_agent_dir()
     auth_storage = options.get("authStorage") or AuthStorage.create(os.path.join(agent_dir, "auth.json"))
     settings_manager = options.get("settingsManager") or SettingsManager.create(cwd, agent_dir)
+    applyHttpProxySettings(settings_manager.getGlobalSettings().get("httpProxy"))
     model_registry = options.get("modelRegistry") or ModelRegistry.create(
         auth_storage,
         os.path.join(agent_dir, "models.json"),
@@ -128,7 +133,7 @@ async def create_agent_session_services(
             "settingsManager": settings_manager,
         }
     )
-    await resource_loader.reload()
+    await resource_loader.reload(options.get("resourceLoaderReloadOptions"))
 
     diagnostics: list[AgentSessionRuntimeDiagnostic] = []
     extensions_result = resource_loader.getExtensions()
@@ -143,6 +148,28 @@ async def create_agent_session_services(
                 )
             )
     extensions_result.runtime.pendingProviderRegistrations = []
+    for registration in list(
+        extensions_result.runtime.pendingNativeProviderRegistrations
+    ):
+        try:
+            model_registry.registerNativeProvider(registration.provider)
+        except Exception as error:  # noqa: BLE001
+            diagnostics.append(
+                AgentSessionRuntimeDiagnostic(
+                    type="error",
+                    message=f'Extension "{registration.extensionPath}" error: {error}',
+                )
+            )
+    extensions_result.runtime.pendingNativeProviderRegistrations = []
+
+    refresh_result = await model_registry.refresh({"allowNetwork": False})
+    for provider_id, error in refresh_result.errors.items():
+        diagnostics.append(
+            AgentSessionRuntimeDiagnostic(
+                type="warning",
+                message=f'Could not restore model catalog for "{provider_id}": {error}',
+            )
+        )
     diagnostics.extend(apply_extension_flag_values(resource_loader, options.get("extensionFlagValues")))
 
     return AgentSessionServices(
@@ -173,6 +200,7 @@ async def create_agent_session_from_services(
             "thinkingLevel": options.get("thinkingLevel"),
             "scopedModels": options.get("scopedModels"),
             "tools": options.get("tools"),
+            "excludeTools": options.get("excludeTools"),
             "noTools": options.get("noTools"),
             "customTools": options.get("customTools"),
             "sessionStartEvent": options.get("sessionStartEvent"),

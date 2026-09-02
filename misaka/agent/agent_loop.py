@@ -10,6 +10,7 @@ from dataclasses import dataclass, fields, is_dataclass, replace
 from types import SimpleNamespace
 from typing import Any
 
+from misaka.agent.stream_fn import get_default_stream_fn
 from misaka.agent.types import (
     AfterToolCallContext,
     AfterToolCallResult,
@@ -34,7 +35,6 @@ from misaka.agent.types import (
     TurnEndEvent,
     TurnStartEvent,
 )
-from misaka.ai.stream import stream_simple
 from misaka.ai.types import (
     AssistantMessage,
     Context,
@@ -169,7 +169,8 @@ async def run_agent_loop(
         await _emit(emit, MessageStartEvent(message=prompt))
         await _emit(emit, MessageEndEvent(message=prompt))
 
-    await _run_loop(current_context, new_messages, config, signal, emit, stream_fn)
+    resolved_stream_fn = stream_fn if stream_fn is not None else get_default_stream_fn()
+    await _run_loop(current_context, new_messages, config, signal, emit, resolved_stream_fn)
     return new_messages
 
 
@@ -194,7 +195,8 @@ async def run_agent_loop_continue(
 
     await _emit(emit, AgentStartEvent())
     await _emit(emit, TurnStartEvent())
-    await _run_loop(current_context, new_messages, config, signal, emit, stream_fn)
+    resolved_stream_fn = stream_fn if stream_fn is not None else get_default_stream_fn()
+    await _run_loop(current_context, new_messages, config, signal, emit, resolved_stream_fn)
     return new_messages
 
 
@@ -208,17 +210,43 @@ async def _run_loop(
 ) -> None:
     current_context = initial_context
     config = initial_config
-    first_turn = True
+    last_completed_turn: ShouldStopAfterTurnContext | None = None
     pending_messages = list(await maybe_await(config.getSteeringMessages()) if config.getSteeringMessages else [])
 
     while True:
         has_more_tool_calls = True
 
         while has_more_tool_calls or pending_messages:
-            if not first_turn:
+            if last_completed_turn is not None:
+                next_turn_snapshot = (
+                    await maybe_await(config.prepareNextTurn(last_completed_turn))
+                    if config.prepareNextTurn
+                    else None
+                )
+                if next_turn_snapshot:
+                    current_context = next_turn_snapshot.context or current_context
+                    config = replace(
+                        config,
+                        model=next_turn_snapshot.model or config.model,
+                        reasoning=(
+                            config.reasoning
+                            if next_turn_snapshot.thinkingLevel is None
+                            else None
+                            if next_turn_snapshot.thinkingLevel == "off"
+                            else next_turn_snapshot.thinkingLevel
+                        ),
+                    )
+
+                # Preparation may take long enough for new steering to arrive. Do not
+                # drain twice when the earlier poll already yielded a message in
+                # one-at-a-time mode.
+                if not pending_messages:
+                    pending_messages = list(
+                        await maybe_await(config.getSteeringMessages())
+                        if config.getSteeringMessages
+                        else []
+                    )
                 await _emit(emit, TurnStartEvent())
-            else:
-                first_turn = False
 
             if pending_messages:
                 for message in pending_messages:
@@ -241,7 +269,13 @@ async def _run_loop(
             tool_results: list[ToolResultMessage] = []
             has_more_tool_calls = False
             if tool_calls:
-                executed_tool_batch = await execute_tool_calls(current_context, message, config, signal, emit)
+                executed_tool_batch = (
+                    await _fail_tool_calls_from_truncated_message(tool_calls, emit)
+                    if message.stopReason == "length"
+                    else await execute_tool_calls(
+                        current_context, message, config, signal, emit
+                    )
+                )
                 tool_results.extend(executed_tool_batch.messages)
                 has_more_tool_calls = not executed_tool_batch.terminate
 
@@ -251,42 +285,14 @@ async def _run_loop(
 
             await _emit(emit, TurnEndEvent(message=message, toolResults=tool_results))
 
-            next_turn_context = ShouldStopAfterTurnContext(
+            last_completed_turn = ShouldStopAfterTurnContext(
                 message=message,
                 toolResults=tool_results,
                 context=current_context,
                 newMessages=new_messages,
             )
-            next_turn_snapshot = (
-                await maybe_await(config.prepareNextTurn(next_turn_context))
-                if config.prepareNextTurn
-                else None
-            )
-            if next_turn_snapshot:
-                current_context = next_turn_snapshot.context or current_context
-                config = replace(
-                    config,
-                    model=next_turn_snapshot.model or config.model,
-                    reasoning=(
-                        config.reasoning
-                        if next_turn_snapshot.thinkingLevel is None
-                        else None
-                        if next_turn_snapshot.thinkingLevel == "off"
-                        else next_turn_snapshot.thinkingLevel
-                    ),
-                )
-
             should_stop = (
-                await maybe_await(
-                    config.shouldStopAfterTurn(
-                        ShouldStopAfterTurnContext(
-                            message=message,
-                            toolResults=tool_results,
-                            context=current_context,
-                            newMessages=new_messages,
-                        )
-                    )
-                )
+                await maybe_await(config.shouldStopAfterTurn(last_completed_turn))
                 if config.shouldStopAfterTurn
                 else False
             )
@@ -324,11 +330,11 @@ async def stream_assistant_response(
     llm_messages = list(await maybe_await(config.convertToLlm(messages)))
     validated_messages = [validate_message(_model_dump(message)) for message in llm_messages]
     llm_context = Context(
-        systemPrompt=context.systemPrompt or None,
+        systemPrompt=context.systemPrompt,
         messages=validated_messages,
         tools=_copy_tools(context.tools),
     )
-    stream_function = stream_fn or stream_simple
+    stream_function = stream_fn if stream_fn is not None else get_default_stream_fn()
     resolved_api_key = (
         await maybe_await(config.getApiKey(config.model.provider))
         if config.getApiKey
@@ -659,11 +665,6 @@ async def prepare_tool_call(
                     result=result,
                     isError=True,
                 )
-            if before_result and before_result.updatedInput is not None:
-                prepared_tool_call = tool_call.model_copy(
-                    update={"arguments": before_result.updatedInput}
-                )
-                validated_args = validate_tool_arguments(tool, prepared_tool_call)
         if signal_aborted(signal):
             return ImmediateToolCallOutcome(
                 kind="immediate",
@@ -686,8 +687,12 @@ async def execute_prepared_tool_call(
     emit: AgentEventSink,
 ) -> ExecutedToolCallOutcome:
     update_tasks: list[asyncio.Task[None]] = []
+    accepting_updates = True
 
     def on_update(partial_result: AgentToolResult) -> None:
+        if not accepting_updates:
+            return
+
         async def emit_update() -> None:
             await _emit(
                 emit,
@@ -705,10 +710,12 @@ async def execute_prepared_tool_call(
         result = await maybe_await(
             prepared.tool.execute(prepared.toolCall.id, prepared.args, signal, on_update)
         )
+        accepting_updates = False
         if update_tasks:
             await asyncio.gather(*update_tasks)
         return ExecutedToolCallOutcome(result=_coerce_agent_tool_result(result), isError=False)
     except BaseException as error:  # noqa: BLE001
+        accepting_updates = False
         if update_tasks:
             await asyncio.gather(*update_tasks, return_exceptions=True)
         _reraise_if_caller_cancelled(error, signal)
@@ -716,6 +723,8 @@ async def execute_prepared_tool_call(
             result=create_error_tool_result(str(error)),
             isError=True,
         )
+    finally:
+        accepting_updates = False
 
 
 async def finalize_executed_tool_call(
@@ -825,6 +834,38 @@ async def emit_tool_result_message(tool_result_message: ToolResultMessage, emit:
     await _emit(emit, MessageEndEvent(message=tool_result_message))
 
 
+async def _fail_tool_calls_from_truncated_message(
+    tool_calls: list[AgentToolCall],
+    emit: AgentEventSink,
+) -> ExecutedToolCallBatch:
+    """Answer, but never execute, tool calls from a length-truncated response."""
+    messages: list[ToolResultMessage] = []
+    for tool_call in tool_calls:
+        await _emit(
+            emit,
+            ToolExecutionStartEvent(
+                toolCallId=tool_call.id,
+                toolName=tool_call.name,
+                args=tool_call.arguments,
+            ),
+        )
+        finalized = FinalizedToolCallOutcome(
+            toolCall=tool_call,
+            result=create_error_tool_result(
+                f'Tool call "{tool_call.name}" was not executed: the response hit the '
+                "output token limit, so its arguments may be truncated. Re-issue the "
+                "tool call with complete arguments; split large payloads into smaller "
+                "calls if necessary."
+            ),
+            isError=True,
+        )
+        await emit_tool_execution_end(finalized, emit)
+        message = create_tool_result_message(finalized)
+        await emit_tool_result_message(message, emit)
+        messages.append(message)
+    return ExecutedToolCallBatch(messages=messages, terminate=False)
+
+
 def _create_agent_stream() -> EventStream[AgentEvent, list[AgentMessage]]:
     return EventStream(
         lambda event: event.type == "agent_end",
@@ -926,7 +967,6 @@ def _coerce_before_tool_call_result(
     return BeforeToolCallResult(
         block=value.get("block"),
         reason=value.get("reason"),
-        updatedInput=value.get("updatedInput"),
         # pi agent-loop.ts:637-644 honours `terminate` on a blocked call regardless of how
         # the hook spelled its result; dropping it here silently disarmed dict-returning hooks.
         terminate=value.get("terminate"),

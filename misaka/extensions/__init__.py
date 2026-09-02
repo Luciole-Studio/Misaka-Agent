@@ -6,8 +6,9 @@
 
 A module takes part by defining ``activate(spec) -> register | None``: ``register(harn)``
 installs the extension into the harness, ``None`` skips it for this session.  A module may
-restrict itself to session kinds with ``SESSION_KINDS = {...}``; the default is every kind
-except ``bare``.  The engine-level extension protocol stays in :mod:`misaka.core.extensions`.
+override its descriptor name with ``EXTENSION_NAME``, hide it with ``HIDDEN``, or restrict
+itself to session kinds with ``SESSION_KINDS = {...}``; the default is every kind except
+``bare``.  The engine-level extension protocol stays in :mod:`misaka.core.extensions`.
 """
 
 from __future__ import annotations
@@ -24,9 +25,11 @@ DEFAULT_KINDS = KINDS - {"bare"}
 _ROLE_DIRS = ("last_order", "sisters")
 
 
-def inline(name: str, factory: Callable[[Any], Any]) -> dict[str, Any]:
+def inline(
+    name: str, factory: Callable[[Any], Any], *, hidden: bool = False
+) -> dict[str, Any]:
     """Build the named inline-extension descriptor used by Pi's resource loader."""
-    return {"name": name, "factory": factory}
+    return {"name": name, "factory": factory, "hidden": hidden}
 
 
 def delegates(spec) -> bool:
@@ -54,7 +57,17 @@ def discover(spec) -> list[dict[str, Any]]:
                 continue
             register = activate(spec)
             if register is not None:
-                out.append(inline(mod.__name__.rsplit(".", 1)[-1], register))
+                out.append(
+                    inline(
+                        getattr(
+                            mod,
+                            "EXTENSION_NAME",
+                            mod.__name__.rsplit(".", 1)[-1],
+                        ),
+                        register,
+                        hidden=bool(getattr(mod, "HIDDEN", False)),
+                    )
+                )
     return out
 
 

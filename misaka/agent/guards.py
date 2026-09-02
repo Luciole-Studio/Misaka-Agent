@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from itertools import pairwise
 from typing import Any, Literal
 
-from misaka.utils.values import read_field
+from misaka.utils.values import call_with_optional_second_arg, read_field
 
 
 @dataclass(frozen=True, slots=True)
@@ -587,26 +587,43 @@ def install_guards(
     guards = _SessionGuards(session, limiter, wall_seconds, bookkeeping_tools)
     original = agent.shouldStopAfterTurn
     original_prepare = getattr(agent, "prepareNextTurn", None)
+    original_prepare_with_context = getattr(agent, "prepareNextTurnWithContext", None)
 
-    async def should_stop(context: Any) -> bool:
+    async def should_stop(context: Any, signal: Any = None) -> bool:
         if await guards.after_turn(context):
             return True
         if original is None:
             return False
-        result = original(context)
+        result = call_with_optional_second_arg(original, context, signal)
         return bool(await result if inspect.isawaitable(result) else result)
 
-    async def prepare_next_turn(context: Any) -> Any:
-        forced = guards.next_turn(context)
+    async def prepare_next_turn(context: Any, signal: Any = None) -> Any:
+        prepared = None
+        if original_prepare_with_context is not None:
+            prepared = original_prepare_with_context(context, signal)
+        elif original_prepare is not None:
+            prepared = original_prepare(signal)
+        if inspect.isawaitable(prepared):
+            prepared = await prepared
+
+        prepared_context = read_field(prepared, "context")
+        forced = guards.next_turn(
+            {
+                "context": (
+                    prepared_context
+                    if prepared_context is not None
+                    else read_field(context, "context")
+                )
+            }
+        )
         if forced is not None:
+            forced.model = read_field(prepared, "model")
+            forced.thinkingLevel = read_field(prepared, "thinkingLevel")
             return forced
-        if original_prepare is None:
-            return None
-        result = original_prepare(context)
-        return await result if inspect.isawaitable(result) else result
+        return prepared
 
     agent.shouldStopAfterTurn = should_stop
-    agent.prepareNextTurn = prepare_next_turn
+    agent.prepareNextTurnWithContext = prepare_next_turn
     agent._misaka_guards = guards
     return guards
 

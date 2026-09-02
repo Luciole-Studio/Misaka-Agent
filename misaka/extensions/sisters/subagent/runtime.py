@@ -97,6 +97,9 @@ class RoleContext:
     profile_dir: str
     workspace: str
     mcp_role: str
+    # The parent session's effective decision, including session-only trust.
+    # Direct SDK construction stays trusted unless the host says otherwise.
+    project_trusted: bool = True
     model_override: str | None = None
     allowed_agent_types: tuple[str, ...] = ()
     parent_agent_id: str | None = None
@@ -205,11 +208,15 @@ class RoleContext:
             cli_rules = tuple(ceiling)
         else:
             cli_rules = ()
+        project_trust_raw = os.environ.get("MISAKA_PROJECT_TRUST")
         return cls(
             role=resolved_role,
             profile_dir=os.path.abspath(os.path.expanduser(resolved_profile)) if resolved_profile else "",
             workspace=resolved_workspace,
             mcp_role=mcp_role or os.environ.get("MISAKA_MCP_ROLE") or resolved_role,
+            project_trusted=(
+                True if project_trust_raw is None else project_trust_raw == "1"
+            ),
             # MISAKA's own variable first. The ported order let another product's
             # environment decide which model MISAKA's subagents run on.
             model_override=os.environ.get("MISAKA_SUBAGENT_MODEL"),
@@ -593,6 +600,17 @@ def _safe_component(value: str) -> str:
     return cleaned[:80] or "session"
 
 
+def _same_location(left: str, right: str) -> bool:
+    """Compare workspace identities without letting a symlink widen trust."""
+
+    try:
+        return os.path.realpath(os.path.abspath(os.path.expanduser(left))) == os.path.realpath(
+            os.path.abspath(os.path.expanduser(right))
+        )
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
 def _atomic_json(path: Path, data: Mapping[str, Any]) -> None:
     atomic.write_text(path, json.dumps(data, ensure_ascii=False, indent=2))
 
@@ -865,6 +883,9 @@ class AgentTask:
     initial_prompt_sent: bool = False
     worktree: Worktree | None = None
     keep_worktree: bool = False
+    project_trusted: bool = True
+    trust_source_cwd: str | None = None
+    trust_from_parent: bool = True
     on_update: Any = field(default=None, repr=False)
     permission_context: Any = field(default=None, repr=False)
     process: asyncio.subprocess.Process | None = field(default=None, repr=False)
@@ -924,6 +945,9 @@ class AgentTask:
                 "pendingMessages": self.pending_messages,
                 "worktree": asdict(self.worktree) if self.worktree else None,
                 "keepWorktree": self.keep_worktree,
+                "projectTrusted": self.project_trusted,
+                "trustSourceCwd": self.trust_source_cwd,
+                "trustFromParent": self.trust_from_parent,
             }
             await asyncio.to_thread(_atomic_json, self.metadata_path, data)
 
@@ -936,6 +960,27 @@ class AgentTask:
             **{key: value for key, value in definition_data.items() if key in allowed}
         )
         worktree_data = data.get("worktree")
+        trust_source_cwd = str(
+            data.get("trustSourceCwd")
+            or (worktree_data.get("repo") if isinstance(worktree_data, dict) else "")
+            or data.get("cwd")
+            or os.getcwd()
+        )
+        trust_from_parent_value = data.get("trustFromParent")
+        trust_from_parent = (
+            trust_from_parent_value
+            if isinstance(trust_from_parent_value, bool)
+            else _same_location(trust_source_cwd, manager.role_context.workspace)
+        )
+        project_trusted_value = data.get("projectTrusted")
+        project_trusted = (
+            project_trusted_value
+            if isinstance(project_trusted_value, bool)
+            else manager._project_trust_for_cwd(
+                trust_source_cwd,
+                explicit_cwd=not trust_from_parent,
+            )[0]
+        )
         transcript = Path(data.get("transcript") or path.with_suffix(".jsonl"))
         task = cls(
             manager=manager,
@@ -983,6 +1028,9 @@ class AgentTask:
             ],
             worktree=Worktree(**worktree_data) if isinstance(worktree_data, dict) else None,
             keep_worktree=bool(data.get("keepWorktree")),
+            project_trusted=project_trusted,
+            trust_source_cwd=trust_source_cwd,
+            trust_from_parent=trust_from_parent,
         )
         if task.status in TERMINAL_STATUSES:
             task._done.set()
@@ -1128,8 +1176,56 @@ class SubagentManager:
     def field(definition: Any, name: str, default: Any = None) -> Any:
         return read_field(definition, name, default)
 
-    def resolve_definition(self, requested: str | None, cwd: str) -> agent_roster.AgentDefinition:
-        definitions = agent_roster.discover(cwd=cwd)
+    @staticmethod
+    def _context_project_trusted(context: Any, fallback: bool) -> bool:
+        getter = getattr(context, "isProjectTrusted", None)
+        return bool(getter()) if callable(getter) else fallback
+
+    @staticmethod
+    def _stored_project_trusted(cwd: str) -> bool:
+        """Read an explicit-cwd decision without opening an interactive prompt."""
+
+        from misaka.config import get_agent_dir
+        from misaka.core.project_trust import ProjectTrustStore
+
+        try:
+            return ProjectTrustStore(get_agent_dir()).get(cwd) is True
+        except Exception as error:  # noqa: BLE001 - a broken store must fail closed
+            _log_warning(f"could not read project trust for {cwd}: {error}")
+            return False
+
+    def _project_trust_for_cwd(
+        self,
+        cwd: str,
+        *,
+        session_project_trusted: bool | None = None,
+        explicit_cwd: bool = False,
+        session_cwd: str | None = None,
+    ) -> tuple[bool, bool]:
+        """Return ``(trusted, inherited_from_parent_session)`` for one source cwd."""
+
+        from_parent = not explicit_cwd and _same_location(
+            cwd,
+            session_cwd or self.role_context.workspace,
+        )
+        if from_parent:
+            trusted = (
+                self.role_context.project_trusted
+                if session_project_trusted is None
+                else session_project_trusted
+            )
+            return bool(trusted), True
+        return self._stored_project_trusted(cwd), False
+
+    def resolve_definition(
+        self,
+        requested: str | None,
+        cwd: str,
+        include_project: bool | None = None,
+    ) -> agent_roster.AgentDefinition:
+        if include_project is None:
+            include_project = self._project_trust_for_cwd(cwd)[0]
+        definitions = agent_roster.discover(cwd=cwd, include_project=include_project)
         name = requested or "general-purpose"
         canonical = "general-purpose" if name in {"general", "general-purpose"} else name
         if self.role_context.allowed_agent_types:
@@ -1207,6 +1303,8 @@ class SubagentManager:
         tool_call_id: str,
         context: Any,
         on_update: Any = None,
+        session_project_trusted: bool | None = None,
+        project_cwd_explicit: bool = False,
     ) -> AgentTask:
         if name and not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", name):
             raise ValueError("Agent name must be 1-64 letters, digits, dots, underscores, or hyphens")
@@ -1225,12 +1323,47 @@ class SubagentManager:
             if name:
                 self._reserved_names.add(name)
 
-        effective_cwd = os.path.abspath(os.path.expanduser(cwd or context.cwd))
+        session_cwd = os.path.abspath(
+            os.path.expanduser(getattr(context, "cwd", None) or self.role_context.workspace)
+        )
+        effective_cwd = os.path.abspath(os.path.expanduser(cwd or session_cwd))
         try:
             if cwd and not os.path.isabs(os.path.expanduser(cwd)):
                 raise ValueError("cwd must be an absolute path")
             if not os.path.isdir(effective_cwd):
                 raise ValueError(f"Working directory does not exist: {effective_cwd}")
+            if session_project_trusted is None:
+                session_project_trusted = self._context_project_trusted(
+                    context,
+                    self.role_context.project_trusted,
+                )
+            effective_isolation = isolation or definition.isolation
+            if effective_isolation not in {None, "worktree"}:
+                raise ValueError(f"Unsupported agent isolation mode: {effective_isolation}")
+            trust_source_cwd = effective_cwd
+            if effective_isolation == "worktree":
+                code, repo, error = await _run(
+                    ["git", "-C", effective_cwd, "rev-parse", "--show-toplevel"]
+                )
+                if code:
+                    raise ValueError(
+                        f'isolation="worktree" requires a git repository: {error.strip()}'
+                    )
+                trust_source_cwd = repo.strip()
+            project_trusted, trust_from_parent = self._project_trust_for_cwd(
+                trust_source_cwd,
+                session_project_trusted=session_project_trusted,
+                explicit_cwd=(
+                    project_cwd_explicit
+                    or not _same_location(effective_cwd, session_cwd)
+                    or not _same_location(trust_source_cwd, session_cwd)
+                ),
+                session_cwd=session_cwd,
+            )
+            if definition.source in {"project", "projectSettings"} and not project_trusted:
+                raise ValueError(
+                    f"Project agent '{definition.name}' is unavailable because its project is not trusted"
+                )
 
             available_models = context.modelRegistry.getAvailable()
             if inspect.isawaitable(available_models):
@@ -1270,6 +1403,7 @@ class SubagentManager:
                 return await self._register_task(
                     agent_id, definition, description, prompt, provider, model_id, effective_cwd, transcript,
                     metadata, output, background, name, tool_call_id, on_update, context, isolation,
+                    project_trusted, trust_source_cwd, trust_from_parent,
                 )
             except BaseException:
                 for leftover in (output, metadata):     # nothing of a task that never started stays behind
@@ -1286,6 +1420,7 @@ class SubagentManager:
     async def _register_task(
         self, agent_id, definition, description, prompt, provider, model_id, effective_cwd, transcript,
         metadata, output, background, name, tool_call_id, on_update, context, isolation,
+        project_trusted, trust_source_cwd, trust_from_parent,
     ) -> AgentTask:
         active: list[str] = []
         try:
@@ -1315,17 +1450,20 @@ class SubagentManager:
             background=background or definition.background,
             name=name,
             tool_call_id=tool_call_id,
-            can_read_output=any(tool.casefold() in {"read", "bash"} for tool in active),
+            can_read_output=any(
+                tool.casefold() in {"read", "bash", "powershell"} for tool in active
+            ),
             allowed_agent_types=self._allowed_agent_types(definition),
             on_update=on_update,
             permission_context=context,
+            project_trusted=project_trusted,
+            trust_source_cwd=trust_source_cwd,
+            trust_from_parent=trust_from_parent,
         )
         effective_isolation = isolation or definition.isolation
         if effective_isolation == "worktree":
             task.worktree = await self._create_worktree(task)
             task.cwd = task.worktree.path
-        elif effective_isolation:
-            raise ValueError(f"Unsupported agent isolation mode: {effective_isolation}")
         try:
             await task.persist()
             async with self._lock:
@@ -1346,11 +1484,17 @@ class SubagentManager:
         ``notify=False`` is used by higher-level orchestrators that must finish
         their own acceptance pipeline before telling the parent the work is
         complete.  Ordinary ``Agent`` calls keep the Claude-compatible default.
+
+        ``on_update`` belongs to the launching tool execution, not to this
+        longer-lived task.  Once detached, progress and completion travel over
+        the task notification / board channels; retaining the tool callback
+        would emit updates after ``tool_execution_end``.
         """
         if self._closed or task._stop_requested or task.status in TERMINAL_STATUSES:
             raise RuntimeError("Sub-agent manager is closed")
         task.background = True
         task.status = "running"
+        task.on_update = None
         task.runner = asyncio.create_task(self._drive(task, prompt, notify=notify))
 
     async def run_foreground(self, task: AgentTask, prompt: str, signal: Any) -> None:
@@ -1830,6 +1974,7 @@ class SubagentManager:
                 "MISAKA_SUBAGENT_PARENT_SESSION_ID": task.parent_session_id,
                 "MISAKA_SUBAGENT_TRANSCRIPT": str(task.transcript),
                 "MISAKA_PARENT_PID": str(os.getpid()),
+                "MISAKA_PROJECT_TRUST": "1" if task.project_trusted else "0",
             }
         )
         if task._budget_limit:
@@ -2280,7 +2425,22 @@ class SubagentManager:
         sections.append(prompt)
         return "\n\n".join(sections)
 
+    def _refresh_task_project_trust(self, task: AgentTask) -> None:
+        """Recheck persistent arbitrary-cwd trust before reading definition payloads."""
+
+        source_cwd = task.trust_source_cwd or (
+            task.worktree.repo if task.worktree is not None else task.cwd
+        )
+        task.trust_source_cwd = source_cwd
+        if not task.trust_from_parent:
+            task.project_trusted = self._stored_project_trusted(source_cwd)
+        if task.definition.source in {"project", "projectSettings"} and not task.project_trusted:
+            raise ValueError(
+                f"Project agent '{task.definition.name}' is unavailable because its project is not trusted"
+            )
+
     async def _child_flags(self, task: AgentTask) -> list[str]:
+        self._refresh_task_project_trust(task)
         prompt_dir = task.metadata_path.parent / ".prompts"
         prompt_dir.mkdir(parents=True, exist_ok=True)
         prompt_path = prompt_dir / f"{task.id}.md"
@@ -2324,6 +2484,7 @@ class SubagentManager:
             str(task.transcript.parent),
             "--system-prompt",
             str(prompt_path),
+            "--approve" if task.project_trusted else "--no-approve",
         ]
         # A missing/inherit allowlist means the child's complete dynamic pool,
         # including MCP tools discovered during child startup.  Do not freeze
@@ -2343,6 +2504,7 @@ class SubagentManager:
             aliases = {
                 "read": "read",
                 "bash": "bash",
+                "powershell": "powershell",
                 "edit": "edit",
                 "write": "write",
                 "grep": "grep",
@@ -2847,22 +3009,57 @@ class SubagentManager:
     async def _prepare_resume(self, task: AgentTask, context: Any) -> None:
         """Validate sidechain state and apply the *current* agent definition."""
 
-        await asyncio.to_thread(clean_resume_transcript, task.transcript)
+        session_cwd = getattr(context, "cwd", None) or self.role_context.workspace
         if task.worktree and not os.path.isdir(task.worktree.path):
             task.cwd = task.worktree.repo
             task.worktree = None
             task.keep_worktree = False
         if not os.path.isdir(task.cwd):
-            fallback = self.role_context.workspace
+            if not task.trust_from_parent:
+                raise ValueError(f"Agent working directory no longer exists: {task.cwd}")
+            fallback = session_cwd
             if not os.path.isdir(fallback):
                 raise ValueError(f"Agent working directory no longer exists: {task.cwd}")
             task.cwd = fallback
 
+        source_cwd = task.trust_source_cwd or task.cwd
+        session_project_trusted = self._context_project_trusted(
+            context,
+            task.project_trusted,
+        )
+        task.project_trusted, task.trust_from_parent = self._project_trust_for_cwd(
+            source_cwd,
+            session_project_trusted=session_project_trusted,
+            explicit_cwd=(
+                not task.trust_from_parent
+                or not _same_location(source_cwd, session_cwd)
+            ),
+            session_cwd=session_cwd,
+        )
+        task.trust_source_cwd = source_cwd
+        if task.definition.source in {"project", "projectSettings"} and not task.project_trusted:
+            raise ValueError(
+                f"Project agent '{task.definition.name}' is unavailable because its project is not trusted"
+            )
+        await asyncio.to_thread(clean_resume_transcript, task.transcript)
         requested = task.agent_type
+        roster_definition = task.definition.source in {
+            "built-in",
+            "project",
+            "projectSettings",
+            "user",
+            "userSettings",
+        }
+
+        def resolve(name: str) -> agent_roster.AgentDefinition:
+            if roster_definition:
+                return self.resolve_definition(name, task.cwd, task.project_trusted)
+            return self.resolve_definition(name, task.cwd)
+
         try:
-            definition = self.resolve_definition(requested, task.cwd)
+            definition = resolve(requested)
         except ValueError:
-            definition = self.resolve_definition("general-purpose", task.cwd)
+            definition = resolve("general-purpose")
         task.definition = definition
         task.allowed_agent_types = self._allowed_agent_types(definition)
 

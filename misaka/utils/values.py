@@ -43,6 +43,24 @@ async def maybe_await(value: Any) -> Any:
     return value
 
 
+def call_with_optional_second_arg(callback: Any, first: Any, second: Any) -> Any:
+    """Call a JavaScript-style callback without breaking legacy one-arg handlers."""
+    try:
+        parameters = inspect.signature(callback).parameters.values()
+    except (TypeError, ValueError):
+        return callback(first, second)
+
+    if any(parameter.kind == inspect.Parameter.VAR_POSITIONAL for parameter in parameters):
+        return callback(first, second)
+    positional = [
+        parameter
+        for parameter in parameters
+        if parameter.kind
+        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    return callback(first, second) if len(positional) >= 2 else callback(first)
+
+
 def signal_aborted(signal: Any) -> bool:
     """Whether the caller has given up on this call.
 

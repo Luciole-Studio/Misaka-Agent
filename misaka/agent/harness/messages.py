@@ -85,14 +85,18 @@ def bash_execution_to_text(msg: BashExecutionMessage) -> str:
     return text
 
 
-def create_branch_summary_message(summary: str, from_id: str, timestamp: str) -> BranchSummaryMessage:
+def create_branch_summary_message(
+    summary: str,
+    from_id: str,
+    timestamp: str | int | datetime,
+) -> BranchSummaryMessage:
     return BranchSummaryMessage(summary=summary, fromId=from_id, timestamp=_timestamp_ms(timestamp))
 
 
 def create_compaction_summary_message(
     summary: str,
     tokens_before: int,
-    timestamp: str,
+    timestamp: str | int | datetime,
 ) -> CompactionSummaryMessage:
     return CompactionSummaryMessage(
         summary=summary,
@@ -106,7 +110,7 @@ def create_custom_message(
     content: str | list[TextContent | ImageContent],
     display: bool,
     details: Any,
-    timestamp: str,
+    timestamp: str | int | datetime,
 ) -> CustomMessage[Any]:
     return CustomMessage(
         customType=custom_type,
@@ -192,7 +196,11 @@ def _coerce_bash_execution(message: Any) -> BashExecutionMessage:
     )
 
 
-def _timestamp_ms(timestamp: str | datetime) -> int:
+def _timestamp_ms(timestamp: str | int | datetime) -> int:
+    if isinstance(timestamp, bool):
+        raise TypeError("timestamp must be an ISO string, datetime, or Unix milliseconds")
+    if isinstance(timestamp, int):
+        return timestamp
     if isinstance(timestamp, datetime):
         dt = timestamp
     else:

@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
+from misaka.core.experimental import get_experimental_tool_sampling
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.tools._common import _drain_worker, _string_arg, abort_race
 from misaka.core.tools.edit_diff import (
@@ -31,7 +32,7 @@ from misaka.core.tools.edit_diff import (
 )
 from misaka.core.tools.file_mutation_queue import with_file_mutation_queue
 from misaka.core.tools.path_utils import resolve_to_cwd
-from misaka.core.tools.render_utils import invalid_arg_text, shorten_path
+from misaka.core.tools.render_utils import render_tool_path
 from misaka.core.tools.tool_definition_wrapper import wrap_tool_definition
 from misaka.ui.tui import Box, Container, Spacer, Text
 from misaka.utils import atomic
@@ -66,6 +67,14 @@ class EditToolInput(BaseModel):
             "merge them into one edit instead."
         )
     )
+
+
+def _edit_tool_schema() -> dict[str, Any]:
+    """Inline the one Pydantic ref that TypeBox does not emit in Pi's edit schema."""
+    schema = EditToolInput.model_json_schema()
+    definitions = schema.pop("$defs")
+    schema["properties"]["edits"]["items"] = definitions["ReplaceEditInput"]
+    return schema
 
 
 @dataclass(slots=True)
@@ -244,17 +253,9 @@ def _preview_args_key(path: str, edits: list[Edit]) -> str:
     )
 
 
-def _format_edit_call(args: RenderableEditArgs | None, theme_obj: Any) -> str:
-    invalid_arg = invalid_arg_text(theme_obj)
+def _format_edit_call(args: RenderableEditArgs | None, theme_obj: Any, cwd: str) -> str:
     raw_path = _string_arg(read_field(args, "file_path", read_field(args, "path")))
-    shortened = shorten_path(raw_path) if raw_path is not None else None
-    if shortened is None:
-        path_display = invalid_arg
-    elif shortened:
-        path_display = theme_obj.fg("accent", shortened)
-    else:
-        path_display = theme_obj.fg("toolOutput", "...")
-    return f"{theme_obj.fg('toolTitle', theme_obj.bold('edit'))} {path_display}"
+    return f"{theme_obj.fg('toolTitle', theme_obj.bold('edit'))} {render_tool_path(raw_path, theme_obj, cwd)}"
 
 
 def _format_edit_result(
@@ -301,12 +302,13 @@ def _build_edit_call_component(
     component: _EditCallRenderComponent,
     args: RenderableEditArgs | None,
     theme_obj: Any,
+    cwd: str,
 ) -> _EditCallRenderComponent:
     from misaka.ui.tui.interactive.components.diff import render_diff
 
     component.setBgFn(_get_edit_header_bg(component.preview, component.settledError, theme_obj))
     component.clear()
-    component.addChild(Text(_format_edit_call(args, theme_obj), 0, 0))
+    component.addChild(Text(_format_edit_call(args, theme_obj, cwd), 0, 0))
 
     if component.preview is None:
         return component
@@ -480,7 +482,7 @@ def create_edit_tool_definition(
 
                 loop.create_task(_load_preview())
 
-        return _build_edit_call_component(component, args, theme_obj)
+        return _build_edit_call_component(component, args, theme_obj, context.cwd)
 
     def render_result(
         result: _EditToolResultLike | Mapping[str, Any],
@@ -506,7 +508,9 @@ def create_edit_tool_definition(
                 call_component.settledError = context.isError
                 changed = True
             if changed:
-                _build_edit_call_component(call_component, context.args, theme_obj)
+                _build_edit_call_component(
+                    call_component, context.args, theme_obj, context.cwd
+                )
 
         output = _format_edit_result(
             context.args,
@@ -541,7 +545,8 @@ def create_edit_tool_definition(
             "Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit.",
             "Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.",
         ],
-        parameters=EditToolInput,
+        parameters=_edit_tool_schema(),
+        constrainedSampling=get_experimental_tool_sampling(),
         renderShell="self",
         prepareArguments=prepare_edit_arguments,
         execute=execute,

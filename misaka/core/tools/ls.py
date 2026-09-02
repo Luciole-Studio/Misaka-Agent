@@ -18,8 +18,7 @@ from misaka.core.tools._common import _ignore_background_task_result, abort_race
 from misaka.core.tools.path_utils import resolve_to_cwd
 from misaka.core.tools.render_utils import (
     get_text_output,
-    invalid_arg_text,
-    shorten_path,
+    render_tool_path,
     str_value,
 )
 from misaka.core.tools.tool_definition_wrapper import wrap_tool_definition
@@ -65,14 +64,14 @@ class LsToolOptions:
 
 @dataclass(slots=True)
 class _DefaultLsOperations:
-    def exists(self, absolute_path: str) -> bool:
-        return os.path.exists(absolute_path)
+    async def exists(self, absolute_path: str) -> bool:
+        return await asyncio.to_thread(os.path.exists, absolute_path)
 
-    def stat(self, absolute_path: str) -> os.stat_result:
-        return os.stat(absolute_path)
+    async def stat(self, absolute_path: str) -> os.stat_result:
+        return await asyncio.to_thread(os.stat, absolute_path)
 
-    def readdir(self, absolute_path: str) -> list[str]:
-        return os.listdir(absolute_path)
+    async def readdir(self, absolute_path: str) -> list[str]:
+        return await asyncio.to_thread(os.listdir, absolute_path)
 
 
 def _coerce_options(options: LsToolOptions | Mapping[str, Any] | None) -> LsToolOptions:
@@ -83,12 +82,13 @@ def _coerce_options(options: LsToolOptions | Mapping[str, Any] | None) -> LsTool
     return LsToolOptions(operations=options.get("operations"))
 
 
-def _format_ls_call(args: Mapping[str, Any] | None, theme_obj: Any) -> str:
+def _format_ls_call(args: Mapping[str, Any] | None, theme_obj: Any, cwd: str) -> str:
     raw_path = str_value(read_field(args, "path"))
-    path_value = shorten_path(raw_path or ".") if raw_path is not None else None
     limit = read_field(args, "limit")
-    invalid_arg = invalid_arg_text(theme_obj)
-    text = f"{theme_obj.fg('toolTitle', theme_obj.bold('ls'))} {invalid_arg if path_value is None else theme_obj.fg('accent', path_value)}"
+    text = (
+        f"{theme_obj.fg('toolTitle', theme_obj.bold('ls'))} "
+        f"{render_tool_path(raw_path, theme_obj, cwd, {'emptyFallback': '.'})}"
+    )
     if limit is not None:
         text += theme_obj.fg("toolOutput", f" (limit {limit})")
     return text
@@ -222,7 +222,7 @@ def create_ls_tool_definition(
 
     def render_call(args: Mapping[str, Any] | None, theme_obj: Any, context: Any) -> Text:
         text = context.lastComponent if isinstance(context.lastComponent, Text) else Text("", 0, 0)
-        text.setText(_format_ls_call(args, theme_obj))
+        text.setText(_format_ls_call(args, theme_obj, context.cwd))
         return text
 
     def render_result(result: Any, options_obj: Any, theme_obj: Any, context: Any) -> Text:

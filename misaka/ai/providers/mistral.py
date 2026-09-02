@@ -188,7 +188,7 @@ def stream_mistral(
 
             mistral = _option(options, "client")
             if mistral is None:
-                mistral = create_client(model, api_key)
+                mistral = create_client(model, api_key, _option(options, "timeoutMs"))
 
             normalize_tool_call_id = create_mistral_tool_call_id_normalizer()
             transformed_messages = transform_messages(
@@ -256,9 +256,15 @@ def stream_simple_mistral(
     )
 
 
-def create_client(model: Model, api_key: str) -> Any:
+def create_client(model: Model, api_key: str, timeout_ms: int | None = None) -> Any:
     mistral_client = _get_mistral_client_class()
-    return mistral_client(api_key=api_key, server_url=model.baseUrl)
+    client_options: dict[str, Any] = {
+        "api_key": api_key,
+        "server_url": model.baseUrl,
+    }
+    if timeout_ms is not None:
+        client_options["timeout_ms"] = timeout_ms
+    return mistral_client(**client_options)
 
 
 def create_output(model: Model) -> AssistantMessage:

@@ -51,12 +51,14 @@ def envApiKeyAuth(name: str, envVars: list[str] | tuple[str, ...]) -> ApiKeyAuth
 
     async def resolve(*, ctx: Any, credential: ApiKeyCredential | None, signal: Any) -> AuthResult | None:
         _throwIfAborted(signal)
-        if credential is not None and credential.key:
-            return AuthResult(
-                auth=ModelAuth(apiKey=credential.key),
-                env=credential.env,
-                source="stored credential",
-            )
+        if credential is not None:
+            if credential.key:
+                return AuthResult(
+                    auth=ModelAuth(apiKey=credential.key),
+                    env=credential.env,
+                    source="stored credential",
+                )
+            return None
         for envVar in envVars:
             value = await ctx.env(envVar)
             _throwIfAborted(signal)

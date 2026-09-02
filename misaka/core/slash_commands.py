@@ -22,13 +22,22 @@ class SlashCommandInfo(TypedDict):
 class BuiltinSlashCommand:
     name: str
     description: str
+    argumentHint: str | None = None
 
 
 BUILTIN_SLASH_COMMANDS: tuple[BuiltinSlashCommand, ...] = (
     BuiltinSlashCommand("settings", "Open settings menu"),
-    BuiltinSlashCommand("model", "Select model (opens selector UI)"),
+    BuiltinSlashCommand(
+        "model",
+        "Select model (opens selector UI)",
+        argumentHint="<provider/model>",
+    ),
     # pi 496185f6: switch thinking level at runtime; --default also saves it as the startup default
-    BuiltinSlashCommand("thinking", "Select thinking level (--default persists it)"),
+    BuiltinSlashCommand(
+        "thinking",
+        "Select thinking level (--default persists it)",
+        argumentHint="[--default] <level>",
+    ),
     BuiltinSlashCommand("scoped-models", "Enable/disable models for Ctrl+P cycling"),
     # "models" and "theme" were removed: they were only declared here with no handler in
     # interactive mode, so the input matched nothing and went to the LLM as a plain message
@@ -43,7 +52,12 @@ BUILTIN_SLASH_COMMANDS: tuple[BuiltinSlashCommand, ...] = (
     BuiltinSlashCommand("fork", "Create a new fork from a previous user message"),
     BuiltinSlashCommand("clone", "Duplicate the current session at the current position"),
     BuiltinSlashCommand("tree", "Navigate session tree (switch branches)"),
-    BuiltinSlashCommand("login", "Configure provider authentication"),
+    BuiltinSlashCommand("trust", "Save project trust decision for future sessions"),
+    BuiltinSlashCommand(
+        "login",
+        "Configure provider authentication",
+        argumentHint="<provider>",
+    ),
     BuiltinSlashCommand("logout", "Remove provider authentication"),
     BuiltinSlashCommand("new", "Start a new session"),
     BuiltinSlashCommand("compact", "Manually compact the session context"),

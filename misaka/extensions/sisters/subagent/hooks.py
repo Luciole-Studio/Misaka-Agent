@@ -62,14 +62,12 @@ def _result(
     decision: str = "passthrough",
     additional_context: str | None = None,
     reason: str | None = None,
-    updated_input: Mapping[str, Any] | None = None,
 ) -> HookResult:
     return {
         "allowed": allowed,
         "decision": decision,
         "additional_context": additional_context,
         "reason": reason,
-        "updated_input": dict(updated_input) if updated_input is not None else None,
     }
 
 
@@ -160,14 +158,12 @@ def parse_hook_output(value: Any, *, expected_event: str | None = None) -> HookR
 
     decision = specific.get("permissionDecision", output.get("permissionDecision"))
     reason = specific.get("permissionDecisionReason") or output.get("reason")
-    updated_input = specific.get("updatedInput", output.get("updatedInput"))
     additional_context = specific.get("additionalContext", output.get("additionalContext"))
 
     permission_request = specific.get("decision")
     if isinstance(permission_request, Mapping):
         decision = permission_request.get("behavior", decision)
         reason = permission_request.get("message") or reason
-        updated_input = permission_request.get("updatedInput", updated_input)
 
     legacy_decision = output.get("decision")
     if decision is None and legacy_decision in {"approve", "block"}:
@@ -190,7 +186,6 @@ def parse_hook_output(value: Any, *, expected_event: str | None = None) -> HookR
         additional_context=(clamp_hook_output(str(additional_context))
                             if additional_context is not None else None),
         reason=str(reason) if reason is not None else None,
-        updated_input=updated_input if isinstance(updated_input, Mapping) else None,
     )
 
 

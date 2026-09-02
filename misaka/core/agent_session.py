@@ -7,13 +7,21 @@ import inspect
 import os
 import re
 import time
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from datetime import datetime
 from typing import Any
 
 from misaka.agent.agent import AbortController, Agent
-from misaka.agent.types import AgentMessage, AgentState, AgentTool, ThinkingLevel
+from misaka.agent.types import (
+    AgentContext,
+    AgentLoopTurnUpdate,
+    AgentMessage,
+    AgentState,
+    AgentTool,
+    PrepareNextTurnContext,
+    ThinkingLevel,
+)
 from misaka.ai.models import (
     clamp_thinking_level,
     get_supported_thinking_levels,
@@ -29,8 +37,13 @@ from misaka.ai.types import (
     TextContent,
     validate_message,
 )
+from misaka.ai.utils.headers import provider_headers_to_record
 from misaka.ai.utils.overflow import is_context_overflow, is_recoverable_length
-from misaka.ai.utils.retry import RetryPolicy, is_retryable_assistant_error
+from misaka.ai.utils.retry import (
+    RetryCallbacks,
+    RetryPolicy,
+    is_retryable_assistant_error,
+)
 from misaka.core.auth_guidance import (
     format_no_api_key_found_message,
     format_no_model_selected_message,
@@ -61,6 +74,9 @@ from misaka.core.compaction.branch_summarization import (
     collect_entries_for_branch_summary,
     generate_branch_summary,
 )
+from misaka.core.compaction.compaction import (
+    estimate_tokens as estimate_compaction_tokens,
+)
 from misaka.core.defaults import DEFAULT_THINKING_LEVEL
 from misaka.core.export_html import export_session_to_html
 from misaka.core.export_html.tool_renderer import create_tool_html_renderer
@@ -80,12 +96,8 @@ from misaka.core.messages import BashExecutionMessage
 from misaka.core.model_registry import ModelRegistry
 from misaka.core.prompt_templates import PromptTemplate, expand_prompt_template
 from misaka.core.resource_loader import ResourceLoaderLike
-from misaka.core.session_manager import (
-    CURRENT_SESSION_VERSION,
-    SessionManager,
-    _dump_json,
-    get_latest_compaction_entry,
-)
+from misaka.core.session_export import export_session_to_jsonl
+from misaka.core.session_manager import SessionManager, get_latest_compaction_entry
 from misaka.core.settings_manager import SettingsManager
 from misaka.core.slash_commands import SlashCommandInfo, _make_slash_command_info
 from misaka.core.source_info import SourceInfo, create_synthetic_source_info
@@ -95,8 +107,12 @@ from misaka.core.tools.bash import create_local_bash_operations
 from misaka.core.tools.tool_definition_wrapper import (
     create_tool_definition_from_agent_tool,
 )
-from misaka.ui.tui.interactive.theme.theme import theme
-from misaka.utils.paths import resolve_path
+from misaka.core.usage_totals import addUsageToTotals, createUsageTotals
+from misaka.ui.tui.interactive.theme.theme import get_theme_by_name, theme
+from misaka.utils.tool_result_images import (
+    NormalizeToolResultImagesOptions,
+    normalize_tool_result_images,
+)
 from misaka.utils.values import read_field
 
 _SKILL_BLOCK_PATTERN = re.compile(
@@ -140,6 +156,7 @@ class AgentSessionConfig:
     baseToolsOverride: dict[str, AgentTool] | None = None
     extensionRunnerRef: dict[str, Any] | None = None
     sessionStartEvent: dict[str, Any] | None = None
+    excludedToolNames: list[str] | None = None
 
 
 @dataclass(slots=True)
@@ -202,13 +219,26 @@ class _ToolDefinitionEntry:
 
 def parse_skill_block(text: str) -> ParsedSkillBlock | None:
     match = _SKILL_BLOCK_PATTERN.match(text)
-    if not match:
+    if match:
+        return ParsedSkillBlock(
+            name=match.group(1),
+            location=match.group(2),
+            content=match.group(3),
+            userMessage=match.group(4).strip() if match.group(4) else None,
+        )
+
+    # MISAKA keeps Pi's historical transcript renderer, while /skill now emits
+    # Hermes' activation scaffold. Parse both so old and new sessions collapse.
+    from misaka.extensions.skills import parse_skill_invocation_message
+
+    parsed = parse_skill_invocation_message(text)
+    if parsed is None:
         return None
     return ParsedSkillBlock(
-        name=match.group(1),
-        location=match.group(2),
-        content=match.group(3),
-        userMessage=match.group(4).strip() if match.group(4) else None,
+        name=parsed["name"],
+        location=parsed["location"],
+        content=parsed["content"],
+        userMessage=parsed["user_instruction"],
     )
 
 
@@ -227,6 +257,11 @@ class AgentSession:
             list(resolved.initialActiveToolNames) if resolved.initialActiveToolNames is not None else None
         )
         self._allowedToolNames = None if resolved.allowedToolNames is None else set(resolved.allowedToolNames)
+        self._excludedToolNames = (
+            set(resolved.excludedToolNames)
+            if resolved.excludedToolNames is not None
+            else set()
+        )
         self._disallowedToolNames: set[str] = set()
         self._alwaysAllowedToolNames: set[str] = set()
         self._baseToolsOverride = dict(resolved.baseToolsOverride or {})
@@ -248,7 +283,7 @@ class AgentSession:
         self._pendingNextTurnMessages: list[dict[str, Any]] = []
         self._pendingBashMessages: list[BashExecutionMessage] = []
         self._pendingCustomMessages: list[dict[str, Any]] = []
-        self._bashAbortController: AbortController | None = None
+        self._bashAbortControllers: set[AbortController] = set()
         self._auto_compaction_abort_controller: AbortController | None = None
         self._compactionAbortController: AbortController | None = None
         self._branchSummaryAbortController: AbortController | None = None
@@ -268,8 +303,10 @@ class AgentSession:
         self._toolDefinitions: dict[str, _ToolDefinitionEntry] = {}
         self._baseSystemPrompt = ""
         self._baseSystemPromptOptions: BuildSystemPromptOptions = {"cwd": self._cwd}
+        self._systemPromptOverride: str | None = None
 
         self._install_agent_tool_hooks()
+        self._install_agent_next_turn_refresh()
         self._build_runtime(
             {
                 "activeToolNames": self._initialActiveToolNames,
@@ -392,7 +429,7 @@ class AgentSession:
 
     @property
     def isBashRunning(self) -> bool:
-        return self._bashAbortController is not None
+        return len(self._bashAbortControllers) > 0
 
     @property
     def hasPendingBashMessages(self) -> bool:
@@ -411,6 +448,15 @@ class AgentSession:
         return unsubscribe
 
     def dispose(self) -> None:
+        try:
+            self.abortRetry()
+            self.abortCompaction()
+            self.abortBranchSummary()
+            self.abortBash()
+            self.agent.abort()
+        except Exception:  # noqa: BLE001,S110 - Pi disposal ignores abort-hook failures
+            pass
+
         self._extensionRunner.invalidate(_STALE_CONTEXT_MESSAGE)
         self._disconnect_from_agent()
         self._eventListeners = []
@@ -430,16 +476,27 @@ class AgentSession:
         await self.waitForIdle()
 
     async def _get_required_request_auth(self, model: Model[Any]) -> dict[str, Any]:
-        result = await self._modelRegistry.getApiKeyAndHeaders(model)
-        if not result.get("ok"):
-            error = str(result.get("error") or "")
-            if error.startswith("No API key found"):
-                raise RuntimeError(format_no_api_key_found_message(model.provider))
-            raise RuntimeError(error)
+        try:
+            result = await self._modelRegistry.getAuth(model)
+        except Exception as error:
+            if str(error) == "authHeader requires a resolved API key":
+                raise RuntimeError(
+                    format_no_api_key_found_message(model.provider)
+                ) from error
+            raise
 
-        api_key = result.get("apiKey")
-        if isinstance(api_key, str) and api_key:
-            return {"apiKey": api_key, "headers": result.get("headers")}
+        if result and (result.auth.apiKey or result.auth.headers):
+            request_model = (
+                model.model_copy(update={"baseUrl": result.auth.baseUrl})
+                if result.auth.baseUrl
+                else model
+            )
+            return {
+                "model": request_model,
+                "apiKey": result.auth.apiKey,
+                "headers": provider_headers_to_record(result.auth.headers),
+                "env": result.env,
+            }
 
         if self._modelRegistry.isUsingOAuth(model):
             raise RuntimeError(
@@ -453,10 +510,23 @@ class AgentSession:
         if self.agent.streamFn == stream_simple:
             return await self._get_required_request_auth(model)
 
-        result = await self._modelRegistry.getApiKeyAndHeaders(model)
-        if not result.get("ok"):
-            return {}
-        return {"apiKey": result.get("apiKey"), "headers": result.get("headers")}
+        try:
+            result = await self._modelRegistry.getAuth(model)
+            if result is None:
+                return {"model": model}
+            request_model = (
+                model.model_copy(update={"baseUrl": result.auth.baseUrl})
+                if result.auth.baseUrl
+                else model
+            )
+            return {
+                "model": request_model,
+                "apiKey": result.auth.apiKey,
+                "headers": provider_headers_to_record(result.auth.headers),
+                "env": result.env,
+            }
+        except Exception:  # noqa: BLE001 - custom streams may own credentials outside the registry
+            return {"model": model}
 
     async def prompt(
         self,
@@ -499,6 +569,7 @@ class AgentSession:
                     current_text,
                     current_images,
                     resolved.source,
+                    resolved.streamingBehavior if self.isStreaming else None,
                 )
                 action = _event_field(input_result, "action", "continue")
                 if action == "handled":
@@ -532,7 +603,10 @@ class AgentSession:
 
             if self.model is None:
                 raise RuntimeError(format_no_model_selected_message())
-            if not self._modelRegistry.hasConfiguredAuth(self.model):
+            has_configured_auth = self._modelRegistry.hasConfiguredAuth(
+                self.model
+            ) or await self._modelRegistry.checkConfiguredAuth(self.model)
+            if not has_configured_auth:
                 if self._modelRegistry.isUsingOAuth(self.model):
                     raise RuntimeError(
                         f'Authentication failed for "{self.model.provider}". '
@@ -560,21 +634,21 @@ class AgentSession:
                     self._baseSystemPrompt,
                     self._baseSystemPromptOptions,
                 )
-                if before_result:
-                    if _event_field(before_result, "block", False):
-                        raise RuntimeError(
-                            str(
-                                _event_field(
-                                    before_result,
-                                    "reason",
-                                    "before_agent_start hook blocked the turn",
-                                )
+                if before_result and _event_field(before_result, "block", False):
+                    raise RuntimeError(
+                        str(
+                            _event_field(
+                                before_result,
+                                "reason",
+                                "before_agent_start hook blocked the turn",
                             )
                         )
-                    extension_messages = _event_field(before_result, "messages") or []
-                    for message in extension_messages:
-                        normalized_message = _message_dict(message)
-                        messages.append(
+                    )
+                extension_messages = _event_field(before_result, "messages") or []
+                for message in extension_messages:
+                    normalized_message = _message_dict(message)
+                    messages.append(
+                        _normalize_nullish_message_content(
                             {
                                 "role": "custom",
                                 "customType": read_field(normalized_message, "customType"),
@@ -584,12 +658,16 @@ class AgentSession:
                                 "timestamp": int(time.time() * 1000),
                             }
                         )
-                    system_prompt = _event_field(before_result, "systemPrompt")
-                    if system_prompt:
-                        self.agent.state.systemPrompt = system_prompt
-                    else:
-                        self.agent.state.systemPrompt = self._baseSystemPrompt
+                    )
+                system_prompt = _event_field(before_result, "systemPrompt")
+                if system_prompt is not None:
+                    self._systemPromptOverride = str(system_prompt)
+                    self.agent.state.systemPrompt = self._systemPromptOverride
+                else:
+                    self._systemPromptOverride = None
+                    self.agent.state.systemPrompt = self._baseSystemPrompt
             else:
+                self._systemPromptOverride = None
                 self.agent.state.systemPrompt = self._baseSystemPrompt
             report_preflight(True)
             await self._run_agent_prompt(messages)
@@ -668,14 +746,15 @@ class AgentSession:
         ``if (options.persist)``).  Extensions never pass it, so a plugin that swaps the
         model for a subtask can no longer change the user's default.
         """
-        if not self._modelRegistry.hasConfiguredAuth(model):
+        if not await self._modelRegistry.checkConfiguredAuth(model):
             raise RuntimeError(f"No API key for {model.provider}/{model.id}")
         current = self.model
-        thinking_level = self._get_thinking_level_for_model_switch()
+        thinking_level = self._get_thinking_level_for_model_switch(model)
         self.agent.state.model = model
         self.sessionManager.appendModelChange(model.provider, model.id)
         if persist:
             self.settingsManager.setDefaultModelAndProvider(model.provider, model.id)
+            self._add_persisted_default_to_non_empty_scope(model)
         # Persisting the model deliberately does not rewrite the global thinking default.
         self.setThinkingLevel(thinking_level)
         if not models_are_equal(current, model):
@@ -687,6 +766,22 @@ class AgentSession:
                     "source": "set",
                 }
             )
+
+    def _add_persisted_default_to_non_empty_scope(self, model: Model[Any]) -> None:
+        if not self._scopedModels:
+            return
+        if any(models_are_equal(item["model"], model) for item in self._scopedModels):
+            return
+
+        self._scopedModels = [*self._scopedModels, {"model": model}]
+
+        enabled_models = self.settingsManager.getEnabledModels()
+        if not enabled_models:
+            return
+        model_reference = f"{model.provider}/{model.id}"
+        if any(pattern.lower() == model_reference.lower() for pattern in enabled_models):
+            return
+        self.settingsManager.setEnabledModels([*enabled_models, model_reference])
 
     def setThinkingLevel(self, level: ThinkingLevel, persist: bool = False) -> None:
         """Set the session thinking level, clamped to what the model supports.
@@ -758,11 +853,15 @@ class AgentSession:
         current_index = max(current_index, 0)
         next_index = (current_index + (1 if direction != "backward" else -1)) % len(scoped_models)
         next_model = scoped_models[next_index]["model"]
-        thinking_level = self._get_thinking_level_for_model_switch(scoped_models[next_index].get("thinkingLevel"))
+        thinking_level = self._get_thinking_level_for_model_switch(
+            next_model,
+            scoped_models[next_index].get("thinkingLevel"),
+        )
         self.agent.state.model = next_model
         self.sessionManager.appendModelChange(next_model.provider, next_model.id)
         if persist:
             self.settingsManager.setDefaultModelAndProvider(next_model.provider, next_model.id)
+            self._add_persisted_default_to_non_empty_scope(next_model)
         # Model persistence does not implicitly rewrite the global thinking default.
         self.setThinkingLevel(thinking_level)
         await self._extensionRunner.emit(
@@ -787,11 +886,12 @@ class AgentSession:
         current_index = max(current_index, 0)
         next_index = (current_index + (1 if direction != "backward" else -1)) % len(available_models)
         next_model = available_models[next_index]
-        thinking_level = self._get_thinking_level_for_model_switch()
+        thinking_level = self._get_thinking_level_for_model_switch(next_model)
         self.agent.state.model = next_model
         self.sessionManager.appendModelChange(next_model.provider, next_model.id)
         if persist:
             self.settingsManager.setDefaultModelAndProvider(next_model.provider, next_model.id)
+            self._add_persisted_default_to_non_empty_scope(next_model)
         # Model persistence does not implicitly rewrite the global thinking default.
         self.setThinkingLevel(thinking_level)
         await self._extensionRunner.emit(
@@ -804,12 +904,18 @@ class AgentSession:
         )
         return ModelCycleResult(model=next_model, thinkingLevel=self.thinkingLevel, isScoped=False)
 
-    def _get_thinking_level_for_model_switch(self, explicitLevel: ThinkingLevel | None = None) -> ThinkingLevel:
+    def _get_thinking_level_for_model_switch(
+        self,
+        targetModel: Model[Any] | None = None,
+        explicitLevel: ThinkingLevel | None = None,
+    ) -> ThinkingLevel:
         if explicitLevel is not None:
             return explicitLevel
-        if not self.supportsThinking():
-            return self.settingsManager.getDefaultThinkingLevel() or DEFAULT_THINKING_LEVEL
-        return self.thinkingLevel
+        if targetModel is not None:
+            per_model = self.settingsManager.getModelThinkingLevel(targetModel.provider, targetModel.id)
+            if per_model is not None:
+                return per_model
+        return self.settingsManager.getDefaultThinkingLevel() or self.thinkingLevel or DEFAULT_THINKING_LEVEL
 
     def setSteeringMode(self, mode: str) -> None:
         self.agent.steeringMode = mode
@@ -879,7 +985,11 @@ class AgentSession:
         valid_names = [tool.name for tool in active]
         self.agent.state.tools = active
         self._baseSystemPrompt = self._rebuild_system_prompt(valid_names)
-        self.agent.state.systemPrompt = self._baseSystemPrompt
+        self.agent.state.systemPrompt = (
+            self._systemPromptOverride
+            if self._systemPromptOverride is not None
+            else self._baseSystemPrompt
+        )
 
     def setDisallowedToolsByName(
         self,
@@ -919,13 +1029,15 @@ class AgentSession:
             "reload" if _event_field(self._sessionStartEvent, "reason") == "reload" else "startup"
         )
 
-    async def reload(self) -> None:
+    async def reload(self, options: dict[str, Any] | None = None) -> None:
         previous_flag_values = self._extensionRunner.get_flag_values()
         await emit_session_shutdown_event(self._extensionRunner, {"type": "session_shutdown", "reason": "reload"})
         # The old runner must unsubscribe from the shared event bus, or every
         # /reload leaks one more layer of handlers (pi #7656/6ca423447).
         self._extensionRunner.invalidate(_STALE_CONTEXT_MESSAGE)
         await self.settingsManager.reload()
+        self.agent.steeringMode = self.settingsManager.getSteeringMode()
+        self.agent.followUpMode = self.settingsManager.getFollowUpMode()
         reset_api_providers()
         await self._resourceLoader.reload()
         self._build_runtime(
@@ -946,6 +1058,11 @@ class AgentSession:
             )
         )
         if has_bindings:
+            before_session_start = read_field(options, "beforeSessionStart")
+            if before_session_start is not None:
+                result = before_session_start()
+                if inspect.isawaitable(result):
+                    await result
             await self._extensionRunner.emit({"type": "session_start", "reason": "reload"})
             await self._extend_resources_from_extensions("reload")
 
@@ -967,14 +1084,16 @@ class AgentSession:
     ) -> None:
         resolved_options = dict(options or {})
         normalized = _message_dict(message)
-        app_message = {
-            "role": "custom",
-            "customType": read_field(normalized, "customType"),
-            "content": _message_content(normalized),
-            "display": bool(read_field(normalized, "display")),
-            "details": read_field(normalized, "details"),
-            "timestamp": int(time.time() * 1000),
-        }
+        app_message = _normalize_nullish_message_content(
+            {
+                "role": "custom",
+                "customType": read_field(normalized, "customType"),
+                "content": _message_content(normalized),
+                "display": bool(read_field(normalized, "display")),
+                "details": read_field(normalized, "details"),
+                "timestamp": int(time.time() * 1000),
+            }
+        )
         deliver_as = resolved_options.get("deliverAs")
         if deliver_as == "nextTurn":
             self._pendingNextTurnMessages.append(app_message)
@@ -1070,24 +1189,35 @@ class AgentSession:
         options: dict[str, Any] | None = None,
     ) -> BashResult:
         resolved_options = dict(options or {})
-        self._bashAbortController = AbortController()
+        abort_controller = AbortController()
+        self._bashAbortControllers.add(abort_controller)
         prefix = self.settingsManager.getShellCommandPrefix()
         shell_path = self.settingsManager.getShellPath()
         resolved_command = f"{prefix}\n{command}" if prefix else command
+
+        def handle_chunk(delta: str) -> None:
+            if onChunk is not None:
+                onChunk(delta)
+            event: dict[str, Any] = {"type": "bash_execution_update", "delta": delta}
+            bash_id = resolved_options.get("id")
+            if bash_id is not None:
+                event["id"] = bash_id
+            self._emit(event)
+
         try:
             result = await execute_bash_with_operations(
                 resolved_command,
                 self.sessionManager.getCwd(),
                 resolved_options.get("operations") or create_local_bash_operations({"shellPath": shell_path}),
                 {
-                    "onChunk": onChunk,
-                    "signal": self._bashAbortController.signal,
+                    "onChunk": handle_chunk,
+                    "signal": abort_controller.signal,
                 },
             )
             self.recordBashResult(command, result, resolved_options)
             return result
         finally:
-            self._bashAbortController = None
+            self._bashAbortControllers.discard(abort_controller)
 
     def recordBashResult(self, command: str, result: BashResult, options: dict[str, Any] | None = None) -> None:
         resolved_options = dict(options or {})
@@ -1108,8 +1238,8 @@ class AgentSession:
         self.sessionManager.appendMessage(bash_message)
 
     def abortBash(self) -> None:
-        if self._bashAbortController is not None:
-            self._bashAbortController.abort()
+        for abort_controller in tuple(self._bashAbortControllers):
+            abort_controller.abort()
 
     def abortBranchSummary(self) -> None:
         if self._branchSummaryAbortController is not None:
@@ -1128,6 +1258,7 @@ class AgentSession:
                 raise RuntimeError(format_no_model_selected_message())
 
             auth = await self._get_compaction_request_auth(self.model)
+            request_model = auth.get("model", self.model)
             api_key = auth.get("apiKey")
 
             settings = CompactionSettings(**self.settingsManager.getCompactionSettings())
@@ -1148,6 +1279,8 @@ class AgentSession:
                         "preparation": preparation,
                         "branchEntries": branch_entries,
                         "customInstructions": customInstructions,
+                        "reason": "manual",
+                        "willRetry": False,
                         "signal": self._compactionAbortController.signal,
                     }
                 )
@@ -1161,19 +1294,25 @@ class AgentSession:
                     firstKeptEntryId=_event_field(provided, "firstKeptEntryId"),
                     tokensBefore=int(_event_field(provided, "tokensBefore", 0)),
                     details=_event_field(provided, "details"),
+                    usage=_event_field(provided, "usage"),
                 )
                 from_hook = True
             else:
                 result = await run_compaction(
                     preparation,
-                    self.model,
+                    request_model,
                     api_key,
                     auth.get("headers"),
                     customInstructions,
                     self._compactionAbortController.signal,
                     self.thinkingLevel,
                     self.agent.streamFn,
-                    self._summarization_retry_policy(),
+                    retry=self._summarization_retry_policy(),
+                    env=auth.get("env"),
+                    callbacks=self._summarization_retry_callbacks(
+                        {"source": "compaction", "reason": "manual"}
+                    ),
+                    session_id=None,
                 )
 
             if self._compactionAbortController.signal.aborted:
@@ -1185,8 +1324,13 @@ class AgentSession:
                 result.tokensBefore,
                 result.details,
                 from_hook,
+                result.usage,
             )
-            self.agent.state.messages = self.sessionManager.buildSessionContext().messages
+            session_context = self.sessionManager.buildSessionContext()
+            self.agent.state.messages = session_context.messages
+            result.estimatedTokensAfter = sum(
+                estimate_compaction_tokens(message) for message in session_context.messages
+            )
 
             saved_entry = next(
                 (
@@ -1202,6 +1346,8 @@ class AgentSession:
                         "type": "session_compact",
                         "compactionEntry": saved_entry,
                         "fromExtension": from_hook,
+                        "reason": "manual",
+                        "willRetry": False,
                     }
                 )
 
@@ -1262,16 +1408,21 @@ class AgentSession:
         )
 
     def abortCompaction(self) -> None:
-        if self._auto_compaction_abort_controller is not None:
-            self._auto_compaction_abort_controller.abort()
         if self._compactionAbortController is not None:
             self._compactionAbortController.abort()
+        if self._auto_compaction_abort_controller is not None:
+            self._auto_compaction_abort_controller.abort()
 
     async def navigateTree(
         self,
         targetId: str,
         options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        if self.isStreaming:
+            raise RuntimeError(
+                "Wait for the current response to finish before navigating the session tree."
+            )
+
         resolved_options = dict(options or {})
         old_leaf_id = self.sessionManager.getLeafId()
 
@@ -1330,19 +1481,24 @@ class AgentSession:
 
             summary_text: str | None = None
             summary_details: dict[str, Any] | None = None
+            summary_usage: Any | None = None
             if wants_summary and collected.entries and extension_summary is None:
-                auth = await self._get_required_request_auth(self.model)
+                auth = await self._get_compaction_request_auth(self.model)
                 branch_summary_settings = self.settingsManager.getBranchSummarySettings()
                 summary_result = await generate_branch_summary(
                     collected.entries,
                     GenerateBranchSummaryOptions(
-                        model=self.model,
-                        apiKey=auth["apiKey"],
+                        model=auth.get("model", self.model),
+                        apiKey=auth.get("apiKey"),
                         headers=auth.get("headers"),
+                        env=auth.get("env"),
                         signal=self._branchSummaryAbortController.signal,
                         customInstructions=custom_instructions,
                         replaceInstructions=replace_instructions,
                         reserveTokens=int(branch_summary_settings.get("reserveTokens", 16384)),
+                        streamFn=self.agent.streamFn,
+                        retry=self._summarization_retry_policy(),
+                        callbacks=self._summarization_retry_callbacks({"source": "branchSummary"}),
                     ),
                 )
                 if summary_result.aborted:
@@ -1350,6 +1506,7 @@ class AgentSession:
                 if summary_result.error:
                     raise RuntimeError(summary_result.error)
                 summary_text = summary_result.summary
+                summary_usage = summary_result.usage
                 summary_details = {
                     "readFiles": list(summary_result.readFiles or []),
                     "modifiedFiles": list(summary_result.modifiedFiles or []),
@@ -1358,6 +1515,7 @@ class AgentSession:
                 summary_text = _event_field(extension_summary, "summary")
                 details = _event_field(extension_summary, "details")
                 summary_details = _message_dict(details) if details is not None else None
+                summary_usage = _event_field(extension_summary, "usage")
 
             new_leaf_id: str | None
             editor_text: str | None = None
@@ -1388,6 +1546,7 @@ class AgentSession:
                     summary_text,
                     summary_details,
                     from_extension,
+                    summary_usage,
                 )
                 summary_entry = self.sessionManager.getEntry(summary_id)
                 if label:
@@ -1413,7 +1572,7 @@ class AgentSession:
             )
 
             result: dict[str, Any] = {"cancelled": False}
-            if editor_text:
+            if editor_text is not None:
                 result["editorText"] = editor_text
             if summary_entry is not None:
                 result["summaryEntry"] = summary_entry
@@ -1432,37 +1591,37 @@ class AgentSession:
             self._retryAbortController.abort()
 
     def getSessionStats(self) -> SessionStats:
-        state = self.state
-        user_messages = sum(1 for message in state.messages if _message_role(message) == "user")
-        assistant_messages = sum(1 for message in state.messages if _message_role(message) == "assistant")
-        tool_results = sum(1 for message in state.messages if _message_role(message) == "toolResult")
+        user_messages = 0
+        assistant_messages = 0
+        tool_results = 0
+        total_messages = 0
         tool_calls = 0
-        total_input = 0
-        total_output = 0
-        total_cache_read = 0
-        total_cache_write = 0
-        total_cost = 0.0
+        usage_totals = createUsageTotals()
 
-        for message in state.messages:
-            if _message_role(message) != "assistant":
+        for entry in self.sessionManager.getEntries():
+            entry_type = read_field(entry, "type")
+            if entry_type in ("branch_summary", "compaction"):
+                usage = read_field(entry, "usage")
+                if usage:
+                    addUsageToTotals(usage_totals, usage)
+            if entry_type != "message":
                 continue
-            usage = read_field(message, "usage") or {}
-            content = _message_content(message)
-            if isinstance(content, list):
-                tool_calls += sum(1 for block in content if _content_type(block) == "toolCall")
-            # usage may be a dict or a Usage object (providers return objects);
-            # a bare .get() would crash /session once the session has usage.
-            def _u(field, src=usage, default=0):
-                if isinstance(src, dict):
-                    return src.get(field, default)
-                return getattr(src, field, default) or default
-
-            total_input += int(_u("input"))
-            total_output += int(_u("output"))
-            total_cache_read += int(_u("cacheRead"))
-            total_cache_write += int(_u("cacheWrite"))
-            cost = _u("cost", default=None) or {}
-            total_cost += float(_u("total", cost, 0) or 0)
+            total_messages += 1
+            message = read_field(entry, "message")
+            role = _message_role(message)
+            if role == "user":
+                user_messages += 1
+            elif role == "toolResult":
+                tool_results += 1
+                usage = read_field(message, "usage")
+                if usage:
+                    addUsageToTotals(usage_totals, usage)
+            elif role == "assistant":
+                assistant_messages += 1
+                content = _message_content(message)
+                if isinstance(content, list):
+                    tool_calls += sum(1 for block in content if _content_type(block) == "toolCall")
+                addUsageToTotals(usage_totals, read_field(message, "usage") or {})
 
         return SessionStats(
             sessionFile=self.sessionFile,
@@ -1471,25 +1630,45 @@ class AgentSession:
             assistantMessages=assistant_messages,
             toolCalls=tool_calls,
             toolResults=tool_results,
-            totalMessages=len(state.messages),
+            totalMessages=total_messages,
             tokens=SessionTokenStats(
-                input=total_input,
-                output=total_output,
-                cacheRead=total_cache_read,
-                cacheWrite=total_cache_write,
-                total=total_input + total_output + total_cache_read + total_cache_write,
+                input=usage_totals.input,
+                output=usage_totals.output,
+                cacheRead=usage_totals.cacheRead,
+                cacheWrite=usage_totals.cacheWrite,
+                total=(
+                    usage_totals.input
+                    + usage_totals.output
+                    + usage_totals.cacheRead
+                    + usage_totals.cacheWrite
+                ),
             ),
-            cost=total_cost,
+            cost=usage_totals.cost,
             contextUsage=self.getContextUsage(),
         )
 
-    async def exportToHtml(self, outputPath: str | None = None) -> str:
+    async def exportToHtml(
+        self,
+        outputPath: str | None = None,
+        options: dict[str, str | None] | None = None,
+    ) -> str:
+        requested_theme = (options or {}).get("themeName")
+        theme_name = next(
+            (
+                candidate
+                for candidate in (requested_theme, self.settingsManager.getTheme())
+                if isinstance(candidate, str)
+                and candidate
+                and get_theme_by_name(candidate) is not None
+            ),
+            None,
+        )
         return await export_session_to_html(
             self.sessionManager,
             self.state,
             {
                 "outputPath": outputPath,
-                "themeName": self.settingsManager.getTheme(),
+                "themeName": theme_name,
                 "toolRenderer": create_tool_html_renderer(
                     {
                         "getToolDefinition": self.getToolDefinition,
@@ -1501,34 +1680,7 @@ class AgentSession:
         )
 
     def exportToJsonl(self, outputPath: str | None = None) -> str:
-        resolved_output = outputPath or (
-            f"session-{datetime.now(UTC).isoformat(timespec='milliseconds').replace(':', '-').replace('.', '-')}.jsonl"
-        )
-        file_path = resolve_path(resolved_output, os.getcwd())
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-
-        header = {
-            "type": "session",
-            "version": CURRENT_SESSION_VERSION,
-            "id": self.sessionManager.getSessionId(),
-            "timestamp": datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-            "cwd": self.sessionManager.getCwd(),
-        }
-
-        branch_entries = self.sessionManager.getBranch()
-        lines = [_dump_json(header)]
-        previous_id: str | None = None
-        for entry in branch_entries:
-            linear_entry = dict(entry)
-            linear_entry["parentId"] = previous_id
-            lines.append(_dump_json(linear_entry))
-            entry_id = entry.get("id")
-            if isinstance(entry_id, str):
-                previous_id = entry_id
-
-        with open(file_path, "w", encoding="utf-8") as handle:
-            handle.write("\n".join(lines) + "\n")
-        return file_path
+        return export_session_to_jsonl(self.sessionManager, outputPath)
 
     def getLastAssistantText(self) -> str | None:
         for message in reversed(self.messages):
@@ -1575,7 +1727,7 @@ class AgentSession:
                     continue
                 if _calculate_context_tokens(read_field(message, "usage") or {}) > 0:
                     has_post_compaction_usage = True
-                break
+                    break
             if not has_post_compaction_usage:
                 return {"tokens": None, "contextWindow": model.contextWindow, "percent": None}
 
@@ -1785,9 +1937,15 @@ class AgentSession:
             )
         elif event_type == "message_end":
             message = _event_field(event, "message")
+            # The Agent reducer stores an isolated copy before awaiting listeners. Capture
+            # that exact copy before the extension can re-enter and append more state.
+            state_message = self.agent.state.messages[-1] if self.agent.state.messages else None
             replacement = await self._extensionRunner.emit_message_end({"type": "message_end", "message": message})
             if replacement is not None and message is not None:
-                self._replace_message_in_place(message, replacement)
+                normalized_replacement = _normalize_nullish_message_content(replacement)
+                self._replace_message_in_place(message, normalized_replacement)
+                if state_message is not None:
+                    self._replace_message_in_place(state_message, message)
         elif event_type == "tool_execution_start":
             await self._extensionRunner.emit(
                 {
@@ -1869,7 +2027,7 @@ class AgentSession:
                         error if isinstance(error, Exception) else RuntimeError(str(error)),
                     )
 
-            self._spawn_background(_run())
+            self._spawn_extension_message(_run())
 
         def _send_user_message_from_runtime(
             content: str | list[TextContent | ImageContent | dict[str, Any]],
@@ -1884,7 +2042,13 @@ class AgentSession:
                         error if isinstance(error, Exception) else RuntimeError(str(error)),
                     )
 
-            self._spawn_background(_run())
+            self._spawn_extension_message(_run())
+
+        def _append_entry_from_runtime(custom_type: str, *data: Any) -> None:
+            entry_id = self.sessionManager.appendCustomEntry(custom_type, *data)
+            entry = self.sessionManager.getEntry(entry_id)
+            if entry is not None:
+                self._emit({"type": "entry_appended", "entry": entry})
 
         def _compact_from_extension(options: dict[str, Any] | None = None) -> None:
             async def _run() -> None:
@@ -1909,7 +2073,7 @@ class AgentSession:
             {
                 "sendMessage": _send_message_from_runtime,
                 "sendUserMessage": _send_user_message_from_runtime,
-                "appendEntry": lambda customType, data=None: self.sessionManager.appendCustomEntry(customType, data),
+                "appendEntry": _append_entry_from_runtime,
                 "setSessionName": self.setSessionName,
                 "getSessionName": self.sessionManager.getSessionName,
                 "setLabel": lambda entryId, label: self.sessionManager.appendLabelChange(entryId, label),
@@ -1926,6 +2090,7 @@ class AgentSession:
                 "getModel": lambda: self.model,
                 "getScopedModels": lambda: self.scopedModels,
                 "isIdle": lambda: self.isIdle,
+                "isProjectTrusted": lambda: self.settingsManager.isProjectTrusted(),
                 "getSignal": lambda: self.agent.signal,
                 "abort": lambda: self._extensionAbortHandler() if self._extensionAbortHandler else self._spawn_background(self.abort()),
                 "hasPendingMessages": lambda: self.pendingMessageCount > 0,
@@ -1933,9 +2098,11 @@ class AgentSession:
                 "getContextUsage": self.getContextUsage,
                 "compact": _compact_from_extension,
                 "getSystemPrompt": lambda: self.systemPrompt,
+                "getSystemPromptOptions": lambda: self._baseSystemPromptOptions,
             },
             {
                 "registerProvider": self._register_provider,
+                "registerNativeProvider": self._register_native_provider,
                 "unregisterProvider": self._unregister_provider,
             },
         )
@@ -1961,6 +2128,10 @@ class AgentSession:
         self._modelRegistry.registerProvider(name, config)
         self._refresh_current_model_from_registry()
 
+    def _register_native_provider(self, provider: Any) -> None:
+        self._modelRegistry.registerNativeProvider(provider)
+        self._refresh_current_model_from_registry()
+
     def _unregister_provider(self, name: str) -> None:
         self._modelRegistry.unregisterProvider(name)
         self._refresh_current_model_from_registry()
@@ -1980,6 +2151,8 @@ class AgentSession:
         previous_active_tool_names = self.getActiveToolNames()
 
         def is_allowed_tool(name: str) -> bool:
+            if name in self._excludedToolNames:
+                return False
             normalized = name.casefold()
             if name in self._alwaysAllowedToolNames:
                 return True
@@ -2177,30 +2350,6 @@ class AgentSession:
             if isinstance(block, dict) and block.get("type") == "text"
         )
 
-    async def _normalize_tool_result_images(self, result: Any) -> None:
-        """Normalize image blocks in a tool result in place (pi #7330). No-op when autoResizeImages is off."""
-        content = _event_field(result, "content")
-        if not isinstance(content, list) or not self.settingsManager.getImageAutoResize():
-            return
-        from misaka.ai.types import ImageContent
-        from misaka.utils.image_resize import resize_image
-        for index, block in enumerate(list(content)):
-            if read_field(block, "type") != "image":
-                continue
-            img = block if isinstance(block, ImageContent) else ImageContent(
-                data=str(read_field(block, "data") or ""),
-                mimeType=str(read_field(block, "mimeType") or ""))
-            try:
-                resized = await resize_image(img)
-            except Exception:  # noqa: BLE001, S112 - keep the original block if the image backend is unavailable (matches upstream)
-                continue
-            if resized is None or not resized.wasResized:
-                continue
-            replacement = dict(block) if isinstance(block, dict) else {"type": "image"}
-            replacement.update({"type": "image", "data": resized.data,
-                                "mimeType": resized.mimeType})
-            content[index] = replacement
-
     def _install_agent_tool_hooks(self) -> None:
         async def before_tool_call(payload: Any, _signal: Any | None = None) -> Any:
             runner = self._extensionRunner
@@ -2220,39 +2369,130 @@ class AgentSession:
         async def after_tool_call(payload: Any, _signal: Any | None = None) -> Any:
             runner = self._extensionRunner
             result = _event_field(payload, "result")
-            # Images produced by tools (extensions/MCP/screenshots) bypass read's resizing,
-            # and an oversized image makes the provider reject the whole conversation, so
-            # normalize once before they enter history (pi #7330/b0e05b442). On failure keep
-            # the original block: an unavailable image backend must not silently drop output.
-            await self._normalize_tool_result_images(result)
-            if not runner.has_handlers("tool_result"):
-                return None
             tool_call = _event_field(payload, "toolCall")
-            hook_result = await runner.emit_tool_result(  # type: ignore[attr-defined]
-                {
-                    "type": "tool_result",
-                    "toolName": read_field(tool_call, "name"),
-                    "toolCallId": read_field(tool_call, "id"),
-                    "input": _event_field(payload, "args"),
-                    "content": _event_field(result, "content"),
-                    "details": _event_field(result, "details"),
-                    "isError": bool(_event_field(payload, "isError")),
-                    "usage": _event_field(result, "usage"),
-                }
+            hook_result = None
+            if runner.has_handlers("tool_result"):
+                hook_result = await runner.emit_tool_result(  # type: ignore[attr-defined]
+                    {
+                        "type": "tool_result",
+                        "toolName": read_field(tool_call, "name"),
+                        "toolCallId": read_field(tool_call, "id"),
+                        "input": _event_field(payload, "args"),
+                        "content": _event_field(result, "content"),
+                        "details": _event_field(result, "details"),
+                        "isError": bool(_event_field(payload, "isError")),
+                        "usage": _event_field(result, "usage"),
+                    }
+                )
+
+            result_content = _event_field(result, "content")
+            content = (
+                _event_field(hook_result, "content")
+                if hook_result is not None
+                else result_content
             )
-            if not hook_result:
+            if content is None:
+                content = result_content
+            if content is None:
+                content = []
+            normalized_content = await normalize_tool_result_images(
+                content,
+                NormalizeToolResultImagesOptions(
+                    autoResizeImages=self.settingsManager.getImageAutoResize()
+                ),
+            )
+
+            if hook_result is None and normalized_content is content:
                 return None
+
+            hook_is_error = (
+                _event_field(hook_result, "isError")
+                if hook_result is not None
+                else None
+            )
             return {
-                "content": _event_field(hook_result, "content"),
-                "details": _event_field(hook_result, "details"),
-                "isError": _event_field(hook_result, "isError", _event_field(payload, "isError")),
+                "content": normalized_content,
+                "details": (
+                    _event_field(hook_result, "details")
+                    if hook_result is not None
+                    else None
+                ),
+                "isError": (
+                    hook_is_error
+                    if hook_is_error is not None
+                    else _event_field(payload, "isError")
+                ),
                 # None here means "hook did not set it"; the agent loop falls back to the
                 # executed result's usage (pi agent-session.ts:537 usage: hookResult?.usage).
-                "usage": _event_field(hook_result, "usage"),
+                "usage": (
+                    _event_field(hook_result, "usage")
+                    if hook_result is not None
+                    else None
+                ),
             }
 
         self.agent.beforeToolCall = before_tool_call
         self.agent.afterToolCall = after_tool_call
+
+    async def _compact_before_next_assistant_response(
+        self,
+        context: AgentContext,
+    ) -> AgentContext:
+        model = self.model
+        settings = CompactionSettings(**self.settingsManager.getCompactionSettings())
+        if (
+            model is None
+            or model.contextWindow <= 0
+            or not should_compact(
+                estimate_compaction_context_tokens(context.messages).tokens,
+                model.contextWindow,
+                settings,
+            )
+        ):
+            return context
+
+        await self._run_auto_compaction("threshold", False)
+        return AgentContext(
+            systemPrompt=context.systemPrompt,
+            messages=self.agent.state.messages[:],
+            tools=context.tools,
+        )
+
+    def _install_agent_next_turn_refresh(self) -> None:
+        """Refresh mutable session state before each request in one agent run."""
+        previous_with_context = self.agent.prepareNextTurnWithContext
+        previous_legacy = self.agent.prepareNextTurn
+
+        async def prepare_next_turn(
+            turn: PrepareNextTurnContext,
+            signal: Any | None = None,
+        ) -> AgentLoopTurnUpdate:
+            context = await self._compact_before_next_assistant_response(turn.context)
+            previous_snapshot: Any = None
+            if previous_with_context is not None:
+                previous_snapshot = previous_with_context(replace(turn, context=context), signal)
+            elif previous_legacy is not None:
+                previous_snapshot = previous_legacy(signal)
+            if inspect.isawaitable(previous_snapshot):
+                previous_snapshot = await previous_snapshot
+
+            previous_context = read_field(previous_snapshot, "context")
+            next_context = previous_context if previous_context is not None else context
+            return AgentLoopTurnUpdate(
+                context=AgentContext(
+                    systemPrompt=(
+                        self._systemPromptOverride
+                        if self._systemPromptOverride is not None
+                        else self._baseSystemPrompt
+                    ),
+                    messages=list(read_field(next_context, "messages", []) or []),
+                    tools=self.agent.state.tools[:],
+                ),
+                model=self.agent.state.model,
+                thinkingLevel=self.agent.state.thinkingLevel,
+            )
+
+        self.agent.prepareNextTurnWithContext = prepare_next_turn
 
     async def _run_agent_prompt(self, messages: AgentMessage | list[AgentMessage]) -> None:
         self._isAgentRunActive = True
@@ -2261,6 +2501,8 @@ class AgentSession:
             while await self._handle_post_agent_run():
                 await self.agent.continue_()
         finally:
+            self._systemPromptOverride = None
+            self.agent.state.systemPrompt = self._baseSystemPrompt
             self._flush_pending_bash_messages()
             self._flush_pending_custom_messages()
             await self._emit_agent_settled()
@@ -2321,7 +2563,13 @@ class AgentSession:
             )
             self._retryAttempt = 0
 
-        return await self._check_compaction(message)
+        if await self._check_compaction(message):
+            return True
+
+        # The low-level loop drains both queues before agent_end. Anything left
+        # here arrived from an agent_end handler (including a Sister/Last Order
+        # completion) and needs a continuation before this one-shot run settles.
+        return self.agent.hasQueuedMessages()
 
     def _will_retry_after_agent_end(self, event: Any) -> bool:
         if self._stopHookContinuationPending:
@@ -2336,12 +2584,30 @@ class AgentSession:
                 return self._is_retryable_error(assistant_message)
         return False
 
+    def _summarization_retry_callbacks(self, source: dict[str, str]) -> RetryCallbacks:
+        return RetryCallbacks(
+            onRetryScheduled=lambda attempt, max_attempts, delay_ms, error_message: self._emit(
+                {
+                    "type": "summarization_retry_scheduled",
+                    "attempt": attempt,
+                    "maxAttempts": max_attempts,
+                    "delayMs": delay_ms,
+                    "errorMessage": error_message,
+                }
+            ),
+            onRetryAttemptStart=lambda: self._emit(
+                {"type": "summarization_retry_attempt_start", **source}
+            ),
+            onRetryFinished=lambda _success, _attempt, _final_error=None: self._emit(
+                {"type": "summarization_retry_finished"}
+            ),
+        )
+
     def _summarization_retry_policy(self) -> RetryPolicy:
         """The retry budget summarization borrows from agent turns (pi #6647).
 
         pi threads the same `settings.retry` into summarization so one transient stream
-        drop no longer throws away a whole compaction. Only compaction is wired here;
-        branch summaries live in another module and are left to its owner.
+        drop no longer throws away a whole compaction or branch summary.
         """
         settings = self.settingsManager.getRetrySettings()
         return RetryPolicy(
@@ -2479,14 +2745,22 @@ class AgentSession:
         # compact-and-retry once (pi #7540/32850ef7c). A "stop" answer that overflowed the
         # window is only compacted, not retried: it is complete, and agent.continue()
         # cannot resume from an assistant message.
+        context_overflow = same_model and is_context_overflow(
+            assistant_message, context_window)
         recoverable_length = same_model and is_recoverable_length(
             assistant_message, getattr(self.model, "maxTokens", 0) or 0)
-        if same_model and (is_context_overflow(assistant_message, context_window)
-                           or recoverable_length):
+        if context_overflow or recoverable_length:
             will_retry = assistant_message.stopReason != "stop"
             if not will_retry:
                 return await self._run_auto_compaction("overflow", False)
             if self._overflow_recovery_attempted:
+                error_message = (
+                    "Truncated response recovery failed after one compact-and-retry attempt."
+                    if recoverable_length and not context_overflow
+                    else "Context overflow recovery failed after one compact-and-retry "
+                         "attempt. Try reducing context or switching to a "
+                         "larger-context model."
+                )
                 self._emit(
                     {
                         "type": "compaction_end",
@@ -2497,16 +2771,15 @@ class AgentSession:
                         # Report truncation and overflow separately (pi #8130/c7c763f5c): labeling
                         # truncation as overflow would steer the user toward a larger-context
                         # model when the real cause is early-ended output.
-                        "errorMessage": (
-                            "Truncated-response recovery failed after one compact-and-retry "
-                            "attempt. The provider repeatedly ended output early."
-                            if recoverable_length
-                            and not is_context_overflow(assistant_message, context_window)
-                            else "Context overflow recovery failed after one compact-and-retry "
-                                 "attempt. Try reducing context or switching to a "
-                                 "larger-context model."
-                        ),
+                        "errorMessage": error_message,
                     }
+                )
+                await self._emit_session_compact_failed(
+                    reason="overflow",
+                    error_message=error_message,
+                    aborted=False,
+                    will_retry=False,
+                    from_extension=False,
                 )
                 return False
 
@@ -2561,27 +2834,11 @@ class AgentSession:
                 )
                 return False
 
-            api_key: str | None = None
-            headers: dict[str, str] | None = None
-            if self.agent.streamFn == stream_simple:
-                auth_result = await self._modelRegistry.getApiKeyAndHeaders(self.model)
-                if not auth_result.get("ok") or not auth_result.get("apiKey"):
-                    self._emit(
-                        {
-                            "type": "compaction_end",
-                            "reason": reason,
-                            "result": None,
-                            "aborted": False,
-                            "willRetry": False,
-                        }
-                    )
-                    return False
-                api_key = str(auth_result["apiKey"])
-                headers = auth_result.get("headers")
-            else:
-                auth = await self._get_compaction_request_auth(self.model)
-                api_key = auth.get("apiKey")
-                headers = auth.get("headers")
+            auth = await self._get_compaction_request_auth(self.model)
+            request_model = auth.get("model", self.model)
+            api_key = auth.get("apiKey")
+            headers = auth.get("headers")
+            env = auth.get("env")
 
             settings = CompactionSettings(**self.settingsManager.getCompactionSettings())
             branch_entries = self.sessionManager.getBranch()
@@ -2607,6 +2864,8 @@ class AgentSession:
                         "preparation": preparation,
                         "branchEntries": branch_entries,
                         "customInstructions": None,
+                        "reason": reason,
+                        "willRetry": will_retry,
                         "signal": self._auto_compaction_abort_controller.signal,
                     }
                 )
@@ -2631,19 +2890,25 @@ class AgentSession:
                     firstKeptEntryId=_event_field(provided, "firstKeptEntryId"),
                     tokensBefore=int(_event_field(provided, "tokensBefore", 0)),
                     details=_event_field(provided, "details"),
+                    usage=_event_field(provided, "usage"),
                 )
                 from_hook = True
             else:
                 result = await run_compaction(
                     preparation,
-                    self.model,
+                    request_model,
                     api_key,
                     headers,
                     None,
                     self._auto_compaction_abort_controller.signal,
                     self.thinkingLevel,
                     self.agent.streamFn,
-                    self._summarization_retry_policy(),
+                    retry=self._summarization_retry_policy(),
+                    env=env,
+                    callbacks=self._summarization_retry_callbacks(
+                        {"source": "compaction", "reason": reason}
+                    ),
+                    session_id=None,
                 )
 
             if self._auto_compaction_abort_controller.signal.aborted:
@@ -2667,8 +2932,13 @@ class AgentSession:
                 result.tokensBefore,
                 result.details,
                 from_hook,
+                result.usage,
             )
-            self.agent.state.messages = self.sessionManager.buildSessionContext().messages
+            session_context = self.sessionManager.buildSessionContext()
+            self.agent.state.messages = session_context.messages
+            result.estimatedTokensAfter = sum(
+                estimate_compaction_tokens(message) for message in session_context.messages
+            )
 
             saved_entry = next(
                 (
@@ -2684,6 +2954,8 @@ class AgentSession:
                         "type": "session_compact",
                         "compactionEntry": saved_entry,
                         "fromExtension": from_hook,
+                        "reason": reason,
+                        "willRetry": will_retry,
                     }
                 )
 
@@ -2738,6 +3010,15 @@ class AgentSession:
             return
         loop.create_task(awaitable)
 
+    def _spawn_extension_message(self, awaitable: Any) -> None:
+        """Match JavaScript async calls by running eagerly until their first suspension."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(awaitable)
+            return
+        asyncio.Task(awaitable, loop=loop, eager_start=True)
+
 
 def _definition_attr(definition: Any, name: str) -> Any:
     if isinstance(definition, dict):
@@ -2781,6 +3062,17 @@ def _message_role(message: Any) -> str | None:
 
 def _message_content(message: Any) -> Any:
     return read_field(message, "content")
+
+
+def _normalize_nullish_message_content(message: Any) -> Any:
+    if _message_role(message) not in {"user", "assistant", "toolResult", "custom"}:
+        return message
+    if _message_content(message) is not None:
+        return message
+    if isinstance(message, Mapping):
+        return {**message, "content": []}
+    model_copy = getattr(message, "model_copy", None)
+    return model_copy(update={"content": []}) if callable(model_copy) else message
 
 
 def _validate_as(model_type: type, data: Any) -> Any | None:

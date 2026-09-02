@@ -14,6 +14,7 @@ and ~14s of backoff before failing. Excluded patterns are checked first and win.
 
 from __future__ import annotations
 
+import inspect
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -21,7 +22,7 @@ from typing import Any
 
 from misaka.ai.types import AssistantMessage
 from misaka.ai.utils.abort import sleep
-from misaka.utils.values import signal_aborted
+from misaka.utils.values import maybe_await, signal_aborted
 
 
 def _build_provider_error_pattern(patterns: tuple[str, ...]) -> re.Pattern[str]:
@@ -126,10 +127,65 @@ class RetryPolicy:
     baseDelayMs: int
 
 
+@dataclass(slots=True)
+class RetryCallbacks:
+    """Optional lifecycle callbacks around assistant retry attempts."""
+
+    onRetryScheduled: Callable[[int, int, int, str], Awaitable[None] | None] | None = None
+    onRetryAttemptStart: Callable[[], Awaitable[None] | None] | None = None
+    onRetryFinished: (
+        Callable[[bool, int], Awaitable[None] | None]
+        | Callable[[bool, int, str | None], Awaitable[None] | None]
+        | None
+    ) = None
+
+
+async def _invoke_callback(callback: Callable[..., Any] | None, *args: Any) -> None:
+    if callback is None:
+        return
+    await maybe_await(callback(*args))
+
+
+async def _invoke_finished_callback(
+    callback: Callable[..., Any] | None,
+    success: bool,
+    attempt: int,
+    final_error: str | None = None,
+) -> None:
+    """Preserve JavaScript's optional trailing ``finalError`` callback argument."""
+    if callback is None:
+        return
+    try:
+        parameters = inspect.signature(callback).parameters.values()
+    except (TypeError, ValueError):
+        result = callback(success, attempt, final_error)
+    else:
+        accepts_varargs = any(
+            parameter.kind == inspect.Parameter.VAR_POSITIONAL
+            for parameter in parameters
+        )
+        positional = [
+            parameter
+            for parameter in parameters
+            if parameter.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+        ]
+        result = (
+            callback(success, attempt, final_error)
+            if accepts_varargs or len(positional) >= 3
+            else callback(success, attempt)
+        )
+    await maybe_await(result)
+
+
 async def retry_assistant_call(
     produce: Callable[[], Awaitable[AssistantMessage]],
     policy: RetryPolicy | None,
     signal: Any | None = None,
+    callbacks: RetryCallbacks | None = None,
 ) -> AssistantMessage:
     """Run one assistant-producing call with bounded retry on transient errors.
 
@@ -142,29 +198,55 @@ async def retry_assistant_call(
 
     With ``policy`` ``None`` or disabled this is equivalent to awaiting ``produce()``.
 
-    pi additionally takes an optional ``RetryCallbacks`` bundle here and invokes it around
-    each attempt; coding-agent's ``core/agent-session.ts._summarizationRetryCallbacks``
-    is what turns those calls into ``summarization_retry_*`` events. misaka has no such
-    event and nothing listening for one, so the parameter is left out rather than shipped
-    as a hook nothing can reach.
+    Optional callbacks mirror pi's retry lifecycle: scheduled before backoff, attempt-start
+    after backoff, and one finished notification once a scheduled retry loop terminates.
     """
     max_attempts = policy.maxRetries if policy is not None and policy.enabled else 0
 
     attempt = 0
+    last_retry: tuple[int, str] | None = None
     while True:
         response = await produce()
 
-        # Anything that is not an error is terminal: a normal stop, or an abort, which pi
-        # never retries either. pi splits those two branches only to tell its callbacks
-        # whether the loop ended in success; without callbacks one check covers both.
+        if response.stopReason == "aborted":
+            if last_retry is not None:
+                await _invoke_finished_callback(
+                    callbacks.onRetryFinished if callbacks else None,
+                    False,
+                    last_retry[0],
+                )
+            return response
+
         if response.stopReason != "error":
+            if last_retry is not None:
+                await _invoke_finished_callback(
+                    callbacks.onRetryFinished if callbacks else None,
+                    True,
+                    last_retry[0],
+                )
             return response
 
         if attempt >= max_attempts or not is_retryable_assistant_error(response):
+            if last_retry is not None:
+                await _invoke_finished_callback(
+                    callbacks.onRetryFinished if callbacks else None,
+                    False,
+                    last_retry[0],
+                    response.errorMessage,
+                )
             return response
 
         attempt += 1
         delay_ms = (policy.baseDelayMs if policy is not None else 0) * (2 ** (attempt - 1))
+        error_message = response.errorMessage or "Unknown error"
+        last_retry = (attempt, error_message)
+        await _invoke_callback(
+            callbacks.onRetryScheduled if callbacks else None,
+            attempt,
+            max_attempts,
+            delay_ms,
+            error_message,
+        )
 
         try:
             await sleep(delay_ms, signal)
@@ -173,9 +255,16 @@ async def retry_assistant_call(
             # RuntimeError("Request was aborted") where pi throws a private
             # RetrySleepAbortError. Only a real abort is normalized to an aborted
             # message; anything else propagates, matching pi's `throw error`.
+            await _invoke_finished_callback(
+                callbacks.onRetryFinished if callbacks else None,
+                False,
+                attempt,
+                error_message,
+            )
             if not signal_aborted(signal):
                 raise
             return response.model_copy(update={"stopReason": "aborted", "errorMessage": None})
+        await _invoke_callback(callbacks.onRetryAttemptStart if callbacks else None)
 
 
 def is_retryable_assistant_error(message: AssistantMessage) -> bool:

@@ -2,28 +2,37 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import sys
 import traceback
 from collections.abc import Mapping
 from copy import copy, deepcopy
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from misaka.ai.types import ImageContent, Model
 from misaka.core.diagnostics import ResourceDiagnostic
 from misaka.core.extensions.types import (
+    EntryRenderer,
     Extension,
     ExtensionError,
     ExtensionFlag,
     ExtensionMode,
     ExtensionRuntime,
     ExtensionShortcut,
+    InputSource,
+    LoadExtensionsResult,
+    MarkdownTransformer,
+    ProjectTrustContext,
+    ProjectTrustEvent,
     ProviderConfig,
     RegisteredCommand,
     RegisteredTool,
     ResolvedCommand,
+    UIPromptKind,
 )
+from misaka.core.system_prompt import BuildSystemPromptOptions
 from misaka.ui.tui.interactive.theme.theme import theme
 
 RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS = (
@@ -130,7 +139,7 @@ class _NoUIContext:
     def getAllThemes(self) -> list[Any]:
         return []
 
-    def getTheme(self) -> Any:
+    def getTheme(self, _name: str | None = None) -> Any:
         return None
 
     def setTheme(self, _theme: str | Any) -> dict[str, Any]:
@@ -141,6 +150,40 @@ class _NoUIContext:
 
     def setToolsExpanded(self, *_args: Any, **_kwargs: Any) -> None:
         return None
+
+
+class _UIPromptUIContext:
+    """Transparent UI proxy that adds Pi's blocking-prompt lifecycle events."""
+
+    def __init__(self, runner: ExtensionRunner, ui: Any) -> None:
+        self._runner = runner
+        self._ui = ui
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._ui, name)
+
+    async def select(self, title: str, *args: Any, **kwargs: Any) -> Any:
+        return await self._runner._with_ui_prompt(
+            "select", title, self._ui.select, title, *args, **kwargs
+        )
+
+    async def confirm(self, title: str, *args: Any, **kwargs: Any) -> Any:
+        return await self._runner._with_ui_prompt(
+            "confirm", title, self._ui.confirm, title, *args, **kwargs
+        )
+
+    async def input(self, title: str, *args: Any, **kwargs: Any) -> Any:
+        return await self._runner._with_ui_prompt(
+            "input", title, self._ui.input, title, *args, **kwargs
+        )
+
+    async def editor(self, title: str, *args: Any, **kwargs: Any) -> Any:
+        return await self._runner._with_ui_prompt(
+            "editor", title, self._ui.editor, title, *args, **kwargs
+        )
+
+    async def custom(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._runner._with_ui_prompt("custom", None, self._ui.custom, *args, **kwargs)
 
 
 class _ContextBase:
@@ -207,6 +250,10 @@ class _ContextBase:
         self._runner._assert_active()
         return self._extra("isIdle", self._runner.isIdleFn())  # type: ignore[no-any-return]
 
+    def isProjectTrusted(self) -> bool:
+        self._runner._assert_active()
+        return self._runner.isProjectTrustedFn()  # type: ignore[no-any-return]
+
     def abort(self) -> None:
         self._runner._assert_active()
         abort = self._extras.get("abort")
@@ -251,6 +298,10 @@ class _ContextBase:
 
 
 class _CommandContextView(_ContextBase):
+    def getSystemPromptOptions(self) -> BuildSystemPromptOptions:
+        self._runner._assert_active()
+        return self._runner.getSystemPromptOptionsFn()  # type: ignore[no-any-return]
+
     async def waitForIdle(self) -> None:
         self._runner._assert_active()
         await self._runner.waitForIdleFn()
@@ -358,6 +409,38 @@ def _build_builtin_keybindings(resolvedKeybindings: Mapping[str, str | list[str]
     return builtin
 
 
+async def emit_project_trust_event(
+    extensions_result: LoadExtensionsResult,
+    event: ProjectTrustEvent,
+    ctx: ProjectTrustContext,
+) -> dict[str, Any]:
+    errors: list[ExtensionError] = []
+    for extension in extensions_result.extensions:
+        for handler in extension.handlers.get("project_trust", []):
+            try:
+                handler_result = _invoke_handler(handler, event, ctx)
+                if hasattr(handler_result, "__await__"):
+                    handler_result = await handler_result
+                trusted = (
+                    handler_result["trusted"]
+                    if isinstance(handler_result, Mapping)
+                    else handler_result.trusted
+                )
+                if trusted == "undecided":
+                    continue
+                return {"result": handler_result, "errors": errors}
+            except Exception as error:  # noqa: BLE001 - extension failures are returned to the caller
+                errors.append(
+                    ExtensionError(
+                        extensionPath=extension.path,
+                        event=_event_type(event),
+                        error=str(error),
+                        stack="".join(traceback.format_exception(error)),
+                    )
+                )
+    return {"errors": errors}
+
+
 @dataclass(slots=True)
 class ExtensionRunner:
     extensions: list[Extension]
@@ -373,6 +456,7 @@ class ExtensionRunner:
     getModel: Any = field(default=lambda: None)
     getScopedModels: Any = field(default=list)
     isIdleFn: Any = field(default=lambda: True)
+    isProjectTrustedFn: Any = field(default=lambda: True)
     getSignalFn: Any = field(default=lambda: None)
     waitForIdleFn: Any = field(default=lambda: _completed_future())
     abortFn: Any = field(default=lambda: None)
@@ -380,6 +464,7 @@ class ExtensionRunner:
     getContextUsageFn: Any = field(default=lambda: None)
     compactFn: Any = field(default=lambda _options=None: None)
     getSystemPromptFn: Any = field(default=lambda: "")
+    getSystemPromptOptionsFn: Any = field(init=False, repr=False)
     newSessionHandler: Any = field(default=lambda _options=None: _result_future({"cancelled": False}))
     forkHandler: Any = field(default=lambda _entry_id, _options=None: _result_future({"cancelled": False}))
     navigateTreeHandler: Any = field(default=lambda _target_id, _options=None: _result_future({"cancelled": False}))
@@ -389,6 +474,16 @@ class ExtensionRunner:
     shortcutDiagnostics: list[ResourceDiagnostic] = field(default_factory=list)
     commandDiagnostics: list[ResourceDiagnostic] = field(default_factory=list)
     staleMessage: str | None = None
+    uiPromptDepth: int = field(default=0, init=False, repr=False)
+    activeUIPrompt: tuple[UIPromptKind, str | None] | None = field(
+        default=None, init=False, repr=False
+    )
+
+    def __post_init__(self) -> None:
+        self.getSystemPromptOptionsFn = self._default_system_prompt_options
+
+    def _default_system_prompt_options(self) -> BuildSystemPromptOptions:
+        return {"cwd": self.cwd}
 
     def bind_core(
         self,
@@ -414,6 +509,7 @@ class ExtensionRunner:
         self.getModel = _required_action(context_actions, "getModel")
         self.getScopedModels = _resolve_action(context_actions, "getScopedModels", self.getScopedModels)
         self.isIdleFn = _required_action(context_actions, "isIdle")
+        self.isProjectTrustedFn = _required_action(context_actions, "isProjectTrusted")
         self.getSignalFn = _required_action(context_actions, "getSignal")
         self.abortFn = _required_action(context_actions, "abort")
         self.hasPendingMessagesFn = _required_action(context_actions, "hasPendingMessages")
@@ -421,25 +517,25 @@ class ExtensionRunner:
         self.getContextUsageFn = _required_action(context_actions, "getContextUsage")
         self.compactFn = _required_action(context_actions, "compact")
         self.getSystemPromptFn = _required_action(context_actions, "getSystemPrompt")
+        get_system_prompt_options = _resolve_action(context_actions, "getSystemPromptOptions")
+        self.getSystemPromptOptionsFn = (
+            get_system_prompt_options
+            if get_system_prompt_options is not None
+            else self._default_system_prompt_options
+        )
 
         register_provider = _resolve_action(provider_actions, "registerProvider")
+        register_native_provider = _resolve_action(
+            provider_actions, "registerNativeProvider"
+        )
         unregister_provider = _resolve_action(provider_actions, "unregisterProvider")
         fallback_register = getattr(self.modelRegistry, "registerProvider", None)
+        fallback_register_native = getattr(
+            self.modelRegistry, "registerNativeProvider", None
+        )
         fallback_unregister = getattr(self.modelRegistry, "unregisterProvider", None)
 
-        for registration in list(self.runtime.pendingProviderRegistrations):
-            try:
-                if callable(register_provider):
-                    register_provider(registration.name, registration.config)
-                elif callable(fallback_register):
-                    fallback_register(registration.name, registration.config)
-                else:
-                    raise RuntimeError("No provider registration handler bound")  # noqa: TRY004 - callers treat bad input as ValueError
-            except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception
-                self._emit_extension_exception(registration.extensionPath, "register_provider", error)
-        self.runtime.pendingProviderRegistrations.clear()
-
-        def register_provider_now(name: str, config: ProviderConfig, _extension_path: str | None = None) -> None:
+        def dispatch_register(name: str, config: ProviderConfig) -> None:
             if callable(register_provider):
                 register_provider(name, config)
                 return
@@ -447,6 +543,47 @@ class ExtensionRunner:
                 fallback_register(name, config)
                 return
             raise RuntimeError("No provider registration handler bound")
+
+        def dispatch_register_native(provider: Any) -> None:
+            if callable(register_native_provider):
+                register_native_provider(provider)
+                return
+            if callable(fallback_register_native):
+                fallback_register_native(provider)
+                return
+            if callable(fallback_register):
+                fallback_register(provider)
+                return
+            raise RuntimeError("No native provider registration handler bound")
+
+        for registration in list(self.runtime.pendingProviderRegistrations):
+            try:
+                dispatch_register(registration.name, registration.config)
+            except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception
+                self._emit_extension_exception(registration.extensionPath, "register_provider", error)
+        self.runtime.pendingProviderRegistrations.clear()
+
+        for registration in list(self.runtime.pendingNativeProviderRegistrations):
+            try:
+                dispatch_register_native(registration.provider)
+            except Exception as error:  # noqa: BLE001 - extension code: reported through the runner
+                self._emit_extension_exception(
+                    registration.extensionPath, "register_provider", error
+                )
+        self.runtime.pendingNativeProviderRegistrations.clear()
+
+        def register_provider_now(
+            name: str,
+            config: ProviderConfig,
+            _extension_path: str | None = None,
+        ) -> None:
+            dispatch_register(name, config)
+
+        def register_native_provider_now(
+            provider: Any,
+            _extension_path: str | None = None,
+        ) -> None:
+            dispatch_register_native(provider)
 
         def unregister_provider_now(name: str, _extension_path: str | None = None) -> None:
             if callable(unregister_provider):
@@ -458,6 +595,7 @@ class ExtensionRunner:
             raise RuntimeError("No provider unregistration handler bound")
 
         self.runtime.registerProvider = register_provider_now
+        self.runtime.registerNativeProvider = register_native_provider_now
         self.runtime.unregisterProvider = unregister_provider_now
 
     def bind_command_context(self, actions: Any | None = None) -> None:
@@ -478,8 +616,47 @@ class ExtensionRunner:
         self.reloadHandler = _required_action(actions, "reload")
 
     def set_ui_context(self, uiContext: Any | None = None, mode: ExtensionMode = "print") -> None:
-        self.uiContext = uiContext if uiContext is not None else _NoUIContext()
+        self.uiContext = (
+            _UIPromptUIContext(self, uiContext) if uiContext is not None else _NoUIContext()
+        )
         self.mode = mode
+
+    async def _with_ui_prompt(
+        self,
+        kind: UIPromptKind,
+        title: str | None,
+        method: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        if self.uiPromptDepth == 0:
+            self.activeUIPrompt = (kind, title or None)
+            self._queue_ui_prompt_event("ui_prompt_start")
+        self.uiPromptDepth += 1
+        try:
+            return await method(*args, **kwargs)
+        finally:
+            self.uiPromptDepth = max(0, self.uiPromptDepth - 1)
+            if self.uiPromptDepth == 0 and self.activeUIPrompt is not None:
+                self._queue_ui_prompt_event("ui_prompt_end")
+                self.activeUIPrompt = None
+
+    def _queue_ui_prompt_event(
+        self, event_type: Literal["ui_prompt_start", "ui_prompt_end"]
+    ) -> None:
+        active = self.activeUIPrompt
+        if active is None:
+            return
+        kind, title = active
+        event: dict[str, Any] = {
+            "type": event_type,
+            "reason": "ui_prompt",
+            "kind": kind,
+        }
+        if title:
+            event["title"] = title
+        task = asyncio.create_task(self.emit(event))
+        task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
 
     def get_ui_context(self) -> Any:
         return self.uiContext
@@ -621,6 +798,20 @@ class ExtensionRunner:
     def get_message_renderer(self, customType: str) -> Any:
         for extension in self.extensions:
             renderer = extension.messageRenderers.get(customType)
+            if renderer is not None:
+                return renderer
+        return None
+
+    def get_markdown_transformers(self) -> list[MarkdownTransformer]:
+        return [
+            transformer
+            for extension in self.extensions
+            if (transformer := extension.markdownTransformer) is not None
+        ]
+
+    def get_entry_renderer(self, customType: str) -> EntryRenderer[Any] | None:
+        for extension in self.extensions:
+            renderer = extension.entryRenderers.get(customType)
             if renderer is not None:
                 return renderer
         return None
@@ -812,8 +1003,9 @@ class ExtensionRunner:
                     )
                     if hasattr(handler_result, "__await__"):
                         handler_result = await handler_result
-                    if _result_flag(handler_result, "messages"):
-                        current_messages = _result_flag(handler_result, "messages")
+                    next_messages = _result_flag(handler_result, "messages")
+                    if next_messages is not None:
+                        current_messages = next_messages
                 except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception
                     self._emit_extension_exception(extension.path, "context", error)
         return current_messages
@@ -961,14 +1153,26 @@ class ExtensionRunner:
             "themePaths": theme_paths,
         }
 
-    async def emit_input(self, text: str, images: list[ImageContent] | None, source: str) -> dict[str, Any]:
+    async def emit_input(
+        self,
+        text: str,
+        images: list[ImageContent] | None,
+        source: InputSource,
+        streamingBehavior: Literal["steer", "followUp"] | None = None,
+    ) -> dict[str, Any]:
         ctx = self.create_context()
         current_text = text
         current_images = images
         for extension in self.extensions:
             for handler in extension.handlers.get("input", []):
                 try:
-                    event = {"type": "input", "text": current_text, "images": current_images, "source": source}
+                    event = {
+                        "type": "input",
+                        "text": current_text,
+                        "images": current_images,
+                        "source": source,
+                        "streamingBehavior": streamingBehavior,
+                    }
                     handler_result = _invoke_handler(handler, event, ctx)
                     if hasattr(handler_result, "__await__"):
                         handler_result = await handler_result
@@ -1004,6 +1208,8 @@ class ExtensionRunner:
     emitError = emit_error
     hasHandlers = has_handlers
     getMessageRenderer = get_message_renderer
+    getMarkdownTransformers = get_markdown_transformers
+    getEntryRenderer = get_entry_renderer
     getRegisteredCommands = get_registered_commands
     getCommandDiagnostics = get_command_diagnostics
     getCommand = get_command
@@ -1052,4 +1258,5 @@ __all__ = [
     "ReloadHandler",
     "ShutdownHandler",
     "SwitchSessionHandler",
-    ]
+    "emit_project_trust_event",
+]

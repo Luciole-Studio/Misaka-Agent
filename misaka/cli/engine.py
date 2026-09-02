@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypedDict
 
@@ -29,26 +30,45 @@ from misaka.core.agent_session_services import (
 from misaka.core.auth_guidance import formatNoModelsAvailableMessage
 from misaka.core.auth_storage import AuthStorage
 from misaka.core.export_html import export_from_file
+from misaka.core.http_dispatcher import applyHttpProxySettings
 from misaka.core.keybindings import KeybindingsManager
 from misaka.core.model_registry import ModelRegistry
 from misaka.core.model_resolver import ScopedModel, resolveCliModel, resolveModelScope
 from misaka.core.output_guard import isStdoutTakenOver, restoreStdout, takeOverStdout
+from misaka.core.project_trust import (
+    ProjectTrustStore,
+    has_trust_requiring_project_resources,
+    resolve_project_trusted,
+)
 from misaka.core.session_cwd import (
     MissingSessionCwdError,
     SessionCwdIssue,
     format_missing_session_cwd_prompt,
     get_missing_session_cwd_issue,
 )
-from misaka.core.session_manager import SessionManager
+from misaka.core.session_manager import NewSessionOptions, SessionManager
+from misaka.core.settings_diagnostics import (
+    collect_settings_diagnostics,
+    deduplicate_diagnostics,
+)
 from misaka.core.settings_manager import SettingsManager
+from misaka.core.timings import printTimings, resetTimings, time
 from misaka.modes import runPrintMode as run_print_mode
-from misaka.ui.tui import TUI, ProcessTerminal, setKeybindings
+from misaka.ui.tui import TUI, ProcessTerminal, setCapabilityOverrides, setKeybindings
 from misaka.ui.tui.interactive import InteractiveMode
+from misaka.ui.tui.interactive.components.extension_input import (
+    ExtensionInputComponent,
+)
 from misaka.ui.tui.interactive.components.extension_selector import (
     ExtensionSelectorComponent,
 )
 from misaka.ui.tui.interactive.theme.theme import init_theme, stop_theme_watcher
-from misaka.utils.paths import is_local_path, normalize_path, resolve_path
+from misaka.utils.paths import (
+    canonicalize_path,
+    is_local_path,
+    normalize_path,
+    resolve_path,
+)
 
 AppMode = Literal["interactive", "print", "json"]
 PrintOutputMode = Literal["text", "json"]
@@ -98,27 +118,25 @@ async def read_piped_stdin() -> str | None:
     return content.strip() or None
 
 
-def resolve_app_mode(parsed: Args, stdin_is_tty: bool) -> AppMode:
+def resolve_app_mode(parsed: Args, stdin_is_tty: bool, stdout_is_tty: bool = True) -> AppMode:
     if parsed.mode == "json":
         return "json"
-    if parsed.print or not stdin_is_tty:
+    if parsed.print or not stdin_is_tty or not stdout_is_tty:
         return "print"
     return "interactive"
+
+
+def is_plain_runtime_metadata_command(parsed: Args) -> bool:
+    """pi main.ts:127-129: help and list-models answer on the real stdout unless a wire mode was asked for."""
+    return not parsed.print and parsed.mode is None and (parsed.help or parsed.listModels is not None)
 
 
 def to_print_output_mode(app_mode: AppMode) -> PrintOutputMode:
     return "json" if app_mode == "json" else "text"
 
 
-def collect_settings_diagnostics(settings_manager: SettingsManager, context: str) -> list[RuntimeDiagnostic]:
-    return [
-        RuntimeDiagnostic(type="warning", message=f"({context}, {error.scope} settings) {error.error}")
-        for error in settings_manager.drainErrors()
-    ]
-
-
 def report_diagnostics(
-    diagnostics: list[RuntimeDiagnostic],
+    diagnostics: Sequence[AgentSessionRuntimeDiagnostic],
     *,
     stream: Any | None = None,
 ) -> None:
@@ -160,15 +178,38 @@ async def resolve_session_path(session_arg: str, cwd: str, session_dir: str | No
         return ResolvedSession(type="path", path=resolve_path(session_arg, cwd))
 
     local_sessions = await SessionManager.list(cwd, session_dir)
-    local_matches = [session for session in local_sessions if session.id.startswith(session_arg)]
-    if local_matches:
-        return ResolvedSession(type="local", path=local_matches[0].path)
+    local_match = next(
+        (session for session in local_sessions if session.id == session_arg), None
+    )
+    if local_match is None:
+        local_match = next(
+            (
+                session
+                for session in local_sessions
+                if session.id.startswith(session_arg)
+            ),
+            None,
+        )
+    if local_match is not None:
+        return ResolvedSession(type="local", path=local_match.path)
 
     global_sessions = await SessionManager.listAll()
-    global_matches = [session for session in global_sessions if session.id.startswith(session_arg)]
-    if global_matches:
-        match = global_matches[0]
-        return ResolvedSession(type="global", path=match.path, cwd=match.cwd)
+    global_match = next(
+        (session for session in global_sessions if session.id == session_arg), None
+    )
+    if global_match is None:
+        global_match = next(
+            (
+                session
+                for session in global_sessions
+                if session.id.startswith(session_arg)
+            ),
+            None,
+        )
+    if global_match is not None:
+        return ResolvedSession(
+            type="global", path=global_match.path, cwd=global_match.cwd
+        )
 
     return ResolvedSession(type="not_found", arg=session_arg)
 
@@ -182,6 +223,144 @@ async def prompt_confirm(message: str, *, input_stream: Any | None = None, outpu
         flush()
     answer = await asyncio.to_thread(input_handle.readline)
     return answer.strip().lower() in {"y", "yes"}
+
+
+async def _show_startup_component(
+    settings_manager: SettingsManager,
+    builder: Callable[[Callable[[Any], None], TUI], tuple[Any, Any]],
+) -> Any:
+    """Run one modal before InteractiveMode owns the terminal."""
+    init_theme(settings_manager.getTheme())
+    setKeybindings(KeybindingsManager.create())
+    try:
+        ui = TUI(
+            ProcessTerminal(),
+            bool(getattr(settings_manager, "getShowHardwareCursor", lambda: False)()),
+        )
+    except TypeError:
+        ui = TUI(ProcessTerminal())
+    if hasattr(ui, "setClearOnShrink"):
+        ui.setClearOnShrink(bool(getattr(settings_manager, "getClearOnShrink", lambda: False)()))
+
+    done: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+    closed = False
+
+    def finish(result: Any) -> None:
+        nonlocal closed
+        if closed:
+            return
+        closed = True
+        ui.stop()
+        done.set_result(result)
+
+    component, focus = builder(finish, ui)
+    ui.addChild(component)
+    ui.setFocus(focus)
+    try:
+        ui.start()
+        return await done
+    finally:
+        if not closed:
+            closed = True
+            ui.stop()
+
+
+async def _show_startup_selector(
+    settings_manager: SettingsManager,
+    title: str,
+    options: list[tuple[str, Any]],
+) -> Any:
+    labels = [label for label, _value in options]
+
+    def build(finish: Callable[[Any], None], ui: TUI) -> tuple[Any, Any]:
+        def select(label: str) -> None:
+            selected = next((value for candidate, value in options if candidate == label), None)
+            finish(selected)
+
+        selector = ExtensionSelectorComponent(
+            title,
+            labels,
+            select,
+            lambda: finish(None),
+            {"tui": ui},
+        )
+        return selector, selector
+
+    return await _show_startup_component(settings_manager, build)
+
+
+async def _show_startup_input(
+    settings_manager: SettingsManager,
+    title: str,
+    placeholder: str | None,
+) -> str | None:
+    def build(finish: Callable[[Any], None], ui: TUI) -> tuple[Any, Any]:
+        component = ExtensionInputComponent(
+            title,
+            placeholder,
+            finish,
+            lambda: finish(None),
+            {"tui": ui},
+        )
+        return component, component
+
+    result = await _show_startup_component(settings_manager, build)
+    return str(result) if result is not None else None
+
+
+def create_project_trust_context(
+    *,
+    cwd: str,
+    mode: AppMode,
+    settings_manager: SettingsManager,
+    has_ui: bool,
+) -> dict[str, Any]:
+    async def select(title: str, options: list[str], _opts: Any = None) -> str | None:
+        if not has_ui or mode != "interactive":
+            return None
+        result = await _show_startup_selector(
+            settings_manager,
+            title,
+            [(option, option) for option in options],
+        )
+        return str(result) if result is not None else None
+
+    async def confirm(title: str, message: str, _opts: Any = None) -> bool:
+        if not has_ui or mode != "interactive":
+            return False
+        result = await _show_startup_selector(
+            settings_manager,
+            f"{title}\n{message}",
+            [("Yes", True), ("No", False)],
+        )
+        return bool(result)
+
+    async def input_value(
+        title: str,
+        placeholder: str | None = None,
+        _opts: Any = None,
+    ) -> str | None:
+        if not has_ui or mode != "interactive":
+            return None
+        return await _show_startup_input(settings_manager, title, placeholder)
+
+    def notify(message: str, type: str = "info") -> None:
+        if mode == "interactive":
+            return
+        color = _RED if type == "error" else _YELLOW if type == "warning" else _DIM
+        print(_format_colored_message(message, color), file=sys.stderr)
+
+    return {
+        "cwd": cwd,
+        "mode": "tui" if mode == "interactive" else mode,
+        "hasUI": has_ui,
+        "ui": {
+            "select": select,
+            "confirm": confirm,
+            "input": input_value,
+            "notify": notify,
+        },
+    }
 
 
 async def prompt_for_missing_session_cwd(
@@ -250,6 +429,26 @@ def validate_fork_flags(parsed: Args) -> None:
         raise ValueError(f"--fork cannot be combined with {', '.join(conflicts)}")
 
 
+_SESSION_ID = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")   # pi session-manager.ts:212-218
+
+
+def validate_session_id_flags(parsed: Args) -> None:
+    if parsed.sessionId is None:
+        return
+    conflicts = [
+        flag
+        for flag, given in (("--session", parsed.session), ("--continue", parsed.continue_), ("--resume", parsed.resume))
+        if given
+    ]
+    if conflicts:
+        raise ValueError(f"--session-id cannot be combined with {', '.join(conflicts)}")
+    if not _SESSION_ID.match(parsed.sessionId):
+        raise ValueError(
+            "Session id must be non-empty, contain only alphanumeric characters, '-', '_', and '.', "
+            "and start and end with an alphanumeric character"
+        )
+
+
 def resolve_cli_paths(cwd: str, paths: list[str] | None) -> list[str] | None:
     if paths is None:
         return None
@@ -272,6 +471,7 @@ def build_session_options(
             {
                 "cliProvider": parsed.provider,
                 "cliModel": parsed.model,
+                "cliThinking": parsed.thinking,
                 "modelRegistry": model_registry,
             }
         )
@@ -317,6 +517,8 @@ def build_session_options(
         options["noTools"] = "builtin"
     if parsed.tools:
         options["tools"] = list(parsed.tools)
+    if parsed.excludeTools:
+        options["excludeTools"] = list(parsed.excludeTools)
 
     return BuildSessionOptionsResult(
         options=options,
@@ -337,8 +539,77 @@ def create_runtime_factory(
     resolved_prompt_template_paths: list[str] | None = None,
     resolved_theme_paths: list[str] | None = None,
     extension_factories: list[Any] | None = None,
+    app_mode: AppMode = "print",
+    startup_settings_manager: SettingsManager | None = None,
 ) -> Callable[[dict[str, Any]], Awaitable[CreateAgentSessionRuntimeResult]]:
+    project_trust_by_cwd: dict[str, bool] = {}
+
     async def _factory(runtime_options: dict[str, Any]) -> CreateAgentSessionRuntimeResult:
+        runtime_cwd = str(runtime_options["cwd"])
+        agent_dir = str(runtime_options["agentDir"])
+        trust_key = canonicalize_path(resolve_path(runtime_cwd))
+        trust_store = ProjectTrustStore(agent_dir)
+        has_trust_resources = has_trust_requiring_project_resources(runtime_cwd)
+        has_cached_trust = trust_key in project_trust_by_cwd
+        should_resolve_trust = (
+            parsed.projectTrustOverride is None
+            and not has_cached_trust
+            and has_trust_resources
+        )
+        if should_resolve_trust:
+            project_trusted = False
+        elif has_cached_trust:
+            project_trusted = project_trust_by_cwd[trust_key]
+        elif parsed.projectTrustOverride is not None:
+            project_trusted = parsed.projectTrustOverride
+        else:
+            project_trusted = not has_trust_resources or trust_store.get(runtime_cwd) is True
+
+        settings_manager = SettingsManager.create(
+            runtime_cwd,
+            agent_dir,
+            {"projectTrusted": project_trusted},
+        )
+        project_trust_diagnostics: list[AgentSessionRuntimeDiagnostic] = []
+
+        async def resolve_trust(payload: dict[str, Any]) -> bool:
+            nonlocal project_trusted
+            context = runtime_options.get("projectTrustContext")
+            if context is None:
+                context_settings = startup_settings_manager or SettingsManager.create(
+                    runtime_cwd,
+                    agent_dir,
+                    {"projectTrusted": False},
+                )
+                context = create_project_trust_context(
+                    cwd=runtime_cwd,
+                    mode=app_mode,
+                    settings_manager=context_settings,
+                    has_ui=(
+                        runtime_options.get("sessionStartEvent") is None
+                        and app_mode == "interactive"
+                    ),
+                )
+            project_trusted = await resolve_project_trusted(
+                {
+                    "cwd": runtime_cwd,
+                    "trustStore": trust_store,
+                    "trustOverride": parsed.projectTrustOverride,
+                    "defaultProjectTrust": (
+                        startup_settings_manager.getDefaultProjectTrust()
+                        if startup_settings_manager is not None
+                        else settings_manager.getDefaultProjectTrust()
+                    ),
+                    "extensionsResult": payload["extensionsResult"],
+                    "projectTrustContext": context,
+                    "onExtensionError": lambda message: project_trust_diagnostics.append(
+                        AgentSessionRuntimeDiagnostic(type="warning", message=message)
+                    ),
+                }
+            )
+            project_trust_by_cwd[trust_key] = project_trusted
+            return project_trusted
+
         resource_loader_options: dict[str, Any] = {
             "noExtensions": parsed.noExtensions,
             "noPromptTemplates": parsed.noPromptTemplates,
@@ -358,11 +629,21 @@ def create_runtime_factory(
 
         services = await create_agent_session_services(
             {
-                "cwd": runtime_options["cwd"],
-                "agentDir": runtime_options["agentDir"],
+                "cwd": runtime_cwd,
+                "agentDir": agent_dir,
                 "authStorage": auth_storage,
+                "settingsManager": settings_manager,
                 "extensionFlagValues": parsed.unknownFlags,
                 "resourceLoaderOptions": resource_loader_options,
+                **(
+                    {
+                        "resourceLoaderReloadOptions": {
+                            "resolveProjectTrust": resolve_trust,
+                        }
+                    }
+                    if should_resolve_trust
+                    else {}
+                ),
             }
         )
         settings_manager = services.settingsManager
@@ -372,8 +653,9 @@ def create_runtime_factory(
         resource_loader = services.resourceLoader
 
         diagnostics: list[AgentSessionRuntimeDiagnostic] = [
+            *project_trust_diagnostics,
             *services.diagnostics,
-            *_to_agent_runtime_diagnostics(collect_settings_diagnostics(settings_manager, "runtime creation")),
+            *collect_settings_diagnostics(settings_manager),
         ]
         for item in resource_loader.getExtensions().errors:
             path = item.get("path", "") if isinstance(item, dict) else getattr(item, "path", "")
@@ -421,6 +703,7 @@ def create_runtime_factory(
                 "thinkingLevel": session_options.options.get("thinkingLevel"),
                 "scopedModels": session_options.options.get("scopedModels"),
                 "tools": session_options.options.get("tools"),
+                "excludeTools": session_options.options.get("excludeTools"),
                 "noTools": session_options.options.get("noTools"),
                 "customTools": session_options.options.get("customTools"),
             }
@@ -457,20 +740,31 @@ async def create_session_manager(
     err = error_stream or sys.stderr
     selector = select_session_fn or session_picker.select_session
 
-    def fork_session_or_exit(source_path: str) -> SessionManager:
+    def fork_session_or_exit(source_path: str, session_id: str | None = None) -> SessionManager:
         try:
-            return SessionManager.forkFrom(source_path, cwd, session_dir)
+            return SessionManager.forkFrom(
+                source_path, cwd, session_dir, NewSessionOptions(id=session_id) if session_id else None
+            )
         except Exception as error:
             err.write(_format_colored_message(f"Error: {error}", _RED) + "\n")
             raise SystemExit(1) from error
 
-    if parsed.noSession:
-        return SessionManager.inMemory()
+    async def find_local_session_by_exact_id(session_id: str) -> str | None:
+        return next((s.path for s in await SessionManager.list(cwd, session_dir) if s.id == session_id), None)
+
+    if parsed.noSession or parsed.help or parsed.listModels is not None:
+        manager = SessionManager.inMemory(cwd)
+        if parsed.sessionId:
+            manager.newSession(NewSessionOptions(id=parsed.sessionId))
+        return manager
 
     if parsed.fork:
+        if parsed.sessionId and await find_local_session_by_exact_id(parsed.sessionId):
+            err.write(_format_colored_message(f"Session already exists with id '{parsed.sessionId}'", _RED) + "\n")
+            raise SystemExit(1)
         resolved = await resolve_session_path(parsed.fork, cwd, session_dir)
         if resolved.type in {"path", "local", "global"} and resolved.path:
-            return fork_session_or_exit(resolved.path)
+            return fork_session_or_exit(resolved.path, parsed.sessionId)
         err.write(_format_colored_message(f"No session found matching '{resolved.arg}'", _RED) + "\n")
         raise SystemExit(1)
 
@@ -505,10 +799,23 @@ async def create_session_manager(
     if parsed.continue_:
         return SessionManager.continueRecent(cwd, session_dir)
 
+    if parsed.sessionId:   # pi main.ts:430-442: an exact project session id reopens it, otherwise it is created
+        existing = await find_local_session_by_exact_id(parsed.sessionId)
+        if existing:
+            return SessionManager.open(existing, session_dir)
+        err.write(_format_colored_message(
+            f"Warning: No project session found with id '{parsed.sessionId}'; creating a new session with that id.",
+            _YELLOW,
+        ) + "\n")
+        manager = SessionManager.create(cwd, session_dir)
+        manager.newSession(NewSessionOptions(id=parsed.sessionId))
+        return manager
+
     return SessionManager.create(cwd, session_dir)
 
 
 async def main(args: list[str], options: MainOptions | None = None) -> int:
+    resetTimings()
     parsed = parse_args(args)
     for diagnostic in parsed.diagnostics:
         prefix = "Error" if diagnostic.type == "error" else "Warning"
@@ -516,9 +823,25 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
         print(_format_colored_message(f"{prefix}: {diagnostic.message}", color), file=sys.stderr)
     if any(diagnostic.type == "error" for diagnostic in parsed.diagnostics):
         return 1
+    time("parseArgs")
 
-    app_mode = resolve_app_mode(parsed, sys.stdin.isatty())
-    took_over_stdout = app_mode != "interactive"
+    # pi main.ts:614-637: version and export answer on the real stdout before any takeover.
+    if parsed.version:
+        print(VERSION)
+        return 0
+
+    if parsed.export:
+        output_path = parsed.messages[0] if parsed.messages else None
+        try:
+            result = await export_from_file(parsed.export, output_path)
+        except Exception as error:  # noqa: BLE001 - any export failure is reported to the user and exits 1
+            print(_format_colored_message(f"Error: {error}", _RED), file=sys.stderr)
+            return 1
+        print(f"Exported to: {result}")
+        return 0
+
+    app_mode = resolve_app_mode(parsed, sys.stdin.isatty(), sys.stdout.isatty())
+    took_over_stdout = app_mode != "interactive" and not is_plain_runtime_metadata_command(parsed)
     if took_over_stdout:
         takeOverStdout()
 
@@ -527,30 +850,27 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
             restoreStdout()
         return code
 
-    if parsed.version:
-        print(VERSION)
-        return finish(0)
-
-    if parsed.export:
-        output_path = parsed.messages[0] if parsed.messages else None
-        try:
-            result = await export_from_file(parsed.export, output_path)
-        except Exception as error:  # noqa: BLE001 - any export failure is reported to the user and exits 1
-            print(_format_colored_message(f"Error: {error}", _RED), file=sys.stderr)
-            return finish(1)
-        print(f"Exported to: {result}")
-        return finish(0)
-
     try:
         validate_fork_flags(parsed)
+        validate_session_id_flags(parsed)
     except ValueError as error:
         print(_format_colored_message(f"Error: {error}", _RED), file=sys.stderr)
         return finish(1)
 
     cwd = os.getcwd()
     agent_dir = get_agent_dir()
-    startup_settings_manager = SettingsManager.create(cwd, agent_dir)
-    report_diagnostics(collect_settings_diagnostics(startup_settings_manager, "startup session lookup"))
+    # Session lookup and the pre-runtime trust prompt may use global settings,
+    # but project settings are precisely what the trust decision protects.
+    startup_settings_manager = SettingsManager.create(
+        cwd,
+        agent_dir,
+        {"projectTrusted": False},
+    )
+    applyHttpProxySettings(startup_settings_manager.getGlobalSettings().get("httpProxy"))
+    startup_settings_diagnostics = deduplicate_diagnostics(
+        collect_settings_diagnostics(startup_settings_manager)
+    )
+    report_diagnostics(startup_settings_diagnostics)
     session_dir = (
         normalize_path(parsed.sessionDir)
         if parsed.sessionDir
@@ -567,7 +887,7 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
     if hasattr(session_manager, "getSessionFile") and hasattr(session_manager, "getCwd"):
         missing_session_cwd_issue = get_missing_session_cwd_issue(session_manager, cwd)
     if missing_session_cwd_issue is not None:
-        if resolve_app_mode(parsed, sys.stdin.isatty()) == "interactive":
+        if resolve_app_mode(parsed, sys.stdin.isatty(), sys.stdout.isatty()) == "interactive":
             selected_cwd = await prompt_for_missing_session_cwd(missing_session_cwd_issue, startup_settings_manager)
             if selected_cwd is None:
                 return finish(0)
@@ -588,30 +908,54 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
                 file=sys.stderr,
             )
             return finish(1)
+    if parsed.name is not None:   # pi main.ts:689-696
+        name = parsed.name.strip()
+        if not name:
+            print(_format_colored_message("Error: --name requires a non-empty value", _RED), file=sys.stderr)
+            return finish(1)
+        session_manager.appendSessionInfo(name)
 
+    time("createSessionManager")
     resolved_extension_paths = resolve_cli_paths(cwd, parsed.extensions)
     resolved_prompt_template_paths = resolve_cli_paths(cwd, parsed.promptTemplates)
     resolved_theme_paths = resolve_cli_paths(cwd, parsed.themes)
+    session_cwd = session_manager.getCwd()
+    auto_trust_on_reload_cwd = (
+        session_cwd
+        if parsed.projectTrustOverride is None
+        and not has_trust_requiring_project_resources(session_cwd)
+        else None
+    )
     auth_storage = AuthStorage.create()
     try:
-        runtime = await create_agent_session_runtime(
-            create_runtime_factory(
-                parsed,
-                auth_storage,
-                resolved_extension_paths=resolved_extension_paths,
-                resolved_prompt_template_paths=resolved_prompt_template_paths,
-                resolved_theme_paths=resolved_theme_paths,
-                extension_factories=options.get("extensionFactories") if options else None,
+        runtime_factory = create_runtime_factory(
+            parsed,
+            auth_storage,
+            resolved_extension_paths=resolved_extension_paths,
+            resolved_prompt_template_paths=resolved_prompt_template_paths,
+            resolved_theme_paths=resolved_theme_paths,
+            extension_factories=options.get("extensionFactories") if options else None,
+            app_mode=(
+                "print"
+                if parsed.help or parsed.listModels is not None
+                else app_mode
             ),
+            startup_settings_manager=startup_settings_manager,
+        )
+        time("createRuntime")
+        runtime = await create_agent_session_runtime(
+            runtime_factory,
             {
                 "cwd": session_manager.getCwd(),
                 "agentDir": agent_dir,
                 "sessionManager": session_manager,
             },
         )
+        time("createAgentSessionRuntime")
         services = runtime.services
         session = runtime.session
         settings_manager = services.settingsManager
+        setCapabilityOverrides(settings_manager.getTerminalCapabilityOverrides())
         model_registry = services.modelRegistry
 
         if parsed.help:
@@ -633,16 +977,24 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
         stdin_content = await read_piped_stdin()
         if stdin_content is not None and app_mode == "interactive":
             app_mode = "print"
+        time("readPipedStdin")
 
         initial_message, initial_images = await prepare_initial_message(
             parsed,
             settings_manager.getImageAutoResize(),
             stdin_content,
         )
+        time("prepareInitialMessage")
         init_theme(settings_manager.getTheme(), app_mode == "interactive")
-        report_diagnostics(list(runtime.diagnostics))
+        time("initTheme")
+        time("resolveModelScope")
+        display_diagnostics = deduplicate_diagnostics(
+            [*startup_settings_diagnostics, *runtime.diagnostics]
+        )
+        report_diagnostics(display_diagnostics[len(startup_settings_diagnostics) :])
         if any(item.type == "error" for item in runtime.diagnostics):
             return 1
+        time("createAgentSession")
 
         if app_mode != "interactive" and session.model is None:
             print(_format_colored_message(formatNoModelsAvailableMessage(), _RED), file=sys.stderr)
@@ -657,9 +1009,12 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
                     "initialImages": initial_images,
                     "initialMessages": list(parsed.messages),
                     "verbose": parsed.verbose,
+                    "autoTrustOnReloadCwd": auto_trust_on_reload_cwd,
                 },
             )
+            printTimings()
             return await interactive_mode.run()
+        printTimings()
         exit_code = await run_print_mode(
             runtime,
             {

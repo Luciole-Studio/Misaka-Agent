@@ -21,6 +21,7 @@ from misaka.ui.tui.utils import applyBackgroundToLine, visibleWidth, wrapTextWit
 
 type StyleFn = Callable[[str], str]
 type HighlightCodeFn = Callable[[str, str | None], list[str]]
+type MarkdownTransform = Callable[[str, int], str]
 
 _BARE_URL_RE = r"(?:https?://|www\.)[^\s<>]+"
 _EMAIL_RE = r"(?<![A-Za-z0-9.+-])[A-Za-z0-9.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![A-Za-z0-9.-])"
@@ -119,12 +120,14 @@ class Markdown(Component):
         paddingY: int,
         theme: MarkdownTheme,
         defaultTextStyle: DefaultTextStyle | None = None,
+        transform: MarkdownTransform | None = None,
     ) -> None:
         self.text = text
         self.paddingX = paddingX
         self.paddingY = paddingY
         self.theme = theme
         self.defaultTextStyle = defaultTextStyle
+        self.transform = transform
         self.defaultStylePrefix: str | None = None
         self.cachedText: str | None = None
         self.cachedWidth: int | None = None
@@ -146,14 +149,15 @@ class Markdown(Component):
             return self.cachedLines
 
         content_width = max(1, width - self.paddingX * 2)
-        if not self.text or self.text.strip() == "":
+        text = self.transform(self.text, content_width) if self.transform is not None else self.text
+        if not text or text.strip() == "":
             result: list[str] = []
             self.cachedText = self.text
             self.cachedWidth = width
             self.cachedLines = result
             return result
 
-        normalized_text = self.text.replace("\t", "   ")
+        normalized_text = text.replace("\t", "   ")
         normalized_text = _trim_partial_closing_fence(normalized_text)
         self._sourceLines = normalized_text.split("\n")
         root = SyntaxTreeNode(_MARKDOWN_PARSER.parse(normalized_text))
@@ -729,4 +733,4 @@ class Markdown(Component):
         return "\n".join(self._sourceLines[start:end])
 
 
-__all__ = ["DefaultTextStyle", "Markdown", "MarkdownTheme"]
+__all__ = ["DefaultTextStyle", "Markdown", "MarkdownTheme", "MarkdownTransform"]

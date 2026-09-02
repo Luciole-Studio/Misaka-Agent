@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import stat
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, fields
 from pathlib import Path
@@ -61,6 +62,13 @@ class GrepToolInput(BaseModel):
     limit: int | None = Field(default=None, description="Maximum number of matches to return (default: 100)")
 
 
+grep_tool_system_prompt_contribution = {
+    "snippet": "Search file contents for patterns (respects .gitignore)",
+    "guidelines": [],
+}
+grepToolSystemPromptContribution = grep_tool_system_prompt_contribution
+
+
 DEFAULT_LIMIT = 100
 
 
@@ -83,13 +91,16 @@ class GrepToolOptions:
 
 @dataclass(slots=True)
 class _DefaultGrepOperations:
-    def isDirectory(self, absolute_path: str) -> bool:
-        path = Path(absolute_path)
-        path.stat()
-        return path.is_dir()
+    async def isDirectory(self, absolute_path: str) -> bool:
+        path_stat = await asyncio.to_thread(Path(absolute_path).stat)
+        return stat.S_ISDIR(path_stat.st_mode)
 
-    def readFile(self, absolute_path: str) -> str:
-        return Path(absolute_path).read_text(encoding="utf-8")
+    async def readFile(self, absolute_path: str) -> str:
+        return await asyncio.to_thread(
+            Path(absolute_path).read_text,
+            encoding="utf-8",
+            errors="replace",
+        )
 
 
 def _coerce_options(options: GrepToolOptions | Mapping[str, Any] | None) -> GrepToolOptions:
@@ -183,7 +194,12 @@ def create_grep_tool_definition(
     cwd: str,
     options: GrepToolOptions | Mapping[str, Any] | None = None,
 ) -> ToolDefinition[GrepToolInput | dict[str, Any], GrepToolDetails | None]:
-    operations = _coerce_options(options).operations or _DefaultGrepOperations()
+    configured_operations = _coerce_options(options).operations
+    operations = (
+        configured_operations
+        if configured_operations is not None
+        else _DefaultGrepOperations()
+    )
 
     async def execute(
         _tool_call_id: str,
@@ -387,7 +403,7 @@ def create_grep_tool_definition(
             "Respects .gitignore. Output is truncated to 100 matches or 50KB (whichever is hit first). "
             f"Long lines are truncated to {GREP_MAX_LINE_LENGTH} chars."
         ),
-        promptSnippet="Search file contents for patterns (respects .gitignore)",
+        promptSnippet=grep_tool_system_prompt_contribution["snippet"],
         parameters=GrepToolInput,
         execute=execute,
         renderCall=render_call,
@@ -409,4 +425,5 @@ __all__ = [
     "GrepToolOptions",
     "createGrepTool",
     "createGrepToolDefinition",
+    "grepToolSystemPromptContribution",
 ]

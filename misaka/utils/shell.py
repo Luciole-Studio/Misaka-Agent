@@ -2,24 +2,45 @@
 
 from __future__ import annotations
 
+import ntpath
 import os
+import re
 import shutil
 import signal
 import subprocess
 from dataclasses import dataclass
+from typing import Literal
 
 
 @dataclass(slots=True)
 class ShellConfig:
     shell: str
     args: list[str]
+    commandTransport: Literal["argv", "stdin"] | None = None
 
 
-def find_bash_on_path() -> str | None:
+_LEGACY_WSL_BASH_PATH_RE = re.compile(
+    r"[a-z]:\\windows\\(?:system32|sysnative)\\bash\.exe"
+)
+
+
+def _get_bash_shell_config(shell: str) -> ShellConfig:
+    normalized = shell.replace("/", "\\").lower()
+    if _LEGACY_WSL_BASH_PATH_RE.fullmatch(normalized):
+        return ShellConfig(shell=shell, args=["-s"], commandTransport="stdin")
+    return ShellConfig(shell=shell, args=["-c"])
+
+
+def normalize_command_for_stdin(command: str) -> str:
+    """Match Node's UTF-8 replacement semantics for unpaired UTF-16 surrogates."""
+    return command.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
+
+
+def find_executable_on_path(executable: str) -> str | None:
     if os.name == "nt":
         try:
             result = subprocess.run(
-                ["where", "bash.exe"],
+                ["where", executable],
                 capture_output=True,
                 check=False,
                 text=True,
@@ -33,13 +54,17 @@ def find_bash_on_path() -> str | None:
                 return first_match
         return None
 
-    return shutil.which("bash")
+    return shutil.which(executable)
+
+
+def find_bash_on_path() -> str | None:
+    return find_executable_on_path("bash.exe" if os.name == "nt" else "bash")
 
 
 def get_shell_config(custom_shell_path: str | None = None) -> ShellConfig:
     if custom_shell_path:
         if os.path.exists(custom_shell_path):
-            return ShellConfig(shell=custom_shell_path, args=["-c"])
+            return _get_bash_shell_config(custom_shell_path)
         raise Error(f"Custom shell path not found: {custom_shell_path}")
 
     if os.name == "nt":
@@ -52,10 +77,10 @@ def get_shell_config(custom_shell_path: str | None = None) -> ShellConfig:
             candidates.append(os.path.join(program_files_x86, "Git", "bin", "bash.exe"))
         for candidate in candidates:
             if os.path.exists(candidate):
-                return ShellConfig(shell=candidate, args=["-c"])
+                return _get_bash_shell_config(candidate)
         bash_on_path = find_bash_on_path()
         if bash_on_path:
-            return ShellConfig(shell=bash_on_path, args=["-c"])
+            return _get_bash_shell_config(bash_on_path)
         searched = "\n".join(f"  {candidate}" for candidate in candidates)
         raise Error(
             "No bash shell found. Options:\n"
@@ -66,11 +91,36 @@ def get_shell_config(custom_shell_path: str | None = None) -> ShellConfig:
         )
 
     if os.path.exists("/bin/bash"):
-        return ShellConfig(shell="/bin/bash", args=["-c"])
+        return _get_bash_shell_config("/bin/bash")
     bash_on_path = find_bash_on_path()
     if bash_on_path:
-        return ShellConfig(shell=bash_on_path, args=["-c"])
+        return _get_bash_shell_config(bash_on_path)
     return ShellConfig(shell="sh", args=["-c"])
+
+
+POWERSHELL_ARGS = [
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+]
+
+
+def get_powershell_config() -> ShellConfig:
+    """Resolve PowerShell on Windows, preferring PowerShell 7."""
+    if os.name != "nt":
+        raise Error("The powershell tool is only available on Windows.")
+
+    shell = find_executable_on_path("pwsh.exe") or find_executable_on_path(
+        "powershell.exe"
+    )
+    if shell is None:
+        raise Error(
+            "No PowerShell executable found. Install PowerShell or add "
+            "powershell.exe/pwsh.exe to PATH."
+        )
+    return ShellConfig(shell=shell, args=list(POWERSHELL_ARGS))
 
 
 def get_shell_env() -> dict[str, str]:
@@ -120,9 +170,17 @@ def kill_tracked_detached_children() -> None:
 
 def kill_process_tree(pid: int) -> None:
     if os.name == "nt":
+        system_root = os.environ.get("SystemRoot")
+        taskkill = ntpath.normpath(
+            ntpath.join(
+                r"C:\Windows" if system_root is None else system_root,
+                "System32",
+                "taskkill.exe",
+            )
+        )
         try:
             subprocess.Popen(
-                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                [taskkill, "/F", "/T", "/PID", str(pid)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -145,9 +203,14 @@ class Error(RuntimeError):
 
 sanitizeBinaryOutput = sanitize_binary_output
 killTrackedDetachedChildren = kill_tracked_detached_children
+getPowerShellConfig = get_powershell_config
 
 __all__ = [
+    "POWERSHELL_ARGS",
     "ShellConfig",
+    "getPowerShellConfig",
+    "get_powershell_config",
     "killTrackedDetachedChildren",
+    "normalize_command_for_stdin",
     "sanitizeBinaryOutput",
-    ]
+]

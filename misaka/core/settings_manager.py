@@ -9,12 +9,16 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 
 from filelock import FileLock, Timeout
 
-from misaka.ai.types import Transport
+from misaka.ai.types import ModelThinkingLevel, Transport
 from misaka.config import CONFIG_DIR_NAME, get_agent_dir
+from misaka.core.http_dispatcher import (
+    DEFAULT_HTTP_IDLE_TIMEOUT_MS,
+    parseHttpIdleTimeoutMs,
+)
 from misaka.utils import atomic
 from misaka.utils.paths import normalize_path, resolve_path
 
@@ -30,6 +34,11 @@ type WarningSettings = dict[str, Any]
 type Settings = dict[str, Any]
 type SettingsScope = Literal["global", "project"]
 type TransportSetting = Transport
+type DefaultProjectTrust = Literal["ask", "always", "never"]
+
+
+class SettingsManagerOptions(TypedDict, total=False):
+    projectTrusted: bool
 
 
 def deep_merge_settings(base: Settings, overrides: Settings) -> Settings:
@@ -51,6 +60,16 @@ def deep_merge_settings(base: Settings, overrides: Settings) -> Settings:
 class SettingsError:
     scope: SettingsScope
     error: Exception
+    path: str | None = None
+
+
+def _to_settings_error(
+    scope: SettingsScope,
+    error: Exception | BaseException,
+    path: str | None = None,
+) -> SettingsError:
+    normalized = error if isinstance(error, Exception) else Exception(str(error))
+    return SettingsError(scope=scope, error=normalized, path=path)
 
 
 class SettingsStorage:
@@ -134,10 +153,13 @@ class SettingsManager:
         globalLoadError: Exception | None = None,
         projectLoadError: Exception | None = None,
         initialErrors: list[SettingsError] | None = None,
+        projectTrusted: bool = True,
+        settingsPaths: dict[SettingsScope, str] | None = None,
     ) -> None:
         self.storage = storage
         self.globalSettings = copy.deepcopy(initialGlobal)
-        self.projectSettings = copy.deepcopy(initialProject)
+        self.projectSettings = copy.deepcopy(initialProject) if projectTrusted else {}
+        self.projectTrusted = projectTrusted
         self.settings = deep_merge_settings(self.globalSettings, self.projectSettings)
         self.modifiedFields: set[str] = set()
         self.modifiedNestedFields: dict[str, set[str]] = {}
@@ -146,22 +168,58 @@ class SettingsManager:
         self.globalSettingsLoadError = globalLoadError
         self.projectSettingsLoadError = projectLoadError
         self.errors: list[SettingsError] = list(initialErrors or [])
+        self.settingsPaths = dict(settingsPaths or {})
         self.writeQueue: asyncio.Future[None] | None = None
 
     @classmethod
-    def create(cls, cwd: str, agentDir: str | None = None) -> SettingsManager:
+    def create(
+        cls,
+        cwd: str,
+        agentDir: str | None = None,
+        options: SettingsManagerOptions | None = None,
+    ) -> SettingsManager:
         storage = FileSettingsStorage(cwd, get_agent_dir() if agentDir is None else agentDir)
-        return cls.fromStorage(storage)
+        return cls._fromStorageWithPaths(
+            storage,
+            options,
+            {
+                "global": storage.globalSettingsPath,
+                "project": storage.projectSettingsPath,
+            },
+        )
 
     @classmethod
-    def fromStorage(cls, storage: SettingsStorage) -> SettingsManager:
+    def fromStorage(
+        cls,
+        storage: SettingsStorage,
+        options: SettingsManagerOptions | None = None,
+    ) -> SettingsManager:
+        return cls._fromStorageWithPaths(storage, options)
+
+    @classmethod
+    def _fromStorageWithPaths(
+        cls,
+        storage: SettingsStorage,
+        options: SettingsManagerOptions | None = None,
+        settingsPaths: dict[SettingsScope, str] | None = None,
+    ) -> SettingsManager:
+        project_trusted = (options or {}).get("projectTrusted", True)
+        settings_paths = dict(settingsPaths or {})
         global_load = cls.tryLoadFromStorage(storage, "global")
-        project_load = cls.tryLoadFromStorage(storage, "project")
+        project_load = cls.tryLoadFromStorage(storage, "project", project_trusted)
         initial_errors: list[SettingsError] = []
         if global_load["error"] is not None:
-            initial_errors.append(SettingsError(scope="global", error=global_load["error"]))
+            initial_errors.append(
+                _to_settings_error(
+                    "global", global_load["error"], settings_paths.get("global")
+                )
+            )
         if project_load["error"] is not None:
-            initial_errors.append(SettingsError(scope="project", error=project_load["error"]))
+            initial_errors.append(
+                _to_settings_error(
+                    "project", project_load["error"], settings_paths.get("project")
+                )
+            )
         return cls(
             storage,
             global_load["settings"],
@@ -169,17 +227,43 @@ class SettingsManager:
             global_load["error"],
             project_load["error"],
             initial_errors,
+            project_trusted,
+            settings_paths,
         )
 
     @classmethod
-    def inMemory(cls, settings: dict[str, Any] | None = None) -> SettingsManager:
+    def inMemory(
+        cls,
+        settings: dict[str, Any] | None = None,
+        options: SettingsManagerOptions | None = None,
+    ) -> SettingsManager:
         storage = InMemorySettingsStorage()
         initial_settings = cls.migrateSettings(copy.deepcopy(settings or {}))
         storage.withLock("global", lambda _current: json.dumps(initial_settings, indent=2, ensure_ascii=False))
-        return cls.fromStorage(storage)
+        return cls.fromStorage(storage, options)
 
     @classmethod
-    def loadFromStorage(cls, storage: SettingsStorage, scope: SettingsScope) -> Settings:
+    def loadFromStorage(
+        cls,
+        storage: SettingsStorage,
+        scope: SettingsScope,
+        projectTrusted: bool = True,
+    ) -> Settings:
+        if scope == "project" and not projectTrusted:
+            return {}
+
+        # Custom storage backends keep the existing withLock-only contract.
+        if type(storage) is FileSettingsStorage:
+            path = (
+                storage.globalSettingsPath
+                if scope == "global"
+                else storage.projectSettingsPath
+            )
+            try:
+                os.stat(path)
+            except FileNotFoundError:
+                return {}
+
         content: str | None = None
 
         def capture(current: str | None) -> None:
@@ -189,12 +273,17 @@ class SettingsManager:
         storage.withLock(scope, capture)
         if not content:
             return {}
-        return json.loads(content.removeprefix("\ufeff"))
+        return cls.migrateSettings(json.loads(content.removeprefix("\ufeff")))
 
     @classmethod
-    def tryLoadFromStorage(cls, storage: SettingsStorage, scope: SettingsScope) -> dict[str, Any]:
+    def tryLoadFromStorage(
+        cls,
+        storage: SettingsStorage,
+        scope: SettingsScope,
+        projectTrusted: bool = True,
+    ) -> dict[str, Any]:
         try:
-            return {"settings": cls.loadFromStorage(storage, scope), "error": None}
+            return {"settings": cls.loadFromStorage(storage, scope, projectTrusted), "error": None}
         except Exception as error:  # noqa: BLE001
             return {"settings": {}, "error": error}
 
@@ -225,6 +314,29 @@ class SettingsManager:
     def getProjectSettings(self) -> Settings:
         return copy.deepcopy(self.projectSettings)
 
+    def isProjectTrusted(self) -> bool:
+        return self.projectTrusted
+
+    def setProjectTrusted(self, trusted: bool) -> None:
+        if self.projectTrusted == trusted:
+            return
+
+        self.projectTrusted = trusted
+        self.modifiedProjectFields.clear()
+        self.modifiedProjectNestedFields.clear()
+        if not trusted:
+            self.projectSettings = {}
+            self.projectSettingsLoadError = None
+            self.settings = deep_merge_settings(self.globalSettings, self.projectSettings)
+            return
+
+        project_load = self.tryLoadFromStorage(self.storage, "project", trusted)
+        self.projectSettings = project_load["settings"]
+        self.projectSettingsLoadError = project_load["error"]
+        if project_load["error"] is not None:
+            self.recordError("project", project_load["error"])
+        self.settings = deep_merge_settings(self.globalSettings, self.projectSettings)
+
     async def reload(self) -> None:
         await self.flush()
         global_load = self.tryLoadFromStorage(self.storage, "global")
@@ -240,7 +352,7 @@ class SettingsManager:
         self.modifiedProjectFields.clear()
         self.modifiedProjectNestedFields.clear()
 
-        project_load = self.tryLoadFromStorage(self.storage, "project")
+        project_load = self.tryLoadFromStorage(self.storage, "project", self.projectTrusted)
         if project_load["error"] is None:
             self.projectSettings = project_load["settings"]
             self.projectSettingsLoadError = None
@@ -264,8 +376,9 @@ class SettingsManager:
             self.modifiedProjectNestedFields.setdefault(field, set()).add(nestedKey)
 
     def recordError(self, scope: SettingsScope, error: Exception | BaseException) -> None:
-        normalized = error if isinstance(error, Exception) else Exception(str(error))
-        self.errors.append(SettingsError(scope=scope, error=normalized))
+        self.errors.append(
+            _to_settings_error(scope, error, self.settingsPaths.get(scope))
+        )
 
     def clearModifiedScope(self, scope: SettingsScope) -> None:
         if scope == "global":
@@ -288,7 +401,7 @@ class SettingsManager:
         modifiedNestedFields: dict[str, set[str]],
     ) -> None:
         def persist(current: str | None) -> str:
-            current_file_settings = json.loads(current.removeprefix("\ufeff")) if current else {}
+            current_file_settings = self.migrateSettings(json.loads(current.removeprefix("\ufeff"))) if current else {}
             merged_settings: Settings = copy.deepcopy(current_file_settings)
             for field in modifiedFields:
                 value = snapshotSettings.get(field)
@@ -309,6 +422,8 @@ class SettingsManager:
 
     def _run_write_task(self, scope: SettingsScope, task: Any) -> None:
         try:
+            if scope == "project":
+                self._assertProjectTrustedForWrite()
             task()
             self.clearModifiedScope(scope)
         except Exception as error:  # noqa: BLE001
@@ -344,6 +459,7 @@ class SettingsManager:
         )
 
     def saveProjectSettings(self, settings: Settings) -> None:
+        self._assertProjectTrustedForWrite()
         self.projectSettings = copy.deepcopy(settings)
         self.settings = deep_merge_settings(self.globalSettings, self.projectSettings)
         if self.projectSettingsLoadError is not None:
@@ -373,6 +489,10 @@ class SettingsManager:
             self.globalSettings[key] = value
         self.markModified(key)
         self.save()
+
+    def _assertProjectTrustedForWrite(self) -> None:
+        if not self.projectTrusted:
+            raise RuntimeError("Project is not trusted; refusing to write project settings")
 
     def _ensure_global_nested(self, key: str) -> dict[str, Any]:
         value = self.globalSettings.get(key)
@@ -426,7 +546,7 @@ class SettingsManager:
         self._set_global_value("followUpMode", mode)
 
     def getDefaultTools(self) -> list[str] | None:
-        """Startup tool allowlist setting (same format as --tools; pi 4d9aa837c). None when unset."""
+        """Built-in startup selection; extension/custom tools stay enabled. None when unset."""
         tools = self.settings.get("defaultTools")
         return list(tools) if isinstance(tools, list) else None
 
@@ -441,6 +561,40 @@ class SettingsManager:
 
     def setDefaultThinkingLevel(self, level: str) -> None:
         self._set_global_value("defaultThinkingLevel", level)
+
+    def getDefaultProjectTrust(self) -> DefaultProjectTrust:
+        value = self.globalSettings.get("defaultProjectTrust")
+        return value if value in {"ask", "always", "never"} else "ask"
+
+    def setDefaultProjectTrust(self, defaultProjectTrust: DefaultProjectTrust) -> None:
+        self._set_global_value("defaultProjectTrust", defaultProjectTrust)
+
+    def getModelThinkingLevel(self, provider: str, modelId: str) -> ModelThinkingLevel | None:
+        levels = self.settings.get("modelThinkingLevels")
+        return levels.get(f"{provider}/{modelId}") if isinstance(levels, dict) else None
+
+    def getAllModelThinkingLevels(self) -> dict[str, ModelThinkingLevel]:
+        levels = self.settings.get("modelThinkingLevels")
+        return dict(levels) if isinstance(levels, dict) else {}
+
+    def setModelThinkingLevel(self, provider: str, modelId: str, level: ModelThinkingLevel) -> None:
+        levels = self.globalSettings.get("modelThinkingLevels")
+        if not isinstance(levels, dict):
+            levels = {}
+            self.globalSettings["modelThinkingLevels"] = levels
+        levels[f"{provider}/{modelId}"] = level
+        self.markModified("modelThinkingLevels")
+        self.save()
+
+    def removeModelThinkingLevel(self, provider: str, modelId: str) -> None:
+        levels = self.globalSettings.get("modelThinkingLevels")
+        if not isinstance(levels, dict):
+            return
+        levels.pop(f"{provider}/{modelId}", None)
+        if not levels:
+            self.globalSettings.pop("modelThinkingLevels", None)
+        self.markModified("modelThinkingLevels")
+        self.save()
 
     def getTransport(self) -> TransportSetting:
         return self._nullish(self.settings.get("transport"), "auto")
@@ -496,6 +650,23 @@ class SettingsManager:
             "maxRetries": self._nullish(retry_settings.get("maxRetries"), 3),
             "baseDelayMs": self._nullish(retry_settings.get("baseDelayMs"), 2000),
         }
+
+    def getHttpIdleTimeoutMs(self) -> int:
+        if "httpIdleTimeoutMs" not in self.settings:
+            return DEFAULT_HTTP_IDLE_TIMEOUT_MS
+        value = self.settings["httpIdleTimeoutMs"]
+        timeout_ms = parseHttpIdleTimeoutMs(value)
+        if timeout_ms is None:
+            raise ValueError(f"Invalid httpIdleTimeoutMs setting: {value}")
+        return timeout_ms
+
+    def setHttpIdleTimeoutMs(self, timeoutMs: float) -> None:
+        if isinstance(timeoutMs, bool) or not isinstance(timeoutMs, int | float):
+            raise TypeError(f"Invalid httpIdleTimeoutMs setting: {timeoutMs}")
+        timeout_ms = parseHttpIdleTimeoutMs(timeoutMs)
+        if timeout_ms is None:
+            raise ValueError(f"Invalid httpIdleTimeoutMs setting: {timeoutMs}")
+        self._set_global_value("httpIdleTimeoutMs", timeout_ms)
 
     def getProviderRetrySettings(self) -> dict[str, Any]:
         provider = self._settings_object("retry").get("provider")
@@ -561,6 +732,7 @@ class SettingsManager:
         self._set_global_value("prompts", paths)
 
     def setProjectPromptTemplatePaths(self, paths: list[str]) -> None:
+        self._assertProjectTrustedForWrite()
         project_settings = copy.deepcopy(self.projectSettings)
         project_settings["prompts"] = paths
         self.markProjectModified("prompts")
@@ -573,6 +745,7 @@ class SettingsManager:
         self._set_global_value("themes", paths)
 
     def setProjectThemePaths(self, paths: list[str]) -> None:
+        self._assertProjectTrustedForWrite()
         project_settings = copy.deepcopy(self.projectSettings)
         project_settings["themes"] = paths
         self.markProjectModified("themes")
@@ -587,6 +760,20 @@ class SettingsManager:
     def getThinkingBudgets(self) -> dict[str, Any] | None:
         budgets = self.settings.get("thinkingBudgets")
         return budgets if isinstance(budgets, dict) else None
+
+    def getTerminalCapabilityOverrides(self) -> dict[str, Any]:
+        """Explicit `terminal.images`/`trueColor`/`hyperlinks` settings; `"auto"`/absent leave detection alone."""
+        terminal = self._settings_object("terminal")
+        images = terminal.get("images")
+        overrides: dict[str, Any] = {}
+        if images in ("kitty", "iterm2"):
+            overrides["images"] = images
+        elif images is False:
+            overrides["images"] = None
+        for key in ("trueColor", "hyperlinks"):
+            if isinstance(terminal.get(key), bool):
+                overrides[key] = terminal[key]
+        return overrides
 
     def getShowImages(self) -> bool:
         return self._nullish(self._settings_object("terminal").get("showImages"), True)
@@ -682,6 +869,13 @@ class SettingsManager:
     def setEditorPaddingX(self, padding: int) -> None:
         self._set_global_value("editorPaddingX", max(0, min(3, int(padding))))
 
+    def getOutputPad(self) -> Literal[0, 1]:
+        value = self.settings.get("outputPad")
+        return 0 if type(value) in (int, float) and value == 0 else 1
+
+    def setOutputPad(self, padding: Literal[0, 1]) -> None:
+        self._set_global_value("outputPad", padding)
+
     def getAutocompleteMaxVisible(self) -> int:
         return self._nullish(self.settings.get("autocompleteMaxVisible"), 5)
 
@@ -700,6 +894,7 @@ class SettingsManager:
 __all__ = [
     "BranchSummarySettings",
     "CompactionSettings",
+    "DefaultProjectTrust",
     "FileSettingsStorage",
     "ImageSettings",
     "InMemorySettingsStorage",
@@ -709,6 +904,7 @@ __all__ = [
     "Settings",
     "SettingsError",
     "SettingsManager",
+    "SettingsManagerOptions",
     "SettingsScope",
     "SettingsStorage",
     "TerminalSettings",

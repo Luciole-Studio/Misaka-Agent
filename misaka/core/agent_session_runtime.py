@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import stat
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -19,7 +20,11 @@ from misaka.core.agent_session_services import (
     create_agent_session_services,
 )
 from misaka.core.extensions.runner import emit_session_shutdown_event
-from misaka.core.session_cwd import assert_session_cwd_exists
+from misaka.core.session_cwd import (
+    MissingSessionCwdError,
+    SessionCwdIssue,
+    assert_session_cwd_exists,
+)
 from misaka.core.session_manager import (
     NewSessionOptions,
     SessionManager,
@@ -67,6 +72,8 @@ class AgentSessionLike(Protocol):
     sessionManager: SessionManagerLike
     agent: AgentLike
 
+    async def abort(self) -> None: ...
+
     def dispose(self) -> None: ...
 
     def createReplacedSessionContext(self) -> Any: ...
@@ -86,6 +93,7 @@ class CreateAgentSessionRuntimeOptions(TypedDict):
     agentDir: str
     sessionManager: SessionManager
     sessionStartEvent: NotRequired[dict[str, Any]]
+    projectTrustContext: NotRequired[dict[str, Any]]
 
 
 CreateAgentSessionRuntimeFactory = Callable[
@@ -197,6 +205,9 @@ class AgentSessionRuntime:
         return {"cancelled": _result_flag(result, "cancel", False) is True}
 
     async def teardownCurrent(self, reason: str, targetSessionFile: str | None = None) -> None:
+        # Settle any active response first so the aborted turn (including tool
+        # results) is persisted to the outgoing session before it is replaced.
+        await self.session.abort()
         await emit_session_shutdown_event(
             self.session.extensionRunner,
             {
@@ -252,6 +263,15 @@ class AgentSessionRuntime:
                         "reason": "resume",
                         "previousSessionFile": previous_session_file,
                     },
+                    **(
+                        {
+                            "projectTrustContext": options["projectTrustContextFactory"](
+                                session_manager.getCwd()
+                            )
+                        }
+                        if options and callable(options.get("projectTrustContextFactory"))
+                        else {}
+                    ),
                 }
             )
         )
@@ -265,7 +285,11 @@ class AgentSessionRuntime:
 
         previous_session_file = self.session.sessionFile
         session_dir = self.session.sessionManager.getSessionDir()
-        session_manager = SessionManager.create(self.cwd, session_dir)
+        session_manager = (
+            SessionManager.create(self.cwd, session_dir)
+            if self.session.sessionManager.isPersisted()
+            else SessionManager.inMemory(self.cwd)
+        )
         if options and options.get("parentSession"):
             session_manager.newSession(NewSessionOptions(parentSession=options["parentSession"]))
 
@@ -326,6 +350,11 @@ class AgentSessionRuntime:
                 session_manager = SessionManager.create(self.cwd, session_dir)
                 session_manager.newSession(NewSessionOptions(parentSession=current_session_file))
             else:
+                if not os.path.exists(current_session_file):
+                    raise RuntimeError(
+                        "This session has not been saved yet. "
+                        "Wait for the first assistant response before cloning or forking it."
+                    )
                 session_manager = SessionManager.open(current_session_file, session_dir)
                 forked_session_path = session_manager.createBranchedSession(str(target_leaf_id))
                 if not forked_session_path:
@@ -381,36 +410,87 @@ class AgentSessionRuntime:
         if not os.path.isfile(resolved_path):
             raise SessionImportFileNotFoundError(resolved_path)
 
-        # Validate the source before creating or replacing anything in the store.
-        await asyncio.to_thread(load_entries_from_file, resolved_path, strict=True)
+        # Parse a source-safe snapshot before hooks, copies, or runtime replacement.
+        try:
+            source_manager = await asyncio.to_thread(
+                SessionManager.openInMemory,
+                resolved_path,
+                cwdOverride,
+            )
+        except FileNotFoundError as error:
+            raise SessionImportFileNotFoundError(resolved_path) from error
+        if not Path(source_manager.getCwd()).exists():
+            raise MissingSessionCwdError(
+                SessionCwdIssue(
+                    sessionCwd=source_manager.getCwd(),
+                    fallbackCwd=self.cwd,
+                    sessionFile=resolved_path,
+                )
+            )
 
-        session_dir = self.session.sessionManager.getSessionDir()
-        if not os.path.exists(session_dir):
-            os.makedirs(session_dir, exist_ok=True)
-
-        if os.path.dirname(resolved_path) == resolve_path(session_dir):
-            destination_path = resolved_path
+        if not self.session.sessionManager.isPersisted():
+            before_result = await self.emitBeforeSwitch("resume")
+            if before_result["cancelled"]:
+                return before_result
+            session_manager = source_manager
         else:
-            destination_path = os.path.join(session_dir, f"import-{uuid.uuid4().hex}.jsonl")
-        before_result = await self.emitBeforeSwitch("resume", destination_path)
-        if before_result["cancelled"]:
-            return before_result
+            session_dir = self.session.sessionManager.getSessionDir()
+            if not session_dir:
+                raise RuntimeError("Persisted session is missing its session directory")
 
-        previous_session_file = self.session.sessionFile
-        if destination_path != resolved_path:
-            payload = await asyncio.to_thread(Path(resolved_path).read_bytes)
-            await asyncio.to_thread(atomic.write_bytes, destination_path, payload, mode=0o600)
             try:
-                await asyncio.to_thread(load_entries_from_file, destination_path, strict=True)
-            except BaseException:
+                source_stat = os.lstat(resolved_path)
+                source_is_owned = (
+                    stat.S_ISREG(source_stat.st_mode)
+                    and source_stat.st_nlink == 1
+                    and stat.S_IMODE(source_stat.st_mode) == 0o600
+                    and os.path.samefile(os.path.dirname(resolved_path), session_dir)
+                )
+            except OSError:
+                source_is_owned = False
+
+            destination_path = (
+                resolved_path
+                if source_is_owned
+                else os.path.join(session_dir, f"import-{uuid.uuid4().hex}.jsonl")
+            )
+            before_result = await self.emitBeforeSwitch("resume", destination_path)
+            if before_result["cancelled"]:
+                return before_result
+
+            os.makedirs(session_dir, mode=0o700, exist_ok=True)
+            os.chmod(session_dir, 0o700)
+            created_destination = False
+            if destination_path != resolved_path:
                 try:
-                    os.unlink(destination_path)
-                except OSError:
-                    pass
+                    payload = await asyncio.to_thread(Path(resolved_path).read_bytes)
+                    await asyncio.to_thread(atomic.write_bytes, destination_path, payload, mode=0o600)
+                    created_destination = True
+                    await asyncio.to_thread(
+                        load_entries_from_file,
+                        destination_path,
+                        strict=True,
+                        repair_unterminated=True,
+                    )
+                except BaseException:
+                    try:
+                        os.unlink(destination_path)
+                    except OSError:
+                        pass
+                    raise
+
+            try:
+                session_manager = SessionManager.open(destination_path, session_dir, cwdOverride)
+                assert_session_cwd_exists(session_manager, self.cwd)
+            except BaseException:
+                if created_destination:
+                    try:
+                        os.unlink(destination_path)
+                    except OSError:
+                        pass
                 raise
 
-        session_manager = SessionManager.open(destination_path, session_dir, cwdOverride)
-        assert_session_cwd_exists(session_manager, self.cwd)
+        previous_session_file = self.session.sessionFile
         await self.teardownCurrent("resume", session_manager.getSessionFile())
         self.apply(
             await self.createRuntime(

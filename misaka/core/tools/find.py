@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
-from misaka.core.tools._common import abort_race
+from misaka.core.tools._common import _ignore_background_task_result, abort_race
 from misaka.core.tools.path_utils import resolve_to_cwd
 from misaka.core.tools.render_utils import (
     get_text_output,
@@ -36,11 +36,11 @@ from misaka.utils.values import maybe_await, read_field, signal_aborted
 T = TypeVar("T")
 
 
-def _to_posix_path(value: str) -> str:
-    return value.replace(os.sep, "/")
-
-
-def _relativize_find_result(path_value: str, search_path: str) -> str:
+def _relativize_find_result(
+    path_value: str,
+    search_path: str,
+    path_module: Any | None = None,
+) -> str:
     """Make a result path relative to search_path (pi #7569/523b5a491).
 
     Absolute paths go through relpath: prefix slicing loses the first segment at the
@@ -49,9 +49,63 @@ def _relativize_find_result(path_value: str, search_path: str) -> str:
     glob already yields relative results, and relpath would wrongly resolve them
     against cwd.
     """
-    if os.path.isabs(path_value):
-        return _to_posix_path(os.path.relpath(path_value, search_path))
-    return _to_posix_path(path_value)
+    paths = os.path if path_module is None else path_module
+    had_trailing_separator = path_value.endswith(paths.sep) or (
+        paths.sep == "\\" and path_value.endswith("/")
+    )
+    is_absolute = paths.isabs(path_value) or (
+        paths.sep == "\\" and path_value.startswith(("\\", "/"))
+    )
+    if is_absolute:
+        try:
+            relative_path = paths.relpath(path_value, search_path)
+        except ValueError:
+            # Match win32.relative() across drives/UNC roots and root-relative paths.
+            def node_normalize(value: str) -> str:
+                normalized = paths.normpath(value)
+                if paths.sep != "\\":
+                    return normalized
+                drive, tail = paths.splitdrive(normalized)
+                if tail or not drive.startswith("\\\\"):
+                    return normalized
+                drive_parts = [
+                    part for part in drive[2:].split(paths.sep) if part
+                ]
+                if not drive_parts or drive_parts[0] in {"?", "."}:
+                    return normalized
+                if len(drive_parts) == 2:
+                    return normalized + paths.sep
+                return normalized
+
+            relative_path = node_normalize(path_value)
+            source_path = node_normalize(search_path)
+            target_parts = [
+                part for part in relative_path.lstrip(paths.sep).split(paths.sep) if part
+            ]
+            source_parts = [
+                part for part in source_path.lstrip(paths.sep).split(paths.sep) if part
+            ]
+            common = 0
+            for source_part, target_part in zip(source_parts, target_parts):
+                if source_part.lower() != target_part.lower():
+                    break
+                common += 1
+            if not target_parts:
+                relative_path = paths.sep.join([".."] * len(source_parts))
+            elif common:
+                relative_path = paths.sep.join(
+                    [".."] * (len(source_parts) - common) + target_parts[common:]
+                )
+        if relative_path == paths.curdir:
+            # Node's path.relative(path, path) returns "", while Python returns ".".
+            relative_path = ""
+    else:
+        relative_path = path_value
+
+    posix_path = relative_path.replace(paths.sep, "/")
+    if had_trailing_separator and not posix_path.endswith("/"):
+        return f"{posix_path}/"
+    return posix_path
 
 
 class FindToolInput(BaseModel):
@@ -146,6 +200,17 @@ def _details_or_none(details: FindToolDetails) -> FindToolDetails | None:
     return None
 
 
+def _is_inside_git_repo(search_path: str) -> bool:
+    current = search_path
+    while True:
+        if os.path.exists(os.path.join(current, ".git")):
+            return True
+        parent = os.path.dirname(current)
+        if parent == current:
+            return False
+        current = parent
+
+
 async def _run_fd_search(fd_path: str, args: list[str], signal: Any | None) -> tuple[bytes, bytes, int | None]:
     try:
         process = await asyncio.create_subprocess_exec(
@@ -195,43 +260,80 @@ def create_find_tool_definition(
         effective_limit = parsed.limit if parsed.limit is not None else DEFAULT_LIMIT
 
         if custom_ops is not None and callable(getattr(custom_ops, "glob", None)):
-            if not await maybe_await(custom_ops.exists(search_path)):
-                raise RuntimeError(f"Path not found: {search_path}")
-            if signal_aborted(signal):
-                raise RuntimeError("Operation aborted")
 
-            results = await maybe_await(
-                custom_ops.glob(
-                    parsed.pattern,
-                    search_path,
-                    {"ignore": ["**/node_modules/**", "**/.git/**"], "limit": effective_limit},
+            async def run_custom_search() -> AgentToolResult:
+                if not await maybe_await(custom_ops.exists(search_path)):
+                    raise RuntimeError(f"Path not found: {search_path}")
+                if signal_aborted(signal):
+                    raise RuntimeError("Operation aborted")
+
+                results = await maybe_await(
+                    custom_ops.glob(
+                        parsed.pattern,
+                        search_path,
+                        {
+                            "ignore": ["**/node_modules/**", "**/.git/**"],
+                            "limit": effective_limit,
+                        },
+                    )
                 )
-            )
-            if signal_aborted(signal):
-                raise RuntimeError("Operation aborted")
-            if not results:
-                return AgentToolResult(content=[TextContent(text="No files found matching pattern")], details=None)
+                if signal_aborted(signal):
+                    raise RuntimeError("Operation aborted")
+                if not results:
+                    return AgentToolResult(
+                        content=[TextContent(text="No files found matching pattern")],
+                        details=None,
+                    )
 
-            relativized = [_relativize_find_result(path_value, search_path)
-                           for path_value in results]
-            result_limit_reached = len(relativized) >= effective_limit
-            raw_output = "\n".join(relativized)
-            truncation = truncate_head(raw_output, TruncationOptions(maxLines=2**31 - 1))
-            result_output = truncation.content
-            details = FindToolDetails()
-            notices: list[str] = []
-            if result_limit_reached:
-                notices.append(f"{effective_limit} results limit reached")
-                details.resultLimitReached = effective_limit
-            if truncation.truncated:
-                notices.append(f"{format_size(DEFAULT_MAX_BYTES)} limit reached")
-                details.truncation = truncation
-            if notices:
-                result_output += f"\n\n[{'. '.join(notices)}]"
-            return AgentToolResult(
-                content=[TextContent(text=result_output)],
-                details=_details_or_none(details),
-            )
+                relativized = [
+                    _relativize_find_result(path_value, search_path)
+                    for path_value in results
+                ]
+                result_limit_reached = len(relativized) >= effective_limit
+                raw_output = "\n".join(relativized)
+                truncation = truncate_head(
+                    raw_output, TruncationOptions(maxLines=2**31 - 1)
+                )
+                result_output = truncation.content
+                details = FindToolDetails()
+                notices: list[str] = []
+                if result_limit_reached:
+                    notices.append(f"{effective_limit} results limit reached")
+                    details.resultLimitReached = effective_limit
+                if truncation.truncated:
+                    notices.append(f"{format_size(DEFAULT_MAX_BYTES)} limit reached")
+                    details.truncation = truncation
+                if notices:
+                    result_output += f"\n\n[{'. '.join(notices)}]"
+                return AgentToolResult(
+                    content=[TextContent(text=result_output)],
+                    details=_details_or_none(details),
+                )
+
+            worker_task = asyncio.create_task(run_custom_search())
+            try:
+                async with abort_race(signal) as abort_task:
+                    if abort_task is None:
+                        return await worker_task
+
+                    done, _pending = await asyncio.wait(
+                        {worker_task, abort_task}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if abort_task in done or signal_aborted(signal):
+                        if worker_task in done:
+                            await asyncio.gather(worker_task, return_exceptions=True)
+                        else:
+                            _ignore_background_task_result(worker_task)
+                        raise RuntimeError("Operation aborted")
+
+                    result = await worker_task
+                    if signal_aborted(signal):
+                        raise RuntimeError("Operation aborted")
+                    return result
+            except asyncio.CancelledError:
+                worker_task.cancel()
+                await asyncio.gather(worker_task, return_exceptions=True)
+                raise
 
         fd_path = find_tool("fd")
         if signal_aborted(signal):
@@ -239,14 +341,28 @@ def create_find_tool_definition(
         if not fd_path:
             raise RuntimeError(missing_tool_message("fd"))
 
-        args: list[str] = [
-            "--glob",
-            "--color=never",
-            "--hidden",
-            "--no-require-git",
-            "--max-results",
-            str(effective_limit),
-        ]
+        args: list[str] = ["--glob", "--color=never", "--hidden"]
+        repo_probe = asyncio.create_task(
+            asyncio.to_thread(_is_inside_git_repo, search_path)
+        )
+        try:
+            async with abort_race(signal) as abort_task:
+                if abort_task is not None:
+                    done, _pending = await asyncio.wait(
+                        {repo_probe, abort_task}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if abort_task in done and repo_probe not in done:
+                        raise RuntimeError("Operation aborted")
+                inside_git_repo = await repo_probe
+        finally:
+            if not repo_probe.done():
+                repo_probe.cancel()
+            await asyncio.gather(repo_probe, return_exceptions=True)
+        if signal_aborted(signal):
+            raise RuntimeError("Operation aborted")
+        if not inside_git_repo:
+            args.append("--no-require-git")
+        args.extend(["--max-results", str(effective_limit)])
 
         effective_pattern = parsed.pattern
         if "/" in parsed.pattern:
@@ -257,6 +373,8 @@ def create_find_tool_definition(
                 and parsed.pattern != "**"
             ):
                 effective_pattern = f"**/{parsed.pattern}"
+            if os.name == "nt":
+                effective_pattern = effective_pattern.replace("/", r"[/\\]")
         args.extend(["--", effective_pattern, search_path])
 
         stdout, stderr, return_code = await _run_fd_search(fd_path, args, signal)
@@ -274,11 +392,7 @@ def create_find_tool_definition(
             line = raw_line.rstrip("\r").strip()
             if not line:
                 continue
-            had_trailing_slash = line.endswith(("/", "\\"))
-            posix_value = _relativize_find_result(line, search_path)
-            if had_trailing_slash and not posix_value.endswith("/"):
-                posix_value += "/"
-            relativized.append(posix_value)
+            relativized.append(_relativize_find_result(line, search_path))
 
         result_limit_reached = len(relativized) >= effective_limit
         raw_output = "\n".join(relativized)

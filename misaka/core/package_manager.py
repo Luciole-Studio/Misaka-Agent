@@ -120,7 +120,7 @@ def _add_ignore_rules(matcher: _IgnoreMatcher, dir_path: str, root_dir: str) -> 
         if not os.path.exists(ignore_path):
             continue
         try:
-            content = Path(ignore_path).read_text(encoding="utf-8")
+            content = Path(ignore_path).read_text(encoding="utf-8-sig")
         except OSError:
             continue
         patterns = [
@@ -382,11 +382,12 @@ class DefaultPackageManager:
         accumulator = _Accumulator()
         global_settings = self.settingsManager.getGlobalSettings()
         project_settings = self.settingsManager.getProjectSettings()
+        project_trusted = self.settingsManager.isProjectTrusted()
         global_base_dir = self.agentDir
         project_base_dir = os.path.join(self.cwd, CONFIG_DIR_NAME)
         for resource_type in RESOURCE_TYPES:
             target = self._get_target_map(accumulator, resource_type)
-            if resource_type != "extensions":
+            if project_trusted and resource_type != "extensions":
                 self._resolve_local_entries(
                     list(project_settings.get(resource_type) or []),
                     resource_type,
@@ -402,7 +403,12 @@ class DefaultPackageManager:
                 global_base_dir,
             )
         self._add_auto_discovered_resources(
-            accumulator, global_settings, project_settings, global_base_dir, project_base_dir,
+            accumulator,
+            global_settings,
+            project_settings,
+            global_base_dir,
+            project_base_dir,
+            project_trusted=project_trusted,
         )
         return self._to_resolved_paths(accumulator)
 
@@ -462,6 +468,14 @@ class DefaultPackageManager:
         if self._collect_package_resources(resolved, accumulator, metadata):
             return
 
+        from misaka.core.extensions.loader import resolve_extension_entries
+
+        entries = resolve_extension_entries(resolved)
+        if entries is not None:
+            for entry in entries:
+                self._add_resource(accumulator.extensions, entry, metadata, True)
+            return
+
         self._add_resource(accumulator.extensions, resolved, metadata, True)
 
 
@@ -506,6 +520,8 @@ class DefaultPackageManager:
         project_settings: dict[str, Any],
         global_base_dir: str,
         project_base_dir: str,
+        *,
+        project_trusted: bool,
     ) -> None:
         user_metadata: PathMetadata = {
             "source": "auto",
@@ -546,20 +562,21 @@ class DefaultPackageManager:
             for path in paths:
                 self._add_resource(target, path, metadata, self._is_enabled_by_overrides(path, overrides, base_dir))
 
-        add_resources(
-            "prompts",
-            _collect_auto_prompt_entries(project_dirs["prompts"]),
-            project_metadata,
-            project_overrides["prompts"],
-            project_base_dir,
-        )
-        add_resources(
-            "themes",
-            _collect_auto_theme_entries(project_dirs["themes"]),
-            project_metadata,
-            project_overrides["themes"],
-            project_base_dir,
-        )
+        if project_trusted:
+            add_resources(
+                "prompts",
+                _collect_auto_prompt_entries(project_dirs["prompts"]),
+                project_metadata,
+                project_overrides["prompts"],
+                project_base_dir,
+            )
+            add_resources(
+                "themes",
+                _collect_auto_theme_entries(project_dirs["themes"]),
+                project_metadata,
+                project_overrides["themes"],
+                project_base_dir,
+            )
 
         add_resources(
             "extensions",

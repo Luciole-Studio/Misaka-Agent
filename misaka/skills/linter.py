@@ -4,13 +4,13 @@ from pathlib import Path
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")     # the one rule for a skill's name, which is its directory
 _MARKETING = ("powerful", "comprehensive", "seamless", "advanced", "robust",
-              "revolutionary", "industry-leading")
+              "cutting-edge", "state-of-the-art", "revolutionary", "industry-leading")
 _SHELL_TO_TOOL = {
     "cat": "read", "head": "read", "tail": "read", "sed": "edit",
     "awk": "bash", "find": "find", "ls": "ls", "rg": "grep", "grep": "grep",
 }
 _EXPECTED_SECTION = "## When to Use"
-_FORBIDDEN_FILES = {"README.md", "CHANGELOG.md", "install.sh", ".env", ".env.example"}
+_FORBIDDEN_FILES = {"README.md", "CHANGELOG.md", "install.sh", ".env", ".env.example", ".gitignore"}
 _CODE_FENCE = re.compile(r"```.*?```", re.DOTALL)
 _INLINE_CODE = re.compile(r"`([^`\n]+)`")
 _REF_RE = re.compile(r"(references|templates|assets)/[\w./\-\u4e00-\u9fff]+")
@@ -68,7 +68,7 @@ def lint_content(content, skill_dir=None):
                 f"description has {len(desc)} characters; the skill index truncates it after {SKILL_PROMPT_DESC_LIMIT}",
             ))
         low = desc.lower()
-        hits = [w for w in _MARKETING if w in desc or w in low]
+        hits = [w for w in _MARKETING if re.search(rf"\b{re.escape(w)}\b", low)]
         if hits:
             findings.append(Finding("description-marketing", "warning",
                                     f"description contains promotional wording: {hits}"))

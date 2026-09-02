@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import stat as stat_module
 import sys
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, TypedDict
@@ -22,6 +23,7 @@ from misaka.core.extensions.types import (
     InlineExtension,
     LoadExtensionsResult,
 )
+from misaka.core.footer_data_provider import find_git_paths
 from misaka.core.package_manager import (
     DefaultPackageManager,
     PathMetadata,
@@ -30,6 +32,7 @@ from misaka.core.package_manager import (
 from misaka.core.prompt_templates import PromptTemplate, load_prompt_templates
 from misaka.core.settings_manager import SettingsManager
 from misaka.core.source_info import SourceInfo, create_source_info
+from misaka.core.timings import resetTimings
 from misaka.ui.tui.interactive.theme.theme import Theme, load_theme_from_path
 from misaka.utils.paths import canonicalize_path, is_local_path, resolve_path
 
@@ -42,6 +45,10 @@ class ResourcePathEntry(TypedDict):
 class ResourceExtensionPaths(TypedDict, total=False):
     promptPaths: list[ResourcePathEntry]
     themePaths: list[ResourcePathEntry]
+
+
+class ResourceLoaderReloadOptions(TypedDict, total=False):
+    resolveProjectTrust: Callable[[dict[str, LoadExtensionsResult]], Awaitable[bool]]
 
 
 class _DefaultResourceLoaderOptionsRequired(TypedDict):
@@ -95,11 +102,15 @@ class ResourceLoader(Protocol):
 
     def getSystemPrompt(self) -> str | None: ...
 
+    def getSystemPromptSource(self) -> dict[str, str] | None: ...
+
     def getAppendSystemPrompt(self) -> list[str]: ...
+
+    def getAppendSystemPromptSources(self) -> list[dict[str, str]]: ...
 
     def extendResources(self, paths: ResourceExtensionPaths) -> None: ...
 
-    async def reload(self) -> None: ...
+    async def reload(self, options: ResourceLoaderReloadOptions | None = None) -> None: ...
 
 
 def _warn(message: str) -> None:
@@ -123,6 +134,25 @@ def resolve_prompt_input(input_value: str | None, description: str) -> str | Non
     return input_value
 
 
+def _find_shadowed_context_file(cwd: str) -> str | None:
+    git_paths = find_git_paths(cwd)
+    if git_paths is None:
+        return None
+
+    common_git_dir = canonicalize_path(git_paths.commonGitDir)
+    worktree_root = canonicalize_path(git_paths.repoDir)
+    main_repo_root = os.path.dirname(common_git_dir)
+    if not worktree_root.startswith(f"{main_repo_root}{os.sep}"):
+        return None
+    if canonicalize_path(os.path.join(main_repo_root, ".git")) != common_git_dir:
+        return None
+
+    worktree_context_file = _load_context_file_from_dir(worktree_root)
+    if worktree_context_file is None:
+        return None
+    return os.path.join(main_repo_root, os.path.basename(worktree_context_file["path"]))
+
+
 def load_project_context_files(options: dict[str, str]) -> list[dict[str, str]]:
     resolved_cwd = resolve_path(options["cwd"])
     resolved_agent_dir = resolve_path(options["agentDir"])
@@ -135,11 +165,16 @@ def load_project_context_files(options: dict[str, str]) -> list[dict[str, str]]:
         seen_paths.add(global_context["path"])
 
     ancestor_context_files: list[dict[str, str]] = []
+    shadowed_context_file = _find_shadowed_context_file(resolved_cwd)
     current_dir = resolved_cwd
     root = os.path.abspath(os.sep)
     while True:
         context_file = _load_context_file_from_dir(current_dir)
-        if context_file is not None and context_file["path"] not in seen_paths:
+        is_shadowed = (
+            shadowed_context_file is not None
+            and canonicalize_path(context_file["path"] if context_file is not None else "") == shadowed_context_file
+        )
+        if context_file is not None and not is_shadowed and context_file["path"] not in seen_paths:
             ancestor_context_files.insert(0, context_file)
             seen_paths.add(context_file["path"])
         if current_dir == root:
@@ -185,11 +220,15 @@ class DefaultResourceLoader:
     themeDiagnostics: list[ResourceDiagnostic] = field(default_factory=list)
     agentsFiles: list[dict[str, str]] = field(default_factory=list)
     systemPrompt: str | None = None
+    systemPromptSourcePath: str | None = None
     appendSystemPrompt: list[str] = field(default_factory=list)
+    appendSystemPromptSourcePaths: list[str] = field(default_factory=list)
     lastPromptPaths: list[str] = field(default_factory=list)
     lastThemePaths: list[str] = field(default_factory=list)
     extensionPromptSourceInfos: dict[str, SourceInfo] = field(default_factory=dict)
     extensionThemeSourceInfos: dict[str, SourceInfo] = field(default_factory=dict)
+    resourceMetadataByPath: dict[str, PathMetadata] = field(default_factory=dict)
+    loaded: bool = False
 
     def __init__(self, options: DefaultResourceLoaderOptions) -> None:
         self.cwd = resolve_path(options["cwd"])
@@ -222,11 +261,15 @@ class DefaultResourceLoader:
         self.themeDiagnostics = []
         self.agentsFiles = []
         self.systemPrompt = None
+        self.systemPromptSourcePath = None
         self.appendSystemPrompt = []
+        self.appendSystemPromptSourcePaths = []
         self.lastPromptPaths = []
         self.lastThemePaths = []
         self.extensionPromptSourceInfos = {}
         self.extensionThemeSourceInfos = {}
+        self.resourceMetadataByPath = {}
+        self.loaded = False
 
     def getExtensions(self) -> LoadExtensionsResult:
         return self.extensionsResult
@@ -243,8 +286,14 @@ class DefaultResourceLoader:
     def getSystemPrompt(self) -> str | None:
         return self.systemPrompt
 
+    def getSystemPromptSource(self) -> dict[str, str] | None:
+        return {"path": self.systemPromptSourcePath} if self.systemPromptSourcePath is not None else None
+
     def getAppendSystemPrompt(self) -> list[str]:
         return self.appendSystemPrompt
+
+    def getAppendSystemPromptSources(self) -> list[dict[str, str]]:
+        return [{"path": path} for path in self.appendSystemPromptSourcePaths]
 
     def extendResources(self, paths: ResourceExtensionPaths) -> None:
         prompt_paths = self._normalize_extension_paths(paths.get("promptPaths", []))
@@ -257,13 +306,29 @@ class DefaultResourceLoader:
 
         if prompt_paths:
             self.lastPromptPaths = self._merge_paths(self.lastPromptPaths, [entry["path"] for entry in prompt_paths])
-            self._update_prompts_from_paths(self.lastPromptPaths)
+            self._update_prompts_from_paths(self.lastPromptPaths, self.resourceMetadataByPath)
 
         if theme_paths:
             self.lastThemePaths = self._merge_paths(self.lastThemePaths, [entry["path"] for entry in theme_paths])
-            self._update_themes_from_paths(self.lastThemePaths)
+            self._update_themes_from_paths(self.lastThemePaths, self.resourceMetadataByPath)
 
-    async def reload(self) -> None:
+    async def loadProjectTrustExtensions(self) -> LoadExtensionsResult:
+        """Bootstrap only user/CLI/inline extensions while project settings are gated."""
+        self.settingsManager.setProjectTrusted(False)
+        await self.settingsManager.reload()
+        return await self._load_current_extension_set(include_inline_factories=True)
+
+    async def reload(self, options: ResourceLoaderReloadOptions | None = None) -> None:
+        resetTimings("extensions")
+        pre_trust_extensions: LoadExtensionsResult | None = None
+        resolve_project_trust = (options or {}).get("resolveProjectTrust")
+        if resolve_project_trust is not None:
+            pre_trust_extensions = await self.loadProjectTrustExtensions()
+            project_trusted = await resolve_project_trust(
+                {"extensionsResult": pre_trust_extensions}
+            )
+            self.settingsManager.setProjectTrusted(project_trusted)
+
         await self.settingsManager.reload()
         resolved_paths = await self.packageManager.resolve()
         cli_extension_paths = await self.packageManager.resolveExtensionSources(
@@ -271,7 +336,8 @@ class DefaultResourceLoader:
             {"temporary": True},
         )
 
-        metadata_by_path: dict[str, PathMetadata] = {}
+        self.resourceMetadataByPath = {}
+        metadata_by_path = self.resourceMetadataByPath
         self.extensionPromptSourceInfos = {}
         self.extensionThemeSourceInfos = {}
 
@@ -300,16 +366,10 @@ class DefaultResourceLoader:
             cli_enabled_extensions if self.noExtensions else self._merge_paths(cli_enabled_extensions, enabled_extensions)
         )
 
-        extensions_result = await load_extensions(
+        extensions_result = await self._load_final_extension_set(
             extension_paths,
-            self.cwd,
-            self.eventBus,
+            pre_trust_extensions,
         )
-        inline_extensions = await self._load_extension_factories(extensions_result.runtime)
-        extensions_result.extensions.extend(inline_extensions["extensions"])
-        extensions_result.errors.extend(inline_extensions["errors"])
-        for conflict in self._detect_extension_conflicts(extensions_result.extensions):
-            extensions_result.errors.append({"path": conflict["path"], "error": conflict["message"]})
 
         for raw_path in self.additionalExtensionPaths:
             if is_local_path(raw_path):
@@ -374,14 +434,17 @@ class DefaultResourceLoader:
         self.agentsFiles = resolved_agents_files["agentsFiles"]
 
         discovered_system_prompt = self._discover_system_prompt_file()
-        base_system_prompt = resolve_prompt_input(
-            self.systemPromptSource if self.systemPromptSource is not None else discovered_system_prompt,
-            "system prompt",
-        )
+        system_prompt_source = self.systemPromptSource if self.systemPromptSource is not None else discovered_system_prompt
+        base_system_prompt = resolve_prompt_input(system_prompt_source, "system prompt")
         self.systemPrompt = (
             self.systemPromptOverride(base_system_prompt)
             if callable(self.systemPromptOverride)
             else base_system_prompt
+        )
+        self.systemPromptSourcePath = (
+            resolve_path(system_prompt_source)
+            if system_prompt_source is not None and os.path.exists(system_prompt_source)
+            else None
         )
 
         discovered_append_prompt = self._discover_append_system_prompt_file()
@@ -398,6 +461,101 @@ class DefaultResourceLoader:
             if callable(self.appendSystemPromptOverride)
             else base_append
         )
+        self.appendSystemPromptSourcePaths = [
+            resolve_path(source) for source in append_sources if os.path.exists(source)
+        ]
+        self.loaded = True
+
+    async def _load_current_extension_set(
+        self,
+        *,
+        include_inline_factories: bool,
+    ) -> LoadExtensionsResult:
+        resolved_paths = await self.packageManager.resolve()
+        cli_paths = await self.packageManager.resolveExtensionSources(
+            self.additionalExtensionPaths,
+            {"temporary": True},
+        )
+        enabled_extensions = [item.path for item in resolved_paths.extensions if item.enabled]
+        cli_enabled_extensions = [item.path for item in cli_paths.extensions if item.enabled]
+        extension_paths = (
+            cli_enabled_extensions
+            if self.noExtensions
+            else self._merge_paths(cli_enabled_extensions, enabled_extensions)
+        )
+        result = await load_extensions(extension_paths, self.cwd, self.eventBus)
+        if include_inline_factories:
+            inline = await self._load_extension_factories(result.runtime)
+            result.extensions.extend(inline["extensions"])
+            result.errors.extend(inline["errors"])
+        return result
+
+    async def _load_final_extension_set(
+        self,
+        extension_paths: list[str],
+        pre_trust_extensions: LoadExtensionsResult | None,
+    ) -> LoadExtensionsResult:
+        if pre_trust_extensions is None:
+            result = await load_extensions(extension_paths, self.cwd, self.eventBus)
+            inline = await self._load_extension_factories(result.runtime)
+            result.extensions.extend(inline["extensions"])
+            result.errors.extend(inline["errors"])
+            self._add_extension_conflict_diagnostics(result)
+            return result
+
+        preloaded_by_path = {
+            extension.resolvedPath: extension
+            for extension in pre_trust_extensions.extensions
+            if not extension.path.startswith("<inline:")
+        }
+        failed_preload_paths = {
+            self._resolve_extension_load_path(error["path"])
+            for error in pre_trust_extensions.errors
+        }
+        remaining_paths = [
+            path
+            for path in extension_paths
+            if self._resolve_extension_load_path(path) not in preloaded_by_path
+            and self._resolve_extension_load_path(path) not in failed_preload_paths
+        ]
+        remaining = await load_extensions(
+            remaining_paths,
+            self.cwd,
+            self.eventBus,
+            pre_trust_extensions.runtime,
+        )
+        loaded_by_path = dict(preloaded_by_path)
+        loaded_by_path.update(
+            {extension.resolvedPath: extension for extension in remaining.extensions}
+        )
+        inline = [
+            extension
+            for extension in pre_trust_extensions.extensions
+            if extension.path.startswith("<inline:")
+        ]
+        ordered = [
+            loaded_by_path[resolved]
+            for path in extension_paths
+            if (resolved := self._resolve_extension_load_path(path)) in loaded_by_path
+        ]
+        ordered.extend(inline)
+        result = LoadExtensionsResult(
+            extensions=ordered,
+            errors=[*pre_trust_extensions.errors, *remaining.errors],
+            runtime=pre_trust_extensions.runtime,
+        )
+        self._add_extension_conflict_diagnostics(result)
+        return result
+
+    def _resolve_extension_load_path(self, path: str) -> str:
+        # Keep the pre-trust/final-pass identity key byte-for-byte aligned with
+        # extensions.loader._load_extension(), otherwise Unicode-space paths can
+        # activate the same factory twice.
+        return resolve_path(path, self.cwd, normalize_unicode_spaces=True)
+
+    def _add_extension_conflict_diagnostics(self, result: LoadExtensionsResult) -> None:
+        for conflict in self._detect_extension_conflicts(result.extensions):
+            result.errors.append({"path": conflict["path"], "error": conflict["message"]})
 
     def _normalize_extension_paths(self, entries: list[ResourcePathEntry]) -> list[ResourcePathEntry]:
         normalized: list[ResourcePathEntry] = []
@@ -550,8 +708,9 @@ class DefaultResourceLoader:
             os.path.join(self.agentDir, "themes"),
             os.path.join(self.agentDir, "extensions"),
         ]
-        # MISAKA fork: no project-level resource roots. The project folder carries only
-        # PROJECT.md and skills/ (loaded through misaka.skills.layers), never executable config.
+        # Trusted project prompts/themes are classified from package metadata above.
+        # Only user roots need this fallback; project extensions/system prompts stay disabled,
+        # while skills remain owned by misaka.skills.layers.
         for root in agent_roots:
             if self._is_under_path(normalized_path, root):
                 return SourceInfo(path=file_path, source="local", scope="user", origin="top-level", baseDir=root)
@@ -800,4 +959,6 @@ __all__ = [
     "ResourceDiagnostic",
     "ResourceExtensionPaths",
     "ResourceLoader",
-    ]
+    "ResourceLoaderLike",
+    "ResourceLoaderReloadOptions",
+]

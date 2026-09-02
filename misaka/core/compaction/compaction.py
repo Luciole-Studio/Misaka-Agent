@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import math
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypedDict
 
+from misaka.agent.harness.session.uuid import uuidv7
 from misaka.agent.types import AgentMessage, StreamFn, ThinkingLevel
 from misaka.ai.stream import complete_simple
 from misaka.ai.types import (
@@ -18,7 +18,7 @@ from misaka.ai.types import (
     Usage,
     UserMessage,
 )
-from misaka.ai.utils.retry import RetryPolicy, retry_assistant_call
+from misaka.ai.utils.retry import RetryCallbacks, RetryPolicy, retry_assistant_call
 from misaka.core.compaction.utils import (
     SUMMARIZATION_SYSTEM_PROMPT as _SUMMARIZATION_SYSTEM_PROMPT,
 )
@@ -34,14 +34,18 @@ from misaka.core.compaction.utils import (
 from misaka.core.compaction.utils import (
     serialize_conversation as _serialize_conversation,
 )
-from misaka.core.messages import (
-    convertToLlm,
-    createBranchSummaryMessage,
-    createCompactionSummaryMessage,
-    createCustomMessage,
+from misaka.core.messages import convertToLlm
+from misaka.core.session_manager import (
+    SessionEntry,
+    build_session_context,
+    session_entry_to_context_messages,
 )
-from misaka.core.session_manager import SessionEntry, build_session_context
 from misaka.utils.values import read_field
+
+
+class CompactionDetails(TypedDict):
+    readFiles: list[str]
+    modifiedFiles: list[str]
 
 
 @dataclass(slots=True)
@@ -50,6 +54,15 @@ class CompactionResult:
     firstKeptEntryId: str
     tokensBefore: int
     details: Any | None = None
+    # Keep details as the fourth positional field for existing Python extensions.
+    estimatedTokensAfter: int | None = None
+    usage: Usage | dict[str, Any] | None = None
+
+
+@dataclass(slots=True)
+class SummaryWithUsage:
+    text: str
+    usage: Usage
 
 
 @dataclass(slots=True)
@@ -57,6 +70,13 @@ class CompactionSettings:
     enabled: bool
     reserveTokens: int
     keepRecentTokens: int
+
+
+DEFAULT_COMPACTION_SETTINGS = CompactionSettings(
+    enabled=True,
+    reserveTokens=16384,
+    keepRecentTokens=20000,
+)
 
 
 @dataclass(slots=True)
@@ -177,11 +197,57 @@ Summarize the prefix to provide context for the retained suffix:
 Be concise. Focus on what's needed to understand the kept suffix."""
 
 
+def get_summarization_failure(response: AssistantMessage, label: str) -> str | None:
+    """Return why a summarization response is unsafe to persist."""
+    if response.stopReason == "error":
+        return f"{label} failed: {response.errorMessage or 'Unknown error'}"
+    if response.stopReason == "length":
+        return f"{label} failed: generation hit the token cap and the summary is incomplete"
+    return None
+
+
+def combine_usage(first: Usage, second: Usage) -> Usage:
+    return Usage(
+        input=first.input + second.input,
+        output=first.output + second.output,
+        cacheRead=first.cacheRead + second.cacheRead,
+        cacheWrite=first.cacheWrite + second.cacheWrite,
+        cacheWrite1h=(
+            (first.cacheWrite1h or 0) + (second.cacheWrite1h or 0)
+            if first.cacheWrite1h is not None or second.cacheWrite1h is not None
+            else None
+        ),
+        reasoning=(
+            (first.reasoning or 0) + (second.reasoning or 0)
+            if first.reasoning is not None or second.reasoning is not None
+            else None
+        ),
+        totalTokens=first.totalTokens + second.totalTokens,
+        cost={
+            "input": first.cost.input + second.cost.input,
+            "output": first.cost.output + second.cost.output,
+            "cacheRead": first.cost.cacheRead + second.cost.cacheRead,
+            "cacheWrite": first.cost.cacheWrite + second.cost.cacheWrite,
+            "total": first.cost.total + second.cost.total,
+        },
+    )
+
+
 def calculate_context_tokens(usage: Usage | dict[str, Any]) -> int:
     total_tokens = _usage_field(usage, "totalTokens")
     if isinstance(total_tokens, int) and total_tokens:
         return total_tokens
     return sum(int(_usage_field(usage, name) or 0) for name in ("input", "output", "cacheRead", "cacheWrite"))
+
+
+def get_last_assistant_usage(entries: list[SessionEntry]) -> Usage | dict[str, Any] | None:
+    for entry in reversed(entries):
+        if _entry_field(entry, "type") != "message":
+            continue
+        usage = _assistant_usage(_entry_field(entry, "message"))
+        if usage is not None:
+            return usage
+    return None
 
 
 def estimate_context_tokens(messages: list[AgentMessage]) -> ContextUsageEstimate:
@@ -209,6 +275,11 @@ def should_compact(context_tokens: int, context_window: int, settings: Compactio
     return settings.enabled and context_tokens > context_window - settings.reserveTokens
 
 
+def _utf16_length(text: str) -> int:
+    """Return JavaScript ``String.length`` for Pi's chars/4 heuristic."""
+    return len(text) + sum(ord(char) > 0xFFFF for char in text)
+
+
 def estimate_tokens(message: AgentMessage) -> int:
     role = read_field(message, "role")
     chars = 0
@@ -216,14 +287,14 @@ def estimate_tokens(message: AgentMessage) -> int:
     if role == "user":
         content = read_field(message, "content")
         if isinstance(content, str):
-            chars = len(content)
+            chars = _utf16_length(content)
         elif isinstance(content, list):
             for block in content:
                 block_type = read_field(block, "type")
                 if block_type == "text":
                     text = read_field(block, "text")
                     if isinstance(text, str):
-                        chars += len(text)
+                        chars += _utf16_length(text)
                 elif block_type == "image":
                     # Same flat allowance the toolResult branch below applies (and
                     # upstream's estimateTextAndImageContentChars, compaction.ts:246-260).
@@ -238,28 +309,28 @@ def estimate_tokens(message: AgentMessage) -> int:
             if block_type == "text":
                 text = read_field(block, "text")
                 if isinstance(text, str):
-                    chars += len(text)
+                    chars += _utf16_length(text)
             elif block_type == "thinking":
                 thinking = read_field(block, "thinking")
                 if isinstance(thinking, str):
-                    chars += len(thinking)
+                    chars += _utf16_length(thinking)
             elif block_type == "toolCall":
                 name = read_field(block, "name")
-                chars += len(name) if isinstance(name, str) else 0
-                chars += len(_safe_json_stringify(read_field(block, "arguments")))
+                chars += _utf16_length(name) if isinstance(name, str) else 0
+                chars += _utf16_length(_safe_json_stringify(read_field(block, "arguments")))
         return max(0, math.ceil(chars / 4))
 
     if role in {"custom", "toolResult"}:
         content = read_field(message, "content")
         if isinstance(content, str):
-            chars = len(content)
+            chars = _utf16_length(content)
         elif isinstance(content, list):
             for block in content:
                 block_type = read_field(block, "type")
                 if block_type == "text":
                     text = read_field(block, "text")
                     if isinstance(text, str):
-                        chars += len(text)
+                        chars += _utf16_length(text)
                 elif block_type == "image":
                     chars += 4800
         return max(0, math.ceil(chars / 4))
@@ -267,13 +338,13 @@ def estimate_tokens(message: AgentMessage) -> int:
     if role == "bashExecution":
         command = read_field(message, "command")
         output = read_field(message, "output")
-        chars = len(command) if isinstance(command, str) else 0
-        chars += len(output) if isinstance(output, str) else 0
+        chars = _utf16_length(command) if isinstance(command, str) else 0
+        chars += _utf16_length(output) if isinstance(output, str) else 0
         return max(0, math.ceil(chars / 4))
 
     if role in {"branchSummary", "compactionSummary"}:
         summary = read_field(message, "summary")
-        return max(0, math.ceil((len(summary) if isinstance(summary, str) else 0) / 4))
+        return max(0, math.ceil((_utf16_length(summary) if isinstance(summary, str) else 0) / 4))
 
     return 0
 
@@ -349,19 +420,29 @@ def _create_summarization_options(
     headers: dict[str, str] | None,
     signal: Any | None,
     thinking_level: ThinkingLevel | None,
+    env: dict[str, str] | None = None,
+    session_id: str | None = None,
 ) -> SimpleStreamOptions:
-    options = SimpleStreamOptions(maxTokens=max_tokens, signal=signal, apiKey=api_key, headers=headers)
+    options = SimpleStreamOptions(
+        maxTokens=max_tokens,
+        signal=signal,
+        apiKey=api_key,
+        headers=headers,
+        env=env,
+        sessionId=session_id,
+    )
     if model.reasoning and thinking_level and thinking_level != "off":
         options.reasoning = thinking_level
     return options
 
 
-async def _complete_summarization(
+async def complete_summarization(
     model: Model[Any],
     context: dict[str, Any],
     options: SimpleStreamOptions,
     stream_fn: StreamFn | None = None,
     retry: RetryPolicy | None = None,
+    callbacks: RetryCallbacks | None = None,
 ) -> AssistantMessage:
     """The one choke point every summarization call goes through (pi #6647).
 
@@ -371,15 +452,24 @@ async def _complete_summarization(
     backoff instead; deterministic errors and aborts still return on the first attempt.
     """
 
+    # Build the isolated request once, outside the retry closure. Retries keep one
+    # routing key, while independent summaries receive distinct provider sessions.
+    request_options = options.model_copy(
+        update={
+            "cacheRetention": "none",
+            "sessionId": options.sessionId if options.sessionId is not None else uuidv7(),
+        }
+    )
+
     async def produce() -> AssistantMessage:
         if stream_fn is None:
-            return await complete_simple(model, context, options)
-        stream = stream_fn(model, context, options)
+            return await complete_simple(model, context, request_options)
+        stream = stream_fn(model, context, request_options)
         if inspect.isawaitable(stream):
             stream = await stream
         return await stream.result()
 
-    return await retry_assistant_call(produce, retry, options.signal)
+    return await retry_assistant_call(produce, retry, request_options.signal, callbacks)
 
 
 async def generate_summary(
@@ -394,7 +484,46 @@ async def generate_summary(
     thinking_level: ThinkingLevel | None = None,
     stream_fn: StreamFn | None = None,
     retry: RetryPolicy | None = None,
+    env: dict[str, str] | None = None,
+    callbacks: RetryCallbacks | None = None,
+    session_id: str | None = None,
 ) -> str:
+    return (
+        await generate_summary_with_usage(
+            current_messages,
+            model,
+            reserve_tokens,
+            api_key,
+            headers,
+            signal,
+            custom_instructions,
+            previous_summary,
+            thinking_level,
+            stream_fn,
+            retry,
+            env,
+            callbacks,
+            session_id,
+        )
+    ).text
+
+
+async def generate_summary_with_usage(
+    current_messages: list[AgentMessage],
+    model: Model[Any],
+    reserve_tokens: int,
+    api_key: str | None,
+    headers: dict[str, str] | None = None,
+    signal: Any | None = None,
+    custom_instructions: str | None = None,
+    previous_summary: str | None = None,
+    thinking_level: ThinkingLevel | None = None,
+    stream_fn: StreamFn | None = None,
+    retry: RetryPolicy | None = None,
+    env: dict[str, str] | None = None,
+    callbacks: RetryCallbacks | None = None,
+    session_id: str | None = None,
+) -> SummaryWithUsage:
     max_tokens = min(
         math.floor(0.8 * reserve_tokens),
         model.maxTokens if model.maxTokens > 0 else math.inf,
@@ -410,19 +539,100 @@ async def generate_summary(
         prompt_text += f"<previous-summary>\n{previous_summary}\n</previous-summary>\n\n"
     prompt_text += base_prompt
 
-    response = await _complete_summarization(
+    response = await complete_summarization(
         model,
         {
             "systemPrompt": _SUMMARIZATION_SYSTEM_PROMPT,
             "messages": [UserMessage(content=[{"type": "text", "text": prompt_text}], timestamp=_timestamp_ms())],
         },
-        _create_summarization_options(model, int(max_tokens), api_key, headers, signal, thinking_level),
+        _create_summarization_options(
+            model,
+            int(max_tokens),
+            api_key,
+            headers,
+            signal,
+            thinking_level,
+            env,
+            session_id,
+        ),
         stream_fn,
         retry,
+        callbacks,
     )
-    if response.stopReason == "error":
-        raise RuntimeError(f"Summarization failed: {response.errorMessage or 'Unknown error'}")
-    return _assistant_text(response)
+    failure = get_summarization_failure(response, "Summarization")
+    if failure:
+        raise RuntimeError(failure)
+    if any(read_field(block, "type") == "toolCall" for block in response.content):
+        raise RuntimeError("Summarization attempted to call a tool")
+    return SummaryWithUsage(text=_assistant_text(response), usage=response.usage)
+
+
+async def generateSummary(
+    currentMessages: list[AgentMessage],
+    model: Model[Any],
+    reserveTokens: int,
+    apiKey: str | None,
+    headers: dict[str, str] | None = None,
+    signal: Any | None = None,
+    customInstructions: str | None = None,
+    previousSummary: str | None = None,
+    thinkingLevel: ThinkingLevel | None = None,
+    streamFn: StreamFn | None = None,
+    env: dict[str, str] | None = None,
+    retry: RetryPolicy | None = None,
+    callbacks: RetryCallbacks | None = None,
+    sessionId: str | None = None,
+) -> str:
+    return await generate_summary(
+        currentMessages,
+        model,
+        reserveTokens,
+        apiKey,
+        headers=headers,
+        signal=signal,
+        custom_instructions=customInstructions,
+        previous_summary=previousSummary,
+        thinking_level=thinkingLevel,
+        stream_fn=streamFn,
+        retry=retry,
+        env=env,
+        callbacks=callbacks,
+        session_id=sessionId,
+    )
+
+
+async def generateSummaryWithUsage(
+    currentMessages: list[AgentMessage],
+    model: Model[Any],
+    reserveTokens: int,
+    apiKey: str | None,
+    headers: dict[str, str] | None = None,
+    signal: Any | None = None,
+    customInstructions: str | None = None,
+    previousSummary: str | None = None,
+    thinkingLevel: ThinkingLevel | None = None,
+    streamFn: StreamFn | None = None,
+    env: dict[str, str] | None = None,
+    retry: RetryPolicy | None = None,
+    callbacks: RetryCallbacks | None = None,
+    sessionId: str | None = None,
+) -> SummaryWithUsage:
+    return await generate_summary_with_usage(
+        currentMessages,
+        model,
+        reserveTokens,
+        apiKey,
+        headers=headers,
+        signal=signal,
+        custom_instructions=customInstructions,
+        previous_summary=previousSummary,
+        thinking_level=thinkingLevel,
+        stream_fn=streamFn,
+        retry=retry,
+        env=env,
+        callbacks=callbacks,
+        session_id=sessionId,
+    )
 
 
 def prepare_compaction(
@@ -499,11 +709,15 @@ async def compact(
     signal: Any | None = None,
     thinking_level: ThinkingLevel | None = None,
     stream_fn: StreamFn | None = None,
+    env: dict[str, str] | None = None,
     retry: RetryPolicy | None = None,
+    callbacks: RetryCallbacks | None = None,
+    session_id: str | None = None,
 ) -> CompactionResult:
     if preparation.isSplitTurn and preparation.turnPrefixMessages:
-        history_result, turn_prefix_result = await asyncio.gather(
-            generate_summary(
+        history_result = None
+        if preparation.messagesToSummarize:
+            history_result = await generate_summary_with_usage(
                 preparation.messagesToSummarize,
                 model,
                 preparation.settings.reserveTokens,
@@ -513,26 +727,36 @@ async def compact(
                 custom_instructions,
                 preparation.previousSummary,
                 thinking_level,
-                stream_fn,
-                retry,
+                stream_fn=stream_fn,
+                retry=retry,
+                env=env,
+                callbacks=callbacks,
+                session_id=session_id,
             )
-            if preparation.messagesToSummarize
-            else _resolved("No prior history."),
-            _generate_turn_prefix_summary(
-                preparation.turnPrefixMessages,
-                model,
-                preparation.settings.reserveTokens,
-                api_key,
-                headers,
-                signal,
-                thinking_level,
-                stream_fn,
-                retry,
-            ),
+
+        turn_prefix_result = await _generate_turn_prefix_summary(
+            preparation.turnPrefixMessages,
+            model,
+            preparation.settings.reserveTokens,
+            api_key,
+            headers,
+            signal,
+            thinking_level,
+            stream_fn=stream_fn,
+            retry=retry,
+            env=env,
+            callbacks=callbacks,
+            session_id=session_id,
         )
-        summary = f"{history_result}\n\n---\n\n**Turn Context (split turn):**\n\n{turn_prefix_result}"
+        history_text = history_result.text if history_result is not None else "No prior history."
+        summary = f"{history_text}\n\n---\n\n**Turn Context (split turn):**\n\n{turn_prefix_result.text}"
+        summary_usage = (
+            combine_usage(history_result.usage, turn_prefix_result.usage)
+            if history_result is not None
+            else turn_prefix_result.usage
+        )
     else:
-        summary = await generate_summary(
+        summary_result = await generate_summary_with_usage(
             preparation.messagesToSummarize,
             model,
             preparation.settings.reserveTokens,
@@ -542,9 +766,14 @@ async def compact(
             custom_instructions,
             preparation.previousSummary,
             thinking_level,
-            stream_fn,
-            retry,
+            stream_fn=stream_fn,
+            retry=retry,
+            env=env,
+            callbacks=callbacks,
+            session_id=session_id,
         )
+        summary = summary_result.text
+        summary_usage = summary_result.usage
 
     file_lists = compute_file_lists(preparation.fileOps)
     summary += format_file_operations(file_lists["readFiles"], file_lists["modifiedFiles"])
@@ -558,6 +787,7 @@ async def compact(
             "readFiles": file_lists["readFiles"],
             "modifiedFiles": file_lists["modifiedFiles"],
         },
+        usage=summary_usage,
     )
 
 
@@ -588,37 +818,11 @@ def _extract_file_operations(
     return file_ops
 
 
-def _get_message_from_entry(entry: SessionEntry) -> AgentMessage | None:
-    entry_type = entry.get("type")
-    if entry_type == "message":
-        return entry.get("message")
-    if entry_type == "custom_message":
-        return createCustomMessage(
-            entry.get("customType"),
-            entry.get("content"),
-            entry.get("display"),
-            entry.get("details"),
-            entry.get("timestamp"),
-        )
-    if entry_type == "branch_summary":
-        return createBranchSummaryMessage(
-            entry.get("summary"),
-            entry.get("fromId"),
-            entry.get("timestamp"),
-        )
-    if entry_type == "compaction":
-        return createCompactionSummaryMessage(
-            entry.get("summary"),
-            entry.get("tokensBefore"),
-            entry.get("timestamp"),
-        )
-    return None
-
-
 def _get_message_from_entry_for_compaction(entry: SessionEntry) -> AgentMessage | None:
     if entry.get("type") == "compaction":
         return None
-    return _get_message_from_entry(entry)
+    messages = session_entry_to_context_messages(entry)
+    return messages[0] if messages else None
 
 
 def _find_valid_cut_points(entries: list[SessionEntry], start_index: int, end_index: int) -> list[int]:
@@ -645,26 +849,42 @@ async def _generate_turn_prefix_summary(
     thinking_level: ThinkingLevel | None = None,
     stream_fn: StreamFn | None = None,
     retry: RetryPolicy | None = None,
-) -> str:
+    env: dict[str, str] | None = None,
+    callbacks: RetryCallbacks | None = None,
+    session_id: str | None = None,
+) -> SummaryWithUsage:
     max_tokens = min(
         math.floor(0.5 * reserve_tokens),
         model.maxTokens if model.maxTokens > 0 else math.inf,
     )
     conversation_text = _serialize_conversation(convertToLlm(messages))
     prompt_text = f"<conversation>\n{conversation_text}\n</conversation>\n\n{_TURN_PREFIX_SUMMARIZATION_PROMPT}"
-    response = await _complete_summarization(
+    response = await complete_summarization(
         model,
         {
             "systemPrompt": _SUMMARIZATION_SYSTEM_PROMPT,
             "messages": [UserMessage(content=[{"type": "text", "text": prompt_text}], timestamp=_timestamp_ms())],
         },
-        _create_summarization_options(model, int(max_tokens), api_key, headers, signal, thinking_level),
+        _create_summarization_options(
+            model,
+            int(max_tokens),
+            api_key,
+            headers,
+            signal,
+            thinking_level,
+            env,
+            session_id,
+        ),
         stream_fn,
         retry,
+        callbacks,
     )
-    if response.stopReason == "error":
-        raise RuntimeError(f"Turn prefix summarization failed: {response.errorMessage or 'Unknown error'}")
-    return _assistant_text(response)
+    failure = get_summarization_failure(response, "Turn prefix summarization")
+    if failure:
+        raise RuntimeError(failure)
+    if any(read_field(block, "type") == "toolCall" for block in response.content):
+        raise RuntimeError("Turn prefix summarization attempted to call a tool")
+    return SummaryWithUsage(text=_assistant_text(response), usage=response.usage)
 
 
 def _assistant_usage(message: Any) -> Usage | dict[str, Any] | None:
@@ -673,7 +893,7 @@ def _assistant_usage(message: Any) -> Usage | dict[str, Any] | None:
     if read_field(message, "stopReason") in {"aborted", "error"}:
         return None
     usage = read_field(message, "usage")
-    return usage if usage is not None else None
+    return usage if usage is not None and calculate_context_tokens(usage) > 0 else None
 
 
 def _last_assistant_usage_info(messages: list[AgentMessage]) -> dict[str, Any] | None:
@@ -700,24 +920,50 @@ def _timestamp_ms() -> int:
     return int(time.time() * 1000)
 
 
-async def _resolved(value: str) -> str:
-    return value
-
-
 calculateContextTokens = calculate_context_tokens
+completeSummarization = complete_summarization
 estimateContextTokens = estimate_context_tokens
+estimateTokens = estimate_tokens
+findCutPoint = find_cut_point
+findTurnStartIndex = find_turn_start_index
+getLastAssistantUsage = get_last_assistant_usage
+getSummarizationFailure = get_summarization_failure
 prepareCompaction = prepare_compaction
 shouldCompact = should_compact
 
+
 __all__ = [
+    "DEFAULT_COMPACTION_SETTINGS",
+    "CompactionDetails",
     "CompactionPreparation",
     "CompactionResult",
     "CompactionSettings",
     "ContextUsageEstimate",
     "CutPointResult",
+    "SummaryWithUsage",
     "calculateContextTokens",
+    "calculate_context_tokens",
     "compact",
+    "completeSummarization",
+    "complete_summarization",
     "estimateContextTokens",
+    "estimateTokens",
+    "estimate_context_tokens",
+    "estimate_tokens",
+    "findCutPoint",
+    "findTurnStartIndex",
+    "find_cut_point",
+    "find_turn_start_index",
+    "generateSummary",
+    "generateSummaryWithUsage",
+    "generate_summary",
+    "generate_summary_with_usage",
+    "getLastAssistantUsage",
+    "getSummarizationFailure",
+    "get_last_assistant_usage",
+    "get_summarization_failure",
     "prepareCompaction",
+    "prepare_compaction",
     "shouldCompact",
+    "should_compact",
 ]

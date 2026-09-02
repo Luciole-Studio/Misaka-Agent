@@ -82,14 +82,19 @@ def _to_jpeg_ready(image: Image.Image) -> Image.Image:
     return image.convert("RGB")
 
 
-def _resize_image_sync(img: ImageContent, options: ImageResizeOptions | None) -> ResizedImage | None:
+def _resize_image_bytes_sync(
+    input_buffer: bytes,
+    mime_type: str,
+    options: ImageResizeOptions | None,
+    original_base64: str | None = None,
+    input_base64_size: int | None = None,
+) -> ResizedImage | None:
     resolved = _resolve_options(options)
-    try:
-        input_buffer = base64.b64decode(img.data)
-    except ValueError:
-        return None
-
-    input_base64_size = len(img.data.encode("utf-8"))
+    encoded_size = (
+        input_base64_size
+        if input_base64_size is not None
+        else ((len(input_buffer) + 2) // 3) * 4
+    )
 
     try:
         with Image.open(BytesIO(input_buffer)) as opened:
@@ -103,16 +108,20 @@ def _resize_image_sync(img: ImageContent, options: ImageResizeOptions | None) ->
 
     try:
         original_width, original_height = image.size
-        format_suffix = (img.mimeType.split("/", 1)[1] if img.mimeType else (image.format or "png")).lower()
+        format_suffix = (mime_type.split("/", 1)[1] if mime_type else (image.format or "png")).lower()
 
         if (
             original_width <= resolved.maxWidth
             and original_height <= resolved.maxHeight
-            and input_base64_size < resolved.maxBytes
+            and encoded_size < resolved.maxBytes
         ):
             return ResizedImage(
-                data=img.data,
-                mimeType=img.mimeType or f"image/{format_suffix}",
+                data=(
+                    original_base64
+                    if original_base64 is not None
+                    else base64.b64encode(input_buffer).decode("ascii")
+                ),
+                mimeType=mime_type or f"image/{format_suffix}",
                 originalWidth=original_width,
                 originalHeight=original_height,
                 width=original_width,
@@ -169,8 +178,40 @@ def _resize_image_sync(img: ImageContent, options: ImageResizeOptions | None) ->
         image.close()
 
 
+def _resize_image_content_sync(
+    img: ImageContent,
+    options: ImageResizeOptions | None,
+) -> ResizedImage | None:
+    try:
+        input_buffer = base64.b64decode(img.data)
+    except ValueError:
+        return None
+    return _resize_image_bytes_sync(
+        input_buffer,
+        img.mimeType,
+        options,
+        original_base64=img.data,
+        input_base64_size=len(img.data.encode("utf-8")),
+    )
+
+
+async def resize_image_bytes(
+    input_buffer: bytes,
+    mime_type: str,
+    options: ImageResizeOptions | None = None,
+) -> ResizedImage | None:
+    """Resize raw image bytes, encoding base64 only for the returned attachment."""
+    return await asyncio.to_thread(
+        _resize_image_bytes_sync,
+        input_buffer,
+        mime_type,
+        options,
+    )
+
+
 async def resize_image(img: ImageContent, options: ImageResizeOptions | None = None) -> ResizedImage | None:
-    return await asyncio.to_thread(_resize_image_sync, img, options)
+    """Compatibility entry point for callers that already hold base64 image content."""
+    return await asyncio.to_thread(_resize_image_content_sync, img, options)
 
 
 def format_dimension_note(result: ResizedImage) -> str | None:
@@ -193,4 +234,5 @@ __all__ = [
     "ResizedImage",
     "formatDimensionNote",
     "resizeImage",
+    "resize_image_bytes",
 ]

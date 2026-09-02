@@ -8,7 +8,7 @@ import random
 import struct
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 type ImageProtocol = str | None
 
@@ -55,6 +55,7 @@ class _RenderedImage:
 
 
 _cached_capabilities: TerminalCapabilities | None = None
+_capability_overrides: dict[str, object] = {}
 _cell_dimensions = CellDimensions(widthPx=9, heightPx=18)
 
 KITTY_PREFIX = "\x1b_G"
@@ -133,10 +134,21 @@ def detectCapabilities(tmux_forwards_hyperlink=None) -> TerminalCapabilities:
     return TerminalCapabilities(images=None, trueColor=has_truecolor_hint, hyperlinks=False)
 
 
+def setCapabilityOverrides(overrides: dict[str, object]) -> None:
+    """Settings-driven overrides win over detection for the keys they name; the composed result is re-cached lazily."""
+    global _capability_overrides, _cached_capabilities
+    if overrides == _capability_overrides:
+        return
+    _capability_overrides = dict(overrides)
+    _cached_capabilities = None
+
+
 def getCapabilities() -> TerminalCapabilities:
     global _cached_capabilities
     if _cached_capabilities is None:
-        _cached_capabilities = detectCapabilities()
+        hyperlinks = _capability_overrides.get("hyperlinks")
+        detected = detectCapabilities(None if hyperlinks is None else lambda: hyperlinks)  # an override skips the tmux probe
+        _cached_capabilities = replace(detected, **_capability_overrides)
     return _cached_capabilities
 
 

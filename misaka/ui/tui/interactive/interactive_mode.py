@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
+import inspect
 import json
 import os
 import re
@@ -20,7 +22,7 @@ from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from misaka.ai.models import getProviders
@@ -28,33 +30,48 @@ from misaka.ai.types import ImageContent
 from misaka.config import (
     APP_NAME,
     APP_TITLE,
+    CONFIG_DIR_NAME,
     VERSION,
+    get_agent_dir,
     get_auth_path,
     get_debug_log_path,
 )
 from misaka.core.agent_session import parse_skill_block
 from misaka.core.agent_session_runtime import SessionImportFileNotFoundError
 from misaka.core.bash_executor import BashResult
+from misaka.core.defaults import DEFAULT_THINKING_LEVEL
 from misaka.core.extensions import startup_sections
 from misaka.core.footer_data_provider import FooterDataProvider
+from misaka.core.http_dispatcher import formatHttpIdleTimeoutMs
 from misaka.core.keybindings import KeybindingsManager
 from misaka.core.messages import createCompactionSummaryMessage
 from misaka.core.model_resolver import (
     defaultModelPerProvider,
     findExactModelReferenceMatch,
-    resolveModelScope,
+    resolveModelScopeFromModels,
 )
+from misaka.core.project_trust import (
+    ProjectTrustStore,
+    has_trust_requiring_project_resources,
+)
+from misaka.core.prompt_templates import parse_prompt_template_invocation
 from misaka.core.provider_display_names import BUILT_IN_PROVIDER_DISPLAY_NAMES
 from misaka.core.session_cwd import (
     MissingSessionCwdError,
     format_missing_session_cwd_prompt,
 )
-from misaka.core.session_manager import SessionManager
+from misaka.core.session_manager import (
+    InvalidSessionFileError,
+    SessionManager,
+    session_entry_to_context_messages,
+)
+from misaka.core.settings_manager import DefaultProjectTrust
 from misaka.core.slash_commands import (
     _LOCAL_ALIAS_SLASH_COMMANDS,
     BUILTIN_SLASH_COMMANDS,
 )
 from misaka.core.tools.truncate import TruncationResult
+from misaka.core.usage_totals import getUsageCostBreakdown
 from misaka.ui.tui import (
     TUI,
     AutocompleteProvider,
@@ -70,6 +87,7 @@ from misaka.ui.tui import (
     Text,
     TruncatedText,
     matchesKey,
+    setCapabilityOverrides,
     setKeybindings,
 )
 from misaka.ui.tui.interactive.components.assistant_message import (
@@ -84,6 +102,7 @@ from misaka.ui.tui.interactive.components.compaction_summary_message import (
 )
 from misaka.ui.tui.interactive.components.countdown_timer import CountdownTimer
 from misaka.ui.tui.interactive.components.custom_editor import CustomEditor
+from misaka.ui.tui.interactive.components.custom_entry import CustomEntryComponent
 from misaka.ui.tui.interactive.components.custom_message import CustomMessageComponent
 from misaka.ui.tui.interactive.components.dynamic_border import DynamicBorder
 from misaka.ui.tui.interactive.components.extension_editor import (
@@ -93,7 +112,7 @@ from misaka.ui.tui.interactive.components.extension_input import ExtensionInputC
 from misaka.ui.tui.interactive.components.extension_selector import (
     ExtensionSelectorComponent,
 )
-from misaka.ui.tui.interactive.components.footer import FooterComponent
+from misaka.ui.tui.interactive.components.footer import FooterComponent, format_tokens
 from misaka.ui.tui.interactive.components.keybinding_hints import (
     KeyTextFormatOptions,
     format_key_text,
@@ -133,6 +152,10 @@ from misaka.ui.tui.interactive.components.thinking_selector import (
 )
 from misaka.ui.tui.interactive.components.tool_execution import ToolExecutionComponent
 from misaka.ui.tui.interactive.components.tree_selector import TreeSelectorComponent
+from misaka.ui.tui.interactive.components.trust_selector import (
+    TrustSelectorComponent,
+    TrustSelectorOptions,
+)
 from misaka.ui.tui.interactive.components.user_message import UserMessageComponent
 from misaka.ui.tui.interactive.components.user_message_selector import (
     UserMessageItem,
@@ -167,6 +190,7 @@ class InteractiveModeOptions:
     initialImages: list[ImageContent] | None = None
     initialMessages: list[str] | None = None
     verbose: bool = False
+    autoTrustOnReloadCwd: str | None = None
 
 
 class ExpandableText(Text):
@@ -531,6 +555,7 @@ class InteractiveMode:
             if isinstance(options, InteractiveModeOptions)
             else InteractiveModeOptions(**dict(options or {}))
         )
+        self.autoTrustOnReloadCwd = self.options.autoTrustOnReloadCwd
 
         self.session = getattr(
             self,
@@ -543,6 +568,8 @@ class InteractiveMode:
                 isCompacting=False,
                 extensionRunner=SimpleNamespace(
                     get_registered_commands=list,
+                    get_entry_renderer=lambda _custom_type: None,
+                    get_markdown_transformers=list,
                     get_message_renderer=lambda _custom_type: None,
                 ),
                 resourceLoader=SimpleNamespace(getThemes=lambda: {"themes": []}),
@@ -551,6 +578,7 @@ class InteractiveMode:
                     getApiKeyForProvider=_noop_async,
                     getAvailable=list,
                     isUsingOAuth=lambda _model: False,
+                    isUsingSubscription=lambda _model: False,
                 ),
                 state=SimpleNamespace(messages=[], model=None, thinkingLevel="off"),
                 subscribe=lambda _listener: (lambda: None),
@@ -575,6 +603,7 @@ class InteractiveMode:
                 getSessionFile=lambda: None,
                 getSessionDir=lambda: None,
                 getSessionName=lambda: None,
+                buildContextEntries=list,
                 buildSessionContext=lambda: SimpleNamespace(messages=[]),
                 getEntries=list,
                 getTree=list,
@@ -595,10 +624,12 @@ class InteractiveMode:
                 getCodeBlockIndent=lambda: "  ",
                 getHideThinkingBlock=lambda: False,
                 getEditorPaddingX=lambda: 0,
+                getOutputPad=lambda: 1,
                 getAutocompleteMaxVisible=lambda: 5,
                 getClearOnShrink=lambda: False,
                 getShowHardwareCursor=lambda: False,
                 setHideThinkingBlock=lambda _hide: None,
+                setOutputPad=lambda _padding: None,
             ),
         )
         self.runtimeHost = getattr(
@@ -614,6 +645,7 @@ class InteractiveMode:
                 setRebindSession=lambda *_args, **_kwargs: None,
             ),
         )
+        setCapabilityOverrides(getattr(self.settingsManager, "getTerminalCapabilityOverrides", dict)())
         if getattr(self, "ui", None) is None:
             if runtime_session is not None:
                 self.ui = TUI(ProcessTerminal(), _safe_call_bool(self.settingsManager, "getShowHardwareCursor"))
@@ -709,9 +741,19 @@ class InteractiveMode:
         self.extensionSelector = getattr(self, "extensionSelector", None)
         self.extensionInput = getattr(self, "extensionInput", None)
         self.extensionEditor = getattr(self, "extensionEditor", None)
+        self._extensionPromptLock = asyncio.Lock()
+        self._extensionPromptOwner: object | None = None
+        self._extensionPromptTask: asyncio.Task[Any] | None = None
+        self._extensionPromptCancel: Callable[[], None] | None = None
+        self._extensionPromptGeneration = 0
+        self._extensionPromptContext: contextvars.ContextVar[object | None] = (
+            contextvars.ContextVar(f"misaka_extension_prompt_{id(self)}", default=None)
+        )
+        self._extensionPromptContextToken: contextvars.Token[object | None] | None = None
         self.loadingAnimation = getattr(self, "loadingAnimation", None)
         self.autoCompactionEscapeHandler = getattr(self, "autoCompactionEscapeHandler", None)
         self.autoCompactionLoader = getattr(self, "autoCompactionLoader", None)
+        self.branchSummaryLoader = getattr(self, "branchSummaryLoader", None)
         self.extensionWidgetsAbove: dict[str, Any] = dict(getattr(self, "extensionWidgetsAbove", {}))
         self.extensionWidgetsBelow: dict[str, Any] = dict(getattr(self, "extensionWidgetsBelow", {}))
         self.extensionTerminalInputUnsubscribers: set[Callable[[], None]] = set(
@@ -723,6 +765,9 @@ class InteractiveMode:
         )
         self.hideThinkingBlock = bool(
             getattr(self, "hideThinkingBlock", _safe_call_bool(self.settingsManager, "getHideThinkingBlock"))
+        )
+        self.outputPad = int(
+            getattr(self, "outputPad", _safe_call_int(self.settingsManager, "getOutputPad", 1))
         )
         self.version = getattr(self, "version", VERSION)
         self.isInitialized = bool(getattr(self, "isInitialized", False))
@@ -797,10 +842,20 @@ class InteractiveMode:
 
     def createBaseAutocompleteProvider(self) -> AutocompleteProvider:
         builtin_commands = [
-            SlashCommand(name=command.name, description=command.description) for command in BUILTIN_SLASH_COMMANDS
+            SlashCommand(
+                name=command.name,
+                description=command.description,
+                argumentHint=command.argumentHint,
+            )
+            for command in BUILTIN_SLASH_COMMANDS
         ]
         builtin_commands.extend(
-            SlashCommand(name=command.name, description=command.description) for command in _LOCAL_ALIAS_SLASH_COMMANDS
+            SlashCommand(
+                name=command.name,
+                description=command.description,
+                argumentHint=command.argumentHint,
+            )
+            for command in _LOCAL_ALIAS_SLASH_COMMANDS
         )
         model_command = next((command for command in builtin_commands if command.name == "model"), None)
         if model_command is not None:
@@ -851,6 +906,9 @@ class InteractiveMode:
     def createExtensionUIContext(self) -> _ExtensionUIContext:
         return _ExtensionUIContext(self)
 
+    def createProjectTrustContext(self, cwd: str) -> dict[str, Any]:
+        return {"cwd": cwd, "mode": "tui", "hasUI": True, "ui": self.createExtensionUIContext()}
+
     def showStatus(self, message: str) -> None:
         children = getattr(self.chatContainer, "children", [])
         last = children[-1] if len(children) > 0 else None
@@ -871,15 +929,30 @@ class InteractiveMode:
         self.lastStatusText = text
         self._request_render()
 
-    def _append_notice(self, message: str, color: str, prefix: str, trailing_spacer: bool = False) -> None:
+    def _append_notice(
+        self,
+        message: str,
+        color: str,
+        prefix: str,
+        trailing_spacer: bool = False,
+        padding: int = 1,
+    ) -> None:
         self.chatContainer.addChild(Spacer(1))
-        self.chatContainer.addChild(Text(interactive_theme.theme.fg(color, f"{prefix}: {message}"), 1, 0))
+        self.chatContainer.addChild(
+            Text(interactive_theme.theme.fg(color, f"{prefix}: {message}"), padding, 0)
+        )
         if trailing_spacer:
             self.chatContainer.addChild(Spacer(1))
         self._request_render()
 
     def showError(self, message: str) -> None:
-        self._append_notice(message, "error", "Error", trailing_spacer=True)
+        self._append_notice(
+            message,
+            "error",
+            "Error",
+            trailing_spacer=True,
+            padding=self.outputPad,
+        )
 
     def showWarning(self, message: str) -> None:
         self._append_notice(message, "warning", "Warning")
@@ -1025,10 +1098,10 @@ class InteractiveMode:
 
     def isPromptTemplate(self, text: str) -> bool:
         """Whether this names a prompt template, which the menu offers and prompt() expands."""
-        if not text.startswith("/"):
+        invocation = parse_prompt_template_invocation(text)
+        if invocation is None:
             return False
-        space_index = text.find(" ")
-        name = text[1:] if space_index == -1 else text[1:space_index]
+        name, _args = invocation
         return any(str(t.name) == name for t in getattr(self.session, "promptTemplates", []) or [])
 
     async def flushCompactionQueue(self, options: dict[str, Any] | None = None) -> None:
@@ -1087,7 +1160,14 @@ class InteractiveMode:
                 await self.session.prompt(str(read_field(message, "text", "")))
 
             first_prompt_text = str(read_field(first_prompt, "text", ""))
-            task = asyncio.create_task(self.session.prompt(first_prompt_text))
+            task = asyncio.Task(
+                self.session.prompt(
+                    first_prompt_text,
+                    {"streamingBehavior": read_field(first_prompt, "mode")},
+                ),
+                loop=asyncio.get_running_loop(),
+                eager_start=True,
+            )
             self._backgroundTasks.add(task)
 
             def _finish_prompt(prompt_task: asyncio.Task[Any]) -> None:
@@ -1169,6 +1249,17 @@ class InteractiveMode:
             self.workingIndicatorOptions,
         )
 
+    def _show_working_loader(self) -> None:
+        if self.loadingAnimation is not None:
+            return
+        clear_status = _callable_attr(self.statusContainer, "clear")
+        if clear_status is not None:
+            clear_status()
+        self.loadingAnimation = self.createWorkingLoader()
+        add_child = _callable_attr(self.statusContainer, "addChild")
+        if add_child is not None:
+            add_child(self.loadingAnimation)
+
     def stopWorkingLoader(self) -> None:
         if self.loadingAnimation is not None:
             stop = _callable_attr(self.loadingAnimation, "stop")
@@ -1186,13 +1277,7 @@ class InteractiveMode:
             self._request_render()
             return
         if bool(getattr(self.session, "isStreaming", False)) and self.loadingAnimation is None:
-            clear_status = _callable_attr(self.statusContainer, "clear")
-            if clear_status is not None:
-                clear_status()
-            self.loadingAnimation = self.createWorkingLoader()
-            add_child = _callable_attr(self.statusContainer, "addChild")
-            if add_child is not None:
-                add_child(self.loadingAnimation)
+            self._show_working_loader()
         self._request_render()
 
     def setWorkingIndicator(self, options: LoaderIndicatorOptions | None = None) -> None:
@@ -1360,13 +1445,87 @@ class InteractiveMode:
             unsubscribe()
         self.extensionTerminalInputUnsubscribers.clear()
 
-    def resetExtensionUI(self) -> None:
+    async def _acquireExtensionPrompt(self, signal: Any = None) -> object | None:
+        task = asyncio.current_task()
+        if task is self._extensionPromptTask or self._extensionPromptContext.get() is not None:
+            raise RuntimeError("Extension UI prompts cannot be nested")
+        generation = self._extensionPromptGeneration
+        if signal is None:
+            await self._extensionPromptLock.acquire()
+        else:
+            loop = asyncio.get_running_loop()
+            aborted: asyncio.Future[None] = loop.create_future()
+
+            def abort() -> None:
+                def settle() -> None:
+                    if not aborted.done():
+                        aborted.set_result(None)
+
+                with contextlib.suppress(RuntimeError):
+                    loop.call_soon_threadsafe(settle)
+
+            unregister_abort = _register_abort_handler(signal, abort)
+            acquire = asyncio.create_task(self._extensionPromptLock.acquire())
+            acquired = False
+            try:
+                completed, _pending = await asyncio.wait(
+                    {acquire, aborted}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if aborted in completed:
+                    if not acquire.done():
+                        acquire.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await acquire
+                    elif not acquire.cancelled() and acquire.exception() is None:
+                        self._extensionPromptLock.release()
+                    return None
+                acquired = await acquire
+            except BaseException:
+                if not acquire.done():
+                    acquire.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await acquire
+                elif not acquired and not acquire.cancelled() and acquire.exception() is None:
+                    self._extensionPromptLock.release()
+                raise
+            finally:
+                with contextlib.suppress(Exception):
+                    unregister_abort()
+        if generation != self._extensionPromptGeneration:
+            self._extensionPromptLock.release()
+            return None
+        owner = object()
+        self._extensionPromptOwner = owner
+        self._extensionPromptTask = task
+        self._extensionPromptContextToken = self._extensionPromptContext.set(owner)
+        return owner
+
+    def _releaseExtensionPrompt(self, owner: object) -> None:
+        token = self._extensionPromptContextToken
+        if token is not None:
+            self._extensionPromptContext.reset(token)
+            self._extensionPromptContextToken = None
+        if self._extensionPromptOwner is owner:
+            self._extensionPromptOwner = None
+            self._extensionPromptTask = None
+            self._extensionPromptCancel = None
+        self._extensionPromptLock.release()
+
+    def _resetExtensionPrompts(self) -> None:
+        self._extensionPromptGeneration += 1
+        cancel = self._extensionPromptCancel
+        if cancel is not None:
+            with contextlib.suppress(Exception):
+                cancel()
         if self.extensionSelector is not None:
             self.hideExtensionSelector()
         if self.extensionInput is not None:
             self.hideExtensionInput()
         if self.extensionEditor is not None:
             self.hideExtensionEditor()
+
+    def resetExtensionUI(self) -> None:
+        self._resetExtensionPrompts()
         self._clear_selector()
         hide_overlay = _callable_attr(self.ui, "hideOverlay")
         if hide_overlay is not None:
@@ -1462,10 +1621,12 @@ class InteractiveMode:
         self._request_render()
 
     async def showExtensionCustom(self, factory: Any, options: dict[str, Any] | None = None) -> Any:
+        owner = await self._acquireExtensionPrompt()
+        if owner is None:
+            return None
         saved_text = self._get_editor_text()
         use_overlay = bool(read_field(options, "overlay", False))
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[Any] = loop.create_future()
+        future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
 
         def restore_editor() -> None:
             clear = _callable_attr(self.editorContainer, "clear")
@@ -1481,29 +1642,56 @@ class InteractiveMode:
             self._request_render()
 
         component: Any = None
+        overlay_handle: Any = None
+        mounted = False
         closed = False
+        factory_task: asyncio.Future[Any] | None = None
 
         def done(result: Any) -> None:
             nonlocal closed
             if closed:
                 return
             closed = True
-            if use_overlay:
-                hide_overlay = _callable_attr(self.ui, "hideOverlay")
-                if hide_overlay is not None:
-                    hide_overlay()
-            else:
-                restore_editor()
-            if not future.done():
-                future.set_result(result)
+            if self._extensionPromptOwner is owner:
+                if overlay_handle is not None:
+                    hide_overlay = _callable_attr(overlay_handle, "hide")
+                    if hide_overlay is not None:
+                        with contextlib.suppress(Exception):
+                            hide_overlay()
+                elif mounted:
+                    with contextlib.suppress(Exception):
+                        restore_editor()
+                self._extensionPromptOwner = None
+                self._extensionPromptTask = None
+                self._extensionPromptCancel = None
             dispose = _callable_attr(component, "dispose")
             if dispose is not None:
                 with contextlib.suppress(Exception):
                     dispose()
+            if not future.done():
+                future.set_result(result)
 
+        self._extensionPromptCancel = lambda: done(None)
         try:
-            component = await maybe_await(factory(self.ui, interactive_theme.theme, self.keybindings, done))
+            factory_result = factory(self.ui, interactive_theme.theme, self.keybindings, done)
+            if inspect.isawaitable(factory_result):
+                factory_task = asyncio.ensure_future(factory_result)
+                completed, _pending = await asyncio.wait(
+                    {factory_task, future}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if future in completed and factory_task not in completed:
+                    factory_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await factory_task
+                    return await future
+                component = factory_task.result()
+            else:
+                component = factory_result
             if closed:
+                dispose = _callable_attr(component, "dispose")
+                if dispose is not None:
+                    with contextlib.suppress(Exception):
+                        dispose()
                 return await future
             if use_overlay:
                 overlay_options = read_field(options, "overlayOptions")
@@ -1511,27 +1699,19 @@ class InteractiveMode:
                 if resolved_options is None:
                     width = getattr(component, "width", None)
                     resolved_options = {"width": width} if width else None
-                handle = self.ui.showOverlay(component, resolved_options)
+                overlay_handle = self.ui.showOverlay(component, resolved_options)
                 on_handle = read_field(options, "onHandle")
                 if callable(on_handle):
-                    on_handle(handle)
+                    on_handle(overlay_handle)
             else:
-                clear = _callable_attr(self.editorContainer, "clear")
-                add_child = _callable_attr(self.editorContainer, "addChild")
-                set_focus = _callable_attr(self.ui, "setFocus")
-                if clear is not None:
-                    clear()
-                if add_child is not None:
-                    add_child(component)
-                if set_focus is not None:
-                    set_focus(component)
-                self._request_render()
-        except Exception:
-            if not use_overlay:
-                restore_editor()
-            raise
-
-        return await future
+                mounted = True
+                self._mountExtensionComponent(component)
+            return await future
+        finally:
+            if factory_task is not None and not factory_task.done():
+                factory_task.cancel()
+            done(None)
+            self._releaseExtensionPrompt(owner)
 
     def setToolsExpanded(self, expanded: bool) -> None:
         self.toolOutputExpanded = expanded
@@ -1820,6 +2000,8 @@ class InteractiveMode:
         get_themes = _callable_attr(resource_loader, "getThemes")
         get_agents_files = _callable_attr(resource_loader, "getAgentsFiles")
         get_extensions = _callable_attr(resource_loader, "getExtensions")
+        get_system_prompt_source = _callable_attr(resource_loader, "getSystemPromptSource")
+        get_append_system_prompt_sources = _callable_attr(resource_loader, "getAppendSystemPromptSources")
 
         prompts_result = get_prompts() if get_prompts is not None else {"prompts": [], "diagnostics": []}
         themes_result = get_themes() if get_themes is not None else {"themes": [], "diagnostics": []}
@@ -1870,7 +2052,17 @@ class InteractiveMode:
             self.chatContainer.addChild(Spacer(1))
 
         if show_listing:
-            context_files = read_field(get_agents_files() if get_agents_files is not None else {}, "agentsFiles", []) or []
+            context_files: list[Any] = []
+            system_prompt_source = get_system_prompt_source() if get_system_prompt_source is not None else None
+            if system_prompt_source is not None and read_field(system_prompt_source, "path"):
+                context_files.append(system_prompt_source)
+            if get_append_system_prompt_sources is not None:
+                context_files.extend(
+                    source for source in (get_append_system_prompt_sources() or []) if read_field(source, "path")
+                )
+            context_files.extend(
+                read_field(get_agents_files() if get_agents_files is not None else {}, "agentsFiles", []) or []
+            )
             if context_files:
                 add_loaded_section(
                     "Context",
@@ -2059,58 +2251,99 @@ class InteractiveMode:
         options: list[str],
         opts: dict[str, Any] | None = None,
     ) -> str | None:
-        signal = read_field(opts, "signal")
+        return await self._showExtensionComponent(
+            "extensionSelector",
+            lambda finish: ExtensionSelectorComponent(
+                title,
+                options,
+                finish,
+                lambda: finish(None),
+                {
+                    "tui": self.ui,
+                    "timeout": read_field(opts, "timeout"),
+                    "onToggleToolsExpanded": self.toggleToolOutputExpansion,
+                },
+            ),
+            None,
+            read_field(opts, "signal"),
+        )
+
+    async def _showExtensionComponent(
+        self,
+        slot: str,
+        factory: Callable[[Callable[[Any], None]], Any],
+        cancelled_value: Any,
+        signal: Any = None,
+    ) -> Any:
         if signal_aborted(signal):
-            return None
+            return cancelled_value
+        owner = await self._acquireExtensionPrompt(signal)
+        if owner is None:
+            return cancelled_value
+        if signal_aborted(signal):
+            self._releaseExtensionPrompt(owner)
+            return cancelled_value
 
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[str | None] = loop.create_future()
+        future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+        component: Any = None
+        unregister_abort: Callable[[], None] = lambda: None
+        closed = False
 
-        def finish(value: str | None) -> None:
+        def finish(value: Any) -> None:
+            nonlocal closed
+            if closed:
+                return
+            closed = True
+            with contextlib.suppress(Exception):
+                unregister_abort()
+            if self._extensionPromptOwner is owner:
+                if component is not None:
+                    with contextlib.suppress(Exception):
+                        self._hideExtensionComponent(slot, component)
+                self._extensionPromptOwner = None
+                self._extensionPromptTask = None
+                self._extensionPromptCancel = None
             if not future.done():
                 future.set_result(value)
 
-        def abort() -> None:
-            self.hideExtensionSelector()
-            finish(None)
+        try:
+            self._extensionPromptCancel = lambda: finish(cancelled_value)
+            unregister_abort = _register_abort_handler(signal, self._extensionPromptCancel)
+            if closed:
+                with contextlib.suppress(Exception):
+                    unregister_abort()
+            if not closed:
+                component = factory(finish)
+                if closed:
+                    dispose = _callable_attr(component, "dispose")
+                    if dispose is not None:
+                        with contextlib.suppress(Exception):
+                            dispose()
+                else:
+                    setattr(self, slot, component)
+                    self._mountExtensionComponent(component)
+            return await future
+        finally:
+            finish(cancelled_value)
+            self._releaseExtensionPrompt(owner)
 
-        unregister_abort = _register_abort_handler(signal, abort)
-
-        def select(option: str) -> None:
-            unregister_abort()
-            self.hideExtensionSelector()
-            finish(option)
-
-        def cancel() -> None:
-            unregister_abort()
-            self.hideExtensionSelector()
-            finish(None)
-
-        self.extensionSelector = ExtensionSelectorComponent(
-            title,
-            options,
-            select,
-            cancel,
-            {
-                "tui": self.ui,
-                "timeout": read_field(opts, "timeout"),
-                "onToggleToolsExpanded": self.toggleToolOutputExpansion,
-            },
-        )
+    def _mountExtensionComponent(self, component: Any) -> None:
         clear = _callable_attr(self.editorContainer, "clear")
         if clear is not None:
             clear()
         add_child = _callable_attr(self.editorContainer, "addChild")
         if add_child is not None:
-            add_child(self.extensionSelector)
+            add_child(component)
         set_focus = _callable_attr(self.ui, "setFocus")
         if set_focus is not None:
-            set_focus(self.extensionSelector)
+            set_focus(component)
         self._request_render()
-        return await future
 
-    def hideExtensionSelector(self) -> None:
-        dispose = _callable_attr(self.extensionSelector, "dispose")
+    def _hideExtensionComponent(self, slot: str, expected: Any | None = None) -> None:
+        component = getattr(self, slot, None)
+        if expected is not None and component is not expected:
+            return
+        dispose = _callable_attr(component, "dispose")
         if dispose is not None:
             dispose()
         clear = _callable_attr(self.editorContainer, "clear")
@@ -2119,11 +2352,14 @@ class InteractiveMode:
         add_child = _callable_attr(self.editorContainer, "addChild")
         if add_child is not None:
             add_child(self.editor)
-        self.extensionSelector = None
+        setattr(self, slot, None)
         set_focus = _callable_attr(self.ui, "setFocus")
         if set_focus is not None:
             set_focus(self.editor)
         self._request_render()
+
+    def hideExtensionSelector(self, expected: Any | None = None) -> None:
+        self._hideExtensionComponent("extensionSelector", expected)
 
     async def showExtensionConfirm(
         self,
@@ -2140,119 +2376,38 @@ class InteractiveMode:
         placeholder: str | None = None,
         opts: dict[str, Any] | None = None,
     ) -> str | None:
-        signal = read_field(opts, "signal")
-        if signal_aborted(signal):
-            return None
-
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[str | None] = loop.create_future()
-
-        def finish(value: str | None) -> None:
-            if not future.done():
-                future.set_result(value)
-
-        def abort() -> None:
-            self.hideExtensionInput()
-            finish(None)
-
-        unregister_abort = _register_abort_handler(signal, abort)
-
-        def submit(value: str) -> None:
-            unregister_abort()
-            self.hideExtensionInput()
-            finish(value)
-
-        def cancel() -> None:
-            unregister_abort()
-            self.hideExtensionInput()
-            finish(None)
-
-        self.extensionInput = ExtensionInputComponent(
-            title,
-            placeholder,
-            submit,
-            cancel,
-            {"tui": self.ui, "timeout": read_field(opts, "timeout")},
+        return await self._showExtensionComponent(
+            "extensionInput",
+            lambda finish: ExtensionInputComponent(
+                title,
+                placeholder,
+                finish,
+                lambda: finish(None),
+                {"tui": self.ui, "timeout": read_field(opts, "timeout")},
+            ),
+            None,
+            read_field(opts, "signal"),
         )
-        clear = _callable_attr(self.editorContainer, "clear")
-        if clear is not None:
-            clear()
-        add_child = _callable_attr(self.editorContainer, "addChild")
-        if add_child is not None:
-            add_child(self.extensionInput)
-        set_focus = _callable_attr(self.ui, "setFocus")
-        if set_focus is not None:
-            set_focus(self.extensionInput)
-        self._request_render()
-        return await future
 
-    def hideExtensionInput(self) -> None:
-        dispose = _callable_attr(self.extensionInput, "dispose")
-        if dispose is not None:
-            dispose()
-        clear = _callable_attr(self.editorContainer, "clear")
-        if clear is not None:
-            clear()
-        add_child = _callable_attr(self.editorContainer, "addChild")
-        if add_child is not None:
-            add_child(self.editor)
-        self.extensionInput = None
-        set_focus = _callable_attr(self.ui, "setFocus")
-        if set_focus is not None:
-            set_focus(self.editor)
-        self._request_render()
+    def hideExtensionInput(self, expected: Any | None = None) -> None:
+        self._hideExtensionComponent("extensionInput", expected)
 
     async def showExtensionEditor(self, title: str, prefill: str | None = None) -> str | None:
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[str | None] = loop.create_future()
-
-        def finish(value: str | None) -> None:
-            if not future.done():
-                future.set_result(value)
-
-        def submit(value: str) -> None:
-            self.hideExtensionEditor()
-            finish(value)
-
-        def cancel() -> None:
-            self.hideExtensionEditor()
-            finish(None)
-
-        self.extensionEditor = ExtensionEditorComponent(
-            self.ui,
-            self.keybindings,
-            title,
-            prefill,
-            submit,
-            cancel,
+        return await self._showExtensionComponent(
+            "extensionEditor",
+            lambda finish: ExtensionEditorComponent(
+                self.ui,
+                self.keybindings,
+                title,
+                prefill,
+                finish,
+                lambda: finish(None),
+            ),
+            None,
         )
-        clear = _callable_attr(self.editorContainer, "clear")
-        if clear is not None:
-            clear()
-        add_child = _callable_attr(self.editorContainer, "addChild")
-        if add_child is not None:
-            add_child(self.extensionEditor)
-        set_focus = _callable_attr(self.ui, "setFocus")
-        if set_focus is not None:
-            set_focus(self.extensionEditor)
-        self._request_render()
-        return await future
 
-    def hideExtensionEditor(self) -> None:
-        dispose = _callable_attr(self.extensionEditor, "dispose")
-        if dispose is not None:
-            dispose()
-        clear = _callable_attr(self.editorContainer, "clear")
-        if clear is not None:
-            clear()
-        add_child = _callable_attr(self.editorContainer, "addChild")
-        if add_child is not None:
-            add_child(self.editor)
-        self.extensionEditor = None
-        set_focus = _callable_attr(self.ui, "setFocus")
-        if set_focus is not None:
-            set_focus(self.editor)
-        self._request_render()
+    def hideExtensionEditor(self, expected: Any | None = None) -> None:
+        self._hideExtensionComponent("extensionEditor", expected)
 
     async def handleFatalRuntimeError(self, prefix: str, error: Exception | BaseException | Any) -> None:
         message = str(error) if error is not None else "Unknown error"
@@ -2263,7 +2418,7 @@ class InteractiveMode:
         self.stop()
         raise SystemExit(1)
 
-    def renderSessionContext(self, sessionContext: Any, options: dict[str, Any] | None = None) -> None:
+    def _renderSessionItems(self, items: list[Any], options: dict[str, Any] | None = None) -> None:
         rendered_pending_tools: dict[str, ToolExecutionComponent] = {}
         self._toolComponentsById = {}
 
@@ -2273,8 +2428,10 @@ class InteractiveMode:
                 invalidate_footer()
             self.updateEditorBorderColor()
 
-        messages = list(read_field(sessionContext, "messages", getattr(self.session.state, "messages", [])) or [])
-        for message in messages:
+        for message in items:
+            if read_field(message, "type") == "custom" and _message_role(message) is None:
+                self.addCustomEntryToChat(message)
+                continue
             role = _message_role(message)
             if role == "assistant":
                 self.addMessageToChat(message, options=options)
@@ -2328,20 +2485,55 @@ class InteractiveMode:
         self._toolComponentsById = rendered_pending_tools
         self._request_render()
 
-    def renderInitialMessages(self) -> None:
-        context_builder = _callable_attr(self.sessionManager, "buildSessionContext")
-        context = (
-            context_builder()
-            if context_builder is not None
-            else SimpleNamespace(messages=self.session.state.messages)
+    def renderSessionContext(self, sessionContext: Any, options: dict[str, Any] | None = None) -> None:
+        messages = list(
+            read_field(sessionContext, "messages", getattr(self.session.state, "messages", [])) or []
         )
-        self.renderSessionContext(context, {"updateFooter": True, "populateHistory": True})
+        self._renderSessionItems(messages, options)
+
+    def renderSessionEntries(self, entries: list[dict[str, Any]], options: dict[str, Any] | None = None) -> None:
+        items = [
+            item
+            for entry in entries
+            for item in ([entry] if read_field(entry, "type") == "custom" else session_entry_to_context_messages(entry))
+        ]
+        self._renderSessionItems(items, options)
+
+    def renderInitialMessages(self) -> None:
+        self.renderSessionEntries(
+            self.sessionManager.buildContextEntries(),
+            {"updateFooter": True, "populateHistory": True},
+        )
+        self.renderProjectTrustWarningIfNeeded()
         get_entries = _callable_attr(self.sessionManager, "getEntries")
         all_entries = list(get_entries() or []) if get_entries is not None else []
         compaction_count = sum(1 for entry in all_entries if read_field(entry, "type") == "compaction")
         if compaction_count > 0:
             times = "1 time" if compaction_count == 1 else f"{compaction_count} times"
             self.showStatus(f"Session compacted {times}")
+
+    def renderProjectTrustWarningIfNeeded(self) -> None:
+        cwd = str(self.sessionManager.getCwd())
+        if _safe_call_bool(self.settingsManager, "isProjectTrusted", True):
+            return
+        if not has_trust_requiring_project_resources(cwd):
+            return
+
+        if getattr(self.chatContainer, "children", []):
+            self.chatContainer.addChild(Spacer(1))
+        self.chatContainer.addChild(
+            Text(
+                interactive_theme.theme.fg(
+                    "warning",
+                    f"This project is not trusted. Project {CONFIG_DIR_NAME}/settings.json, "
+                    f"{CONFIG_DIR_NAME}/prompts, {CONFIG_DIR_NAME}/themes, and Sisters project "
+                    f"agent definitions in {CONFIG_DIR_NAME}/agents are ignored. "
+                    f"Use /trust to save a trust decision, then restart {APP_NAME}.",
+                ),
+                1,
+                0,
+            )
+        )
 
     async def getUserInput(self) -> str:
         if self.deferredInputMessages:
@@ -2378,13 +2570,7 @@ class InteractiveMode:
         clear = _callable_attr(self.chatContainer, "clear")
         if clear is not None:
             clear()
-        context_builder = _callable_attr(self.sessionManager, "buildSessionContext")
-        context = (
-            context_builder()
-            if context_builder is not None
-            else SimpleNamespace(messages=self.session.state.messages)
-        )
-        self.renderSessionContext(context)
+        self.renderSessionEntries(self.sessionManager.buildContextEntries())
 
     def renderCurrentSessionState(self) -> None:
         clear = _callable_attr(self.chatContainer, "clear")
@@ -2401,6 +2587,29 @@ class InteractiveMode:
         self.lastStatusText = None
         self.renderInitialMessages()
         self._request_render()
+
+    def getMarkdownTransformers(self) -> list[Any]:
+        return self.session.extensionRunner.get_markdown_transformers()
+
+    def addCustomEntryToChat(self, entry: dict[str, Any]) -> None:
+        renderer = self.session.extensionRunner.get_entry_renderer(
+            str(read_field(entry, "customType", ""))
+        )
+        if renderer is None:
+            return
+        component = CustomEntryComponent(entry, renderer)
+        component.setExpanded(self.toolOutputExpanded)
+        if not component.hasContent():
+            return
+        if self.streamingComponent is not None:
+            try:
+                streaming_index = self.chatContainer.children.index(self.streamingComponent)
+            except ValueError:
+                pass
+            else:
+                self.chatContainer.children.insert(streaming_index, component)
+                return
+        self.chatContainer.addChild(component)
 
     def addMessageToChat(
         self,
@@ -2422,9 +2631,23 @@ class InteractiveMode:
                     self.chatContainer.addChild(component)
                     user_message = read_field(skill_block, "userMessage")
                     if user_message:
-                        self.chatContainer.addChild(UserMessageComponent(str(user_message), markdown_theme))
+                        self.chatContainer.addChild(
+                            UserMessageComponent(
+                                str(user_message),
+                                markdown_theme,
+                                self.outputPad,
+                                self.getMarkdownTransformers(),
+                            )
+                        )
                 else:
-                    self.chatContainer.addChild(UserMessageComponent(text, markdown_theme))
+                    self.chatContainer.addChild(
+                        UserMessageComponent(
+                            text,
+                            markdown_theme,
+                            self.outputPad,
+                            self.getMarkdownTransformers(),
+                        )
+                    )
                 if bool(read_field(options, "populateHistory", False)):
                     add_history = _callable_attr(self.editor, "addToHistory")
                     if add_history is not None:
@@ -2437,6 +2660,8 @@ class InteractiveMode:
                 self.hideThinkingBlock,
                 markdown_theme,
                 self.hiddenThinkingLabel,
+                self.outputPad,
+                self.getMarkdownTransformers(),
             )
             self.chatContainer.addChild(assistant)
             return
@@ -2469,7 +2694,12 @@ class InteractiveMode:
                 runner, "getMessageRenderer"
             )
             renderer = get_renderer(custom_type) if get_renderer is not None else None
-            component = CustomMessageComponent(message, renderer, markdown_theme)
+            component = CustomMessageComponent(
+                message,
+                renderer,
+                markdown_theme,
+                self.outputPad,
+            )
             component.setExpanded(self.toolOutputExpanded)
             self.chatContainer.addChild(component)
             return
@@ -2530,7 +2760,7 @@ class InteractiveMode:
                 return
             self.renderCurrentSessionState()
             self.showStatus(f"Session imported from: {input_path}")
-        except SessionImportFileNotFoundError as error:
+        except (SessionImportFileNotFoundError, InvalidSessionFileError) as error:
             self.showError(f"Failed to import session: {error}")
         except Exception as error:  # noqa: BLE001
             await self.handleFatalRuntimeError("Failed to import session", error)
@@ -2583,7 +2813,9 @@ class InteractiveMode:
         try:
             with tempfile.NamedTemporaryFile(prefix="session-", suffix=".html", delete=False) as handle:
                 tmp_path = handle.name
-            await self.session.exportToHtml(tmp_path)
+            await self.session.exportToHtml(
+                tmp_path, {"themeName": interactive_theme.theme.name}
+            )
             self.showStatus("Creating gist...")
             result = await asyncio.to_thread(
                 subprocess.run,
@@ -2652,6 +2884,7 @@ class InteractiveMode:
 
     def handleSessionCommand(self) -> None:
         stats = self.session.getSessionStats()
+        usage_breakdown = getUsageCostBreakdown(self.sessionManager.getEntries())
         lines = [interactive_theme.theme.bold("Session Info"), ""]
         session_name = self.sessionManager.getSessionName()
         if session_name:
@@ -2686,6 +2919,12 @@ class InteractiveMode:
                     f"{interactive_theme.theme.fg('dim', 'Total:')} {stats.cost:.4f}",
                 ]
             )
+            if len(usage_breakdown) > 1:
+                for entry in usage_breakdown:
+                    lines.append(
+                        f"  {interactive_theme.theme.fg('dim', f'{entry.key}:')} ${entry.cost:.3f} "
+                        f"{interactive_theme.theme.fg('dim', f'({format_tokens(entry.tokens)} tokens)')}"
+                    )
 
         self.chatContainer.addChild(Spacer(1))
         self.chatContainer.addChild(Text("\n".join(lines), 1, 0))
@@ -2898,7 +3137,10 @@ class InteractiveMode:
         try:
             result = await self.runtimeHost.switchSession(
                 sessionPath,
-                {"withSession": read_field(options, "withSession")},
+                {
+                    "withSession": read_field(options, "withSession"),
+                    "projectTrustContextFactory": self.createProjectTrustContext,
+                },
             )
             if read_field(result, "cancelled", False):
                 return result
@@ -2915,6 +3157,7 @@ class InteractiveMode:
                 {
                     "cwdOverride": selected_cwd,
                     "withSession": read_field(options, "withSession"),
+                    "projectTrustContextFactory": self.createProjectTrustContext,
                 },
             )
             if read_field(result, "cancelled", False):
@@ -3139,9 +3382,14 @@ class InteractiveMode:
             self._set_editor_text("")
             self.showTreeSelector()
             return
-        if text == "/login":
+        if text == "/trust":
             self._set_editor_text("")
-            await self.showOAuthSelector("login")
+            self.showTrustSelector()
+            return
+        if text == "/login" or text.startswith("/login "):
+            self._set_editor_text("")
+            provider_ref = text[7:].strip() if text.startswith("/login ") else None
+            await self.handleLoginCommand(provider_ref or None)
             return
         if text == "/logout":
             self._set_editor_text("")
@@ -3277,8 +3525,31 @@ class InteractiveMode:
                 set_focus(editor)
             self._request_render()
 
+        chat_restored_before_session_start = False
+
+        def restore_chat_before_session_start() -> None:
+            nonlocal chat_restored_before_session_start
+            if chat_restored_before_session_start:
+                return
+            self.hideThinkingBlock = _safe_call_bool(
+                self.settingsManager,
+                "getHideThinkingBlock",
+                self.hideThinkingBlock,
+            )
+            self.outputPad = _safe_call_int(
+                self.settingsManager,
+                "getOutputPad",
+                self.outputPad,
+            )
+            self.rebuildChatFromMessages()
+            chat_restored_before_session_start = True
+
         try:
-            await self.session.reload()
+            await self.session.reload(
+                {"beforeSessionStart": restore_chat_before_session_start}
+            )
+            restore_chat_before_session_start()
+            setCapabilityOverrides(getattr(self.settingsManager, "getTerminalCapabilityOverrides", dict)())
             self.keybindings.reload()
             active_header = self.customHeader or self.builtInHeader
             set_expanded = _callable_attr(active_header, "setExpanded")
@@ -3288,11 +3559,6 @@ class InteractiveMode:
             get_themes = _callable_attr(resource_loader, "getThemes")
             themes_result = get_themes() if get_themes is not None else {}
             interactive_theme.set_registered_themes(read_field(themes_result, "themes", []))
-            self.hideThinkingBlock = _safe_call_bool(
-                self.settingsManager,
-                "getHideThinkingBlock",
-                self.hideThinkingBlock,
-            )
             theme_name = _safe_call_str(self.settingsManager, "getTheme")
             theme_result = (
                 interactive_theme.set_theme(theme_name, True)
@@ -3326,14 +3592,18 @@ class InteractiveMode:
                 set_clear_on_shrink(_safe_call_bool(self.settingsManager, "getClearOnShrink", False))
             self.setupAutocompleteProvider()
             self.setupExtensionShortcuts(self.session.extensionRunner)
-            self.rebuildChatFromMessages()
             dismiss(self.editor)
             self.showLoadedResources({"force": False, "showDiagnosticsWhenQuiet": True})
+            saved_implicit_project_trust = self.maybeSaveImplicitProjectTrustAfterReload()
             get_model_error = _callable_attr(getattr(self.session, "modelRegistry", None), "getError")
             models_json_error = get_model_error() if get_model_error is not None else None
             if models_json_error:
                 self.showError(f"models.json error: {models_json_error}")
-            self.showStatus("Reloaded keybindings, extensions, skills, prompts, themes")
+            self.showStatus(
+                "Reloaded keybindings, extensions, skills, prompts, themes; saved project trust"
+                if saved_implicit_project_trust
+                else "Reloaded keybindings, extensions, skills, prompts, themes"
+            )
         except Exception as error:  # noqa: BLE001
             dismiss(previous_editor)
             self.showError(f"Reload failed: {error}")
@@ -3344,14 +3614,62 @@ class InteractiveMode:
             if output_path and output_path.endswith(".jsonl"):
                 file_path = self.session.exportToJsonl(output_path)
             else:
-                file_path = await self.session.exportToHtml(output_path)
+                file_path = await self.session.exportToHtml(
+                    output_path,
+                    {"themeName": interactive_theme.theme.name},
+                )
             self.showStatus(f"Session exported to: {file_path}")
         except Exception as error:  # noqa: BLE001
             self.showError(f"Failed to export session: {error}")
 
+    async def handleLoginCommand(self, providerRef: str | None = None) -> None:
+        if not providerRef:
+            await self.showOAuthSelector("login")
+            return
+        await self.session.modelRegistry.authStorage.readLatestData()
+        normalized = providerRef.casefold()
+        matches = [
+            provider
+            for provider in self.getLoginProviderOptions()
+            if provider.id.casefold() == normalized or provider.name.casefold() == normalized
+        ]
+        if len(matches) == 1:
+            await self._handle_login_provider_select(
+                matches, matches[0].id, lambda: None
+            )
+            return
+        if len(matches) > 1 and len({provider.id for provider in matches}) == 1:
+            labels = [
+                "Use a subscription"
+                if provider.authType == "oauth"
+                else "Use an API key"
+                for provider in matches
+            ]
+
+            def build(done: Callable[[], None]) -> dict[str, Any]:
+                selector = ExtensionSelectorComponent(
+                    f"Select authentication method for {matches[0].name}:",
+                    labels,
+                    lambda label: (
+                        done(),
+                        self._schedule_task(
+                            self._handle_login_provider_select(
+                                [matches[labels.index(label)]],
+                                matches[labels.index(label)].id,
+                                lambda: None,
+                            )
+                        ),
+                    ),
+                    lambda: (done(), self._request_render()),
+                )
+                return {"component": selector, "focus": selector}
+
+            self.showSelector(build)
+            return
+        self.showStatus(f'Unknown login provider: "{providerRef}"')
+
     def getLoginProviderOptions(self, authType: str | None = None) -> list[AuthSelectorProvider]:
-        auth_storage = self.session.modelRegistry.authStorage
-        oauth_providers = list(auth_storage.getOAuthProviders())
+        oauth_providers = list(self.session.modelRegistry.getOAuthProviders())
         oauth_provider_ids = {provider.id for provider in oauth_providers}
         options = [
             AuthSelectorProvider(id=str(provider.id), name=str(provider.name), authType="oauth")
@@ -3375,7 +3693,32 @@ class InteractiveMode:
                 )
             )
 
-        filtered = [option for option in options if authType is None or option.authType == authType]
+        get_native = _callable_attr(self.session.modelRegistry, "getNativeProviders")
+        for provider in (get_native() if get_native is not None else []):
+            auth = getattr(provider, "auth", None)
+            if getattr(auth, "oauth", None) is not None:
+                options.append(
+                    AuthSelectorProvider(
+                        id=str(provider.id),
+                        name=str(provider.name),
+                        authType="oauth",
+                    )
+                )
+            if getattr(auth, "apiKey", None) is not None:
+                options.append(
+                    AuthSelectorProvider(
+                        id=str(provider.id),
+                        name=str(provider.name),
+                        authType="api_key",
+                    )
+                )
+
+        deduplicated = {
+            (option.id, option.authType): option
+            for option in options
+            if authType is None or option.authType == authType
+        }
+        filtered = list(deduplicated.values())
         return sorted(filtered, key=lambda option: option.name)
 
     def getLogoutProviderOptions(self) -> list[AuthSelectorProvider]:
@@ -3455,6 +3798,7 @@ class InteractiveMode:
         await self.showApiKeyLoginDialog(provider.id, provider.name)
 
     async def showOAuthSelector(self, mode: str) -> None:
+        await self.session.modelRegistry.authStorage.readLatestData()
         if mode == "login":
             self.showLoginAuthTypeSelector()
             return
@@ -3493,7 +3837,7 @@ class InteractiveMode:
             return
         try:
             self.session.modelRegistry.authStorage.logout(provider.id)
-            self.session.modelRegistry.refresh()
+            await self.session.modelRegistry.refresh()
             await maybe_await(self.updateAvailableProviderCount())
             message = (
                 f"Logged out of {provider.name}"
@@ -3514,7 +3858,7 @@ class InteractiveMode:
         auth_type: str,
         previous_model: Any = None,
     ) -> None:
-        self.session.modelRegistry.refresh()
+        await self.session.modelRegistry.refresh()
         action_label = f"Logged in to {provider_name}" if auth_type == "oauth" else f"Saved API key for {provider_name}"
 
         selected_model = None
@@ -3522,7 +3866,13 @@ class InteractiveMode:
         if _is_unknown_model(previous_model):
             available_models = list(await maybe_await(self.session.modelRegistry.getAvailable()))
             provider_models = [model for model in available_models if read_field(model, "provider") == provider_id]
-            if provider_id not in defaultModelPerProvider:
+            if provider_id == "llama.cpp":
+                selection_error = (
+                    f"{action_label}. No llama.cpp models are loaded. Use /llama to load a model, then /model to select it."
+                    if not provider_models
+                    else f"{action_label}. Use /model to select a loaded llama.cpp model, or /llama to manage models."
+                )
+            elif provider_id not in defaultModelPerProvider:
                 selection_error = (
                     f'{action_label}, but no default model is configured for provider "{provider_id}". '
                     "Use /model to select a model."
@@ -3624,10 +3974,65 @@ class InteractiveMode:
             self._request_render()
 
         try:
-            api_key = str((await dialog.showPrompt("Enter API key:")).strip())
-            if not api_key:
-                raise RuntimeError("API key cannot be empty.")
-            self.session.modelRegistry.authStorage.set(providerId, {"type": "api_key", "key": api_key})
+            native_provider = next(
+                (
+                    provider
+                    for provider in self.session.modelRegistry.getNativeProviders()
+                    if provider.id == providerId
+                ),
+                None,
+            )
+            if native_provider is not None:
+                async def prompt_auth(prompt: Any) -> str:
+                    prompt_type = str(read_field(prompt, "type", "text"))
+                    if prompt_type == "select":
+                        selected = await self.showOAuthLoginSelect(dialog, prompt)
+                        if selected is None:
+                            raise RuntimeError("Login cancelled")
+                        return selected
+                    if prompt_type == "manual_code":
+                        return str(
+                            await dialog.showManualInput(
+                                str(read_field(prompt, "message", ""))
+                            )
+                        )
+                    return str(
+                        await dialog.showPrompt(
+                            str(read_field(prompt, "message", "")),
+                            read_field(prompt, "placeholder"),
+                        )
+                    )
+
+                def notify_auth(event: Any) -> None:
+                    event_type = str(read_field(event, "type", ""))
+                    if event_type == "auth_url":
+                        dialog.showAuth(
+                            str(read_field(event, "url", "")),
+                            read_field(event, "instructions"),
+                        )
+                    elif event_type == "device_code":
+                        dialog.showDeviceCode(event)
+                    elif event_type == "info":
+                        dialog.showInfo([str(read_field(event, "message", ""))])
+                    elif event_type == "progress":
+                        dialog.showProgress(str(read_field(event, "message", "")))
+
+                await self.session.modelRegistry.login(
+                    providerId,
+                    "api_key",
+                    SimpleNamespace(
+                        signal=dialog.signal,
+                        prompt=prompt_auth,
+                        notify=notify_auth,
+                    ),
+                )
+            else:
+                api_key = str((await dialog.showPrompt("Enter API key:")).strip())
+                if not api_key:
+                    raise RuntimeError("API key cannot be empty.")
+                self.session.modelRegistry.authStorage.set(
+                    providerId, {"type": "api_key", "key": api_key}
+                )
             restore_editor()
             await self.completeProviderAuthentication(providerId, providerName, "api_key", previous_model)
         except Exception as error:  # noqa: BLE001
@@ -3678,7 +4083,7 @@ class InteractiveMode:
         provider_info = next(
             (
                 provider
-                for provider in self.session.modelRegistry.authStorage.getOAuthProviders()
+                for provider in self.session.modelRegistry.getOAuthProviders()
                 if provider.id == providerId
             ),
             None,
@@ -3731,21 +4136,71 @@ class InteractiveMode:
                 dialog.showDeviceCode(info)
                 dialog.showWaiting("Waiting for authentication...")
 
-            await self.session.modelRegistry.authStorage.login(
-                providerId,
-                SimpleNamespace(
-                    onAuth=_handle_auth,
-                    onDeviceCode=_handle_device_code,
-                    onPrompt=lambda prompt: dialog.showPrompt(
-                        str(read_field(prompt, "message", "")),
-                        read_field(prompt, "placeholder"),
-                    ),
-                    onProgress=dialog.showProgress,
-                    onSelect=lambda prompt: self.showOAuthLoginSelect(dialog, prompt),
-                    onManualCodeInput=lambda: manual_code_future,
-                    signal=dialog.signal,
-                ),
+            registry_owned = (
+                self.session.modelRegistry.getRegisteredProviderConfig(providerId)
+                is not None
+                or self.session.modelRegistry.getRegisteredNativeProvider(providerId)
+                is not None
             )
+            if registry_owned:
+                async def prompt_auth(prompt: Any) -> str:
+                    prompt_type = str(read_field(prompt, "type", "text"))
+                    if prompt_type == "select":
+                        selected = await self.showOAuthLoginSelect(dialog, prompt)
+                        if selected is None:
+                            raise RuntimeError("Login cancelled")
+                        return selected
+                    if prompt_type == "manual_code":
+                        if uses_callback_server:
+                            return await manual_code_future
+                        return str(
+                            await dialog.showManualInput(
+                                str(read_field(prompt, "message", ""))
+                            )
+                        )
+                    return str(
+                        await dialog.showPrompt(
+                            str(read_field(prompt, "message", "")),
+                            read_field(prompt, "placeholder"),
+                        )
+                    )
+
+                def notify_auth(event: Any) -> None:
+                    event_type = str(read_field(event, "type", ""))
+                    if event_type == "auth_url":
+                        _handle_auth(event)
+                    elif event_type == "device_code":
+                        _handle_device_code(event)
+                    elif event_type == "info":
+                        dialog.showInfo([str(read_field(event, "message", ""))])
+                    elif event_type == "progress":
+                        dialog.showProgress(str(read_field(event, "message", "")))
+
+                await self.session.modelRegistry.login(
+                    providerId,
+                    "oauth",
+                    SimpleNamespace(
+                        signal=dialog.signal,
+                        prompt=prompt_auth,
+                        notify=notify_auth,
+                    ),
+                )
+            else:
+                await self.session.modelRegistry.authStorage.login(
+                    providerId,
+                    SimpleNamespace(
+                        onAuth=_handle_auth,
+                        onDeviceCode=_handle_device_code,
+                        onPrompt=lambda prompt: dialog.showPrompt(
+                            str(read_field(prompt, "message", "")),
+                            read_field(prompt, "placeholder"),
+                        ),
+                        onProgress=dialog.showProgress,
+                        onSelect=lambda prompt: self.showOAuthLoginSelect(dialog, prompt),
+                        onManualCodeInput=lambda: manual_code_future,
+                        signal=dialog.signal,
+                    ),
+                )
             restore_editor()
             await self.completeProviderAuthentication(providerId, providerName, "oauth", previous_model)
         except Exception as error:  # noqa: BLE001
@@ -3777,6 +4232,111 @@ class InteractiveMode:
             return
         await self.shutdown()
 
+    def _clear_retry_status(self) -> None:
+        had_retry_status = self.retryCountdown is not None or self.retryLoader is not None
+        if self.retryCountdown is not None:
+            dispose = _callable_attr(self.retryCountdown, "dispose")
+            if dispose is not None:
+                dispose()
+            self.retryCountdown = None
+        if self.retryLoader is not None:
+            stop = _callable_attr(self.retryLoader, "stop")
+            if stop is not None:
+                stop()
+            self.retryLoader = None
+        if had_retry_status:
+            clear_status = _callable_attr(self.statusContainer, "clear")
+            if clear_status is not None:
+                clear_status()
+
+    def _show_retry_status(self, event: dict[str, Any] | Any) -> None:
+        if self.autoCompactionLoader is not None:
+            stop = _callable_attr(self.autoCompactionLoader, "stop")
+            if stop is not None:
+                stop()
+            self.autoCompactionLoader = None
+        self._clear_branch_summary_status()
+        self._clear_retry_status()
+        clear_status = _callable_attr(self.statusContainer, "clear")
+        if clear_status is not None:
+            clear_status()
+
+        def retry_message(seconds: int) -> str:
+            return (
+                f"Retrying ({int(read_field(event, 'attempt', 0))}/"
+                f"{int(read_field(event, 'maxAttempts', 0))}) in {seconds}s... "
+                f"({key_text('app.interrupt')} to cancel)"
+            )
+
+        self.retryLoader = Loader(
+            self.ui,
+            lambda spinner: interactive_theme.theme.fg("warning", spinner),
+            lambda text: interactive_theme.theme.fg("muted", text),
+            retry_message(int((read_field(event, "delayMs", 0) + 999) // 1000)),
+        )
+        self.retryCountdown = CountdownTimer(
+            int(read_field(event, "delayMs", 0)),
+            self.ui,
+            lambda seconds: self.retryLoader.setMessage(retry_message(seconds))
+            if self.retryLoader is not None
+            else None,
+            lambda: setattr(self, "retryCountdown", None),
+        )
+        add_child = _callable_attr(self.statusContainer, "addChild")
+        if add_child is not None:
+            add_child(self.retryLoader)
+
+    def _show_compaction_status(self, reason: str) -> None:
+        self.stopWorkingLoader()
+        if self.autoCompactionLoader is not None:
+            stop = _callable_attr(self.autoCompactionLoader, "stop")
+            if stop is not None:
+                stop()
+        clear_status = _callable_attr(self.statusContainer, "clear")
+        if clear_status is not None:
+            clear_status()
+        cancel_hint = f"({key_text('app.interrupt')} to cancel)"
+        label = (
+            f"Compacting context... {cancel_hint}"
+            if reason == "manual"
+            else f"{'Context overflow detected, ' if reason == 'overflow' else ''}Auto-compacting... {cancel_hint}"
+        )
+        self.autoCompactionLoader = Loader(
+            self.ui,
+            lambda spinner: interactive_theme.theme.fg("accent", spinner),
+            lambda text: interactive_theme.theme.fg("muted", text),
+            label,
+        )
+        add_child = _callable_attr(self.statusContainer, "addChild")
+        if add_child is not None:
+            add_child(self.autoCompactionLoader)
+
+    def _clear_branch_summary_status(self) -> None:
+        if self.branchSummaryLoader is None:
+            return
+        stop = _callable_attr(self.branchSummaryLoader, "stop")
+        if stop is not None:
+            stop()
+        self.branchSummaryLoader = None
+        clear_status = _callable_attr(self.statusContainer, "clear")
+        if clear_status is not None:
+            clear_status()
+
+    def _show_branch_summary_status(self) -> None:
+        self._clear_branch_summary_status()
+        clear_status = _callable_attr(self.statusContainer, "clear")
+        if clear_status is not None:
+            clear_status()
+        self.branchSummaryLoader = Loader(
+            self.ui,
+            lambda spinner: interactive_theme.theme.fg("accent", spinner),
+            lambda text: interactive_theme.theme.fg("muted", text),
+            f"Summarizing branch... ({key_text('app.interrupt')} to cancel)",
+        )
+        add_child = _callable_attr(self.statusContainer, "addChild")
+        if add_child is not None:
+            add_child(self.branchSummaryLoader)
+
     async def handleEvent(self, event: dict[str, Any] | Any) -> None:
         if not self.isInitialized:
             await self.init()
@@ -3784,12 +4344,6 @@ class InteractiveMode:
         event_type = read_field(event, "type")
         if event_type == "agent_start":
             self._toolComponentsById.clear()
-            get_progress = _callable_attr(self.settingsManager, "getShowTerminalProgress")
-            terminal = getattr(self.ui, "terminal", None)
-            set_progress = _callable_attr(terminal, "setProgress")
-            if get_progress is not None and bool(get_progress()) and set_progress is not None:
-                set_progress(True)
-
             if self.retryEscapeHandler is not None:
                 self.defaultEditor.onEscape = self.retryEscapeHandler
                 self.retryEscapeHandler = None
@@ -3803,18 +4357,31 @@ class InteractiveMode:
                 if stop is not None:
                     stop()
                 self.retryLoader = None
-            self.stopWorkingLoader()
+            self.footer.invalidate()
+            self._request_render()
+            return
+        if event_type == "turn_start":
+            get_progress = _callable_attr(self.settingsManager, "getShowTerminalProgress")
+            terminal = getattr(self.ui, "terminal", None)
+            set_progress = _callable_attr(terminal, "setProgress")
+            if get_progress is not None and bool(get_progress()) and set_progress is not None:
+                set_progress(True)
             if self.workingVisible:
-                self.loadingAnimation = self.createWorkingLoader()
-                add_child = _callable_attr(self.statusContainer, "addChild")
-                if add_child is not None:
-                    add_child(self.loadingAnimation)
+                self._show_working_loader()
+            else:
+                self.stopWorkingLoader()
             self.footer.invalidate()
             self._request_render()
             return
         if event_type == "queue_update":
             self.updatePendingMessagesDisplay()
             self._request_render()
+            return
+        if event_type == "entry_appended":
+            entry = read_field(event, "entry")
+            if read_field(entry, "type") == "custom":
+                self.addCustomEntryToChat(entry)
+                self._request_render()
             return
         if event_type == "compaction_start":
             get_progress = _callable_attr(self.settingsManager, "getShowTerminalProgress")
@@ -3825,25 +4392,8 @@ class InteractiveMode:
 
             self.autoCompactionEscapeHandler = getattr(self.defaultEditor, "onEscape", None)
             self.defaultEditor.onEscape = lambda: _callable_attr(self.session, "abortCompaction") and self.session.abortCompaction()
-            clear_status = _callable_attr(self.statusContainer, "clear")
-            if clear_status is not None:
-                clear_status()
-            cancel_hint = f"({key_text('app.interrupt')} to cancel)"
             reason = str(read_field(event, "reason", "manual"))
-            label = (
-                f"Compacting context... {cancel_hint}"
-                if reason == "manual"
-                else f"{'Context overflow detected, ' if reason == 'overflow' else ''}Auto-compacting... {cancel_hint}"
-            )
-            self.autoCompactionLoader = Loader(
-                self.ui,
-                lambda spinner: interactive_theme.theme.fg("accent", spinner),
-                lambda text: interactive_theme.theme.fg("muted", text),
-                label,
-            )
-            add_child = _callable_attr(self.statusContainer, "addChild")
-            if add_child is not None:
-                add_child(self.autoCompactionLoader)
+            self._show_compaction_status(reason)
             self._request_render()
             return
         if event_type == "message_start":
@@ -3866,10 +4416,12 @@ class InteractiveMode:
                     self.hideThinkingBlock,
                     self.getMarkdownThemeWithSettings(),
                     self.hiddenThinkingLabel,
+                    self.outputPad,
+                    self.getMarkdownTransformers(),
                 )
                 self.streamingMessage = message
                 self.chatContainer.addChild(self.streamingComponent)
-                self.streamingComponent.updateContent(message)
+                self.streamingComponent.updateContent(message, True)
             self.footer.invalidate()
             self._request_render()
             return
@@ -3877,7 +4429,7 @@ class InteractiveMode:
             message = read_field(event, "message")
             if self.streamingComponent is not None and _message_role(message) == "assistant":
                 self.streamingMessage = message
-                self.streamingComponent.updateContent(message)
+                self.streamingComponent.updateContent(message, True)
 
                 for content in list(read_field(message, "content", []) or []):
                     if read_field(content, "type") != "toolCall":
@@ -3925,7 +4477,7 @@ class InteractiveMode:
                         message["errorMessage"] = error_message
                     else:
                         message.errorMessage = error_message
-                self.streamingComponent.updateContent(message)
+                self.streamingComponent.updateContent(message, False)
 
                 if read_field(message, "stopReason") in {"aborted", "error"}:
                     final_error = error_message or str(read_field(message, "errorMessage", "") or "Error")
@@ -3943,6 +4495,8 @@ class InteractiveMode:
                 self._request_render()
                 return
             self.renderCurrentSessionState()
+            return
+        if event_type == "bash_execution_update":
             return
         if event_type == "tool_execution_start":
             tool_call_id = str(read_field(event, "toolCallId", ""))
@@ -4020,35 +4574,7 @@ class InteractiveMode:
         if event_type == "auto_retry_start":
             self.retryEscapeHandler = getattr(self.defaultEditor, "onEscape", None)
             self.defaultEditor.onEscape = lambda: _callable_attr(self.session, "abortRetry") and self.session.abortRetry()
-            clear_status = _callable_attr(self.statusContainer, "clear")
-            if clear_status is not None:
-                clear_status()
-            if self.retryCountdown is not None:
-                dispose = _callable_attr(self.retryCountdown, "dispose")
-                if dispose is not None:
-                    dispose()
-
-            def retry_message(seconds: int) -> str:
-                return (
-                    f"Retrying ({int(read_field(event, 'attempt', 0))}/{int(read_field(event, 'maxAttempts', 0))}) in {seconds}s... "
-                    f"({key_text('app.interrupt')} to cancel)"
-                )
-
-            self.retryLoader = Loader(
-                self.ui,
-                lambda spinner: interactive_theme.theme.fg("warning", spinner),
-                lambda text: interactive_theme.theme.fg("muted", text),
-                retry_message(int((read_field(event, "delayMs", 0) + 999) // 1000)),
-            )
-            self.retryCountdown = CountdownTimer(
-                int(read_field(event, "delayMs", 0)),
-                self.ui,
-                lambda seconds: self.retryLoader.setMessage(retry_message(seconds)) if self.retryLoader is not None else None,
-                lambda: setattr(self, "retryCountdown", None),
-            )
-            add_child = _callable_attr(self.statusContainer, "addChild")
-            if add_child is not None:
-                add_child(self.retryLoader)
+            self._show_retry_status(event)
             self.footer.invalidate()
             self._request_render()
             return
@@ -4056,24 +4582,32 @@ class InteractiveMode:
             if self.retryEscapeHandler is not None:
                 self.defaultEditor.onEscape = self.retryEscapeHandler
                 self.retryEscapeHandler = None
-            if self.retryCountdown is not None:
-                dispose = _callable_attr(self.retryCountdown, "dispose")
-                if dispose is not None:
-                    dispose()
-                self.retryCountdown = None
-            if self.retryLoader is not None:
-                stop = _callable_attr(self.retryLoader, "stop")
-                if stop is not None:
-                    stop()
-                self.retryLoader = None
-                clear_status = _callable_attr(self.statusContainer, "clear")
-                if clear_status is not None:
-                    clear_status()
+            self._clear_retry_status()
             if not bool(read_field(event, "success", False)):
                 self.showError(
                     f"Retry failed after {int(read_field(event, 'attempt', 0))} attempts: "
                     f"{read_field(event, 'finalError', None) or 'Unknown error'}"
                 )
+            self.footer.invalidate()
+            self._request_render()
+            return
+        if event_type == "summarization_retry_scheduled":
+            self.showError(str(read_field(event, "errorMessage", "")))
+            self._show_retry_status(event)
+            self.footer.invalidate()
+            self._request_render()
+            return
+        if event_type == "summarization_retry_attempt_start":
+            self._clear_retry_status()
+            if read_field(event, "source") == "branchSummary":
+                self._show_branch_summary_status()
+            else:
+                self._show_compaction_status(str(read_field(event, "reason", "manual")))
+            self.footer.invalidate()
+            self._request_render()
+            return
+        if event_type == "summarization_retry_finished":
+            self._clear_retry_status()
             self.footer.invalidate()
             self._request_render()
             return
@@ -4108,10 +4642,13 @@ class InteractiveMode:
         else:
             result = read_field(event, "result")
             if result is not None:
+                entries = self.sessionManager.buildContextEntries()
+                if not entries or read_field(entries[0], "type") != "compaction":
+                    raise RuntimeError("Completed compaction is missing from the session context")
                 clear_chat = _callable_attr(self.chatContainer, "clear")
                 if clear_chat is not None:
                     clear_chat()
-                self.rebuildChatFromMessages()
+                self.renderSessionEntries(entries[1:])
                 self.addMessageToChat(
                     createCompactionSummaryMessage(
                         str(read_field(result, "summary", "")),
@@ -4137,7 +4674,14 @@ class InteractiveMode:
 
         flush_queue = _callable_attr(self, "flushCompactionQueue")
         if flush_queue is not None:
-            self._schedule_task(maybe_await(flush_queue({"willRetry": bool(read_field(event, "willRetry", False))})))
+            self._schedule_task(
+                maybe_await(
+                    flush_queue(
+                        {"willRetry": bool(read_field(event, "willRetry", False))}
+                    )
+                ),
+                eager_start=True,
+            )
         self._request_render()
 
     def applyRuntimeSettings(self) -> None:
@@ -4152,6 +4696,11 @@ class InteractiveMode:
             self.settingsManager,
             "getHideThinkingBlock",
             self.hideThinkingBlock,
+        )
+        self.outputPad = _safe_call_int(
+            self.settingsManager,
+            "getOutputPad",
+            self.outputPad,
         )
         set_show_hardware_cursor = _callable_attr(self.ui, "setShowHardwareCursor")
         if set_show_hardware_cursor is not None:
@@ -4229,7 +4778,10 @@ class InteractiveMode:
             return
 
         def _listener(event: Any) -> None:
-            self._schedule_task(self.handleEvent(event))
+            # JavaScript async listeners run synchronously until their first await. Eager
+            # start preserves that ordering so compaction-end queue delivery can beat the
+            # agent loop's immediate post-compaction steering poll.
+            self._schedule_task(self.handleEvent(event), eager_start=True)
 
         self._sessionUnsubscribe = subscribe(_listener)
 
@@ -4537,28 +5089,31 @@ class InteractiveMode:
         self.showStatus(f"Restored {restored} queued message{suffix} to editor")
 
     def showModelSelector(self, initialSearchInput: str | None = None) -> None:
-        self.showSelector(
-            lambda done: {
-                "component": ModelSelectorComponent(
-                    self.ui,
-                    getattr(self.session, "model", None),
-                    self.settingsManager,
-                    self.session.modelRegistry,
-                    [
-                        ScopedModelItem(
-                            model=item["model"] if isinstance(item, dict) else item.model,
-                            thinkingLevel=(
-                                item.get("thinkingLevel") if isinstance(item, dict) else item.thinkingLevel
-                            ),
-                        )
-                        for item in list(getattr(self.session, "scopedModels", []) or [])
-                    ],
-                    lambda model: self._schedule_task(self._handle_model_select(model, done)),
-                    lambda: (done(), self._request_render()),
-                    initialSearchInput,
+        def build_selector(done: Callable[[], None]) -> dict[str, Any]:
+            default_provider = _safe_call_str(self.settingsManager, "getDefaultProvider", "")
+            default_model = _safe_call_str(self.settingsManager, "getDefaultModel", "")
+            selector = ModelSelectorComponent(
+                self.ui,
+                getattr(self.session, "model", None),
+                self.session.modelRegistry,
+                [
+                    ScopedModelItem(
+                        model=item["model"] if isinstance(item, dict) else item.model,
+                        thinkingLevel=(item.get("thinkingLevel") if isinstance(item, dict) else item.thinkingLevel),
+                    )
+                    for item in list(getattr(self.session, "scopedModels", []) or [])
+                ],
+                lambda model: self._schedule_task(self._handle_model_select(model, done, persist=False)),
+                lambda: (done(), self._request_render()),
+                initialSearchInput,
+                onSelectAsDefault=lambda model: self._schedule_task(
+                    self._handle_model_select(model, done, persist=True)
                 ),
-            }
-        )
+                defaultModel=(default_provider, default_model) if default_provider and default_model else None,
+            )
+            return {"component": selector, "focus": selector}
+
+        self.showSelector(build_selector)
 
     def showSessionSelector(self) -> None:
         def _build_session_selector(done: Callable[[], None]) -> dict[str, Any]:
@@ -4608,7 +5163,6 @@ class InteractiveMode:
                 lambda entry_id: self._schedule_task(
                     self._handle_tree_select(
                         str(entry_id),
-                        str(real_leaf_id) if real_leaf_id is not None else None,
                         done,
                     )
                 ),
@@ -4643,6 +5197,63 @@ class InteractiveMode:
         if set_focus is not None:
             set_focus(focus)
         self._request_render()
+
+    def showTrustSelector(self) -> None:
+        cwd = str(self.sessionManager.getCwd())
+        services = read_field(self.runtimeHost, "services")
+        agent_dir = str(read_field(services, "agentDir") or get_agent_dir())
+        trust_store = ProjectTrustStore(agent_dir)
+        saved_decision = trust_store.get_entry(cwd)
+
+        def build(done: Callable[[], None]) -> dict[str, Any]:
+            def save(selection: Any) -> None:
+                trust_store.set_many(selection.updates)
+                done()
+                decision = "trusted" if selection.trusted else "untrusted"
+                self.showStatus(
+                    f"Saved trust decision: {decision}. "
+                    f"Restart {APP_NAME} for this to take effect."
+                )
+
+            selector = TrustSelectorComponent(
+                TrustSelectorOptions(
+                    cwd=cwd,
+                    savedDecision=saved_decision,
+                    projectTrusted=_safe_call_bool(
+                        self.settingsManager,
+                        "isProjectTrusted",
+                        True,
+                    ),
+                    onSelect=save,
+                    onCancel=lambda: (done(), self._request_render()),
+                )
+            )
+            return {"component": selector, "focus": selector}
+
+        self.showSelector(build)
+
+    def maybeSaveImplicitProjectTrustAfterReload(self) -> bool:
+        cwd = str(self.sessionManager.getCwd())
+        if self.autoTrustOnReloadCwd != cwd:
+            return False
+        if not _safe_call_bool(self.settingsManager, "isProjectTrusted", False):
+            return False
+        if not has_trust_requiring_project_resources(cwd):
+            return False
+
+        services = read_field(self.runtimeHost, "services")
+        agent_dir = str(read_field(services, "agentDir") or get_agent_dir())
+        trust_store = ProjectTrustStore(agent_dir)
+        try:
+            if trust_store.get(cwd) is not None:
+                self.autoTrustOnReloadCwd = None
+                return False
+            trust_store.set(cwd, True)
+            self.autoTrustOnReloadCwd = None
+            return True
+        except Exception as error:  # noqa: BLE001 - warn and retry on the next reload
+            self.showWarning(f"Could not save project trust after reload: {error}")
+            return False
 
     async def init(self) -> None:
         if self.isInitialized:
@@ -5034,6 +5645,7 @@ class InteractiveMode:
 
     def stop(self) -> None:
         self.unregisterSignalHandlers()
+        self._resetExtensionPrompts()
         get_progress = _callable_attr(self.settingsManager, "getShowTerminalProgress")
         set_progress = _callable_attr(getattr(self.ui, "terminal", None), "setProgress")
         if get_progress is not None and bool(get_progress()) and set_progress is not None:
@@ -5073,13 +5685,17 @@ class InteractiveMode:
         if was_bash_mode != self.isBashMode:
             self.updateEditorBorderColor()
 
-    def _schedule_task(self, awaitable: Awaitable[Any]) -> None:
+    def _schedule_task(self, awaitable: Awaitable[Any], *, eager_start: bool = False) -> None:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             asyncio.run(awaitable)
             return
-        task = loop.create_task(awaitable)
+        task = (
+            asyncio.Task(awaitable, loop=loop, eager_start=True)
+            if eager_start
+            else loop.create_task(awaitable)
+        )
         self._backgroundTasks.add(task)
         task.add_done_callback(self._finish_background_task)
 
@@ -5150,13 +5766,24 @@ class InteractiveMode:
         self.updateEditorBorderColor()
         self.showStatus(f"Thinking level: {level}")
 
-    async def _handle_model_select(self, model: Any, done: Callable[[], None]) -> None:
+    async def _handle_model_select(
+        self,
+        model: Any,
+        done: Callable[[], None],
+        *,
+        persist: bool,
+    ) -> None:
         try:
-            await self.session.setModel(model)
+            await self.session.setModel(model, persist=persist)
+            await maybe_await(self.updateAvailableProviderCount())
             self.footer.invalidate()
             self.updateEditorBorderColor()
             done()
-            self.showStatus(f"Model: {read_field(model, 'id', model)}")
+            self.showStatus(
+                f"Default model: {read_field(model, 'provider')}/{read_field(model, 'id')}"
+                if persist
+                else f"Model: {read_field(model, 'id', model)}"
+            )
             self._schedule_task(self.maybeWarnAboutAnthropicSubscriptionAuth(model))
         except Exception as error:  # noqa: BLE001
             done()
@@ -5184,13 +5811,12 @@ class InteractiveMode:
         self._apply_thinking_level(level, persist=parsed.persist)
 
     def _apply_thinking_level(self, level: str, *, persist: bool = False) -> None:
-        # `--default` is the only interactive path that writes the global default; the
-        # session passes it through now instead of persisting every switch
-        # (pi interactive-mode.ts:4775 `setThinkingLevel(level, { persist })`).
+        # Only explicit default actions (`--default` or selector Ctrl+S) write the global
+        # default; ordinary selection remains session scoped like pi.
         self.session.setThinkingLevel(level, persist)
         self.footer.invalidate()
         self.updateEditorBorderColor()
-        self.showStatus(f"Thinking level: {level}" + (" (saved as default)" if persist else ""))
+        self.showStatus(f"Default thinking level: {level}" if persist else f"Thinking level: {level}")
 
     def showThinkingSelector(self, *, persist: bool = False) -> None:
         # Adaptive models send an effort keyword rather than a budget, so use the
@@ -5205,6 +5831,15 @@ class InteractiveMode:
                     lambda level: (done(), self._apply_thinking_level(level, persist=persist)),
                     lambda: (done(), self._request_render()),
                     descriptions=ADAPTIVE_LEVEL_DESCRIPTIONS if adaptive else None,
+                    onSelectAsDefault=lambda level: (done(), self._apply_thinking_level(level, persist=True)),
+                    defaultThinkingLevel=(
+                        _safe_call_str(
+                            self.settingsManager,
+                            "getDefaultThinkingLevel",
+                            DEFAULT_THINKING_LEVEL,
+                        )
+                        or DEFAULT_THINKING_LEVEL
+                    ),
                 ),
             }
         )
@@ -5240,7 +5875,7 @@ class InteractiveMode:
         model_registry = getattr(self.session, "modelRegistry", None)
         refresh = _callable_attr(model_registry, "refresh")
         if refresh is not None:
-            refresh()
+            await maybe_await(refresh())
         get_available = _callable_attr(model_registry, "getAvailable")
         if get_available is None:
             return []
@@ -5298,6 +5933,28 @@ class InteractiveMode:
                 clear_chat()
             self.rebuildChatFromMessages()
 
+        def _on_output_pad_change(padding: int) -> None:
+            set_output_pad = _callable_attr(self.settingsManager, "setOutputPad")
+            if set_output_pad is not None:
+                set_output_pad(padding)
+            self.outputPad = padding
+            if self.streamingComponent is not None or bool(getattr(self.session, "isStreaming", False)):
+                for child in getattr(self.chatContainer, "children", []):
+                    if isinstance(
+                        child,
+                        (
+                            AssistantMessageComponent,
+                            CustomMessageComponent,
+                            UserMessageComponent,
+                        ),
+                    ):
+                        child.setOutputPad(padding)
+                if self.streamingComponent is not None:
+                    self.streamingComponent.setOutputPad(padding)
+                self._request_render()
+                return
+            self.rebuildChatFromMessages()
+
         def _on_show_images_change(enabled: bool) -> None:
             set_show_images = _callable_attr(self.settingsManager, "setShowImages")
             if set_show_images is not None:
@@ -5326,6 +5983,86 @@ class InteractiveMode:
             if agent is not None:
                 agent.transport = transport
 
+        def _on_http_idle_timeout_ms_change(timeout_ms: int) -> None:
+            set_http_idle_timeout_ms = _callable_attr(
+                self.settingsManager,
+                "setHttpIdleTimeoutMs",
+            )
+            if set_http_idle_timeout_ms is not None:
+                set_http_idle_timeout_ms(timeout_ms)
+            self.showStatus(
+                f"HTTP idle timeout: {formatHttpIdleTimeoutMs(timeout_ms)}"
+            )
+
+        def _current_model() -> Any | None:
+            model = getattr(self.session, "model", None)
+            if model is not None:
+                return model
+            return read_field(getattr(self.session, "state", None), "model")
+
+        def _is_current_model(provider: str, model_id: str) -> bool:
+            current = _current_model()
+            return bool(
+                current is not None
+                and read_field(current, "provider") == provider
+                and read_field(current, "id") == model_id
+            )
+
+        def _on_model_thinking_level_change(provider: str, model_id: str, level: str) -> None:
+            setter = _callable_attr(self.settingsManager, "setModelThinkingLevel")
+            if setter is not None:
+                setter(provider, model_id, level)
+            if _is_current_model(provider, model_id):
+                self.session.setThinkingLevel(level)
+                self.footer.invalidate()
+                self.updateEditorBorderColor()
+
+        def _on_model_thinking_level_remove(provider: str, model_id: str) -> None:
+            remover = _callable_attr(self.settingsManager, "removeModelThinkingLevel")
+            if remover is not None:
+                remover(provider, model_id)
+            if _is_current_model(provider, model_id):
+                default_level = (
+                    _safe_call_str(
+                        self.settingsManager,
+                        "getDefaultThinkingLevel",
+                        DEFAULT_THINKING_LEVEL,
+                    )
+                    or DEFAULT_THINKING_LEVEL
+                )
+                self.session.setThinkingLevel(default_level)
+                self.footer.invalidate()
+                self.updateEditorBorderColor()
+
+        get_available_models = _callable_attr(getattr(self.session, "modelRegistry", None), "getAvailable")
+        try:
+            available_default_models = list(get_available_models() or []) if get_available_models is not None else []
+        except Exception:  # noqa: BLE001 - a registry that cannot list models offers none
+            available_default_models = []
+        get_model_thinking_levels = _callable_attr(self.settingsManager, "getAllModelThinkingLevels")
+        model_thinking_levels = (
+            dict(get_model_thinking_levels() or {}) if get_model_thinking_levels is not None else {}
+        )
+        global_thinking_level = (
+            _safe_call_str(
+                self.settingsManager,
+                "getDefaultThinkingLevel",
+                DEFAULT_THINKING_LEVEL,
+            )
+            or DEFAULT_THINKING_LEVEL
+        )
+        configured_project_trust = _safe_call_str(
+            self.settingsManager,
+            "getDefaultProjectTrust",
+            "ask",
+        )
+        default_project_trust = cast(
+            DefaultProjectTrust,
+            configured_project_trust
+            if configured_project_trust in {"ask", "always", "never"}
+            else "ask",
+        )
+
         self.showSelector(
             lambda done: {
                 "component": SettingsSelectorComponent(
@@ -5339,10 +6076,18 @@ class InteractiveMode:
                         steeringMode=str(getattr(self.session, "steeringMode", "one-at-a-time")),
                         followUpMode=str(getattr(self.session, "followUpMode", "one-at-a-time")),
                         transport=str(_safe_call_str(self.settingsManager, "getTransport", "sse")),
-                        thinkingLevel=self._get_session_thinking_level(),
+                        httpIdleTimeoutMs=_safe_call_int(
+                            self.settingsManager,
+                            "getHttpIdleTimeoutMs",
+                            300_000,
+                        ),
+                        thinkingLevel=global_thinking_level,
                         availableThinkingLevels=list(get_available_thinking_levels() or [])
                         if get_available_thinking_levels is not None
                         else [],
+                        currentModel=_current_model(),
+                        availableDefaultModels=available_default_models,
+                        modelThinkingLevels=model_thinking_levels,
                         currentTheme=_safe_call_str(self.settingsManager, "getTheme", "dark") or "dark",
                         availableThemes=available_themes,
                         hideThinkingBlock=self.hideThinkingBlock,
@@ -5353,12 +6098,16 @@ class InteractiveMode:
                         or "default",
                         showHardwareCursor=_safe_call_bool(self.settingsManager, "getShowHardwareCursor", False),
                         editorPaddingX=_safe_call_int(self.settingsManager, "getEditorPaddingX", 0),
+                        outputPad=0
+                        if _safe_call_int(self.settingsManager, "getOutputPad", 1) == 0
+                        else 1,
                         autocompleteMaxVisible=_safe_call_int(
                             self.settingsManager,
                             "getAutocompleteMaxVisible",
                             5,
                         ),
                         quietStartup=_safe_call_bool(self.settingsManager, "getQuietStartup", False),
+                        defaultProjectTrust=default_project_trust,
                         clearOnShrink=_safe_call_bool(self.settingsManager, "getClearOnShrink", False),
                         showTerminalProgress=_safe_call_bool(self.settingsManager, "getShowTerminalProgress", False),
                         warnings=dict(get_warnings() or {}) if get_warnings is not None else {},
@@ -5387,6 +6136,7 @@ class InteractiveMode:
                             _callable_attr(self.session, "setFollowUpMode") and self.session.setFollowUpMode(mode)
                         ),
                         onTransportChange=_on_transport_change,
+                        onHttpIdleTimeoutMsChange=_on_http_idle_timeout_ms_change,
                         # The settings panel is the defaults panel: every other item here
                         # writes through to settings.json (setSteeringMode, setFollowUpMode,
                         # setTransport, ...), so this one persists too. pi has no global
@@ -5400,6 +6150,8 @@ class InteractiveMode:
                             self.footer.invalidate(),
                             self.updateEditorBorderColor(),
                         ),
+                        onModelThinkingLevelChange=_on_model_thinking_level_change,
+                        onModelThinkingLevelRemove=_on_model_thinking_level_remove,
                         onThemeChange=_on_theme_change,
                         onThemePreview=_on_theme_preview,
                         onHideThinkingBlockChange=_on_hide_thinking_block_change,
@@ -5430,6 +6182,7 @@ class InteractiveMode:
                             and _callable_attr(self.editor, "setPaddingX")
                             and self.editor.setPaddingX(padding),
                         ),
+                        onOutputPadChange=_on_output_pad_change,
                         onAutocompleteMaxVisibleChange=lambda max_visible: (
                             _callable_attr(self.settingsManager, "setAutocompleteMaxVisible")
                             and self.settingsManager.setAutocompleteMaxVisible(max_visible),
@@ -5442,6 +6195,10 @@ class InteractiveMode:
                         onQuietStartupChange=lambda enabled: (
                             _callable_attr(self.settingsManager, "setQuietStartup")
                             and self.settingsManager.setQuietStartup(enabled)
+                        ),
+                        onDefaultProjectTrustChange=lambda value: (
+                            _callable_attr(self.settingsManager, "setDefaultProjectTrust")
+                            and self.settingsManager.setDefaultProjectTrust(value)
                         ),
                         onClearOnShrinkChange=lambda enabled: (
                             _callable_attr(self.settingsManager, "setClearOnShrink")
@@ -5466,7 +6223,7 @@ class InteractiveMode:
         model_registry = getattr(self.session, "modelRegistry", None)
         refresh = _callable_attr(model_registry, "refresh")
         if refresh is not None:
-            refresh()
+            await maybe_await(refresh())
         get_available = _callable_attr(model_registry, "getAvailable")
         all_models = list(get_available() or []) if get_available is not None else []
         if not all_models:
@@ -5484,8 +6241,15 @@ class InteractiveMode:
             patterns = _callable_attr(self.settingsManager, "getEnabledModels")
             enabled_patterns = list(patterns() or []) if patterns is not None else []
             if enabled_patterns:
-                resolved = await resolveModelScope(enabled_patterns, getattr(self.session, "modelRegistry", None))
-                current_enabled_ids = [f"{item.model.provider}/{item.model.id}" for item in resolved]
+                # pi interactive-mode.ts showModelsSelector -- diagnostics are data here: keep
+                # unmatched patterns in the enabled list instead of printing over the frame.
+                resolved = resolveModelScopeFromModels(enabled_patterns, all_models)
+                current_enabled_ids = [f"{item.model.provider}/{item.model.id}" for item in resolved.scopedModels]
+                current_enabled_ids += [
+                    diagnostic.pattern
+                    for diagnostic in resolved.diagnostics
+                    if diagnostic.code == "no-match" and diagnostic.pattern not in current_enabled_ids
+                ]
             else:
                 current_enabled_ids = None
 
@@ -5493,7 +6257,7 @@ class InteractiveMode:
             nonlocal current_enabled_ids
             current_enabled_ids = None if enabled_ids is None else [*enabled_ids]
             if enabled_ids and len(enabled_ids) < len(all_models):
-                resolved = await resolveModelScope(enabled_ids, getattr(self.session, "modelRegistry", None))
+                resolved = resolveModelScopeFromModels(enabled_ids, all_models).scopedModels
                 self.session.setScopedModels(
                     [{"model": item.model, "thinkingLevel": item.thinkingLevel} for item in resolved]
                 )
@@ -5565,10 +6329,11 @@ class InteractiveMode:
     async def _handle_tree_select(
         self,
         entryId: str,
-        realLeafId: str | None,
         done: Callable[[], None],
     ) -> None:
-        if entryId == realLeafId:
+        get_leaf_id = _callable_attr(self.sessionManager, "getLeafId")
+        current_leaf_id = get_leaf_id() if get_leaf_id is not None else None
+        if entryId == current_leaf_id:
             done()
             self.showStatus("Already at this point")
             return
@@ -5599,8 +6364,12 @@ class InteractiveMode:
                         continue
                 break
 
+        if bool(getattr(self.session, "isStreaming", False)):
+            self.restoreQueuedMessagesToEditor()
+            await self.session.abort()
+
         original_escape = getattr(self.defaultEditor, "onEscape", None)
-        summary_loader = None
+        showing_summary_indicator = wants_summary
         if wants_summary:
             self.defaultEditor.onEscape = (
                 (lambda: abort_branch_summary()) if abort_branch_summary is not None else original_escape
@@ -5608,15 +6377,7 @@ class InteractiveMode:
             add_chat_child = _callable_attr(self.chatContainer, "addChild")
             if add_chat_child is not None:
                 add_chat_child(Spacer(1))
-            summary_loader = Loader(
-                self.ui,
-                lambda spinner: interactive_theme.theme.fg("accent", spinner),
-                lambda text: interactive_theme.theme.fg("muted", text),
-                f"Summarizing branch... ({key_text('app.interrupt')} to cancel)",
-            )
-            add_child = _callable_attr(self.statusContainer, "addChild")
-            if add_child is not None:
-                add_child(summary_loader)
+            self._show_branch_summary_status()
             self._request_render()
 
         try:
@@ -5649,13 +6410,8 @@ class InteractiveMode:
             self.showError(str(error))
         finally:
             self.defaultEditor.onEscape = original_escape
-            if summary_loader is not None:
-                stop = _callable_attr(summary_loader, "stop")
-                if stop is not None:
-                    stop()
-                clear_status = _callable_attr(self.statusContainer, "clear")
-                if clear_status is not None:
-                    clear_status()
+            if showing_summary_indicator:
+                self._clear_branch_summary_status()
 
     async def _new_session_from_command_context(
         self,

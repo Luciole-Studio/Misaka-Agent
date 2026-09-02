@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import datetime as _datetime
 from typing import NotRequired, TypedDict
 
 
@@ -26,7 +25,6 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
     context_files = options.get("contextFiles") or []
 
     prompt_cwd = cwd.replace("\\", "/")
-    date = _datetime.date.today().isoformat()  # noqa: DTZ011 - the model is told the user's local date
     append_section = f"\n\n{append_system_prompt}" if append_system_prompt else ""
 
     if custom_prompt:
@@ -35,12 +33,15 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
             prompt += append_section
         if context_files:
             prompt += _format_project_context(context_files)
-        prompt += f"\nCurrent date: {date}"
         # Trailing newline: anything appended to the prompt later must start on its own line (upstream #7887/3dd4623ee)
         prompt += f"\nCurrent working directory: {prompt_cwd}\n"
         return prompt
 
-    tools = selected_tools or ["read", "bash", "edit", "write"]
+    tools = (
+        selected_tools
+        if selected_tools is not None
+        else ["read", "bash", "edit", "write"]
+    )
     visible_tools = [name for name in tools if tool_snippets and tool_snippets.get(name)]
     tools_list = "\n".join(f"- {name}: {tool_snippets[name]}" for name in visible_tools) if visible_tools else "(none)"
 
@@ -54,14 +55,33 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
         guidelines.append(guideline)
 
     has_bash = "bash" in tools
+    has_powershell = "powershell" in tools
     has_grep = "grep" in tools
     has_find = "find" in tools
     has_ls = "ls" in tools
 
-    if has_bash and not has_grep and not has_find and not has_ls:
-        add_guideline("Use bash for file operations like ls, rg, find")
-    elif has_bash and (has_grep or has_find or has_ls):
-        add_guideline("Prefer grep/find/ls tools over bash for file exploration (faster, respects .gitignore)")
+    if (has_bash or has_powershell) and not has_grep and not has_find and not has_ls:
+        if has_bash and has_powershell:
+            add_guideline(
+                "Use bash or PowerShell for file operations like listing, searching, and finding files"
+            )
+        elif has_powershell:
+            add_guideline(
+                "Use PowerShell for file operations like listing, searching, and finding files"
+            )
+        else:
+            add_guideline("Use bash for file operations like ls, rg, find")
+    elif has_bash or has_powershell:
+        if has_bash and has_powershell:
+            shell_names = "bash or PowerShell"
+        elif has_powershell:
+            shell_names = "PowerShell"
+        else:
+            shell_names = "bash"
+        add_guideline(
+            f"Prefer grep/find/ls tools over {shell_names} for file exploration "
+            "(faster, respects .gitignore)"
+        )
 
     for guideline in prompt_guidelines or []:
         normalized = guideline.strip()
@@ -90,7 +110,6 @@ Guidelines:
 {guidelines_text}"""
     if context_files:
         prompt += _format_project_context(context_files)
-    prompt += f"\nCurrent date: {date}"
     prompt += f"\nCurrent working directory: {prompt_cwd}"
     return prompt
 

@@ -51,6 +51,7 @@ from misaka.ui.tui.keys import (
 from misaka.ui.tui.terminal import ProcessTerminal
 from misaka.ui.tui.terminal_image import (
     getCapabilities,
+    setCapabilityOverrides,
 )
 from misaka.ui.tui.tui import (
     TUI,
@@ -115,6 +116,7 @@ __all__ = [
     "getCapabilities",
     "getKeybindings",
     "matchesKey",
+    "setCapabilityOverrides",
     "setKeybindings",
     "truncateToWidth",
     "visibleWidth",

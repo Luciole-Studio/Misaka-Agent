@@ -6,6 +6,7 @@ import os
 import re
 from typing import Any
 
+from misaka.core.usage_totals import addUsageToTotals, createUsageTotals
 from misaka.ui.tui import truncateToWidth, visibleWidth
 from misaka.ui.tui.interactive.theme.theme import theme
 from misaka.utils.values import read_field
@@ -47,20 +48,7 @@ class FooterComponent:
 
     def render(self, width: int) -> list[str]:
         state = self.session.state
-        total_input = 0
-        total_output = 0
-        total_cache_read = 0
-        total_cache_write = 0
-        total_cost = 0.0
-
-        def add_usage(usage: Any) -> None:
-            nonlocal total_input, total_output, total_cache_read, total_cache_write, total_cost
-            cost = read_field(usage, "cost") or {}
-            total_input += int(read_field(usage, "input", 0) or 0)
-            total_output += int(read_field(usage, "output", 0) or 0)
-            total_cache_read += int(read_field(usage, "cacheRead", 0) or 0)
-            total_cache_write += int(read_field(usage, "cacheWrite", 0) or 0)
-            total_cost += float(read_field(cost, "total", 0) or 0)
+        usage_totals = createUsageTotals()
 
         # pi footer.ts:92-105 counts three kinds of entry, not one: assistant messages,
         # tool results that carry their own usage (subagent/summariser tools report back
@@ -71,11 +59,11 @@ class FooterComponent:
                 message = read_field(entry, "message")
                 role = read_field(message, "role")
                 if role == "assistant":
-                    add_usage(read_field(message, "usage") or {})
+                    addUsageToTotals(usage_totals, read_field(message, "usage") or {})
                 elif role == "toolResult" and read_field(message, "usage"):
-                    add_usage(read_field(message, "usage"))
+                    addUsageToTotals(usage_totals, read_field(message, "usage"))
             elif entry_type in ("branch_summary", "compaction") and read_field(entry, "usage"):
-                add_usage(read_field(entry, "usage"))
+                addUsageToTotals(usage_totals, read_field(entry, "usage"))
 
         context_usage = self.session.getContextUsage()
         model = read_field(state, "model")
@@ -97,18 +85,25 @@ class FooterComponent:
             pwd = f"{pwd} • {session_name}"
 
         stats_parts: list[str] = []
-        if total_input:
-            stats_parts.append(f"↑{format_tokens(total_input)}")
-        if total_output:
-            stats_parts.append(f"↓{format_tokens(total_output)}")
-        if total_cache_read:
-            stats_parts.append(f"R{format_tokens(total_cache_read)}")
-        if total_cache_write:
-            stats_parts.append(f"W{format_tokens(total_cache_write)}")
+        if usage_totals.input:
+            stats_parts.append(f"↑{format_tokens(usage_totals.input)}")
+        if usage_totals.output:
+            stats_parts.append(f"↓{format_tokens(usage_totals.output)}")
+        if usage_totals.cacheRead:
+            stats_parts.append(f"R{format_tokens(usage_totals.cacheRead)}")
+        if usage_totals.cacheWrite:
+            stats_parts.append(f"W{format_tokens(usage_totals.cacheWrite)}")
 
-        using_subscription = bool(model is not None and self.session.modelRegistry.isUsingOAuth(model))
-        if total_cost or using_subscription:
-            stats_parts.append(f"${total_cost:.3f}{' (sub)' if using_subscription else ''}")
+        # Kimi Coding is subscription-backed despite using API-key authentication.
+        using_subscription = bool(
+            model is not None
+            and (
+                read_field(model, "provider") == "kimi-coding"
+                or self.session.modelRegistry.isUsingSubscription(model)
+            )
+        )
+        if usage_totals.cost or using_subscription:
+            stats_parts.append(f"${usage_totals.cost:.3f}{' (sub)' if using_subscription else ''}")
 
         auto_indicator = " (auto)" if self.autoCompactEnabled else ""
         if context_percent == "?":

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import subprocess
 import time
@@ -14,8 +15,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
+from misaka.core.experimental import get_experimental_tool_sampling
 from misaka.core.extensions.types import ToolDefinition
-from misaka.core.tools._common import _string_arg, abort_race
+from misaka.core.tools._common import _drain_worker, _string_arg, abort_race
 from misaka.core.tools.output_accumulator import (
     OutputAccumulator,
     OutputAccumulatorOptions,
@@ -31,11 +33,13 @@ from misaka.core.tools.truncate import (
 )
 from misaka.ui.tui import Container, Text, truncateToWidth
 from misaka.ui.tui.interactive.theme.theme import theme
-from misaka.utils.child_process import wait_for_child_process
+from misaka.utils.child_process import spawn_child_process, wait_for_child_process
 from misaka.utils.shell import (
+    ShellConfig,
     get_shell_config,
     get_shell_env,
     kill_process_tree,
+    normalize_command_for_stdin,
     track_detached_child_pid,
     untrack_detached_child_pid,
 )
@@ -43,12 +47,34 @@ from misaka.utils.values import read_field, signal_aborted
 
 _BASH_PREVIEW_LINES = 5
 _BASH_UPDATE_THROTTLE_SECONDS = 0.1
+_MAX_TIMEOUT_MS = 2_147_483_647
+_MAX_TIMEOUT_SECONDS = _MAX_TIMEOUT_MS / 1000
+_SESSION_ENV_KEYS = (
+    "PI_SESSION_ID",
+    "PI_SESSION_FILE",
+    "PI_PROVIDER",
+    "PI_MODEL",
+    "PI_REASONING_LEVEL",
+)
+_SESSION_ENV_GUIDELINE = "You can inspect PI_* environment variables for current model and session details."
+
+
+def _resolve_timeout_seconds(timeout: float | None) -> float | None:
+    if timeout is None:
+        return None
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise RuntimeError("Invalid timeout: must be a finite number of seconds")
+    if timeout > _MAX_TIMEOUT_SECONDS:
+        raise RuntimeError(
+            f"Invalid timeout: maximum is {_MAX_TIMEOUT_SECONDS} seconds"
+        )
+    return timeout
 
 
 class BashToolInput(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    command: str = Field(description="Bash command to execute")
+    command: str = Field(description="Shell command to execute")
     timeout: float | None = Field(default=None, description="Timeout in seconds (optional, no default timeout)")
 
 
@@ -84,7 +110,19 @@ class BashToolOptions:
     operations: BashOperations | None = None
     commandPrefix: str | None = None
     shellPath: str | None = None
+    exposeSessionEnvironment: bool | None = True
     spawnHook: BashSpawnHook | None = None
+
+
+@dataclass(slots=True)
+class ShellToolConfig:
+    name: str
+    label: str
+    shellName: str
+    prompt: str
+    promptSnippet: str
+    promptGuidelines: tuple[str, ...] = ()
+    tempFilePrefix: str = "misaka-shell"
 
 
 @dataclass(slots=True)
@@ -138,68 +176,68 @@ class _CollapsedBashPreview:
 
 
 @dataclass(slots=True)
-class _LocalBashOperations:
-    shellPath: str | None = None
+class _LocalShellOperations:
+    shellName: str
+    resolveShellConfig: Callable[[], ShellConfig]
 
     async def exec(self, command: str, cwd: str, options: BashExecOptions) -> dict[str, int | None]:
-        if not os.path.exists(cwd):
-            raise RuntimeError(f"Working directory does not exist: {cwd}\nCannot execute bash commands.")
-
-        shell_config = get_shell_config(self.shellPath)
-        env = options["env"] if "env" in options else get_shell_env()
+        timeout = _resolve_timeout_seconds(options.get("timeout"))
         signal = options.get("signal")
-        timeout = options.get("timeout")
-        on_data = options["onData"]
+        if signal_aborted(signal):
+            raise RuntimeError("aborted")
+        if not os.path.exists(cwd):
+            raise RuntimeError(
+                f"Working directory does not exist: {cwd}\n"
+                f"Cannot execute {self.shellName} commands."
+            )
 
-        process = subprocess.Popen(  # noqa: ASYNC220 - the child is driven through pipes by reader threads; Popen is the intended API
-            [shell_config.shell, *shell_config.args, command],
+        shell_config = self.resolveShellConfig()
+        env = options["env"] if "env" in options else get_shell_env()
+        on_data = options["onData"]
+        command_from_stdin = shell_config.commandTransport == "stdin"
+
+        process = await spawn_child_process(
+            shell_config.shell,
+            *(
+                shell_config.args
+                if command_from_stdin
+                else [*shell_config.args, command]
+            ),
             cwd=cwd,
             env=dict(env),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdin=subprocess.PIPE if command_from_stdin else subprocess.DEVNULL,
             start_new_session=os.name != "nt",
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            on_data=lambda _fd, data: on_data(data),
         )
         if process.pid is not None:
             track_detached_child_pid(process.pid)
 
-        loop = asyncio.get_running_loop()
-        queue: asyncio.Queue[bytes | None] = asyncio.Queue()
-        stream_count = 0
-
-        def _pump_stream(stream: Any) -> None:
+        stdin_error: BaseException | None = None
+        if command_from_stdin:
             try:
-                while True:
-                    chunk = stream.read(4096)
-                    if not chunk:
-                        return
-                    loop.call_soon_threadsafe(queue.put_nowait, bytes(chunk))
+                process.write_stdin(
+                    normalize_command_for_stdin(command).encode("utf-8")
+                )
+            except OSError:
+                pass
+            except BaseException as error:  # noqa: BLE001 - preserve the local-operations contract
+                stdin_error = error
             finally:
-                loop.call_soon_threadsafe(queue.put_nowait, None)
-
-        async def _forward_output(expected_streams: int) -> None:
-            completed_streams = 0
-            while completed_streams < expected_streams:
-                chunk = await queue.get()
-                if chunk is None:
-                    completed_streams += 1
-                    continue
-                on_data(chunk)
-
-        reader_tasks: list[asyncio.Task[Any]] = []
-        for stream in (process.stdout, process.stderr):
-            if stream is None:
-                continue
-            stream_count += 1
-            reader_tasks.append(asyncio.create_task(asyncio.to_thread(_pump_stream, stream)))
-
-        forward_task = asyncio.create_task(_forward_output(stream_count))
+                try:
+                    process.close_stdin()
+                except OSError:
+                    pass
+                except BaseException as error:  # noqa: BLE001 - report writer failures after cleanup
+                    stdin_error = error
         wait_task = asyncio.create_task(wait_for_child_process(process))
-        timeout_task = asyncio.create_task(asyncio.sleep(timeout)) if timeout is not None and timeout > 0 else None
+        timeout_task = (
+            asyncio.create_task(asyncio.sleep(timeout)) if timeout is not None else None
+        )
         timed_out = False
 
         async with abort_race(signal) as abort_task:
+            primary_error: BaseException | None = None
             try:
                 pending: set[asyncio.Task[Any]] = {wait_task}
                 if abort_task is not None:
@@ -208,36 +246,66 @@ class _LocalBashOperations:
                     pending.add(timeout_task)
                 done, _pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
 
-                if wait_task not in done:
-                    if timeout_task is not None and timeout_task in done:
-                        timed_out = True
-                    if process.pid is not None:
-                        kill_process_tree(process.pid)
-                    exit_code = await wait_task
-                else:
-                    exit_code = await wait_task
+                timed_out = timeout_task is not None and timeout_task in done
+                abort_won = abort_task is not None and abort_task in done
+                abort_requested = abort_won or signal_aborted(signal)
+                if (timed_out or abort_requested) and process.pid is not None:
+                    kill_process_tree(process.pid)
+                exit_code = await wait_task
 
                 if signal_aborted(signal):
                     raise RuntimeError("aborted")
                 if timed_out:
                     raise RuntimeError(f"timeout:{timeout}")
                 return {"exitCode": None if exit_code is not None and exit_code < 0 else exit_code}
+            except BaseException as error:
+                primary_error = error
+                if isinstance(error, asyncio.CancelledError):
+                    try:
+                        if process.pid is not None:
+                            kill_process_tree(process.pid)
+                    finally:
+                        process.close()
+                raise
             finally:
-                if timeout_task is not None and not timeout_task.done():
-                    timeout_task.cancel()
-                await asyncio.gather(*reader_tasks, return_exceptions=True)
-                await forward_task
-                await asyncio.sleep(0)
-                await asyncio.gather(wait_task, return_exceptions=True)
-                if timeout_task is not None:
-                    await asyncio.gather(timeout_task, return_exceptions=True)
+                async def cleanup() -> None:
+                    tasks: list[asyncio.Task[Any]] = [wait_task]
+                    for task in (abort_task, timeout_task):
+                        if task is None:
+                            continue
+                        if not task.done():
+                            task.cancel()
+                        tasks.append(task)
+                    await asyncio.gather(*tasks, return_exceptions=True)
+
+                cancelled_during_cleanup = await _drain_worker(
+                    asyncio.create_task(cleanup())
+                )
                 if process.pid is not None:
                     untrack_detached_child_pid(process.pid)
+                if primary_error is None:
+                    if cancelled_during_cleanup:
+                        raise asyncio.CancelledError
+                    if stdin_error is not None:
+                        raise stdin_error
+
+
+def create_local_shell_operations(
+    shell_name: str,
+    resolve_shell_config: Callable[[], ShellConfig],
+) -> BashOperations:
+    return _LocalShellOperations(
+        shellName=shell_name,
+        resolveShellConfig=resolve_shell_config,
+    )
 
 
 def create_local_bash_operations(options: Mapping[str, Any] | None = None) -> BashOperations:
     shell_path = options.get("shellPath") if options else None
-    return _LocalBashOperations(shellPath=shell_path)
+    return create_local_shell_operations(
+        "bash",
+        lambda: get_shell_config(shell_path),
+    )
 
 
 def _coerce_options(options: BashToolOptions | Mapping[str, Any] | None) -> BashToolOptions:
@@ -245,17 +313,43 @@ def _coerce_options(options: BashToolOptions | Mapping[str, Any] | None) -> Bash
         return BashToolOptions()
     if isinstance(options, BashToolOptions):
         return options
+    expose_session_environment = options.get("exposeSessionEnvironment")
     return BashToolOptions(
         operations=options.get("operations"),
         commandPrefix=options.get("commandPrefix"),
         shellPath=options.get("shellPath"),
+        exposeSessionEnvironment=(
+            True if expose_session_environment is None else expose_session_environment
+        ),
         spawnHook=options.get("spawnHook"),
     )
 
 
-def _resolve_spawn_context(command: str, cwd: str, spawn_hook: BashSpawnHook | None = None) -> BashSpawnContext:
-    base_context = BashSpawnContext(command=command, cwd=cwd, env={**get_shell_env()})
-    return spawn_hook(base_context) if spawn_hook else base_context
+def _resolve_spawn_context(
+    command: str,
+    cwd: str,
+    spawn_hook: BashSpawnHook | None,
+    expose_session_environment: bool,
+    ctx: Any,
+) -> BashSpawnContext:
+    env = {**get_shell_env()}
+    for key in _SESSION_ENV_KEYS:
+        env.pop(key, None)
+    if expose_session_environment and ctx is not None:
+        session_manager = read_field(ctx, "sessionManager")
+        env["PI_SESSION_ID"] = read_field(session_manager, "getSessionId")()
+        session_file = read_field(session_manager, "getSessionFile")()
+        if session_file:
+            env["PI_SESSION_FILE"] = session_file
+        model = read_field(ctx, "model")
+        if model is not None:
+            env["PI_PROVIDER"] = read_field(model, "provider")
+            env["PI_MODEL"] = read_field(model, "id")
+        thinking_level = read_field(ctx, "thinkingLevel")
+        if thinking_level:
+            env["PI_REASONING_LEVEL"] = thinking_level
+    base_context = BashSpawnContext(command=command, cwd=cwd, env=env)
+    return spawn_hook(base_context) if spawn_hook is not None else base_context
 
 
 def _make_text_result(text: str, details: BashToolDetails | None = None) -> AgentToolResult:
@@ -300,7 +394,7 @@ def _create_render_interval(invalidate: Callable[[], None]) -> asyncio.Task[None
     return loop.create_task(_tick())
 
 
-def _format_bash_call(args: dict[str, Any] | None) -> str:
+def _format_shell_call(args: dict[str, Any] | None, prompt: str) -> str:
     command = _string_arg(read_field(args, "command"))
     timeout = read_field(args, "timeout")
     timeout_suffix = theme.fg("muted", f" (timeout {timeout}s)") if timeout else ""
@@ -310,7 +404,7 @@ def _format_bash_call(args: dict[str, Any] | None) -> str:
         command_display = command
     else:
         command_display = theme.fg("toolOutput", "...")
-    return theme.fg("toolTitle", theme.bold(f"$ {command_display}")) + timeout_suffix
+    return theme.fg("toolTitle", theme.bold(f"{prompt} {command_display}")) + timeout_suffix
 
 
 def _rebuild_bash_result_render_component(
@@ -369,13 +463,13 @@ def _rebuild_bash_result_render_component(
         component.addChild(Text(f"\n{theme.fg('muted', f'{label} {_format_duration(end_time - started_at)}')}", 0, 0))
 
 
-def _render_call(args: dict[str, Any] | None, context: Any) -> Text:
+def _render_call(args: dict[str, Any] | None, context: Any, prompt: str) -> Text:
     state = _get_render_state(context.state)
     if context.executionStarted and state.startedAt is None:
         state.startedAt = _now_ms()
         state.endedAt = None
     text = context.lastComponent if callable(getattr(context.lastComponent, "setText", None)) else Text("", 0, 0)
-    text.setText(_format_bash_call(args))
+    text.setText(_format_shell_call(args, prompt))
     return text
 
 
@@ -411,12 +505,22 @@ def _render_result(
     return component
 
 
-def create_bash_tool_definition(
+def create_shell_tool_definition(
     cwd: str,
+    config: ShellToolConfig,
     options: BashToolOptions | Mapping[str, Any] | None = None,
 ) -> ToolDefinition[dict[str, Any], BashToolDetails | None]:
     resolved_options = _coerce_options(options)
-    operations = resolved_options.operations or create_local_bash_operations({"shellPath": resolved_options.shellPath})
+    expose_session_environment = (
+        True
+        if resolved_options.exposeSessionEnvironment is None
+        else resolved_options.exposeSessionEnvironment
+    )
+    operations = resolved_options.operations
+    if operations is None:
+        operations = create_local_bash_operations(
+            {"shellPath": resolved_options.shellPath}
+        )
 
     async def execute(
         _tool_call_id: str,
@@ -429,8 +533,17 @@ def create_bash_tool_definition(
         resolved_command = (
             f"{resolved_options.commandPrefix}\n{parsed.command}" if resolved_options.commandPrefix else parsed.command
         )
-        spawn_context = _resolve_spawn_context(resolved_command, cwd, resolved_options.spawnHook)
-        output = OutputAccumulator(OutputAccumulatorOptions(tempFilePrefix="misaka-bash"))
+        spawn_context = _resolve_spawn_context(
+            resolved_command,
+            cwd,
+            resolved_options.spawnHook,
+            expose_session_environment,
+            _ctx,
+        )
+        output = OutputAccumulator(
+            OutputAccumulatorOptions(tempFilePrefix=config.tempFilePrefix)
+        )
+        accepting_output = True
         loop = asyncio.get_running_loop()
         update_handle: asyncio.TimerHandle | None = None
         update_dirty = False
@@ -477,10 +590,14 @@ def create_bash_tool_definition(
             on_update(AgentToolResult(content=[], details=None))
 
         def handle_data(data: bytes) -> None:
+            if not accepting_output:
+                return
             output.append(data)
             schedule_output_update()
 
         async def finish_output() -> OutputSnapshot:
+            nonlocal accepting_output
+            accepting_output = False
             output.finish()
             clear_update_handle()
             emit_output_update()
@@ -547,24 +664,55 @@ def create_bash_tool_definition(
             clear_update_handle()
 
     return ToolDefinition(
-        name="bash",
-        label="bash",
+        name=config.name,
+        label=config.label,
         description=(
-            "Execute a bash command in the current working directory. Returns stdout and stderr. "
+            f"Execute a {config.shellName} command in the current working directory. "
+            "Returns stdout and stderr. "
             f"Output is truncated to last {DEFAULT_MAX_LINES} lines or {DEFAULT_MAX_BYTES // 1024}KB "
             "(whichever is hit first). If truncated, full output is saved to a temp file. "
             "Optionally provide a timeout in seconds."
         ),
-        promptSnippet="Execute bash commands (ls, grep, find, etc.)",
+        promptSnippet=config.promptSnippet,
+        promptGuidelines=(
+            list(config.promptGuidelines) if expose_session_environment else []
+        ),
         parameters=BashToolInput,
+        constrainedSampling=get_experimental_tool_sampling(),
         execute=execute,
-        renderCall=lambda args, _theme, context: _render_call(args, context),
+        renderCall=lambda args, _theme, context: _render_call(
+            args, context, config.prompt
+        ),
         renderResult=lambda result, render_options, _theme, context: _render_result(result, render_options, context),
     )
 
 
+_BASH_TOOL_CONFIG = ShellToolConfig(
+    name="bash",
+    label="bash",
+    shellName="bash",
+    prompt="$",
+    promptSnippet="Execute bash commands (ls, grep, find, etc.)",
+    promptGuidelines=(_SESSION_ENV_GUIDELINE,),
+    tempFilePrefix="misaka-bash",
+)
+
+
+def create_bash_tool_definition(
+    cwd: str,
+    options: BashToolOptions | Mapping[str, Any] | None = None,
+) -> ToolDefinition[dict[str, Any], BashToolDetails | None]:
+    return create_shell_tool_definition(cwd, _BASH_TOOL_CONFIG, options)
+
+
 def create_bash_tool(cwd: str, options: BashToolOptions | Mapping[str, Any] | None = None) -> AgentTool:
-    return wrap_tool_definition(create_bash_tool_definition(cwd, options))
+    definition = create_bash_tool_definition(cwd, options)
+    tool = wrap_tool_definition(definition)
+    # Pi assigns these definition-only fields dynamically so registerTool(createBashTool(...))
+    # keeps its system-prompt contribution.
+    object.__setattr__(tool, "promptSnippet", definition.promptSnippet)
+    object.__setattr__(tool, "promptGuidelines", definition.promptGuidelines)
+    return tool
 
 
 createBashTool = create_bash_tool
@@ -578,6 +726,7 @@ __all__ = [
     "BashToolDetails",
     "BashToolInput",
     "BashToolOptions",
+    "ShellToolConfig",
     "createBashTool",
     "createBashToolDefinition",
     "createLocalBashOperations",

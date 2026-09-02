@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import os
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -14,18 +13,18 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import Api, ImageContent, Model, TextContent
+from misaka.core.experimental import get_experimental_tool_sampling
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.tools._common import (
     _ignore_background_task_result,
     _string_arg,
     abort_race,
 )
-from misaka.core.tools.path_utils import resolve_read_path
+from misaka.core.tools.path_utils import resolve_read_path_async, resolve_to_cwd
 from misaka.core.tools.render_utils import (
     get_text_output,
-    invalid_arg_text,
+    render_tool_path,
     replace_tabs,
-    shorten_path,
 )
 from misaka.core.tools.tool_definition_wrapper import wrap_tool_definition
 from misaka.core.tools.truncate import (
@@ -37,7 +36,7 @@ from misaka.core.tools.truncate import (
 )
 from misaka.ui.tui import Text
 from misaka.ui.tui.interactive.theme.theme import get_language_from_path, highlight_code
-from misaka.utils.image_resize import format_dimension_note, resize_image
+from misaka.utils.image_process import ProcessImageOptions, process_image
 from misaka.utils.mime import detect_supported_image_mime_type_from_file
 from misaka.utils.paths import format_path_relative_to_cwd_or_absolute
 from misaka.utils.values import read_field, signal_aborted
@@ -113,12 +112,12 @@ def _format_read_line_range(args: Mapping[str, Any] | None, theme_obj: Any) -> s
     return theme_obj.fg("warning", f":{start_line}{f'-{end_line}' if end_line else ''}")
 
 
-def _format_read_call(args: Mapping[str, Any] | None, theme_obj: Any) -> str:
+def _format_read_call(args: Mapping[str, Any] | None, theme_obj: Any, cwd: str) -> str:
     raw_path = _string_arg(read_field(args, "file_path", read_field(args, "path")))
-    path_value = shorten_path(raw_path) if raw_path is not None else None
-    invalid_arg = invalid_arg_text(theme_obj)
-    path_display = invalid_arg if path_value is None else (theme_obj.fg("accent", path_value) if path_value else theme_obj.fg("toolOutput", "..."))
-    return f"{theme_obj.fg('toolTitle', theme_obj.bold('read'))} {path_display}{_format_read_line_range(args, theme_obj)}"
+    return (
+        f"{theme_obj.fg('toolTitle', theme_obj.bold('read'))} "
+        f"{render_tool_path(raw_path, theme_obj, cwd)}{_format_read_line_range(args, theme_obj)}"
+    )
 
 
 def _trim_trailing_empty_lines(lines: list[str]) -> list[str]:
@@ -143,7 +142,7 @@ def _get_compact_read_classification(args: Mapping[str, Any] | None, cwd: str) -
     if not raw_path:
         return None
 
-    absolute_path = resolve_read_path(raw_path, cwd)
+    absolute_path = resolve_to_cwd(raw_path, cwd)
     file_name = os.path.basename(absolute_path)
     if file_name == "SKILL.md":
         return _CompactReadClassification(kind="skill", label=os.path.basename(os.path.dirname(absolute_path)) or file_name)
@@ -243,12 +242,14 @@ def create_read_tool_definition(
         ctx: Any = None,
     ) -> AgentToolResult:
         parsed = ReadToolInput.model_validate(params)
-        absolute_path = resolve_read_path(parsed.path, cwd)
 
         if signal_aborted(signal):
             raise RuntimeError("Operation aborted")
 
         async def worker() -> AgentToolResult:
+            absolute_path = await resolve_read_path_async(parsed.path, cwd)
+            if signal_aborted(signal):
+                return AgentToolResult(content=[], details=None)
             await operations.access(absolute_path)
             if signal_aborted(signal):
                 return AgentToolResult(content=[], details=None)
@@ -261,35 +262,25 @@ def create_read_tool_definition(
 
             if mime_type:
                 buffer = await operations.readFile(absolute_path)
-                base64_data = base64.b64encode(buffer).decode("ascii")
-                if auto_resize_images:
-                    resized = await resize_image(ImageContent(data=base64_data, mimeType=mime_type))
-                    if not resized:
-                        text_note = (
-                            f"Read image file [{mime_type}]\n"
-                            "[Image omitted: could not be resized below the inline image size limit.]"
-                        )
-                        if non_vision_image_note:
-                            text_note += f"\n{non_vision_image_note}"
-                        content = [TextContent(text=text_note)]
-                    else:
-                        dimension_note = format_dimension_note(resized)
-                        text_note = f"Read image file [{resized.mimeType}]"
-                        if dimension_note:
-                            text_note += f"\n{dimension_note}"
-                        if non_vision_image_note:
-                            text_note += f"\n{non_vision_image_note}"
-                        content = [
-                            TextContent(text=text_note),
-                            ImageContent(data=resized.data, mimeType=resized.mimeType),
-                        ]
+                processed = await process_image(
+                    buffer,
+                    mime_type,
+                    ProcessImageOptions(autoResizeImages=auto_resize_images),
+                )
+                if not processed.ok:
+                    text_note = f"Read image file [{mime_type}]\n{processed.message}"
+                    if non_vision_image_note:
+                        text_note += f"\n{non_vision_image_note}"
+                    content = [TextContent(text=text_note)]
                 else:
-                    text_note = f"Read image file [{mime_type}]"
+                    text_note = f"Read image file [{processed.mimeType}]"
+                    if processed.hints:
+                        text_note += "\n" + "\n".join(processed.hints)
                     if non_vision_image_note:
                         text_note += f"\n{non_vision_image_note}"
                     content = [
                         TextContent(text=text_note),
-                        ImageContent(data=base64_data, mimeType=mime_type),
+                        ImageContent(data=processed.data, mimeType=processed.mimeType),
                     ]
             else:
                 buffer = await operations.readFile(absolute_path)
@@ -368,7 +359,7 @@ def create_read_tool_definition(
         text.setText(
             _format_compact_read_call(classification, args, theme_obj)
             if classification is not None
-            else _format_read_call(args, theme_obj)
+            else _format_read_call(args, theme_obj, context.cwd)
         )
         return text
 
@@ -391,7 +382,7 @@ def create_read_tool_definition(
         name="read",
         label="read",
         description=(
-            "Read the contents of a file. Supports text files and images (jpg, png, gif, webp). "
+            "Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). "
             f"Images are sent as attachments. For text files, output is truncated to {DEFAULT_MAX_LINES} "
             f"lines or {DEFAULT_MAX_BYTES // 1024}KB (whichever is hit first). Use offset/limit for large files. "
             "When you need the full file, continue with offset until complete."
@@ -399,6 +390,7 @@ def create_read_tool_definition(
         promptSnippet="Read file contents",
         promptGuidelines=["Use read to examine files instead of cat or sed."],
         parameters=ReadToolInput,
+        constrainedSampling=get_experimental_tool_sampling(),
         execute=execute,
         renderCall=render_call,
         renderResult=render_result,

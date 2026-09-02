@@ -64,6 +64,8 @@ def _string_arg(value: object) -> str | None:
 
 def _ignore_background_task_result(task: asyncio.Task[Any]) -> None:
     def _consume(done: asyncio.Task[Any]) -> None:
+        if done.cancelled():
+            return
         try:
             done.result()
         except Exception:  # noqa: BLE001 - the background task's outcome is intentionally discarded

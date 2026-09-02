@@ -8,7 +8,7 @@ import re
 import subprocess
 from collections.abc import Mapping
 
-from misaka.utils.shell import get_shell_config
+from misaka.utils.shell import get_shell_config, normalize_command_for_stdin
 
 _command_result_cache: dict[str, str | None] = {}
 
@@ -167,11 +167,20 @@ def resolve_config_value(config: str, env: Mapping[str, str] | None = None) -> s
 def _execute_with_configured_shell(command: str) -> tuple[bool, str | None]:
     try:
         shell_config = get_shell_config()
+        command_from_stdin = shell_config.commandTransport == "stdin"
         result = subprocess.run(
-            [shell_config.shell, *shell_config.args, command],
+            (
+                [shell_config.shell, *shell_config.args]
+                if command_from_stdin
+                else [shell_config.shell, *shell_config.args, command]
+            ),
             check=False,
-            encoding="utf-8",
-            stdin=subprocess.DEVNULL,
+            input=(
+                normalize_command_for_stdin(command).encode("utf-8")
+                if command_from_stdin
+                else None
+            ),
+            stdin=None if command_from_stdin else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             timeout=10,
@@ -190,7 +199,7 @@ def _execute_with_configured_shell(command: str) -> tuple[bool, str | None]:
 
     if result.returncode != 0:
         return True, None
-    value = (result.stdout or "").strip()
+    value = (result.stdout or b"").decode("utf-8", errors="replace").strip()
     return True, value or None
 
 

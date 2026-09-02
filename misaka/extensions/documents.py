@@ -1,6 +1,5 @@
 """Document navigation, reading, search, and quotation-verification tools."""
 import asyncio
-import base64
 import os
 from io import BytesIO
 
@@ -14,7 +13,7 @@ from misaka.core.extensions.types import ToolDefinition
 from misaka.core.tools.read import _get_non_vision_image_note
 from misaka.documents import index as corpus
 from misaka.platform.prompt_guard import untrusted
-from misaka.utils.image_resize import format_dimension_note, resize_image
+from misaka.utils.image_resize import format_dimension_note, resize_image_bytes
 from misaka.utils.values import signal_aborted
 
 
@@ -388,8 +387,7 @@ def register(harn):
             # agree and a page number from doc_read/doc_find lands where the model expects.
             return _text(f"Page {params.page} is outside {params.doc_id}: it has {count} page"
                          f"{'' if count == 1 else 's'}, numbered from 1.")
-        resized = await resize_image(ImageContent(data=base64.b64encode(png).decode("ascii"),
-                                                  mimeType="image/png"))
+        resized = await resize_image_bytes(png, "image/png")
         note = _get_non_vision_image_note(getattr(ctx, "model", None))
         # The title names the document the way a caption should, but it is the document's own
         # text (a card names its own artifacts, and an EPUB its own dc:title), so it is shown

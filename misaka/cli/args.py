@@ -34,10 +34,13 @@ class Args:
     mode: Mode | None = None
     noSession: bool = False
     session: str | None = None
+    sessionId: str | None = None
+    name: str | None = None
     fork: str | None = None
     sessionDir: str | None = None
     models: list[str] | None = None
     tools: list[str] | None = None
+    excludeTools: list[str] | None = None
     noTools: bool = False
     noBuiltinTools: bool = False
     extensions: list[str] | None = None
@@ -52,6 +55,7 @@ class Args:
     noContextFiles: bool = False
     listModels: str | bool | None = None
     verbose: bool = False
+    projectTrustOverride: bool | None = None
     messages: list[str] = field(default_factory=list)
     fileArgs: list[str] = field(default_factory=list)
     unknownFlags: dict[str, bool | str] = field(default_factory=dict)
@@ -85,13 +89,39 @@ def parse_args(args: list[str]) -> Args:
             result.help = True
         elif arg in {"--version", "-v"}:
             result.version = True
-        elif arg == "--mode" and has_next:
-            mode = args[index + 1]
+        elif arg == "--mode":
+            mode = args[index + 1] if has_next else None
+            if mode is not None and not mode.startswith(("-", "@")):
+                index += 1
+            else:
+                mode = None
+
             if mode in {"text", "json"}:
                 result.mode = mode
-            index += 1
+            elif mode:
+                result.diagnostics.append(
+                    ArgDiagnostic(
+                        type="error",
+                        message=f'Invalid mode "{mode}". Valid values: text, json',
+                    )
+                )
+            else:
+                result.diagnostics.append(
+                    ArgDiagnostic(type="error", message="--mode requires text or json")
+                )
+        elif arg.startswith("--mode="):
+            result.diagnostics.append(
+                ArgDiagnostic(
+                    type="error",
+                    message="--mode must be followed by text or json as a separate argument",
+                )
+            )
         elif arg in {"--continue", "-c"}:
             result.continue_ = True
+        elif arg in {"--approve", "-a"}:
+            result.projectTrustOverride = True
+        elif arg in {"--no-approve", "-na"}:
+            result.projectTrustOverride = False
         elif arg in {"--resume", "-r"}:
             result.resume = True
         elif arg == "--provider" and has_next:
@@ -110,10 +140,19 @@ def parse_args(args: list[str]) -> Args:
             result.appendSystemPrompt = result.appendSystemPrompt or []
             result.appendSystemPrompt.append(args[index + 1])
             index += 1
+        elif arg in {"--name", "-n"}:
+            if has_next:
+                result.name = args[index + 1]
+                index += 1
+            else:
+                result.diagnostics.append(ArgDiagnostic(type="error", message="--name requires a value"))
         elif arg == "--no-session":
             result.noSession = True
         elif arg == "--session" and has_next:
             result.session = args[index + 1]
+            index += 1
+        elif arg == "--session-id" and has_next:
+            result.sessionId = args[index + 1]
             index += 1
         elif arg == "--fork" and has_next:
             result.fork = args[index + 1]
@@ -130,6 +169,9 @@ def parse_args(args: list[str]) -> Args:
             result.noBuiltinTools = True
         elif arg in {"--tools", "-t"} and has_next:
             result.tools = [item.strip() for item in args[index + 1].split(",") if item.strip()]
+            index += 1
+        elif arg in {"--exclude-tools", "-xt"} and has_next:
+            result.excludeTools = [item.strip() for item in args[index + 1].split(",") if item.strip()]
             index += 1
         elif arg == "--thinking" and has_next:
             level = args[index + 1]
@@ -242,18 +284,24 @@ Options:
   --mode <mode>                  Output mode: text (default) or json
   --print, -p                    Non-interactive mode: process prompt and exit
   --continue, -c                 Continue previous session
+  --approve, -a                  Trust project-local settings and resources for this run
+  --no-approve, -na              Ignore project-local settings and resources for this run
   --resume, -r                   Select a session to resume
   --session <path|id>            Use specific session file or partial UUID
+  --session-id <id>              Use exact project session ID, creating it if missing
   --fork <path|id>               Fork specific session file or partial UUID into a new session
   --session-dir <dir>            Directory for session storage and lookup
   --no-session                   Don't save session (ephemeral)
+  --name, -n <name>              Set session display name
   --models <patterns>            Comma-separated model patterns for Ctrl+P cycling
                                  Supports globs (anthropic/*, *sonnet*) and fuzzy matching
   --no-tools, -nt                Disable all tools by default (built-in and extension)
   --no-builtin-tools, -nbt       Disable built-in tools by default but keep extension/custom tools enabled
   --tools, -t <tools>            Comma-separated allowlist of tool names to enable
                                  Applies to built-in, extension, and custom tools
-  --thinking <level>             Set thinking level: off, minimal, low, medium, high, xhigh
+  --exclude-tools, -xt <tools>   Comma-separated denylist of tool names to disable
+                                 Applies to built-in, extension, and custom tools
+  --thinking <level>             Set thinking level: off, minimal, low, medium, high, xhigh, max
   --extension, -e <path>         Load an extension file (can be used multiple times)
   --no-extensions, -ne           Disable extension discovery (explicit -e paths still work)
   --prompt-template <path>       Load a prompt template file or directory (can be used multiple times)
@@ -358,13 +406,14 @@ Environment Variables:
   {ENV_SESSION_DIR.ljust(32)} - Session storage directory (overridden by --session-dir)
 
 Built-in Tool Names:
-  read   - Read file contents
-  bash   - Execute bash commands
-  edit   - Edit files with find/replace
-  write  - Write files (creates/overwrites)
-  grep   - Search file contents (read-only, off by default)
-  find   - Find files by glob pattern (read-only, off by default)
-  ls     - List directory contents (read-only, off by default)
+  read       - Read file contents
+  bash       - Execute bash commands
+  powershell - Execute PowerShell commands on Windows
+  edit       - Edit files with find/replace
+  write      - Write files (creates/overwrites)
+  grep       - Search file contents (read-only, off by default)
+  find       - Find files by glob pattern (read-only, off by default)
+  ls         - List directory contents (read-only, off by default)
 """
     )
 

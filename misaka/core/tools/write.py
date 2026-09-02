@@ -12,15 +12,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
+from misaka.core.experimental import get_experimental_tool_sampling
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.tools._common import _drain_worker, abort_race
 from misaka.core.tools.file_mutation_queue import with_file_mutation_queue
 from misaka.core.tools.path_utils import resolve_to_cwd
 from misaka.core.tools.render_utils import (
-    invalid_arg_text,
     normalize_display_text,
+    render_tool_path,
     replace_tabs,
-    shorten_path,
     str_value,
 )
 from misaka.core.tools.tool_definition_wrapper import wrap_tool_definition
@@ -35,6 +35,13 @@ class WriteToolInput(BaseModel):
 
     path: str = Field(description="Path to the file to write (relative or absolute)")
     content: str = Field(description="Content to write to the file")
+
+
+write_tool_system_prompt_contribution = {
+    "snippet": "Create or overwrite files",
+    "guidelines": ["Use write only for new files or complete rewrites."],
+}
+writeToolSystemPromptContribution = write_tool_system_prompt_contribution
 
 
 class WriteOperations(Protocol):
@@ -171,20 +178,13 @@ def _format_write_call(
     expanded: bool,
     theme_obj: Any,
     cache: WriteHighlightCache | None,
+    cwd: str,
 ) -> str:
     from misaka.ui.tui.interactive.components.keybinding_hints import key_hint
 
     raw_path = str_value(read_field(args, "file_path", read_field(args, "path")))
     file_content = str_value(read_field(args, "content"))
-    path = shorten_path(raw_path) if raw_path is not None else None
-    invalid_arg = invalid_arg_text(theme_obj)
-    if path is None:
-        path_display = invalid_arg
-    elif path:
-        path_display = theme_obj.fg("accent", path)
-    else:
-        path_display = theme_obj.fg("toolOutput", "...")
-    text = f"{theme_obj.fg('toolTitle', theme_obj.bold('write'))} {path_display}"
+    text = f"{theme_obj.fg('toolTitle', theme_obj.bold('write'))} {render_tool_path(raw_path, theme_obj, cwd)}"
 
     if file_content is None:
         text += f"\n\n{theme_obj.fg('error', '[invalid content arg - expected string]')}"
@@ -208,7 +208,8 @@ def _format_write_call(
         if remaining > 0:
             text += (
                 theme_obj.fg("muted", f"\n... ({remaining} more lines, {total_lines} total,")
-                + f" {key_hint('app.tools.expand', 'to expand')})"
+                + f" {key_hint('app.tools.expand', 'to expand')}"
+                + theme_obj.fg("muted", ")")
             )
 
     return text
@@ -231,7 +232,11 @@ def create_write_tool_definition(
     options: WriteToolOptions | Mapping[str, Any] | None = None,
 ) -> ToolDefinition[WriteToolInput | dict[str, Any], None]:
     resolved_options = _coerce_options(options)
-    operations = resolved_options.operations or _DefaultWriteOperations()
+    operations = (
+        resolved_options.operations
+        if resolved_options.operations is not None
+        else _DefaultWriteOperations()
+    )
 
     async def execute(
         _tool_call_id: str,
@@ -250,14 +255,17 @@ def create_write_tool_definition(
 
             aborted = False
 
+            def throw_if_aborted() -> None:
+                if aborted or signal_aborted(signal):
+                    raise RuntimeError("Operation aborted")
+
             async def worker() -> AgentToolResult | None:
                 try:
+                    throw_if_aborted()
                     await operations.mkdir(directory)
-                    if aborted:
-                        return None
+                    throw_if_aborted()
                     await operations.writeFile(absolute_path, parsed.content)
-                    if aborted:
-                        return None
+                    throw_if_aborted()
                     return AgentToolResult(
                         content=[TextContent(text=f"Successfully wrote {len(parsed.content.encode('utf-8'))} bytes to {parsed.path}")],
                         details=None,
@@ -321,6 +329,7 @@ def create_write_tool_definition(
                 expanded=context.expanded,
                 theme_obj=theme_obj,
                 cache=component.cache,
+                cwd=context.cwd,
             )
         )
         return component
@@ -342,9 +351,10 @@ def create_write_tool_definition(
             "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. "
             "Automatically creates parent directories."
         ),
-        promptSnippet="Create or overwrite files",
-        promptGuidelines=["Use write only for new files or complete rewrites."],
+        promptSnippet=write_tool_system_prompt_contribution["snippet"],
+        promptGuidelines=list(write_tool_system_prompt_contribution["guidelines"]),
         parameters=WriteToolInput,
+        constrainedSampling=get_experimental_tool_sampling(),
         execute=execute,
         renderCall=render_call,
         renderResult=render_result,
@@ -364,4 +374,5 @@ __all__ = [
     "WriteToolOptions",
     "createWriteTool",
     "createWriteToolDefinition",
+    "writeToolSystemPromptContribution",
 ]

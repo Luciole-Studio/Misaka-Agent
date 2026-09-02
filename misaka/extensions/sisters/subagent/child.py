@@ -502,7 +502,7 @@ async def amain() -> int:
                 )
             return None
 
-        async def should_stop(_turn: Any) -> bool:
+        async def should_stop(_turn: Any, _signal: Any = None) -> bool:
             nonlocal turns
             turns += 1
             return turns >= (1 if kind == "prompt" else 50)
@@ -533,8 +533,6 @@ async def amain() -> int:
                 getApiKey=session.agent.getApiKey,
                 beforeToolCall=before_tool if tools else None,
                 shouldStopAfterTurn=should_stop,
-                maxRetries=0,
-                maxTokens=1024 if kind == "prompt" else session.agent.maxTokens,
             )
         )
         await verifier.prompt(prompt)

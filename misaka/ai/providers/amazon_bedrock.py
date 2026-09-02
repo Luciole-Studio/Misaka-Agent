@@ -215,6 +215,9 @@ def build_client_settings(model: Model, options: StreamOptions | dict[str, Any] 
     )
 
     config_kwargs: dict[str, Any] = {}
+    timeout_ms = _option(options, "timeoutMs")
+    if timeout_ms is not None:
+        config_kwargs["read_timeout"] = timeout_ms / 1000
     proxy_agents = create_http_proxy_agents_for_target(model.baseUrl)
     if proxy_agents is not None:
         config_kwargs["proxies"] = {

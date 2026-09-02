@@ -280,6 +280,7 @@ def discover(
     user_root: str | os.PathLike[str] | None = None,
     project_root: str | os.PathLike[str] | None = None,
     cwd: str | os.PathLike[str] | None = None,
+    include_project: bool = True,
 ) -> dict[str, AgentDefinition]:
     """Load definitions with Claude Code precedence: built-in < user < project.
 
@@ -289,7 +290,9 @@ def discover(
     builtin_root = root or ROOT
     use_defaults = root is None
     user_dir = user_root if user_root is not None else (_user_agents_dir() if use_defaults else None)
-    if project_root is not None:
+    if not include_project:
+        project_dirs = []
+    elif project_root is not None:
         project_dirs = [Path(project_root)]
     elif use_defaults:
         project_dirs = _project_agent_dirs(cwd)

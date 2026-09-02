@@ -5,14 +5,19 @@ Layers, in precedence order: the project folder's ``skills/``, the role's
 directories listed in ``~/.misaka/skills.json`` (hermes ``skills.external_dirs``).
 Turning them into an index (one entry per name, the system-prompt section,
 lookups) is :mod:`misaka.skills.index`; this module only says where skills live
-and which directories count.
+and which directories count, plus the project-tier quarantine chokepoint.
 """
+import hashlib
 import json
+import logging
 import os
 from pathlib import Path
+from stat import S_ISLNK
 
 from misaka.config import CFG
 from misaka.utils import atomic
+
+logger = logging.getLogger(__name__)
 
 
 def home():
@@ -55,20 +60,29 @@ EXCLUDED_SKILL_DIRS = frozenset((
 SKILL_SUPPORT_DIRS = frozenset(("references", "templates", "assets", "scripts"))
 
 
-def walk_skill_tree(root):
-    """``(directory, files)`` for every directory under a layer root, pruning dependency
-    trees and a skill's support directories as it goes (hermes iter_skill_index_files).
-    Symlinked directories are followed: a role's skill is often a link into a library."""
+def _walk_skill_tree(root, *, prune_support, prune_excluded=True):
+    """Walk a skill tree once, following links without revisiting a real directory."""
     seen = set()
     for here, dirs, files in os.walk(root, followlinks=True):
         real = os.path.realpath(here)
-        if real in seen:                    # a link back into the tree: walked already
+        if real in seen:
             dirs[:] = []
             continue
         seen.add(real)
         has_skill = "SKILL.md" in files
-        dirs[:] = [d for d in dirs
-                   if d not in EXCLUDED_SKILL_DIRS and not (has_skill and d in SKILL_SUPPORT_DIRS)]
+        dirs[:] = sorted(
+            d for d in dirs
+            if (not prune_excluded or d not in EXCLUDED_SKILL_DIRS)
+            and not (prune_support and has_skill and d in SKILL_SUPPORT_DIRS)
+        )
+        yield here, dirs, files
+
+
+def walk_skill_tree(root):
+    """``(directory, files)`` for every directory under a layer root, pruning dependency
+    trees and a skill's support directories as it goes (hermes iter_skill_index_files).
+    Symlinked directories are followed: a role's skill is often a link into a library."""
+    for here, _dirs, files in _walk_skill_tree(root, prune_support=True):
         yield here, files
 
 
@@ -77,6 +91,56 @@ def iter_skill_files(root, filename="SKILL.md"):
     between: ``<root>/finance/fmp-data/SKILL.md`` is ``finance/fmp-data``."""
     return iter(sorted(Path(here) / filename for here, files in walk_skill_tree(root)
                        if filename in files))
+
+
+_PROJECT_SCAN_SOURCE = "project-local"
+
+
+def is_quarantined_project_skill(skill_md):
+    """Fail closed when a project skill's full directory cannot scan or is dangerous."""
+    skill_dir = Path(skill_md).parent
+    try:
+        from misaka.skills import guard
+
+        result = guard.scan_skill(skill_dir, source=_PROJECT_SCAN_SOURCE)
+        verdict, summary = result.verdict, result.summary
+    except Exception:
+        logger.warning("Project skill scan failed; quarantining: %s", skill_dir, exc_info=True)
+        return True
+    if verdict in ("safe", "caution"):
+        return False
+    logger.warning("Project skill quarantined: %s - %s", skill_dir, summary)
+    return True
+
+
+def iter_project_skill_files(root):
+    """Yield project SKILL.md files through the single quarantine chokepoint."""
+    return (path for path in iter_skill_files(root) if not is_quarantined_project_skill(path))
+
+
+def project_skill_tree_fingerprint(root):
+    """Metadata fingerprint of every project skill bundle, including support files.
+
+    This deliberately has no path-only cache: live edits must invalidate the index,
+    while the scanner reads file contents only after the resulting cache miss.
+    """
+    records = []
+    for here, dirs, files in _walk_skill_tree(
+        root, prune_support=False, prune_excluded=False,
+    ):
+        for name in (*dirs, *sorted(files)):
+            path = Path(here) / name
+            rel = Path(os.path.relpath(path, root)).as_posix()
+            try:
+                info = path.lstat()
+                target = os.readlink(path) if S_ISLNK(info.st_mode) else ""
+                records.append(
+                    (rel, info.st_mtime_ns, info.st_ctime_ns, info.st_size, info.st_mode, target)
+                )
+            except OSError as error:
+                records.append((rel, type(error).__name__, error.errno))
+    payload = json.dumps(sorted(records), ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def external_skills_dirs():

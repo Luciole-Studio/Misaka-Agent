@@ -13,7 +13,7 @@ _TOOL_RESULT_MAX_CHARS = 2000
 
 SUMMARIZATION_SYSTEM_PROMPT = (
     "You are a context summarization assistant. Your task is to read a conversation between a user "
-    "and an AI coding assistant, then produce a structured summary following the exact format specified.\n\n"
+    "and an AI assistant, then produce a structured summary following the exact format specified.\n\n"
     "Do NOT continue the conversation. Do NOT respond to any questions in the conversation. "
     "ONLY output the structured summary."
 )
@@ -167,10 +167,26 @@ def _safe_json_stringify(value: Any) -> str:
     return serialized if serialized is not None else "undefined"
 
 
+computeFileLists = compute_file_lists
+createFileOps = create_file_ops
+extractFileOpsFromMessage = extract_file_ops_from_message
+formatFileOperations = format_file_operations
+serializeConversation = serialize_conversation
+
 __all__ = [
     "SUMMARIZATION_SYSTEM_PROMPT",
     "FileOperations",
-    ]
+    "computeFileLists",
+    "compute_file_lists",
+    "createFileOps",
+    "create_file_ops",
+    "extractFileOpsFromMessage",
+    "extract_file_ops_from_message",
+    "formatFileOperations",
+    "format_file_operations",
+    "serializeConversation",
+    "serialize_conversation",
+]
 
 
 def _assistant_text(message: Any) -> str:

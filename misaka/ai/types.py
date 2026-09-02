@@ -56,6 +56,7 @@ class StreamOptions(RuntimeModel):
     maxTokens: int | None = None
     signal: Any | None = None
     apiKey: str | None = None
+    env: dict[str, str] | None = None
     transport: Transport | None = None
     cacheRetention: CacheRetention | None = None
     sessionId: str | None = None
@@ -140,8 +141,8 @@ class ProviderStreamOptions(SimpleStreamOptions):
     base, a ``streamSimple`` call that passed no options at all died with
     ``AttributeError: reasoning`` on seven of the ten registered APIs.
 
-    ``extra="allow"`` carries the fields no options model declares -- ``env``, transform
-    hooks -- through to whichever seam reads them.
+    ``extra="allow"`` carries transform hooks and other provider-owned fields through to
+    whichever seam reads them.
     """
 
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
@@ -178,6 +179,8 @@ class ToolCall(SchemaModel):
     name: str
     arguments: dict[str, Any]
     thoughtSignature: str | None = None
+    # OpenAI Responses namespace for dynamically loaded or namespaced tools.
+    namespace: str | None = None
 
 
 UserContentValue: TypeAlias = TextContent | ImageContent

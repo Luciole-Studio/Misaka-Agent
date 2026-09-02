@@ -129,6 +129,7 @@ def stream_google_vertex(
                         model,
                         api_key,
                         _option(options, "headers"),
+                        _option(options, "timeoutMs"),
                     )
                 else:
                     client = create_client(
@@ -136,6 +137,7 @@ def stream_google_vertex(
                         resolve_project(options),
                         resolve_location(options),
                         _option(options, "headers"),
+                        _option(options, "timeoutMs"),
                     )
 
             params = build_params(model, context, options)
@@ -356,8 +358,9 @@ def create_client(
     project: str,
     location: str,
     options_headers: Mapping[str, str] | None = None,
+    timeout_ms: int | None = None,
 ) -> GoogleGenAI:
-    http_options = build_http_options(model, options_headers) or {}
+    http_options = build_http_options(model, options_headers, timeout_ms) or {}
     http_options.setdefault("apiVersion", API_VERSION)
     return require(GoogleGenAI, "google-genai")(
         vertexai=True,
@@ -371,8 +374,9 @@ def create_client_with_api_key(
     model: Model,
     api_key: str,
     options_headers: Mapping[str, str] | None = None,
+    timeout_ms: int | None = None,
 ) -> GoogleGenAI:
-    http_options = build_http_options(model, options_headers) or {}
+    http_options = build_http_options(model, options_headers, timeout_ms) or {}
     http_options.setdefault("apiVersion", API_VERSION)
     return require(GoogleGenAI, "google-genai")(
         vertexai=True,
@@ -384,6 +388,7 @@ def create_client_with_api_key(
 def build_http_options(
     model: Model,
     options_headers: Mapping[str, str] | None = None,
+    timeout_ms: int | None = None,
 ) -> dict[str, Any] | None:
     http_options: dict[str, Any] = {}
     base_url = resolve_custom_base_url(model.baseUrl)
@@ -402,6 +407,8 @@ def build_http_options(
             **dict(options_headers or {}),
         }
     )
+    if timeout_ms is not None:
+        http_options["timeout"] = timeout_ms
 
     return http_options or None
 

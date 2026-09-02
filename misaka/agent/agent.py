@@ -11,6 +11,7 @@ from typing import Any, overload
 from pydantic import BaseModel
 
 from misaka.agent.agent_loop import run_agent_loop, run_agent_loop_continue
+from misaka.agent.stream_fn import get_default_stream_fn
 from misaka.agent.types import (
     AfterToolCallContext,
     AfterToolCallResult,
@@ -25,13 +26,13 @@ from misaka.agent.types import (
     BeforeToolCallResult,
     MessageEndEvent,
     MessageStartEvent,
+    PrepareNextTurnContext,
     QueueMode,
     ShouldStopAfterTurnContext,
     StreamFn,
     ToolExecutionMode,
     TurnEndEvent,
 )
-from misaka.ai.stream import stream_simple
 from misaka.ai.types import (
     AssistantMessage,
     ImageContent,
@@ -44,7 +45,7 @@ from misaka.ai.types import (
     Usage,
     validate_message,
 )
-from misaka.utils.values import maybe_await
+from misaka.utils.values import call_with_optional_second_arg, maybe_await
 
 
 class MutableAgentState(AgentState):
@@ -89,7 +90,17 @@ PrepareNextTurnFn = Callable[
     ["AbortSignal | None"],
     AgentLoopTurnUpdate | None | Awaitable[AgentLoopTurnUpdate | None],
 ]
-ShouldStopAfterTurnFn = Callable[[ShouldStopAfterTurnContext], bool | Awaitable[bool]]
+PrepareNextTurnWithContextFn = Callable[
+    [PrepareNextTurnContext, "AbortSignal | None"],
+    AgentLoopTurnUpdate | None | Awaitable[AgentLoopTurnUpdate | None],
+]
+ShouldStopAfterTurnFn = (
+    Callable[
+        [ShouldStopAfterTurnContext, "AbortSignal | None"],
+        bool | Awaitable[bool],
+    ]
+    | Callable[[ShouldStopAfterTurnContext], bool | Awaitable[bool]]
+)
 
 
 def _copy_empty_usage() -> Usage:
@@ -213,6 +224,7 @@ class AgentOptions:
         | None
     ) = None
     prepareNextTurn: PrepareNextTurnFn | None = None
+    prepareNextTurnWithContext: PrepareNextTurnWithContextFn | None = None
     shouldStopAfterTurn: ShouldStopAfterTurnFn | None = None
     steeringMode: QueueMode = "one-at-a-time"
     followUpMode: QueueMode = "one-at-a-time"
@@ -221,12 +233,6 @@ class AgentOptions:
     transport: Transport = "auto"
     maxRetryDelayMs: int | None = None
     toolExecution: ToolExecutionMode = "parallel"
-    headers: dict[str, str] | None = None
-    timeoutMs: int | None = None
-    maxRetries: int | None = None
-    metadata: dict[str, Any] | None = None
-    temperature: float | None = None
-    maxTokens: int | None = None
 
 
 @dataclass(slots=True)
@@ -246,25 +252,24 @@ class Agent:
 
         self.convertToLlm = resolved.convertToLlm or default_convert_to_llm
         self.transformContext = resolved.transformContext
-        self.streamFn = resolved.streamFn or stream_simple
+        self.streamFn = (
+            resolved.streamFn
+            if resolved.streamFn is not None
+            else get_default_stream_fn()
+        )
         self.getApiKey = resolved.getApiKey
         self.onPayload = resolved.onPayload
         self.onResponse = resolved.onResponse
         self.beforeToolCall = resolved.beforeToolCall
         self.afterToolCall = resolved.afterToolCall
         self.prepareNextTurn = resolved.prepareNextTurn
+        self.prepareNextTurnWithContext = resolved.prepareNextTurnWithContext
         self.shouldStopAfterTurn = resolved.shouldStopAfterTurn
         self.sessionId = resolved.sessionId
         self.thinkingBudgets = resolved.thinkingBudgets
         self.transport = resolved.transport
         self.maxRetryDelayMs = resolved.maxRetryDelayMs
         self.toolExecution = resolved.toolExecution
-        self.headers = dict(resolved.headers) if resolved.headers is not None else None
-        self.timeoutMs = resolved.timeoutMs
-        self.maxRetries = resolved.maxRetries
-        self.metadata = dict(resolved.metadata) if resolved.metadata is not None else None
-        self.temperature = resolved.temperature
-        self.maxTokens = resolved.maxTokens
 
     @staticmethod
     def _normalize_options(options: AgentOptions | dict[str, Any] | None, kwargs: dict[str, Any]) -> AgentOptions:
@@ -460,6 +465,7 @@ class Agent:
 
     def _create_loop_config(self, *, skip_initial_steering_poll: bool = False) -> AgentLoopConfig:
         skip_poll = skip_initial_steering_poll
+        should_stop_after_turn = self.shouldStopAfterTurn
 
         async def get_steering_messages() -> list[AgentMessage]:
             nonlocal skip_poll
@@ -471,18 +477,38 @@ class Agent:
         async def get_follow_up_messages() -> list[AgentMessage]:
             return self._follow_up_queue.drain()
 
-        async def prepare_next_turn(_next_turn_context: Any) -> AgentLoopTurnUpdate | None:
-            if self.prepareNextTurn is None:
-                return None
-            return await maybe_await(self.prepareNextTurn(self.signal))
+        async def should_stop(context: ShouldStopAfterTurnContext) -> bool:
+            return bool(
+                await maybe_await(
+                    call_with_optional_second_arg(
+                        should_stop_after_turn,
+                        context,
+                        self.signal,
+                    )
+                )
+            )
+
+        async def prepare_next_turn(next_turn_context: Any) -> AgentLoopTurnUpdate | None:
+            if self.prepareNextTurnWithContext is not None:
+                return await maybe_await(
+                    self.prepareNextTurnWithContext(next_turn_context, self.signal)
+                )
+            if self.prepareNextTurn is not None:
+                return await maybe_await(self.prepareNextTurn(self.signal))
+            return None
 
         return AgentLoopConfig(
             model=self._state.model,
             convertToLlm=self.convertToLlm,
             transformContext=self.transformContext,
             getApiKey=self.getApiKey,
-            prepareNextTurn=prepare_next_turn if self.prepareNextTurn is not None else None,
-            shouldStopAfterTurn=self.shouldStopAfterTurn,
+            prepareNextTurn=(
+                prepare_next_turn
+                if self.prepareNextTurnWithContext is not None
+                or self.prepareNextTurn is not None
+                else None
+            ),
+            shouldStopAfterTurn=should_stop if should_stop_after_turn is not None else None,
             getSteeringMessages=get_steering_messages,
             getFollowUpMessages=get_follow_up_messages,
             toolExecution=self.toolExecution,
@@ -490,17 +516,11 @@ class Agent:
             afterToolCall=self.afterToolCall,
             reasoning=None if self._state.thinkingLevel == "off" else self._state.thinkingLevel,
             sessionId=self.sessionId,
-            temperature=self.temperature,
-            maxTokens=self.maxTokens,
             onPayload=self.onPayload,
             onResponse=self.onResponse,
             transport=self.transport,
             thinkingBudgets=self.thinkingBudgets,
             maxRetryDelayMs=self.maxRetryDelayMs,
-            headers=dict(self.headers) if self.headers is not None else None,
-            timeoutMs=self.timeoutMs,
-            maxRetries=self.maxRetries,
-            metadata=dict(self.metadata) if self.metadata is not None else None,
         )
 
     async def _run_with_lifecycle(self, executor: Callable[[AbortSignal], Awaitable[None]]) -> None:

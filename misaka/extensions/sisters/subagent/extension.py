@@ -152,8 +152,20 @@ def _render_result(result: Any, context: Any = None, *_args: Any) -> Any:
         return None
 
 
-def _agent_prompt(context: RoleContext) -> str:
-    agents = agent_roster.discover(cwd=context.workspace)
+def _agent_prompt(
+    context: RoleContext,
+    project_trusted: bool | None = None,
+    cwd: str | None = None,
+) -> str:
+    include_project = (
+        getattr(context, "project_trusted", True)
+        if project_trusted is None
+        else project_trusted
+    )
+    agents = agent_roster.discover(
+        cwd=cwd or context.workspace,
+        include_project=include_project,
+    )
     if context.allowed_agent_types:
         allowed = set(context.allowed_agent_types)
         allowed = {"general-purpose" if item in {"general", "general-purpose"} else item for item in allowed}
@@ -202,9 +214,26 @@ def _register(harn: Any, context: RoleContext, permitted: bool) -> None:
         assert isinstance(params, AgentParams)
         if params.cwd and params.isolation:
             raise ValueError('cwd and isolation="worktree" are mutually exclusive')
+        if params.cwd and not os.path.isabs(os.path.expanduser(params.cwd)):
+            raise ValueError("cwd must be an absolute path")
 
-        call_cwd = params.cwd or getattr(ctx, "cwd", None) or context.workspace
-        definition = manager.resolve_definition(params.subagent_type, call_cwd)
+        session_cwd = getattr(ctx, "cwd", None) or context.workspace
+        call_cwd = params.cwd or session_cwd
+        session_project_trusted = manager._context_project_trusted(
+            ctx,
+            context.project_trusted,
+        )
+        include_project, _ = manager._project_trust_for_cwd(
+            call_cwd,
+            session_project_trusted=session_project_trusted,
+            explicit_cwd=params.cwd is not None,
+            session_cwd=session_cwd,
+        )
+        definition = manager.resolve_definition(
+            params.subagent_type,
+            call_cwd,
+            include_project,
+        )
         await manager.require_mcp(definition)
         task = await manager.create_task(
             definition=definition,
@@ -218,6 +247,8 @@ def _register(harn: Any, context: RoleContext, permitted: bool) -> None:
             tool_call_id=tool_call_id,
             context=ctx,
             on_update=on_update,
+            session_project_trusted=session_project_trusted,
+            project_cwd_explicit=params.cwd is not None,
         )
 
         if params.run_in_background or bool(manager.field(definition, "background", False)):
@@ -253,24 +284,38 @@ def _register(harn: Any, context: RoleContext, permitted: bool) -> None:
         data = await manager.stop_task(task_id, context=ctx)
         return _text_result(json.dumps(data, ensure_ascii=False), data)
 
-    harn.registerTool(
-        ToolDefinition(
-            name=AGENT_TOOL_NAME,
-            label="Agent",
-            description=_agent_prompt(context),
-            parameters=AgentParams.model_json_schema(),
-            execute=launch_agent,
-            renderResult=_render_result,
-            promptSnippet="Delegate one task to an autonomous agent",
-            promptGuidelines=[
-                "Give fresh agents all relevant context; they do not see the parent conversation.",
-                "Use multiple Agent tool calls in one message for independent parallel work.",
-                "Use background only when useful work remains for you to do in parallel.",
-                "Completion arrives as a <task-notification>; never sleep or poll. TaskOutput reads a result, SendMessage continues the same agent, TaskStop stops one that is still running.",
-                "Findings a delegate brings back need the same source verification as your own before you cite them.",
-            ],
-        )
+    agent_tool = ToolDefinition(
+        name=AGENT_TOOL_NAME,
+        label="Agent",
+        # The factory also runs during the pre-trust pass. The final session_start
+        # event replaces this conservative roster after ctx.isProjectTrusted() binds.
+        description=_agent_prompt(context, False),
+        parameters=AgentParams.model_json_schema(),
+        execute=launch_agent,
+        renderResult=_render_result,
+        promptSnippet="Delegate one task to an autonomous agent",
+        promptGuidelines=[
+            "Give fresh agents all relevant context; they do not see the parent conversation.",
+            "Use multiple Agent tool calls in one message for independent parallel work.",
+            "Use background only when useful work remains for you to do in parallel.",
+            "Completion arrives as a <task-notification>; never sleep or poll. TaskOutput reads a result, SendMessage continues the same agent, TaskStop stops one that is still running.",
+            "Findings a delegate brings back need the same source verification as your own before you cite them.",
+        ],
     )
+    harn.registerTool(agent_tool)
+
+    async def refresh_agent_prompt(_event: Any, ctx: Any) -> None:
+        description = _agent_prompt(
+            context,
+            ctx.isProjectTrusted(),
+            getattr(ctx, "cwd", None) or context.workspace,
+        )
+        if description != agent_tool.description:
+            agent_tool.description = description
+            # Re-register so the session wraps the tool with its final description.
+            harn.registerTool(agent_tool)
+
+    harn.on("session_start", refresh_agent_prompt)
     harn.registerTool(
         ToolDefinition(
             name=TASK_OUTPUT_TOOL_NAME,

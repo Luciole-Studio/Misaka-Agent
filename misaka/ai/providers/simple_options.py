@@ -48,6 +48,7 @@ def build_base_options(
         maxTokens=max_tokens,
         signal=options.signal,
         apiKey=api_key or options.apiKey,
+        env=options.env,
         transport=options.transport,
         cacheRetention=options.cacheRetention,
         sessionId=options.sessionId,

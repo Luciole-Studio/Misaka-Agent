@@ -2,9 +2,10 @@
 
 herdr installs ``herdr-agent-state.ts`` into pi so the agent reports its own state instead of
 being guessed from the screen (src/integration/assets/pi/herdr-agent-state.ts). Same here:
-``agent_start`` -> working, ``agent_end`` -> idle, an AskUserQuestion in flight -> blocked
+``agent_start`` -> working, ``agent_end`` -> idle, an extension UI prompt in flight -> blocked
 (the panel's red dot: she is waiting for a person). Reports go to ``pane.report_state`` with a
-monotonic seq; a duplicate state is not resent. Only sessions that live in a pane take part.
+seq that stays monotonic across extension reloads; a duplicate state is not resent. Only sessions
+that live in a pane take part.
 
 Each report also carries the session file this pane is writing, so the panel can mark the
 open ones in its sessions list and jump to the tab instead of opening a second one.
@@ -13,11 +14,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 
 # Sessions with a UI inside a pane. Children inherit MISAKA_NET_PANE from their parent but run
 # headless, and must not speak for her pane.
 SESSION_KINDS = {"foreground", "dm", "card"}
-BLOCKING_TOOLS = frozenset({"AskUserQuestion"})
 BLOCKED_MESSAGE = "waiting for your answer"
 
 
@@ -49,7 +50,7 @@ class Reporter:
         if not force and (state, message, self.session) == self.last:
             return False
         self.last = (state, message, self.session)
-        self.seq += 1
+        self.seq = max(self.seq + 1, time.monotonic_ns())
         try:
             await asyncio.to_thread(self.send, state, message, self.seq, self.session)
         except Exception:  # noqa: BLE001, S110 - the daemon may be gone; a status ping never breaks the session
@@ -89,18 +90,16 @@ def register(harn, send=None):
         reporter.note_session(ctx)
         await reporter.publish()
 
-    async def tool_start(event, _ctx):
-        if event.get("toolName") in BLOCKING_TOOLS:
-            reporter.blocked += 1
-            reporter.message = BLOCKED_MESSAGE
-            await reporter.publish()
+    async def prompt_start(event, _ctx):
+        reporter.blocked += 1
+        reporter.message = str(event.get("title") or BLOCKED_MESSAGE)
+        await reporter.publish()
 
-    async def tool_end(event, _ctx):
-        if event.get("toolName") in BLOCKING_TOOLS:
-            reporter.blocked = max(0, reporter.blocked - 1)
-            if reporter.blocked == 0:
-                reporter.message = ""
-            await reporter.publish()
+    async def prompt_end(_event, _ctx):
+        reporter.blocked = max(0, reporter.blocked - 1)
+        if reporter.blocked == 0:
+            reporter.message = ""
+        await reporter.publish()
 
     async def shutdown(_event, _ctx):
         reporter.active, reporter.blocked, reporter.message = False, 0, ""
@@ -109,7 +108,7 @@ def register(harn, send=None):
     harn.on("session_start", session_start)
     harn.on("agent_start", agent_start)
     harn.on("agent_end", agent_end)
-    harn.on("tool_execution_start", tool_start)
-    harn.on("tool_execution_end", tool_end)
+    harn.on("ui_prompt_start", prompt_start)
+    harn.on("ui_prompt_end", prompt_end)
     harn.on("session_shutdown", shutdown)
     return reporter

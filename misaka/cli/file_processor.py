@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import os
 import sys
 from dataclasses import dataclass
 
 from misaka.ai.types import ImageContent
 from misaka.core.tools.path_utils import resolve_read_path
-from misaka.utils.image_resize import format_dimension_note, resize_image
+from misaka.utils.image_process import ProcessImageOptions, process_image
 from misaka.utils.mime import detect_supported_image_mime_type_from_file
 
 
@@ -56,25 +55,20 @@ async def _process_file_arguments(
         mime_type = await detect_supported_image_mime_type_from_file(absolute_path)
         if mime_type:
             content = await asyncio.to_thread(_read_bytes, absolute_path)
-            base64_content = base64.b64encode(content).decode("ascii")
+            processed = await process_image(
+                content,
+                mime_type,
+                ProcessImageOptions(autoResizeImages=auto_resize_images),
+            )
+            if not processed.ok:
+                text += f'<file name="{absolute_path}">{processed.message}</file>\n'
+                continue
 
-            if auto_resize_images:
-                resized = await resize_image(ImageContent(type="image", data=base64_content, mimeType=mime_type))
-                if resized is None:
-                    text += (
-                        f'<file name="{absolute_path}">'
-                        "[Image omitted: could not be resized below the inline image size limit.]"
-                        "</file>\n"
-                    )
-                    continue
-                attachment = ImageContent(type="image", mimeType=resized.mimeType, data=resized.data)
-                dimension_note = format_dimension_note(resized)
-            else:
-                attachment = ImageContent(type="image", mimeType=mime_type, data=base64_content)
-                dimension_note = None
-
+            attachment = ImageContent(
+                type="image", mimeType=processed.mimeType, data=processed.data
+            )
             images.append(attachment)
-            note = dimension_note or ""
+            note = "\n".join(processed.hints)
             text += f'<file name="{absolute_path}">{note}</file>\n'
             continue
 

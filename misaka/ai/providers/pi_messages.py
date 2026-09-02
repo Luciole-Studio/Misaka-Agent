@@ -74,6 +74,7 @@ from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stre
 from misaka.ai.utils.headers import headers_to_record
 from misaka.ai.utils.json_parse import parse_streaming_json
 from misaka.ai.utils.provider_env import get_provider_env_value
+from misaka.core.http_dispatcher import createHttpxIdleTimeout
 from misaka.utils.values import maybe_await, signal_aborted
 
 DIAGNOSTIC_BODY_MAX_LENGTH = 8192
@@ -103,6 +104,7 @@ class PiMessagesOptions(TypedDict, total=False):
     cacheRetention: CacheRetention
     sessionId: str
     reasoning: str
+    timeoutMs: int
     toolChoice: str | dict[str, Any]
     debug: bool
     """Ask the backend for debug metadata (e.g. routing response headers)."""
@@ -526,9 +528,7 @@ def stream_pi_messages(
             transport = _option(options, "httpTransport")
             client = httpx.AsyncClient(
                 transport=transport,
-                # httpx defaults to ``Timeout(5.0)``, so it would abandon a slow stream after
-                # five seconds of quiet, which is normal while a model is thinking.
-                timeout=httpx.Timeout(None),
+                timeout=createHttpxIdleTimeout(_option(options, "timeoutMs")),
                 follow_redirects=True,
             )
             try:

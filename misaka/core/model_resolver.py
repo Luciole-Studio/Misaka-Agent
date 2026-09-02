@@ -69,6 +69,20 @@ class ScopedModel:
 
 
 @dataclass(slots=True)
+class ModelScopeDiagnostic:
+    code: Literal["no-match", "invalid-thinking-level"]
+    message: str
+    pattern: str
+    type: Literal["warning"] = "warning"
+
+
+@dataclass(slots=True)
+class ResolveModelScopeResult:
+    scopedModels: list[ScopedModel]
+    diagnostics: list[ModelScopeDiagnostic]
+
+
+@dataclass(slots=True)
 class ParsedModelResult:
     model: Model | None
     thinkingLevel: ResolvedThinkingLevel | None
@@ -225,9 +239,19 @@ def parseModelPattern(
     return result
 
 
-async def resolveModelScope(patterns: list[str], modelRegistry: Any) -> list[ScopedModel]:
-    available_models = list(await maybe_await(modelRegistry.getAvailable()))
+def resolveModelScopeFromModels(patterns: list[str], models: list[Model]) -> ResolveModelScopeResult:
+    available_models = list(models)
     scoped_models: list[ScopedModel] = []
+    diagnostics: list[ModelScopeDiagnostic] = []
+
+    def add(model: Model, thinking_level: ResolvedThinkingLevel | None) -> None:
+        if not any(models_are_equal(item.model, model) for item in scoped_models):
+            scoped_models.append(ScopedModel(model=model, thinkingLevel=thinking_level))
+
+    def no_match(pattern: str) -> None:
+        diagnostics.append(
+            ModelScopeDiagnostic(code="no-match", message=f'No models match pattern "{pattern}"', pattern=pattern)
+        )
 
     for pattern in patterns:
         if any(token in pattern for token in ("*", "?", "[")):
@@ -240,6 +264,11 @@ async def resolveModelScope(patterns: list[str], modelRegistry: Any) -> list[Sco
                     thinking_level = suffix  # type: ignore[assignment]
                     glob_pattern = pattern[:colon_index]
 
+            exact_match = findExactModelReferenceMatch(glob_pattern, available_models)
+            if exact_match is not None:
+                add(exact_match, thinking_level)
+                continue
+
             matching_models = [
                 model
                 for model in available_models
@@ -247,23 +276,34 @@ async def resolveModelScope(patterns: list[str], modelRegistry: Any) -> list[Sco
                 or _minimatch(model.id.lower(), glob_pattern.lower())
             ]
             if not matching_models:
-                print(_yellow(f'Warning: No models match pattern "{pattern}"'), file=sys.stderr)
+                no_match(pattern)
                 continue
             for model in matching_models:
-                if not any(models_are_equal(item.model, model) for item in scoped_models):
-                    scoped_models.append(ScopedModel(model=model, thinkingLevel=thinking_level))
+                add(model, thinking_level)
             continue
 
         result = parseModelPattern(pattern, available_models)
         if result.warning:
-            print(_yellow(f"Warning: {result.warning}"), file=sys.stderr)
+            diagnostics.append(
+                ModelScopeDiagnostic(code="invalid-thinking-level", message=result.warning, pattern=pattern)
+            )
         if result.model is None:
-            print(_yellow(f'Warning: No models match pattern "{pattern}"'), file=sys.stderr)
+            no_match(pattern)
             continue
-        if not any(models_are_equal(item.model, result.model) for item in scoped_models):
-            scoped_models.append(ScopedModel(model=result.model, thinkingLevel=result.thinkingLevel))
+        add(result.model, result.thinkingLevel)
 
-    return scoped_models
+    return ResolveModelScopeResult(scopedModels=scoped_models, diagnostics=diagnostics)
+
+
+async def resolveModelScopeWithDiagnostics(patterns: list[str], modelRegistry: Any) -> ResolveModelScopeResult:
+    return resolveModelScopeFromModels(patterns, list(await maybe_await(modelRegistry.getAvailable())))
+
+
+async def resolveModelScope(patterns: list[str], modelRegistry: Any) -> list[ScopedModel]:
+    result = await resolveModelScopeWithDiagnostics(patterns, modelRegistry)
+    for diagnostic in result.diagnostics:
+        print(_yellow(f"Warning: {diagnostic.message}"), file=sys.stderr)
+    return result.scopedModels
 
 
 def resolveCliModel(options: dict[str, Any]) -> ResolveCliModelResult:
@@ -304,17 +344,31 @@ def resolveCliModel(options: dict[str, Any]) -> ResolveCliModelResult:
                 inferred_provider = True
 
     if provider is None:
+        # pi model-resolver.ts:469-501 -- bare ids exist in several providers; never pick by
+        # catalog order, only by uniqueness or the sole authenticated provider.
         lower = cli_model.lower()
-        exact = next(
-            (
-                model
-                for model in available_models
-                if model.id.lower() == lower or f"{model.provider}/{model.id}".lower() == lower
-            ),
-            None,
-        )
-        if exact is not None:
-            return ResolveCliModelResult(model=exact, warning=None, error=None, thinkingLevel=None)
+        exact_matches = [
+            model
+            for model in available_models
+            if model.id.lower() == lower or f"{model.provider}/{model.id}".lower() == lower
+        ]
+        if len(exact_matches) == 1:
+            return ResolveCliModelResult(model=exact_matches[0], warning=None, error=None)
+        if len(exact_matches) > 1:
+            authenticated = [model for model in exact_matches if model_registry.hasConfiguredAuth(model)]
+            if len(authenticated) == 1:
+                return ResolveCliModelResult(model=authenticated[0], warning=None, error=None)
+            matches = ", ".join(sorted(f"{model.provider}/{model.id}" for model in exact_matches))
+            auth_hint = (
+                "No matching provider is authenticated."
+                if not authenticated
+                else "More than one matching provider is authenticated."
+            )
+            return ResolveCliModelResult(
+                model=None,
+                warning=None,
+                error=f'Model "{cli_model}" is ambiguous across providers: {matches}. {auth_hint} Use --provider or provider/model.',
+            )
 
     if cli_provider and provider:
         prefix = f"{provider}/"
@@ -324,6 +378,19 @@ def resolveCliModel(options: dict[str, Any]) -> ResolveCliModelResult:
     candidates = [model for model in available_models if model.provider == provider] if provider else available_models
     parsed = parseModelPattern(pattern, candidates, {"allowInvalidThinkingLevelFallback": False})
     if parsed.model is not None:
+        if inferred_provider:
+            # pi model-resolver.ts:518-539 -- keep "provider/model" syntax unless that provider is
+            # unauthenticated and the whole string is the raw id of the one authenticated provider.
+            lower = cli_model.lower()
+            raw_matches = [
+                model
+                for model in available_models
+                if model.id.lower() == lower and not models_are_equal(model, parsed.model)
+            ]
+            if raw_matches and not model_registry.hasConfiguredAuth(parsed.model):
+                authenticated = [model for model in raw_matches if model_registry.hasConfiguredAuth(model)]
+                if len(authenticated) == 1:
+                    return ResolveCliModelResult(model=authenticated[0], warning=None, error=None)
         return ResolveCliModelResult(
             model=parsed.model,
             thinkingLevel=parsed.thinkingLevel,
@@ -353,14 +420,23 @@ def resolveCliModel(options: dict[str, Any]) -> ResolveCliModelResult:
             )
 
     if provider:
-        fallback_model = _buildFallbackModel(provider, pattern, available_models)
+        # pi model-resolver.ts:569-595 -- a valid ":level" suffix belongs to the thinking level,
+        # not to the custom model id, unless --thinking was given explicitly.
+        cli_thinking = options.get("cliThinking")
+        fallback_pattern, fallback_thinking = pattern, None
+        last_colon = pattern.rfind(":")
+        if not cli_thinking and last_colon != -1 and _isValidThinkingLevel(pattern[last_colon + 1 :]):
+            fallback_pattern, fallback_thinking = pattern[:last_colon], pattern[last_colon + 1 :]
+        fallback_model = _buildFallbackModel(provider, fallback_pattern, available_models)
         if fallback_model is not None:
-            warning = (
-                f'{parsed.warning} Model "{pattern}" not found for provider "{provider}". Using custom model id.'
-                if parsed.warning
-                else f'Model "{pattern}" not found for provider "{provider}". Using custom model id.'
+            requested_thinking = cli_thinking or fallback_thinking
+            if requested_thinking and requested_thinking != "off":
+                fallback_model = fallback_model.model_copy(update={"reasoning": True})
+            not_found = f'Model "{fallback_pattern}" not found for provider "{provider}". Using custom model id.'
+            warning = f"{parsed.warning} {not_found}" if parsed.warning else not_found
+            return ResolveCliModelResult(
+                model=fallback_model, thinkingLevel=fallback_thinking, warning=warning, error=None
             )
-            return ResolveCliModelResult(model=fallback_model, thinkingLevel=None, warning=warning, error=None)
 
     display = f"{provider}/{pattern}" if provider else cli_model
     return ResolveCliModelResult(
@@ -379,6 +455,7 @@ async def findInitialModel(options: dict[str, Any]) -> InitialModelResult:
     default_provider = options.get("defaultProvider")
     default_model_id = options.get("defaultModelId")
     default_thinking_level = options.get("defaultThinkingLevel")
+    model_thinking_levels: dict[str, ResolvedThinkingLevel] = options.get("modelThinkingLevels") or {}
     model_registry = options["modelRegistry"]
 
     if cli_provider and cli_model:
@@ -400,9 +477,17 @@ async def findInitialModel(options: dict[str, Any]) -> InitialModelResult:
             )
 
     if scoped_models and not is_continuing:
+        scoped_model = scoped_models[0]
+        per_model = model_thinking_levels.get(f"{scoped_model.model.provider}/{scoped_model.model.id}")
         return InitialModelResult(
-            model=scoped_models[0].model,
-            thinkingLevel=scoped_models[0].thinkingLevel or default_thinking_level or DEFAULT_THINKING_LEVEL,
+            model=scoped_model.model,
+            thinkingLevel=(
+                scoped_model.thinkingLevel
+                if scoped_model.thinkingLevel is not None
+                else per_model if per_model is not None
+                else default_thinking_level if default_thinking_level is not None
+                else DEFAULT_THINKING_LEVEL
+            ),
             fallbackMessage=None,
         )
 
@@ -412,9 +497,15 @@ async def findInitialModel(options: dict[str, Any]) -> InitialModelResult:
         # model whose first request would 401.
         found = model_registry.find(default_provider, default_model_id)
         if found is not None and model_registry.hasConfiguredAuth(found):
+            per_model = model_thinking_levels.get(f"{default_provider}/{default_model_id}")
             return InitialModelResult(
                 model=found,
-                thinkingLevel=default_thinking_level or DEFAULT_THINKING_LEVEL,
+                thinkingLevel=(
+                    per_model
+                    if per_model is not None
+                    else default_thinking_level if default_thinking_level is not None
+                    else DEFAULT_THINKING_LEVEL
+                ),
                 fallbackMessage=None,
             )
 
@@ -434,8 +525,10 @@ async def findInitialModel(options: dict[str, Any]) -> InitialModelResult:
 
 __all__ = [
     "InitialModelResult",
+    "ModelScopeDiagnostic",
     "ParsedModelResult",
     "ResolveCliModelResult",
+    "ResolveModelScopeResult",
     "ScopedModel",
     "defaultModelPerProvider",
     "findExactModelReferenceMatch",
@@ -443,4 +536,6 @@ __all__ = [
     "parseModelPattern",
     "resolveCliModel",
     "resolveModelScope",
+    "resolveModelScopeFromModels",
+    "resolveModelScopeWithDiagnostics",
 ]
