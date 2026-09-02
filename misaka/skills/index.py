@@ -25,6 +25,7 @@ from misaka.skills.layers import (
     PERSONAL_LAYERS,
     disabled_skill_names,
     home,
+    inline_shell_enabled,
     iter_project_skill_files,
     iter_skill_files,
     project_skill_tree_fingerprint,
@@ -33,7 +34,6 @@ from misaka.skills.layers import (
 
 _INVALID = re.compile(r"[^a-z0-9-]")
 _MULTI_HYPHEN = re.compile(r"-{2,}")
-_FRONTMATTER_END = re.compile(r"\n---\s*\n")
 _CACHE = {}                 # (roots, disabled) -> (prompt entries, categories, all, runtime entries)
 _CACHE_MAX = 32
 SNAPSHOT_VERSION = 2
@@ -64,16 +64,22 @@ def parse_skill_markdown(content):
 
     Mutation and lint paths deliberately keep using the strict global parser; this
     lenient parser is only for advertising and loading already-present skills.
+
+    Where the frontmatter *ends* is not part of that difference, and must not be:
+    this parser used to find the closing fence with its own regex, which rejected
+    spellings the strict parser accepts (`----`, a fence at end of file with no
+    trailing newline, text after the fence on the same line). A SKILL.md written
+    through `skill_manage` then validated fine and arrived here as one big body:
+    no name, no description, and `platforms:` silently not enforced. So the two
+    share one boundary implementation, `_extract_frontmatter`, and differ only in
+    how they load the YAML between the fences: strict raises, this one falls back
+    to reading `key: value` lines out of whatever it got.
     """
-    content = content.removeprefix("\ufeff")
-    body = content
-    if not content.startswith("---"):
+    from misaka.utils.frontmatter import _extract_frontmatter
+
+    yaml_content, body = _extract_frontmatter(content)
+    if yaml_content is None:
         return {}, body
-    end = _FRONTMATTER_END.search(content, 3)
-    if end is None:
-        return {}, body
-    yaml_content = content[3:end.start()]
-    body = content[end.end():]
     try:
         import yaml
         parsed = yaml.load(yaml_content, Loader=getattr(yaml, "CSafeLoader", None) or yaml.SafeLoader)
@@ -282,7 +288,10 @@ def _cached(roots):
     filesystem metadata reads instead of YAML parsing and security scans.
     """
     normalized_roots, disabled = _key(roots)
-    key = (normalized_roots, disabled,
+    # inline_shell is part of the key because the project quarantine consults it:
+    # turning the setting on must re-run the scan, and the tree it scans has not
+    # changed, so nothing else in this key would move.
+    key = (normalized_roots, disabled, inline_shell_enabled(),
            tuple(sorted((layer, _root_fingerprint(layer, root))
                         for layer, root in normalized_roots)))
     entry = _CACHE.get(key)

@@ -365,7 +365,19 @@ def connect(path: str) -> sqlite3.Connection:
         raise RuntimeError(f"This board was written by a newer MISAKA (task schema v{newest}; this build knows "
                            f"v{TASK_SCHEMA_VERSION}). Upgrade MISAKA rather than downgrading the data.")
     if newest != TASK_SCHEMA_VERSION:
-        _migrate(con)                        # once per upgrade, not on every connection
+        # Once per upgrade, not on every connection -- and once per *board*, not per process.
+        # _migrate reads the column set and then ALTERs; two processes that both connect to the
+        # same stale board right after an upgrade each read the pre-migration metadata, and the
+        # loser's ALTER raises "duplicate column name" (or its DROP raises "no such table")
+        # straight out of connect(), killing that process at startup. busy_timeout does not help:
+        # it is stale metadata, not a lock conflict. BEGIN IMMEDIATE makes the loser queue, and
+        # re-reading the version inside the transaction makes it skip work the winner committed.
+        with _write_txn(con):
+            newest = con.execute(
+                "SELECT MAX(version) FROM schema_migrations WHERE component='tasks'"
+            ).fetchone()[0]
+            if newest != TASK_SCHEMA_VERSION:
+                _migrate(con)
     notifications.init(con)
     return con
 

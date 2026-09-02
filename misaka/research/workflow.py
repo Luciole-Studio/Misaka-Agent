@@ -32,6 +32,7 @@ from misaka.research import ledger, planner, report, runs
 
 POLL_SECONDS = 2.0
 MAX_PROBE_ROUNDS = 3          # ponytail: a fork opens cards at most this many times before it must judge
+DEFAULT_FANOUT = 4            # how many node/probe processes one driver may hold open at once
 ACTIVE_TASKS = ("running", "review")
 # Statuses on which a *missing* plan edge is history rather than a fault: the card is finished (or
 # gone) and has nothing left to wait for. `running` is excluded on purpose -- see `_submit_tasks`.
@@ -570,24 +571,28 @@ async def _expand(con, cfg, runner, worker, run, node, *, spawner, context, tool
                 await _progress(progress, "probing",
                                 f"The red team left {len(pending)} issues on {_label(node)}; a Last Order fork investigates each.",
                                 run, issues=[i["id"] for i in pending])
-                handles = {}
-                try:
-                    for issue in pending:
-                        probe_dir = runs.probe_session_dir(run, issue["id"])
-                        if not os.path.isdir(probe_dir):             # resume: a fork already forked keeps its session
-                            planner.fork_session(planner._lo_session(run, node), probe_dir)
-                        runs.set_issue(con, issue["id"], "probing")
-                        await asyncio.to_thread(_reap_orphan_runner, con, "research_issues", issue)
-                        handle = spawner.spawn(_probe_argv(run, issue), cwd=run["workspace"],
-                                               title=f"LO·{nid}·{issue['id']}", place="split")
-                        handles[issue["id"]] = handle
-                        _record_runner(con, "research_issues", issue["id"], handle)
-                except BaseException:
-                    await _stop_all_off_loop(spawner, handles)
-                    raise
-                outcome = await _wait_probes(con, cfg, spawner, run, handles, poll_seconds=poll_seconds)
-                if outcome != "done":
-                    return outcome
+                # A red team may raise any number of material issues; each fork is a Last Order
+                # session with cards of its own, so they go out `_fanout` at a time. An issue not
+                # yet spawned stays `open` and is picked up by the next batch (or by a resume).
+                for batch in _batches(pending, _fanout(cfg)):
+                    handles = {}
+                    try:
+                        for issue in batch:
+                            probe_dir = runs.probe_session_dir(run, issue["id"])
+                            if not os.path.isdir(probe_dir):         # resume: a fork already forked keeps its session
+                                planner.fork_session(planner._lo_session(run, node), probe_dir)
+                            runs.set_issue(con, issue["id"], "probing")
+                            await asyncio.to_thread(_reap_orphan_runner, con, "research_issues", issue)
+                            handle = spawner.spawn(_probe_argv(run, issue), cwd=run["workspace"],
+                                                   title=f"LO·{nid}·{issue['id']}", place="split")
+                            handles[issue["id"]] = handle
+                            _record_runner(con, "research_issues", issue["id"], handle)
+                    except BaseException:
+                        await _stop_all_off_loop(spawner, handles)
+                        raise
+                    outcome = await _wait_probes(con, cfg, spawner, run, handles, poll_seconds=poll_seconds)
+                    if outcome != "done":
+                        return outcome
             runs.set_node(con, nid, status="triaging")
 
         elif status == "triaging":
@@ -613,7 +618,14 @@ async def _expand(con, cfg, runner, worker, run, node, *, spawner, context, tool
 
 def _unfinished_reason(con, run_id):
     """Why the run must not be adjudicated as done: nodes that failed, or nodes whose branch is
-    still in conflict (their work is not on the line the report is written from)."""
+    still in conflict (their work is not on the line the report is written from).
+
+    A run with no node at all is the third case: ``runs.create`` writes the root node, so its
+    absence means that create was interrupted between the row and the node. ``next_level``
+    returns nothing for such a run, which reads exactly like "every node is closed" -- without
+    this check the run would be finalized into a report with no research behind it."""
+    if not runs.nodes(con, run_id):
+        return "the run has no research node: its creation was interrupted, so there is nothing to adjudicate"
     parts = []
     for status, label in (("failed", "failed"), ("conflict", "in merge conflict")):
         ids = [n["id"] for n in runs.nodes(con, run_id) if n["status"] == status]
@@ -953,23 +965,45 @@ def _reap_orphan_runner(con, table, row):
         con.execute(f'UPDATE "{table}" SET runner_pid=NULL, runner_identity=NULL WHERE id=?', (row["id"],))
 
 
-async def _expand_level(con, cfg, spawner, run, level, *, poll_seconds, progress, driver_lock=None):
-    """Spawn every node of the level and wait until each has left the frontier (terminal,
-    closing, or waiting for input). Returns "done", a halt, or a waiting_input result. If one
-    node's process dies, the level's other processes are stopped before the error propagates."""
-    handles = {}
+def _fanout(cfg):
+    """How many node or probe processes may be open at once. Each one is a Last Order session that
+    opens up to ``research_parallel`` card processes of its own, so an unbatched level is a
+    multiplier on the machine: the frontier has no width limit (a red team may raise any number of
+    undermining issues), only a depth limit."""
     try:
-        for node in level:                              # registered one by one: a failed spawn stops the started ones
-            await asyncio.to_thread(_reap_orphan_runner, con, "research_branches", node)
-            handle = spawner.spawn(_node_argv(run, node), cwd=run["workspace"],
-                                   title=f"LO·{node['id']}", place="split")
-            handles[node["id"]] = handle
-            _record_runner(con, "research_branches", node["id"], handle)
-        return await _wait_level(con, cfg, spawner, run, handles, poll_seconds=poll_seconds, progress=progress,
-                                 driver_lock=driver_lock)
-    except BaseException:
-        await _stop_all_off_loop(spawner, handles)
-        raise
+        return max(1, int(cfg.get("research_parallel", DEFAULT_FANOUT)))
+    except (TypeError, ValueError):
+        return DEFAULT_FANOUT
+
+
+def _batches(items, size):
+    for start in range(0, len(items), size):
+        yield items[start:start + size]
+
+
+async def _expand_level(con, cfg, spawner, run, level, *, poll_seconds, progress, driver_lock=None):
+    """Spawn the level's nodes -- at most ``_fanout(cfg)`` of them at a time -- and wait until each
+    batch has left the frontier (terminal, closing, or waiting for input) before starting the next.
+    Returns "done", a halt, or a waiting_input result. If one node's process dies, the batch's other
+    processes are stopped before the error propagates."""
+    batches = list(_batches(list(level), _fanout(cfg))) or [[]]   # an empty level still reports the run's halt state
+    for batch in batches:
+        handles = {}
+        try:
+            for node in batch:                          # registered one by one: a failed spawn stops the started ones
+                await asyncio.to_thread(_reap_orphan_runner, con, "research_branches", node)
+                handle = spawner.spawn(_node_argv(run, node), cwd=run["workspace"],
+                                       title=f"LO·{node['id']}", place="split")
+                handles[node["id"]] = handle
+                _record_runner(con, "research_branches", node["id"], handle)
+            outcome = await _wait_level(con, cfg, spawner, run, handles, poll_seconds=poll_seconds,
+                                        progress=progress, driver_lock=driver_lock)
+        except BaseException:
+            await _stop_all_off_loop(spawner, handles)
+            raise
+        if outcome != "done":            # a halt or waiting_input: the untouched batches stay queued for the resume
+            return outcome
+    return "done"
 
 
 async def _wait_level(con, cfg, spawner, run, handles, *, poll_seconds, progress, driver_lock=None):

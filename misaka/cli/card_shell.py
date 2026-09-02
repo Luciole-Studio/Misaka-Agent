@@ -9,6 +9,7 @@ an existing session is resumed when there is one.
 """
 import asyncio
 import os
+import signal
 import sys
 import threading
 import time
@@ -27,14 +28,18 @@ class Supervisor:
     runs the exit reconciliation with the claim still held."""
 
     def __init__(self, db_path, task, run_dir, claim_lock, generation, *,
-                 poll_seconds=5.0, exit_fn=None):
+                 poll_seconds=5.0, exit_fn=None, hard_exit_after=20.0, on_hard_exit=None):
         self.db_path, self.task, self.run_dir = db_path, dict(task), run_dir
         self.lock, self.generation = claim_lock, int(generation)
         self.poll_seconds = poll_seconds
         self.exit_fn = exit_fn or (lambda code: os._exit(code))
+        self.hard_exit_after = hard_exit_after
+        self.on_hard_exit = on_hard_exit
         self.deadline = time.time() + int(self.task["timeout_seconds"])
         self.submitted = False
+        self.timed_out = False
         self._stop = threading.Event()
+        self._settled = threading.Event()   # `stop()` ran: the session is down, cancel the backstop
         self._beat = 0.0
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -68,7 +73,43 @@ class Supervisor:
             if db.add_event(con, tid, "failed", {"reason": "Sister timeout"},
                             generation=self.generation, claim_lock=self.lock):
                 db.mark_failed(con, tid, generation=self.generation, claim_lock=self.lock)
-            self.exit_fn(124)
+            self.timed_out = True
+            self.submitted = True   # the card is settled as failed; stop() must not re-settle it
+            self._stop.set()
+            return False            # _run exits the process once it has closed its connection
+        return True
+
+    def _exit_on_timeout(self):
+        """Bring the process down, giving the session one bounded chance to close cleanly.
+
+        ``os._exit`` runs no ``finally``, no atexit and no flush, so the timeout used to skip
+        ``launch``'s sandbox cleanup below *and* every ``session_shutdown`` listener -- most
+        visibly MCP, whose ``_cleanup`` is what stops the server subprocesses. A SIGTERM is what
+        both modes already turn into exactly that shutdown (interactive_mode.py:5645-5667,
+        print_mode.py:140-144), so ask for it first and keep the hard exit as the backstop for a
+        shutdown that hangs. When nothing has installed a SIGTERM handler yet there is no
+        graceful path to ask for -- the default action would kill us just as abruptly, and with a
+        different exit code -- so that case goes straight to the backstop."""
+        if self._request_graceful_exit() and self._settled.wait(self.hard_exit_after):
+            return                       # `launch` reached its own finally: nothing left to force
+        if self.on_hard_exit is not None:
+            try:
+                self.on_hard_exit()      # the cleanup `launch`'s finally will not get to run
+            except Exception as error:  # noqa: BLE001 - the exit below is what matters
+                print(f"card {self.task['id']}: timeout cleanup failed: {error}", file=sys.stderr)
+        self.exit_fn(124)
+
+    def _request_graceful_exit(self):
+        """Signal the main thread to shut down, or report that no one is listening."""
+        try:
+            handler = signal.getsignal(signal.SIGTERM)
+        except (OSError, ValueError):
+            return False
+        if handler is None or handler in (signal.SIG_DFL, signal.SIG_IGN):
+            return False
+        try:
+            os.kill(os.getpid(), signal.SIGTERM)   # process-directed: Python runs it on the main thread
+        except OSError:
             return False
         return True
 
@@ -80,11 +121,14 @@ class Supervisor:
                     return
         finally:
             con.close()
+            if self.timed_out:
+                self._exit_on_timeout()   # only after the connection is closed; may not return
 
     def stop(self):
         """The session ended: settle the card while the claim is still ours -- submit a
         report left at the last moment, park a blocked one, send anything else back."""
         self._stop.set()
+        self._settled.set()
         self._thread.join(timeout=10)
         if self.submitted:
             return
@@ -203,9 +247,19 @@ def launch(task_id, resume_only=False, say=None):
     })
     os.chdir(run_dir)
 
+    def hard_exit_cleanup():
+        """What the supervisor runs in place of the ``finally`` below when it has to hard-exit."""
+        from misaka.utils.shell import kill_tracked_detached_children
+        kill_tracked_detached_children()
+        from misaka.skills import sandbox as skill_sandbox
+        skill_sandbox.cleanup(ro_root)
+        sys.stdout.flush()
+        sys.stderr.flush()
+
     supervisor = None
     if lock and generation:            # claimed, first run or continuation: the card drives itself
-        supervisor = Supervisor(CFG["db"], task, run_dir, lock, generation).start()
+        supervisor = Supervisor(CFG["db"], task, run_dir, lock, generation,
+                                on_hard_exit=hard_exit_cleanup).start()
 
     from misaka.cli.engine import main as engine_main
     try:
@@ -215,4 +269,6 @@ def launch(task_id, resume_only=False, say=None):
             supervisor.stop()
         from misaka.skills import sandbox as skill_sandbox
         skill_sandbox.cleanup(ro_root)
+    if supervisor is not None and supervisor.timed_out:
+        code = 124   # the session shut down on the supervisor's SIGTERM; keep the timeout's code
     sys.exit(code)

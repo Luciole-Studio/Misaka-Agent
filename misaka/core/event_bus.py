@@ -12,6 +12,13 @@ from typing import Any, Protocol
 
 type _EventHandler = Callable[[Any], Any]
 
+# CPython's event loop keeps only a weak reference to a Task, so a fire-and-forget
+# `create_task(...)` whose result is discarded can be garbage-collected mid-flight
+# ("Task was destroyed but it is pending"), silently dropping an extension's async
+# event handler. pi has no equivalent hazard: V8 keeps the Promise returned by
+# `safeHandler` alive (core/event-bus.ts:19-27). Hold a strong reference until done.
+_pending_handler_tasks: set[asyncio.Task[None]] = set()
+
 
 class EventBus(Protocol):
     def emit(self, channel: str, data: Any) -> None: ...
@@ -69,7 +76,9 @@ def _schedule_awaitable(channel: str, awaitable: Awaitable[Any]) -> None:
             daemon=True,
         ).start()
         return
-    loop.create_task(_await_handler(channel, awaitable))
+    task = loop.create_task(_await_handler(channel, awaitable))
+    _pending_handler_tasks.add(task)
+    task.add_done_callback(_pending_handler_tasks.discard)
 
 
 def _report_handler_error(channel: str, error: Exception) -> None:

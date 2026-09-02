@@ -1,5 +1,6 @@
 """Validated entry point for creating and modifying skills."""
 import contextvars
+import logging
 import os
 import shutil
 from pathlib import Path
@@ -7,6 +8,8 @@ from pathlib import Path
 from misaka.skills import write as skill_write
 from misaka.skills.linter import NAME_RE
 from misaka.utils import atomic
+
+logger = logging.getLogger(__name__)
 
 MAX_SKILL_CONTENT_CHARS = 40_000
 MAX_DESCRIPTION_LENGTH = 1024
@@ -97,6 +100,18 @@ def validate_frontmatter(content, *, new_skill=False):
         )
     if not (parsed.body or "").strip():
         return "SKILL.md must contain a body after frontmatter."
+    # Last gate: the index reads SKILL.md with its own lenient parser, and what
+    # this function accepts is worth nothing if that parser comes back empty --
+    # the skill installs, then advertises no description and enforces no
+    # `platforms:`, silently. The two share a frontmatter boundary now
+    # (index.parse_skill_markdown), so this only catches a disagreement between
+    # the two YAML loaders; it is cheap, and it fails at write time where the
+    # author can still see why.
+    from misaka.skills.index import parse_skill_markdown
+    indexed = parse_skill_markdown(text)[0]
+    if not str(indexed.get("name") or "").strip() or not str(indexed.get("description") or "").strip():
+        return ("The skill index cannot read a name and description back out of this frontmatter. "
+                "Keep it to plain `key: value` lines between two `---` fences.")
     return None
 
 
@@ -260,17 +275,53 @@ def _resolve_target(skill_dir, file_path):
     if err:
         return None, err
     from misaka.skills.guard import SKILL_IGNORE_FILENAMES
-    if Path(file_path).name in SKILL_IGNORE_FILENAMES:
+    relative = Path(file_path)
+    if relative.name in SKILL_IGNORE_FILENAMES:
         return None, f"{file_path} controls what the security scanner sees; it is not written through skill_manage."
+    # A SKILL.md anywhere but the skill root is a second skill, not a support
+    # file: the index walks every directory under the layer root and any folder
+    # holding a SKILL.md becomes an entry of its own, named by its own
+    # frontmatter. Writing one through this path would skip everything create
+    # enforces (frontmatter validation, name == directory name, the visible-layer
+    # conflict check, the 60-character description budget) and would be recorded
+    # in the ledger as "add a file to skill X" while actually adding skill Y.
+    # The root SKILL.md is still reachable here — `patch(file_path='SKILL.md')`
+    # is a normal thing to ask for, and the callers re-validate it as SKILL.md.
+    if relative.name.casefold() == "skill.md" and len(relative.parts) > 1:
+        return None, (
+            f"{file_path} would define a second skill inside '{Path(skill_dir).name}'. "
+            "Create a skill with skill_manage(action='create'); support files cannot be named SKILL.md."
+        )
     current = Path(skill_dir)
     if current.is_symlink():
         return None, f"Skill mutation paths cannot contain symlinks: {current}"
-    for part in Path(file_path).parts:
+    for part in relative.parts:
         current /= part
         if current.is_symlink():
             return None, f"Skill mutation paths cannot contain symlinks: {current}"
     target = Path(skill_dir) / file_path
+    if target.is_dir():
+        # Every caller from here reads, writes or unlinks the path as a file;
+        # a directory turns that into an uncaught IsADirectoryError/PermissionError
+        # and the tool answers with a traceback instead of its error contract.
+        return None, f"{file_path} is a directory, not a file."
     return target, None
+
+
+def _read_text_file(path, label):
+    """``(text, None)`` for a UTF-8 file, ``(None, error)`` otherwise.
+
+    ``read_text`` raises on both halves of this: a directory and a file that is
+    not UTF-8. The mutation tool's contract is a result dict, and
+    ``manage_execute`` reads it without a try/except, so neither may escape.
+    """
+    try:
+        return path.read_bytes().decode("utf-8"), None
+    except UnicodeDecodeError:
+        return None, (f"{label} is not UTF-8 text, so it cannot be edited through skill_manage. "
+                      "Replace it with remove_file plus write_file, or edit it outside the tool.")
+    except OSError as error:
+        return None, f"Cannot read {label}: {error}"
 
 
 def _support_file_error(text, label):
@@ -313,13 +364,20 @@ def _write_file(profile_dir, name, file_path, file_content):
         return {"success": False, "error": "Use create or edit for SKILL.md so frontmatter is validated."}
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    original = target.read_text(encoding="utf-8") if target.exists() else None
+    # Bytes, not text: the copy exists only to put the file back if the scan
+    # rejects the write, and an existing support file the tool did not create
+    # (a vendored asset, a latin-1 note) is allowed to be anything at all.
+    # Decoding it here would fail the whole call on a file we never had to read.
+    try:
+        original = target.read_bytes() if target.exists() else None
+    except OSError as error:
+        return {"success": False, "error": f"Cannot read {file_path}: {error}"}
     _atomic_write(target, file_content)
 
     scan_error = _security_scan(skill_dir)
     if scan_error:
         if original is not None:
-            _atomic_write(target, original)
+            atomic.write_bytes(target, original)
         else:
             target.unlink(missing_ok=True)
         return {"success": False, "error": scan_error}
@@ -335,11 +393,18 @@ def _edit_skill(profile_dir, name, content):
     if err:
         return {"success": False, "error": err}
     md = skill_dir / "SKILL.md"
-    original = md.read_text(encoding="utf-8")
+    # The replacement is validated; the old bytes are only the undo. Reading them
+    # as text would make a skill whose SKILL.md is not UTF-8 (installed by hand,
+    # written by another tool) impossible to repair with the very action meant
+    # to replace it wholesale.
+    try:
+        original = md.read_bytes()
+    except OSError as error:
+        return {"success": False, "error": f"Cannot read SKILL.md for '{name}': {error}"}
     _atomic_write(md, content)
     scan_error = _security_scan(skill_dir)
     if scan_error:
-        _atomic_write(md, original)
+        atomic.write_bytes(md, original)
         return {"success": False, "error": scan_error}
     result = {"success": True, "message": f"Skill '{name}' replaced.", "path": str(skill_dir)}
     preview = _description_preview(content)
@@ -364,10 +429,15 @@ def _patch_skill(profile_dir, name, old_string, new_string, file_path=None,
             return {"success": False, "error": err}
     else:
         target = skill_dir / "SKILL.md"
+    label = file_path or "SKILL.md"
     if not target.exists():
-        return {"success": False, "error": f"File does not exist: {file_path or 'SKILL.md'}"}
+        return {"success": False, "error": f"File does not exist: {label}"}
+    if target.is_dir():
+        return {"success": False, "error": f"{label} is a directory, not a file."}
 
-    content = target.read_text(encoding="utf-8")
+    content, err = _read_text_file(target, label)
+    if err:
+        return {"success": False, "error": err}
     count = content.count(old_string)
     if count == 0:
         return {"success": False,
@@ -379,7 +449,6 @@ def _patch_skill(profile_dir, name, old_string, new_string, file_path=None,
     new_content = content.replace(old_string, new_string) if replace_all \
         else content.replace(old_string, new_string, 1)
 
-    label = file_path or "SKILL.md"
     if not file_path or _is_skill_md(target, skill_dir):
         err = (validate_content_size(new_content) or validate_frontmatter(new_content)
                or name_mismatch(name, new_content))
@@ -442,10 +511,16 @@ def _remove_file(profile_dir, name, file_path):
         return {"success": False,
                 "error": f"Skill '{name}' has no file at {file_path}.",
                 "available_files": available or None}
-    target.unlink()
+    try:
+        target.unlink()
+    except OSError as error:                # unreadable parent, read-only mount, a race with _resolve_target's is_dir check
+        return {"success": False, "error": f"Cannot delete {file_path}: {error}"}
     parent = target.parent
-    if parent != skill_dir and parent.exists() and not any(parent.iterdir()):
-        parent.rmdir()
+    try:
+        if parent != skill_dir and parent.exists() and not any(parent.iterdir()):
+            parent.rmdir()
+    except OSError:                         # tidying an emptied directory is best-effort; the file is gone either way
+        logger.debug("Could not remove empty support directory %s", parent, exc_info=True)
     return {"success": True, "message": f"Deleted {file_path} from '{name}'."}
 
 

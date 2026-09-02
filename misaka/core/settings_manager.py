@@ -72,6 +72,31 @@ def _to_settings_error(
     return SettingsError(scope=scope, error=normalized, path=path)
 
 
+async def _settle(pending: asyncio.Future[None]) -> None:
+    """Wait for a write-queue link without inheriting its outcome.
+
+    pi ``settings-manager.ts:598-609`` hangs a single ``.catch`` on the whole
+    promise chain, so a link that rejects both records its error and resets the
+    queue to a resolved promise -- the next write still runs. Python's ``await``
+    has no such reset: awaiting a failed or *cancelled* predecessor re-raises
+    inside the successor, which used to poison every later write (silently
+    dropped) plus ``flush()``/``reload()`` (permanent ``CancelledError``).
+
+    ``asyncio.wait`` reports the predecessor's outcome instead of re-raising it,
+    while still propagating cancellation of the *caller* -- so Ctrl-C during
+    ``flush()`` keeps working. Each link records its own failure through
+    ``_run_write_task``; there is nothing left for the successor to report.
+    """
+    if pending.done():
+        return
+    if pending.get_loop() is not asyncio.get_running_loop():
+        # The predecessor belongs to a different event loop (one SettingsManager
+        # reused across two asyncio.run() calls). Waiting on it here would block
+        # forever, so give up the ordering guarantee rather than the write.
+        return
+    await asyncio.wait({pending})
+
+
 class SettingsStorage:
     def withLock(self, scope: SettingsScope, fn: Any) -> None:  # pragma: no cover - protocol-like
         raise NotImplementedError
@@ -440,7 +465,15 @@ class SettingsManager:
 
         async def runner() -> None:
             if previous is not None:
-                await previous
+                try:
+                    await _settle(previous)
+                except asyncio.CancelledError:
+                    # This link is being cancelled, not the predecessor (``_settle``
+                    # never re-raises the predecessor's outcome). The write is lost;
+                    # say so instead of dropping it silently, then let cancellation
+                    # continue -- successors chain through ``_settle`` and survive.
+                    self.recordError(scope, asyncio.CancelledError("settings write cancelled"))
+                    raise
             self._run_write_task(scope, task)
 
         self.writeQueue = loop.create_task(runner())
@@ -474,8 +507,9 @@ class SettingsManager:
         )
 
     async def flush(self) -> None:
-        if self.writeQueue is not None:
-            await self.writeQueue
+        queue = self.writeQueue
+        if queue is not None:
+            await _settle(queue)
 
     def drainErrors(self) -> list[SettingsError]:
         drained = list(self.errors)

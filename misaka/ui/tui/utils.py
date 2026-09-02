@@ -188,10 +188,20 @@ def extract_ansi_code(text: str, pos: int) -> AnsiMatch | None:
 
     next_char = text[pos + 1]
     if next_char == "[":
+        # ECMA-48 CSI: parameter bytes 0x30-0x3F, then intermediate bytes 0x20-0x2F, then one
+        # final byte 0x40-0x7E. Pi (utils.ts:406-420) instead scans forward for `[mGKHJ]`, which
+        # makes any other CSI — `\x1b[10A`, `\x1b[6n`, `\x1b[?25l` — swallow every character up
+        # to the next `m`. `TUI.applyLineResets` appends `\x1b[0m` to every line, so that `m`
+        # always exists, and `visible_width` then counts the swallowed text as zero: lines get
+        # wrapped and truncated against a width that is far too small, the terminal soft-wraps
+        # them, and the over-wide-line guard in `_doRenderInner` never fires. Scan the real
+        # grammar instead, and report "not an escape" for anything that does not terminate.
         end = pos + 2
-        while end < len(text) and not re.match(r"[mGKHJ]", text[end]):
+        while end < len(text) and "\x30" <= text[end] <= "\x3f":
             end += 1
-        if end < len(text):
+        while end < len(text) and "\x20" <= text[end] <= "\x2f":
+            end += 1
+        if end < len(text) and "\x40" <= text[end] <= "\x7e":
             return AnsiMatch(code=text[pos : end + 1], length=end + 1 - pos)
         return None
 

@@ -10,8 +10,9 @@ a prefix that no longer exists, so timestamps decide whether a usage block still
 That is upstream's reasoning too (``estimate.ts:71-73``).
 
 ``clamp_max_tokens_to_context`` comes from ``api/simple-options.ts:15-19``; it lives here
-because it is the one caller that needs the estimate. Nothing under ``misaka/`` calls it
-today; only the tests do.
+because it is the one caller that needs the estimate. Every ``streamSimple`` request goes
+through it (``ai/providers/simple_options.py:41``), so an estimate that reads low here
+hands the provider a larger output budget than the window can actually hold.
 """
 
 from __future__ import annotations
@@ -143,12 +144,28 @@ def _estimate_messages(messages: list[Any]) -> ContextUsageEstimate:
     )
 
 
+def _tool_payload(tool: Any) -> Any:
+    """What a tool costs on the wire, as far as a character count can tell.
+
+    Upstream stringifies ``Tool[]`` directly (``estimate.ts:105-108``) and its
+    ``parameters`` *is* the JSON schema. Misaka's ``Tool.parameters`` may instead be a
+    pydantic model class -- every built-in tool passes one -- and ``model_dump`` leaves
+    that class untouched, so the fallback stringifier collapsed a schema worth hundreds
+    of tokens into ``"<class '...BashToolInput'>"``. Expanding it here is what makes the
+    estimate comparable with what the provider is actually sent.
+    """
+    if not hasattr(tool, "model_dump") or not hasattr(tool, "parameters_json_schema"):
+        # Not a ``Tool``: leave it to ``_safe_json``, which is what handled it before.
+        return tool.model_dump() if hasattr(tool, "model_dump") else tool
+    payload = tool.model_dump(exclude={"parameters"})
+    payload["parameters"] = tool.parameters_json_schema()
+    return payload
+
+
 def _estimate_tools_tokens(tools: list[Any] | None) -> int:
     if not tools:
         return 0
-    return estimate_text_tokens(
-        _safe_json([t.model_dump() if hasattr(t, "model_dump") else t for t in tools])
-    )
+    return estimate_text_tokens(_safe_json([_tool_payload(t) for t in tools]))
 
 
 def estimate_context_tokens(context: Context | list[Any]) -> ContextUsageEstimate:

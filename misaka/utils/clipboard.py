@@ -39,6 +39,17 @@ def emit_osc52(text: str, *, writer: Any = None) -> bool:
         return False
     resolved_writer = writer or sys.stdout
     resolved_writer.write(f"\x1b]52;c;{encoded}\x07")
+    # OSC 52 carries no newline, and `sys.stdout` is line-buffered on a tty: without this
+    # the sequence sits in the buffer until something else writes a `\n`, so the copy that
+    # `copy_to_clipboard` just reported as successful has not reached the terminal yet —
+    # and lands mid-frame whenever it finally does. Node's TTY writes are synchronous, so
+    # pi (clipboard.ts:31) needs no equivalent.
+    flush = getattr(resolved_writer, "flush", None)
+    if callable(flush):
+        try:
+            flush()
+        except (OSError, ValueError):
+            return False
     return True
 
 

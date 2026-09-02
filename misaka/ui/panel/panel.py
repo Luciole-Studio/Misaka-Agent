@@ -16,6 +16,7 @@ x close pane | d quit (Last Order and the Sisters shut down with the panel) | ? 
 ctrl+b again sends a literal ctrl+b.
 """
 import base64
+import concurrent.futures
 import fcntl
 import json
 import os
@@ -317,6 +318,45 @@ def git_info(folder, active_cards=()):
     stray = sum(1 for ref in refs.split()
                 if ref.removeprefix("card/") not in active_cards)
     return {"branch": branch, "dirty": dirty, "ahead": abs(ahead), "behind": abs(behind), "stray": stray}
+
+
+def _poll_git_cache(now, polled, active, cache, jobs, submit):
+    """One turn of the sidebar's git bookkeeping: collect finished probes, start stale ones.
+
+    ``git_info`` spawns two subprocesses per folder, each with a two-second timeout, and it
+    used to be called straight from the panel's poll: a large repo or a network filesystem
+    froze the whole panel -- no keystrokes read, no pane frames drained -- for seconds at a
+    time (audit 2026-09-02, ui-panel-16). Nothing here runs git; ``submit`` hands the probe
+    to a worker and the next turn picks the answer up. ``git_info`` reads nothing but its two
+    arguments, so the worker never touches panel state.
+    """
+    for folder, job in [(f, j) for f, j in jobs.items() if j.done()]:
+        del jobs[folder]
+        try:
+            cache[folder] = {"at": now, "info": job.result()}
+        except Exception:  # noqa: BLE001 - a folder whose probe failed simply has no branch row
+            cache[folder] = {"at": now, "info": None}
+    for folder in polled:
+        entry = cache.get(folder)
+        if (entry and now - entry["at"] < GIT_TTL_SECONDS) or folder in jobs:
+            continue
+        jobs[folder] = submit(git_info, folder, active)
+    for folder in [f for f in cache if f not in polled and f not in jobs]:
+        del cache[folder]
+
+
+def _without_dead(tree, dead):
+    """Drop the leaves for panes the daemon's last listing reported dead, and only those.
+
+    Pruning against a positive "alive" list instead dropped every pane created between two
+    polls -- a Sister Last Order summoned, a fork, a research node -- and the next
+    ``push_layout`` handed the daemon a layout that omitted it. The daemon reseats an omitted
+    live pane, which means a brand-new space (audit 2026-09-02, ui-panel-15).
+    """
+    for pid in (hui.pane_ids(tree) if tree else []):
+        if pid in dead:
+            tree = hui.remove_pane(tree, pid) if tree else None
+    return tree
 
 
 def _sorted_agents(agents, sort):
@@ -1327,20 +1367,17 @@ def launch():
         return [(s["id"], list(s["tabs"]), list(s["tab_names"]), s["name"]) for s in spaces]
 
     def reload_layout():
-        """Pull the daemon's layout. Panes that already exited are left out of the view (the poll
-        closes them). Returns True when anything changed."""
+        """Pull the daemon's layout. Panes the last listing reported dead are left out of the
+        view (the poll closes them); see _without_dead. Returns True when anything changed."""
         before = _layout_snapshot()
-        alive = {p["id"] for p in listing if p["alive"]}
+        dead = {p["id"] for p in listing if not p["alive"]}
         payload = control.request("layout.get")
         layout_rev["n"] = payload.get("revision")
         got = []
         for space in payload["spaces"]:
             trees, names = [], []
             for tab in space["tabs"]:
-                tree = hui.from_jsonable(tab["tree"])
-                for pid in (hui.pane_ids(tree) if tree else []):
-                    if pid not in alive:
-                        tree = hui.remove_pane(tree, pid) if tree else None
+                tree = _without_dead(hui.from_jsonable(tab["tree"]), dead)
                 if tree is not None:
                     trees.append(tree)
                     names.append(tab.get("name"))
@@ -1446,6 +1483,9 @@ def launch():
 
     git_cache = {}      # realpath folder -> {"at": monotonic, "info": git_info() or None}
     git_seen = set()     # folders the sidebar drew since the last poll
+    git_jobs = {}        # realpath folder -> in-flight probe; one worker, so probes queue
+    git_pool = concurrent.futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="misaka-panel-git")
 
     def git_view(folder):
         """The sidebar's lookup: cached info now, and a note to the poll to keep it fresh."""
@@ -1460,13 +1500,7 @@ def launch():
         polled = set(git_seen)
         git_seen.clear()
         active = {c["id"] for c in cards_cache["items"] if c["status"] in GIT_OWNED}
-        for folder in polled:
-            entry = git_cache.get(folder)
-            if entry and now - entry["at"] < GIT_TTL_SECONDS:
-                continue
-            git_cache[folder] = {"at": now, "info": git_info(folder, active)}
-        for folder in [f for f in git_cache if f not in polled]:
-            del git_cache[folder]
+        _poll_git_cache(now, polled, active, git_cache, git_jobs, git_pool.submit)
 
     def session_entry_ids(path):
         """Every entry id in a session file, cached by mtime: the divergence test for forks."""
@@ -3205,6 +3239,9 @@ def launch():
                 else f"Panel crashed with {type(error).__name__}")
         sys.exit(f"{what}: {error}\nTraceback saved to {log}. Run `misaka` to start again.")
     finally:
+        # Nothing waits on an in-flight git probe: it has its own two-second timeout and
+        # the panel is on its way out.
+        git_pool.shutdown(wait=False, cancel_futures=True)
         termios.tcsetattr(0, termios.TCSANOW, old_attrs)
         # Turn off mouse tracking, leave the alternate screen, and show the cursor again.
         _write_all(b"\x1b[?1000;1002;1003;1006l\x1b[?7h\x1b[0m\x1b[2J\x1b[?1049l\x1b[?25h")

@@ -22,7 +22,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import threading
 
 from misaka.core.extensions.types import ToolDefinition
 
@@ -55,23 +54,23 @@ def _result(text: str) -> dict:
     return {"content": [{"type": "text", "text": text}], "details": {}}
 
 
-# Upstream serialises its writes and states that its reads are unlocked (`store.py`
-# around `_write_lock`), which holds for one calling thread. misaka runs a tool batch in
-# parallel, so without this two worker threads step statements on the same sqlite3
-# connection: that raises `InterfaceError: bad parameter or other API misuse` and, worse,
-# hands one thread's row to the other's cursor. One caller at a time, off the loop either
-# way -- the point of the worker thread is that the session keeps running, not that two
-# recalls overlap.
-_ENGINE_LOCK = threading.Lock()
+# misaka runs a tool batch in parallel, so two recalls can be in flight at once. They
+# queue on the one engine lock, which now also holds back the session-event handlers
+# (`extension._off_loop`) -- the reason it lives in `context_engine` rather than here.
+_ENGINE_LOCK = context_engine.ENGINE_LOCK
 
 
-def _answer(engine, name: str, args: dict, messages) -> str:
+def _answer(engine, name: str, args: dict, messages, rebind=None) -> str:
     """One handler call and the fence check on its result, both off the event loop.
 
     The check reads the same database the handler just did, so it belongs in the same
-    worker thread rather than back on the loop.
+    worker thread rather than back on the loop. So does the rebind: it is a write on the
+    connections every other holder of this lock is using, and doing it on the loop meant
+    it was the one engine call not covered by the lock.
     """
     with _ENGINE_LOCK:
+        if rebind is not None:
+            context_engine.start(rebind)
         output = str(engine.handle_tool_call(name, args, messages=messages))
         return fence.refence(output, engine=engine, tool_name=name)
 
@@ -88,10 +87,9 @@ def _execute(name: str):
             # handlers read whichever session it is bound to. A card asking about its
             # own history has to be that session first.
             session_id = ingest.session_id(ctx)
-            if session_id and engine.current_session_id != session_id:
-                context_engine.start(ctx)
+            rebind = ctx if session_id and engine.current_session_id != session_id else None
             answer = await asyncio.to_thread(
-                _answer, engine, name, _args_of(raw), _messages(ctx)
+                _answer, engine, name, _args_of(raw), _messages(ctx), rebind
             )
         # A failed recall is an answer the model can work with; a raised one ends the
         # turn -- and an error carries no retrieved text, so nothing escapes the fence.

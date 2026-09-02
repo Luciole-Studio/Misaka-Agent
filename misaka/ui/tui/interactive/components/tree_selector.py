@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -17,14 +18,15 @@ from misaka.ui.tui import (
     Input,
     Spacer,
     Text,
-    TruncatedText,
     getKeybindings,
     truncateToWidth,
+    visibleWidth,
+    wrapTextWithAnsi,
 )
 from misaka.ui.tui.interactive.theme.theme import theme
 
 from .dynamic_border import DynamicBorder
-from .keybinding_hints import key_hint, key_text
+from .keybinding_hints import format_key_text, key_hint
 
 type FilterMode = Literal["default", "no-tools", "user-only", "labeled-only", "all"]
 
@@ -936,6 +938,104 @@ class TreeList(Component):
             current_id = parent_id
 
 
+# One line per action; `labelFirst` puts the label before the keys ("filters ctrl+d/...").
+_TREE_HELP_ITEMS: list[tuple[list[str], str, bool]] = [
+    (["tui.select.up", "tui.select.down"], "move", False),
+    (["tui.editor.cursorLeft", "tui.editor.cursorRight"], "page", False),
+    (["app.tree.foldOrUp", "app.tree.unfoldOrDown"], "branch", False),
+    (["app.message.copy"], "copy", False),
+    (["app.tree.editLabel"], "label", False),
+    (["app.tree.toggleLabelTimestamp"], "label time", False),
+    (
+        [
+            "app.tree.filter.default",
+            "app.tree.filter.noTools",
+            "app.tree.filter.userOnly",
+            "app.tree.filter.labeledOnly",
+            "app.tree.filter.all",
+        ],
+        "filters",
+        True,
+    ),
+    (["app.tree.filter.cycleForward", "app.tree.filter.cycleBackward"], "cycle", True),
+]
+
+_ARROW_NAMES = {
+    "pageUp": "pgup",
+    "pageDown": "pgdn",
+    "up": "↑",
+    "down": "↓",
+    "left": "←",
+    "right": "→",
+}
+
+
+def _compact_raw_keys(keys: list[str]) -> str:
+    """`alt+left`, `alt+right` -> `alt+left/right`; anything else joins with `/`."""
+    if len(keys) == 1:
+        return keys[0]
+    parts = []
+    for key in keys:
+        separator = key.rfind("+")
+        parts.append(("", key) if separator == -1 else (key[: separator + 1], key[separator + 1 :]))
+    prefix = parts[0][0]
+    if prefix and all(part[0] == prefix for part in parts):
+        return prefix + "/".join(part[1] for part in parts)
+    return "/".join(keys)
+
+
+def _format_help_keys(keybindings: list[str]) -> str:
+    kb = getKeybindings()
+    # Only the first alias of each action: key_text() joins all of them, which is how the
+    # single help line grew to 192 columns and hid everything past "fold/branch".
+    keys = [bound[0] for bound in (kb.getKeys(keybinding) for keybinding in keybindings) if bound]
+    if not keys:
+        return ""
+    text = format_key_text(_compact_raw_keys(keys))
+    for name, symbol in _ARROW_NAMES.items():
+        text = re.sub(rf"\b{re.escape(name)}\b", symbol, text)
+    return text
+
+
+class TreeHelp(Component):
+    """The `/tree` help, wrapped per chunk instead of truncated to one line."""
+
+    def invalidate(self) -> None:
+        return None
+
+    def render(self, width: int) -> list[str]:
+        items: list[str] = []
+        for keybindings, label, label_first in _TREE_HELP_ITEMS:
+            text = _format_help_keys(keybindings)
+            if not text:
+                items.append(label)
+            else:
+                items.append(f"{label} {text}" if label_first else f"{text} {label}")
+
+        available = max(1, width)
+        indent = "  "
+        separator = " · "
+        lines: list[str] = []
+        current = ""
+        for item in items:
+            indented = f"{indent}{item}"
+            if not current:
+                current = indented if visibleWidth(indented) <= available else item
+                continue
+            candidate = f"{current}{separator}{item}"
+            if visibleWidth(candidate) <= available:
+                current = candidate
+                continue
+            lines.extend(wrapTextWithAnsi(current.rstrip(), available))
+            current = indented if visibleWidth(indented) <= available else item
+        if current:
+            lines.extend(wrapTextWithAnsi(current.rstrip(), available))
+        return [theme.fg("muted", line) for line in lines]
+
+    def handleInput(self, keyData: str) -> None:
+        del keyData
+
+
 class SearchLine(Component):
     def __init__(self, treeList: TreeList) -> None:
         self.treeList = treeList
@@ -1040,35 +1140,10 @@ class TreeSelectorComponent(Container, Focusable):
         self.labelInputContainer = Container()
         self.treeContainer.addChild(self.treeList)
 
-        filter_keys = "/".join(
-            [
-                key_text("app.tree.filter.default"),
-                key_text("app.tree.filter.noTools"),
-                key_text("app.tree.filter.userOnly"),
-                key_text("app.tree.filter.labeledOnly"),
-                key_text("app.tree.filter.all"),
-            ]
-        )
-        cycle_keys = f"{key_text('app.tree.filter.cycleForward')}/{key_text('app.tree.filter.cycleBackward')}"
-        branch_keys = f"{key_text('app.tree.foldOrUp')}/{key_text('app.tree.unfoldOrDown')}"
-
         self.addChild(Spacer(1))
         self.addChild(DynamicBorder())
         self.addChild(Text(theme.bold("  Session Tree"), 1, 0))
-        self.addChild(
-            TruncatedText(
-                theme.fg(
-                    "muted",
-                    "  ↑/↓: move. ←/→: page. "
-                    f"{branch_keys}: fold/branch. "
-                    f"{key_text('app.tree.editLabel')}: label. "
-                    f"{filter_keys}: filters ({cycle_keys} cycle). "
-                    f"{key_text('app.tree.toggleLabelTimestamp')}: label time",
-                ),
-                0,
-                0,
-            )
-        )
+        self.addChild(TreeHelp())
         self.addChild(SearchLine(self.treeList))
         self.addChild(DynamicBorder())
         self.addChild(Spacer(1))

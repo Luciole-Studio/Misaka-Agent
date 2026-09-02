@@ -23,6 +23,13 @@ type StyleFn = Callable[[str], str]
 type HighlightCodeFn = Callable[[str, str | None], list[str]]
 type MarkdownTransform = Callable[[str, int], str]
 
+# Everything this renderer is handed is model or user prose. A C0 control character in it
+# reaches the terminal verbatim — nothing downstream filters it (`normalize_terminal_output`
+# only touches tabs and Thai/Lao vowels), so an `\x1b[10A` in an assistant reply really does
+# move the cursor and scramble the diff renderer's line accounting. Newline and carriage
+# return stay; the tab is already expanded before this runs.
+_C0_CONTROLS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
 _BARE_URL_RE = r"(?:https?://|www\.)[^\s<>]+"
 _EMAIL_RE = r"(?<![A-Za-z0-9.+-])[A-Za-z0-9.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![A-Za-z0-9.-])"
 _AUTOLINK_RE = re.compile(f"(?P<url>{_BARE_URL_RE})|(?P<email>{_EMAIL_RE})")
@@ -157,7 +164,7 @@ class Markdown(Component):
             self.cachedLines = result
             return result
 
-        normalized_text = text.replace("\t", "   ")
+        normalized_text = _C0_CONTROLS_RE.sub("", text.replace("\t", "   "))
         normalized_text = _trim_partial_closing_fence(normalized_text)
         self._sourceLines = normalized_text.split("\n")
         root = SyntaxTreeNode(_MARKDOWN_PARSER.parse(normalized_text))

@@ -36,11 +36,31 @@ BOOKKEEPING_TOOLS = frozenset({
 
 
 def run_coro(coro):
-    """Run a coroutine from synchronous code, using a helper thread if needed."""
+    """Run a coroutine from synchronous code, using a helper thread if needed.
+
+    Both branches stamp the environment-window re-entry token, because both are ways for
+    one synchronous call to nest a session inside a window that is already open. The
+    helper-thread branch is the obvious one; the no-loop branch matters whenever the
+    caller is *already* off the loop in a worker thread that inherited the window owner
+    -- ``asyncio.to_thread`` copies the context, so ``hermes_lcm``'s handlers reach
+    ``host/llm.py`` -> here with ``_ENV_WINDOW_OWNER`` set and no loop running. Without
+    the token there, ``_env_window`` fails its re-entry test by one term and the nested
+    session waits forever on the ``_ENV_LOCK`` its own caller is holding.
+
+    Stamping it is safe rather than merely convenient: ``_env_window`` still requires the
+    inherited owner to be the *live* one (``inherited is _ENV_OWNER``), so a context
+    copied out of a window that has since closed -- or out of a different window -- never
+    passes. What it does trust, in both branches alike, is that a thread which inherited
+    the owner is nested under that window rather than racing it.
+    """
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(coro)
+        token = _ENV_REENTRY_OWNER.set(_ENV_WINDOW_OWNER.get())
+        try:
+            return asyncio.run(coro)
+        finally:
+            _ENV_REENTRY_OWNER.reset(token)
     box = {}
     context = contextvars.copy_context()
     owner = _ENV_WINDOW_OWNER.get()

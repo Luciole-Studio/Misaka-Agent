@@ -8,14 +8,20 @@ import json
 import urllib.parse
 import urllib.request
 
+from misaka.ai.utils.user_agent import get_misaka_user_agent
+
 SESSION_KINDS = {"foreground", "dm", "card", "bare"}
 API = "https://api.openalex.org"
 LIMIT = 12
 
 
 def _get(path, **params):
+    # The one client string this install sends, rather than a version literal that stopped
+    # tracking the package three releases ago: OpenAlex reads the UA to tell clients apart,
+    # and every other outbound request in the repo already identifies itself this way.
     url = f"{API}{path}?{urllib.parse.urlencode(params)}"
-    request = urllib.request.Request(url, headers={"User-Agent": "misaka/0.5 (research coverage scan)"})
+    request = urllib.request.Request(
+        url, headers={"User-Agent": f"{get_misaka_user_agent()} coverage-scan"})
     with urllib.request.urlopen(request, timeout=25) as response:
         return json.load(response)
 

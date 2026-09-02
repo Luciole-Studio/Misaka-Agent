@@ -55,10 +55,13 @@ def stub_replay(event, ctx) -> dict | None:
     rather than by position, because ``convert_to_llm`` drops messages excluded from
     context and the two lists are therefore not the same length.
 
-    Deliberately synchronous on the event loop. Upstream reads the protected tail length
-    out of the live config, and ``context_engine`` pins that field for the duration of
-    one compaction -- a window with no ``await`` in it, so nothing else in this process
-    can observe the pinned value unless this work is moved off the loop.
+    Synchronous, and called from a worker thread under ``context_engine.ENGINE_LOCK``
+    (``extension._off_loop``). Upstream reads the protected tail length out of the live
+    config, and ``context_engine`` pins that field for the duration of one compaction;
+    what keeps this call from reading the pinned value is that lock, not -- as it once
+    was -- the fact that both ran on the same thread. That earlier arrangement only held
+    while nothing in the pinned window blocked, and a compaction's auxiliary summariser
+    blocks for a whole model round trip.
     """
     built = context_engine.engine()
     if built is None or not getattr(built._config, "large_output_active_replay_stubbing_enabled", False):

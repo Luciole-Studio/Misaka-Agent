@@ -24,6 +24,11 @@ from misaka.ui.tui.interactive.theme.theme import theme
 from misaka.utils.image_convert import convert_to_png
 from misaka.utils.values import read_field
 
+from .keybinding_hints import key_hint
+
+# Rows of an unfolded fallback result before "... (N more lines)" takes over.
+FALLBACK_PREVIEW_LINES = 10
+
 
 @dataclass(slots=True)
 class ToolExecutionOptions:
@@ -166,7 +171,20 @@ class ToolExecutionComponent(Container):
         output = self.getTextOutput()
         if not output:
             return None
-        return Text(theme.fg("toolOutput", output), 0, 0)
+        # Every extension/MCP tool without a renderResult lands here, so an unfolded
+        # ten-thousand-line result would otherwise be re-laid-out on every frame.
+        lines = output.split("\n")
+        display_lines = lines if self.expanded else lines[:FALLBACK_PREVIEW_LINES]
+        remaining = len(lines) - len(display_lines)
+        text = "\n".join(theme.fg("toolOutput", line) for line in display_lines)
+        if remaining > 0:
+            text += (
+                theme.fg("muted", f"\n... ({remaining} more lines,")
+                + " "
+                + key_hint("app.tools.expand", "to expand")
+                + theme.fg("muted", ")")
+            )
+        return Text(text, 0, 0)
 
     def updateArgs(self, args: Any) -> None:
         self.args = args

@@ -931,6 +931,8 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
         else None
     )
     auth_storage = AuthStorage.create()
+    runtime = None
+    runtime_handed_off = False   # set once a mode is running: the mode disposes the runtime itself
     try:
         runtime_factory = create_runtime_factory(
             parsed,
@@ -1017,9 +1019,11 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
                 },
             )
             printTimings()
+            runtime_handed_off = True
             return await interactive_mode.run()
         printTimings()
-        exit_code = await run_print_mode(
+        runtime_handed_off = True
+        return await run_print_mode(
             runtime,
             {
                 "mode": to_print_output_mode(app_mode),
@@ -1028,9 +1032,24 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
                 "initialImages": initial_images,
             },
         )
-        stop_theme_watcher()
-        return exit_code
     finally:
+        # pi main.ts:858/865 leaves via process.exit() right after --help / --list-models, which
+        # releases everything by definition. Returning instead means every early return above
+        # (help, list-models, an error diagnostic from the runtime, no model in a non-interactive
+        # run) has to release explicitly, or the extensions registered on session_shutdown -- MCP
+        # server subprocesses, the LCM context flush, subagent and research teardown -- never get
+        # their event. Both modes dispose the runtime themselves (print_mode.py:189,
+        # interactive_mode.py:5604), so a handed-off runtime is left alone rather than being sent
+        # session_shutdown twice.
+        if runtime is not None and not runtime_handed_off:
+            try:
+                await runtime.dispose()
+            except Exception as error:  # noqa: BLE001 - shutdown must not replace the command's own result
+                print(
+                    _format_colored_message(f"Warning: session shutdown failed: {error}", _YELLOW),
+                    file=sys.stderr,
+                )
+        stop_theme_watcher()   # pi main.ts:971-972 stops it beside restoreStdout()
         if took_over_stdout and isStdoutTakenOver():
             restoreStdout()
 

@@ -118,8 +118,15 @@ def has_trust_requiring_project_resources(cwd: str) -> bool:
         return True
 
     home = Path(_normalize_cwd(str(Path.home())))
+    # pi trust-manager.ts:187/197: the user's *own* global agents directory is a
+    # trusted user resource, never a project resource. Without this exclusion the
+    # walk reaches $HOME, sees ~/<CONFIG_DIR_NAME>/agents (which most users have)
+    # and asks "Trust project folder?" in every non-git directory under $HOME --
+    # training users to click Trust reflexively.
+    user_agents_dir = home / CONFIG_DIR_NAME / "agents"
     while True:
-        if (current / CONFIG_DIR_NAME / "agents").is_dir():
+        agents_dir = current / CONFIG_DIR_NAME / "agents"
+        if agents_dir != user_agents_dir and agents_dir.is_dir():
             return True
         if (current / ".git").exists() or current == home or current.parent == current:
             return False

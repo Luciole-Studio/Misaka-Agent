@@ -533,20 +533,48 @@ def _read_text(p, meta=None):
     return text
 
 
+PAGE_CEILING = 4          # a page may run this many times over ``chars`` before it is cut anyway
+
+
 def _paginate(s, chars=3000):
     """Cut running text into pages at paragraph breaks -- a format without pages still needs
-    somewhere for a citation to point."""
+    somewhere for a citation to point.
+
+    ``chars`` is where a paragraph break becomes a page break, so it is a floor, not a ceiling:
+    a CSV, a .jsonl, a log -- all readable formats here -- have no blank line anywhere and used to
+    come out as one page the size of the whole file. That page is not a display problem but a
+    quadratic-feeling one: ``_locate`` builds one span entry per character of the page it hits, so
+    a single ``doc_verify`` against a 9.7 MB page cost seconds and gigabytes. Past
+    ``chars * PAGE_CEILING`` the page is cut at the last line break in the ceiling's back half
+    instead (mid-line if there is none), so every page is at least half the ceiling. Pages still
+    concatenate back to the source exactly."""
     if not s.strip():
         return []
-    out, buf, size = [], [], 0
+    ceiling = max(1, int(chars)) * PAGE_CEILING
+    out, buf = [], []
+
+    def flush():
+        page = "".join(buf)
+        buf.clear()
+        while len(page) > ceiling:
+            # Only the back half is searched for a line break: a heading's newline near the start
+            # would otherwise cut a one-line page off the front of a book chapter.
+            cut = page.rfind("\n", ceiling // 2, ceiling)
+            cut = cut + 1 if cut > 0 else ceiling
+            out.append(page[:cut])
+            page = page[cut:]
+        if page:
+            out.append(page)
+
+    size = 0
     for para in re.split(r"(\n\s*\n)", s):
         buf.append(para)
         size += len(para)
         if size >= chars:
-            out.append("".join(buf))
-            buf, size = [], 0
+            flush()
+            size = 0
     if buf:
-        out.append("".join(buf))
+        flush()
     return out
 
 
@@ -861,6 +889,34 @@ def _tree(doc_id, workspace=None):
 
 
 STAGE_SUFFIX = ".part-"     # an in-progress document: "<doc_id>.part-<pid>-<thread>", never listed
+STAGE_GRACE = 2 * OCR_TIMEOUT   # untouched for this long: the process that owned it is not coming back
+_swept = False                  # the reclaim below runs once per process, not once per ingested file
+
+
+def _sweep_stale_stages(root):
+    """Delete staging directories a killed ingest left behind.
+
+    ``ingest`` cleans its own stage up on both the success and the failure path, but SIGKILL runs
+    neither -- and research is where that happens most (``processes.terminate`` takes a node's whole
+    tree down, and a card's ingest is the tail of its settlement). What is left holds a full copy of
+    the source file, under a name ``docs()`` filters out, so nothing ever notices or reclaims it.
+    A stage belonging to this process is never touched, nor is one still being written to.
+    """
+    global _swept
+    if _swept:                     # once per process: `scan` ingests a whole directory in a loop
+        return
+    _swept = True
+    mine, cutoff = f"{STAGE_SUFFIX}{os.getpid()}-", time.time() - STAGE_GRACE
+    for name in (os.listdir(root) if os.path.isdir(root) else []):
+        if STAGE_SUFFIX not in name or mine in name:
+            continue
+        path = os.path.join(root, name)
+        try:
+            stale = os.stat(path).st_mtime < cutoff
+        except OSError:
+            continue
+        if stale:
+            shutil.rmtree(path, ignore_errors=True)
 
 
 def _meta_lock(ddir):
@@ -914,6 +970,7 @@ def ingest(p, title=None, with_tree=True, task_id=None):
     tree = build_tree(p) if (with_tree and len(pages) >= 20) else None
     # Build the document beside its final place and move it in with one rename: the corpus holds
     # a complete document or none, never a half-written directory that reads as "already indexed".
+    _sweep_stale_stages(corpus_root())      # whatever a killed ingest left behind, before adding ours
     stage = f"{ddir}{STAGE_SUFFIX}{os.getpid()}-{threading.get_ident()}"
     shutil.rmtree(stage, ignore_errors=True)
     try:

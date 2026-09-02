@@ -191,7 +191,9 @@ class ScopedModelsSelectorComponent(Container):
             if query
             else items
         )
-        self.selectedIndex = min(self.selectedIndex, max(0, len(self.filteredItems) - 1))
+        # Lower bound included on purpose: a negative index is a legal Python subscript,
+        # so `filteredItems[-1]` would silently hand the last row to the toggle path.
+        self.selectedIndex = max(0, min(self.selectedIndex, len(self.filteredItems) - 1))
         self.updateList()
         self.footerText.setText(self.getFooterText())
 
@@ -258,8 +260,19 @@ class ScopedModelsSelectorComponent(Container):
                 if 0 <= newIndex < len(self.enabledIds):
                     self.enabledIds = move(self.enabledIds, item.fullId, delta)
                     self.isDirty = True
-                    self.selectedIndex += delta
                     self.refresh()
+                    # `selectedIndex` indexes the filtered view while the reorder moved the
+                    # model in the *global* order, so the two only agree without a search
+                    # query. Re-find the row that was just moved instead of stepping by delta.
+                    self.selectedIndex = next(
+                        (
+                            index
+                            for index, candidate in enumerate(self.filteredItems)
+                            if candidate.fullId == item.fullId
+                        ),
+                        self.selectedIndex,
+                    )
+                    self.updateList()
                     self.notifyChange()
             return
 

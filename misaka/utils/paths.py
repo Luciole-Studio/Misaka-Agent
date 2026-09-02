@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import re
-import stat
 import subprocess
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -26,11 +25,19 @@ def canonicalize_path(path: str) -> str:
 
 
 def get_file_revision(path: str) -> tuple[int, int, int, int, int] | None:
+    """Identity of the bytes currently at ``path`` (pi paths.ts:36-42).
+
+    ``os.stat`` follows symlinks and imposes no shape filters, on purpose. An earlier
+    revision of this helper used ``os.lstat`` plus ``S_ISREG``/``st_nlink == 1``/
+    ``st_size > 0`` guards; each of those made a perfectly ordinary credential file
+    (``~/.misaka/auth.json`` symlinked into a dotfiles repo, hard-linked by a backup
+    tool, or momentarily zero bytes mid-write) return ``None`` forever, which silently
+    disabled the concurrent-edit detection in ``core/auth_storage.py``. ``None`` here
+    means only "cannot stat it".
+    """
     try:
-        stats = os.lstat(path)
+        stats = os.stat(path)
     except OSError:
-        return None
-    if not stat.S_ISREG(stats.st_mode) or stats.st_nlink != 1 or stats.st_size == 0:
         return None
     return stats.st_dev, stats.st_ino, stats.st_size, stats.st_mtime_ns, stats.st_ctime_ns
 
@@ -93,7 +100,13 @@ def resolve_path(value: str, base_dir: str | None = None, **options: object) -> 
 def get_cwd_relative_path(file_path: str, cwd: str) -> str | None:
     resolved_cwd = resolve_path(cwd)
     resolved_path = resolve_path(file_path, resolved_cwd)
-    relative_path = os.path.relpath(resolved_path, resolved_cwd)
+    try:
+        relative_path = os.path.relpath(resolved_path, resolved_cwd)
+    except ValueError:
+        # Windows: path and cwd sit on different drives. Node's `relative()` hands back an
+        # absolute path here, which pi then rejects via `isAbsolute` — so "not inside cwd"
+        # is the answer, not an exception thrown through a caller that only wanted a label.
+        return None
     is_inside_cwd = relative_path == "." or (
         relative_path != ".." and not relative_path.startswith(f"..{os.sep}") and not os.path.isabs(relative_path)
     )

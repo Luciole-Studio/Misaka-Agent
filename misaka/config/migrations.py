@@ -20,7 +20,8 @@ _RESET = "\x1b[0m"
 def migrate_auth_to_auth_json() -> list[str]:
     """oauth.json and settings.apiKeys into auth.json, one provider at a time: a provider the store
     already holds is left as it is, so a run that failed halfway simply continues; the old sources
-    go only once every provider is in. A failed write raises and leaves them in place."""
+    go only once every provider *the source listed* is in -- an entry that could not even be parsed
+    keeps oauth.json where it is. A failed write raises and leaves them in place."""
     agent_dir = Path(get_agent_dir())
     auth_path = agent_dir / "auth.json"
     oauth_path = agent_dir / "oauth.json"
@@ -28,13 +29,24 @@ def migrate_auth_to_auth_json() -> list[str]:
 
     # Read every old source first; nothing is renamed or rewritten until the new store holds it.
     migrated: dict[str, object] = {}
+    oauth_incomplete = False
     settings: dict | None = None
     if oauth_path.exists():
         try:
-            for provider, credential in json.loads(oauth_path.read_text(encoding="utf-8-sig")).items():
+            entries = json.loads(oauth_path.read_text(encoding="utf-8-sig")).items()
+        except Exception:  # noqa: BLE001 - an unreadable oauth.json is left in place
+            entries = ()
+            oauth_incomplete = True
+        # One entry at a time: a hand-edited record that is not a mapping used to raise inside
+        # the loop, and the `except` around the loop swallowed it *after* the loop had already
+        # stopped -- every provider listed after the bad one silently failed to migrate while
+        # oauth.json was renamed away regardless. A bad entry is now skipped, and the flag
+        # below keeps the source file in place so nothing is left unreadable.
+        for provider, credential in entries:
+            try:
                 migrated[str(provider)] = {"type": "oauth", **credential}
-        except Exception:  # noqa: BLE001, S110 - an unreadable oauth.json is left in place
-            pass
+            except Exception:  # noqa: BLE001 - a credential that is not a mapping is left behind
+                oauth_incomplete = True
     if settings_path.exists():
         try:
             settings = json.loads(settings_path.read_text(encoding="utf-8-sig"))
@@ -59,7 +71,13 @@ def migrate_auth_to_auth_json() -> list[str]:
         return []                                              # the store did not take it: old sources stay untouched
 
     if oauth_path.exists():
-        oauth_path.rename(oauth_path.with_suffix(".json.migrated"))
+        if oauth_incomplete:
+            print(
+                f"{_YELLOW}Warning: {oauth_path} has entries this migration could not read; "
+                f"it is left in place so they are not lost.{_RESET}"
+            )
+        else:
+            oauth_path.rename(oauth_path.with_suffix(".json.migrated"))
     if settings is not None and isinstance(settings, dict) and "apiKeys" in settings:
         settings.pop("apiKeys", None)
         atomic.write_text(settings_path, json.dumps(settings, indent=2))

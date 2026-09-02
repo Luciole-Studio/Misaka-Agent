@@ -359,4 +359,15 @@ def index_artifacts(con, task_id, artifacts, generation):
         return
     if got:
         db.add_event(con, task_id, "indexed", {"docs": [item[0] for item in got]}, generation=generation)
+    # ingest_artifacts refuses a deliverable by *returning without it* (no extractor for the
+    # suffix, a scanned PDF with no OCR, an unreadable EPUB, an escaping or missing path) --
+    # only an infrastructure fault reaches the except above. Recording just the successes left a
+    # card that delivered three files and indexed none with no trace on the board, in the card
+    # file, or in the ledger, while every later reader assumed the corpus had them. The failure
+    # still must not undo the acceptance: it is an event, not a status.
+    landed = {item[1] for item in got}
+    missed = [str(name) for name in (artifacts or []) if str(name) not in landed]
+    if missed:
+        db.add_event(con, task_id, "index_skipped", {"artifacts": missed[:20]},
+                     generation=generation)
 

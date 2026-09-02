@@ -14,10 +14,13 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
+import time
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 
 import httpx
+
+from misaka.utils.values import signal_aborted
 
 #: Bytes of one response body a caller keeps by default. Callers that stream to
 #: disk pass their own ceiling.
@@ -235,13 +238,28 @@ async def open_checked_stream(
 
 
 async def read_bounded(
-    response: httpx.Response, max_bytes: int = DEFAULT_MAX_FETCH_BYTES
+    response: httpx.Response,
+    max_bytes: int = DEFAULT_MAX_FETCH_BYTES,
+    *,
+    deadline: float | None = None,
+    signal: object | None = None,
 ) -> tuple[bytes, bool]:
     """``(body, truncated)`` for a streaming response, reading at most one chunk
     past ``max_bytes``.
 
     Must be called inside :func:`open_checked_stream`. Returning early closes the
     connection, so a 2GB URL costs the cap, not the file.
+
+    ``deadline`` is a ``time.monotonic()`` instant for the whole read, and ``signal``
+    is checked once per chunk. Both are needed because the client's timeout is
+    *per operation*: it bounds a stall between two chunks, so a server that sends one
+    byte every 29 seconds passes it forever, and nothing else in this loop would ever
+    look at an abort the caller has already issued. Same pair of checks, for the same
+    reason, as ``core/tools/download_file._stream_to_disk``.
+
+    Raises ``httpx.ReadTimeout`` past ``deadline`` -- the same exception a stalled read
+    raises, so callers need one handler -- and ``RuntimeError("Operation aborted")``
+    when ``signal`` is set.
     """
     chunks: list[bytes] = []
     total = 0
@@ -250,6 +268,13 @@ async def read_bounded(
         total += len(chunk)
         if total > max_bytes:
             return b"".join(chunks)[:max_bytes], True
+        if signal is not None and signal_aborted(signal):
+            raise RuntimeError("Operation aborted")
+        if deadline is not None and time.monotonic() > deadline:
+            raise httpx.ReadTimeout(
+                f"body not complete after the total read deadline ({total} bytes received)",
+                request=response.request,
+            )
     return b"".join(chunks), False
 
 

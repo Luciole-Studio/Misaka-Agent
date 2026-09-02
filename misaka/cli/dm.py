@@ -65,11 +65,11 @@ def protocol_file():
                 return path
     except OSError:
         pass
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = f"{path}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-    os.replace(tmp, path)
+    # atomic.write_text names its temp file per pid, so two concurrent `misaka dm` to
+    # different recipients (the per-recipient flock does not serialize them, and this runs
+    # before it anyway) cannot race for one `.tmp` and leave the loser with FileNotFoundError.
+    from misaka.utils import atomic
+    atomic.write_text(path, text)
     return path
 
 

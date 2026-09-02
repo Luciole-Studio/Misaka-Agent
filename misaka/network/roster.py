@@ -105,6 +105,13 @@ def describe(sid, root=None):
             parsed = parse_frontmatter(f.read())
     except OSError:
         return None, None
+    except ValueError as error:
+        # DESCRIBE.md is a file people are told to edit by hand, and parse_frontmatter raises
+        # FrontmatterError (a ValueError) on malformed YAML. Every caller here walks the *whole*
+        # roster -- the /sister menu, the misaka_sisters tool, the chat banner -- so letting one
+        # member's typo out would take down the entire list. Name the file instead: whoever sees
+        # the roster is the person who can fix it.
+        return f"DESCRIBE.md could not be read ({' '.join(str(error).split())})", None
     desc = str(parsed.frontmatter.get("description") or "").strip()
     return desc or None, parsed.body.strip() or None
 

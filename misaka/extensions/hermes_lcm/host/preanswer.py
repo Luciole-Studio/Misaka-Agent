@@ -260,10 +260,12 @@ def inject(event, ctx) -> dict | None:
     the common case with the switch on -- the runner then keeps the list it already has,
     byte for byte.
 
-    Deliberately synchronous, for the reason ``externalize.stub_replay`` is: the two share
-    this seam and both read fields off the live config that ``context_engine`` pins for
-    the duration of one compaction. That window contains no ``await``, so it is invisible
-    to anything that stays on the loop and visible to anything that does not.
+    Synchronous, and off the event loop for the reason ``externalize.stub_replay`` is:
+    the recall below is a full-text scan and the selective compiler's selector is a real
+    model round trip, neither of which the loop can afford to wait on inline. The two
+    share this seam and both read fields off the live config that ``context_engine`` pins
+    for the duration of one compaction; ``context_engine.ENGINE_LOCK``, which
+    ``extension._off_loop`` holds around both, is what keeps that window invisible.
 
     Registered *after* ``stub_replay``, and that order is load-bearing: the runner threads
     each handler's messages into the next, and upstream's active-replay stubbing protects

@@ -163,14 +163,39 @@ def is_quarantined_project_skill(skill_md):
         # the user can override deliberately, a bypass is not something they can
         # see. `skill_manage` keeps `honor_ignore=True` for skills the user owns.
         result = guard.scan_skill(skill_dir, source=_PROJECT_SCAN_SOURCE, honor_ignore=False)
-        verdict, summary = result.verdict, result.summary
+        verdict, summary, findings = result.verdict, result.summary, result.findings
     except Exception:
         logger.warning("Project skill scan failed; quarantining: %s", skill_dir, exc_info=True)
         return True
     if verdict in ("safe", "caution"):
+        # One finding outranks its severity here. `skill_inline_shell` is medium
+        # — informational, so the verdict stays safe — because in the user's own
+        # layers `!`cmd`` is a feature they asked for, and blocking every skill
+        # that uses it would be wrong. A project skill is different: it comes
+        # from a repository the user opened, nobody approved it, and reading it
+        # is what runs the command. So when the feature is switched on, the
+        # presence of an inline snippet quarantines the project skill even
+        # though the same snippet elsewhere is fine.
+        #
+        # The check is conditional on the setting rather than unconditional
+        # because with `inline_shell` off the snippet is inert text, and
+        # quarantining inert text would only cost the user a skill.
+        if inline_shell_enabled() and any(
+            f.pattern_id == "skill_inline_shell" for f in findings
+        ):
+            logger.warning(
+                "Project skill quarantined: %s - inline shell runs on load and "
+                "skills.json has inline_shell enabled", skill_dir,
+            )
+            return True
         return False
     logger.warning("Project skill quarantined: %s - %s", skill_dir, summary)
     return True
+
+
+def inline_shell_enabled():
+    """Whether ``skills.json`` arms SKILL.md's inline-shell expansion (default off)."""
+    return bool(load_skills_config().get("inline_shell", False))
 
 
 def iter_project_skill_files(root):
@@ -183,6 +208,17 @@ def project_skill_tree_fingerprint(root):
 
     This deliberately has no path-only cache: live edits must invalidate the index,
     while the scanner reads file contents only after the resulting cache miss.
+
+    Both prunings are off on purpose, and it is not free: this runs on every turn,
+    before ``build`` can consult its cache, so a project ``skills/`` holding a git
+    checkout or a ``node_modules`` is stat-ed in full each time. Turning
+    ``prune_excluded`` back on was tried and reverted (audit skills-utils-07): the
+    fingerprint's job is to invalidate a *quarantine verdict*, and the scanner that
+    produces that verdict walks the bundle with ``rglob("*")``, which prunes nothing.
+    A payload dropped into ``node_modules/`` is scanned; if the fingerprint could not
+    see it, the verdict would go stale exactly where it matters. The two scopes have
+    to be the same set, and narrowing them is a security decision about where a
+    payload may hide, not a cache tweak.
     """
     records = []
     for here, dirs, files in _walk_skill_tree(

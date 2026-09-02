@@ -1024,9 +1024,22 @@ class SisterRuntime:
                             await self._notify(handle, token)
                         return
                     from misaka.network import dispatch
-                    if not dispatch.accept(self.con, row, result, generation=handle.generation,
-                                           claim_lock=handle.claim_lock,
-                                           workspace=self._workspace(handle.board_id)):
+                    # accept() is the whole acceptance chain, PageIndex included:
+                    # index_artifacts -> ingest_artifacts -> documents.index.ingest ->
+                    # build_tree, which is a synchronous parse measured at 14s on a 758-page
+                    # PDF (and spawns a process pool past 64 pages). On the loop that stalls
+                    # every other Sister's streaming output and every panel repaint. The board
+                    # connection is a SerializedConnection built with check_same_thread=False
+                    # and this file already runs fair_ready/_reconcile_abandoned off-loop for
+                    # the same reason; state_lock is still held, so a concurrent stop() or
+                    # SendMessage on this card still waits its turn.
+                    accepted = await asyncio.to_thread(
+                        dispatch.accept, self.con, row, result,
+                        generation=handle.generation,
+                        claim_lock=handle.claim_lock,
+                        workspace=self._workspace(handle.board_id),
+                    )
+                    if not accepted:
                         return
                     if db.get(self.con, handle.board_id)["status"] == "review":
                         self._event(handle, "review_requested", {"reviewer": row["reviewer"]})
@@ -1465,7 +1478,14 @@ class SisterRuntime:
                     and handle.agent.status in {"running", "pending"}
                 ):
                     await handle.manager.stop_task(handle.agent.id, context=context)
-            if handle.supervisor:
+            # A supervisor that has already returned cannot make the transition for us. That is
+            # the ordinary shape of a card in review: _supervise runs accept -> review_requested
+            # and returns, but its finally only drops the handle on a TERMINAL status, and
+            # review is not one -- so the handle survives with a finished supervisor and an
+            # already-set done event. Waiting on it returned instantly with the card still in
+            # review, and stop() answered "temporarily owned by another transition; retry
+            # shortly" to every retry, forever. Finished is the same as absent here.
+            if handle.supervisor and not handle.supervisor.done():
                 wait_done = True
             else:
                 await self._finish_stop(handle, token)

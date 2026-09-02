@@ -33,8 +33,10 @@ from pydantic import BaseModel
 
 from misaka.core.extensions import startup_sections
 from misaka.core.extensions.types import ToolDefinition
+from misaka.core.tools._common import abort_race
 from misaka.platform.prompt_guard import untrusted
 from misaka.utils.streams import STREAM_LIMIT
+from misaka.utils.values import signal_aborted
 
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -285,18 +287,58 @@ class McpClient:
     async def _notify(self, method, params):
         await self._send({"jsonrpc": "2.0", "method": method, "params": params})
 
-    async def _request(self, method, params, timeout=None):
+    async def _cancel_request(self, rid):
+        """Tell the server to stop working on a request we have stopped waiting for.
+
+        Best-effort by protocol: MCP's `notifications/cancelled` may lose the race with
+        the response, and a server is free to ignore it. Best-effort here for a second
+        reason -- the connection may be the thing that went wrong, and an abort must not
+        turn into a different error than the one the caller asked for.
+        """
+        try:
+            await self._notify("notifications/cancelled",
+                               {"requestId": rid, "reason": "aborted by the user"})
+        except Exception:  # noqa: BLE001, S110 - a failed cancel still leaves the caller aborted
+            pass
+
+    async def _request(self, method, params, timeout=None, signal=None):
+        """One JSON-RPC round trip, which the caller's abort signal can cut short.
+
+        Without the race a call runs to `CALL_TIMEOUT` (two minutes by default) after the
+        person pressed Esc, because the agent loop cancels nothing: it awaits a tool's
+        `execute` and leaves observing the signal to the tool, the way `core/tools/bash.py`
+        does. `notifications/cancelled` is the protocol's own way to say so, and sending it
+        is what stops the *server's* half -- a browser or a crawl keeps working otherwise.
+        """
         async with self._lock:
             self._id += 1
             rid = self._id
         fut = asyncio.get_running_loop().create_future()
         self._pending[rid] = fut
         await self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
+        waiting = asyncio.ensure_future(asyncio.wait_for(fut, timeout or INIT_TIMEOUT))
         try:
-            msg = await asyncio.wait_for(fut, timeout or INIT_TIMEOUT)
+            async with abort_race(signal) as aborting:
+                if aborting is None:
+                    msg = await waiting
+                else:
+                    done, _ = await asyncio.wait({waiting, aborting}, return_when=asyncio.FIRST_COMPLETED)
+                    if waiting not in done:
+                        await self._cancel_request(rid)
+                        raise RuntimeError("Operation aborted")
+                    msg = await waiting
         except TimeoutError:
-            self._pending.pop(rid, None)
             raise RuntimeError(f"MCP server {self.name} timed out during {method}.")
+        finally:
+            if not waiting.done():
+                # The abort path, and a caller cancelled from outside: `asyncio.wait`
+                # leaves its children running, so this wrapper has to be retired by hand
+                # or it waits out the full timeout on a future nobody will resolve.
+                waiting.cancel()
+                waiting.add_done_callback(lambda t: t.cancelled() or t.exception())
+            # Every exit, not just the timeout: a cancelled or aborted waiter used to
+            # leave its future in `_pending` for the life of the connection.
+            self._pending.pop(rid, None)
         if msg.get("error"):
             raise RuntimeError(f"{self.name}: {msg['error'].get('message') or msg['error']}")
         return msg.get("result") or {}
@@ -317,10 +359,10 @@ class McpClient:
                 await self.stop()          # tear down the half-started one before replacing it
             await self.start()
 
-    async def call(self, tool, args):
+    async def call(self, tool, args, signal=None):
         await self.ensure_started()
         r = await self._request("tools/call", {"name": tool, "arguments": args or {}},
-                                timeout=CALL_TIMEOUT)
+                                timeout=CALL_TIMEOUT, signal=signal)
         parts = []
         for c in r.get("content") or []:
             if c.get("type") == "text":
@@ -458,7 +500,11 @@ def _register_bound(harn, context):
         async def execute(tool_call_id, raw, signal, on_update, ctx, _c=client, _t=tname):
             args = raw if isinstance(raw, dict) else (
                 raw.model_dump() if isinstance(raw, BaseModel) else dict(raw or {}))
-            text = await _c.call(_t, args)
+            # An abort before the call is the cheapest one to honour: starting a server,
+            # then a round trip, for an answer nobody is waiting for is pure latency.
+            if signal_aborted(signal):
+                raise RuntimeError("Operation aborted")
+            text = await _c.call(_t, args, signal=signal)
             fenced = untrusted(f"mcp:{_c.name}/{_t}", text)
             return {"content": [{"type": "text", "text": fenced}],
                     "details": {"server": _c.name, "tool": _t}}

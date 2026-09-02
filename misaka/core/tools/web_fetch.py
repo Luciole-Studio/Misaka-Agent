@@ -57,6 +57,15 @@ from misaka.utils.values import signal_aborted
 
 TIMEOUT_SECONDS = 30.0
 
+# Wall-clock ceiling for one fetch, counted from just before the request. The constant
+# above is httpx's *per-operation* timeout: it bounds a stall between two chunks, so a
+# server that sends one byte every 29 seconds satisfies it until the 2 MiB cap is
+# reached -- an interval measured in years -- while the tool call is not a cancellable
+# task, so Esc cannot free the session either. Same failure and same fix as
+# ``download_file._TOTAL_TIMEOUT``; smaller value because a readable web page is three
+# orders of magnitude smaller than a downloadable dataset.
+TOTAL_TIMEOUT_SECONDS = 120.0
+
 # Characters of extracted page text that enter the model's context. The byte cap
 # upstream bounds the *transfer*; this bounds the *context*, and 2 MiB of HTML can
 # still render to far more prose than a turn should carry. Roughly 10k tokens.
@@ -352,8 +361,12 @@ def _status_advice(status: int) -> str:
     return "Use a different URL or another source."
 
 
-async def _fetch(target: _Target, cwd: str | None = None) -> _Outcome:
+async def _fetch(target: _Target, cwd: str | None = None, signal: Any | None = None) -> _Outcome:
     """One full fetch of *target*, reporting every failure as prose rather than raising.
+
+    Two exceptions to "rather than raising": an abort and the total deadline. The first
+    is re-raised as ``RuntimeError("Operation aborted")`` because a cancelled call has no
+    result to report, and the second lands in the timeout branch below.
 
     Runs under :func:`single_flight`, so this must stay side-effect-safe to share: the
     state it writes is the negative cache, which is idempotent per verdict, and the
@@ -362,6 +375,11 @@ async def _fetch(target: _Target, cwd: str | None = None) -> _Outcome:
     """
     url = target.url
     base = target.provenance()
+    # Started before the connection so connect, TLS and the redirect chain are all
+    # inside the budget. Only the body read polls it (the hop loop is bounded by
+    # MAX_REDIRECT_HOPS x TIMEOUT_SECONDS instead), so the effective worst case is the
+    # deadline plus one hop's worth of stall, not the deadline exactly.
+    deadline = time.monotonic() + TOTAL_TIMEOUT_SECONDS
 
     def failed(text: str, **details: Any) -> _Outcome:
         # The routing note rides on failures, not only on the header the blueprint names:
@@ -394,7 +412,9 @@ async def _fetch(target: _Target, cwd: str | None = None) -> _Outcome:
                     status=status,
                     content_type=content_type,
                 )
-            body, truncated = await read_bounded(response, DEFAULT_MAX_FETCH_BYTES)
+            body, truncated = await read_bounded(
+                response, DEFAULT_MAX_FETCH_BYTES, deadline=deadline, signal=signal
+            )
             text = decode_body(response, body)
     except UnsafeUrlError as error:
         return failed(
@@ -410,8 +430,8 @@ async def _fetch(target: _Target, cwd: str | None = None) -> _Outcome:
         )
     except httpx.TimeoutException:
         return failed(
-            f"Fetching {url} timed out after {TIMEOUT_SECONDS:g}s. Retry once, or use "
-            "another source.",
+            f"Fetching {url} timed out ({TIMEOUT_SECONDS:g}s with no data, or "
+            f"{TOTAL_TIMEOUT_SECONDS:g}s in total). Retry once, or use another source.",
             refused="timeout",
         )
     except httpx.HTTPError as error:
@@ -547,9 +567,11 @@ def create_web_fetch_tool_definition(
         route = route_academic(url)
         target = _Target(requested=url, url=route.url, kind=route.kind, note=route.note)
 
-        # ponytail: aborts are checked before the request rather than raced against it,
-        # the same trade web_search makes -- ceiling is one wasted round-trip of latency,
-        # upgrade path is read.py's `abort_race`.
+        # ponytail: aborts are checked before the request and then once per body chunk
+        # (`read_bounded`), rather than raced against the whole call. The tool call is
+        # awaited directly by the agent loop, not run as a cancellable task, so polling
+        # is the only thing that can stop it; the residual ceiling is one hop's stall,
+        # bounded by TIMEOUT_SECONDS. Upgrade path is read.py's `abort_race`.
         if signal_aborted(signal):
             raise RuntimeError("Operation aborted")
 
@@ -567,7 +589,11 @@ def create_web_fetch_tool_definition(
 
         # Keyed on the URL actually requested, matching the negative cache: two sisters
         # that pick the same link out of one search result page share a single round-trip.
-        return _result(await single_flight(target.url, lambda: _fetch(target, cwd)))
+        # The leader's signal is the one the shared transfer watches. A follower whose
+        # own caller aborts is not stuck with it: single_flight treats the leader's
+        # raise as "make your own call", and that call checks the follower's signal
+        # before it dials.
+        return _result(await single_flight(target.url, lambda: _fetch(target, cwd, signal)))
 
     return ToolDefinition(
         name="web_fetch",

@@ -494,14 +494,27 @@ class _SessionGuards:
             if read_field(block, "type", "") == "text"
         )
 
-        if self._forced_turn:
+        # Take and clear both flags before anything can return. A request can die
+        # between arming and firing -- an errored or aborted turn returns straight out
+        # of `_run_loop` without ever consulting `shouldStopAfterTurn` -- so a flag left
+        # standing would otherwise be waiting for the *next* request. Whoever reaches
+        # `after_turn` first owns the flags.
+        forced, self._forcing, self._forced_turn = self._forced_turn, False, False
+
+        # Clearing alone is not enough: the stranded flag would still be spent on the
+        # next request's first turn, ending it after its tools had already run but
+        # before the model wrote anything. So the flag is confirmed against the one
+        # observable consequence of arming it -- `next_turn` handed this turn an empty
+        # tool list, and a turn with no tools cannot come back with tool calls. A turn
+        # that did call tools was never the wrap-up turn, whatever the flag says; it
+        # falls through and is judged on its own merits.
+        if forced and not tool_calls:
             # The wrap-up turn ran with no tools available. Whatever it produced is the
             # answer, so no verdict of its own is acted on -- but the guards must still
             # see it. This is the only tool-free turn the whole request has, and a
             # tool-free turn is the documented reset (see RepeatedToolCallGuard and
             # NoProgressGuard): `_run_session` keeps the session alive for follow-up
             # turns, so a streak left standing here stops the next request's first call.
-            self._forcing = self._forced_turn = False
             self._observe_prose_turn(text)
             return True
 
@@ -538,20 +551,23 @@ class _SessionGuards:
     def next_turn(self, context: Any) -> Any:
         """Strip the tools off the wrap-up turn, so the model can only answer in prose.
 
-        Arming and firing are two flags rather than one because a run can die between
-        them: an errored or aborted turn returns out of the loop without consulting
-        ``shouldStopAfterTurn``. A single flag would then survive into the next request
-        and end its very first turn. This way a stranded arm costs one tool-free turn
-        and clears itself.
+        Arming (``_forcing``) and firing (``_forced_turn``) are two flags rather than
+        one so the wrap-up turn can be recognised in ``after_turn`` even after the
+        context snapshot has moved on. Neither survives a request: a run can die
+        between arming and firing -- an errored or aborted turn returns out of the loop
+        without consulting ``shouldStopAfterTurn`` -- so ``after_turn`` clears both on
+        entry, and the next request starts from a clean slate.
         """
         if not self._forcing:
             return None
-        self._forced_turn = True
         from misaka.agent.types import AgentContext, AgentLoopTurnUpdate
 
         current = read_field(context, "context")
         if current is None:
+            # No snapshot to rewrite: the tools were never stripped, so this turn is not
+            # the wrap-up turn and must not be marked as one.
             return None
+        self._forced_turn = True
         return AgentLoopTurnUpdate(
             context=AgentContext(
                 systemPrompt=read_field(current, "systemPrompt", "") or "",

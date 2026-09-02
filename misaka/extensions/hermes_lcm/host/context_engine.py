@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
+import threading
 from contextlib import contextmanager
 
 from misaka.platform.prompt_guard import untrusted
@@ -40,6 +41,22 @@ logger = logging.getLogger(__name__)
 _SUMMARY_BLOCK = re.compile(r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d(\d+), node (\d+)\)\]")
 
 _ENGINES: dict[str, object] = {}
+
+# Upstream serialises its writes and states that its reads are unlocked (`store.py`
+# around `_write_lock`), which holds for one calling thread. Every caller on this side is
+# off the event loop -- the tools (`tools._answer`) and the session events
+# (`extension._off_loop`) alike -- so without this two worker threads step statements on
+# the same sqlite3 connection: that raises `InterfaceError: bad parameter or other API
+# misuse` and, worse, hands one thread's row to the other's cursor. One caller at a time,
+# off the loop either way -- the point of the worker thread is that the session keeps
+# running, not that two engine calls overlap.
+#
+# It also covers `_host_driven_boundary`: a compaction pins four config fields on the
+# shared engine for the length of its run, and every reader of those fields
+# (`externalize.stub_replay`, `preanswer.inject`) takes this lock, so none of them can
+# observe a pinned value. Nothing here is re-entrant; a holder must not call another
+# locked entry point.
+ENGINE_LOCK = threading.Lock()
 
 
 def engine():

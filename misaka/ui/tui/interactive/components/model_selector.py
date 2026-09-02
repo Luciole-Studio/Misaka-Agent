@@ -71,6 +71,7 @@ class ModelSelectorComponent(Container):
         self.filteredModels: list[ModelItem] = []
         self.selectedIndex = 0
         self._refreshTask: asyncio.Task[None] | None = None
+        self._closed = False
 
         self.addChild(DynamicBorder())
         self.addChild(Spacer(1))
@@ -174,8 +175,12 @@ class ModelSelectorComponent(Container):
         )
 
     async def _refreshModels(self) -> None:
+        if self._closed:
+            return
         try:
             result = await asyncio.wait_for(self.modelRegistry.refresh(), timeout=15)
+            if self._closed:
+                return
             refresh_error: str | None = None
             if result.errors:
                 providers = ", ".join(result.errors)
@@ -188,17 +193,27 @@ class ModelSelectorComponent(Container):
             self.filterModels(self.searchInput.getValue())
             self._request_render()
         except TimeoutError:
+            if self._closed:
+                return
             self.errorMessage = "Model refresh timed out; showing cached models."
             self.updateList()
             self._request_render()
         except asyncio.CancelledError:
             raise
         except Exception as error:  # noqa: BLE001 - catalog failures stay in the selector
+            if self._closed:
+                return
             self.errorMessage = f"Could not refresh model catalogs: {error}"
             self.updateList()
             self._request_render()
 
     def dispose(self) -> None:
+        # KNOWN GAP (audit ui-interactive-components-18): the selector host
+        # (`interactive_mode.showSelector` / `_clear_selector`) never calls this, so closing
+        # `/model` still leaves the catalog refresh running to completion. The `_closed` guard
+        # below keeps a *disposed* selector from writing back and forcing a repaint; wiring an
+        # optional `dispose` through the host's selector handle is the other half of the fix.
+        self._closed = True
         if self._refreshTask is not None:
             self._refreshTask.cancel()
             self._refreshTask = None
@@ -243,7 +258,9 @@ class ModelSelectorComponent(Container):
             if query
             else self.activeModels
         )
-        self.selectedIndex = min(self.selectedIndex, max(0, len(self.filteredModels) - 1))
+        # With a query the list is ordered by relevance, so the cursor goes back to the
+        # top row: otherwise Enter picks whatever row the pre-search cursor happened to be on.
+        self.selectedIndex = 0 if query else min(self.selectedIndex, max(0, len(self.filteredModels) - 1))
         self.updateList()
 
     def updateList(self) -> None:

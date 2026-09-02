@@ -128,6 +128,9 @@ _THINKING_LEVELS: tuple[ThinkingLevel, ...] = (
     "off", "minimal", "low", "medium", "high", "xhigh", "max",
 )
 
+# Strong references to fire-and-forget session tasks; see `_hold_background_task`.
+_BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
+
 
 @dataclass(slots=True)
 class ParsedSkillBlock:
@@ -721,7 +724,7 @@ class AgentSession:
         self._emit(event)
         # pi agent-session.ts:3063-3068 sends the same event to the extension runner as well;
         # only the UI half was ported, so `session_info_changed` handlers never ran.
-        self._spawn_background(self._extensionRunner.emit(event))
+        self._spawn_background(self._extensionRunner.emit(event), "session_info_changed")
 
     def clearQueue(self) -> dict[str, list[str]]:
         steering = list(self._steeringMessages)
@@ -812,12 +815,11 @@ class AgentSession:
                 )
 
             try:
-                import asyncio
-
                 loop = asyncio.get_running_loop()
-                loop.create_task(emit_change())
             except RuntimeError:
-                pass
+                pass  # no loop to deliver on; the UI half of the event already went out
+            else:
+                self._hold_background_task(loop.create_task(emit_change()), "thinking_level_select")
 
     def getAvailableThinkingLevels(self) -> list[ThinkingLevel]:
         if self.model is None:
@@ -2042,7 +2044,7 @@ class AgentSession:
                         error if isinstance(error, Exception) else RuntimeError(str(error)),
                     )
 
-            self._spawn_extension_message(_run())
+            self._spawn_extension_message(_run(), "send_user_message")
 
         def _append_entry_from_runtime(custom_type: str, *data: Any) -> None:
             entry_id = self.sessionManager.appendCustomEntry(custom_type, *data)
@@ -2062,12 +2064,7 @@ class AgentSession:
                     if callable(on_error):
                         on_error(error if isinstance(error, Exception) else RuntimeError(str(error)))
 
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                asyncio.run(_run())
-                return
-            loop.create_task(_run())
+            self._spawn_background(_run(), "compact")
 
         runner.bind_core(
             {
@@ -2092,7 +2089,7 @@ class AgentSession:
                 "isIdle": lambda: self.isIdle,
                 "isProjectTrusted": lambda: self.settingsManager.isProjectTrusted(),
                 "getSignal": lambda: self.agent.signal,
-                "abort": lambda: self._extensionAbortHandler() if self._extensionAbortHandler else self._spawn_background(self.abort()),
+                "abort": lambda: self._extensionAbortHandler() if self._extensionAbortHandler else self._spawn_background(self.abort(), "abort"),
                 "hasPendingMessages": lambda: self.pendingMessageCount > 0,
                 "shutdown": lambda: self._extensionShutdownHandler() if self._extensionShutdownHandler else None,
                 "getContextUsage": self.getContextUsage,
@@ -3002,22 +2999,55 @@ class AgentSession:
         finally:
             self._auto_compaction_abort_controller = None
 
-    def _spawn_background(self, awaitable: Any) -> None:
+    def _hold_background_task(self, task: asyncio.Task[Any], event: str) -> None:
+        """Keep the task alive and make sure its failure is not swallowed.
+
+        pi fires these with `void promise`, and a JS promise is never collected. The
+        event loop keeps only a weak reference to a Task, so the Python equivalent has
+        to hold the reference itself -- the same conclusion `spawn_stream_task`
+        (misaka/ai/utils/event_stream.py) reached for provider streams. Retrieving
+        `exception()` in the done callback also turns a silently dropped extension
+        failure into an ExtensionError the runner's listeners can see, instead of a
+        "Task exception was never retrieved" line at GC time.
+        """
+        _BACKGROUND_TASKS.add(task)
+
+        def _done(finished: asyncio.Task[Any]) -> None:
+            _BACKGROUND_TASKS.discard(finished)
+            if finished.cancelled():
+                return
+            error = finished.exception()
+            if error is None:
+                return
+            self._extensionRunner.emit_error(
+                ExtensionError(extensionPath="<runtime>", event=event, error=str(error))
+            )
+
+        task.add_done_callback(_done)
+
+    def _spawn_background(self, awaitable: Any, event: str = "background") -> None:
+        # KNOWN GAP (audit core-session-10, deliberately left as-is): the no-loop
+        # fallback runs the coroutine on a brand-new loop. `self.abort()` /
+        # `self.compact()` await futures created on the session's own loop
+        # (`waitForIdle`'s `_idleWaiters`), so reaching this branch would be a
+        # cross-loop wait. Every known caller is already on the session loop; making
+        # this correct means giving the session a loop handle, which is a design
+        # change, not a patch.
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             asyncio.run(awaitable)
             return
-        loop.create_task(awaitable)
+        self._hold_background_task(loop.create_task(awaitable), event)
 
-    def _spawn_extension_message(self, awaitable: Any) -> None:
+    def _spawn_extension_message(self, awaitable: Any, event: str = "send_message") -> None:
         """Match JavaScript async calls by running eagerly until their first suspension."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             asyncio.run(awaitable)
             return
-        asyncio.Task(awaitable, loop=loop, eager_start=True)
+        self._hold_background_task(asyncio.Task(awaitable, loop=loop, eager_start=True), event)
 
 
 def _definition_attr(definition: Any, name: str) -> Any:

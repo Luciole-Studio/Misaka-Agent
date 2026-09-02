@@ -38,8 +38,12 @@ CREATE INDEX IF NOT EXISTS idx_notification_events_resource
   ON notification_events(resource_type,resource_id,kind,id);
 """
 
+# ``unixepoch()`` is SQLite 3.38 (2022-02). A CREATE TRIGGER does not compile its body, so an
+# older library installs this happily and then fails *every* terminal UPDATE with "no such
+# function" -- submit/fail/stop/block/reclaim all raise. requires-python does not constrain
+# libsqlite3: Ubuntu 22.04's system Python 3.12 links 3.37.2. strftime has been there since 3.x.
 TASK_TRIGGER = """
-CREATE TRIGGER IF NOT EXISTS task_terminal_notification_v3
+CREATE TRIGGER IF NOT EXISTS task_terminal_notification_v4
 AFTER UPDATE OF status,generation ON tasks
 WHEN NEW.status IN ('done','failed','stopped','blocked','triage')
  AND (OLD.status IS NOT NEW.status OR OLD.generation IS NOT NEW.generation)
@@ -49,7 +53,7 @@ BEGIN
   VALUES
     ('task',NEW.id,'terminal',
      json_object('status',NEW.status,'generation',NEW.generation),
-     NULL,unixepoch());
+     NULL,CAST(strftime('%s','now') AS INTEGER));
 END;
 """
 
@@ -102,11 +106,15 @@ def init(con):
     }
     if {"id", "status", "generation", "completed_at", "created_at"} <= task_columns:
         con.executescript(TASK_TRIGGER)           # install the replacement before retiring old triggers
-        for obsolete in ("task_terminal_notification", "task_terminal_notification_v2"):
-            if con.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?", (obsolete,)
-            ).fetchone():
-                con.execute(f'DROP TRIGGER "{obsolete}"')
+        # One statement, not "SELECT sqlite_master then bare DROP": v3 is on every board this
+        # build inherits, so the first time two processes connect to one after the upgrade --
+        # chat + panel, Last Order + a Sister, two `misaka dm` children -- both read it as
+        # present and both issued the DROP. The loser got "no such trigger" straight out of
+        # tasks.connect() and died at startup. busy_timeout cannot help: that is stale
+        # metadata, not a lock conflict. IF EXISTS makes the loser a no-op.
+        for obsolete in ("task_terminal_notification", "task_terminal_notification_v2",
+                         "task_terminal_notification_v3"):
+            con.execute(f'DROP TRIGGER IF EXISTS "{obsolete}"')
         if con.execute(
             "SELECT 1 FROM schema_migrations WHERE component='notifications' AND version=?",
             (NOTIFICATION_SCHEMA_VERSION,),

@@ -91,15 +91,15 @@ THREAD_ALLOWED = {
     ("misaka/ui/tui/tui.py", "_scheduleRender"): "render scheduling, same path as _schedule_next_tick",
     ("misaka/ui/tui/components/loader.py", "_scheduleNextFrame"): "spinner frame advance, no coroutine wake",
     ("misaka/ui/tui/interactive/interactive_mode.py", "handleCtrlZ"): "no-op keep-alive reference",
-    # PENDING -- audit findings that will remove these entries:
     ("misaka/ui/tui/interactive/components/countdown_timer.py", "__init__"): (
-        "PENDING ui-interactive-components-07"
+        "ticks off-loop, hands onTick/onExpire back via call_soon_threadsafe"
     ),
+    ("misaka/ui/tui/interactive/theme/theme.py", "_start_theme_watcher"): (
+        "polls the theme file off-loop, applies the swap via call_soon_threadsafe"
+    ),
+    # PENDING -- audit findings that will remove these entries:
     ("misaka/ui/tui/interactive/components/tree_selector.py", "__init__"): "PENDING cross-cutting-03",
     ("misaka/ui/tui/interactive/components/user_message_selector.py", "__init__"): "PENDING cross-cutting-03",
-    ("misaka/ui/tui/interactive/theme/theme.py", "_start_theme_watcher"): (
-        "PENDING ui-interactive-components-22"
-    ),
 }
 
 

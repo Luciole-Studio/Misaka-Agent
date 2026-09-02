@@ -85,6 +85,14 @@ def lazyOAuth(
     first calls each find the cache still empty and start their own load.
     ``tests/test_ai_auth_stack.py::test_a_lazy_oauth_flow_loads_once_under_concurrent_first_use``
     pins the difference.
+
+    The ``shield`` is the other half of matching upstream. A JavaScript promise cannot
+    be cancelled by a caller who walks away, but an awaited asyncio Task can: without
+    the shield, the first caller being task-cancelled (Esc, ``race_with_abort_signal``)
+    cancels the shared load and leaves a cancelled Task in ``pending`` forever, so every
+    later OAuth call on that provider raises ``CancelledError`` until the process
+    restarts. Shielded, the abandoned caller still sees its own cancellation while the
+    load runs to completion for whoever comes next.
     """
     pending: asyncio.Future[OAuthAuth] | None = None
 
@@ -92,7 +100,7 @@ def lazyOAuth(
         nonlocal pending
         if pending is None:
             pending = asyncio.ensure_future(load())
-        return await pending
+        return await asyncio.shield(pending)
 
     async def login(interaction: ProviderAuthInteraction) -> OAuthCredential:
         return await (await _loaded()).login(interaction)

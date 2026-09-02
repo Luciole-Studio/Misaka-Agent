@@ -13,8 +13,6 @@ try:
 except ImportError:  # optional extra: misaka[openai]
     AsyncOpenAI = None
 
-import misaka.ai.providers.cloudflare as _cloudflare
-import misaka.ai.providers.github_copilot_headers as _copilot_headers
 from misaka.ai.env_api_keys import get_env_api_key
 from misaka.ai.models import clamp_thinking_level
 from misaka.ai.providers._common import (
@@ -26,8 +24,16 @@ from misaka.ai.providers._common import (
     apply_service_tier_pricing,
     resolve_cache_retention,
 )
+from misaka.ai.providers.cloudflare import (
+    is_cloudflare_provider,
+    resolve_cloudflare_base_url,
+)
 from misaka.ai.providers.constrained_sampling import (
     create_grammar_tool_input_properties,
+)
+from misaka.ai.providers.github_copilot_headers import (
+    build_copilot_dynamic_headers,
+    has_copilot_vision_input,
 )
 from misaka.ai.providers.openai_prompt_cache import clamp_openai_prompt_cache_key
 from misaka.ai.providers.openai_responses_shared import (
@@ -58,10 +64,6 @@ from misaka.ai.utils.provider_retry import retry_provider_request
 from misaka.utils.values import maybe_await, read_field, signal_aborted
 
 OPENAI_TOOL_CALL_PROVIDERS = {"openai", "openai-codex", "opencode"}
-is_cloudflare_provider = getattr(_cloudflare, "is_cloudflare_provider", lambda _provider: False)
-resolve_cloudflare_base_url = getattr(_cloudflare, "resolve_cloudflare_base_url", lambda model: model.baseUrl)
-build_copilot_dynamic_headers = getattr(_copilot_headers, "build_copilot_dynamic_headers", lambda **_: {})
-has_copilot_vision_input = getattr(_copilot_headers, "has_copilot_vision_input", lambda _messages: False)
 
 
 class OpenAIResponsesOptions(TypedDict, total=False):

@@ -5,7 +5,7 @@ def register_provider(harn):
     from misaka.extensions.moa import provider
 
     models = []
-    for model in provider.preset_models(resolve_aggregators=False):
+    for model in provider.preset_models():
         models.append({
             "id": model.id,
             "name": model.name or model.id,

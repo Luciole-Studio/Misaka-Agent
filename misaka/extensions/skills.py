@@ -7,6 +7,7 @@ thing that decides which skills a session sees -- the role's three layers, or th
 read-only sandbox a card runs against (``SessionSpec.skill_roots``).
 """
 import os
+import shlex
 from pathlib import Path
 
 from misaka.skills import index as skill_index
@@ -226,8 +227,7 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
                 target = os.path.realpath(os.path.join(workspace, os.path.expanduser(str(args.get("path") or ""))))
                 return any(target == root or target.startswith(root + os.sep) for root in live_roots)
             if tool in {"bash", "powershell"}:
-                command = str(args.get("command") or "")
-                return any(root in command for root in live_roots)   # ponytail: a text match; the shell is not parsed
+                return _command_touches(str(args.get("command") or ""), workspace, live_roots)
             return False
 
         async def guard_live_skills(event, _ctx):
@@ -452,6 +452,44 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
 
 
 SESSION_KINDS = {"foreground", "dm", "card", "child"}
+
+
+def _command_touches(command, workspace, live_roots):
+    """True when a shell command names a path inside a live skill tree.
+
+    The literal substring test this replaces read the command as text, so only the
+    expanded absolute form was caught: `cd ~/.misaka/profiles/<role>/skills`, or any
+    path relative to the workspace, walked straight past a guard whose whole job is to
+    keep unattended card sessions out of the live trees.
+
+    Every token that could be a path is resolved the way the shell would resolve it --
+    `~` expanded, relatives taken against the workspace, symlinks followed -- and
+    compared as a path, not as text. Tokens are taken from `shlex`; a command `shlex`
+    cannot parse, or one carrying substitution (`$(...)`, backticks) whose expansion is
+    unknowable here, is treated as touching a tree. Refusing a command the guard cannot
+    read is the safe direction: `skill_view` reads skills, and `skill_manage` writes
+    them, so nothing legitimate needs the shell to reach one.
+    """
+    if not command.strip():
+        return False
+    if any(token in command for token in ("$(", "`", "${")):
+        return True
+    if any(root in command for root in live_roots):
+        return True
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return True
+    for item in argv:
+        if not item or item.startswith("-"):
+            continue
+        candidate = os.path.expanduser(item)
+        if not os.path.isabs(candidate):
+            candidate = os.path.join(workspace, candidate)
+        for resolved in (os.path.abspath(candidate), os.path.realpath(candidate)):
+            if any(resolved == root or resolved.startswith(root + os.sep) for root in live_roots):
+                return True
+    return False
 
 
 def activate(spec):

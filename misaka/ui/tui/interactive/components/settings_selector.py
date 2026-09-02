@@ -93,6 +93,9 @@ class SettingsConfig:
     clearOnShrink: bool
     showTerminalProgress: bool
     warnings: WarningSettings
+    # Defaulted so a host that has not wired the switch yet still constructs; see the
+    # matching callback below.
+    enableInstallTelemetry: bool = True
 
 
 @dataclass(slots=True)
@@ -126,6 +129,12 @@ class SettingsCallbacks:
     onShowTerminalProgressChange: Callable[[bool], None]
     onWarningsChange: Callable[[WarningSettings], None]
     onCancel: Callable[[], None]
+    # KNOWN GAP (audit ui-interactive-components-20): `enableInstallTelemetry` defaults to
+    # true in SettingsManager and had no UI at all, so the only way to turn the anonymous
+    # install attribution off was hand-editing settings.json. The row below appears once a
+    # host passes this callback -- wiring it to `settingsManager.setEnableInstallTelemetry`
+    # in interactive_mode is the remaining half.
+    onEnableInstallTelemetryChange: Callable[[bool], None] | None = None
 
 
 class WarningSettingsSubmenu(Container):
@@ -573,6 +582,17 @@ class SettingsSelectorComponent(Container):
                 ["true", "false"],
             ),
         ]
+        if callbacks.onEnableInstallTelemetryChange is not None:
+            extra_items.append(
+                (
+                    "install-telemetry",
+                    "Install telemetry",
+                    "Send an anonymous install identifier to providers for attribution",
+                    "true" if config.enableInstallTelemetry else "false",
+                    ["true", "false"],
+                )
+            )
+
         insert_after = next(index for index, item in enumerate(items) if item.id == "block-images") + 1
         for offset, (item_id, label, description, current_value, values) in enumerate(extra_items):
             items.insert(
@@ -674,6 +694,9 @@ class SettingsSelectorComponent(Container):
                 callbacks.onClearOnShrinkChange(new_value == "true")
             case "terminal-progress":
                 callbacks.onShowTerminalProgressChange(new_value == "true")
+            case "install-telemetry":
+                if callbacks.onEnableInstallTelemetryChange is not None:
+                    callbacks.onEnableInstallTelemetryChange(new_value == "true")
 
     def getSettingsList(self) -> SettingsList:
         return self.settingsList

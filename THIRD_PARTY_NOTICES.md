@@ -22,6 +22,24 @@ MISAKA 的部分文件移植自其它项目。移植代码所附带的许可证�
 - 说明：经由 Pi 的 `packages/tui/src/stdin-buffer.ts` 移植；转义序列的缓冲与切分
   逻辑来自上游，字节层增量解码与定时器回环是本仓库为 Python 运行时所加。
 
+## hermes-lcm
+
+- 上游：https://github.com/stephenschoettler/hermes-lcm
+- 许可证：MIT
+- 版权：Copyright (c) 2026 Stephen Schoettler
+- 本仓库位置：`misaka/extensions/hermes_lcm/vendor/`（完整 MIT 文本在该目录的 `LICENSE.hermes-lcm`）
+- pin：`10cbb78347ec86f3004153b24767324ded9e37b4`（v0.21.0-rc2），见
+  `misaka/extensions/hermes_lcm/UPSTREAM_COMMIT`
+- 说明：61 个模块原样收录（审计核对为 60 个逐字节相同、1 个有登记的修改），
+  上游自己的测试套件收在 `tests/hermes_lcm_vendor/`。胶水代码在 `host/` 下，是本仓库自有。
+
+## PageIndex
+
+- 上游：https://github.com/VectifyAI/PageIndex
+- 许可证：MIT
+- 版权：Copyright (c) 2025 Vectify AI
+- 本仓库位置：`misaka/documents/pageindex/`（完整 MIT 文本在该目录的 `LICENSE.PageIndex`）
+
 ## 上游整体移植
 
 `misaka/ai/**`、`misaka/core/**`、`misaka/agent/**`、`misaka/ui/tui/**` 的大部分是

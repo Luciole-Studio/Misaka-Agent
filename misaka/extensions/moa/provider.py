@@ -709,12 +709,37 @@ def stream_simple_moa(model: Model, context: Context, options: SimpleStreamOptio
 # Configured presets exposed as virtual registry models.
 
 
-def preset_models(*, resolve_aggregators: bool = True) -> list[Model]:
-    """Build one virtual `moa` Model per configured preset, sized from its aggregator when resolvable."""
+def _catalog_model(slot) -> Model | None:
+    """The builtin catalog's entry for a slot, for sizes a registry lookup cannot supply.
+
+    ``register_provider`` runs while the extension is being registered, which is before
+    any session has injected a model resolver -- so ``_resolve_slot_model`` there is not
+    "usually None", it is always None, and that one call fixes what every ``moa:<preset>``
+    model advertises for the life of the process. The builtin catalog is the same table
+    the registry merges its dynamic and custom models onto, so reading it directly answers
+    for every aggregator that is a catalogued model, resolver or no resolver.
+    """
+    from misaka.ai.models import get_model
+
+    return get_model(str(slot.get("provider") or ""), str(slot.get("model") or ""))
+
+
+def preset_models() -> list[Model]:
+    """Build one virtual `moa` Model per configured preset, sized from its aggregator.
+
+    The sizes are not decoration: ``core/agent_session`` reads ``contextWindow`` for the
+    auto-compaction threshold, the ``/context`` percentage and the footer. A preset whose
+    aggregator holds 128k while its virtual model claims 200k does not compact until the
+    turn is already over the provider's limit, and one whose aggregator holds 1M compacts
+    long before it needs to.
+    """
     cfg = load_moa_config()
     out: list[Model] = []
     for name, preset in cfg["presets"].items():
-        agg = _resolve_slot_model(preset["aggregator"]) if resolve_aggregators else None
+        # The resolver when a session has bound one, the builtin catalog otherwise. The
+        # literals below stay the last resort for an aggregator in neither -- a local or
+        # custom model the catalog has never heard of.
+        agg = _resolve_slot_model(preset["aggregator"]) or _catalog_model(preset["aggregator"])
         out.append(Model(
             id=name, name=f"MoA·{name}", api="moa", provider="moa",
             baseUrl="moa://local", reasoning=True, input=["text", "image"],

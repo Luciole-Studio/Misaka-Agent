@@ -191,8 +191,21 @@ def word_wrap_line(
     if visibleWidth(line) <= max_width:
         return [TextChunk(text=line, startIndex=0, endIndex=len(line))]
 
-    chunks: list[TextChunk] = []
     segments = list(pre_segmented) if pre_segmented is not None else list(_BASE_SEGMENTER.segment(line))
+    if len(segments) <= 1 and len(list(_BASE_SEGMENTER.segment(line))) <= 1:
+        # A single grapheme cluster wider than the column: a CJK ideograph or an emoji at
+        # `max_width == 1`. There is nothing left to split, so the `grapheme_width > max_width`
+        # branch below would hand the very same string back to this function forever — pi
+        # (editor.ts wordWrapLine) recurses the same way and blows the stack too. Overflow the
+        # column by a cell instead; the render thread stays alive.
+        #
+        # The base-segmenter re-check is what keeps this guard off the paste-marker path: a line
+        # holding exactly one `[paste #N …]` marker is a *single* segment under
+        # `segment_with_markers`, but many graphemes under the base segmenter, so the
+        # `grapheme_width > max_width` branch recurses with `pre_segmented=None` and terminates.
+        return [TextChunk(text=line, startIndex=0, endIndex=len(line))]
+
+    chunks: list[TextChunk] = []
     current_width = 0
     chunk_start = 0
     wrap_opp_index = -1

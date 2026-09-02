@@ -14,7 +14,7 @@ class ClipboardModule(Protocol):
 
     def has_image(self) -> bool: ...
 
-    async def get_image_binary(self) -> list[int] | None: ...
+    async def get_image_binary(self) -> bytes | None: ...
 
 
 def _has_display(env: dict[str, str], platform_name: str) -> bool:
@@ -36,10 +36,10 @@ class _NativeClipboardImpl:
             return False
         return hasattr(image, "save")
 
-    async def get_image_binary(self) -> list[int] | None:
+    async def get_image_binary(self) -> bytes | None:
         return await asyncio.to_thread(self._get_image_binary_sync)
 
-    def _get_image_binary_sync(self) -> list[int] | None:
+    def _get_image_binary_sync(self) -> bytes | None:
         try:
             image = self._image_grab.grabclipboard()
         except Exception:  # noqa: BLE001 - no clipboard image
@@ -52,7 +52,12 @@ class _NativeClipboardImpl:
         close = getattr(image, "close", None)
         if callable(close):
             close()
-        return list(buffer.getvalue())
+        # PNG bytes, not the `list[int]` pi's Protocol declares: that shape exists only
+        # because @mariozechner/clipboard crosses an N-API boundary. Here both ends are
+        # the same Python process, and boxing a 5 MB screenshot into 5M int objects costs
+        # ~8x the memory for nothing. `read_clipboard_image_via_native_clipboard` still
+        # accepts either shape.
+        return buffer.getvalue()
 
 
 def _load_clipboard(

@@ -89,7 +89,12 @@ def _read_bytes(path: str) -> bytes:
 
 
 def _read_text(path: str) -> str:
-    with open(path, encoding="utf-8-sig") as handle:
+    # errors="replace" is what every other reader in the repo does (core/tools/read.py:287,
+    # workspace.py:27) and what pi cli/file-processor.ts:77 gets for free from Node's decoder.
+    # Strict decoding would raise UnicodeDecodeError -- a ValueError, which the caller's
+    # ``except OSError`` does not catch -- and end the process on a traceback instead of
+    # putting the (mostly readable) file into the <file> block.
+    with open(path, encoding="utf-8-sig", errors="replace") as handle:
         return handle.read()
 
 

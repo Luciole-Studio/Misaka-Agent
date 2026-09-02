@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import threading
@@ -898,10 +899,28 @@ def _start_theme_watcher() -> None:
     watched_path = str(watched_file)
     stop_event = threading.Event()
     last_signature = _theme_file_signature(watched_path)
+    try:
+        # `_ON_THEME_CHANGE` walks the whole component tree and rebuilds transcript
+        # subtrees (assistant_message.invalidate clears and re-adds children). Doing that
+        # on the watcher thread races the renderer iterating the very same child lists, so
+        # a theme save could paint one corrupted frame. Hand the swap to the loop instead.
+        watch_loop_target: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+    except RuntimeError:
+        watch_loop_target = None
+
+    def apply_reload(reloaded: Theme) -> None:
+        if _CURRENT_THEME_NAME != watched_theme_name or stop_event.is_set():
+            return
+        _REGISTERED_THEMES[watched_theme_name] = reloaded
+        set_global_theme(reloaded)
+        if callable(_ON_THEME_CHANGE):
+            _ON_THEME_CHANGE()
 
     def watch_loop() -> None:
         nonlocal last_signature
-        while not stop_event.wait(0.1):
+        # 0.5s rather than 0.1s: this is a "did the user just save their theme file" poll,
+        # not an input path, and it runs for the whole session.
+        while not stop_event.wait(0.5):
             if _CURRENT_THEME_NAME != watched_theme_name:
                 return
             next_signature = _theme_file_signature(watched_path)
@@ -914,10 +933,13 @@ def _start_theme_watcher() -> None:
                 reloaded = load_theme_from_path(watched_path)
             except Exception:  # noqa: BLE001, S112 - a theme mid-write is retried on the next change
                 continue
-            _REGISTERED_THEMES[watched_theme_name] = reloaded
-            set_global_theme(reloaded)
-            if callable(_ON_THEME_CHANGE):
-                _ON_THEME_CHANGE()
+            if watch_loop_target is None or watch_loop_target.is_closed():
+                apply_reload(reloaded)
+                continue
+            try:
+                watch_loop_target.call_soon_threadsafe(apply_reload, reloaded)
+            except RuntimeError:  # loop shut down between the check and the call
+                apply_reload(reloaded)
 
     _THEME_WATCHER_STOP = stop_event
     _THEME_WATCHER_THREAD = threading.Thread(

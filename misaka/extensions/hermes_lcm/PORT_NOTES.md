@@ -197,9 +197,12 @@ ref 判干净会自相矛盾。代价是外部化载荷取回一律带围栏,而
 `stub_replay` 的决策整个是上游 `_stub_large_tool_results_for_active_replay` 的:两个开关、
 token 阈值、受保护的 fresh tail(默认 32 条)、"模型刚要求展开的那个载荷不动"的豁免、
 结构化内容保持块形状。host 只做**按 `toolCallId` 回接**(不按下标——`convert_to_llm` 会丢掉
-`excludeFromContext` 的消息,两张表不等长),并且**故意留在事件循环上**:上游从 live config
-读受保护尾长,而 `context_engine._host_driven_boundary` 会在一次压缩期间钉住那个字段——
-那个窗口里没有 `await`,挪到线程里才会让别人看见钉住的值。
+`excludeFromContext` 的消息,两张表不等长)。它和 `host/` 的其余五个事件处理器一样**跑在
+工作线程上**(`extension._off_loop`):上游从 live config 读受保护尾长,而
+`context_engine._host_driven_boundary` 会在一次压缩期间钉住那个字段——挡住这个窗口的是
+`context_engine.ENGINE_LOCK`(压缩、工具、这两个 `context` 处理器共用一把),不再是"同一
+条线程"。曾经的理由("那个窗口里没有 `await`")只在钉住期间不阻塞时成立,而压缩恰恰要
+`run_coro` 同步等一整轮辅助模型——那期间 `tools.py` 的工作线程照常运行。
 
 `externalize-backfill` 复用 `store.gc_externalized_tool_result`(上游自己缩写已外部化行的
 那个写),它自带 role/pinned/幂等三道判据,并且在同一个事务里 `before_commit` 归档 chunk

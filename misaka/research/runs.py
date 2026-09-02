@@ -509,21 +509,25 @@ def create(con, *, workspace, question, limits=None, token_start=0):
     now = int(time.time())
     run_id = "r_" + secrets.token_hex(5)
     spec = normalize_limits(limits)
-    con.execute(
-        "INSERT INTO research_runs "
-        "(id,workspace,question,phase,status,limits_json,token_start,created_at,updated_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
-        (run_id, workspace, question, "created", "active",
-         json.dumps(spec, ensure_ascii=False), int(token_start), now, now),
-    )
-    row = get(con, run_id)
-    ensure_layout(row)
-    write_text(con, run_id, "question", 'Original research question', "question.md",
-               f"""# Original research question
+    # One unit: a run row without its root node is a run ``workflow.run`` would walk straight to
+    # finalize as "every node closed", handing back a final report with no research behind it.
+    # An interrupted create must leave no row at all.
+    with task_store.write_txn(con):
+        con.execute(
+            "INSERT INTO research_runs "
+            "(id,workspace,question,phase,status,limits_json,token_start,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (run_id, workspace, question, "created", "active",
+             json.dumps(spec, ensure_ascii=False), int(token_start), now, now),
+        )
+        row = get(con, run_id)
+        ensure_layout(row)
+        write_text(con, run_id, "question", 'Original research question', "question.md",
+                   f"""# Original research question
 
 {question}
 """)
-    create_node(con, run_id, trigger=question, parent_id=None, depth=0)
+        create_node(con, run_id, trigger=question, parent_id=None, depth=0)
     return get(con, run_id)
 
 

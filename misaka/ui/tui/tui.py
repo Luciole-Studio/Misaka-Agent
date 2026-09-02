@@ -43,28 +43,54 @@ def _utc_iso_timestamp() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def _extract_kitty_image_ids(line: str) -> list[int]:
+@dataclass(slots=True)
+class KittyImageHeader:
+    ids: list[int]
+    rows: int
+
+
+def _parse_kitty_image_header(line: str) -> KittyImageHeader | None:
+    """ids and row count of a kitty graphics escape (pi tui-main-screen.ts:80-98).
+
+    `r=` matters as much as `i=`: `components/image.py` renders a multi-row image as the
+    escape on one line followed by `rows - 1` blank placeholder lines, and every renderer
+    path has to treat that whole run as one block.
+    """
     sequence_start = line.find(KITTY_SEQUENCE_PREFIX)
     if sequence_start == -1:
-        return []
+        return None
     params_start = sequence_start + len(KITTY_SEQUENCE_PREFIX)
     params_end = line.find(";", params_start)
     if params_end == -1:
-        return []
-    params = line[params_start:params_end]
-    for param in params.split(","):
+        return None
+
+    ids: list[int] = []
+    rows = 1
+    for param in line[params_start:params_end].split(","):
         if "=" not in param:
             continue
         key, value = param.split("=", 1)
-        if key != "i":
-            continue
         try:
-            image_id = int(value)
+            number = int(value)
         except ValueError:
             continue
-        if 0 < image_id <= 0xFFFFFFFF:
-            return [image_id]
-    return []
+        if not 0 < number <= 0xFFFFFFFF:
+            continue
+        if key == "i":
+            ids.append(number)
+        elif key == "r":
+            rows = number
+    return KittyImageHeader(ids=ids, rows=rows)
+
+
+def _extract_kitty_image_ids(line: str) -> list[int]:
+    header = _parse_kitty_image_header(line)
+    return header.ids if header is not None else []
+
+
+def _extract_kitty_image_rows(line: str) -> int:
+    header = _parse_kitty_image_header(line)
+    return header.rows if header is not None else 1
 
 
 class Component(Protocol):
@@ -756,12 +782,53 @@ class TUI(Container):
     def deleteKittyImages(self, ids: set[int] | list[int]) -> str:
         return "".join(deleteKittyImage(image_id) for image_id in ids)
 
-    def expandLastChangedForKittyImages(self, firstChanged: int, lastChanged: int) -> int:
-        expanded = lastChanged
-        for index in range(firstChanged, len(self.previousLines)):
-            if _extract_kitty_image_ids(self.previousLines[index]):
-                expanded = max(expanded, index)
-        return expanded
+    def getKittyImageReservedRows(self, lines: list[str], index: int, maxIndex: int | None = None) -> int:
+        """How many lines the kitty image starting at ``index`` occupies (pi :195-207).
+
+        `components/image.py` emits the escape on the image's first line and pads with blank
+        placeholder lines; the run stops early if a real line turns up before `r=` is used up.
+        """
+        resolved_max_index = len(lines) - 1 if maxIndex is None else maxIndex
+        rows = _extract_kitty_image_rows(lines[index] if index < len(lines) else "")
+        if rows <= 1:
+            return 1
+
+        max_rows = min(rows, resolved_max_index - index + 1, len(lines) - index)
+        reserved_rows = 1
+        while reserved_rows < max_rows:
+            line = lines[index + reserved_rows]
+            if isImageLine(line) or visibleWidth(line) > 0:
+                break
+            reserved_rows += 1
+        return reserved_rows
+
+    def expandChangedRangeForKittyImages(
+        self, firstChanged: int, lastChanged: int, newLines: list[str]
+    ) -> tuple[int, int]:
+        """Widen the diff range so no image block is ever half-inside it (pi :209-230).
+
+        An image whose *start* sits above ``firstChanged`` but whose block reaches into the
+        changed range has to be repainted whole, so ``firstChanged`` moves backwards as well
+        as ``lastChanged`` forwards — otherwise the `\\x1b[2K` sweep erases the bottom of the
+        image and nothing ever redraws it. Both the previous and the new frame are scanned:
+        the old one to know what is on screen, the new one to know what is about to be.
+        """
+        expanded_first = firstChanged
+        expanded_last = lastChanged
+
+        def expand_for(lines: list[str]) -> None:
+            nonlocal expanded_first, expanded_last
+            for index in range(len(lines)):
+                if not _extract_kitty_image_ids(lines[index]):
+                    continue
+                block_end = index + self.getKittyImageReservedRows(lines, index) - 1
+                if index >= firstChanged or (index <= lastChanged and block_end >= firstChanged):
+                    expanded_first = min(expanded_first, index)
+                    expanded_last = max(expanded_last, block_end)
+
+        expand_for(self.previousLines)
+        expand_for(newLines)
+        return expanded_first, expanded_last
 
     def deleteChangedKittyImages(self, firstChanged: int, lastChanged: int) -> str:
         if firstChanged < 0 or lastChanged < firstChanged:
@@ -873,10 +940,26 @@ class TUI(Container):
             if clear:
                 buffer += self.deleteKittyImages(self.previousKittyImageIds)
                 buffer += "\x1b[2J\x1b[H\x1b[3J"
-            for index, line in enumerate(new_lines):
+            index = 0
+            while index < len(new_lines):
                 if index > 0:
                     buffer += "\r\n"
+                line = new_lines[index]
+                reserved_rows = (
+                    self.getKittyImageReservedRows(new_lines, index) if isImageLine(line) else 1
+                )
+                if 1 < reserved_rows <= height:
+                    # Scroll the image's rows into existence first, then come back up and emit
+                    # the escape (pi :287-298). Writing the escape where it stands leaves the
+                    # rows below it unwritten, so a following line overwrites the image.
+                    buffer += "\r\n" * (reserved_rows - 1)
+                    buffer += f"\x1b[{reserved_rows - 1}A"
+                    buffer += line
+                    buffer += f"\x1b[{reserved_rows - 1}B"
+                    index += reserved_rows
+                    continue
                 buffer += line
+                index += 1
             buffer += "\x1b[?2026l"
             self.terminal.write(buffer)
             self.cursorRow = max(0, len(new_lines) - 1)
@@ -920,7 +1003,9 @@ class TUI(Container):
                 first_changed = len(self.previousLines)
             last_changed = len(new_lines) - 1
         if first_changed != -1:
-            last_changed = self.expandLastChangedForKittyImages(first_changed, last_changed)
+            first_changed, last_changed = self.expandChangedRangeForKittyImages(
+                first_changed, last_changed, new_lines
+            )
         append_start = appended_lines and first_changed == len(self.previousLines) and first_changed > 0
 
         if first_changed == -1:
@@ -994,12 +1079,31 @@ class TUI(Container):
         buffer += "\r\n" if append_start else "\r"
 
         render_end = min(last_changed, len(new_lines) - 1)
-        for index in range(first_changed, render_end + 1):
+        index = first_changed
+        while index <= render_end:
             if index > first_changed:
                 buffer += "\r\n"
-            buffer += "\x1b[2K"
             line = new_lines[index]
-            if not isImageLine(line) and visibleWidth(line) > width:
+            is_image = isImageLine(line)
+            reserved_rows = (
+                self.getKittyImageReservedRows(new_lines, index, render_end) if is_image else 1
+            )
+            if reserved_rows > 1:
+                image_start_screen_row = index - viewport_top
+                if image_start_screen_row < 0 or image_start_screen_row + reserved_rows > height:
+                    # Pre-clearing the block would scroll the screen and desync every row
+                    # number we are about to use; repaint everything instead (pi :493-499).
+                    full_render(True)
+                    return
+                buffer += "\x1b[2K"
+                buffer += "\r\n\x1b[2K" * (reserved_rows - 1)
+                buffer += f"\x1b[{reserved_rows - 1}A"
+                buffer += line
+                buffer += f"\x1b[{reserved_rows - 1}B"
+                index += reserved_rows
+                continue
+            buffer += "\x1b[2K"
+            if not is_image and visibleWidth(line) > width:
                 crash_log_path = Path.home() / ".misaka" / "agent" / "misaka-crash.log"
                 crash_log_path.parent.mkdir(parents=True, exist_ok=True)
                 crash_data = [
@@ -1026,6 +1130,7 @@ class TUI(Container):
                     )
                 )
             buffer += line
+            index += 1
 
         final_cursor_row = render_end
         if len(self.previousLines) > len(new_lines):

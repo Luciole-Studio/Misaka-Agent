@@ -561,14 +561,21 @@ async def execute_tool_calls_parallel(
     )
 
 
-def _reraise_if_caller_cancelled(error: BaseException, signal: Any | None) -> None:
-    """Let a caller's cancellation through; keep our own abort in band.
+def _reraise_if_not_tool_failure(error: BaseException, signal: Any | None) -> None:
+    """Let interpreter-level exits and a caller's cancellation through.
 
     These handlers turn any exception into an error tool result, which is right for a
     tool that failed but wrong for ``CancelledError``: swallowing it means the caller's
     ``task.cancel()`` never arrives and the loop keeps running. When our own abort
     signal is set the cancellation is ours, and the aborted result is the honest answer.
+
+    ``KeyboardInterrupt`` / ``SystemExit`` are never a tool failure either. pi catches
+    ``Exception`` here (agent.ts:502), and JS has no equivalent of these two; catching
+    ``BaseException`` without letting them out turns Ctrl-C inside a tool into a
+    "the model errored" message while the process keeps running.
     """
+    if isinstance(error, KeyboardInterrupt | SystemExit):
+        raise error
     if isinstance(error, asyncio.CancelledError) and not signal_aborted(signal):
         raise error
 
@@ -673,7 +680,7 @@ async def prepare_tool_call(
             )
         return PreparedToolCall(kind="prepared", toolCall=tool_call, tool=tool, args=validated_args)
     except BaseException as error:  # noqa: BLE001
-        _reraise_if_caller_cancelled(error, signal)
+        _reraise_if_not_tool_failure(error, signal)
         return ImmediateToolCallOutcome(
             kind="immediate",
             result=create_error_tool_result(str(error)),
@@ -718,7 +725,7 @@ async def execute_prepared_tool_call(
         accepting_updates = False
         if update_tasks:
             await asyncio.gather(*update_tasks, return_exceptions=True)
-        _reraise_if_caller_cancelled(error, signal)
+        _reraise_if_not_tool_failure(error, signal)
         return ExecutedToolCallOutcome(
             result=create_error_tool_result(str(error)),
             isError=True,
@@ -783,7 +790,7 @@ async def finalize_executed_tool_call(
                 )
                 is_error = normalized_after_result.isError if normalized_after_result.isError is not None else is_error
         except BaseException as error:  # noqa: BLE001
-            _reraise_if_caller_cancelled(error, signal)
+            _reraise_if_not_tool_failure(error, signal)
             result = create_error_tool_result(str(error))
             is_error = True
 
@@ -818,7 +825,10 @@ def create_tool_result_message(finalized: FinalizedToolCallOutcome) -> ToolResul
     return ToolResultMessage(
         toolCallId=finalized.toolCall.id,
         toolName=finalized.toolCall.name,
-        content=[validate_user_content(_model_dump(block)) for block in finalized.result.content],
+        # pi agent-loop.ts:780 `content: finalized.result.content ?? []` -- untyped tools
+        # (extensions, MCP) can return a result with no content; normalize so the null
+        # never enters session history or a provider payload.
+        content=[validate_user_content(_model_dump(block)) for block in finalized.result.content or []],
         details=finalized.result.details,
         usage=finalized.result.usage,
         # pi only spreads the key when the list is non-empty, so an empty diff leaves the
@@ -931,7 +941,7 @@ def _coerce_agent_tool_result(value: AgentToolResult | dict[str, Any]) -> AgentT
         return value
     content = [
         validate_user_content(_model_dump(block))
-        for block in value.get("content", [])
+        for block in value.get("content") or []  # explicit `content: None` is the same as absent
     ]
     added_tool_names = value.get("addedToolNames")
     return AgentToolResult(

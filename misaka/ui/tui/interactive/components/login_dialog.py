@@ -83,8 +83,18 @@ class LoginDialogComponent(Container):
         self._inputFuture = future
         return future
 
+    def _replace_input_with_submitted_text(self, value: str) -> None:
+        # The Input instance is reused for every step of a login, so leaving it in the
+        # container means step two renders a second, value-synced copy of the same box --
+        # and the code the user just pasted stays on screen and editable.
+        self.contentContainer.children = [
+            Text(f"> {value}", 0, 0) if child is self.input else child
+            for child in self.contentContainer.children
+        ]
+
     def _resolve_input(self, value: str) -> None:
         if self._inputFuture is not None and not self._inputFuture.done():
+            self._replace_input_with_submitted_text(value)
             self._inputFuture.set_result(value)
         self._inputFuture = None
 
@@ -128,7 +138,10 @@ class LoginDialogComponent(Container):
             if sys.platform == "darwin":
                 command = ["open", url]
             elif sys.platform == "win32":
-                command = ["cmd", "/c", "start", "", url]
+                # Never `cmd /c start`: cmd.exe re-parses &, |, ^ ... before `start` runs,
+                # so a provider-supplied URL like `https://host/cb?x=1&calc.exe` would
+                # execute. rundll32 takes the target as a single argument, unparsed.
+                command = ["rundll32", "url.dll,FileProtocolHandler", url]
             else:
                 command = ["xdg-open", url]
             with open(os.devnull, "wb") as sink:
@@ -140,6 +153,7 @@ class LoginDialogComponent(Container):
             return
 
     def showManualInput(self, prompt: str):
+        self.input.setValue("")
         self.contentContainer.addChild(Spacer(1))
         self.contentContainer.addChild(Text(theme.fg("dim", prompt), 1, 0))
         self.contentContainer.addChild(self.input)

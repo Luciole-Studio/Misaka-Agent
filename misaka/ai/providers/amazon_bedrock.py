@@ -9,7 +9,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict, cast
 from urllib.parse import urlparse
 
 try:
@@ -42,6 +42,7 @@ from misaka.ai.providers.simple_options import (
     adjust_max_tokens_for_thinking,
     build_base_options,
     clamp_reasoning,
+    clamp_thinking_budget_to_answer_room,
 )
 from misaka.ai.providers.transform_messages import transform_messages
 from misaka.ai.types import (
@@ -76,6 +77,7 @@ from misaka.ai.utils.diagnostics import (
     AssistantMessageDiagnostic,
     append_assistant_message_diagnostic,
 )
+from misaka.ai.utils.estimate import clamp_max_tokens_to_context
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
 from misaka.ai.utils.json_parse import StreamingArgs
@@ -346,7 +348,6 @@ def stream_bedrock(
         # Declared out here so a failure anywhere below can still sweep what arrived.
         partial_json: dict[int, StreamingArgs] = {}
         redacted_chunks: dict[int, list[bytes]] = {}
-        saw_message_start = False
         saw_message_stop = False
         # Kept out here so the catch can still correlate a mid-stream failure: an
         # exception delivered as a stream event carries no HTTP metadata of its own.
@@ -418,7 +419,6 @@ def stream_bedrock(
                     message_start = item["messageStart"] or {}
                     if message_start.get("role") != "assistant":
                         raise RuntimeError("Unexpected assistant message start but got user message start instead")
-                    saw_message_start = True
                     stream.push(StartEvent(partial=output))
                     continue
 
@@ -441,7 +441,10 @@ def stream_bedrock(
                 if "messageStop" in item:
                     message_stop = item["messageStop"] or {}
                     saw_message_stop = True
-                    output.stopReason = map_stop_reason(message_stop.get("stopReason"))
+                    stop_result = map_stop_reason(message_stop.get("stopReason"))
+                    output.stopReason = cast(StopReason, stop_result["stopReason"])
+                    if stop_result.get("errorMessage"):
+                        output.errorMessage = stop_result["errorMessage"]
                     continue
 
                 if "metadata" in item:
@@ -470,10 +473,15 @@ def stream_bedrock(
             # unconditionally after the loop). Without it a stream cut mid-tool-call still
             # carried the constructor's "stop", so a truncated call was pushed as a clean
             # DoneEvent and ran.
-            if saw_message_start and not saw_message_stop:
-                raise RuntimeError("Bedrock stream ended before messageStop")
+            # Not gated on ``saw_message_start``: a response whose "stream" key is missing,
+            # or a proxy that answers 200 with an empty event stream, iterates zero times
+            # and would otherwise reach here holding the constructor's "stop" and push a
+            # clean DoneEvent for a turn that never happened. Upstream's equivalent is a
+            # "pending" initial stopReason, which misaka's StopReason cannot express.
+            if not saw_message_stop:
+                raise RuntimeError("Bedrock stream ended without a stop reason")
             if output.stopReason in {"error", "aborted"}:
-                raise RuntimeError("An unknown error occurred")
+                raise RuntimeError(output.errorMessage or "An unknown error occurred")
 
             stream.push(DoneEvent(reason=output.stopReason, message=output))
         except Exception as error:  # noqa: BLE001
@@ -518,17 +526,23 @@ def stream_simple_bedrock(
             options.reasoning,
             options.thinkingBudgets,
         )
+        # ``adjust_max_tokens_for_thinking`` adds the budget on top of a base that was
+        # already fitted to the context window, so the sum can exceed what is left of the
+        # window again -- Bedrock answers that with a ValidationException instead of a
+        # shorter reply. Clamp once more, then keep MIN_ANSWER_TOKENS of the clamped
+        # ceiling for the answer (the anthropic adapter's stream_simple does both).
+        max_tokens = clamp_max_tokens_to_context(model, context, adjusted.maxTokens)
         clamped_level = clamp_reasoning(options.reasoning)
         merged_budgets = dict(options.thinkingBudgets.model_dump() if options.thinkingBudgets is not None else {})
         if clamped_level is not None:
-            merged_budgets[clamped_level] = adjusted.thinkingBudget
+            merged_budgets[clamped_level] = clamp_thinking_budget_to_answer_room(adjusted.thinkingBudget, max_tokens)
 
         return stream_bedrock(
             model,
             context,
             {
                 **base.model_dump(),
-                "maxTokens": adjusted.maxTokens,
+                "maxTokens": max_tokens,
                 "reasoning": options.reasoning,
                 "thinkingBudgets": merged_budgets,
             },
@@ -899,16 +913,22 @@ def get_model_match_candidates(model_id: str, model_name: str | None = None) -> 
     return candidates
 
 
+# Kept as literal substring lists, in upstream's order, so a new model is one line in one
+# place. The catalog already ships Bedrock entries for opus-4-8 / opus-5 / sonnet-5 /
+# fable-5; leaving them off these lists sent them a budget_tokens request instead of the
+# adaptive/effort shape they expect.
+_ADAPTIVE_THINKING_MARKERS = ("opus-4-6", "opus-4-7", "opus-4-8", "opus-5", "sonnet-4-6", "sonnet-5", "fable-5")
+_NATIVE_XHIGH_MARKERS = ("opus-4-7", "opus-4-8", "opus-5", "sonnet-5", "fable-5")
+
+
 def supports_adaptive_thinking(model_id: str, model_name: str | None = None) -> bool:
     candidates = get_model_match_candidates(model_id, model_name)
-    return any(
-        "opus-4-6" in value or "opus-4-7" in value or "sonnet-4-6" in value
-        for value in candidates
-    )
+    return any(marker in value for value in candidates for marker in _ADAPTIVE_THINKING_MARKERS)
 
 
 def supports_native_xhigh_effort(model: Model) -> bool:
-    return any("opus-4-7" in value for value in get_model_match_candidates(model.id, model.name))
+    candidates = get_model_match_candidates(model.id, model.name)
+    return any(marker in value for value in candidates for marker in _NATIVE_XHIGH_MARKERS)
 
 
 def map_thinking_level_to_effort(
@@ -1203,14 +1223,23 @@ def convert_tool_config(
     return {"tools": bedrock_tools, **({"toolChoice": bedrock_tool_choice} if bedrock_tool_choice is not None else {})}
 
 
-def map_stop_reason(reason: str | None) -> StopReason:
+def map_stop_reason(reason: str | None) -> dict[str, str]:
+    """Map Bedrock's ``messageStop.stopReason``, keeping the raw value on unknowns.
+
+    Returns the same ``{"stopReason", "errorMessage"?}`` shape openai-completions'
+    ``map_stop_reason`` does. A ``guardrail_intervened`` / ``content_filtered`` turn used
+    to surface as a bare "An unknown error occurred"; the reason is what tells a user (and
+    the retry layer) whether the turn is worth repeating.
+    """
     if reason in {"end_turn", "stop_sequence"}:
-        return "stop"
+        return {"stopReason": "stop"}
     if reason in {"max_tokens", "model_context_window_exceeded"}:
-        return "length"
+        return {"stopReason": "length"}
     if reason == "tool_use":
-        return "toolUse"
-    return "error"
+        return {"stopReason": "toolUse"}
+    if reason:
+        return {"stopReason": "error", "errorMessage": f"Provider stopped with: {reason}"}
+    return {"stopReason": "error"}
 
 
 def get_configured_bedrock_region(options: StreamOptions | dict[str, Any] | None = None) -> str | None:

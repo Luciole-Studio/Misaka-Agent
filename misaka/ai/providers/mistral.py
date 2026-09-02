@@ -9,7 +9,7 @@ import math
 import time
 from collections.abc import AsyncIterable, Mapping
 from functools import lru_cache
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict, cast
 
 from misaka.ai.env_api_keys import get_env_api_key
 from misaka.ai.models import calculate_cost, clamp_thinking_level
@@ -212,12 +212,19 @@ def stream_mistral(
                 _option(options, "signal"),
             )
             stream.push(StartEvent(partial=output))
-            await consume_chat_stream(model, output, stream, mistral_stream, _option(options, "signal"))
+            saw_finish_reason = await consume_chat_stream(
+                model, output, stream, mistral_stream, _option(options, "signal")
+            )
 
             if signal_aborted(_option(options, "signal")):
                 raise RuntimeError("Request was aborted")
+            # Upstream's "pending" initial stopReason, expressed as a flag: without it a
+            # server-side close or a gateway truncation that raised no httpx error left
+            # the constructor's "stop" in place and half a reply was pushed as a DoneEvent.
+            if not saw_finish_reason:
+                raise RuntimeError("Mistral stream ended without a finish reason")
             if output.stopReason in {"aborted", "error"}:
-                raise RuntimeError("An unknown error occurred")
+                raise RuntimeError(output.errorMessage or "An unknown error occurred")
 
             stream.push(DoneEvent(reason=output.stopReason, message=output))
         except Exception as error:  # noqa: BLE001
@@ -389,6 +396,11 @@ def build_chat_payload(
         payload["promptMode"] = _option(options, "promptMode")
     if _option(options, "reasoningEffort") is not None:
         payload["reasoningEffort"] = _option(options, "reasoningEffort")
+    # The x-affinity header routes the request to the machine holding the cache;
+    # promptCacheKey is what makes the cache exist at all. build_request_kwargs only set
+    # the former, so caching was requested and never obtained.
+    if _should_use_prompt_caching(options):
+        payload["promptCacheKey"] = _option(options, "sessionId")
 
     if context.systemPrompt:
         payload["messages"].insert(
@@ -569,10 +581,17 @@ async def consume_chat_stream(
     stream: AssistantMessageEventStream,
     mistral_stream: AsyncIterable[Any],
     signal: Any = None,
-) -> None:
+) -> bool:
+    """Drain the SDK stream into ``output``; returns whether a ``finish_reason`` arrived.
+
+    The caller needs that answer: ``create_output`` starts at ``"stop"`` (misaka's
+    StopReason has no ``"pending"``), so a stream that ends before any finish_reason is
+    otherwise indistinguishable from a model that finished speaking.
+    """
     current_block: TextContent | ThinkingContent | None = None
     tool_blocks_by_key: dict[str, int] = {}
     partial_args_by_index: dict[int, StreamingArgs] = {}
+    saw_finish_reason = False
 
     def block_index() -> int:
         return len(output.content) - 1
@@ -610,7 +629,11 @@ async def consume_chat_stream(
 
         finish_reason = _coalesce_attr(choice, "finish_reason", "finishReason")
         if finish_reason is not None:
-            output.stopReason = map_chat_stop_reason(finish_reason)
+            saw_finish_reason = True
+            stop_result = map_chat_stop_reason(finish_reason)
+            output.stopReason = cast(StopReason, stop_result["stopReason"])
+            if stop_result.get("errorMessage"):
+                output.errorMessage = stop_result["errorMessage"]
 
         delta = _coalesce_attr(choice, "delta")
         if delta is None:
@@ -716,24 +739,27 @@ async def consume_chat_stream(
             block.arguments = accumulated.finish()
         stream.push(ToolCallEndEvent(contentIndex=index, toolCall=block, partial=output))
 
+    return saw_finish_reason
+
 
 def to_function_tools(tools: list[Tool]) -> list[dict[str, Any]]:
-    return [
-        {
+    def entry(tool: Tool) -> dict[str, Any]:
+        # The `True` is upstream's second argument to the resolver -- "this API always
+        # accepts a strict schema" -- not the wire field. The same answer has to reach
+        # both: a strictified schema shipped with `strict: false` asks Mistral to ignore
+        # exactly the constrained sampling the tool declared.
+        strict = resolve_json_schema_strict_sampling(tool, True)
+        return {
             "type": "function",
             "function": {
                 "name": tool.name,
                 "description": tool.description,
-                # Upstream passes `true` here unconditionally: the Mistral conversations
-                # API always accepts a strict schema (mistral-conversations.ts:755).
-                "parameters": strip_symbol_keys(
-                    get_json_schema_tool_parameters(tool, resolve_json_schema_strict_sampling(tool, True))
-                ),
-                "strict": False,
+                "parameters": strip_symbol_keys(get_json_schema_tool_parameters(tool, strict)),
+                "strict": strict is True,
             },
         }
-        for tool in tools
-    ]
+
+    return [entry(tool) for tool in tools]
 
 
 def strip_symbol_keys(value: Any) -> Any:
@@ -804,7 +830,10 @@ def to_chat_messages(messages: list[MessageValue], supports_images: bool) -> lis
                 result.append(assistant_message)
             continue
 
-        text_result = "\n".join(part.text for part in message.content if part.type == "text")
+        # Sanitized like every other text on this payload: a lone surrogate anywhere in a
+        # tool result makes pydantic's model_dump_json raise inside the SDK, which fails
+        # not just this turn but every later turn that still carries it in history.
+        text_result = "\n".join(sanitize_surrogates(part.text) for part in message.content if part.type == "text")
         has_images = any(part.type == "image" for part in message.content)
         tool_content = [
             {
@@ -870,18 +899,22 @@ def map_tool_choice(choice: Any) -> Any:
     return {"type": "function", "function": {"name": function_name}}
 
 
-def map_chat_stop_reason(reason: str | None) -> StopReason:
+def map_chat_stop_reason(reason: str | None) -> dict[str, str]:
+    """Map Mistral's ``finish_reason``, keeping the raw value on unknowns.
+
+    Same ``{"stopReason", "errorMessage"?}`` shape as openai-completions' map_stop_reason.
+    A new or unrecognised finish reason used to become a plain ``"stop"``, so a filtered
+    or aborted turn read to the agent loop as a model that had finished speaking.
+    """
     if reason is None:
-        return "stop"
+        return {"stopReason": "stop"}
     if reason == "stop":
-        return "stop"
+        return {"stopReason": "stop"}
     if reason in {"length", "model_length"}:
-        return "length"
+        return {"stopReason": "length"}
     if reason == "tool_calls":
-        return "toolUse"
-    if reason == "error":
-        return "error"
-    return "stop"
+        return {"stopReason": "toolUse"}
+    return {"stopReason": "error", "errorMessage": f"Provider stopped with: {reason}"}
 
 
 streamMistral = stream_mistral

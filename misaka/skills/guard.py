@@ -511,12 +511,21 @@ SUSPICIOUS_BINARY_EXTENSIONS = {
     '.msi', '.dmg', '.app', '.deb', '.rpm',
 }
 
-# Zero-width and invisible unicode characters used for injection
+# Zero-width and invisible unicode characters used for injection.
+#
+# Kept as an explicit set (not `unicodedata.category(ch) == "Cf"`) so the answer
+# does not move when the interpreter's Unicode tables do, but it must cover the
+# carriers actually used to hide instructions from a reader while leaving them
+# legible to the model — the Unicode Tag block above all, which maps the whole
+# of ASCII into codepoints that render as nothing. `_INVISIBLE_RE` is what the
+# scan runs; this set is the single-codepoint part of it, kept for callers that
+# ask "is this one character invisible?".
 INVISIBLE_CHARS = {
     '\u200b',  # zero-width space
     '\u200c',  # zero-width non-joiner
     '\u200d',  # zero-width joiner
     '\u2060',  # word joiner
+    '\u2061',  # function application
     '\u2062',  # invisible times
     '\u2063',  # invisible separator
     '\u2064',  # invisible plus
@@ -530,7 +539,33 @@ INVISIBLE_CHARS = {
     '\u2067',  # right-to-left isolate
     '\u2068',  # first strong isolate
     '\u2069',  # pop directional isolate
+    '\u00ad',  # soft hyphen
+    '\u034f',  # combining grapheme joiner
+    '\u061c',  # arabic letter mark
+    '\u115f',  # hangul choseong filler
+    '\u1160',  # hangul jungseong filler
+    '\u17b4',  # khmer vowel inherent aq
+    '\u17b5',  # khmer vowel inherent aa
+    '\u180e',  # mongolian vowel separator
+    '\u200e',  # left-to-right mark
+    '\u200f',  # right-to-left mark
+    '\u3164',  # hangul filler
+    '\uffa0',  # halfwidth hangul filler
 }
+
+# The same judgement as a scannable pattern, plus the two ranges that are the
+# point of the exercise: U+E0000-U+E007F (Unicode Tag block: every ASCII
+# character has a rendering-free twin there, so a whole instruction can be
+# hidden inside visible prose) and U+E0100-U+E01EF (variation selectors
+# supplement, the byte-smuggling channel of the same family). Both are matched
+# as ranges rather than listed, because the unassigned codepoints between the
+# assigned ones carry a payload just as well.
+#
+# Deliberately NOT matched: U+FE00-U+FE0F. VS15/VS16 sit inside ordinary emoji,
+# so flagging that range would fire on prose rather than on hiding.
+_INVISIBLE_RE = re.compile(
+    "[" + "".join(sorted(INVISIBLE_CHARS)) + "\\U000e0000-\\U000e007f\\U000e0100-\\U000e01ef]"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -567,9 +602,15 @@ def scan_file(file_path: Path, rel_path: str = "") -> list[Finding]:
     lines = content.split('\n')
     seen = set()  # (pattern_id, line_number) for deduplication
 
-    # Regex pattern matching
+    # Regex pattern matching. Every pattern is single-line, so a shell command
+    # split across a backslash continuation would otherwise show each pattern
+    # only a fragment of itself: `curl ... \` + newline + `| sh` matches no rule
+    # while the one-line spelling is critical. The scan therefore sees both the
+    # physical lines and the logical ones, joined the way the shell joins them.
+    candidates = [(i, line) for i, line in enumerate(lines, start=1)]
+    candidates.extend(_continued_lines(lines))
     for pattern, pid, severity, category, description in _COMPILED_THREAT_PATTERNS:
-        for i, line in enumerate(lines, start=1):
+        for i, line in candidates:
             if (pid, i) in seen:
                 continue
             if pattern.search(line):
@@ -589,21 +630,83 @@ def scan_file(file_path: Path, rel_path: str = "") -> list[Finding]:
 
     # Invisible unicode character detection
     for i, line in enumerate(lines, start=1):
-        for char in INVISIBLE_CHARS:
-            if char in line:
-                char_name = _unicode_char_name(char)
-                findings.append(Finding(
-                    pattern_id="invisible_unicode",
-                    severity="high",
-                    category="injection",
-                    file=rel_path,
-                    line=i,
-                    match=f"U+{ord(char):04X} ({char_name})",
-                    description=f"invisible unicode character {char_name} (possible text hiding/injection)",
-                ))
-                break  # one finding per line for invisible chars
+        hit = _INVISIBLE_RE.search(line)
+        if hit:
+            char = hit.group(0)
+            char_name = _unicode_char_name(char)
+            findings.append(Finding(
+                pattern_id="invisible_unicode",
+                severity="high",
+                category="injection",
+                file=rel_path,
+                line=i,
+                match=f"U+{ord(char):04X} ({char_name})",
+                description=f"invisible unicode character {char_name} (possible text hiding/injection)",
+            ))
 
     return findings
+
+
+_MAX_JOINED_LINE = 2000
+_MAX_JOINED_PARTS = 200
+
+
+def _continued_lines(lines):
+    """``(line_number, joined_text)`` for each run of backslash-continued lines.
+
+    A trailing backslash continues the line for every shell in use, so the text
+    the machine acts on is the join, not the pieces. Only runs that actually
+    continue are returned: unbroken lines are already scanned as themselves, and
+    the line number reported is the first physical line of the run, which is
+    where a reader looks. A doubled backslash at end of line is an escaped
+    backslash, not a continuation, so the trailing run's parity decides.
+    """
+    joined = []
+    i, total = 0, len(lines)
+    while i < total:
+        start = i
+        parts = []
+        run_len = 0
+        while i < total and _ends_with_continuation(lines[i]):
+            piece = lines[i][:-1].strip()
+            parts.append(piece)
+            run_len += len(piece)
+            i += 1
+            # A file whose every line ends in a backslash would otherwise join
+            # into one string as long as the file, and several patterns here are
+            # `verb\s+[^\n]*\|...`, which costs O(len²) on a line that has no
+            # match. The run is emitted in windows instead; a genuine
+            # continuation is a handful of lines, so nothing real is cut.
+            #
+            # The window closes on either measure. Length alone is not enough: a
+            # file of bare `\` lines strips to empty pieces, so the joined length
+            # stays 0 forever and `parts` grows to the length of the file — and
+            # re-measuring it each round (the earlier `sum(map(len, parts))`)
+            # made that O(N²) on an untrusted input path. `run_len` is carried
+            # instead of recomputed, and the part count is capped outright.
+            #
+            # Windows overlap by one piece. A window boundary is otherwise a free
+            # alignment point: pad a run to exactly the cap and the terminating
+            # line — the part carrying the payload — lands in no window at all,
+            # and a physical line on its own matches nothing. Both caps are
+            # constants in open source, so aligning to one costs an attacker a
+            # line count. Carrying the last piece forward means a payload split
+            # across a boundary is still joined with what precedes it.
+            if run_len >= _MAX_JOINED_LINE or len(parts) >= _MAX_JOINED_PARTS:
+                joined.append((start + 1, " ".join(p for p in parts if p)))
+                carry = parts[-1]
+                start, parts, run_len = i - 1, [carry], len(carry)
+        if parts:
+            parts.append(lines[i].strip() if i < total else "")
+            joined.append((start + 1, " ".join(p for p in parts if p)))
+        i += 1
+    return joined
+
+
+def _ends_with_continuation(line):
+    """True when ``line`` ends in an odd number of backslashes (a continuation)."""
+    trailing = len(line) - len(line.rstrip("\\"))
+    return trailing % 2 == 1
 
 
 def scan_skill(skill_path: Path, source: str = "community", *, honor_ignore: bool = True) -> ScanResult:
@@ -937,7 +1040,14 @@ def _unicode_char_name(char: str) -> str:
         '\u2068': "first strong isolate",
         '\u2069': "pop directional isolate",
     }
-    return names.get(char, f"U+{ord(char):04X}")
+    if char in names:
+        return names[char]
+    if 0xE0000 <= ord(char) <= 0xE007F:
+        return "unicode tag character (hidden text)"
+    if 0xE0100 <= ord(char) <= 0xE01EF:
+        return "variation selector supplement (hidden text)"
+    import unicodedata
+    return unicodedata.name(char, "").lower() or f"U+{ord(char):04X}"
 
 
 

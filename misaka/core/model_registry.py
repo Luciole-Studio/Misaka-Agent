@@ -962,6 +962,12 @@ class ModelRegistry:
         ``recomposeProvider`` prefers ``nativeExtensionProviders`` over builtins.
         """
         for provider_id, previous in self._radiusProviders.items():
+            if provider_id in self._nativeProviderIds:
+                # A native extension provider claimed this id after the radius
+                # wrapper was installed. Restoring "what radius replaced" here
+                # would delete that native provider on the next reload while
+                # _nativeProviderIds still claimed it existed.
+                continue
             if previous is None:
                 self._authModels.deleteProvider(provider_id)
             else:
@@ -2046,9 +2052,19 @@ class ModelRegistry:
                     ) from rollback_error
                 self._scheduleOfflineRefresh()
                 raise
+        # pi model-runtime.ts:219-233 recomposes from scratch every time and always
+        # prefers the native extension provider over a radius wrapper, so the radius
+        # bookkeeping for this id has to go. Keeping it would (a) list the id in both
+        # _nativeProviderIds and _radiusProviders, so getAll() emits every model twice
+        # and resolveCliModel reports it as ambiguous, and (b) make the next reload's
+        # restore loop overwrite the freshly registered native provider.
+        had_radius = provider_id in self._radiusProviders
+        pre_radius = self._radiusProviders.pop(provider_id, None)
         if provider_id not in self._nativeProviderIds:
-            self._nativePreviousProviders[provider_id] = self._authModels.getProvider(
-                provider_id
+            # When radius wrapped this id, "what was here before the native provider"
+            # is what radius itself displaced, not the radius wrapper.
+            self._nativePreviousProviders[provider_id] = (
+                pre_radius if had_radius else self._authModels.getProvider(provider_id)
             )
         self._nativeProviderIds[provider_id] = None
         self._nativeAuthChecks.pop(provider_id, None)

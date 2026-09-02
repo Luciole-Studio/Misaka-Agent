@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+import re
 import unicodedata
 from collections.abc import Callable
 from itertools import zip_longest
@@ -30,9 +31,26 @@ from misaka.ui.tui.interactive.theme.theme import (
 )
 from misaka.utils.clipboard_image import read_clipboard_image
 
+# question / header / label / description / preview all come from the model, and Text,
+# Markdown and theme.fg pass escape sequences straight through to the terminal (and
+# visibleWidth counts them as zero-width, so nothing looks off). A prompt-injected model
+# could rewrite the clipboard with OSC 52 or repaint the screen from inside a dialog that
+# exists to ask the user for a decision. Strip control characters at the single accessor
+# every one of those fields goes through; \n and \t stay, previews are Markdown.
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def _sanitize(text: str) -> str:
+    return _CONTROL_CHARACTERS.sub(" ", text)
+
+
+def _read(value: Any, key: str, default: Any = None) -> Any:
+    return value.get(key, default) if isinstance(value, dict) else getattr(value, key, default)
+
 
 def _get(value: Any, key: str, default: Any = None) -> Any:
-    return value.get(key, default) if isinstance(value, dict) else getattr(value, key, default)
+    result = _read(value, key, default)
+    return _sanitize(result) if isinstance(result, str) else result
 
 
 def _pad(text: str, width: int) -> str:
@@ -99,7 +117,12 @@ class AskUserQuestionComponent:
         return self.questions[self.current]
 
     def _key(self, question: Any | None = None) -> str:
-        return str(_get(question or self._question(), "question", ""))
+        # Deliberately unsanitised: this is the identity the answers/annotations dicts are
+        # keyed by, and `extensions/ask_user` looks those up with the question text it sent.
+        # Every caller that puts the result on screen must wrap it in `_sanitize` itself --
+        # `_submit_lines` does, and `_nav_line` only uses it as a dict lookup. Adding a new
+        # render site that prints a `_key()` without `_sanitize` reopens the OSC 52 hole.
+        return str(_read(question or self._question(), "question", ""))
 
     def _options(self, question: Any | None = None) -> list[Any]:
         return list(_get(question or self._question(), "options", []) or [])
@@ -630,7 +653,12 @@ class AskUserQuestionComponent:
         for question in self.questions:
             key = self._key(question)
             if key in self.answers:
-                lines += [theme.fg("text", f"• {key}"), theme.fg("success", f"  → {self.answers[key]}")]
+                # `key` is the raw question text (the answers dict identity); the review
+                # screen is a render site, so only the sanitised copy reaches the terminal.
+                lines += [
+                    theme.fg("text", f"• {_sanitize(key)}"),
+                    theme.fg("success", f"  → {_sanitize(self.answers[key])}"),
+                ]
         lines += ["", theme.fg("muted", "Ready to submit your answers?"), ""]
         for index, label in enumerate(("Submit answers", "Cancel")):
             selected = index == self.submitFocus

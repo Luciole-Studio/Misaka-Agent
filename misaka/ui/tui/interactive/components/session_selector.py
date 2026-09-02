@@ -106,6 +106,9 @@ def canonicalize_optional_path(path: str | None) -> str | None:
 class SessionTreeNode:
     session: SessionInfo
     children: list[SessionTreeNode]
+    # Newest `modified` anywhere in this subtree; a three-month-old root continued from a
+    # branch ten minutes ago has to sort as ten minutes old, not three months.
+    latestActivity: float = 0.0
 
 
 @dataclass(slots=True)
@@ -132,11 +135,20 @@ def build_session_tree(sessions: list[SessionInfo]) -> list[SessionTreeNode]:
         else:
             roots.append(node)
 
+    def update_latest_activity(node: SessionTreeNode) -> float:
+        latest = node.session.modified.timestamp()
+        for child in node.children:
+            latest = max(latest, update_latest_activity(child))
+        node.latestActivity = latest
+        return latest
+
     def sort_nodes(nodes: list[SessionTreeNode]) -> None:
-        nodes.sort(key=lambda entry: entry.session.modified, reverse=True)
+        nodes.sort(key=lambda entry: entry.latestActivity, reverse=True)
         for node in nodes:
             sort_nodes(node.children)
 
+    for root in roots:
+        update_latest_activity(root)
     sort_nodes(roots)
     return roots
 

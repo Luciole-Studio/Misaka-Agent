@@ -536,6 +536,11 @@ class Agent:
         try:
             await executor(self._active_run.abort_controller.signal)
         except BaseException as error:
+            # pi catches `Exception` here (agent.ts:502); the two BaseException-only
+            # exits have no JS equivalent and are not the model erroring -- turning
+            # Ctrl-C into a stopReason="error" message leaves the process running.
+            if isinstance(error, KeyboardInterrupt | SystemExit):
+                raise
             aborted = self.signal is not None and self.signal.aborted
             if isinstance(error, asyncio.CancelledError) and not aborted:
                 raise                      # the caller cancelled us: do not answer for them
