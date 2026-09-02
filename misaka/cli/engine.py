@@ -46,7 +46,11 @@ from misaka.core.session_cwd import (
     format_missing_session_cwd_prompt,
     get_missing_session_cwd_issue,
 )
-from misaka.core.session_manager import NewSessionOptions, SessionManager
+from misaka.core.session_manager import (
+    NewSessionOptions,
+    SessionManager,
+    sessions_root_of,
+)
 from misaka.core.settings_diagnostics import (
     collect_settings_diagnostics,
     deduplicate_diagnostics,
@@ -193,7 +197,7 @@ async def resolve_session_path(session_arg: str, cwd: str, session_dir: str | No
     if local_match is not None:
         return ResolvedSession(type="local", path=local_match.path)
 
-    global_sessions = await SessionManager.listAll()
+    global_sessions = await SessionManager.listAll(sessions_root_of(session_dir))
     global_match = next(
         (session for session in global_sessions if session.id == session_arg), None
     )
@@ -787,7 +791,7 @@ async def create_session_manager(
         try:
             selected_path = await selector(
                 lambda onProgress=None: SessionManager.list(cwd, session_dir, onProgress),
-                SessionManager.listAll,
+                lambda onProgress=None: SessionManager.listAll(sessions_root_of(session_dir), onProgress),
             )
             if not selected_path:
                 out.write(_format_colored_message("No session selected", _DIM) + "\n")

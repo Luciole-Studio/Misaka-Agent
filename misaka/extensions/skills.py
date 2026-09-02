@@ -430,7 +430,13 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
                 return
             cfg = skill_layers.load_skills_config()
             cfg["skill_write_mode"] = value
-            skill_layers.write_skills_config(cfg)
+            try:
+                skill_layers.write_skills_config(cfg)
+            except skill_layers.SkillsConfigError as error:
+                # A skills.json the user broke by hand is their file to fix; the
+                # refusal is the point, so say it rather than crash the command.
+                ctx.ui.notify(str(error), "error")
+                return
             ctx.ui.notify(f"Skill write mode set to {value}; it takes effect immediately.", "info")
 
         if kind == "foreground":         # the write mode is the user's to set, at the keyboard

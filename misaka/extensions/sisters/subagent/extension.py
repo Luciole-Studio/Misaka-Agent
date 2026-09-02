@@ -465,7 +465,7 @@ async def route_to_children(to: str, message: str, _summary: str, ctx: Any):
         try:
             # No ctx in the lookup on purpose: route only looks for live tasks (in memory or already
             # bound); binding a blank manager here would poison concurrent sessions (review 2026-08-20).
-            if manager._find_task(to) is None:
+            if await manager._find_task_async(to) is None:
                 continue
         except RuntimeError:
             continue

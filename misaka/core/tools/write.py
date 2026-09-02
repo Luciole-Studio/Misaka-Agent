@@ -14,7 +14,7 @@ from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.experimental import get_experimental_tool_sampling
 from misaka.core.extensions.types import ToolDefinition
-from misaka.core.tools._common import _drain_worker, abort_race
+from misaka.core.tools._common import _drain_worker, abort_race, write_file_text
 from misaka.core.tools.file_mutation_queue import with_file_mutation_queue
 from misaka.core.tools.path_utils import resolve_to_cwd
 from misaka.core.tools.render_utils import (
@@ -26,7 +26,6 @@ from misaka.core.tools.render_utils import (
 from misaka.core.tools.tool_definition_wrapper import wrap_tool_definition
 from misaka.ui.tui import Container, Text
 from misaka.ui.tui.interactive.theme.theme import get_language_from_path, highlight_code
-from misaka.utils import atomic
 from misaka.utils.values import read_field, signal_aborted
 
 
@@ -72,7 +71,7 @@ class WriteCallRenderComponent(Text):
 @dataclass(slots=True)
 class _DefaultWriteOperations:
     async def writeFile(self, absolute_path: str, content: str) -> None:
-        await asyncio.to_thread(atomic.write_text, absolute_path, content)   # atomic; keeps the file's mode
+        await asyncio.to_thread(write_file_text, absolute_path, content)   # follows symlinks; keeps the file's mode
 
     async def mkdir(self, directory: str) -> None:
         await asyncio.to_thread(os.makedirs, directory, exist_ok=True)

@@ -392,16 +392,18 @@ def relocate_node_tasks(con, node, old_root, new_root):
 
 # Cards past these statuses keep their dependency history as it is: the DAG must not be rewritten
 # under a moving card, and a finished one (whose node line may already be merged and gone) has
-# nothing left to wait for.
-_SETTLED_TASK_STATUSES = frozenset({"running", "review", "done", "failed", "stopped", "archived"})
+# nothing left to wait for. Read by ``_backfill_dependencies`` and by ``workflow._submit_tasks``,
+# the two places that replay a plan's edges onto cards that may already have run.
+SETTLED_TASK_STATUSES = frozenset({"running", "review", "done", "failed", "stopped", "archived"})
 
 
 def _backfill_dependencies(con):
     """Replay the stored local-id dependencies into the generic task DAG.
 
-    Idempotent and tolerant: it runs on every ``init``, so edges that already exist are skipped,
-    settled cards are left alone, and a card whose line no longer exists (a closed node's
-    worktree) cannot make the whole replay fail."""
+    Idempotent where nothing is wrong: edges that already exist are skipped, settled cards are
+    left alone, and a card whose line no longer exists (a closed node's worktree) cannot make the
+    replay fail. An edge that a *live* card refuses is the one thing it will not swallow -- see
+    the raise below."""
     rows = con.execute(
         "SELECT task_id,run_id,branch_id,local_id,depends_json FROM research_run_tasks"
     ).fetchall()
@@ -415,7 +417,7 @@ def _backfill_dependencies(con):
         if any(parent is None for parent in parents):
             continue
         task = task_store.get(con, row["task_id"])
-        if task is None or task["status"] in _SETTLED_TASK_STATUSES:
+        if task is None or task["status"] in SETTLED_TASK_STATUSES:
             continue
         from misaka.platform import cards as card_files
         if not os.path.isfile(card_files.card_path(task["workspace"], row["task_id"])):
@@ -426,17 +428,24 @@ def _backfill_dependencies(con):
                 continue
             try:
                 task_store.link_tasks(con, parent_id, row["task_id"])
-            except (ValueError, OSError):
-                continue        # settled meanwhile, or the card's line is gone: history, not an error
+            except (ValueError, OSError) as error:
+                # Everything that is merely history was skipped above -- a settled card, a card
+                # whose line is gone, an edge the file already carries. What is left here is a
+                # fault: an unreadable ancestor (so the acyclicity walk could not run), a cycle, a
+                # plan that names itself, or a file that would not take the write. The child's
+                # ``needs`` does not name this parent either way, and there is no status that can
+                # hold it back -- nothing in the board writes or honours a ``held`` card, and
+                # ``cards.reconcile`` writes the card file's own ``status`` back over any row we
+                # set here on the very next tick. So the replay refuses to finish quietly: it says
+                # which edge it could not write and why, and ``depends_json`` keeps the plan for
+                # the next attempt once the card that blocked the walk is fixed.
+                raise RuntimeError(
+                    f"Research dependency could not be replayed: {parent_id} -> {row['task_id']} "
+                    f"({error}) Fix that card, then run init again; until the edge exists the "
+                    "run's cards would execute out of order."
+                ) from error
         if dependencies:
-            con.execute(
-                "UPDATE tasks SET status='todo' WHERE id=? AND status='held'", (row["task_id"],)
-            )
             task_store.promote_task(con, row["task_id"])
-        else:
-            con.execute(
-                "UPDATE tasks SET status='ready' WHERE id=? AND status='held'", (row["task_id"],)
-            )
 
 
 def normalize_limits(raw=None):
@@ -669,13 +678,38 @@ def link_task(con, run_id, task_id, *, kind, node, preflight_artifact=None,
     else:
         card_exists = False
     if card_exists:
+        refused = []
         for dependency in dependencies:
             parent = con.execute(
                 "SELECT task_id FROM research_run_tasks WHERE run_id=? AND branch_id=? AND local_id=?",
                 (run_id, node["id"], dependency),
             ).fetchone()
-            if parent:
+            if not parent:
+                continue
+            try:
                 task_store.link_tasks(con, parent["task_id"], task_id)
+            except (ValueError, OSError) as error:
+                refused.append((parent["task_id"], str(error)))
+        if refused:
+            # An edge we cannot write has to be loud. The obvious softer landing -- park this one
+            # card in a `held` status and let ``_backfill_dependencies`` promote it later -- was
+            # tried and does not work: nothing else in the board writes or reads `held`, and
+            # ``cards.reconcile`` copies the card file's own `status` back over the row on the very
+            # next tick, so the card is `ready` again and dispatched before anyone notices. There
+            # is no state that holds a card whose file does not name its parent, so the caller is
+            # told instead, and ``depends_json`` (inserted above) keeps the plan for a later replay.
+            #
+            # Residual, deliberately not fixed here: with several parents, the edges that *did* get
+            # written already ran ``link_tasks``'s own tail -- ready -> todo plus ``promote_task``
+            # -- so a child whose written-out parents are all done is `ready` before this raise is
+            # reached, and stays dispatchable. Closing that needs every edge of one node written in
+            # a single transaction, which is a design change for a later wave.
+            task_store.add_event(con, task_id, "dependency_unlinked",
+                                 {"parents": [pid for pid, _ in refused], "reason": refused[0][1]})
+            raise RuntimeError(
+                f"Research dependency could not be linked onto {task_id}: {refused[0][1]} "
+                "The card's `needs` does not name that parent, so it would run out of order."
+            )
 
 
 def tasks(con, run_id, *, kind=None, node_id=None, issue_id=None):

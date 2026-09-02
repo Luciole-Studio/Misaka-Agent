@@ -74,8 +74,65 @@ _PARSED: dict[str, tuple] = {}
 _PARSED_CAP = 4096          # cards seen in one long-lived process; a cache, so overflow just drops it
 
 
+# Card files this process could not use: path -> (kind, reason). A card is a hand-edited file,
+# so a broken one is a normal accident; what it may not do is take every *other* card down with
+# it, since the traversals below walk the whole project on behalf of a single card's transition.
+# They skip a card they cannot use -- and record it here, because a skip nobody can see is the
+# same lost work by a quieter route. :func:`board` shows such a card as ``invalid`` so the person
+# who broke the file learns which file to fix.
+#
+# The three kinds are cleared by different readers, and confusing them loses the diagnosis:
+#   "unreadable" -- the bytes are there and do not parse (broken frontmatter, not UTF-8, a
+#                   directory or an unreadable mode in the file's place). Every reader hits it,
+#                   so any successful :func:`try_read` is proof the file was repaired and clears it.
+#   "missing"    -- there is no file at all. That is not a broken card: an index row whose file
+#                   never got written (pre-migration) is what ``board`` already shows as
+#                   ``missing_file``, and a card that does not exist declares no dependencies and
+#                   can hide no cycle. So it is kept apart from "unreadable" -- it is not listed
+#                   as a card that failed to parse, and it may not make a caller fail closed --
+#                   and, like "unreadable", any successful read clears it.
+#   "invalid"    -- it parses, but is not a usable card (an at-rest status no lifecycle can
+#                   produce, generation < 1, a field of the wrong type). ``try_read`` succeeds on
+#                   such a file, so only :func:`reconcile_one` -- the one reader that validates --
+#                   may clear it. Letting try_read clear it too meant the diagnosis died on the
+#                   next board() or dependency walk, and the board went on printing the stale
+#                   index status of a card that could never be dispatched.
+_INVALID: dict[str, tuple[str, str]] = {}
+
+
 def _forget(path):
     _PARSED.pop(str(path), None)
+    _INVALID.pop(str(path), None)
+
+
+def _note_invalid(path, error, kind):
+    # "no file there" is its own answer, never a parse failure: only a caller holding bytes it
+    # cannot make sense of has something to fail closed on.
+    if kind == "unreadable" and isinstance(error, (FileNotFoundError, NotADirectoryError)):
+        kind = "missing"
+    if len(_INVALID) >= _PARSED_CAP:
+        _INVALID.clear()
+    _INVALID[str(path)] = (kind, f"{type(error).__name__}: {error}")
+
+
+def unreadable_reason(path):
+    """Why this card file's content is unusable, or ``None``.
+
+    ``None`` also covers "there is no such file": a caller that must refuse to guess at a card's
+    contract (see ``tasks.parent_ids(strict=True)``) has nothing to refuse over when the file is
+    absent -- an absent card declares nothing, hides nothing, and cannot be repaired either.
+    """
+    entry = _INVALID.get(str(path))
+    return entry[1] if entry is not None and entry[0] != "missing" else None
+
+
+def invalid_cards():
+    """``{card path: why it could not be used}`` for every card skipped since process start.
+
+    Cards with no file at all are not in here; ``board`` lists their index rows as
+    ``missing_file`` instead, which says the repairable thing (``misaka init --migrate``).
+    """
+    return {path: reason for path, (kind, reason) in _INVALID.items() if kind != "missing"}
 
 
 def _write_file(path, text):
@@ -87,6 +144,29 @@ def read(path):
     """``{"fields": frontmatter, "body": contract text}`` for one card file."""
     parsed = parse_frontmatter(Path(path).read_text(encoding="utf-8"))
     return {"fields": parsed.frontmatter or {}, "body": (parsed.body or "").strip()}
+
+
+def try_read(path):
+    """:func:`read`, or ``None`` with the failure recorded in :func:`invalid_cards`.
+
+    Broken frontmatter raises ``FrontmatterError`` and a non-UTF-8 file raises
+    ``UnicodeDecodeError`` -- both ``ValueError``, neither an ``OSError``. For a caller that
+    walks every card in the project, one such file is one card's problem, not the project's.
+    A missing file is recorded apart from those, as ``missing``: nothing about it parsed badly.
+
+    Success clears an ``unreadable`` or ``missing`` note -- the file this reader just read is
+    proof of neither. It says nothing about whether the file is a *usable* card, so it may not
+    clear the ``invalid`` diagnosis :func:`reconcile_one` recorded.
+    """
+    try:
+        card = read(path)
+    except (OSError, ValueError) as error:
+        _note_invalid(path, error, "unreadable")
+        return None
+    note = _INVALID.get(str(path))
+    if note is not None and note[0] != "invalid":
+        del _INVALID[str(path)]
+    return card
 
 
 def iter_cards(workspace):
@@ -222,10 +302,8 @@ def attachment_list(base_dir, task_id, workspace=None):
             full = os.path.join(root, name)
             if os.path.isfile(full) and not os.path.islink(full):
                 out.append({"kind": "file", "path": full, "name": name})
-    try:
-        fields = read(card_path(workspace or base_dir, task_id))["fields"]
-    except OSError:
-        fields = {}
+    card = try_read(card_path(workspace or base_dir, task_id))
+    fields = card["fields"] if card is not None else {}
     out.extend({"kind": "url", "source": u, "name": u} for u in fields.get("urls") or [])
     return out
 
@@ -246,9 +324,25 @@ def board(con, workspace):
     rebuild(con, workspace)
     out, seen = [], set()
     for tid, path in iter_cards(workspace):
-        fields = read(path)["fields"]
+        card = try_read(path)
+        note = _INVALID.get(str(path))
         row = tasks.get(con, tid)
         seen.add(tid)
+        # Unparsable, or parsed and not a usable card (``rebuild`` above just decided that):
+        # either way ``reconcile_one`` refuses it, so it can never be dispatched. Printing the
+        # index row's status -- a mirror last written when the file was still good -- would tell
+        # the reader the card is ``ready`` while nothing will ever pick it up. Name the file.
+        if card is None or note is not None:
+            kind, reason = note if note is not None else ("unreadable", "unreadable card file")
+            fields = card["fields"] if card is not None else {}
+            title = str(fields.get("title") or (row["title"] if row is not None else "") or "")
+            out.append({"id": tid, "title": f"{title} (card file {kind}: {reason})".strip(),
+                        "assignee": str(fields.get("assignee")
+                                        or (row["assignee"] if row is not None else "") or ""),
+                        "status": "invalid", "invalid": reason,
+                        "origin_session": row["origin_session"] if row is not None else None})
+            continue
+        fields = card["fields"]
         out.append({"id": tid, "title": str(fields.get("title") or ""),
                     "assignee": str(fields.get("assignee") or ""),
                     "status": str(row["status"] if row is not None else fields.get("status") or "?"),
@@ -281,6 +375,10 @@ def remove(con, workspace, task_id):
     except OSError as error:
         return False, (f"Card {task_id} left the board but its file could not be deleted ({error}); "
                        f"remove {path} by hand or the card comes back on the next rebuild.")
+    # Deleting the file is the last repair a broken card can get: nothing will ever read it again,
+    # so nothing would ever clear its diagnosis, and it would go on being reported for the life of
+    # the process (and, through board(), to the person who just removed it).
+    _forget(path)
     attachments = attachment_dir(workspace, task_id)
     if os.path.isdir(attachments):
         import shutil
@@ -367,12 +465,20 @@ def reconcile_one(con, workspace, task_id):
     else:
         try:
             card = read(path)
-            fields, body = card["fields"], card["body"]
-            if str(fields.get("id") or "") != str(task_id):
-                return None
-            values = _card_values(fields, body)
-        except (OSError, TypeError, ValueError):
+        except (OSError, ValueError) as error:
+            _note_invalid(path, error, "unreadable")
             return None                     # a card we cannot use is re-read next pass, never cached
+        fields, body = card["fields"], card["body"]
+        try:
+            if str(fields.get("id") or "") != str(task_id):
+                raise ValueError(f"Card names id {fields.get('id')!r}, but its file is {task_id}.md")
+            values = _card_values(fields, body)
+        except (TypeError, ValueError) as error:
+            # Parses, but is not a card any lifecycle could have written. This is the only reader
+            # that can tell, so it is also the only one allowed to clear the note below.
+            _note_invalid(path, error, "invalid")
+            return None
+        _INVALID.pop(path, None)
         if len(_PARSED) >= _PARSED_CAP:
             _PARSED.clear()
         _PARSED[path] = (key, fields, body, values)
@@ -392,10 +498,17 @@ def reconcile_one(con, workspace, task_id):
         return card                         # an in-flight contract is immutable until it rests again
     if all(row[column] == values[column] for column in _MIRRORED):
         return card
+    # The status the SELECT above saw is part of the WHERE: between it and here another process
+    # can have claimed this card (``claim`` sets status='running' and the lease in one CAS), and
+    # this mirror is then holding a snapshot that is simply out of date. Writing it anyway would
+    # put the row back to 'ready' with the claimer's lock still on it -- every fenced write that
+    # worker makes afterwards fails, nobody can re-claim it, and the round's work is lost. Zero
+    # rows affected is that case, and it is not an error: the file's at-rest status is only ever
+    # a mirror of the live state, and the next pass reads both again.
     con.execute(
         "UPDATE tasks SET title=?,body=?,assignee=?,reviewer=?,executor=?,model=?,priority=?,"
-        "timeout_seconds=?,origin_session=?,status=?,generation=? WHERE id=?",
-        (*(values[column] for column in _MIRRORED), task_id),
+        "timeout_seconds=?,origin_session=?,status=?,generation=? WHERE id=? AND status=?",
+        (*(values[column] for column in _MIRRORED), task_id, row["status"]),
     )
     return card
 

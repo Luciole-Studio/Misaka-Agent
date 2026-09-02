@@ -616,16 +616,48 @@ def scan_skill(skill_path: Path, source: str = "community", *, honor_ignore: boo
     3. Invisible unicode character detection
 
     A skill may ship a `.skillignore` (or `.clawhubignore`) file with
-    gitignore-style patterns. Matching paths are excluded from BOTH the
-    structural checks and the pattern scan, so development/docs artifacts
-    that are not part of the installed skill (e.g. `SKILL-original.md`,
-    `docs/plans/`, `release-notes.md`) don't trip findings. The ignore
-    file itself is always excluded. Patterns cannot un-ignore the
-    skill's own `SKILL.md`, which is always scanned.
+    gitignore-style patterns, so development/docs artifacts that are not
+    part of the installed skill (e.g. `SKILL-original.md`, `docs/plans/`,
+    a vendored dependency tree) don't flood the report. The ignore file
+    is written by the party being scanned, so the line it can move is
+    drawn structurally rather than by guessing at its intent:
+
+    * Step 1, the structural checks, NEVER honor it. `symlink_escape`,
+      `broken_symlink`, the size and count limits see the whole
+      directory, so no ignore pattern — `*` included — can exempt a
+      skill from them. There is deliberately no "is this pattern too
+      broad?" heuristic: guessing at a glob's width is a race the
+      scanner cannot win, and the structural checks make it unnecessary.
+    * `binary_file` is the one structural item the ignore file moves,
+      because it says "I could not read this", not "this is hostile".
+      An ignored binary drops to an informational `ignored_binary_file`
+      that does not drive the verdict; an un-ignored one keeps its
+      critical severity.
+    * Step 2, the regex content scan, honors it — that is the point: a
+      legitimate skill that excludes a vendored tree is not condemned
+      for third-party code it merely ships.
+    * The ignore file itself is never content-scanned, and `SKILL.md`
+      can never be excluded.
+
+    Because the ignore file is written by the party being scanned, whether
+    to consult it at all is the caller's decision, and it turns on whether
+    that party is trusted:
+
+    * `honor_ignore=True` (default) is for skills the user owns — the
+      `skill_manage` tool, the user's own layers. Their ignore file is a
+      convenience and there is no adversary to defend against.
+    * `honor_ignore=False` is for anything arriving from a repository the
+      user merely opened. `misaka/skills/layers.py` uses it for the
+      project-skill quarantine, so a `.skillignore` of `*` cannot switch
+      off the content scan of `scripts/*.sh`. It also drops the
+      `binary_file` downgrade, so a vendored `.dylib` quarantines a project
+      skill; that false positive is the deliberate price of closing the
+      bypass, and the user can still approve such a skill explicitly.
 
     Args:
         skill_path: Path to the skill directory (must contain SKILL.md)
         source: Caller-supplied label for policy selection; it is not authenticated
+        honor_ignore: Whether the skill's own `.skillignore` narrows the content scan
 
     Returns:
         ScanResult with verdict, findings, and source-label metadata
@@ -636,10 +668,12 @@ def scan_skill(skill_path: Path, source: str = "community", *, honor_ignore: boo
     all_findings: list[Finding] = []
 
     if skill_path.is_dir():
-        ignore = _load_skill_ignore(skill_path) if honor_ignore else (lambda _rel: False)
+        ignore = _load_skill_ignore(skill_path) if honor_ignore else _ignore_nothing
 
-        # Structural checks first (honoring the ignore list)
-        all_findings.extend(_check_structure(skill_path, ignore=ignore))
+        # Structural checks see every file. `ignore` is passed only so an
+        # excluded binary can be reported informationally instead of as a
+        # critical finding; it cannot suppress anything else.
+        all_findings.extend(_check_structure(skill_path, ignore))
 
         # Pattern scanning on each file
         for f in skill_path.rglob("*"):
@@ -749,7 +783,7 @@ def format_scan_report(result: ScanResult) -> str:
 # Structural checks
 # ---------------------------------------------------------------------------
 
-def _check_structure(skill_dir: Path, ignore=None) -> list[Finding]:
+def _check_structure(skill_dir: Path, ignore) -> list[Finding]:
     """
     Check the skill directory for structural anomalies:
     - Too many files
@@ -758,16 +792,16 @@ def _check_structure(skill_dir: Path, ignore=None) -> list[Finding]:
     - Symlinks pointing outside the skill directory
     - Individual files that are too large
 
-    Args:
-        skill_dir: Path to the skill directory.
-        ignore: Optional callable taking a relative posix path and returning
-            True if the path should be excluded (e.g. from `.skillignore`).
-            Ignored files are not counted toward the file count, total size,
-            or any structural finding.
-    """
-    if ignore is None:
-        ignore = lambda _rel: False
+    Every file under the directory is walked, whatever the skill's own
+    `.skillignore` says (see scan_skill): letting the scanned party exclude
+    paths here would let it exclude its own escaping symlink.
 
+    `ignore` changes exactly one verdict-bearing thing: a binary file the skill
+    has excluded is reported as informational `ignored_binary_file` rather than
+    critical `binary_file`. "There is a file here I cannot read" is not by
+    itself evidence of harm, and a legitimate skill that vendors a compiled
+    dependency should not be quarantined for saying so out loud.
+    """
     findings = []
     file_count = 0
     total_size = 0
@@ -777,8 +811,6 @@ def _check_structure(skill_dir: Path, ignore=None) -> list[Finding]:
             continue
 
         rel = str(f.relative_to(skill_dir))
-        if ignore(rel):
-            continue
         file_count += 1
 
         # Symlink check — must resolve within the skill directory
@@ -829,14 +861,20 @@ def _check_structure(skill_dir: Path, ignore=None) -> list[Finding]:
         # Binary/executable files
         ext = f.suffix.lower()
         if ext in SUSPICIOUS_BINARY_EXTENSIONS:
+            excluded = ignore(rel)
             findings.append(Finding(
-                pattern_id="binary_file",
-                severity="critical",
+                pattern_id="ignored_binary_file" if excluded else "binary_file",
+                severity="low" if excluded else "critical",
                 category="structural",
                 file=rel,
                 line=0,
                 match=f"binary: {ext}",
-                description=f"binary/executable file ({ext}) should not be in a skill",
+                description=(
+                    f"binary file ({ext}) excluded by the skill's ignore file; it was not "
+                    "scanned (informational — see the ignore file to review it)"
+                    if excluded else
+                    f"binary/executable file ({ext}) should not be in a skill"
+                ),
             ))
 
         # Executable permission on non-script files
@@ -918,16 +956,26 @@ _ALWAYS_IGNORED_NAMES = set(SKILL_IGNORE_FILENAMES)
 _NEVER_IGNORABLE = {"SKILL.md"}
 
 
+def _ignore_nothing(_rel: str) -> bool:
+    return False
+
+
 def _load_skill_ignore(skill_dir: Path):
     """Build a matcher from a skill's `.skillignore` / `.clawhubignore`.
 
-    Returns a callable ``ignore(rel_posix_path) -> bool``. The matcher
-    supports gitignore-style basics: blank lines and ``#`` comments are
-    skipped, a trailing ``/`` marks a directory (matches that dir and
-    everything under it), and ``*``/``?`` globs are honored via fnmatch on
-    both the full relative path and each path segment. A leading ``/``
-    anchors a pattern to the skill root. The ignore files themselves are
-    always excluded; ``SKILL.md`` can never be excluded.
+    Returns a callable ``ignore(rel_posix_path) -> bool``. The matcher supports
+    gitignore-style basics: blank lines and ``#`` comments are skipped, a
+    trailing ``/`` marks a directory (matches that dir and everything under
+    it), and ``*``/``?`` globs are honored via fnmatch on both the full
+    relative path and each path segment. A leading ``/`` anchors a pattern to
+    the skill root. The ignore files themselves are always excluded;
+    ``SKILL.md`` can never be excluded.
+
+    No pattern is judged "too broad" here. That check existed and was removed:
+    every width heuristic is a glob-vs-glob race the scanner loses (a probe
+    path without a dot is dodged by ``*.*``, one with a dot by ``*[!.]*``,
+    and so on), while what it was defending — structural findings — is
+    defended for free by not consulting this matcher at all.
     """
     patterns: list[str] = []
     for name in SKILL_IGNORE_FILENAMES:

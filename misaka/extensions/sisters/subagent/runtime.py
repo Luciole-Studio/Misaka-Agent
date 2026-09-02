@@ -2837,7 +2837,7 @@ class SubagentManager:
         signal: Any,
         context: Any,
     ) -> dict[str, Any]:
-        task = self._find_task(task_id, context)
+        task = await self._find_task_async(task_id, context)
         if task is None:
             raise ValueError(f"No task found with ID: {task_id}")
         settled = getattr(task, "_settled", None)
@@ -2886,7 +2886,7 @@ class SubagentManager:
             raise ValueError("message must not be empty")
         if self._closed:
             raise RuntimeError("Sub-agent manager is closed")
-        task = self._find_task(ref, context)
+        task = await self._find_task_async(ref, context)
         if task is None:
             raise ValueError(f"No agent found with ID or name: {ref}")
         task.permission_context = context
@@ -3081,7 +3081,7 @@ class SubagentManager:
         await task.persist()
 
     async def stop_task(self, task_id: str, *, context: Any) -> dict[str, Any]:
-        task = self._find_task(task_id, context)
+        task = await self._find_task_async(task_id, context)
         if task is None:
             raise ValueError(f"No task found with ID: {task_id}")
         if task.status not in {"running", "pending"}:
@@ -3103,19 +3103,21 @@ class SubagentManager:
             "command": task.description,
         }
 
-    def _find_task(self, ref: str, context: Any = None) -> AgentTask | None:
-        agent_id = self._names.get(ref, ref)
-        if agent_id in self._tasks:
-            return self._tasks[agent_id]
-        if context is not None:
-            self._session_paths(context)
+    def _scan_metadata(self, ref: str, agent_id: str) -> list[AgentTask]:
+        """Load this session's metadata files, stopping at the first match.
+
+        Read-only on the manager (``_names``/``_metadata_dir``/``_parent_session_id``): the
+        registration half lives in `_adopt_scanned`, so this half can run in a worker thread.
+        """
+
         if self._metadata_dir is None:
-            return None
+            return []
         candidates: list[Path] = []
         if re.fullmatch(r"a[0-9a-f]{16}", agent_id):
             candidates.append(self._metadata_dir / f"agent-{agent_id}.meta.json")
         if ref not in self._names:
             candidates.extend(self._metadata_dir.glob("agent-*.meta.json"))
+        loaded: list[AgentTask] = []
         for path in dict.fromkeys(candidates):
             if not path.is_file():
                 continue
@@ -3129,12 +3131,65 @@ class SubagentManager:
                 task.transcript.expanduser().resolve().relative_to(self._metadata_dir.resolve())
             except (OSError, ValueError):
                 continue
-            self._tasks[task.id] = task
-            if task.name:
-                self._names[task.name] = task.id
+            loaded.append(task)
             if task.id == agent_id or task.name == ref:
+                break
+        return loaded
+
+    def _adopt_scanned(self, ref: str, agent_id: str, loaded: list[AgentTask]) -> AgentTask | None:
+        """Register the scanned snapshots that are not already in memory, and return the match.
+
+        A live task is never replaced by its own snapshot: `AgentTask.load` rewrites any
+        non-terminal status to ``failed`` and drops ``runner``, so without this guard a single
+        lookup for a mistyped address turned every running background agent into a dead stub —
+        unstoppable and never awaited on close (audit 2026-09-02, ext-sisters-lastorder-03).
+
+        Nothing here mutates the snapshot's own fields. Blanking `task.name` to keep
+        `_tasks`/`_names` paired looked local, but the object goes on to product code that
+        persists it (`task_output` sets ``notified`` and calls `AgentTask.persist`, whose
+        payload carries ``"name"``), so a read-only lookup by id rewrote the *other* agent's
+        meta file on disk to ``"name": null``. The snapshot is adopted under its id and
+        simply left out of `_names`; the live task keeps the name, and `_evict_old_tasks`
+        only ever unregisters a name that still points at the task being retired.
+        """
+
+        for task in loaded:
+            matched = task.id == agent_id or task.name == ref
+            live = self._tasks.get(task.id)
+            if live is not None:
+                task = live
+            else:
+                self._tasks[task.id] = task
+                if task.name and self._names.get(task.name, task.id) == task.id:
+                    self._names[task.name] = task.id
+            if matched:
                 return task
         return None
+
+    async def _find_task_async(self, ref: str, context: Any = None) -> AgentTask | None:
+        """Find a task by name or id, with the fallback disk scan off the event loop.
+
+        The scan globs the whole metadata directory and `AgentTask.load` may read a
+        multi-megabyte transcript (ext-sisters-lastorder-04).  Only the scan goes to a thread;
+        the registration stays on the loop so the "already live" guard cannot race a task
+        being spawned concurrently.
+        """
+
+        agent_id = self._names.get(ref, ref)
+        if agent_id in self._tasks:
+            return self._tasks[agent_id]
+        if context is not None:
+            self._session_paths(context)
+        loaded = await asyncio.to_thread(self._scan_metadata, ref, agent_id)
+        # The await is a window of its own: `spawn` may have registered this very task while
+        # the thread was reading a terminal snapshot of an older one off disk. Re-resolve
+        # before adopting, or the fresh live task loses to the stale scan -- the same defect
+        # the guard above exists to kill, one await later.
+        agent_id = self._names.get(ref, agent_id)
+        live = self._tasks.get(agent_id)
+        if live is not None:
+            return live
+        return self._adopt_scanned(ref, agent_id, loaded)
 
     def _evict_old_tasks(self) -> None:
         if len(self._tasks) < MAX_TASKS_PER_SESSION:
@@ -3145,7 +3200,10 @@ class SubagentManager:
         )
         for task in terminal[: max(1, len(self._tasks) - MAX_TASKS_PER_SESSION + 1)]:
             self._tasks.pop(task.id, None)
-            if task.name:
+            if task.name and self._names.get(task.name) == task.id:
+                # Only this task's own registration. An adopted snapshot may carry a name a
+                # newer task answers to (`_adopt_scanned` leaves it out of `_names`); popping
+                # by name alone unregistered the live task when the snapshot aged out.
                 self._names.pop(task.name, None)
 
     async def _create_worktree(self, task: AgentTask) -> Worktree:

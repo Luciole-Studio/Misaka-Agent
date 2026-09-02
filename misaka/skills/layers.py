@@ -29,14 +29,50 @@ def config_path():
     return os.path.join(home(), "skills.json")
 
 
+class SkillsConfigError(RuntimeError):
+    """skills.json is on disk but cannot be parsed, so it must not be overwritten."""
+
+
+def read_skills_config():
+    """Read skills.json as three states: ``(cfg, reason)``.
+
+    Missing file -> ``({}, None)``: nothing to lose, safe to write over. So is a
+    file that holds no settings — zero bytes, whitespace only, a lone BOM, or a
+    literal ``null``; refusing to write those would wedge every setting change
+    behind a file with nothing in it to protect.
+    Parsed -> ``(cfg, None)``. Present but unreadable, malformed, or not a JSON
+    object -> ``({}, reason)``: read-only callers fall back to the empty mapping,
+    while a read-modify-write caller must refuse to overwrite (see
+    write_skills_config). ``utf-8-sig`` matches write.py's ``_config``: a BOM
+    must not read as content.
+    """
+    path = config_path()
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            text = f.read()
+    except FileNotFoundError:
+        return {}, None
+    except (OSError, UnicodeDecodeError) as error:
+        return {}, f"{path}: {error}"
+    if not text.strip():
+        return {}, None
+    try:
+        raw = json.loads(text)
+    except ValueError as error:
+        return {}, f"{path}: {error}"
+    if raw is None:
+        return {}, None
+    if not isinstance(raw, dict):
+        return {}, f"{path}: expected a JSON object, found {type(raw).__name__}"
+    return raw, None
+
+
 def load_skills_config():
     """Load the skills configuration, treating invalid files as empty."""
-    try:
-        with open(config_path(), encoding="utf-8") as f:
-            raw = json.load(f)
-        return raw if isinstance(raw, dict) else {}
-    except (OSError, ValueError):
-        return {}
+    cfg, reason = read_skills_config()
+    if reason:
+        logger.warning("Ignoring unreadable skills configuration: %s", reason)
+    return cfg
 
 
 def disabled_skill_names():
@@ -48,6 +84,18 @@ def disabled_skill_names():
 
 
 def write_skills_config(cfg):
+    """Replace skills.json, refusing when the file on disk exists and does not parse.
+
+    Every caller reads the config, changes one key, and writes the whole file back, so
+    overwriting an unparseable file would silently destroy the user's ``disabled`` list
+    and ``external_dirs``.
+    """
+    reason = read_skills_config()[1]
+    if reason:
+        raise SkillsConfigError(
+            f"Refusing to overwrite the skills configuration: {reason}. "
+            "Fix or remove the file, then try again."
+        )
     atomic.write_text(config_path(), json.dumps(cfg, ensure_ascii=False, indent=2))
 
 
@@ -102,7 +150,19 @@ def is_quarantined_project_skill(skill_md):
     try:
         from misaka.skills import guard
 
-        result = guard.scan_skill(skill_dir, source=_PROJECT_SCAN_SOURCE)
+        # A project skill comes out of a repository the user merely cd'd into, so
+        # the party that writes `.skillignore` is the party being scanned. On this
+        # path the ignore file is not consulted at all: `honor_ignore=False`.
+        #
+        # That costs a false positive — a legitimate skill vendoring a `.dylib`
+        # quarantines on `binary_file`, and its author cannot ignore it away. The
+        # alternative costs a silent bypass: honoring the file lets a one-line
+        # `.skillignore` of `*` hide `scripts/*.sh` from the content scan, and a
+        # payload there loads with no warning at all. Fail-closed on untrusted
+        # input is the right side of that trade: quarantine is an inconvenience
+        # the user can override deliberately, a bypass is not something they can
+        # see. `skill_manage` keeps `honor_ignore=True` for skills the user owns.
+        result = guard.scan_skill(skill_dir, source=_PROJECT_SCAN_SOURCE, honor_ignore=False)
         verdict, summary = result.verdict, result.summary
     except Exception:
         logger.warning("Project skill scan failed; quarantining: %s", skill_dir, exc_info=True)

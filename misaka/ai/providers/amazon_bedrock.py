@@ -1198,7 +1198,9 @@ def convert_tool_config(
     elif isinstance(tool_choice, dict) and tool_choice.get("type") == "tool":
         bedrock_tool_choice = {"tool": {"name": tool_choice.get("name")}}
 
-    return {"tools": bedrock_tools, "toolChoice": bedrock_tool_choice}
+    # Pi emits `toolChoice: undefined`, which the Smithy serializer drops; botocore's
+    # parameter validation rejects an explicit None, so omit the key instead.
+    return {"tools": bedrock_tools, **({"toolChoice": bedrock_tool_choice} if bedrock_tool_choice is not None else {})}
 
 
 def map_stop_reason(reason: str | None) -> StopReason:
@@ -1279,7 +1281,8 @@ def build_additional_model_request_fields(
         "low": 2048,
         "medium": 8192,
         "high": 16384,
-        "xhigh": 16384,
+        "xhigh": 16384,  # Budget-based Claude clamps extended levels to high
+        "max": 16384,
     }
     thinking_budgets = _option(options, "thinkingBudgets")
     if isinstance(thinking_budgets, ThinkingBudgets):
@@ -1289,8 +1292,9 @@ def build_additional_model_request_fields(
     else:
         budget_map = {}
 
-    budget_key = "high" if reasoning == "xhigh" else reasoning
-    budget = budget_map.get(budget_key)
+    # Custom budgets only cover token-based levels through high; clamp_reasoning is the
+    # one place that fold lives (stream_simple_bedrock above takes the same route).
+    budget = budget_map.get(clamp_reasoning(reasoning))
     if budget is None:
         budget = default_budgets[reasoning]
     result = {

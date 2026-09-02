@@ -658,15 +658,33 @@ def delete_task(con, task_id, *, allow_active=False):
     con.execute("DELETE FROM task_runs WHERE task_id=?", (task_id,))
     if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_run_tasks'").fetchone():
         con.execute("DELETE FROM research_run_tasks WHERE task_id=?", (task_id,))   # a link without its card is a trap for resume
-    try:
-        from misaka.platform import cards
-        for child in _children_of(con, task_id):
-            child_row = get(con, child)
-            remaining = [p for p in parent_ids(con, child) if p != task_id]
+    from misaka.platform import cards
+    skipped = []
+    for child in _children_of(con, task_id):
+        # One child's accident is that child's alone. The handler lives inside the iteration on
+        # purpose: hoisted around the loop, a single casualty (a card file deleted concurrently
+        # between _children_of's walk and this rewrite) aborted the whole loop, and every
+        # surviving sibling kept a needs entry pointing at the card being deleted -- held at
+        # todo forever, waiting on a parent that no longer exists.
+        try:
+            remaining = [p for p in parent_ids(con, child, strict=True) if p != task_id]
+        except UnreadableCard as error:
+            skipped.append((child, error.reason))   # an empty read here would rewrite needs=None,
+            continue                                # dropping the child's *other* dependencies;
+                                                    # leave the file for its owner
+        child_row = get(con, child)
+        if child_row is None or not child_row["workspace"]:
+            skipped.append((child, "no index row"))     # a card file with no row to name its project
+            continue
+        try:
             cards.set_fields(child_row["workspace"], child, needs=remaining or None)
-            promote_task(con, child)
-    except OSError:
-        pass
+            promote_task(con, child)        # mirrors the child's file too, so it races the same way
+        except OSError as error:
+            skipped.append((child, str(error)))
+    for child, reason in skipped:
+        # On the *child*, which survives this deletion -- the parent's own events go with it.
+        add_event(con, child, "dependency_rewrite_skipped",
+                  {"parent_id": task_id, "reason": reason})
     con.execute(
         "DELETE FROM notification_events WHERE resource_type='task' AND resource_id=?",
         (task_id,),
@@ -677,8 +695,12 @@ def delete_task(con, task_id, *, allow_active=False):
     )
     con.execute("DELETE FROM tasks WHERE id=?", (task_id,))
     shutil.rmtree(task_state_dir(task_id), ignore_errors=True)
-    return True, (f"Card {task_id} and its runs, dependencies, events, budget, and to-do items "
-                  "were deleted. Its file, log, and attachments live in the project repository.")
+    message = (f"Card {task_id} and its runs, dependencies, events, budget, and to-do items "
+               "were deleted. Its file, log, and attachments live in the project repository.")
+    if skipped:
+        message += (" These cards still name it in needs and could not be rewritten: "
+                    + "; ".join(f"{child} ({reason})" for child, reason in skipped) + ".")
+    return True, message
 
 
 @_serialized
@@ -743,8 +765,10 @@ def fair_ready(con, *, limit=None, lane="workers", advance=True, now=None, works
 @_serialized
 def link_tasks(con, parent_id, child_id) -> bool:
     """Make ``child`` wait for ``parent``. The edge lives on the child's card file
-    (frontmatter ``needs``); same project only. Rejects self-links, cycles, and children
-    already moving; holds the child at todo until every dependency is done."""
+    (frontmatter ``needs``); same project only. Rejects self-links, cycles, children already
+    moving, and links whose acyclicity cannot be checked because a card on the way up is
+    unreadable; holds the child at todo until every dependency is done. Re-posting an edge the
+    child's file already carries is a no-op (``False``) whatever the child is doing."""
     if parent_id == child_id:
         raise ValueError("A task cannot depend on itself.")
     parent, child = get(con, parent_id), get(con, child_id)
@@ -752,19 +776,35 @@ def link_tasks(con, parent_id, child_id) -> bool:
         raise ValueError("Both ends of a dependency must be existing tasks.")
     if parent["workspace"] != child["workspace"]:
         raise ValueError("A dependency must stay inside one project.")
+    # Idempotency comes first, before every check that can refuse: an edge the child's file already
+    # carries is not a change to a moving card, it is that card's own history being re-posted. A
+    # resume replays a whole plan over cards that have since started, and the replay must be a
+    # no-op rather than the reason the node fails again. Only a *new* edge is refused below.
+    needs = parent_ids(con, child_id, strict=True)
+    if parent_id in needs:
+        return False
     if child["status"] in {"running", "review", "done"}:
         raise ValueError(f"Child task is {child['status']}; its dependencies cannot be changed.")
-    seen, frontier = set(), [parent_id]        # cycle iff the child is already upstream of the parent
+    # Cycle iff the child is already upstream of the parent. This walk is the only thing standing
+    # between a typo and a cycle written into the card files, and a cycle is not repairable by
+    # fixing the file that hid it: reconcile's fixed point then holds the whole chain at todo
+    # forever, with nothing on the board saying why. So it reads strictly -- an ancestor whose
+    # file will not parse means we do not know the graph, and an edge we cannot prove acyclic is
+    # refused. Refusing one new edge costs nobody their running work; the cycle costs the chain.
+    seen, frontier = set(), [parent_id]
     while frontier:
         current = frontier.pop()
         if current == child_id:
             raise ValueError("Task dependency creates a cycle.")
         if current not in seen:
             seen.add(current)
-            frontier.extend(parent_ids(con, current))
-    needs = parent_ids(con, child_id)
-    if parent_id in needs:
-        return False
+            try:
+                frontier.extend(parent_ids(con, current, strict=True))
+            except UnreadableCard as error:
+                raise ValueError(
+                    f"Dependency refused: {error} Its dependencies could decide whether this "
+                    "link closes a cycle, so fix that card first."
+                ) from error
     from misaka.platform import cards
     cards.set_fields(child["workspace"], child_id, needs=[*needs, parent_id])
     with _write_txn(con):
@@ -799,18 +839,41 @@ def _mirror_status(con, task_id, *, commit=False):
         )
 
 
+class UnreadableCard(ValueError):
+    """A card file had to be read to answer this, and could not be parsed."""
+
+    def __init__(self, task_id, path, reason):
+        super().__init__(f"Card {task_id}'s file cannot be read ({reason}): {path}")
+        self.task_id, self.path, self.reason = task_id, path, reason
+
+
 @_serialized
-def parent_ids(con, task_id):
-    """The card's dependencies, from its file's frontmatter ``needs`` (the table is gone)."""
+def parent_ids(con, task_id, *, strict=False):
+    """The card's dependencies, from its file's frontmatter ``needs`` (the table is gone).
+
+    An unreadable card answers ``[]`` for the walks that visit the whole project on one card's
+    behalf: one hand-broken file may not stop every other card (the failure is recorded in
+    ``cards.invalid_cards()``). ``strict=True`` raises :class:`UnreadableCard` instead, for the
+    caller that cannot tell "declares no dependencies" from "we could not find out" -- reading
+    the second as the first is how a cycle gets written into the files.
+
+    A card with no file at all is not that case, and is ``[]`` even under ``strict``. Such a row
+    is what ``cards.board`` shows as ``missing_file``: it has no frontmatter, so it declares no
+    dependencies and can hide no cycle, and refusing over it would refuse forever -- there is no
+    file to go and fix. Only bytes we hold and cannot parse make us say we do not know.
+    """
     row = get(con, task_id)
     if row is None or not row["workspace"]:
         return []
     from misaka.platform import cards
-    try:
-        needs = cards.read(cards.card_path(row["workspace"], task_id))["fields"].get("needs")
-    except OSError:
+    path = cards.card_path(row["workspace"], task_id)
+    card = cards.try_read(path)
+    if card is None:                        # unreadable: recorded in cards.invalid_cards()
+        reason = cards.unreadable_reason(path)      # None when there simply is no file
+        if strict and reason is not None:
+            raise UnreadableCard(task_id, path, reason)
         return []
-    return [str(x) for x in needs or []]
+    return [str(x) for x in card["fields"].get("needs") or []]
 
 
 def _children_of(con, parent_id):
@@ -821,10 +884,10 @@ def _children_of(con, parent_id):
     from misaka.platform import cards
     out = []
     for tid, path in cards.iter_cards(row["workspace"]):
-        try:
-            needs = cards.read(path)["fields"].get("needs") or []
-        except OSError:
-            continue
+        card = cards.try_read(path)
+        if card is None:                    # one broken file is one card's problem, not the
+            continue                        # whole project's: recorded in cards.invalid_cards()
+        needs = card["fields"].get("needs") or []
         if parent_id in [str(x) for x in needs]:
             out.append(tid)
     return out
@@ -1508,6 +1571,9 @@ def reopen_task(
         if invalidate_descendants:
             _invalidate_descendants(con, task_id)
         if target_status is None:
+            # Lenient on purpose: an unreadable card cannot reach the end of this call at all
+            # (``_mirror_status`` below rewrites its file and raises, rolling the row back), so
+            # the empty answer here is never the one that decides a reopened card's state.
             target_status = "todo" if parent_ids(con, task_id) else "ready"
         if target_status not in {"todo", "ready"}:
             raise ValueError("Only todo or ready tasks can be reset.")
@@ -1603,6 +1669,9 @@ def unblock_task(con, task_id) -> bool:
     row = get(con, task_id)
     if row is None or row["status"] not in {"blocked", "triage"}:
         return False
+    # Lenient for the same reason as ``reopen_task``: the ``_mirror_status`` below cannot write
+    # an unreadable card, so such a card's unblock raises and rolls back rather than resting on
+    # this answer. Holding it at ``todo`` instead would only be undone by ``promote_task``.
     target = "todo" if parent_ids(con, task_id) else "ready"
     with _write_txn(con):
         cur = con.execute(

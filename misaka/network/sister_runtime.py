@@ -1299,7 +1299,7 @@ class SisterRuntime:
         manager = _SisterManager(self.harness, self.cfg, row, row["workspace"])
         manager._semaphore = self._sister_semaphore
         manager._session_paths(context)
-        agent = manager._find_task(row["agent_id"], context)
+        agent = await manager._find_task_async(row["agent_id"], context)
         if agent is None:
             raise ValueError(f"Card {task_id} has no Sister session log.")
         if row["session_file"] and agent.transcript.resolve() != Path(row["session_file"]).resolve():

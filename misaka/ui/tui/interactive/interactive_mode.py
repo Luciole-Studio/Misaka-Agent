@@ -64,6 +64,7 @@ from misaka.core.session_manager import (
     InvalidSessionFileError,
     SessionManager,
     session_entry_to_context_messages,
+    sessions_root_of,
 )
 from misaka.core.settings_manager import DefaultProjectTrust
 from misaka.core.slash_commands import (
@@ -2572,6 +2573,44 @@ class InteractiveMode:
             clear()
         self.renderSessionEntries(self.sessionManager.buildContextEntries())
 
+    def _customMessageIsInTranscript(self, message: Any) -> bool:
+        """Has the custom message just announced already been written to the session?
+
+        ``AgentSession._handle_agent_event`` emits ``message_end`` *before* it calls
+        ``_persist_message``, and the TUI listener runs synchronously up to that point, so
+        a custom message delivered by the agent loop -- ``followUp``/``steer``/``prompt``,
+        which is how a Sisters task notification reaches the chat -- is announced while the
+        transcript still lacks its entry. Rebuilding from ``buildContextEntries()`` there
+        erases the card ``message_start`` just drew, and with tool results no longer
+        rebuilding it never comes back.
+
+        Counting rather than merely looking for a match keeps two identical cards apart:
+        the second one is unpersisted exactly when the chat already shows more copies than
+        the transcript holds.
+        """
+        custom_type = str(read_field(message, "customType", ""))
+        content = read_field(message, "content")
+
+        def _matches(item: Any) -> bool:
+            return (
+                str(read_field(item, "customType", "")) == custom_type
+                and read_field(item, "content") == content
+            )
+
+        persisted = sum(
+            1
+            for entry in (self.sessionManager.buildContextEntries() or [])
+            if read_field(entry, "type") in {"custom_message", "custom"} and _matches(entry)
+        )
+        if persisted == 0:
+            return False
+        drawn = sum(
+            1
+            for child in getattr(self.chatContainer, "children", [])
+            if isinstance(child, CustomMessageComponent) and _matches(child.message)
+        )
+        return persisted >= drawn
+
     def renderCurrentSessionState(self) -> None:
         clear = _callable_attr(self.chatContainer, "clear")
         if clear is not None:
@@ -4494,7 +4533,26 @@ class InteractiveMode:
                 self.footer.invalidate()
                 self._request_render()
                 return
-            self.renderCurrentSessionState()
+            if _message_role(message) == "custom":
+                # The rebuild belongs to custom messages alone: nothing else puts one at
+                # its transcript position, so agent_session defers announcing it until the
+                # entry exists and lets this redraw place it (agent_session.py
+                # _flush_pending_custom_messages). Every other role falls through to a
+                # plain render like pi does -- emit_tool_result_message sends a
+                # message_end per tool result, and rebuilding there cleared the transient
+                # notices, the compaction queue and the live tool components on every
+                # single tool call.
+                #
+                # ...but only once the entry is really there. A custom message delivered
+                # through the agent loop (followUp / steer / prompt) arrives here before
+                # agent_session._persist_message has written it, so the rebuild would read
+                # a transcript without it and clear the component message_start just drew.
+                if self._customMessageIsInTranscript(message):
+                    self.renderCurrentSessionState()
+                else:
+                    self._request_render()
+                return
+            self._request_render()
             return
         if event_type == "bash_execution_update":
             return
@@ -5123,7 +5181,14 @@ class InteractiveMode:
                     self.sessionManager.getSessionDir(),
                     onProgress,
                 ),
-                SessionManager.listAll,
+                # The bare `SessionManager.listAll` would take the selector's progress callback as
+                # its *root* overload (session_manager.py:1100) and list the engine default store,
+                # so `/resume`'s "all sessions" tab was a blank page under `dm` / `chat` /
+                # `card-shell`. Scope it to this run's store, exactly like `-r` (engine.py:794).
+                lambda onProgress=None: SessionManager.listAll(
+                    sessions_root_of(self.sessionManager.getSessionDir()),
+                    onProgress,
+                ),
                 lambda sessionPath: self._schedule_task(self._handle_session_select(sessionPath, done)),
                 lambda: (done(), self._request_render()),
                 lambda: self._schedule_task(self.shutdown()),

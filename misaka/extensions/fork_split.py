@@ -23,6 +23,10 @@ def activate(spec):
     if not os.environ.get("MISAKA_NET_PANE"):
         return None
     role = spec.role
+    # ``--as`` (cli/app.py:90) names a Sister the way chat.assembly resolves her --
+    # relative to profiles/sisters/ -- while the role is the path relative to profiles/
+    # (``sisters/10032``). Same trim as messages.py:16 and todo.py:11.
+    who = role.rsplit("/", 1)[-1]
 
     def register(harn, request=None, open_manager=None):
         pane_id = os.environ["MISAKA_NET_PANE"]
@@ -59,12 +63,14 @@ def activate(spec):
                     branch_manager.rewrite_file()
                 chat = [sys.executable, "-m", "misaka", "chat"]
                 if role != "last_order":           # chat.py:42 -- Last Order's role name
-                    chat += ["--as", role]
-                request("pane.create",
-                        {"argv": [*chat, "--session", branched], "cwd": manager.getCwd(),
-                         "title": "Last Order" if role == "last_order" else role,
-                         "place": {"split": pane_id}})
-                return True
+                    chat += ["--as", who]
+                created = request("pane.create",
+                                  {"argv": [*chat, "--session", branched], "cwd": manager.getCwd(),
+                                   "title": "Last Order" if role == "last_order" else who,
+                                   "place": {"split": pane_id}})
+                # Only a seated pane (daemon.py:1194 answers with its id) earns the cancel:
+                # cancelling first and failing second loses the fork at both ends.
+                return bool(created and created.get("pane_id"))
 
             try:
                 done = await asyncio.to_thread(split)

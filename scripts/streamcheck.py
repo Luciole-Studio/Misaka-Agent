@@ -65,8 +65,6 @@ STREAM_ALLOWED = {
     ("misaka/extensions/web/backends/ddgs.py", "create_subprocess_exec"): "communicate()",
     ("misaka/extensions/sisters/subagent/runtime.py", "create_subprocess_exec"): "git helper, communicate()",
     # PENDING -- audit findings that will remove these entries:
-    ("misaka/core/tools/grep.py", "create_subprocess_exec"): "PENDING core-tools-03 (P1)",
-    ("misaka/ui/panel/daemon.py", "start_unix_server"): "PENDING ui-panel-01 (P1)",
     ("misaka/ai/utils/oauth/anthropic.py", "start_server"): "PENDING cross-cutting-01 (OAuth callback)",
     ("misaka/ai/utils/oauth/openai_codex.py", "start_server"): "PENDING cross-cutting-01 (OAuth callback)",
     ("misaka/ai/utils/oauth/openrouter.py", "start_server"): "PENDING cross-cutting-01 (OAuth callback)",
@@ -77,19 +75,31 @@ STREAM_ALLOWED = {
 # a callback may stay off-loop needs the callback's body and its callees, which a static
 # pass cannot follow reliably; the audit judged these one by one, so the list -- not a
 # heuristic -- is the record. A new site must be judged and added.
+#
+# Keyed by (file, enclosing function) rather than line number: an edit anywhere above a
+# judged site used to shift its line and make this check fail for no reason, which trains
+# people to re-stamp the list instead of reading it.
 THREAD_ALLOWED = {
-    ("misaka/ui/tui/stdin_buffer.py", 231): "hands off via call_soon_threadsafe at :281",
-    ("misaka/ui/tui/terminal.py", 274): "hands off via call_soon_threadsafe at :607",
-    ("misaka/ui/tui/terminal.py", 476): "progress keepalive writes bytes only, touches no component",
-    ("misaka/ui/tui/tui.py", 479): "render tick re-enters through the loop's scheduled callback",
-    ("misaka/ui/tui/tui.py", 526): "render scheduling, same path as :479",
-    ("misaka/ui/tui/components/loader.py", 85): "spinner frame advance, no coroutine wake",
-    ("misaka/ui/tui/interactive/interactive_mode.py", 1770): "no-op keep-alive reference",
+    ("misaka/ui/tui/stdin_buffer.py", "process"): "hands off via call_soon_threadsafe in _on_flush_timer",
+    ("misaka/ui/tui/terminal.py", "schedule_keyboard_protocol_negotiation_buffer_flush"): (
+        "hands off via call_soon_threadsafe"
+    ),
+    ("misaka/ui/tui/terminal.py", "_schedule_progress_keepalive"): (
+        "writes bytes only, touches no component"
+    ),
+    ("misaka/ui/tui/tui.py", "_schedule_next_tick"): "render tick re-enters through the loop",
+    ("misaka/ui/tui/tui.py", "_scheduleRender"): "render scheduling, same path as _schedule_next_tick",
+    ("misaka/ui/tui/components/loader.py", "_scheduleNextFrame"): "spinner frame advance, no coroutine wake",
+    ("misaka/ui/tui/interactive/interactive_mode.py", "handleCtrlZ"): "no-op keep-alive reference",
     # PENDING -- audit findings that will remove these entries:
-    ("misaka/ui/tui/interactive/components/countdown_timer.py", 26): "PENDING ui-interactive-components-07",
-    ("misaka/ui/tui/interactive/components/tree_selector.py", 1081): "PENDING cross-cutting-03",
-    ("misaka/ui/tui/interactive/components/user_message_selector.py", 110): "PENDING cross-cutting-03",
-    ("misaka/ui/tui/interactive/theme/theme.py", 923): "PENDING ui-interactive-components-22",
+    ("misaka/ui/tui/interactive/components/countdown_timer.py", "__init__"): (
+        "PENDING ui-interactive-components-07"
+    ),
+    ("misaka/ui/tui/interactive/components/tree_selector.py", "__init__"): "PENDING cross-cutting-03",
+    ("misaka/ui/tui/interactive/components/user_message_selector.py", "__init__"): "PENDING cross-cutting-03",
+    ("misaka/ui/tui/interactive/theme/theme.py", "_start_theme_watcher"): (
+        "PENDING ui-interactive-components-22"
+    ),
 }
 
 
@@ -108,6 +118,17 @@ def _call_name(node: ast.Call) -> str:
     if isinstance(func, ast.Name):
         return func.id
     return ""
+
+
+def _enclosing_function(tree: ast.AST, node: ast.AST) -> str:
+    """Name of the innermost def containing node -- a key that survives edits above it."""
+    best = None
+    for candidate in ast.walk(tree):
+        if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            end = candidate.end_lineno or candidate.lineno
+            if candidate.lineno <= node.lineno <= end and (best is None or candidate.lineno > best.lineno):
+                best = candidate
+    return best.name if best is not None else "<module>"
 
 
 def _uses_readline(tree: ast.AST) -> bool:
@@ -147,10 +168,11 @@ def main() -> int:
             if (
                 rel.startswith("misaka/ui/")
                 and name in {"Timer", "Thread"}
-                and (rel, node.lineno) not in THREAD_ALLOWED
+                and (rel, _enclosing_function(tree, node)) not in THREAD_ALLOWED
             ):
                 thread_problems.append(
-                    f"  {rel}:{node.lineno} {name}(...) is a new off-loop timer/thread"
+                    f"  {rel}:{node.lineno} {name}(...) in "
+                    f"{_enclosing_function(tree, node)}() is a new off-loop timer/thread"
                 )
 
     if stream_problems:

@@ -35,6 +35,7 @@ from misaka.core.tools.truncate import (
     truncate_line,
 )
 from misaka.ui.tui import Text
+from misaka.utils.streams import STREAM_LIMIT
 from misaka.utils.tools_manager import find_tool, missing_tool_message
 from misaka.utils.values import maybe_await, read_field, signal_aborted
 
@@ -77,6 +78,11 @@ class GrepToolDetails:
     truncation: TruncationResult | None = None
     matchLimitReached: int | None = None
     linesTruncated: bool | None = None
+    # The search gave up part way through because a file has a line past STREAM_LIMIT.
+    # It is a detail, not only a tail note, because the collapsed result renders 15 lines
+    # and then reads the warnings from here: without it the one notice that says the
+    # result is incomplete is exactly the line the clip drops.
+    searchStoppedEarly: bool | None = None
 
 
 class GrepOperations(Protocol):
@@ -151,7 +157,8 @@ def _format_grep_result(result: Any, options: Any, theme_obj: Any, show_images: 
     match_limit = read_field(details, "matchLimitReached")
     truncation = read_field(details, "truncation")
     lines_truncated = read_field(details, "linesTruncated")
-    if match_limit or bool(read_field(truncation, "truncated")) or lines_truncated:
+    stopped_early = read_field(details, "searchStoppedEarly")
+    if match_limit or bool(read_field(truncation, "truncated")) or lines_truncated or stopped_early:
         warnings: list[str] = []
         if match_limit:
             warnings.append(f"{match_limit} matches limit")
@@ -159,6 +166,8 @@ def _format_grep_result(result: Any, options: Any, theme_obj: Any, show_images: 
             warnings.append(f"{format_size(read_field(truncation, 'maxBytes') or DEFAULT_MAX_BYTES)} limit")
         if lines_truncated:
             warnings.append("some lines truncated")
+        if stopped_early:
+            warnings.append("search stopped at an overlong line")
         warning_text = f"[Truncated: {', '.join(warnings)}]"
         text += "\n" + theme_obj.fg("warning", warning_text)
     return text
@@ -258,6 +267,7 @@ def create_grep_tool_definition(
                 *args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=STREAM_LIMIT,
             )
         except Exception as error:  # noqa: BLE001 - any spawn failure is reported as 'failed to run ripgrep'
             raise RuntimeError(f"Failed to run ripgrep: {error}") from None
@@ -268,6 +278,7 @@ def create_grep_tool_definition(
         lines_truncated = False
         aborted = False
         killed_due_to_limit = False
+        long_line_skipped = False
         matches: list[tuple[str, int, str | None]] = []
 
         def stop_process(due_to_limit: bool = False) -> None:
@@ -292,7 +303,20 @@ def create_grep_tool_definition(
                     await asyncio.gather(line_task, return_exceptions=True)
                     break
 
-                raw_line = await line_task
+                try:
+                    raw_line = await line_task
+                except ValueError:
+                    # readline() raises ValueError for a line past STREAM_LIMIT, and it
+                    # drops the buffered part of that line first: up to the newline when
+                    # the newline is already buffered, otherwise the entire buffer. So the
+                    # reader stays usable, but reading on would resume at an arbitrary
+                    # byte -- usually mid-line, with an unknown number of match events
+                    # already discarded -- and the results after it could not be trusted.
+                    # One minified file must not cost the caller every match already found
+                    # in the other files either, so stop here and say why.
+                    long_line_skipped = True
+                    stop_process(True)
+                    break
                 if not raw_line:
                     break
 
@@ -331,8 +355,18 @@ def create_grep_tool_definition(
         if not killed_due_to_limit and return_code not in {0, 1}:
             raise RuntimeError(stderr_text or f"ripgrep exited with code {return_code}")
 
+        long_line_notice = (
+            f"Search stopped early: a file has a line longer than {format_size(STREAM_LIMIT)} "
+            "(minified or single-line dump); anything after it was not searched"
+            if long_line_skipped
+            else None
+        )
+
         if match_count == 0:
-            return AgentToolResult(content=[TextContent(text="No matches found")], details=None)
+            no_matches = "No matches found"
+            if long_line_notice:
+                no_matches += f"\n\n[{long_line_notice}]"
+            return AgentToolResult(content=[TextContent(text=no_matches)], details=None)
 
         output_lines: list[str] = []
         for file_path, line_number, line_text in matches:
@@ -366,6 +400,9 @@ def create_grep_tool_definition(
         output = truncation.content
         details = GrepToolDetails()
         notices: list[str] = []
+        if long_line_notice:
+            notices.append(long_line_notice)
+            details.searchStoppedEarly = True
         if match_limit_reached:
             notices.append(
                 f"{effective_limit} matches limit reached. Use limit={effective_limit * 2} for more, or refine pattern"

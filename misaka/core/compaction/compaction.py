@@ -349,16 +349,47 @@ def estimate_tokens(message: AgentMessage) -> int:
     return 0
 
 
-def find_turn_start_index(entries: list[SessionEntry], entry_index: int, start_index: int) -> int:
+# Roles a cut may land on. toolResult is excluded: it must stay with its tool call.
+_CUT_POINT_ROLES = frozenset({"user", "assistant", "bashExecution", "custom", "branchSummary", "compactionSummary"})
+# Roles that open a turn. assistant/toolResult continue the turn they are in.
+_TURN_START_ROLES = frozenset({"user", "bashExecution", "custom", "branchSummary", "compactionSummary"})
+
+
+def _projected_messages(
+    entries: list[SessionEntry],
+    index: int,
+    projections: dict[int, list[AgentMessage]] | None,
+) -> list[AgentMessage]:
+    """The context projection of one entry, reusing ``projections`` when it has it.
+
+    ``session_entry_to_context_messages`` builds a fresh message for every
+    custom_message / branch_summary / compaction entry, and find_cut_point walks the same
+    range up to four times (cut points, keep window, metadata absorption, turn start), so
+    the projection is computed once per call and shared. An empty list is a real answer
+    (an entry the context cannot see) and is cached as such; ``None`` means "not cached".
+    """
+    if projections is not None:
+        cached = projections.get(index)
+        if cached is not None:
+            return cached
+    return session_entry_to_context_messages(entries[index])
+
+
+def _is_turn_start(entry: SessionEntry, messages: list[AgentMessage]) -> bool:
+    if _entry_field(entry, "type") == "compaction":
+        return False
+    return any(read_field(message, "role") in _TURN_START_ROLES for message in messages)
+
+
+def find_turn_start_index(
+    entries: list[SessionEntry],
+    entry_index: int,
+    start_index: int,
+    projections: dict[int, list[AgentMessage]] | None = None,
+) -> int:
     for index in range(entry_index, start_index - 1, -1):
-        entry = entries[index]
-        entry_type = _entry_field(entry, "type")
-        if entry_type in {"branch_summary", "custom_message"}:
+        if _is_turn_start(entries[index], _projected_messages(entries, index, projections)):
             return index
-        if entry_type == "message":
-            role = read_field(_entry_field(entry, "message"), "role")
-            if role in {"user", "bashExecution"}:
-                return index
     return -1
 
 
@@ -368,7 +399,10 @@ def find_cut_point(
     end_index: int,
     keep_recent_tokens: int,
 ) -> CutPointResult:
-    cut_points = _find_valid_cut_points(entries, start_index, end_index)
+    projections = {
+        index: session_entry_to_context_messages(entries[index]) for index in range(start_index, end_index)
+    }
+    cut_points = _find_valid_cut_points(entries, start_index, end_index, projections)
     if not cut_points:
         return CutPointResult(firstKeptEntryIndex=start_index, turnStartIndex=-1, isSplitTurn=False)
 
@@ -381,11 +415,15 @@ def find_cut_point(
     # every turn. "Cannot keep a full keepRecentTokens window" must mean keep less.
     cut_index = cut_points[-1]
 
+    # The keep window is measured over everything the context actually carries, so
+    # custom_message / branch_summary entries count here just like message entries -- and
+    # so does the previous compaction's own summary, which every second compaction walks
+    # over and which the context pays for exactly like any other message.
     for index in range(end_index - 1, start_index - 1, -1):
-        entry = entries[index]
-        if _entry_field(entry, "type") != "message":
+        message_tokens = sum(estimate_tokens(message) for message in projections[index])
+        if message_tokens == 0:
             continue
-        accumulated_tokens += estimate_tokens(_entry_field(entry, "message"))
+        accumulated_tokens += message_tokens
         if accumulated_tokens >= keep_recent_tokens:
             for candidate in cut_points:
                 if candidate >= index:
@@ -393,23 +431,20 @@ def find_cut_point(
                     break
             break
 
+    # Absorb adjacent entries that are invisible to the context; stop at a compaction
+    # boundary or at anything the context can see.
     while cut_index > start_index:
         previous = entries[cut_index - 1]
-        previous_type = _entry_field(previous, "type")
-        if previous_type == "compaction":
-            break
-        if previous_type == "message":
+        if _entry_field(previous, "type") == "compaction" or projections[cut_index - 1]:
             break
         cut_index -= 1
 
-    cut_entry = entries[cut_index]
-    cut_message = _entry_field(cut_entry, "message")
-    is_user_message = _entry_field(cut_entry, "type") == "message" and read_field(cut_message, "role") == "user"
-    turn_start_index = -1 if is_user_message else find_turn_start_index(entries, cut_index, start_index)
+    starts_turn = _is_turn_start(entries[cut_index], projections[cut_index])
+    turn_start_index = -1 if starts_turn else find_turn_start_index(entries, cut_index, start_index, projections)
     return CutPointResult(
         firstKeptEntryIndex=cut_index,
         turnStartIndex=turn_start_index,
-        isSplitTurn=(not is_user_message and turn_start_index != -1),
+        isSplitTurn=(not starts_turn and turn_start_index != -1),
     )
 
 
@@ -825,16 +860,18 @@ def _get_message_from_entry_for_compaction(entry: SessionEntry) -> AgentMessage 
     return messages[0] if messages else None
 
 
-def _find_valid_cut_points(entries: list[SessionEntry], start_index: int, end_index: int) -> list[int]:
+def _find_valid_cut_points(
+    entries: list[SessionEntry],
+    start_index: int,
+    end_index: int,
+    projections: dict[int, list[AgentMessage]] | None = None,
+) -> list[int]:
     cut_points: list[int] = []
     for index in range(start_index, end_index):
-        entry = entries[index]
-        entry_type = entry.get("type")
-        if entry_type == "message":
-            role = read_field(entry.get("message"), "role")
-            if role in {"bashExecution", "custom", "branchSummary", "compactionSummary", "user", "assistant"}:
-                cut_points.append(index)
-        if entry_type in {"branch_summary", "custom_message"}:
+        if _entry_field(entries[index], "type") == "compaction":
+            continue
+        messages = _projected_messages(entries, index, projections)
+        if any(read_field(message, "role") in _CUT_POINT_ROLES for message in messages):
             cut_points.append(index)
     return cut_points
 

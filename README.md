@@ -168,6 +168,7 @@ Terminal and panel:
 | `MISAKA_THEME` | the terminal's | `dark` or `light` |
 | `MISAKA_APP_TITLE` / `MISAKA_TAGLINE` | `MISAKA` | what the header shows |
 | `MISAKA_PANEL_PREFIX` | `ctrl+b` | the panel's prefix chord |
+| `MISAKA_TUI_ESC_TIMEOUT` | `10` ms, `100` under ssh | how long a lone ESC waits for an Alt+key second byte |
 | `MISAKA_ALLOW_NESTED` | unset | `1` allows opening the panel inside one of its own panes |
 | `MISAKA_HARDWARE_CURSOR` / `MISAKA_CLEAR_ON_SHRINK` | `settings.json`, else off | `1` enables; the settings file wins when it names them |
 | `MISAKA_OAUTH_CALLBACK_HOST` | `127.0.0.1` | host the OAuth loopback listener binds |

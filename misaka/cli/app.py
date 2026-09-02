@@ -742,4 +742,11 @@ def main(argv=None):
 
         return run_auth_command(argv[1:])
     args = _parser().parse_args(argv)
-    return COMMANDS[args.cmd](args)
+    from misaka.skills.layers import SkillsConfigError
+
+    try:
+        return COMMANDS[args.cmd](args)
+    except SkillsConfigError as error:
+        # A skills.json the user broke by hand is their file to fix, not a traceback.
+        print(f"misaka: {error}", file=sys.stderr)
+        return 1

@@ -217,9 +217,13 @@ def _coerce_with_json_schema(value: Any, schema: JsonSchemaObject) -> Any:
                 next_value = candidate
                 break
 
+    # Only the same value in another type ("1" for 1) is rescued. Matching on `type()`
+    # alone rewrote *any* out-of-enum string into the first member, so a model asking for
+    # an operation that does not exist silently ran a real one instead of getting the
+    # validation error back. Upstream has no enum branch at all.
     if "enum" in schema and isinstance(schema["enum"], list) and next_value not in schema["enum"]:
         for candidate in schema["enum"]:
-            if type(candidate) is type(next_value) or str(candidate) == str(next_value):
+            if str(candidate) == str(next_value):
                 next_value = candidate
                 break
 

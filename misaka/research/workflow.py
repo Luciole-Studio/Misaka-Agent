@@ -33,6 +33,9 @@ from misaka.research import ledger, planner, report, runs
 POLL_SECONDS = 2.0
 MAX_PROBE_ROUNDS = 3          # ponytail: a fork opens cards at most this many times before it must judge
 ACTIVE_TASKS = ("running", "review")
+# Statuses on which a *missing* plan edge is history rather than a fault: the card is finished (or
+# gone) and has nothing left to wait for. `running` is excluded on purpose -- see `_submit_tasks`.
+_EDGES_ARE_HISTORY = runs.SETTLED_TASK_STATUSES - {"running"}
 RESEARCH_DISCIPLINE = """[Research Workflow active]
 Last Order is now in Research mode. Each node of the research tree runs the same routine: Last Order plans and assigns
 Sisters (every task starts with a preflight plan), Last Order writes the node's conclusion in one pass, the red-team Sister she
@@ -207,9 +210,34 @@ async def _submit_tasks(con, run, cfg, worker, node, specs, *, kind, issue_id=No
     for spec in specs:
         if spec["local_id"] not in local_to_task:
             continue
-        for dependency in spec.get("dependencies") or []:
+        dependencies = spec.get("dependencies") or []
+        # The plan's own completeness is checked for every spec, whatever the card is doing: a
+        # dependency Last Order named and nobody created is a broken plan, and a card that had
+        # already settled must not be the reason we stop looking.
+        for dependency in dependencies:
             if dependency not in local_to_task:
                 raise RuntimeError(f"Research dependency was not created: {dependency}")
+        child = task_store.get(con, local_to_task[spec["local_id"]])
+        # A resume replays this pass over the cards of the first attempt: a node that failed after
+        # its research was done comes back through `planning` with every card already finished, and
+        # an edge that never reached one of those is history now -- nothing is left to wait for. So
+        # skip it, the same guard and the same reason as `runs._backfill_dependencies`. `running`
+        # is deliberately not in that set: a card someone claimed between its creation here and
+        # this pass still has its whole job ahead of it, so a *missing* edge on it is a real
+        # ordering fault and `link_tasks` should say so out loud. (An edge it already carries
+        # short-circuits inside `link_tasks` before any status check, so a plain replay is quiet.)
+        if child is None or child["status"] in _EDGES_ARE_HISTORY:
+            continue
+        # A refusal here is raised, not caught: the submit fails and the node with it. That is on
+        # purpose -- a missing edge silently dropped is out-of-order research with nothing on the
+        # board to say so -- but it is only half a guarantee, and the honest name for the other
+        # half is a known gap: these edges are posted one at a time, and each `link_tasks` that
+        # succeeds ends with its own ready -> todo + `promote_task`. So for a child with several
+        # parents, if the first edge lands and the second is refused, the child may already be
+        # `ready` (its remaining written parent being done is enough) and stays dispatchable after
+        # the raise. Nothing short of writing all of one node's edges in a single transaction
+        # closes that, which is a design change and deliberately not attempted here.
+        for dependency in dependencies:
             task_store.link_tasks(con, local_to_task[dependency], local_to_task[spec["local_id"]])
     return local_to_task
 

@@ -398,6 +398,27 @@ def get_default_session_dir(cwd: str, agent_dir: str | None = None) -> str:
     return get_session_dir_for_cwd(cwd, os.path.join(resolved_agent_dir, "sessions"))
 
 
+def sessions_root_of(session_dir: str | None) -> str | None:
+    """The store the "any bucket" lookup must search, given this run's session directory.
+
+    ``chat`` / ``dm`` / ``card-shell`` always pass one folder's bucket (``--<slug>-<sha256>--``,
+    see :func:`encode_cwd`), so the same role's other folders are its siblings: the store is the
+    bucket's parent. Anything else -- settings ``sessionDir``,
+    ``$MISAKA_CODING_AGENT_SESSION_DIR`` -- is already the store and stays as it is. Pi's session
+    dir is flat (one directory holding every cwd), which is why ``main.ts:267`` hands ``listAll``
+    the directory itself. ``None`` keeps the engine default.
+
+    Both ends of "all sessions" go through here: the CLI picker (``cli/engine.py``) and the TUI
+    ``/resume`` selector (``ui/tui/interactive/interactive_mode.py``), which is why it lives with
+    ``encode_cwd`` rather than in either caller.
+    """
+    if not session_dir:
+        return None
+    normalized = os.path.normpath(normalize_path(session_dir))
+    parent, name = os.path.split(normalized)
+    return parent if name.startswith("--") and name.endswith("--") else normalized
+
+
 def read_session_header(file_path: str) -> dict[str, Any]:
     """The header line of a session file (``id``, ``cwd``, ``timestamp``), or ``{}``.
     Reads one line: the panel calls this for every file it lists."""
@@ -1067,21 +1088,48 @@ class SessionManager:
         return sessions
 
     @classmethod
-    async def listAll(cls, onProgress: SessionListProgress | None = None) -> list[SessionInfo]:
-        sessions_dir = get_sessions_dir()
+    async def listAll(
+        cls,
+        sessionsRoot: str | SessionListProgress | None = None,
+        onProgress: SessionListProgress | None = None,
+    ) -> list[SessionInfo]:
+        """Every session under one sessions root (its per-cwd buckets), newest first.
+
+        pi session-manager.ts:1655-1663 overloads this the same way: the root is optional and a
+        lone callback is the progress reporting, so ``listAll(onProgress)`` keeps working."""
+        if callable(sessionsRoot):
+            sessionsRoot, onProgress = None, sessionsRoot
+        explicit_root = sessionsRoot is not None
+        sessions_dir = normalize_path(sessionsRoot) if sessionsRoot else get_sessions_dir()
+        root_files: list[str] = []
         try:
             if not os.path.exists(sessions_dir):
                 return []
+            entries = os.listdir(sessions_dir)
             directories = [
                 os.path.join(sessions_dir, entry)
-                for entry in os.listdir(sessions_dir)
+                for entry in entries
                 if os.path.isdir(os.path.join(sessions_dir, entry))
             ]
+            if explicit_root:
+                # A root handed in from outside is not always a tree of per-cwd buckets: pi
+                # (session-manager.ts:1664-1670) lists a custom session dir *flat*, and the dirs
+                # `misaka dm`, card-shell and settings `sessionDir` point at keep their .jsonl
+                # right here rather than one level down. Reading only the subdirectories left
+                # those roots listing nothing at all, so take both shapes -- the files lying
+                # here and the ones in the buckets below -- and a bucket root, a flat dir and a
+                # mix of the two all list.
+                root_files = [
+                    os.path.join(sessions_dir, entry)
+                    for entry in entries
+                    if entry.endswith(".jsonl")
+                    and os.path.isfile(os.path.join(sessions_dir, entry))
+                ]
         except OSError:
             return []
 
-        total_files = 0
-        directory_files: list[list[str]] = []
+        total_files = len(root_files)
+        directory_files: list[list[str]] = [root_files]
         for directory in directories:
             try:
                 files = [
@@ -1431,4 +1479,5 @@ __all__ = [
     "buildSessionContext",
     "build_context_entries",
     "session_entry_to_context_messages",
+    "sessions_root_of",
 ]

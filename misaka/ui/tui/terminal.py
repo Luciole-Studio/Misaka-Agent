@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import math
 import os
 import re
 import signal
@@ -46,10 +47,31 @@ APPLE_TERMINAL_SHIFT_ENTER_SEQUENCE = "\x1b[13;2u"
 DESIRED_KITTY_KEYBOARD_PROTOCOL_FLAGS = 7
 KEYBOARD_PROTOCOL_RESPONSE_FRAGMENT_TIMEOUT_MS = 150
 KITTY_KEYBOARD_PROTOCOL_QUERY = f"\x1b[>{DESIRED_KITTY_KEYBOARD_PROTOCOL_FLAGS}u\x1b[?u\x1b[c"
+DEFAULT_ESCAPE_TIMEOUT_MS = 10
+DEFAULT_SSH_ESCAPE_TIMEOUT_MS = 100
 
 _KITTY_FLAGS_RE = re.compile(r"^\x1b\[\?(\d+)u$")
 _DEVICE_ATTRS_RE = re.compile(r"^\x1b\[\?[\d;]*c$")
 _NEGOTIATION_PREFIX_RE = re.compile(r"^\x1b\[\?[\d;]*$")
+
+
+def resolve_escape_timeout_ms(env: Any = None) -> float:
+    """How long to wait after a lone ESC before dispatching it as the Escape key.
+
+    Legacy Alt+key input is ESC plus another byte, so a high-latency transport needs a
+    longer reassembly window; ssh gets 100ms unless the variable names something else.
+    Only ESC uses this: every other partial sequence waits the full sequence timeout.
+    """
+    environ = os.environ if env is None else env
+    try:
+        configured = float(environ.get("MISAKA_TUI_ESC_TIMEOUT") or 0)
+    except ValueError:
+        configured = 0.0
+    if math.isfinite(configured) and configured > 0:
+        return configured
+    if environ.get("SSH_CONNECTION") or environ.get("SSH_TTY"):
+        return DEFAULT_SSH_ESCAPE_TIMEOUT_MS
+    return DEFAULT_ESCAPE_TIMEOUT_MS
 
 
 def parse_keyboard_protocol_negotiation_sequence(sequence: str):
@@ -190,7 +212,7 @@ class ProcessTerminal:
         self.write(KITTY_KEYBOARD_PROTOCOL_QUERY)
 
     def setupStdinBuffer(self) -> None:
-        self.stdinBuffer = StdinBuffer({"timeout": 10}, loop=self.loop)
+        self.stdinBuffer = StdinBuffer({"escapeTimeout": resolve_escape_timeout_ms()}, loop=self.loop)
 
         def on_data(sequence: str) -> None:
             negotiation = self.read_keyboard_protocol_negotiation_sequence(sequence)

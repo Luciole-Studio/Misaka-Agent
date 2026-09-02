@@ -4,9 +4,23 @@ PORT-NOTE: upstream receives strings from Node after setEncoding("utf8"), where
 StringDecoder buffers partial multi-byte sequences across chunks. Here the input is raw
 bytes, so an incremental decoder is required; otherwise a >4KB CJK paste split at an
 os.read boundary yields U+FFFD (reliably reproducible).
-The 10ms flush timer runs on the event loop via loop.call_soon_threadsafe (Node's
+The flush timer runs on the event loop via loop.call_soon_threadsafe (Node's
 single-threaded semantics), which removes the race between the timer thread and the
-main thread over the buffer.
+main thread over the buffer. threading.Timer.cancel() is a no-op once the timer thread
+is past its own cancelled check, so every armed timer carries a generation number and a
+callback whose generation is stale returns without touching the buffer.
+
+PORT-NOTE (known residual, faithful to upstream): the arming site picks its window from
+the *whole* pending buffer -- `escapeTimeoutMs` when it is exactly one ESC, `timeoutMs`
+otherwise (stdin-buffer.ts:388 is the same ternary). So a bracketed paste whose opener is
+split right after the lone ESC (`b"\\x1b"` then `b"[200~..."`, the shape ssh/tmux produce
+when read(2) returns a single byte) still only gets the escape window, and a gap wider
+than `escapeTimeoutMs` shatters it into per-character key events with the literal
+`\\x1b[201~` closer landing in the text. Every other split point of the same opener is
+covered by the 50ms sequence window. Raising `MISAKA_TUI_ESC_TIMEOUT` (ssh already gets
+100ms, see terminal.resolve_escape_timeout_ms) reassembles it. Deliberately not diverged
+from upstream here; tests/test_stdin_buffer_timeouts.py pins the residual so a future
+change to it is a visible decision rather than a silent one.
 """
 
 from __future__ import annotations
@@ -21,6 +35,9 @@ from typing import Any, Literal
 _ESC = "\x1b"
 _BRACKETED_PASTE_START = "\x1b[200~"
 _BRACKETED_PASTE_END = "\x1b[201~"
+
+DEFAULT_SEQUENCE_TIMEOUT_MS = 50
+DEFAULT_ESCAPE_TIMEOUT_MS = 10
 
 type SequenceStatus = Literal["complete", "incomplete", "not-escape"]
 type StdinBufferEvent = Literal["data", "paste"]
@@ -153,7 +170,11 @@ class StdinBuffer:
         self.buffer = ""
         self.timeout: threading.Timer | None = None
         timeout = opts.get("timeout")
-        self.timeoutMs = 10 if timeout is None else timeout
+        self.timeoutMs = DEFAULT_SEQUENCE_TIMEOUT_MS if timeout is None else timeout
+        escape_timeout = opts.get("escapeTimeout")
+        # a lone ESC waits only long enough for an Alt+key second byte, so Escape stays snappy
+        self.escapeTimeoutMs = DEFAULT_ESCAPE_TIMEOUT_MS if escape_timeout is None else escape_timeout
+        self._timerSeq = 0
         self.pasteMode = False
         self.pasteBuffer = ""
         self.pendingKittyPrintableCodepoint: int | None = None
@@ -166,9 +187,7 @@ class StdinBuffer:
         return self
 
     def process(self, data: str | bytes | bytearray) -> None:
-        if self.timeout is not None:
-            self.timeout.cancel()
-            self.timeout = None
+        self._cancelTimeout()
 
         if isinstance(data, (bytes, bytearray)):
             raw = self._decoder.decode(bytes(data))  # a partial multi-byte sequence stays in the decoder until the next chunk
@@ -228,7 +247,13 @@ class StdinBuffer:
             self._emitDataSequence(sequence)
 
         if self.buffer:
-            self.timeout = threading.Timer(self.timeoutMs / 1000.0, self._on_flush_timer)
+            # A buffer that is exactly one ESC cannot tell "Escape key" from "first byte of
+            # a longer sequence", so it takes the short window -- including when it is the
+            # first byte of a bracketed-paste opener. See the module PORT-NOTE.
+            timeout_ms = self.escapeTimeoutMs if self.buffer == _ESC else self.timeoutMs
+            self._timerSeq += 1
+            seq = self._timerSeq
+            self.timeout = threading.Timer(timeout_ms / 1000.0, self._on_flush_timer, (seq,))
             self.timeout.daemon = True
             self.timeout.start()
 
@@ -246,9 +271,7 @@ class StdinBuffer:
         self._emit("data", sequence)
 
     def flush(self) -> list[str]:
-        if self.timeout is not None:
-            self.timeout.cancel()
-            self.timeout = None
+        self._cancelTimeout()
 
         if self.buffer == "":
             return []
@@ -259,9 +282,7 @@ class StdinBuffer:
         return sequences
 
     def clear(self) -> None:
-        if self.timeout is not None:
-            self.timeout.cancel()
-            self.timeout = None
+        self._cancelTimeout()
         self._decoder.reset()
         self.buffer = ""
         self.pasteMode = False
@@ -274,17 +295,27 @@ class StdinBuffer:
     def destroy(self) -> None:
         self.clear()
 
-    def _on_flush_timer(self) -> None:
+    def _cancelTimeout(self) -> None:
+        if self.timeout is not None:
+            self.timeout.cancel()
+            self.timeout = None
+        # cancel() is a no-op once the timer thread is past its own check, so retire the
+        # generation as well: the callback that is already on its way finds itself stale.
+        self._timerSeq += 1
+
+    def _on_flush_timer(self, seq: int) -> None:
         loop = self._loop
         if loop is not None and not loop.is_closed():
             try:
-                loop.call_soon_threadsafe(self._flush_timeout)
+                loop.call_soon_threadsafe(self._flush_timeout, seq)
                 return
             except RuntimeError:
                 pass
-        self._flush_timeout()
+        self._flush_timeout(seq)
 
-    def _flush_timeout(self) -> None:
+    def _flush_timeout(self, seq: int) -> None:
+        if seq != self._timerSeq:
+            return  # a newer process() already took over the buffer
         flushed = self.flush()
         for sequence in flushed:
             self._emitDataSequence(sequence)

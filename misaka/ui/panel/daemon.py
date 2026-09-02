@@ -33,6 +33,7 @@ from misaka.config import CFG
 from misaka.ui.panel import (
     geometry as hui,  # layout.rs port: split_at / remove_pane / pane_ids
 )
+from misaka.utils.streams import STREAM_LIMIT
 
 # Wire protocol version (strict equality, as in herdr). Bump it whenever *server
 # behaviour* changes, not only method/event shapes: an unbumped behaviour change
@@ -55,7 +56,16 @@ def _write_pty(fd, data):
     """Write all of ``data`` to a non-blocking PTY. ``os.write`` may take only part of the
     buffer; the remainder is retried until the queue is full. A pane whose program stops
     reading raises instead of silently truncating the input — no waiting: the daemon's
-    single event loop serves every pane, so blocking here would freeze all of them."""
+    single event loop serves every pane, so blocking here would freeze all of them.
+
+    Known limit (audit 2026-09-02, ui-panel-01): a terminal's input queue holds ~2 KiB, so a
+    send larger than that fails even for a healthy pane that would have read it. Round 3
+    queued the remainder per pane and drained it on writability, which delivered the big
+    payload but turned *every* send into ``{"sent": true}`` the moment the bytes were queued —
+    a pane stuck not reading answered success and the two product tools built on that reply
+    lost their only failure signal. Reverted to failing loudly. Closing the size limit for
+    real needs a delivery path that can wait: an awaitable `pane.send` that drains with a
+    deadline and reports what actually landed, not a fire-and-forget queue."""
     view = memoryview(data)
     while view:
         try:
@@ -505,6 +515,7 @@ class Daemon:
         self.snapshot_path = _expand(snapshot_path or CFG["net_snapshot"])
         self.panes: dict[str, Pane] = {}
         self._reapers = set()          # background kill-escalation tasks (close never blocks)
+        self._read_limit = STREAM_LIMIT   # request-reader limit; _read_line frames against it
         self._seq = 0
         # The layout, as in herdr: the server holds spaces -> tabs -> split trees and seats every
         # pane at creation; clients only draw it. {"id","folder","name","tabs":[{"name","tree"}]}
@@ -1274,14 +1285,50 @@ class Daemon:
             return {"stopping": True}
         raise ValueError(f"Unknown method: {method}")
 
+    async def _read_line(self, reader) -> bytes:
+        """One newline-terminated request, ``b""`` at EOF, ValueError once per over-long line.
+
+        `StreamReader.readline` cannot be used here. When a line outruns the reader's limit it
+        clears the whole buffer *before* the newline has necessarily arrived and raises, so the
+        tail of that one line kept coming and was parsed as line after line of junk: a single
+        70 KB request was answered with N error frames (audit 2026-09-02, ui-panel-01). Going
+        through `readuntil` keeps the accounting: every byte of the over-long line is dropped,
+        up to and including its newline, and the requests queued behind it are left alone."""
+
+        dropped = 0
+        while True:
+            try:
+                line = await reader.readuntil(b"\n")
+            except asyncio.IncompleteReadError as error:   # EOF with no newline in sight
+                if dropped:
+                    raise ValueError(
+                        f"Request line too long: {dropped + len(error.partial)} bytes with no "
+                        "newline before end of stream.") from None
+                return error.partial
+            except asyncio.LimitOverrunError as error:
+                # `consumed` bytes are known to hold no newline. Zero means the newline *is*
+                # buffered but sits past the limit, which by construction leaves the first
+                # `_read_limit` bytes newline-free -- so that much is safe to drop too.
+                dropped += len(await reader.readexactly(error.consumed or self._read_limit))
+                continue
+            if dropped:
+                raise ValueError(
+                    f"Request line too long: {dropped + len(line)} bytes discarded.") from None
+            return line
+
     async def _serve_client(self, reader, writer):
         self._clients.add(writer)
         try:
             while not self._stopping.is_set():
-                line = await reader.readline()
-                if not line:
-                    break
                 try:
+                    # The read belongs inside the try: on a line past the reader's limit it
+                    # raises ValueError, and letting that out killed the connection without a
+                    # reply -- for the panel's connection that meant the finally below read
+                    # "the panel left" and run() SIGTERMed every pane. _read_line also leaves
+                    # the stream framed, so one over-long request costs exactly one error frame.
+                    line = await self._read_line(reader)
+                    if not line:
+                        break
                     req = json.loads(line)
                     method = req.get("method", "")
                     if method == "pane.attach":   # subscription stream; "*" = screen events from every pane (tiled panel)
@@ -1297,7 +1344,7 @@ class Daemon:
                     else:
                         result = self._api(method, req.get("params") or {})
                     out = {"id": req.get("id"), "result": result}
-                except Exception as error:  # noqa: BLE001 - one failed request must not drop the connection
+                except Exception as error:  # noqa: BLE001 - one failed request (or one unreadable line) must not drop the connection
                     out = {"id": None, "error": f"{type(error).__name__}: {error}"}
                 writer.write((json.dumps(out, ensure_ascii=False) + "\n").encode())
                 try:
@@ -1333,7 +1380,10 @@ class Daemon:
                 probe.close()
             os.unlink(self.sock_path)
         os.makedirs(os.path.dirname(self.sock_path), exist_ok=True)
-        server = await asyncio.start_unix_server(self._serve_client, self.sock_path)
+        # A request line is one whole JSON object -- `pane.send` carries arbitrary user text,
+        # `layout.set` a whole space tree -- so asyncio's 64 KiB default is far too small.
+        server = await asyncio.start_unix_server(self._serve_client, self.sock_path,
+                                                 limit=self._read_limit)
         os.chmod(self.sock_path, 0o600)
         ally_commands()   # seed allies.json on first run so the user can edit it at any time
         skipped = self.restore_snapshot()

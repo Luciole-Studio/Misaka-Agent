@@ -105,6 +105,7 @@ class AssistantMessageComponent(Container):
             self.isStreaming = isStreaming
 
         content = list(read_field(message, "content", []) or [])
+        stop_reason = read_field(message, "stopReason")
 
         # Fast path: if the content is a single text block (the common
         # streaming case), update the existing Markdown via setText() instead
@@ -112,11 +113,13 @@ class AssistantMessageComponent(Container):
         # thread-safety race where the background render timer can observe
         # the container in a partially-cleared state (between clear() and
         # addChild()), producing incorrect line counts that corrupt the
-        # differential renderer.
+        # differential renderer.  Messages that stopped abnormally must take
+        # the full rebuild so the aborted/error/length notice is rendered.
         if (
             len(content) == 1
             and read_field(content[0], "type") == "text"
             and not self.hasToolCalls
+            and stop_reason not in ("aborted", "error", "length")
         ):
             text_value = read_field(content[0], "text", "")
             text = text_value.strip() if isinstance(text_value, str) else ""
@@ -208,28 +211,38 @@ class AssistantMessageComponent(Container):
             index += 1
 
         self.hasToolCalls = any(read_field(block, "type") == "toolCall" for block in content)
-        if self.hasToolCalls:
-            return
 
-        stop_reason = read_field(message, "stopReason")
+        # Length stops can happen before a tool call is complete, so surface
+        # them even when tool calls are present; for aborted/error the tool
+        # execution components already show the error.
         error_message = read_field(message, "errorMessage")
-        if stop_reason == "aborted":
-            abort_message = (
-                str(error_message)
-                if isinstance(error_message, str) and error_message and error_message != "Request was aborted"
-                else "Operation aborted"
-            )
-            self.contentContainer.addChild(Spacer(1))
-            self.contentContainer.addChild(Text(theme.fg("error", abort_message), self.outputPad, 0))
-        elif stop_reason == "error":
+        if stop_reason == "length":
             self.contentContainer.addChild(Spacer(1))
             self.contentContainer.addChild(
                 Text(
-                    theme.fg("error", f"Error: {error_message or 'Unknown error'}"),
+                    theme.fg("error", "Response was truncated before completion."),
                     self.outputPad,
                     0,
                 )
             )
+        elif not self.hasToolCalls:
+            if stop_reason == "aborted":
+                abort_message = (
+                    str(error_message)
+                    if isinstance(error_message, str) and error_message and error_message != "Request was aborted"
+                    else "Operation aborted"
+                )
+                self.contentContainer.addChild(Spacer(1))
+                self.contentContainer.addChild(Text(theme.fg("error", abort_message), self.outputPad, 0))
+            elif stop_reason == "error":
+                self.contentContainer.addChild(Spacer(1))
+                self.contentContainer.addChild(
+                    Text(
+                        theme.fg("error", f"Error: {error_message or 'Unknown error'}"),
+                        self.outputPad,
+                        0,
+                    )
+                )
 
 
 __all__ = ["AssistantMessageComponent"]

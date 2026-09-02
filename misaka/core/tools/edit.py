@@ -16,7 +16,12 @@ from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.experimental import get_experimental_tool_sampling
 from misaka.core.extensions.types import ToolDefinition
-from misaka.core.tools._common import _drain_worker, _string_arg, abort_race
+from misaka.core.tools._common import (
+    _drain_worker,
+    _string_arg,
+    abort_race,
+    write_file_text,
+)
 from misaka.core.tools.edit_diff import (
     Edit,
     EditDiffError,
@@ -35,7 +40,6 @@ from misaka.core.tools.path_utils import resolve_to_cwd
 from misaka.core.tools.render_utils import render_tool_path
 from misaka.core.tools.tool_definition_wrapper import wrap_tool_definition
 from misaka.ui.tui import Box, Container, Spacer, Text
-from misaka.utils import atomic
 from misaka.utils.values import read_field, signal_aborted
 
 type EditPreview = EditDiffResult | EditDiffError
@@ -130,7 +134,7 @@ class _DefaultEditOperations:
         return await asyncio.to_thread(Path(absolute_path).read_bytes)
 
     async def writeFile(self, absolute_path: str, content: str) -> None:
-        await asyncio.to_thread(atomic.write_text, absolute_path, content)   # atomic; keeps the file's mode
+        await asyncio.to_thread(write_file_text, absolute_path, content)   # follows symlinks; keeps the file's mode
 
     async def access(self, absolute_path: str) -> None:
         def _check() -> None:
