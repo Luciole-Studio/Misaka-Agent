@@ -150,6 +150,13 @@ def _report(engine, rows) -> dict:
     }
 
 
+# Why these two do not end in `context_engine.close_all()` the way embed/assertions/operations
+# do (audit ext-other-07, 2026-09-02): those five hand back a string and are done, but `plan` and
+# `run` are called against a live engine that the caller keeps using -- plan, apply, plan again to
+# show there is nothing left, which is how idempotence is checked and what this family's own tests
+# do. Closing here would leave that caller holding an engine whose store connection is None. The
+# lifetime belongs to the CLI branch that builds it (`misaka lcm externalize-backfill` in
+# cli/app.py), not to the two functions it calls. `run`'s VACUUM already folds the WAL back in.
 def plan(limit: int | None = None) -> dict:
     """What a backfill would move, without writing anything."""
     engine = context_engine.engine()

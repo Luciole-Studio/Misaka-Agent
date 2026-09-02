@@ -23,11 +23,14 @@ def resolve_cloudflare_base_url(model: Model) -> str:
         name = match.group(1)
         value = os.environ.get(name)
         if not value:
-            raise RuntimeError(f"{name} is required for provider {model.provider} but is not set.")
+            raise RuntimeError(
+                f"{name} is required for provider {model.provider} but is not set. "
+                f"Set {name} in the environment, or replace the {{{name}}} placeholder in the "
+                f"provider's baseUrl in models.json."
+            )
         return value
 
     return _PLACEHOLDER_PATTERN.sub(replace, url)
 
 
-__all__ = [
-    ]
+__all__ = ["is_cloudflare_provider", "resolve_cloudflare_base_url"]

@@ -52,22 +52,16 @@ class AgentDefinition:
     mcp_servers: list[Any] = field(default_factory=list)
     hooks: dict[str, Any] | None = None
 
+    # Frontmatter key -> field name, for the keys `_agent_value` is actually asked for.
+    # It is not a general vocabulary table: `parse` reads the frontmatter directly and
+    # only in camelCase (`permissionMode`, `maxTurns`, `initialPrompt`,
+    # `requiredMcpServers`, `mcpServers`), and `name`/`description` have no accepted
+    # alias at all -- a file written with `agentType:`/`whenToUse:` is skipped. Eleven
+    # further entries once sat here for spellings no caller ever looks up; they were
+    # removed rather than left implying a tolerance the parser does not have.
     _ALIASES: ClassVar[dict[str, str]] = {
-        "agentType": "name",
-        "whenToUse": "description",
-        "baseDir": "base_dir",
         "disallowed": "disallowed_tools",
         "disallowedTools": "disallowed_tools",
-        "permissionMode": "permission_mode",
-        "permission_mode": "permission_mode",
-        "maxTurns": "max_turns",
-        "max_turns": "max_turns",
-        "initialPrompt": "initial_prompt",
-        "initial_prompt": "initial_prompt",
-        "requiredMcpServers": "required_mcp_servers",
-        "required_mcp_servers": "required_mcp_servers",
-        "mcpServers": "mcp_servers",
-        "mcp_servers": "mcp_servers",
     }
 
 

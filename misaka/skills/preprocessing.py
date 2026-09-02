@@ -48,6 +48,14 @@ def run_inline_shell(command, cwd, timeout):
 
     Failures return a short ``[inline-shell error: ...]`` marker instead of
     raising, so one bad snippet can't wreck the whole skill message.
+
+    POSIX only, by contract: the snippet runs under ``bash -c``, not under the
+    per-platform shell ``misaka/utils/shell.py`` picks for the ``bash`` tool. A skill
+    author writing ``!`cmd`` is writing bash, and the substitution happens while a
+    SKILL.md is being read into a message -- there is no session shell to inherit and
+    nowhere to report a shell mismatch. On a Windows box with no ``bash`` on PATH every
+    snippet becomes its error marker; that is the declared behaviour, not a fallback
+    waiting to be written.
     """
     try:
         completed = subprocess.run(
@@ -62,7 +70,7 @@ def run_inline_shell(command, cwd, timeout):
     except subprocess.TimeoutExpired:
         return f"[inline-shell timeout after {timeout}s: {command}]"
     except FileNotFoundError:
-        return "[inline-shell error: bash not found]"
+        return "[inline-shell error: bash not found; inline shell snippets are POSIX-only]"
     except Exception as exc:  # noqa: BLE001 - one bad snippet must not take down the whole skill
         return f"[inline-shell error: {exc}]"
 

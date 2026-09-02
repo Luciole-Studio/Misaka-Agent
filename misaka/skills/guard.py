@@ -802,7 +802,7 @@ def scan_skill(skill_path: Path, source: str = "community", *, honor_ignore: boo
     )
 
 
-def should_allow_install(result: ScanResult, force: bool = False) -> tuple[bool, str]:
+def should_allow_install(result: ScanResult, force: bool = False) -> tuple[bool | None, str]:
     """
     Decide whether scanned skill content passes the configured source-label policy.
 
@@ -811,7 +811,10 @@ def should_allow_install(result: ScanResult, force: bool = False) -> tuple[bool,
         force: If True, override eligible blocked decisions for this scan result
 
     Returns:
-        (allowed, reason) tuple
+        ``(allowed, reason)``. The decision is three-valued, not boolean: ``True``
+        allows, ``False`` blocks, and ``None`` means the policy wants the user asked.
+        Test it with ``is True`` / ``is None``; a plain ``if allowed:`` reads "ask" as
+        "block", and ``if allowed is False:`` reads it as "allow".
     """
     policy = INSTALL_POLICY.get(result.trust_level, INSTALL_POLICY["community"])
     vi = VERDICT_INDEX.get(result.verdict, 2)

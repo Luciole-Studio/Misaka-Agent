@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import json
 import math
+import re
 import time
 from collections.abc import AsyncIterable, Mapping
 from functools import lru_cache
@@ -50,20 +50,26 @@ try:
 except ImportError:  # optional extra: misaka[mistral]
     _MistralClient = None
 
-from misaka.ai.providers._common import _empty_usage, _option, safe_json_stringify
+from misaka.ai.providers._common import (
+    _await_with_signal,
+    _empty_usage,
+    _iterate_async_iterable,
+    _option,
+    safe_json_stringify,
+)
 from misaka.ai.providers.constrained_sampling import (
     get_json_schema_tool_parameters,
     resolve_json_schema_strict_sampling,
 )
 from misaka.ai.providers.sdk import require
-from misaka.ai.utils.headers import apply_provider_headers
+from misaka.ai.utils.headers import apply_provider_headers, headers_to_record
 from misaka.ai.utils.user_agent import get_misaka_user_agent
 from misaka.utils.values import maybe_await, signal_aborted
 
 MISTRAL_TOOL_CALL_ID_LENGTH = 9
+_MISTRAL_ID_DISALLOWED = re.compile(r"[^a-zA-Z0-9]")
 MAX_MISTRAL_ERROR_BODY_CHARS = 4000
 MistralReasoningEffort = Literal["none", "high"]
-_STREAM_END = object()
 
 
 class MistralToolChoiceFunction(TypedDict):
@@ -90,35 +96,6 @@ class MistralOptions(TypedDict, total=False):
     reasoningEffort: MistralReasoningEffort
 
 
-async def _await_with_abort(request_factory: Any, signal: Any) -> Any:
-    if signal_aborted(signal):
-        raise RuntimeError("Request was aborted")
-
-    request = request_factory()
-    wait = getattr(signal, "wait", None)
-    if not callable(wait):
-        return await request
-
-    abort_waiter = wait()
-    if not hasattr(abort_waiter, "__await__"):
-        return await request
-
-    request_task = asyncio.create_task(request)
-    abort_task = asyncio.create_task(abort_waiter)
-
-    try:
-        done, _ = await asyncio.wait({request_task, abort_task}, return_when=asyncio.FIRST_COMPLETED)
-        if request_task in done:
-            return await request_task
-
-        request_task.cancel()
-        await asyncio.gather(request_task, return_exceptions=True)
-        raise RuntimeError("Request was aborted")
-    finally:
-        abort_task.cancel()
-        await asyncio.gather(abort_task, return_exceptions=True)
-
-
 def _coalesce_attr(obj: Any, *names: str) -> Any:
     for name in names:
         if isinstance(obj, Mapping):
@@ -129,41 +106,6 @@ def _coalesce_attr(obj: Any, *names: str) -> Any:
         if value is not None:
             return value
     return None
-
-
-async def _iterate_with_abort(iterable: AsyncIterable[Any], signal: Any) -> AsyncIterable[Any]:
-    iterator = aiter(iterable)
-
-    while True:
-        if signal_aborted(signal):
-            raise RuntimeError("Request was aborted")
-
-        next_item = anext(iterator, _STREAM_END)
-        wait = getattr(signal, "wait", None)
-        if not callable(wait):
-            item = await next_item
-        else:
-            abort_waiter = wait()
-            if not hasattr(abort_waiter, "__await__"):
-                item = await next_item
-            else:
-                next_task = asyncio.create_task(next_item)
-                abort_task = asyncio.create_task(abort_waiter)
-                try:
-                    done, _ = await asyncio.wait({next_task, abort_task}, return_when=asyncio.FIRST_COMPLETED)
-                    if next_task in done:
-                        item = await next_task
-                    else:
-                        next_task.cancel()
-                        await asyncio.gather(next_task, return_exceptions=True)
-                        raise RuntimeError("Request was aborted")
-                finally:
-                    abort_task.cancel()
-                    await asyncio.gather(abort_task, return_exceptions=True)
-
-        if item is _STREAM_END:
-            return
-        yield item
 
 
 def _get_mistral_client_class():
@@ -207,10 +149,23 @@ def stream_mistral(
             request_options = build_request_kwargs(model, options)
             sdk_payload = _prepare_sdk_chat_payload(payload)
             sdk_request_kwargs = _prepare_sdk_request_kwargs(request_options)
-            mistral_stream = await _await_with_abort(
-                lambda: maybe_await(mistral.chat.stream_async(**sdk_payload, **sdk_request_kwargs)),
+            mistral_stream = await _await_with_signal(
+                maybe_await(mistral.chat.stream_async(**sdk_payload, **sdk_request_kwargs)),
                 _option(options, "signal"),
             )
+            # The SDK's EventStreamAsync keeps the httpx.Response it was opened from;
+            # that is where the status and the gateway's headers live.
+            on_response = _option(options, "onResponse")
+            http_response = getattr(mistral_stream, "response", None)
+            if callable(on_response) and http_response is not None:
+                status = getattr(http_response, "status_code", None)
+                if status is not None:
+                    await maybe_await(
+                        on_response(
+                            {"status": int(status), "headers": headers_to_record(getattr(http_response, "headers", None) or {})},
+                            model,
+                        )
+                    )
             stream.push(StartEvent(partial=output))
             saw_finish_reason = await consume_chat_stream(
                 model, output, stream, mistral_stream, _option(options, "signal")
@@ -309,13 +264,16 @@ def create_mistral_tool_call_id_normalizer() -> Any:
 
 
 def derive_mistral_tool_call_id(tool_call_id: str, attempt: int) -> str:
-    normalized = "".join(char for char in tool_call_id if char.isalnum())
+    # Mistral's ids are `^[a-zA-Z0-9]{9}$`. `str.isalnum` is true for CJK and accented
+    # letters too, so a 9-character id like "abc工12345" used to pass through whole and be
+    # rejected by the API; pi strips with `[^a-zA-Z0-9]` and hashes what is left.
+    normalized = _MISTRAL_ID_DISALLOWED.sub("", tool_call_id)
     if attempt == 0 and len(normalized) == MISTRAL_TOOL_CALL_ID_LENGTH:
         return normalized
 
     seed_base = normalized or tool_call_id
     seed = seed_base if attempt == 0 else f"{seed_base}:{attempt}"
-    return "".join(char for char in short_hash(seed) if char.isalnum())[:MISTRAL_TOOL_CALL_ID_LENGTH]
+    return _MISTRAL_ID_DISALLOWED.sub("", short_hash(seed))[:MISTRAL_TOOL_CALL_ID_LENGTH]
 
 
 def format_mistral_error(error: Any) -> str:
@@ -418,7 +376,8 @@ def _prepare_sdk_request_kwargs(request_options: Mapping[str, Any]) -> dict[str,
     """Only what ``Chat.stream_async`` declares: it is generated code with a fixed keyword
     list and no ``**kwargs``, so anything extra -- an abort signal above all, which the
     agent loop always supplies -- is a TypeError raised before the request is sent.
-    Abort is handled here by ``_await_with_abort``/``_iterate_with_abort`` instead.
+    Abort is handled here by ``_common``'s ``_await_with_signal`` / ``_iterate_async_iterable``
+    instead.
     """
     sdk_request_kwargs: dict[str, Any] = {}
     headers = request_options.get("headers")
@@ -604,7 +563,7 @@ async def consume_chat_stream(
         else:
             stream.push(ThinkingEndEvent(contentIndex=block_index(), content=block.thinking, partial=output))
 
-    async for event in _iterate_with_abort(mistral_stream, signal):
+    async for event in _iterate_async_iterable(mistral_stream, signal):
         chunk = _coalesce_attr(event, "data") or event
         output.responseId = output.responseId or _coalesce_attr(chunk, "id")
 

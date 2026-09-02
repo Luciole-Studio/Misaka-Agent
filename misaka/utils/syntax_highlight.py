@@ -17,7 +17,16 @@ HighlightTheme = dict[str, HighlightFormatter]
 @dataclass(slots=True)
 class HighlightOptions:
     language: str | None = None
+    # Accepted for source compatibility with upstream's highlight.js options and inert
+    # here: highlight.js aborts a highlight on an illegal match unless told not to,
+    # while Pygments never aborts -- it emits `Token.Error` and keeps going. So this
+    # side always behaves as `ignoreIllegals: True`, which is what both in-repo callers
+    # ask for; nothing reads the field.
     ignoreIllegals: bool | None = None
+    # Only consulted when `language` is unset. Both in-repo callers gate on
+    # `supports_language()` and always pass `language`, so the scoring loop below and
+    # the `guess_lexer` fallback are reached only through this module's public
+    # `highlight()` from outside the repo (an extension, a test).
     languageSubset: Sequence[str] | None = None
     theme: HighlightTheme | None = None
 

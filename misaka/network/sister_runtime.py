@@ -39,6 +39,9 @@ from misaka.skills import sandbox as skill_sandbox
 
 TERMINAL_BOARD_STATUSES = frozenset({"done", "failed", "stopped", "blocked", "triage"})
 ACTIVE_BOARD_STATUSES = frozenset({"running", "review"})
+# `output`'s fallback tick. A run this process owns wakes it through `handle.done`; the poll
+# is only there for a card another process settles, so it is a backstop, not the mechanism.
+_OUTPUT_POLL_SECONDS = 1.0
 from misaka.extensions.sisters.subagent.child import (
     PROCESS_GROUP_IDENTITY,  # single source of truth for the wire constant
 )
@@ -1275,7 +1278,7 @@ class SisterRuntime:
                         if handle and not handle.done.is_set()
                         else None
                     )
-                    tick = asyncio.create_task(asyncio.sleep(min(0.1, remaining)))
+                    tick = asyncio.create_task(asyncio.sleep(min(_OUTPUT_POLL_SECONDS, remaining)))
                     watchers = {tick}
                     if local_done:
                         watchers.add(local_done)
@@ -1290,7 +1293,10 @@ class SisterRuntime:
                         item.cancel()
                     if aborted and aborted in done:
                         raise asyncio.CancelledError
-                    row = db.get(self.con, task_id)
+                    # A blocking board read, off the loop the way `_reconcile_abandoned`
+                    # and `fair_ready` already are: at a 100 ms tick this ran hundreds of
+                    # times per wait and each one could sit on the board's busy timeout.
+                    row = await asyncio.to_thread(db.get, self.con, task_id)
             finally:
                 if aborted:
                     aborted.cancel()

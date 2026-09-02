@@ -6,10 +6,32 @@ import os
 import re
 from typing import Any
 
+from misaka.core.experimental import are_experimental_features_enabled
 from misaka.core.usage_totals import addUsageToTotals, createUsageTotals
 from misaka.ui.tui import truncateToWidth, visibleWidth
 from misaka.ui.tui.interactive.theme.theme import theme
 from misaka.utils.values import read_field
+
+
+def collapse_home(path: str) -> str:
+    """Replace the home prefix with ``~``, by path component (pi footer.ts formatCwdForFooter).
+
+    A plain ``startswith(home)`` is a string test, not a path test: with HOME=/home/ab it turns
+    /home/abc/proj into "~c/proj", and a HOME with a trailing slash eats the separator
+    ("~x" instead of "~/x").
+    """
+    home = os.path.expanduser("~")
+    if not path or not home:
+        return path
+    try:
+        relative = os.path.relpath(path, home)
+    except ValueError:      # different drives on Windows; nothing to collapse
+        return path
+    if relative == os.curdir:
+        return "~"
+    if relative == os.pardir or relative.startswith(os.pardir + os.sep) or os.path.isabs(relative):
+        return path
+    return "~" + os.sep + relative
 
 
 def sanitize_status_text(text: str) -> str:
@@ -49,6 +71,7 @@ class FooterComponent:
     def render(self, width: int) -> list[str]:
         state = self.session.state
         usage_totals = createUsageTotals()
+        latest_cache_hit_rate: float | None = None
 
         # pi footer.ts:92-105 counts three kinds of entry, not one: assistant messages,
         # tool results that carry their own usage (subagent/summariser tools report back
@@ -59,7 +82,15 @@ class FooterComponent:
                 message = read_field(entry, "message")
                 role = read_field(message, "role")
                 if role == "assistant":
-                    addUsageToTotals(usage_totals, read_field(message, "usage") or {})
+                    usage = read_field(message, "usage") or {}
+                    addUsageToTotals(usage_totals, usage)
+                    prompt_tokens = (
+                        int(read_field(usage, "input", 0) or 0)
+                        + int(read_field(usage, "cacheRead", 0) or 0)
+                        + int(read_field(usage, "cacheWrite", 0) or 0)
+                    )
+                    cache_read = int(read_field(usage, "cacheRead", 0) or 0)
+                    latest_cache_hit_rate = (cache_read / prompt_tokens) * 100 if prompt_tokens > 0 else None
                 elif role == "toolResult" and read_field(message, "usage"):
                     addUsageToTotals(usage_totals, read_field(message, "usage"))
             elif entry_type in ("branch_summary", "compaction") and read_field(entry, "usage"):
@@ -71,10 +102,7 @@ class FooterComponent:
         context_percent_value = float(read_field(context_usage, "percent", 0) or 0)
         context_percent = f"{context_percent_value:.1f}" if read_field(context_usage, "percent") is not None else "?"
 
-        pwd = self.session.sessionManager.getCwd()
-        home = os.path.expanduser("~")
-        if pwd.startswith(home):
-            pwd = f"~{pwd[len(home):]}"
+        pwd = collapse_home(self.session.sessionManager.getCwd())
 
         branch = self.footerData.getGitBranch()
         if branch:
@@ -93,6 +121,8 @@ class FooterComponent:
             stats_parts.append(f"R{format_tokens(usage_totals.cacheRead)}")
         if usage_totals.cacheWrite:
             stats_parts.append(f"W{format_tokens(usage_totals.cacheWrite)}")
+        if (usage_totals.cacheRead or usage_totals.cacheWrite) and latest_cache_hit_rate is not None:
+            stats_parts.append(f"CH{latest_cache_hit_rate:.1f}%")
 
         # Kimi Coding is subscription-backed despite using API-key authentication.
         using_subscription = bool(
@@ -117,6 +147,8 @@ class FooterComponent:
         else:
             context_percent_str = context_percent_display
         stats_parts.append(context_percent_str)
+        if are_experimental_features_enabled():
+            stats_parts.append(theme.fg("dim", "•") + " " + theme.bold(theme.fg("warning", "xp")))
 
         stats_left = " ".join(stats_parts)
         model_name = read_field(model, "id", "no-model") or "no-model"

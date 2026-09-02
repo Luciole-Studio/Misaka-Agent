@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 from pathlib import Path
 
 from misaka.config import CONFIG_DIR_NAME, get_agent_dir, get_bin_dir
@@ -93,8 +94,12 @@ def migrate_sessions_from_agent_root() -> None:
 
     for session_file in files:
         try:
-            first_line = session_file.read_text(encoding="utf-8-sig").splitlines()[0]
-            header = json.loads(first_line)
+            # One line, not the whole file: an appended-to session is routinely tens of MB
+            # and only its header decides where it belongs. Read locally rather than via
+            # `session_manager.read_session_header`, which opens with plain "utf-8" and so
+            # returns {} for the BOM-prefixed files this migration exists to rescue.
+            with session_file.open(encoding="utf-8-sig") as handle:
+                header = json.loads(handle.readline())
             if header.get("type") != "session" or not isinstance(header.get("cwd"), str):
                 continue
             target_dir = Path(get_default_session_dir(header["cwd"], str(agent_dir)))
@@ -132,25 +137,39 @@ def migrate_legacy_session_buckets() -> int:
             if not bucket.is_dir() or not bucket.name.startswith("--"):
                 continue
             for session_file in sorted(bucket.glob("*.jsonl")):
-                header = read_session_header(str(session_file))
-                cwd = header.get("cwd")
-                if not isinstance(cwd, str) or not cwd:
+                # Per file, like `migrate_sessions_from_agent_root`: one unreadable session
+                # (permissions, a file deleted mid-scan, a full target disk) used to abort
+                # the whole run, taking the four migrations queued after it in
+                # `run_migrations` with it.
+                try:
+                    header = read_session_header(str(session_file))
+                    cwd = header.get("cwd")
+                    if not isinstance(cwd, str) or not cwd:
+                        continue
+                    canonical = _canonical_cwd(cwd)
+                    if bucket.name not in {_legacy_encode_cwd(cwd), _legacy_encode_cwd(canonical)}:
+                        continue                   # already canonical, or someone else's bucket
+                    target_dir = role_dir / encode_cwd(canonical)
+                    if target_dir == bucket:
+                        continue
+                    target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    target = target_dir / session_file.name
+                    if target.exists():
+                        target = target_dir / f"legacy-{session_file.stem}.jsonl"
+                    if target.exists():
+                        continue
+                    try:
+                        # Same filesystem in every realistic layout (both buckets live under
+                        # the same role dir), so this is a rename, not a copy of a file that
+                        # can be hundreds of MB. `chmod` keeps the 0o600 the copy path set.
+                        os.replace(session_file, target)
+                        os.chmod(target, 0o600)
+                    except OSError:
+                        atomic.write_bytes(target, session_file.read_bytes(), mode=0o600)
+                        session_file.unlink()
+                    moved += 1
+                except OSError:
                     continue
-                canonical = _canonical_cwd(cwd)
-                if bucket.name not in {_legacy_encode_cwd(cwd), _legacy_encode_cwd(canonical)}:
-                    continue                       # already canonical, or someone else's bucket
-                target_dir = role_dir / encode_cwd(canonical)
-                if target_dir == bucket:
-                    continue
-                target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-                target = target_dir / session_file.name
-                if target.exists():
-                    target = target_dir / f"legacy-{session_file.stem}.jsonl"
-                if target.exists():
-                    continue
-                atomic.write_bytes(target, session_file.read_bytes(), mode=0o600)
-                session_file.unlink()
-                moved += 1
             with contextlib.suppress(OSError):
                 bucket.rmdir()                     # only when it is empty
     return moved

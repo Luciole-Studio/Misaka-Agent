@@ -305,12 +305,17 @@ class FooterDataProvider:
 
     def _startTablesListPoll(self, path: str) -> None:
         self._stopTablesListPoll()
-        self._tablesListPollStop = threading.Event()
+        stop = threading.Event()
+        self._tablesListPollStop = stop
         previous = self._tables_list_stat(path)
 
+        # `stop` is captured, not read back off `self`: _stopTablesListPoll replaces the
+        # attribute after its join times out, and a thread that read the attribute each
+        # round would then see a fresh un-set Event and poll `os.stat` at 4 Hz until the
+        # process died. Every thread now watches the one Event it was started with.
         def watch() -> None:
             nonlocal previous
-            while not self._tablesListPollStop.wait(_TABLES_LIST_POLL_INTERVAL_SECONDS):
+            while not stop.wait(_TABLES_LIST_POLL_INTERVAL_SECONDS):
                 current = self._tables_list_stat(path)
                 if current != previous:
                     previous = current
@@ -328,7 +333,8 @@ class FooterDataProvider:
         if self._tablesListPollThread is not None and threading.current_thread() is not self._tablesListPollThread:
             self._tablesListPollThread.join(timeout=0.5)
         self._tablesListPollThread = None
-        self._tablesListPollStop = threading.Event()
+        # Not replaced with a fresh Event: the thread that was just told to stop keeps
+        # its own reference, and _startTablesListPoll installs a new one anyway.
 
     def _tables_list_stat(self, path: str) -> tuple[int, int, int] | None:
         try:

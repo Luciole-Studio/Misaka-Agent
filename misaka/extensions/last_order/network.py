@@ -19,6 +19,8 @@ from misaka.platform import tasks as db
 from misaka.platform.prompt_guard import untrusted
 
 _CON = None
+# How many board rows one `misaka_board` result carries.
+_BOARD_LIMIT = 40
 TaskId = Annotated[str, Field(pattern=r"^t_[0-9a-f]{6}$")]
 
 
@@ -152,12 +154,19 @@ def register(harn):
         rows = card_files.board(con, workspace)
         if params.status:
             rows = [r for r in rows if r["status"] == params.status]
-        rows = rows[-40:]
+        # `cards.board` puts index rows with no card file last, so a bare `[-40:]` on a
+        # project with more than 40 cards keeps exactly the strays and drops every real
+        # card without saying so. Truncation stays (the tool result is model context),
+        # but it is named, and the count is the pre-truncation one.
+        total = len(rows)
+        rows = rows[-_BOARD_LIMIT:]
         mine = _session_line(ctx)
         lines = [f"{'*' if r['origin_session'] in mine else ' '} {r['id']}  "
                  f"{r['status']:<10} {r['assignee']:<14} {r['title'][:50]}"
                  + ("  (no card file: run `misaka init --migrate`)" if r.get("missing_file") else "")
                  for r in rows]
+        if total > len(rows):
+            lines.insert(0, f"(showing the last {len(rows)} of {total} cards)")
         if mine and any(line.startswith("*") for line in lines):
             lines.append("* = created in this conversation")
         b = budget.status(con, _cfg()["token_cap"])

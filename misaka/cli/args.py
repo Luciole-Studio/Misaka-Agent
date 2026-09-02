@@ -71,6 +71,16 @@ def is_valid_thinking_level(level: str) -> bool:
     return level in VALID_THINKING_LEVELS
 
 
+# Long flags whose own branch below is guarded by `has_next`, so they need this list to be
+# told apart from a genuinely unknown extension flag when they appear in last position.
+# `--name` and `--use-theme` are absent on purpose: they report the missing value themselves.
+_FLAGS_REQUIRING_A_VALUE = frozenset({
+    "api-key", "append-system-prompt", "exclude-tools", "export", "extension", "fork",
+    "model", "models", "prompt-template", "provider", "session", "session-dir",
+    "session-id", "system-prompt", "theme", "thinking", "tools",
+})
+
+
 def parse_args(args: list[str]) -> Args:
     result = Args()
 
@@ -241,6 +251,15 @@ def parse_args(args: list[str]) -> Args:
             flag_name, _, inline_value = arg[2:].partition("=")
             if inline_value:
                 result.unknownFlags[flag_name] = inline_value
+            elif not has_next and flag_name in _FLAGS_REQUIRING_A_VALUE:
+                # Every branch above is written `arg == "--x" and has_next`, so a known
+                # value-taking flag in last position falls through to here. Without this it
+                # became `unknownFlags["session-id"] = True` and was handed to the
+                # extensions -- no error, no warning, and the run continued as if the flag
+                # had not been passed at all.
+                result.diagnostics.append(
+                    ArgDiagnostic(type="error", message=f"--{flag_name} requires a value")
+                )
             else:
                 next_arg = args[index + 1] if has_next else None
                 if next_arg is not None and not next_arg.startswith("-") and not next_arg.startswith("@"):

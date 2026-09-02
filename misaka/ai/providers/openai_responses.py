@@ -186,7 +186,7 @@ def build_params(model: Model, context: Context, options: Any = None) -> dict[st
     )},
     )
 
-    cache_retention = resolve_cache_retention(_option(options, "cacheRetention"))
+    cache_retention = resolve_cache_retention(_option(options, "cacheRetention"), _option(options, "env"))
     compat = get_compat(model)
     params: dict[str, Any] = {
         "model": model.id,
@@ -313,7 +313,7 @@ def stream_openai_responses(
 
         try:
             api_key = _option(options, "apiKey") or get_env_api_key(model.provider) or ""
-            cache_retention = resolve_cache_retention(_option(options, "cacheRetention"))
+            cache_retention = resolve_cache_retention(_option(options, "cacheRetention"), _option(options, "env"))
             cache_session_id = None if cache_retention == "none" else _option(options, "sessionId")
             client = create_client(
                 model,

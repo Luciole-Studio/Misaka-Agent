@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -69,8 +70,14 @@ class UserMessageList:
         elif kb.matches(keyData, "tui.select.down"):
             self.selectedIndex = 0 if self.selectedIndex == len(self.messages) - 1 else self.selectedIndex + 1
         elif kb.matches(keyData, "tui.select.confirm"):
-            selected = self.messages[self.selectedIndex]
-            if callable(self.onSelect):
+            # An empty list leaves selectedIndex at 0 (and ↑ puts it at -1); indexing blindly
+            # raises IndexError out of the TUI's input dispatch. Pi guards with `selected &&`.
+            selected = (
+                self.messages[self.selectedIndex]
+                if 0 <= self.selectedIndex < len(self.messages)
+                else None
+            )
+            if selected is not None and callable(self.onSelect):
                 self.onSelect(selected.id)
         elif kb.matches(keyData, "tui.select.cancel") and callable(self.onCancel):
             self.onCancel()
@@ -107,9 +114,17 @@ class UserMessageSelectorComponent(Container):
         self.addChild(DynamicBorder())
 
         if not messages:
-            timer = threading.Timer(0.1, onCancel)
-            timer.daemon = True
-            timer.start()
+            # onCancel edits the component tree, so it belongs on the event loop the TUI
+            # renders from (pi uses setTimeout). The bare thread stays as the fallback for
+            # callers that build this component outside a running loop.
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                timer = threading.Timer(0.1, onCancel)
+                timer.daemon = True
+                timer.start()
+            else:
+                loop.call_later(0.1, onCancel)
 
     def handleInput(self, data: str) -> None:
         self.messageList.handleInput(data)

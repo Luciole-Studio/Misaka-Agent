@@ -32,7 +32,10 @@ from __future__ import annotations
 import re
 
 
-def _ansi_regex(*, only_first: bool = False) -> re.Pattern[str]:
+def _ansi_regex() -> re.Pattern[str]:
+    # Upstream's `onlyFirst` option is not ported: it exists to choose between a JS
+    # regex with and without the `g` flag, and `re` carries no such state -- `sub`
+    # replaces every match and `search` finds the first, per call site.
     st = r"(?:\u0007|\u001B\u005C|\u009C)"
     osc = rf"(?:\u001B\][\s\S]*?{st})"
     csi = r"[\u001B\u009B][\[\]()#;?]*(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]"

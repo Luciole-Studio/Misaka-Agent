@@ -96,7 +96,17 @@ def applyHttpProxySettings(
 def createHttpxIdleTimeout(
     timeout_ms: Any = None,
 ) -> httpx.Timeout:
-    """Translate header/body idle policy without imposing a total request limit."""
+    """Translate header/body idle policy without imposing a total request limit.
+
+    Contract note (audit 2026-09-02, core-config-02): ``0`` here means *zero-second read
+    idle*, i.e. an immediate ``ReadTimeout`` -- not undici's "0 disables the timeout", which
+    is what `HTTP_IDLE_TIMEOUT_CHOICES`' ``disabled`` entry and `parseHttpIdleTimeoutMs`
+    ("disabled" -> 0) speak. Callers that accept the settings value must map the disabled
+    choice themselves before calling in; `sdk.py` does (`effective_timeout_ms`). The
+    immediate-timeout reading is pinned by
+    `tests/test_http_dispatcher.py::test_pi_messages_timeout_is_per_idle_gap_and_explicit_zero_times_out`,
+    so it is documented rather than changed here.
+    """
     if timeout_ms is None:
         timeout_ms = DEFAULT_HTTP_IDLE_TIMEOUT_MS
     normalized_timeout_ms = parseHttpIdleTimeoutMs(timeout_ms)

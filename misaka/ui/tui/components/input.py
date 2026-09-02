@@ -334,6 +334,13 @@ class Input:
         clean_text = (
             pastedText.replace("\r\n", "").replace("\r", "").replace("\n", "").replace("\t", "    ")
         )
+        # `handleInput` already refuses control characters from the keyboard; the paste path
+        # has to do the same or a copied "\x1b[2J" runs as a control sequence when `render`
+        # writes the value out (and throws off the column arithmetic on the way). This is a
+        # single-line field, so unlike Editor.handlePaste not even "\n" survives.
+        clean_text = "".join(
+            char for char in clean_text if not (ord(char) < 32 or ord(char) == 0x7F or 0x80 <= ord(char) <= 0x9F)
+        )
         self.value = self.value[: self.cursor] + clean_text + self.value[self.cursor :]
         self.cursor += len(clean_text)
 

@@ -132,12 +132,19 @@ def register(harn, *, sender, route=None, receive=False):
             # The message is durable before anyone is woken: a queued row is delivered by the
             # recipient's live session (the pump below) or by the contact turn started here,
             # and a wake-up that dies leaves it queued for the next one.
-            con = connect()
-            try:
-                mid = send(con, addr, args.message, summary=args.summary, sender=sender,
-                           task_id=card_task, generation=card_gen)
-            finally:
-                con.close()
+            def queue_message():
+                # sqlite3 is blocking and this database has several writers (Last Order,
+                # every Sister session, every `misaka dm` child), so `connect`'s 5s busy
+                # timeout is 5s of a frozen session -- streaming and tool dispatch included
+                # -- if it runs on the loop. The whole connect/send/close goes to a thread.
+                con = connect()
+                try:
+                    return send(con, addr, args.message, summary=args.summary, sender=sender,
+                                task_id=card_task, generation=card_gen)
+                finally:
+                    con.close()
+
+            mid = await asyncio.to_thread(queue_message)
             argv = [sys.executable, "-m", "misaka", "dm", "--from", sender, "--", addr]
             # Do not charge the recipient's turn to the sender's task card.
             child_env = {k: v for k, v in os.environ.items()
@@ -182,7 +189,9 @@ def register(harn, *, sender, route=None, receive=False):
     job = None
 
     async def pump():
-        con = connect()
+        # `connect` opens the file, runs the schema script and sweeps delivered rows: all
+        # blocking, all on this session's loop unless it is handed to a thread.
+        con = await asyncio.to_thread(connect)
         try:
             while not stop.is_set():
                 # One bad poll must not end the inbox. Everything below -- pending/claim/ack --
@@ -201,11 +210,14 @@ def register(harn, *, sender, route=None, receive=False):
                 except TimeoutError:
                     pass
         finally:
-            con.close()
+            await asyncio.to_thread(con.close)
 
     async def deliver_once(con):
-        rows = pending(con, sender)
-        won = claim(con, [r["id"] for r in rows], ttl_seconds=60)
+        # Every sqlite call below waits on a lock other processes hold; none of them may run
+        # on the loop. The connection is opened with check_same_thread=False and only this
+        # task uses it, and these awaits are sequential, so it is never touched concurrently.
+        rows = await asyncio.to_thread(pending, con, sender)
+        won = await asyncio.to_thread(claim, con, [r["id"] for r in rows], ttl_seconds=60)
         mine = [r for r in rows if r["id"] in won]
         if not mine:
             return
@@ -231,9 +243,9 @@ def register(harn, *, sender, route=None, receive=False):
                  "display": True, "details": {"count": len(mine)}},
                 {"deliverAs": "followUp", "triggerTurn": True})
         except Exception:  # noqa: BLE001 - restore delivery state so the next session can retry
-            unclaim(con, [r["id"] for r in mine])
+            await asyncio.to_thread(unclaim, con, [r["id"] for r in mine])
         else:
-            ack(con, [r["id"] for r in mine])
+            await asyncio.to_thread(ack, con, [r["id"] for r in mine])
 
     def _report(task):
         # The only reader of this task's result is ``shutdown``'s return_exceptions=True gather,

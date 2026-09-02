@@ -46,6 +46,7 @@ IDLE_QUIET_SECONDS = 1.0       # screen unchanged this long = idle (a static spi
 CARD_POLL_SECONDS = 5.0        # card-pane polling interval
 DEFAULT_ROWS, DEFAULT_COLS = 32, 120
 CARD_SHELL = [sys.executable, "-m", "misaka", "card-shell"]   # tests may override
+SINGLETON_LOCK_TRIES = 100     # x 50 ms: how long a cold start waits for another one's probe+bind
 
 
 def _expand(path):
@@ -56,7 +57,10 @@ def _write_pty(fd, data):
     """Write all of ``data`` to a non-blocking PTY. ``os.write`` may take only part of the
     buffer; the remainder is retried until the queue is full. A pane whose program stops
     reading raises instead of silently truncating the input — no waiting: the daemon's
-    single event loop serves every pane, so blocking here would freeze all of them.
+    single event loop serves every pane, so blocking here would freeze all of them. The
+    raise is still a *partial* delivery when the first write took some of the buffer, so
+    the message says how much landed rather than implying the whole batch bounced
+    (audit 2026-09-02, ui-panel-10; the real fix is the awaitable path described below).
 
     Known limit (audit 2026-09-02, ui-panel-01): a terminal's input queue holds ~2 KiB, so a
     send larger than that fails even for a healthy pane that would have read it. Round 3
@@ -74,9 +78,16 @@ def _write_pty(fd, data):
             written = 0
         if not written:
             sent = len(data) - len(view)
+            # Say which way it failed. The first `os.write` can take part of the buffer, so
+            # this is not "the batch was refused": those `sent` bytes are already in the pane's
+            # input queue and the program will read them. The caller shows this text verbatim
+            # and used to prefix it with "Input dropped" (audit 2026-09-02, ui-panel-10).
+            detail = (
+                f"{sent} of {len(data)} bytes already entered the pane and the rest could not be sent"
+                if sent else f"none of the {len(data)} bytes could be sent"
+            )
             raise RuntimeError(
-                f"Pane input buffer is full after {sent} of {len(data)} bytes; "
-                "the program in the pane is not reading."
+                f"Pane input buffer is full: {detail}; the program in the pane is not reading."
             ) from None
         view = view[written:]
 
@@ -1514,20 +1525,6 @@ class Daemon:
             writer.close()
 
     async def run(self):
-        # Singleton: if the socket answers, a daemon is already running; a stale socket is removed and recreated.
-        if os.path.exists(self.sock_path):
-            # herdr ipc.rs prepare_socket_path: a live listener refuses a second server;
-            # refused / missing / timed out means a stale file to reclaim.
-            probe = socket.socket(socket.AF_UNIX)
-            probe.settimeout(1.0)
-            try:
-                probe.connect(self.sock_path)
-                raise SystemExit("The daemon is already running (its socket answered).")
-            except (ConnectionRefusedError, FileNotFoundError, TimeoutError, OSError):
-                pass
-            finally:
-                probe.close()
-            os.unlink(self.sock_path)
         # `pane.create` takes argv/cwd/env from whoever connects, so the socket is a
         # code-execution door: it must never be world-connectable, not even for the moment
         # between bind and chmod (audit 2026-09-02, ui-panel-05). umask covers the bind
@@ -1539,15 +1536,53 @@ class Daemon:
             os.chmod(directory, 0o700)
         except OSError:
             pass
-        # A request line is one whole JSON object -- `pane.send` carries arbitrary user text,
-        # `layout.set` a whole space tree -- so asyncio's 64 KiB default is far too small.
-        old_umask = os.umask(0o177)
+        # Probe -> unlink -> bind is three steps, and two panels cold-starting in two
+        # terminals interleave them: the loser either crashes on a FileNotFoundError from
+        # `os.unlink` or unlinks the winner's live socket and binds over it, leaving a daemon
+        # that believes it is serving and never sees another connection (audit 2026-09-02,
+        # ui-panel-09). The flock serialises the whole sequence, so the second daemon runs its
+        # probe against a socket that is already listening and exits with the honest message.
+        # The kernel drops the lock when the process dies, so a crash cannot wedge startup.
+        # Polled rather than blocking: the holder keeps it only across a probe and a bind, and
+        # a blocking flock would freeze this event loop (and deadlock two daemons sharing one).
+        lock_fd = os.open(self.sock_path + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
         try:
-            server = await asyncio.start_unix_server(self._serve_client, self.sock_path,
-                                                     limit=self._read_limit)
+            for _ in range(SINGLETON_LOCK_TRIES):
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    await asyncio.sleep(0.05)
+            # Waited it out: fall through and let bind decide, which is where this stood
+            # before the lock existed. Better a loud "address already in use" than a hang.
+            # Singleton: if the socket answers, a daemon is already running; a stale socket is removed and recreated.
+            if os.path.exists(self.sock_path):
+                # herdr ipc.rs prepare_socket_path: a live listener refuses a second server;
+                # refused / missing / timed out means a stale file to reclaim.
+                probe = socket.socket(socket.AF_UNIX)
+                probe.settimeout(1.0)
+                try:
+                    probe.connect(self.sock_path)
+                    raise SystemExit("The daemon is already running (its socket answered).")
+                except (ConnectionRefusedError, FileNotFoundError, TimeoutError, OSError):
+                    pass
+                finally:
+                    probe.close()
+                try:
+                    os.unlink(self.sock_path)
+                except FileNotFoundError:
+                    pass
+            # A request line is one whole JSON object -- `pane.send` carries arbitrary user text,
+            # `layout.set` a whole space tree -- so asyncio's 64 KiB default is far too small.
+            old_umask = os.umask(0o177)
+            try:
+                server = await asyncio.start_unix_server(self._serve_client, self.sock_path,
+                                                         limit=self._read_limit)
+            finally:
+                os.umask(old_umask)
+            os.chmod(self.sock_path, 0o600)
         finally:
-            os.umask(old_umask)
-        os.chmod(self.sock_path, 0o600)
+            os.close(lock_fd)   # releases the flock
         ally_commands()   # seed allies.json on first run so the user can edit it at any time
         skipped = self.restore_snapshot()
         if skipped:

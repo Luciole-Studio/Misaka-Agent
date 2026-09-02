@@ -2338,13 +2338,20 @@ class AgentSession:
             content.extend(image.model_dump() if hasattr(image, "model_dump") else image for image in images)
         return {"role": "user", "content": content, "timestamp": int(time.time() * 1000)}
 
-    def _extract_user_message_text(self, content: str | list[dict[str, Any]]) -> str:
+    def _extract_user_message_text(self, content: str | list[Any]) -> str:
+        # `read_field` rather than `block.get`: a user message that came through
+        # `Agent.prompt()` has been run through `validate_message`, so its blocks are
+        # pydantic `TextContent`, not dicts, and the dict-only filter returned "" for
+        # every one of them. Only the steer/followUp queue path (raw dicts built by
+        # `_build_user_message`) still matches by text, so this was a silent zero rather
+        # than a visible bug -- one normalization away from a queue that never drains.
+        # pi has no such split: agent-session.ts:649 shares one `contentText` helper.
         if isinstance(content, str):
             return content
         return "".join(
-            str(block.get("text", ""))
+            str(read_field(block, "text") or "")
             for block in content
-            if isinstance(block, dict) and block.get("type") == "text"
+            if read_field(block, "type") == "text"
         )
 
     def _install_agent_tool_hooks(self) -> None:

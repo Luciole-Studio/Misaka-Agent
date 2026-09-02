@@ -1141,6 +1141,34 @@ def _cut(text, width):
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
+def _clip_row(line, width):
+    """Truncate one rendered pane row to ``width`` display columns, keeping its SGR sequences.
+
+    The daemon renders a row at the pane's own ``screen.columns``, which is not always the
+    width of the slice the panel gave it: ``relayout`` skips ``pane.resize`` for a pane whose
+    inner rect is under 2x2, and again when the resize errors, leaving the daemon on the old
+    (120-column) size. Painting that row unclipped runs it straight through the border and
+    over the neighbouring pane until the next full redraw (audit 2026-09-02, ui-panel-18)."""
+    if width <= 0:
+        return ""
+    out, col, index = [], 0, 0
+    while index < len(line):
+        code = _ANSI.match(line, index)
+        if code is not None:                      # zero-width: styles pass through untouched
+            out.append(code.group(0))
+            index = code.end()
+            continue
+        step = _wcwidth(line[index])
+        if col + step > width:
+            break
+        out.append(line[index])
+        col += step
+        index += 1
+    if index < len(line):     # cut mid-line: close whatever style we were inside of
+        out.append("\x1b[0m")
+    return "".join(out)
+
+
 def _cols(plain, c0, c1):
     """Substring by display-column range [c0, c1) (CJK is 2 columns; a wide character straddling
     the boundary is included). Selections are dragged in screen columns, not character indexes."""
@@ -1229,12 +1257,39 @@ def _send_pane_input(control, pane_id, data, note):
     close every pane: Last Order, every Sister, every running research card. So drop the
     batch and say so, the way pane.close already tolerates a pane that is already gone.
     ConnectionError is not this case — the daemon really is gone — so it propagates.
+
+    "Costs the batch" is the network's view, not the pane's: `_write_pty` writes until the
+    queue fills, so a big paste can leave its first bytes in the pane and refuse the rest.
+    The daemon's message says which of the two happened, so it is shown as-is rather than
+    under a "dropped" heading that would be a lie half the time (audit 2026-09-02, ui-panel-10).
     """
     try:
         control.request("pane.input", {
             "id": pane_id, "data": base64.b64encode(bytes(data)).decode()})
     except RuntimeError as error:
-        note(f"{hui.sgr_fg(hui.OVERLAY1)}Input dropped: {error}")
+        note(f"{hui.sgr_fg(hui.OVERLAY1)}Input not delivered: {error}")
+
+
+def _restore_bottom_row(paint, control, slices, rows, main_col):
+    """Repaint the main area's bottom row from the panes that own it, inside one synchronized
+    update. Module level so the escape pairing is testable: the closing ``\\x1b[?2026l`` used to
+    hang off the per-pane paint inside the loop, so with borders — where no pane's inner rect
+    reaches the bottom row and every iteration hits the `continue` — the opening ``?2026h`` was
+    never closed and the terminal froze until its own synchronized-update timeout
+    (audit 2026-09-02, ui-panel-17)."""
+    paint(f"\x1b[?25l\x1b[?2026h\x1b[{rows};{main_col}H\x1b[K".encode())
+    try:
+        for pane_id, rect in slices:
+            if rect.y + rect.height < rows:      # This pane does not reach the bottom row.
+                continue
+            try:
+                screen = control.request("pane.screen", {"id": pane_id})
+            except (RuntimeError, ConnectionError):
+                continue
+            if screen["rows"]:
+                paint(f"\x1b[{rows};{rect.x + 1}H{screen['rows'][-1]}".encode())
+    finally:
+        paint(b"\x1b[?2026l")
 
 
 def _write_all(data):
@@ -2501,17 +2556,7 @@ def launch():
         """Remove the mode bar: clear the main area's bottom row, then restore that row for any
         pane that reaches it (the sidebar was never covered, so it needs nothing)."""
         bottom_bar[0] = None
-        paint(f"\x1b[?25l\x1b[?2026h\x1b[{rows};{main_col()}H\x1b[K".encode())
-        for pane_id, rect in slices:
-            if rect.y + rect.height < rows:      # This pane does not reach the bottom row.
-                continue
-            try:
-                screen = control.request("pane.screen", {"id": pane_id})
-            except (RuntimeError, ConnectionError):
-                continue
-            if screen["rows"]:
-                paint(f"\x1b[{rows};{rect.x + 1}H{screen['rows'][-1]}"
-                           "\x1b[?2026l".encode())
+        _restore_bottom_row(paint, control, slices, rows, main_col())
 
     def draw_help_overlay():
         # herdr: "?" shows the full key help (keybind_help), centered in the main area,
@@ -2652,8 +2697,9 @@ def launch():
         for row_str, line in rendered.items():
             row = int(row_str)
             if row < rect.height:                # Only inside our own rectangle (herdr hard-clips).
-                out.append(f"\x1b[{rect.y + row + 1};{rect.x + 1}H{line}")
-                buf[row] = line
+                clipped = _clip_row(line, rect.width)   # ... in the column direction too.
+                out.append(f"\x1b[{rect.y + row + 1};{rect.x + 1}H{clipped}")
+                buf[row] = clipped
         out.append("\x1b[?2026l")
         paint("".join(out).encode())
         if sel["pane"] == pane_id:       # New content painted over the highlight; put it back.

@@ -27,6 +27,7 @@ from misaka.ui.tui import (
     truncateToWidth,
     visibleWidth,
 )
+from misaka.ui.tui.interactive.components.footer import collapse_home
 from misaka.ui.tui.interactive.theme.theme import theme
 from misaka.utils.paths import canonicalize_path
 
@@ -69,12 +70,9 @@ def _run_or_schedule(awaitable: Awaitable[object]) -> None:
 
 
 def shorten_path(path: str) -> str:
-    home_dir = str(Path.home())
-    if not path:
-        return path
-    if path.startswith(home_dir):
-        return f"~{path[len(home_dir):]}"
-    return path
+    # Same component-wise home collapse the footer uses: `startswith(home)` would turn
+    # /home/abc/x into "~c/x" when HOME is /home/ab (audit 2026-09-02, ui-interactive-components-06).
+    return collapse_home(path)
 
 
 def format_session_date(date: datetime) -> str:

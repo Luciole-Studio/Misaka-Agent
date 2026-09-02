@@ -60,7 +60,13 @@ ENGINE_LOCK = threading.Lock()
 
 
 def engine():
-    """The process-wide engine for the configured database, or ``None`` if unusable."""
+    """The process-wide engine for the configured database.
+
+    Never ``None``: a database that cannot be opened raises out of ``LCMEngine`` (through
+    `extension.py`'s own `except Exception`), it is not cached as an absence. The
+    ``built is None`` guards at the call sites are belt-and-braces for that day, not a
+    reachable path; do not read them as "engine() may decline".
+    """
     db_path = config_bridge.database_path()
     if db_path in _ENGINES:
         return _ENGINES[db_path]

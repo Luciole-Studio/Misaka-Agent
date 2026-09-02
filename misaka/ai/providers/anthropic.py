@@ -222,8 +222,10 @@ def get_anthropic_compat(model: Model) -> dict[str, bool]:
     }
 
 
-def get_cache_control(model: Model, cache_retention: CacheRetention | None = None) -> dict[str, Any]:
-    retention = resolve_cache_retention(cache_retention)
+def get_cache_control(
+    model: Model, cache_retention: CacheRetention | None = None, env: Any = None
+) -> dict[str, Any]:
+    retention = resolve_cache_retention(cache_retention, env)
     if retention == "none":
         return {"retention": retention}
 
@@ -406,7 +408,7 @@ def build_params(
     is_oauth: bool,
     options: Any = None,
 ) -> dict[str, Any]:
-    cache_state = get_cache_control(model, _option(options, "cacheRetention"))
+    cache_state = get_cache_control(model, _option(options, "cacheRetention"), _option(options, "env"))
     cache_control = cache_state.get("cacheControl")
     compat = get_anthropic_compat(model)
 
@@ -1053,7 +1055,7 @@ def stream_anthropic(
                         messages=context.messages,
                         hasImages=has_copilot_vision_input(context.messages),
                     )
-                cache_retention = resolve_cache_retention(_option(options, "cacheRetention"))
+                cache_retention = resolve_cache_retention(_option(options, "cacheRetention"), _option(options, "env"))
                 cache_session_id = None if cache_retention == "none" else _option(options, "sessionId")
                 client, is_oauth = create_client(
                     model,

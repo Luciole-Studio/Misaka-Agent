@@ -90,14 +90,20 @@ def _role_key(role):
 
 
 def read_soul(profile_dir):
-    """Return the role's SOUL.md content, or None if the file is missing or blank."""
+    """Return the role's SOUL.md content, or None if the file is missing, blank or unreadable.
+
+    SOUL.md is a user-editable slot, so it can arrive as GBK or Latin-1 from wherever it was
+    pasted; that raises ``UnicodeDecodeError`` here, which ``except OSError`` did not catch,
+    and ``misaka chat`` ended in a traceback rather than falling back to ``ROLE_IDENTITY``.
+    A file we cannot decode is treated as one we cannot read, the way ``product.py:_json``
+    already treats a corrupt JSON file next door."""
     path = os.path.join(profile_dir or "", "SOUL.md")
     if not profile_dir or not os.path.isfile(path):
         return None
     try:
         with open(path, encoding="utf-8-sig") as f:
             content = f.read().strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     return content or None
 

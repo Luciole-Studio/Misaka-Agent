@@ -110,15 +110,17 @@ def _write(con, run, cfg, worker, contract, *, tools, extra=""):
     they let her introduce, so each call site names its own surface (SURVEY_TOOLS, FINAL_TOOLS).
     """
     root = runs.run_dir(run)
+    # Both blocks below are model-written text that started life on a fetched page (a node's
+    # synthesis, a red-team card's issue questions), so they get the same fence as the evidence
+    # ledger in _source_block -- otherwise half this prompt is guarded and half is not.
     prompt = (contract + f"""
 # Original question
 {run['question']}
 
 # Nodes: conclusions, critiques, and what each issue's fork found (root first, then by depth)
-{json.dumps(_nodes(con, run), ensure_ascii=False, indent=2)}
-
+{prompt_guard.untrusted("research-nodes", json.dumps(_nodes(con, run), ensure_ascii=False, indent=2))}
 # Honest boundary: issues that stayed open, inconclusive, or parked
-{json.dumps(_boundary(con, run), ensure_ascii=False, indent=2)}
+{prompt_guard.untrusted("research-boundary", json.dumps(_boundary(con, run), ensure_ascii=False, indent=2))}
 """ + extra)
     session_dir = runs.session_dir(run, "root-lo")
     _obj, text, err = worker.run_llm_json(

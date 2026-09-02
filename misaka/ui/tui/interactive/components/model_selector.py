@@ -248,16 +248,32 @@ class ModelSelectorComponent(Container):
         if self.scopeHintText is not None:
             self.scopeHintText.setText(self.getScopeHintText())
 
+    def _isDefaultModel(self, item: ModelItem) -> bool:
+        return self.defaultModel == (item.provider, item.id)
+
+    def _searchText(self, item: ModelItem) -> str:
+        # pi model-search.ts getModelSelectorSearchText: the bare id deliberately stays out of
+        # the leading position (so `openai/gpt-5` outranks `openrouter/openai/gpt-5`), and the
+        # display name is searchable -- users type "Claude Opus", not the dated id.
+        name = getattr(item.model, "name", "") or ""
+        default = " default" if self._isDefaultModel(item) else ""
+        return f"{item.provider} {item.provider}/{item.id} {item.provider} {item.id}{' ' + name if name else ''}{default}"
+
+    @staticmethod
+    def _isDefaultSearch(query: str) -> bool:
+        normalized = query.strip().lower()
+        return bool(normalized) and "default".startswith(normalized)
+
     def filterModels(self, query: str) -> None:
-        self.filteredModels = (
-            fuzzyFilter(
-                self.activeModels,
-                query,
-                lambda item: f"{item.id} {item.provider} {item.provider}/{item.id} {item.provider} {item.id}",
-            )
-            if query
-            else self.activeModels
-        )
+        if query:
+            filtered = fuzzyFilter(self.activeModels, query, self._searchText)
+            if self._isDefaultSearch(query):
+                defaults = [item for item in self.activeModels if self._isDefaultModel(item)]
+                keys = {(item.provider, item.id) for item in defaults}
+                filtered = defaults + [item for item in filtered if (item.provider, item.id) not in keys]
+            self.filteredModels = filtered
+        else:
+            self.filteredModels = self.activeModels
         # With a query the list is ordered by relevance, so the cursor goes back to the
         # top row: otherwise Enter picks whatever row the pre-search cursor happened to be on.
         self.selectedIndex = 0 if query else min(self.selectedIndex, max(0, len(self.filteredModels) - 1))

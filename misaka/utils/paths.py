@@ -14,14 +14,13 @@ _WINDOWS_SHELL_DRIVE = re.compile(r"^/(?:mnt/|cygdrive/)?([a-zA-Z])(?:/(.*))?$")
 
 
 def canonicalize_path(path: str) -> str:
+    # `strict=` has existed since 3.10 and this package requires >=3.12, so there is no
+    # interpreter that answers this call with TypeError; the only failure is the OSError
+    # a missing or unresolvable path raises, and that answer is the path unchanged.
     try:
         return os.path.realpath(path, strict=True)
-    except TypeError:
-        if os.path.exists(path):
-            return os.path.realpath(path)
     except OSError:
         return path
-    return path
 
 
 def get_file_revision(path: str) -> tuple[int, int, int, int, int] | None:

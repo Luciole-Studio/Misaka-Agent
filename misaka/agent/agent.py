@@ -133,7 +133,20 @@ def default_convert_to_llm(messages: list[AgentMessage]) -> list[MessageValue]:
 
 
 def _create_mutable_agent_state(initial_state: AgentState | dict[str, Any] | None = None) -> AgentState:
-    initial = dict(initial_state.model_dump() if isinstance(initial_state, AgentState) else (initial_state or {}))
+    # `AgentState` is a plain class, not a pydantic model, so the `model_dump()` this
+    # used to call raised AttributeError for anyone who passed the type `AgentOptions`
+    # advertises. Read the five carried fields instead; the streaming fields are
+    # deliberately reset below, exactly as pi's createMutableAgentState does.
+    if isinstance(initial_state, AgentState):
+        initial: dict[str, Any] = {
+            "systemPrompt": initial_state.systemPrompt,
+            "model": initial_state.model,
+            "thinkingLevel": initial_state.thinkingLevel,
+            "tools": initial_state.tools,
+            "messages": initial_state.messages,
+        }
+    else:
+        initial = dict(initial_state or {})
     model = initial.get("model", DEFAULT_MODEL)
     if not isinstance(model, Model):
         model = Model.model_validate(model)

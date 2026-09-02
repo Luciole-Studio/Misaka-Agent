@@ -51,6 +51,13 @@ def envApiKeyAuth(name: str, envVars: list[str] | tuple[str, ...]) -> ApiKeyAuth
 
     async def resolve(*, ctx: Any, credential: ApiKeyCredential | None, signal: Any) -> AuthResult | None:
         _throwIfAborted(signal)
+        # A stored credential ends resolution here whether or not it carries a key.
+        # Upstream (``auth/helpers.ts:20-26``) falls through to ``envVars`` when the key is
+        # empty; misaka deliberately does not -- see the header of
+        # ``tests/test_ai_auth_resolve.py``: falling through would sign a user who is
+        # logged in as one account silently in as whichever account the ambient
+        # ``*_API_KEY`` belongs to. "Stored but broken" is a login to redo, not a licence
+        # to pick another identity.
         if credential is not None:
             if credential.key:
                 return AuthResult(

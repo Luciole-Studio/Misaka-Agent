@@ -640,7 +640,15 @@ def stop_requested(con, run_id):
 
 
 def call_timeout(cfg, default):
-    """Per-call failure timeout in seconds (``cfg["call_timeout"]`` overrides ``default``); this is not a research stopping criterion."""
+    """Per-call failure timeout in seconds; this is not a research stopping criterion.
+
+    ``cfg["call_timeout"]`` overrides ``default`` when it is there -- but no shipped
+    configuration puts it there: ``config/product.py``'s ``CFG`` has no such key and no
+    ``MISAKA_*`` variable writes one, so every caller today gets the ``default`` it
+    passed. The read stays because it is the seam a future key connects through
+    (``_fanout`` keeps ``research_parallel`` for the same reason); it is not a knob a
+    user can turn yet, and it must not be documented as one.
+    """
     try:
         value = int((cfg or {}).get("call_timeout") or default)
     except (TypeError, ValueError, AttributeError):

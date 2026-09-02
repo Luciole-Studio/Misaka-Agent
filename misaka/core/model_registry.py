@@ -1901,9 +1901,16 @@ class ModelRegistry:
         )
 
     async def getApiKeyForProvider(self, provider: str) -> str | None:
+        # `_radiusProviders` belongs in the same set as the other two, exactly as it does
+        # in login() above: a models.json `oauth: "radius"` provider stores its credential
+        # through pi-ai's native OAuth, and the fallback below cannot read that back --
+        # its id was never registered in the legacy OAuth registry, so
+        # `authStorage.getApiKey` returns None and `misaka auth check --show` printed
+        # "(credential could not be resolved)" for a provider that is plainly logged in.
         if (
             provider in self._nativeProviderIds
             or provider in self._registeredProviders
+            or provider in self._radiusProviders
         ):
             resolution = await self.getProviderAuth(provider)
             return resolution.auth.apiKey if resolution is not None else None

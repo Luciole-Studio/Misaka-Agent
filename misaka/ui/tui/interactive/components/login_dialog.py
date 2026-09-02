@@ -108,7 +108,7 @@ class LoginDialogComponent(Container):
         self._reject_input(Exception("Login cancelled"))
         self.onComplete(False, "Login cancelled")
 
-    def showAuth(self, url: str, instructions: str | None = None, options: dict[str, Any] | None = None) -> None:
+    def showAuth(self, url: str, instructions: str | None = None) -> None:
         self.contentContainer.clear()
         self.contentContainer.addChild(Spacer(1))
         self.contentContainer.addChild(Text(theme.fg("accent", _hyperlink(url)), 1, 0))
@@ -117,9 +117,7 @@ class LoginDialogComponent(Container):
         if instructions:
             self.contentContainer.addChild(Spacer(1))
             self.contentContainer.addChild(Text(theme.fg("warning", instructions), 1, 0))
-        autoOpenBrowser = (options or {}).get("autoOpenBrowser")
-        if autoOpenBrowser if autoOpenBrowser is not None else True:
-            self.openUrl(url)
+        self.openUrl(url)
         self._request_render()
 
     def showDeviceCode(self, info: OAuthDeviceCodeInfo) -> None:

@@ -160,4 +160,8 @@ async def wait_for_child_process(child: ChildProcess) -> int | None:
     return await child.wait()
 
 
-__all__: list[str] = []
+__all__ = [
+    "ChildProcess",
+    "spawn_child_process",
+    "wait_for_child_process",
+]

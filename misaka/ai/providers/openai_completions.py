@@ -251,7 +251,7 @@ def stream_openai_completions(
             client = _option(options, "client")
             if client is None:
                 api_key = _option(options, "apiKey") or get_env_api_key(model.provider) or ""
-                cache_retention = resolve_cache_retention(_option(options, "cacheRetention"))
+                cache_retention = resolve_cache_retention(_option(options, "cacheRetention"), _option(options, "env"))
                 cache_session_id = None if cache_retention == "none" else _option(options, "sessionId")
                 client = create_client(
                     model,
@@ -647,7 +647,10 @@ def build_params(
     cache_retention: CacheRetention | None = None,
 ) -> dict[str, Any]:
     compat = compat or get_compat(model)
-    resolved_cache_retention = resolve_cache_retention(_option(options, "cacheRetention") if cache_retention is None else cache_retention)
+    resolved_cache_retention = resolve_cache_retention(
+        _option(options, "cacheRetention") if cache_retention is None else cache_retention,
+        _option(options, "env"),
+    )
     grammar_tool_input_properties = create_grammar_tool_input_properties(
         context.tools, bool(compat.get("supportsOpenAIGrammarTools"))
     )

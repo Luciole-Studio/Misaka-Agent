@@ -141,6 +141,21 @@ def _orig_col(orig_line: str, norm_line: str, col: int) -> int | None:
     return None
 
 
+def _end_cut(orig_line: str, norm_line: str, col: int) -> int | None:
+    """``_orig_col`` for a boundary that *ends* a gap.
+
+    ``normalize_for_fuzzy_match`` rstrips every line, so a gap ending at the end of a
+    normalized line ends, in original coordinates, at the end of the *original* line --
+    trailing whitespace included. Asking ``_orig_col`` for that column returns the
+    rstripped index instead, which silently drops those bytes even though they sit
+    outside the requested edit. The mirror case (a gap that *starts* there) is already
+    right: ``orig_line[cut_a:]`` runs to the real end of the line.
+    """
+    if col == len(norm_line):
+        return len(orig_line)
+    return _orig_col(orig_line, norm_line, col)
+
+
 def _recover_gap(
     orig_lines: list[str],
     norm_lines: list[str],
@@ -158,12 +173,12 @@ def _recover_gap(
     (line_a, col_a), (line_b, col_b) = start, end
     if line_a == line_b:
         cut_a = _orig_col(orig_lines[line_a], norm_lines[line_a], col_a)
-        cut_b = _orig_col(orig_lines[line_a], norm_lines[line_a], col_b)
+        cut_b = _end_cut(orig_lines[line_a], norm_lines[line_a], col_b)
         if cut_a is not None and cut_b is not None and cut_a <= cut_b:
             return orig_lines[line_a][cut_a:cut_b]
         return None
     cut_a = _orig_col(orig_lines[line_a], norm_lines[line_a], col_a)
-    cut_b = _orig_col(orig_lines[line_b], norm_lines[line_b], col_b)
+    cut_b = _end_cut(orig_lines[line_b], norm_lines[line_b], col_b)
     if cut_a is None or cut_b is None:
         return None
     head = orig_lines[line_a][cut_a:]

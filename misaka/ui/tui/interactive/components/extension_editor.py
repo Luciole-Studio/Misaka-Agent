@@ -7,7 +7,6 @@ import os
 import shlex
 import sys
 import tempfile
-import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -25,7 +24,11 @@ async def edit_text_external(tui, text: str) -> str | None:
     if not editor_cmd:
         return None
 
-    temp_file = Path(tempfile.gettempdir()) / f"misaka-extension-editor-{int(time.time() * 1000)}.md"
+    # A predictable name under a shared /tmp lets another local user pre-plant a symlink and
+    # capture (or redirect) the text being edited. A 0700 directory from mkdtemp is the same
+    # thing pi does (external-editor.ts: mkdtempSync(join(tmpdir(), "pi-editor-"))).
+    temp_dir = Path(tempfile.mkdtemp(prefix="misaka-extension-editor-"))
+    temp_file = temp_dir / "buffer.md"
     temp_file.write_text(text, encoding="utf-8")
     stop = getattr(tui, "stop", None)
     if callable(stop):
@@ -45,6 +48,10 @@ async def edit_text_external(tui, text: str) -> str | None:
     finally:
         try:
             temp_file.unlink()
+        except OSError:
+            pass
+        try:
+            temp_dir.rmdir()
         except OSError:
             pass
         start = getattr(tui, "start", None)

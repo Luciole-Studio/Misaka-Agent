@@ -140,6 +140,9 @@ def _parse_duration(value: str) -> int:
     if match is None:
         raise AuthCommandError("--min-expiry must use a duration such as 30m or 1h", 1)
     try:
+        # Reachable despite `[0-9]+`: `int()` refuses a decimal string longer than
+        # `sys.get_int_max_str_digits()` (4300 by default), so `"1"*5000 + "m"` lands here
+        # rather than becoming an absurd duration.
         amount = int(match.group(1))
     except ValueError as error:
         raise AuthCommandError(
@@ -316,24 +319,35 @@ def _create_runtime(*, read_only: bool) -> _AuthRuntime:
 
 
 def _validate_storage(storage: AuthStorage) -> None:
+    """Raises ``AuthCommandError`` so the reason survives.
+
+    ``_check_auth`` folds anything raised here into a structured ``invalid`` result, but
+    ``print-api-key`` / ``print-bearer-token`` replace every non-``AuthCommandError`` with
+    the generic "Failed to resolve credential"; raising the specific type is what puts the
+    offending provider's name in front of the user on that path too.
+    """
+    # Deliberately *not* an AuthCommandError: a parse error quotes the offending bytes of
+    # auth.json, and `print-api-key` prints an AuthCommandError verbatim. Same for the
+    # pydantic validations below. Only the messages this function writes itself -- which
+    # name a provider and nothing else -- are safe to surface.
     if storage.loadError is not None:
         raise storage.loadError
     if not isinstance(storage.data, dict):
-        raise TypeError("Invalid auth.json: expected an object")
+        raise AuthCommandError("Invalid auth.json: expected an object", 1)
     for provider, value in storage.data.items():
         if not isinstance(provider, str) or not isinstance(value, dict):
-            raise TypeError(f'Invalid auth.json credential for provider "{provider}"')
+            raise AuthCommandError(f'Invalid auth.json credential for provider "{provider}"', 1)
         if value.get("type") == "api_key":
             ApiKeyCredential.model_validate(value)
         elif value.get("type") == "oauth":
             expires = value.get("expires")
             if isinstance(expires, bool) or not isinstance(expires, (int, float)):
-                raise TypeError(
-                    f'Invalid auth.json credential for provider "{provider}"'
+                raise AuthCommandError(
+                    f'Invalid auth.json credential for provider "{provider}"', 1
                 )
             OAuthCredential.model_validate(value)
         else:
-            raise ValueError(f'Invalid auth.json credential for provider "{provider}"')
+            raise AuthCommandError(f'Invalid auth.json credential for provider "{provider}"', 1)
 
 
 def _model_candidates(

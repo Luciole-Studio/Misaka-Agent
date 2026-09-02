@@ -581,7 +581,10 @@ def format_task_output(data: Mapping[str, Any]) -> str:
             maximum = 32_000
         if len(output) > maximum:
             header = "[Truncated. Read the task output file for the full transcript.]\n\n"
-            output = header + output[-max(0, maximum - len(header)) :]
+            # max(1, ...): a maximum at or under the header's own length made the slice index
+            # -0, i.e. output[0:], which handed back the whole transcript -- the opposite of
+            # truncating. A tiny budget now yields the header plus one character.
+            output = header + output[-max(1, maximum - len(header)) :]
         lines.append(f"<output>\n{x(output).rstrip()}\n</output>")
     if task.get("error"):
         lines.append(f"<error>{x(task['error'])}</error>")
@@ -2442,7 +2445,7 @@ class SubagentManager:
     async def _child_flags(self, task: AgentTask) -> list[str]:
         self._refresh_task_project_trust(task)
         prompt_dir = task.metadata_path.parent / ".prompts"
-        prompt_dir.mkdir(parents=True, exist_ok=True)
+        prompt_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         prompt_path = prompt_dir / f"{task.id}.md"
         system_prompt = task.definition.prompt
         if task.definition.source == "built-in" and task.definition.name in {"general", "general-purpose"}:
@@ -2458,11 +2461,21 @@ class SubagentManager:
                     + identity.prompt_sections(profile, _profiles.role_of(profile)))
         if task.definition.memory:
             system_prompt += "\n\n" + self._memory_prompt(task)
-        prompt_path.write_text(system_prompt, encoding="utf-8")
+        # Temp file, chmod, rename -- the same shape as child._atomic_write_json and
+        # policy._persist_once. Writing in place and chmod'ing afterwards left the file at the
+        # umask default (0644 on most systems) for the length of the write, and for a
+        # general-purpose child this file is the SOUL plus the whole persona.
+        tmp_path = prompt_dir / f".{task.id}.md.{secrets.token_hex(6)}.tmp"
         try:
-            prompt_path.chmod(0o600)
-        except OSError:
-            pass
+            with tmp_path.open("x", encoding="utf-8") as handle:
+                handle.write(system_prompt)
+            tmp_path.chmod(0o600)
+            os.replace(tmp_path, prompt_path)
+        finally:
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
 
         effort = task.definition.effort
         if isinstance(effort, str) and effort in {"low", "medium", "high", "xhigh", "max"}:
@@ -2670,11 +2683,15 @@ class SubagentManager:
         from misaka.extensions import mcp
 
         available = mcp.servers_for(self.role_context.profile_dir)
+        # Everything available, then whatever the definition spells out inline. A
+        # definition's `mcpServers` can only add: the child's own `mcp.servers_for()`
+        # unions the injected file with its profile's `mcp_servers`, so a name left out
+        # here still reaches the child through its profile. Naming an available server by
+        # its string is therefore a no-op -- it is in `selected` already -- and only the
+        # inline `{name: {...}}` form carries a server this side did not have.
         selected: dict[str, Any] = dict(available)
         for spec in task.definition.mcp_servers:
-            if isinstance(spec, str) and spec in available:
-                selected[spec] = available[spec]
-            elif isinstance(spec, dict):
+            if isinstance(spec, dict):
                 selected.update(
                     {name: config for name, config in spec.items() if isinstance(config, dict)}
                 )

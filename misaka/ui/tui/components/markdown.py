@@ -28,9 +28,13 @@ type MarkdownTransform = Callable[[str, int], str]
 # only touches tabs and Thai/Lao vowels), so an `\x1b[10A` in an assistant reply really does
 # move the cursor and scramble the diff renderer's line accounting. Newline and carriage
 # return stay; the tab is already expanded before this runs.
-_C0_CONTROLS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# C1 (U+0080-U+009F) goes with them: in a UTF-8 terminal U+009B is still read as CSI and
+# U+009C as ST by xterm and friends, so a lone U+009C inside an autolinked URL closes the
+# OSC 8 hyperlink early and the rest of the sequence lands on screen as text
+# (audit 2026-09-02, ui-tui-core-09).
+_C0_CONTROLS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
-_BARE_URL_RE = r"(?:https?://|www\.)[^\s<>]+"
+_BARE_URL_RE = r"(?:https?://|www\.)[^\s<>\x00-\x1f\x7f-\x9f]+"
 _EMAIL_RE = r"(?<![A-Za-z0-9.+-])[A-Za-z0-9.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![A-Za-z0-9.-])"
 _AUTOLINK_RE = re.compile(f"(?P<url>{_BARE_URL_RE})|(?P<email>{_EMAIL_RE})")
 
@@ -488,7 +492,10 @@ class Markdown(Component):
         alreadyStyled: bool = False,
     ) -> str:
         styled_link = linkText if alreadyStyled else self.theme.link(self.theme.underline(linkText))
-        if getCapabilities().hyperlinks:
+        # A control character inside the OSC 8 parameter terminates the sequence early (BEL and
+        # ST are both legal OSC terminators), so such an href never becomes a hyperlink: it
+        # falls through to the plain "label (url)" form below.
+        if getCapabilities().hyperlinks and not _C0_CONTROLS_RE.search(href):
             return hyperlink(styled_link, href) + stylePrefix
 
         href_for_comparison = href.removeprefix("mailto:")

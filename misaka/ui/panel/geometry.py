@@ -672,7 +672,11 @@ def from_jsonable(data):
             first, second = from_jsonable(data[3]), from_jsonable(data[4])
             if first is None or second is None:
                 return None
-            return ("split", data[1], float(data[2]), first, second)
+            # Clamp on the way in, like every other writer (split_at / set_ratio_at). A stored
+            # tree is client-supplied: an out-of-range ratio draws a pane wider than the
+            # terminal, and a NaN takes `collect_panes` down with a ValueError -- which kills
+            # the panel, and the panel leaving is the daemon's cue to close every pane.
+            return ("split", data[1], valid_split_ratio(float(data[2])), first, second)
     except (TypeError, IndexError, ValueError):
         pass
     return None

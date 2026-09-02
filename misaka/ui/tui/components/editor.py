@@ -993,18 +993,27 @@ class Editor:
                 self.pasteCounter -= 1
                 for pid in sorted(k for k in self.pastes if k > target_id):
                     self.pastes[pid - 1] = self.pastes.pop(pid)
-                self.state.lines = [
-                    PASTE_MARKER_REGEX.sub(
-                        lambda m: m.group(0) if int(m.group(1)) <= target_id
+
+                def renumber(text: str, *, above: int = target_id) -> str:
+                    return PASTE_MARKER_REGEX.sub(
+                        lambda m: m.group(0) if int(m.group(1)) <= above
                         else f"[paste #{int(m.group(1)) - 1}{m.group(2) or ''}]",
-                        ln)
-                    for ln in self.state.lines
-                ]
-                line = self.state.lines[self.state.cursorLine]
-            before = line[: self.state.cursorCol - grapheme_length]
-            after = line[self.state.cursorCol :]
-            self.state.lines[self.state.cursorLine] = before + after
-            self.setCursorCol(self.state.cursorCol - grapheme_length)
+                        text)
+
+                # Cut the marker out at the *old* coordinates, then renumber the two halves
+                # separately. Renumbering first (what pi does) shortens markers left of the
+                # cursor -- "[paste #10]" becomes "[paste #9]" -- so the line moves out from
+                # under cursorCol and the slice leaves half the deleted marker behind.
+                before = renumber(line[: self.state.cursorCol - grapheme_length])
+                after = renumber(line[self.state.cursorCol :])
+                self.state.lines = [renumber(ln) for ln in self.state.lines]
+                self.state.lines[self.state.cursorLine] = before + after
+                self.setCursorCol(len(before))
+            else:
+                before = line[: self.state.cursorCol - grapheme_length]
+                after = line[self.state.cursorCol :]
+                self.state.lines[self.state.cursorLine] = before + after
+                self.setCursorCol(self.state.cursorCol - grapheme_length)
         elif self.state.cursorLine > 0:
             self.pushUndoSnapshot()
             current_line = self.state.lines[self.state.cursorLine]

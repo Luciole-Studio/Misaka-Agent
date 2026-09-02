@@ -16,8 +16,9 @@ Configuration follows Hermes: each role lists its own servers in
 
 A role can use whatever its own directory declares; no separate assignment field is
 needed. Hand-written servers live in `profiles/<role>/mcp/*.py` (as in Hermes). A parent
-hands a sub-agent child its selection through `MISAKA_MCP_CONFIG` (a `{"mcpServers": ...}`
-file); nothing else is read.
+*adds* servers to a sub-agent child through `MISAKA_MCP_CONFIG` (a `{"mcpServers": ...}`
+file); nothing else is read. `servers_for` unions that file with the child's own profile,
+so the injected set can only widen what the child reaches, never narrow it.
 
 Tools are registered as `mcp__<server>__<tool>`, matching Claude Code's naming so they
 never collide with built-in tools.

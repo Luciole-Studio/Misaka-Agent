@@ -29,6 +29,12 @@ def register(harn, con_factory):
         con = con_factory()
         run = (runs.get(con, params.run_id) if params.run_id
                else runs.latest(con, workspace=workspace))
+        # The board is one file for the whole machine, so a run_id handed in by the caller is not
+        # by itself proof the run belongs here: without this an id seen in another project reads
+        # out that project's question, issues, and findings. Same answer as "no such run", so the
+        # tool does not confirm the id exists elsewhere either.
+        if run and os.path.realpath(run["workspace"]) != workspace:
+            run = None
         if not run:
             return _text("No research run exists.")
         if params.view == "run":

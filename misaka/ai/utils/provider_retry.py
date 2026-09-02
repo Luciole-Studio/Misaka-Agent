@@ -12,7 +12,9 @@ retries, and 408/409/429/5xx retry. That 408/409/429/5xx ladder is the one
 delay above ``maxRetryDelayMs`` fails immediately rather than parking the request for
 minutes -- sixty seconds by default, zero to allow any delay.
 
-Nothing under ``misaka/ai/providers/`` imports this module today; only the tests do.
+Callers: ``anthropic.py``, ``openai_completions.py``, ``openai_responses.py``,
+``azure_openai_responses.py``, ``google_shared.py`` and ``images/openrouter.py`` all set the
+SDK's own ``maxRetries`` to zero and wrap the request with ``retry_provider_request``.
 """
 
 from __future__ import annotations

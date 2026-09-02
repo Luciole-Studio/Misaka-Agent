@@ -1032,14 +1032,20 @@ class TUI(Container):
                 if extra_lines > height:
                     full_render(True)
                     return
-                if extra_lines > 0:
-                    buffer += "\x1b[1B"
+                # pi tui-main-screen.ts:422-431: the cursor sits on the last *new* line, so the
+                # stale rows start one below it -- except when there are no new lines at all,
+                # where the cursor is already on the first row to clear. Stepping down anyway
+                # left the old first row on screen and wiped one row below our own area.
+                clear_start_offset = 0 if not new_lines else 1
+                if extra_lines > 0 and clear_start_offset:
+                    buffer += f"\x1b[{clear_start_offset}B"
                 for index in range(extra_lines):
                     buffer += "\r\x1b[2K"
                     if index < extra_lines - 1:
                         buffer += "\x1b[1B"
-                if extra_lines > 0:
-                    buffer += f"\x1b[{extra_lines}A"
+                back_up = max(0, extra_lines - 1 + clear_start_offset)
+                if extra_lines > 0 and back_up:
+                    buffer += f"\x1b[{back_up}A"
                 buffer += "\x1b[?2026l"
                 self.terminal.write(buffer)
                 self.cursorRow = target_row
@@ -1104,7 +1110,12 @@ class TUI(Container):
                 continue
             buffer += "\x1b[2K"
             if not is_image and visibleWidth(line) > width:
-                crash_log_path = Path.home() / ".misaka" / "agent" / "misaka-crash.log"
+                # Imported here, on the crash path only, so `ui/tui` keeps no import-time
+                # dependency on `config`; the hardcoded `~/.misaka/agent` used to ignore
+                # MISAKA_CODING_AGENT_DIR and then print that wrong path in the error.
+                from misaka.config import get_agent_dir
+
+                crash_log_path = Path(get_agent_dir()) / "misaka-crash.log"
                 crash_log_path.parent.mkdir(parents=True, exist_ok=True)
                 crash_data = [
                     f"Crash at {_utc_iso_timestamp()}",

@@ -585,7 +585,6 @@ class DefaultResourceLoader:
                         "cwd": self.cwd,
                         "agentDir": self.agentDir,
                         "promptPaths": prompt_paths,
-                        "includeDefaults": False,
                     }
                 )
             )
@@ -618,7 +617,7 @@ class DefaultResourceLoader:
         if self.noThemes and not theme_paths:
             themes_result = {"themes": [], "diagnostics": []}
         else:
-            loaded = self._load_themes(theme_paths, False)
+            loaded = self._load_themes(theme_paths)
             deduped = self._dedupe_themes(loaded["themes"])
             themes_result = {
                 "themes": deduped["themes"],
@@ -744,12 +743,11 @@ class DefaultResourceLoader:
     def _resolve_resource_path(self, path: str) -> str:
         return resolve_path(path, self.cwd, trim=True)
 
-    def _load_themes(self, paths: list[str], include_defaults: bool = True) -> dict[str, list[Any]]:
+    def _load_themes(self, paths: list[str]) -> dict[str, list[Any]]:
+        # The `include_defaults` parameter (default True, only ever called with False) used to
+        # auto-load `<agentDir>/themes` here; removed with its dead branch.
         themes: list[Theme] = []
         diagnostics: list[ResourceDiagnostic] = []
-
-        if include_defaults:
-            self._load_themes_from_dir(os.path.join(self.agentDir, "themes"), themes, diagnostics)
 
         for path in paths:
             resolved = self._resolve_resource_path(path)
@@ -940,7 +938,13 @@ class DefaultResourceLoader:
 def _load_context_file_from_dir(dir_path: str) -> dict[str, str] | None:
     for filename in ("PROJECT.md", "AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"):  # pi 8ecf8a9 + the project brief
         file_path = os.path.join(dir_path, filename)
-        if not os.path.exists(file_path):
+        # `isfile` rather than `exists`: pi's resource-loader.ts:71-90 stats and skips
+        # anything that is not a regular file before reading, and the port dropped that
+        # line. A directory only costs an IsADirectoryError, but a FIFO named AGENTS.md
+        # makes `read_text` block forever -- and `load_project_context_files` walks every
+        # ancestor up to the filesystem root, so any one of them can hang startup with no
+        # timeout and no diagnostic. A symlink to /dev/zero reads until OOM.
+        if not os.path.isfile(file_path):
             continue
         try:
             return {"path": file_path, "content": Path(file_path).read_text(encoding="utf-8-sig")}

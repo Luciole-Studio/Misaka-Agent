@@ -838,13 +838,22 @@ def source_title(p):
     return htmltext.clip(title.strip(), htmltext.MAX_TITLE_CHARS) or None
 
 
-def build_tree(p):
+# How many pdfium subprocesses one outline build may open. PageIndex's own default is
+# "CPU count - 1", which is the right answer for a lone command and the wrong one here: this
+# runs in the tail of a research card's settlement, and the cards are already N-way parallel
+# (research_parallel per node, and the nodes run in parallel too), so the auto default
+# multiplies -- 3 nodes x 4 cards x 7 workers is 84 pdfium processes on an 8-core machine.
+# A caller that owns the whole machine passes its own `workers`.
+TREE_WORKERS = 2
+
+
+def build_tree(p, *, workers=TREE_WORKERS):
     """Return the PageIndex outline of a PDF as JSON text, or None for other formats or on failure."""
     if os.path.splitext(p)[1].lower() != ".pdf":
         return None
     try:
         from .pageindex import build_tree as pageindex_tree
-        nodes = pageindex_tree(os.path.abspath(p))
+        nodes = pageindex_tree(os.path.abspath(p), workers=workers)
         return json.dumps(nodes, ensure_ascii=False) if nodes else None
     except Exception:  # noqa: BLE001 - outline extraction must not block ingestion
         return None
@@ -919,6 +928,40 @@ def _sweep_stale_stages(root):
             shutil.rmtree(path, ignore_errors=True)
 
 
+def _fsync_stage(stage):
+    """Push a staging directory's contents to disk before the rename that publishes it.
+
+    Renaming a directory makes the document *visible* atomically; it does not make it *durable*.
+    The rename's metadata can reach disk ahead of the page files, so a power loss leaves the
+    corpus a document that passes every check ``resolve_doc`` makes (meta.json intact) and holds
+    empty or truncated pages. Everything else in this module writes through ``utils.atomic``,
+    which fsyncs; ingest builds its directory first and moves it, so the sync happens here.
+    """
+    for base, _dirs, names in os.walk(stage):
+        for name in names:
+            try:
+                fd = os.open(os.path.join(base, name), os.O_RDONLY)
+            except OSError:
+                continue
+            try:
+                os.fsync(fd)
+            except OSError:      # a filesystem that refuses fsync on this file: nothing to do
+                pass
+            finally:
+                os.close(fd)
+    for base, _dirs, _names in os.walk(stage, topdown=False):
+        try:
+            fd = os.open(base, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        except OSError:
+            continue
+        try:
+            os.fsync(fd)
+        except OSError:          # directory fsync is unsupported on some platforms
+            pass
+        finally:
+            os.close(fd)
+
+
 def _meta_lock(ddir):
     """One lock per document for meta.json read-modify-write: two ingests of the same content
     (two cards, two panes) must not lose each other's task or path link."""
@@ -989,6 +1032,7 @@ def ingest(p, title=None, with_tree=True, task_id=None):
                 **extracted}
         with open(os.path.join(stage, "meta.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
+        _fsync_stage(stage)     # durability, before the rename hands the directory its real name
         try:
             os.replace(stage, ddir)
         except OSError:

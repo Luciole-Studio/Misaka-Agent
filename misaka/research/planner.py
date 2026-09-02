@@ -15,6 +15,7 @@ from misaka.core.session_manager import find_most_recent_session
 from misaka.platform import prompt_guard
 from misaka.research import ledger, runs
 from misaka.skills import layers as skill_layers
+from misaka.utils import atomic
 
 PROJECT_INTAKE_CONTRACT = """You are Last Order in Research mode. Draft the project brief (PROJECT.md) for the user's research question.
 Do not answer the original question, and do not break it into research tasks yet.
@@ -241,7 +242,9 @@ def ensure_project_brief(cfg, worker, question, workspace):
     text = str((obj or {}).get("project_markdown") or "").strip()
     if len(text) < 40:
         raise ValueError("Last Order did not generate a complete PROJECT.md.")
-    Path(path).write_text(text.rstrip() + "\n", encoding="utf-8")
+    # atomic: `ensure_project_brief` only checks `isfile` next time, so a half-written
+    # PROJECT.md left by a kill would be returned forever as the project brief.
+    atomic.write_text(path, text.rstrip() + "\n")
     return path
 
 
@@ -340,7 +343,7 @@ def _lo_session(run, node, *parts):
     return runs.session_dir(run, "root-lo" if node["parent_id"] is None else f"node-{node['id']}", *parts)
 
 
-def plan(con, run, cfg, worker, node, *, context_path=None):
+def plan(run, cfg, worker, node, *, context_path=None):
     """Open or continue the node's Last Order session and return its research plan."""
     root = runs.run_dir(run)
     session_dir = _lo_session(run, node)

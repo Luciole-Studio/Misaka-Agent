@@ -140,4 +140,11 @@ def load_image_bytes(data: bytes) -> Image.Image:
 
 
 __all__ = [
-    ]
+    "apply_exif_orientation",
+    "find_jpeg_tiff_offset",
+    "find_webp_tiff_offset",
+    "get_exif_orientation",
+    "has_exif_header",
+    "load_image_bytes",
+    "read_orientation_from_tiff",
+]

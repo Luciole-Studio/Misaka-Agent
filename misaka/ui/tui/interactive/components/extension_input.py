@@ -38,9 +38,11 @@ class ExtensionInputComponent(Container):
 
         timeout = (opts or {}).get("timeout")
         tui = (opts or {}).get("tui")
-        if isinstance(timeout, int) and timeout > 0 and tui is not None:
+        # Extensions send milliseconds through JSON, so a float (or a bool, which is an
+        # `int` subclass) reaches us as often as a plain int; `CountdownTimer` wants an int.
+        if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and timeout > 0 and tui is not None:
             self.countdown = CountdownTimer(
-                timeout,
+                int(timeout),
                 tui,
                 lambda seconds: self.titleText.setText(theme.fg("accent", f"{self.baseTitle} ({seconds}s)")),
                 self.onCancelCallback,

@@ -489,6 +489,13 @@ class AskUserQuestionComponent:
             elif index == self._other_index():
                 self.focuses[self.current] = index
                 self._begin_input("other")
+            # `_option_lines`/`_question_lines` number the multi-select "Submit"/"Next" row
+            # and the "Chat about this" row too, so the digits that render must also act.
+            elif self._is_multi() and index == self._submit_index():
+                self.focuses[self.current] = index
+                self._advance()
+            elif index == self._chat_index():
+                self._finish("clarify")
 
     def _nav_line(self, width: int) -> str:
         hide_submit = len(self.questions) == 1 and not self._is_multi(self.questions[0])

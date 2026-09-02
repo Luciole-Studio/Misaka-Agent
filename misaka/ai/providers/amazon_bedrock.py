@@ -8,6 +8,7 @@ import os
 import re
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, TypedDict, cast
 from urllib.parse import urlparse
@@ -132,6 +133,8 @@ BEDROCK_ERROR_PREFIXES: dict[str, str] = {
     "ThrottlingException": "Throttling error",
     "ServiceUnavailableException": "Service unavailable",
 }
+BEDROCK_DATA_RETENTION_DOCS_URL = "https://docs.aws.amazon.com/bedrock/latest/userguide/data-retention.html"
+_DATA_RETENTION_PATTERN = re.compile(r"data retention mode", re.IGNORECASE)
 _STANDARD_BEDROCK_ENDPOINT_PATTERN = re.compile(
     r"^bedrock-runtime(?:-fips)?\.([a-z0-9-]+)\.amazonaws\.com(?:\.cn)?$"
 )
@@ -220,7 +223,7 @@ def build_client_settings(model: Model, options: StreamOptions | dict[str, Any] 
     timeout_ms = _option(options, "timeoutMs")
     if timeout_ms is not None:
         config_kwargs["read_timeout"] = timeout_ms / 1000
-    proxy_agents = create_http_proxy_agents_for_target(model.baseUrl)
+    proxy_agents = create_http_proxy_agents_for_target(model.baseUrl, _option(options, "env"))
     if proxy_agents is not None:
         config_kwargs["proxies"] = {
             "http": proxy_agents.httpAgent,
@@ -361,7 +364,7 @@ def stream_bedrock(
                 # lease heartbeats along with it.
                 client = await asyncio.to_thread(create_client, model, options)
             env = _option(options, "env")
-            cache_retention = resolve_cache_retention(_option(options, "cacheRetention"))
+            cache_retention = resolve_cache_retention(_option(options, "cacheRetention"), _option(options, "env"))
             inference_max_tokens = _option(options, "maxTokens")
             if inference_max_tokens is None and is_anthropic_claude_model(model):
                 inference_max_tokens = model.maxTokens
@@ -401,9 +404,17 @@ def stream_bedrock(
             response_request_id = normalize_bedrock_diagnostic_value(response_metadata.get("RequestId"))
             on_response = _option(options, "onResponse")
             if callable(on_response) and response_metadata.get("HTTPStatusCode") is not None:
-                headers: dict[str, str] = {}
+                # botocore keeps the full response header dict on ResponseMetadata; pass it
+                # through so a custom gateway's rate-limit/billing headers reach onResponse
+                # (upstream reads the raw Smithy HttpResponse for the same reason).
+                raw_headers = response_metadata.get("HTTPHeaders")
+                headers: dict[str, str] = (
+                    {str(key): str(value) for key, value in raw_headers.items()}
+                    if isinstance(raw_headers, Mapping)
+                    else {}
+                )
                 if response_metadata.get("RequestId"):
-                    headers["x-amzn-requestid"] = str(response_metadata["RequestId"])
+                    headers.setdefault("x-amzn-requestid", str(response_metadata["RequestId"]))
                 await maybe_await(
                     on_response({"status": int(response_metadata["HTTPStatusCode"]), "headers": headers}, model)
                 )
@@ -693,16 +704,31 @@ def append_bedrock_failure_diagnostic(
     )
 
 
+def _bedrock_data_retention_hint(core: str) -> str:
+    """Some models reject the account/profile's configured data retention mode.
+
+    Upstream (``bedrock-converse-stream.ts:382``) appends the AWS docs link to any error
+    whose text mentions the mode, so the user is told where to change it.
+    """
+    return (
+        f" See {BEDROCK_DATA_RETENTION_DOCS_URL} for supported data retention modes."
+        if _DATA_RETENTION_PATTERN.search(core)
+        else ""
+    )
+
+
 def format_bedrock_error(error: Any) -> str:
     if isinstance(error, ClientError):
         name = error.response.get("Error", {}).get("Code", "ClientError")
         prefix = BEDROCK_ERROR_PREFIXES.get(name, name)
-        return f"{prefix}: {error.response.get('Error', {}).get('Message', str(error))}"
+        core = str(error.response.get("Error", {}).get("Message", str(error)))
+        return f"{prefix}: {core}{_bedrock_data_retention_hint(core)}"
 
     message = str(error) if isinstance(error, Exception) else safe_json_stringify(error)
+    hint = _bedrock_data_retention_hint(message)
     name = getattr(error, "name", None) or error.__class__.__name__
     prefix = BEDROCK_ERROR_PREFIXES.get(name)
-    return f"{prefix}: {message}" if prefix else message
+    return f"{prefix}: {message}{hint}" if prefix else f"{message}{hint}"
 
 
 def flush_redacted_content(

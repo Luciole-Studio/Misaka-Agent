@@ -319,6 +319,8 @@ async def _drive_tasks(con, cfg, runner, run_id, *, scope, context=None,
             return halt
         await asyncio.to_thread(_release_dependencies, con, run_id)
         linked = [row for row in runs.tasks(con, run_id) if row["id"] in scope]
+        # `research_parallel` is not in `config/product.py`'s CFG, so this is 4 in every
+        # shipped configuration; the read is the seam a future key connects through.
         free = max(0, max(1, int(cfg.get("research_parallel", 4)))
                    - sum(1 for row in linked if row["status"] in ACTIVE_TASKS))
         ready = [row["id"] for row in linked if row["status"] == "ready"][:free]
@@ -496,7 +498,7 @@ async def _expand(con, cfg, runner, worker, run, node, *, spawner, context, tool
             if plan is None:
                 await _progress(progress, "planning", f"Last Order is planning {_label(node)}.", run)
                 plan, _raw, session_file = await asyncio.to_thread(
-                    planner.plan, con, run, cfg, worker, node, context_path=context_path)
+                    planner.plan, run, cfg, worker, node, context_path=context_path)
                 _write(con, run, node, "plan", "Research plan", "plan.md", plan["plan_markdown"].rstrip() + "\n")
                 runs.set_node(con, nid, session_file=session_file)
                 if node["parent_id"] is None:
@@ -969,7 +971,12 @@ def _fanout(cfg):
     """How many node or probe processes may be open at once. Each one is a Last Order session that
     opens up to ``research_parallel`` card processes of its own, so an unbatched level is a
     multiplier on the machine: the frontier has no width limit (a red team may raise any number of
-    undermining issues), only a depth limit."""
+    undermining issues), only a depth limit.
+
+    Reads ``cfg["research_parallel"]``, which no shipped configuration sets (it is absent
+    from ``config/product.py``'s ``CFG``), so this is ``DEFAULT_FANOUT`` everywhere today.
+    The read is deliberate: adding the key to ``CFG`` connects the knob without touching
+    this file."""
     try:
         return max(1, int(cfg.get("research_parallel", DEFAULT_FANOUT)))
     except (TypeError, ValueError):

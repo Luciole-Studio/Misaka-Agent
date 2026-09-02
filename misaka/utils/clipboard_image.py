@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import selectors
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
@@ -21,6 +23,7 @@ DEFAULT_LIST_TIMEOUT_MS = 1000
 DEFAULT_READ_TIMEOUT_MS = 3000
 DEFAULT_POWERSHELL_TIMEOUT_MS = 5000
 DEFAULT_MAX_BUFFER_BYTES = 50 * 1024 * 1024
+_READ_CHUNK_BYTES = 64 * 1024
 
 
 class _NativeClipboard(Protocol):
@@ -111,26 +114,68 @@ def run_command(
     max_buffer_bytes: int = DEFAULT_MAX_BUFFER_BYTES,
     env: dict[str, str] | None = None,
 ) -> _CommandResult:
+    """Run one clipboard helper and return its stdout, or ``ok=False``.
+
+    ``max_buffer_bytes`` is enforced while reading, the way Node's ``execFile({maxBuffer})``
+    that this mirrors does: a `subprocess.run(capture_output=True)` first read the whole of
+    stdout into memory and only then compared the length, so a 1 GB image on the clipboard
+    was copied into this process in full before being thrown away. Over the limit -- or past
+    the deadline -- the child is killed and nothing is returned.
+
+    Every caller is the Linux/Wayland/WSL command cascade below (wl-paste, xclip, wslpath,
+    powershell.exe under WSL), so the poll-a-pipe loop only ever runs on POSIX.
+    """
     try:
-        completed = subprocess.run(
+        proc = subprocess.Popen(
             [command, *args],
-            check=False,
-            timeout=timeout_ms / 1000,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,   # never a pipe: nothing reads it, and a full one deadlocks
             env=env,
         )
     except OSError:
         return _CommandResult(stdout=b"", ok=False)
-    except subprocess.TimeoutExpired:
-        return _CommandResult(stdout=b"", ok=False)
 
-    if completed.returncode != 0:
-        return _CommandResult(stdout=b"", ok=False)
+    deadline = time.monotonic() + timeout_ms / 1000
+    chunks: list[bytes] = []
+    total = 0
+    failed = False
+    stdout_pipe = proc.stdout
+    assert stdout_pipe is not None
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(stdout_pipe, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    failed = True                       # timed out mid-read
+                    break
+                chunk = os.read(stdout_pipe.fileno(), _READ_CHUNK_BYTES)
+                if not chunk:
+                    break                               # EOF: the child closed stdout
+                total += len(chunk)
+                if total > max_buffer_bytes:
+                    failed = True
+                    break
+                chunks.append(chunk)
+    except (OSError, ValueError):
+        # ValueError is how a selector rejects a file object it cannot poll (a pipe on
+        # Windows, which no caller here reaches): an unreadable child is a failed read,
+        # not an exception out of a clipboard probe.
+        failed = True
+    finally:
+        if failed:
+            proc.kill()
+        stdout_pipe.close()
+        try:
+            proc.wait(timeout=max(deadline - time.monotonic(), 1.0))
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            failed = True
 
-    stdout = bytes(completed.stdout or b"")
-    if len(stdout) > max_buffer_bytes:
+    if failed or proc.returncode != 0:
         return _CommandResult(stdout=b"", ok=False)
-    return _CommandResult(stdout=stdout, ok=True)
+    return _CommandResult(stdout=b"".join(chunks), ok=True)
 
 
 def read_clipboard_image_via_wl_paste(*, env: dict[str, str] | None = None) -> ClipboardImage | None:
@@ -158,9 +203,10 @@ def is_wsl(env: dict[str, str] | None = None) -> bool:
     if resolved_env.get("WSL_DISTRO_NAME") or resolved_env.get("WSLENV"):
         return True
     try:
-        return "microsoft" in _read_proc_version().lower() or "wsl" in _read_proc_version().lower()
+        version = _read_proc_version().lower()   # one read, not one per keyword
     except OSError:
         return False
+    return "microsoft" in version or "wsl" in version
 
 
 def read_clipboard_image_via_powershell(*, env: dict[str, str] | None = None) -> ClipboardImage | None:
@@ -342,5 +388,24 @@ def _get_native_clipboard() -> _NativeClipboard | None:
 
 
 __all__ = [
+    "DEFAULT_LIST_TIMEOUT_MS",
+    "DEFAULT_MAX_BUFFER_BYTES",
+    "DEFAULT_POWERSHELL_TIMEOUT_MS",
+    "DEFAULT_READ_TIMEOUT_MS",
+    "SUPPORTED_IMAGE_MIME_TYPES",
     "ClipboardImage",
-    ]
+    "ReadClipboardImageOptions",
+    "base_mime_type",
+    "convert_to_png",
+    "extension_for_image_mime_type",
+    "is_supported_image_mime_type",
+    "is_wayland_session",
+    "is_wsl",
+    "read_clipboard_image",
+    "read_clipboard_image_via_native_clipboard",
+    "read_clipboard_image_via_powershell",
+    "read_clipboard_image_via_wl_paste",
+    "read_clipboard_image_via_xclip",
+    "run_command",
+    "select_preferred_image_mime_type",
+]

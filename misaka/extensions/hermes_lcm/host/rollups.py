@@ -148,7 +148,12 @@ def _days(first: float, last: float) -> list[str]:
         end = datetime.fromtimestamp(max(first, last), tz=UTC).date()
     except (OverflowError, OSError, ValueError):
         return []
-    span = min((end - start).days, _MAX_SEEDED_DAYS - 1)
+    # Clamp from the *old* end. The cap exists for the skewed timestamp the comment on
+    # _MAX_SEEDED_DAYS names, and keeping the oldest 400 days handed that case the whole
+    # budget: one summary node stamped 0 filled the seed set with empty 1970 dates and left
+    # the recent days -- the ones with content, the ones a rebuild exists to repair -- unseeded.
+    start = max(start, end - timedelta(days=_MAX_SEEDED_DAYS - 1))
+    span = (end - start).days
     return [(start + timedelta(days=offset)).isoformat() for offset in range(span + 1)]
 
 
@@ -212,31 +217,39 @@ def rebuild(db_path: str) -> dict:
         return {"database": db_path, "error": "temporal rollups are disabled "
                                               "(set LCM_TEMPORAL_ROLLUPS_ENABLED=true)"}
     dag = engine._dag
-    seeded: dict[str, int] = {}
-    store = RollupStore(dag.db_path)
     try:
-        for scope, days in sorted(_covered_days(dag).items()):
-            targets = [("day", day, scope) for day in sorted(days)[:_MAX_SEEDED_DAYS]]
-            seeded[scope] = store.upsert_stale_many(targets)
-    finally:
-        store.close()
+        seeded: dict[str, int] = {}
+        store = RollupStore(dag.db_path)
+        try:
+            for scope, days in sorted(_covered_days(dag).items()):
+                # Newest end again: the union of several nodes' day sets can exceed the cap
+                # even when each stayed under it, and the days worth rebuilding are recent.
+                targets = [("day", day, scope) for day in sorted(days)[-_MAX_SEEDED_DAYS:]]
+                seeded[scope] = store.upsert_stale_many(targets)
+        finally:
+            store.close()
 
-    built, exhausted = 0, []
-    for scope in seeded:
-        passes = 0
-        while passes < _MAX_PASSES:
-            remaining = _unfinished(dag, scope)
-            if not remaining:
-                break
-            built += run_rollup_maintenance(dag, config, scope)
-            passes += 1
-            if _unfinished(dag, scope) >= remaining:
-                # A pass that moved nothing will move nothing next time either: what is
-                # left is waiting on something this loop cannot supply -- a daily inside
-                # its retry backoff, or an aggregate whose day never will be ready.
+        built, exhausted = 0, []
+        for scope in seeded:
+            passes = 0
+            while passes < _MAX_PASSES:
+                remaining = _unfinished(dag, scope)
+                if not remaining:
+                    break
+                built += run_rollup_maintenance(dag, config, scope)
+                passes += 1
+                if _unfinished(dag, scope) >= remaining:
+                    # A pass that moved nothing will move nothing next time either: what is
+                    # left is waiting on something this loop cannot supply -- a daily inside
+                    # its retry backoff, or an aggregate whose day never will be ready.
+                    exhausted.append(scope)
+                    break
+            else:
                 exhausted.append(scope)
-                break
-        else:
-            exhausted.append(scope)
-    return {"database": db_path, "seeded": seeded, "built": built, "exhausted": exhausted,
-            "status": status(db_path)}
+        return {"database": db_path, "seeded": seeded, "built": built, "exhausted": exhausted,
+                "status": status(db_path)}
+    finally:
+        # A CLI run owns the engine it just built: leaving its sqlite connections open
+        # would hold a WAL lock past the point the command has printed its answer.
+        # (embed.run / assertions.rebuild / operations.* all say the same thing.)
+        context_engine.close_all()

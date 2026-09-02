@@ -8,6 +8,7 @@ the pane, and
 an existing session is resumed when there is one.
 """
 import asyncio
+import contextlib
 import os
 import signal
 import sys
@@ -130,7 +131,14 @@ class Supervisor:
         self._stop.set()
         self._settled.set()
         self._thread.join(timeout=10)
-        if self.submitted:
+        if self.submitted or self._thread.is_alive():
+            # A thread that outlived the join still owns the card: it may be inside
+            # `dispatch.accept` right now, with `submitted` still False because `_submit`
+            # only flips it afterwards. Settling here would submit the same report a second
+            # time, over a second connection that cannot see the first, uncommitted
+            # transaction. Leave the card claimed instead -- the heartbeat lapses and the
+            # daemon reclaims it. Once the thread is joined, `submitted` is settled and the
+            # read below it is the only writer's final value.
             return
         con = db.connect(self.db_path)
         tid = self.task["id"]
@@ -189,8 +197,10 @@ def launch(task_id, resume_only=False, say=None):
     it) is delivered as the first turn of a new attempt: the daemon claimed the card
     (``pane.continue_card``) and this process settles it like a first run. Without a claim a
     reopened session is only for looking."""
-    con = db.connect(CFG["db"])
-    row = db.get(con, task_id)
+    # Read the card and let go: the session below runs for as long as a person keeps it open,
+    # and this connection was staying open for all of it (`Supervisor` opens its own).
+    with contextlib.closing(db.connect(CFG["db"])) as con:
+        row = db.get(con, task_id)
     if row is None:
         sys.exit(f"Card not found: {task_id}")
     task = dict(row)

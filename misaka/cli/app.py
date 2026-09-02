@@ -138,6 +138,9 @@ def _parser():
     mo.add_argument("op", nargs="?", default="list", choices=["list", "delete"])
     mo.add_argument("name", nargs="?", help="Preset name (for delete)")
 
+    # Registered so `misaka --help` lists it, and so `misaka auth --help` is not an
+    # "invalid choice" -- but it is never dispatched: `main` short-circuits `argv[0] ==
+    # "auth"` before argparse runs, because auth has its own Pi-compatible grammar.
     ac = sub.add_parser("auth", help="Check or print provider credentials")
     ac.add_argument("auth_args", nargs=argparse.REMAINDER)
 
@@ -398,7 +401,7 @@ def _cmd_lcm(args):
         print(lcm_assertions.rebuild(apply=args.apply, limit=args.limit))
     elif args.op == "rollups":
         from misaka.extensions.hermes_lcm.host import rollups as lcm_rollups
-        # The engine resolves its database through `switch.database_path()`, which lets
+        # The engine resolves its database through `config_bridge.database_path()`, which lets
         # upstream's own `LCM_DATABASE_PATH` win. Reporting on `lcm_db` instead would
         # answer "nothing has been built" about a file the engine never opened -- and
         # `--rebuild` would build into one database and print a status from another.
@@ -446,12 +449,6 @@ def _cmd_lcm(args):
             print("Usage: misaka lcm preset show|suggest|apply [NAME] [--apply]")
             sys.exit(2)
         print(lcm_operations.preset(args.target, args.name or "", apply=args.apply))
-
-
-def _cmd_auth(args):
-    from misaka.cli.auth import run_auth_command
-
-    return run_auth_command(args.auth_args)
 
 
 def _cmd_web(args):
@@ -720,7 +717,6 @@ COMMANDS = {
     "board": _cmd_board,
     "research": _cmd_research,
     "lcm": _cmd_lcm,
-    "auth": _cmd_auth,
     "web": _cmd_web,
     "moa": _cmd_moa,
     "skills": _cmd_skills,

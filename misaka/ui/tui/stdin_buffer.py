@@ -189,7 +189,12 @@ class StdinBuffer:
     def process(self, data: str | bytes | bytearray) -> None:
         self._cancelTimeout()
 
-        if isinstance(data, (bytes, bytearray)):
+        if isinstance(data, (bytes, bytearray)) and len(data) == 1 and data[0] > 127:
+            # 8-bit meta (xterm metaSendsEscape=false): Alt+a arrives as a lone 0xE1, which the
+            # UTF-8 decoder would hold as a truncated sequence and then replace with U+FFFD.
+            # pi stdin-buffer.ts restores the ESC-prefixed form instead.
+            raw = "\x1b" + chr(data[0] - 128)
+        elif isinstance(data, (bytes, bytearray)):
             raw = self._decoder.decode(bytes(data))  # a partial multi-byte sequence stays in the decoder until the next chunk
         else:
             raw = data

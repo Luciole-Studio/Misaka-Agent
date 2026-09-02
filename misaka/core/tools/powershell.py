@@ -80,7 +80,7 @@ _POWERSHELL_TOOL_CONFIG = ShellToolConfig(
     promptGuidelines=tuple(
         powershell_tool_system_prompt_contribution["guidelines"]
     ),
-    tempFilePrefix="pi-powershell",
+    tempFilePrefix="misaka-powershell",
 )
 
 

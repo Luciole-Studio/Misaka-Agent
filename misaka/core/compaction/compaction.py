@@ -718,6 +718,13 @@ def prepare_compaction(
             if message is not None:
                 turn_prefix_messages.append(message)
 
+    # pi compaction.ts:805-807 returns undefined here: with nothing to summarize, `compact()`
+    # would pay for a request over an empty `<conversation>` and persist a fake summary.
+    # `agent_session` already guards with `_is_noop_compaction`; the guard belongs to the
+    # public API too (audit 2026-09-02, core-runtime-02).
+    if not messages_to_summarize and not turn_prefix_messages:
+        return None
+
     file_ops = _extract_file_operations(messages_to_summarize, path_entries, previous_compaction_index)
     if cut_point.isSplitTurn:
         for message in turn_prefix_messages:

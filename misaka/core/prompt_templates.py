@@ -28,7 +28,6 @@ class LoadPromptTemplatesOptions(TypedDict):
     cwd: str
     agentDir: str
     promptPaths: list[str]
-    includeDefaults: bool
 
 
 _ECMASCRIPT_WHITESPACE = frozenset(
@@ -140,7 +139,6 @@ def load_prompt_templates(options: LoadPromptTemplatesOptions) -> list[PromptTem
     resolved_cwd = resolve_path(options["cwd"])
     resolved_agent_dir = resolve_path(options["agentDir"])
     prompt_paths = options["promptPaths"]
-    include_defaults = options["includeDefaults"]
 
     templates: list[PromptTemplate] = []
     global_prompts_dir = os.path.join(resolved_agent_dir, "prompts")
@@ -171,9 +169,11 @@ def load_prompt_templates(options: LoadPromptTemplatesOptions) -> list[PromptTem
             {"source": "local", "baseDir": base_dir},
         )
 
-    if include_defaults:
-        templates.extend(_load_templates_from_dir(global_prompts_dir, get_source_info))
-        templates.extend(_load_templates_from_dir(project_prompts_dir, get_source_info))
+    # `includeDefaults` used to sit here (always False at the one call site,
+    # `resource_loader.py`), auto-loading `<agentDir>/prompts` and -- with no
+    # `isProjectTrusted()` gate of its own -- `<cwd>/.misaka/prompts`. The package manager
+    # is where project prompts get their trust gate, so the dead branch was a latent hole
+    # rather than a feature; removed with the option (audit 2026-09-02, core-config-05).
 
     for raw_path in prompt_paths:
         resolved = resolve_path(raw_path, resolved_cwd, trim=True)

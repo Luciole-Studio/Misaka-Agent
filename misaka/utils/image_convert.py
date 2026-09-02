@@ -56,4 +56,8 @@ async def convert_to_png(base64_data: str, mime_type: str) -> ConvertedImage | N
     )
 
 
-__all__ = []
+__all__ = [
+    "ConvertedImage",
+    "convert_image_bytes_to_png",
+    "convert_to_png",
+]

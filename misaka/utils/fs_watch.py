@@ -90,4 +90,8 @@ def _snapshot(path: str) -> tuple[Any, ...]:
 
 __all__ = [
     "FS_WATCH_RETRY_DELAY_MS",
-    ]
+    "FSWatcher",
+    "WatchListener",
+    "close_watcher",
+    "watch_with_error_handler",
+]

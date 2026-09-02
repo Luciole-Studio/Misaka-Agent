@@ -190,6 +190,13 @@ async def generate_branch_summary(
     reserve_tokens = options.reserveTokens if options.reserveTokens is not None else 16384
     context_window = options.model.contextWindow or 128000
     token_budget = context_window - reserve_tokens
+    if token_budget <= 0:
+        # `prepare_branch_entries` reads a non-positive budget as "no limit" (:173), so a
+        # model whose whole context is smaller than the reserve -- an 8k or 16k window
+        # against the default 16384 -- used to send the entire branch and have the
+        # provider reject the request, failing the summary silently. Half the window is
+        # the fallback: it leaves room for the instructions and the summary itself.
+        token_budget = max(1, context_window // 2)
     preparation = prepare_branch_entries(entries, token_budget)
 
     if not preparation.messages:

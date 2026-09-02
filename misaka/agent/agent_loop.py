@@ -43,7 +43,7 @@ from misaka.ai.types import (
     validate_message,
     validate_user_content,
 )
-from misaka.ai.utils.event_stream import EventStream
+from misaka.ai.utils.event_stream import EventStream, spawn_stream_task
 from misaka.ai.utils.validation import validate_tool_arguments
 from misaka.utils.values import maybe_await, signal_aborted
 
@@ -144,7 +144,11 @@ def agent_loop(
             stream.result().set_exception(error)
             stream.end([])
 
-    asyncio.create_task(run())
+    # Not a bare `create_task`: the event loop holds only a weak reference, so the task
+    # can be collected mid-run ("Task was destroyed but it is pending"). pi has no such
+    # hazard -- V8 keeps the promise `void run().then()` returns alive. This is the
+    # repo's own helper for exactly this shape.
+    spawn_stream_task(run())
     return stream
 
 
@@ -913,7 +917,18 @@ def _copy_agent_messages(messages: list[AgentMessage]) -> list[AgentMessage]:
 def _copy_tools(tools: list[AgentTool] | None) -> list[AgentTool] | None:
     if tools is None:
         return None
-    return [tool.model_copy(deep=True) for tool in tools]
+    # Shallow, not deep. pi hands `context.tools` straight through (agent-loop.ts:105,
+    # 296) and copies nothing; Misaka keeps a per-pass object so a stray attribute write
+    # cannot reach the caller's tool list, but the deep walk was doing real damage:
+    #   - it re-copied every tool's `parameters` JSON schema on *every* LLM round trip,
+    #     which for MCP/extension tools grows with the schema;
+    #   - `copy.deepcopy` of a bound method copies `__self__` too, so a tool whose
+    #     `execute`/`prepareArguments` is a bound method (the passthrough at
+    #     tool_definition_wrapper.py:39) ran against a duplicate of its own object and
+    #     any state it recorded was invisible to the original.
+    # A shallow copy shares both the schema and the callables, which is what the loop
+    # actually needs.
+    return [tool.model_copy() for tool in tools]
 
 
 def _model_dump(value: Any) -> Any:

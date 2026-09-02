@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from collections.abc import Mapping
 from typing import Any
 
 from misaka.ai.types import CacheRetention, Model, Usage, UsageCost
+from misaka.ai.utils.provider_env import get_provider_env_value
 from misaka.utils.values import maybe_await, signal_aborted
 
 
@@ -143,17 +143,25 @@ def _prepare_sdk_params(params: Mapping[str, Any]) -> dict[str, Any]:
     return sdk_params
 
 
-def resolve_cache_retention(cache_retention: CacheRetention | None = None) -> CacheRetention:
+def resolve_cache_retention(
+    cache_retention: CacheRetention | None = None, env: Any = None
+) -> CacheRetention:
+    """The explicit retention, else the request-scoped ``env``, else the process env.
+
+    ``env`` is the caller's ``options.env`` (auth resolution env merged with the request's
+    own), which is where a per-provider ``MISAKA_CACHE_RETENTION`` override lives.
+    """
     if cache_retention:
         return cache_retention
-    return "long" if os.environ.get("MISAKA_CACHE_RETENTION") == "long" else "short"
+    return "long" if get_provider_env_value("MISAKA_CACHE_RETENTION", env) == "long" else "short"
 
 
 def safe_json_stringify(value: Any) -> str:
+    # pi's ``safeJsonStringify`` has to handle ``JSON.stringify(undefined) === undefined``;
+    # ``json.dumps`` never returns None, it raises, so only the except branch is needed.
     try:
-        serialized = json.dumps(value)
-        return str(value) if serialized is None else serialized
-    except Exception:  # noqa: BLE001
+        return json.dumps(value)
+    except Exception:  # noqa: BLE001 - any unserialisable value falls back to repr
         return str(value)
 
 

@@ -88,6 +88,14 @@ _PAGE_STEM_CHARS = 12
 # anywhere near this long.
 _MAX_TYPE_CHARS = 100
 
+# The URL a redirect chain landed on is chosen by the remote, and it is quoted back in
+# this tool's own voice outside the untrusted() fence. Without a bound,
+# `Location: https://<15KB of a>.example/` buys 15KB of the model's context in a
+# position the model reads as ours -- the same reasoning as _MAX_TYPE_CHARS above and as
+# _web/academic.py's _MAX_HOST_CHARS. Generous enough for a real redirect target
+# (253-byte host plus a long path); `details["final_url"]` keeps the full value.
+_MAX_URL_CHARS = 300
+
 # Sent to every site fetched. The compatible-token form is what unblocks origins that
 # reject an unfamiliar agent outright; the name is the project, never an account.
 _HEADERS = {
@@ -483,7 +491,7 @@ async def _fetch(target: _Target, cwd: str | None = None, signal: Any | None = N
 
     notes = [f"Fetched {url}"]
     if final_url != url:
-        notes.append(f"redirected to {final_url}")
+        notes.append(f"redirected to {_clip(final_url, _MAX_URL_CHARS)}")
     notes.append(f"{len(body)} bytes")
     header = "; ".join(notes) + "."
     page = got.full

@@ -125,14 +125,41 @@ def derive_export_colors(base_color: str) -> dict[str, str]:
     }
 
 
+# A theme is a data file: it comes from `get_custom_themes_dir()`, and themes get
+# copied off the internet and passed between people. Its keys and values land inside
+# the export's `<head><style>`, so an unvalidated value can close the element
+# (`red;} </style><script>...`) and run script in the browser of everyone the export
+# is handed to -- with the whole transcript in reach, since the page decodes and
+# renders it itself. The session-content path is already fenced (base64 + escapeHtml +
+# marked's html/tag tokenizers disabled); this is the one hole left.
+# The schema (theme-schema.json) admits only `#RRGGBB` and a 0-255 palette index, and
+# `_adjust_brightness` emits `rgb(r, g, b)`, so the whitelist below is wider than any
+# legitimate theme needs. Anything outside it falls back rather than reaching the CSS.
+_SAFE_CSS_IDENT = re.compile(r"[A-Za-z0-9_-]+")
+_SAFE_CSS_COLOR = re.compile(
+    r"#[0-9A-Fa-f]{3,8}"  # hex, the only literal the schema documents
+    r"|[A-Za-z]+"  # named colours, `transparent`, `currentColor`
+    r"|(?:rgb|rgba|hsl|hsla)\(\s*[0-9.,%\s/-]*\)"  # what _adjust_brightness emits
+)
+_FALLBACK_CSS_COLOR = "inherit"
+
+
+def _safe_css_color(value: str, fallback: str = _FALLBACK_CSS_COLOR) -> str:
+    return value if _SAFE_CSS_COLOR.fullmatch(value) else fallback
+
+
 def generate_theme_vars(theme_name: str | None = None) -> str:
     colors = get_resolved_theme_colors(theme_name)
-    lines = [f"--{key}: {value};" for key, value in colors.items()]
+    lines = [
+        f"--{key}: {_safe_css_color(value)};"
+        for key, value in colors.items()
+        if _SAFE_CSS_IDENT.fullmatch(key)
+    ]
     theme_export = get_theme_export_colors(theme_name)
     derived = derive_export_colors(colors.get("userMessageBg") or "#343541")
-    lines.append(f"--exportPageBg: {_nullish(theme_export.get('pageBg'), derived['pageBg'])};")
-    lines.append(f"--exportCardBg: {_nullish(theme_export.get('cardBg'), derived['cardBg'])};")
-    lines.append(f"--exportInfoBg: {_nullish(theme_export.get('infoBg'), derived['infoBg'])};")
+    lines.append(f"--exportPageBg: {_safe_css_color(_nullish(theme_export.get('pageBg'), derived['pageBg']))};")
+    lines.append(f"--exportCardBg: {_safe_css_color(_nullish(theme_export.get('cardBg'), derived['cardBg']))};")
+    lines.append(f"--exportInfoBg: {_safe_css_color(_nullish(theme_export.get('infoBg'), derived['infoBg']))};")
     return "\n      ".join(lines)
 
 
@@ -155,9 +182,11 @@ def generate_html(session_data: SessionData, theme_name: str | None = None) -> s
     colors = get_resolved_theme_colors(theme_name)
     theme_export = get_theme_export_colors(theme_name)
     derived = derive_export_colors(colors.get("userMessageBg") or "#343541")
-    body_bg = _nullish(theme_export.get("pageBg"), derived["pageBg"])
-    container_bg = _nullish(theme_export.get("cardBg"), derived["cardBg"])
-    info_bg = _nullish(theme_export.get("infoBg"), derived["infoBg"])
+    # Same substitution hazard as generate_theme_vars: these three land in template.css's
+    # `--body-bg`/`--container-bg`/`--info-bg` declarations, inside the same `<style>`.
+    body_bg = _safe_css_color(_nullish(theme_export.get("pageBg"), derived["pageBg"]))
+    container_bg = _safe_css_color(_nullish(theme_export.get("cardBg"), derived["cardBg"]))
+    info_bg = _safe_css_color(_nullish(theme_export.get("infoBg"), derived["infoBg"]))
 
     # Entries may carry dataclass/pydantic values (a `!cmd` run puts a BashExecutionMessage
     # into fileEntries); serialize through the same wire conversion the JSONL mode uses.

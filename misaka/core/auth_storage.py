@@ -824,8 +824,13 @@ class AuthStorage:
                         return refreshed["apiKey"]
                 except Exception:  # noqa: BLE001 - another process may have refreshed it meanwhile
                     _throw_if_aborted(operation_options)
-                    self.reload()
-                    updated = _coerce_storage_object(self.data).get(providerId)
+                    # `reload()` is the synchronous path: `time.sleep` lock retries (up to
+                    # ~200ms) plus a blocking file read, all on the event loop, and several
+                    # requests hit this together when a token expires. The async read above
+                    # (:797) is the same snapshot without blocking the loop.
+                    updated = _coerce_storage_object(
+                        await self.readLatestData(operation_options)
+                    ).get(providerId)
                     if isinstance(updated, dict) and updated.get("type") == "oauth":
                         updated_credentials = _coerce_oauth_credentials(updated)
                         if not self._oauthExpiresSoon(updated_credentials):

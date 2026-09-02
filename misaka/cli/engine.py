@@ -567,7 +567,12 @@ def create_runtime_factory(
         elif parsed.projectTrustOverride is not None:
             project_trusted = parsed.projectTrustOverride
         else:
-            project_trusted = not has_trust_resources or trust_store.get(runtime_cwd) is True
+            # Reaching this branch means `should_resolve_trust` was false with no cached
+            # decision and no override, which -- given how it is computed above -- can only
+            # happen when `has_trust_resources` is false. There is nothing to trust, so
+            # there is nothing to look up: the saved decisions are read by `resolve_trust`
+            # below, via `resolve_project_trusted`.
+            project_trusted = True
 
         settings_manager = SettingsManager.create(
             runtime_cwd,
@@ -980,9 +985,12 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
             )
             return 0
 
+        # No downgrade to "print" here, unlike upstream `main.ts:867-872`: piped stdin
+        # already forced `resolve_app_mode` to "print" (`read_piped_stdin` returns None on
+        # a tty), so the downgrade was unreachable -- and `took_over_stdout` was computed
+        # from the pre-downgrade mode, so a reachable version of it would have run print
+        # mode with stdout never taken over.
         stdin_content = await read_piped_stdin()
-        if stdin_content is not None and app_mode == "interactive":
-            app_mode = "print"
         time("readPipedStdin")
 
         initial_message, initial_images = await prepare_initial_message(

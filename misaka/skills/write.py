@@ -77,10 +77,18 @@ def snapshot(root, *, store=True):
     if not root.is_dir():
         return []
     out = []
-    for f in sorted(root.rglob("*")):
-        if f.is_file() and not f.is_symlink():
+    for f in sorted(root.rglob("*")):                     # rglob does not descend symlinked dirs
+        rel = str(f.relative_to(root))
+        if f.is_symlink():
+            # Recorded rather than followed. A role's skill is often a link into a library
+            # (layers.py:84), so a snapshot that did not name the link left `restore` with
+            # nothing to put back after its cleanup pass unlinked it.
+            out.append({"path": rel, "symlink": os.readlink(f)})
+        elif f.is_file():
             sha = _store_blob(f) if store else hashlib.sha256(f.read_bytes()).hexdigest()
-            out.append({"path": str(f.relative_to(root)), "sha256": sha})
+            # The permission bits are content too: scripts/*.sh that came back without its
+            # executable bit is a rollback that did not roll back.
+            out.append({"path": rel, "sha256": sha, "mode": f.stat().st_mode & 0o777})
     return out
 
 
@@ -119,11 +127,22 @@ def restore(root, before):
     for item in before:
         dest = root / item["path"]
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes((_blob_dir() / item["sha256"]).read_bytes())
-        keep.add(dest.resolve())
+        if item.get("symlink") is not None:
+            if dest.is_symlink() or dest.exists():
+                dest.unlink()
+            os.symlink(item["symlink"], dest)
+        else:
+            dest.write_bytes((_blob_dir() / item["sha256"]).read_bytes())
+            if item.get("mode") is not None:              # absent in ledger entries from before this
+                os.chmod(dest, int(item["mode"]))
+        # Relative paths, not `resolve()`: resolving a restored symlink would name its target
+        # outside the tree, and the cleanup below would then delete the link it just made.
+        keep.add(str(Path(item["path"])))
     for f in sorted(root.rglob("*"), reverse=True):       # deepest first, so emptied directories go too
-        if f.is_file() and f.resolve() not in keep:
-            f.unlink()
+        if str(f.relative_to(root)) in keep:
+            continue
+        if f.is_symlink() or f.is_file():                 # is_symlink first: is_file/is_dir follow it,
+            f.unlink()                                    # and rmdir on a link to a dir raises
         elif f.is_dir() and not any(f.iterdir()):
             f.rmdir()
     if not before and not any(root.iterdir()):
@@ -193,6 +212,8 @@ def rollback(entry_id, skill_root):
         return False, "Rollback target must be inside ~/.misaka."
     # Verify every required blob before changing the live skill.
     for item in target["before"]:
+        if item.get("symlink") is not None:
+            continue            # a link is restored from its recorded target, not from a blob
         if not (_blob_dir() / item["sha256"]).exists():
             return False, f"Missing rollback blob for {item['path']} ({item['sha256'][:12]})."
     with mutation_lock():

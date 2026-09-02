@@ -181,7 +181,6 @@ ANTHROPIC_SUBSCRIPTION_AUTH_WARNING = (
 
 _BUILT_IN_MODEL_PROVIDERS = frozenset(getProviders())
 _BEDROCK_PROVIDER_ID = "amazon-bedrock"
-_DEAD_TERMINAL_ERROR_CODES = frozenset({"EIO", "EPIPE", "ENOTCONN"})
 
 
 @dataclass(slots=True)
@@ -267,10 +266,6 @@ def _is_unknown_model(model: Any) -> bool:
         and read_field(model, "id") == "unknown"
         and read_field(model, "api") == "unknown"
     )
-
-
-def _is_dead_terminal_error(error: Any) -> bool:
-    return getattr(error, "code", None) in _DEAD_TERMINAL_ERROR_CODES
 
 
 async def _noop_async(*_args: Any, **_kwargs: Any) -> Any:
@@ -633,10 +628,12 @@ class InteractiveMode:
                 setOutputPad=lambda _padding: None,
             ),
         )
-        self.runtimeHost = getattr(
-            self,
-            "runtimeHost",
-            SimpleNamespace(
+        # Unlike `session`/`ui`/`settingsManager`, `runtimeHost` was already assigned above
+        # (possibly None), so the `getattr` form this used to share with them never fired and
+        # the fallback was dead: `/new`, `/clear`, `/resume`, `/import`, `/fork` then died on
+        # `NoneType.newSession` inside `handleFatalRuntimeError` (showError + SystemExit).
+        if self.runtimeHost is None:
+            self.runtimeHost = SimpleNamespace(
                 importFromJsonl=_noop_async,
                 fork=_noop_async,
                 switchSession=_noop_async,
@@ -644,8 +641,7 @@ class InteractiveMode:
                 dispose=_noop_async,
                 setBeforeSessionInvalidate=lambda *_args, **_kwargs: None,
                 setRebindSession=lambda *_args, **_kwargs: None,
-            ),
-        )
+            )
         setCapabilityOverrides(getattr(self.settingsManager, "getTerminalCapabilityOverrides", dict)())
         if getattr(self, "ui", None) is None:
             if runtime_session is not None:
@@ -799,7 +795,6 @@ class InteractiveMode:
         self._pendingUserInputFuture: asyncio.Future[str] | None = None
         self._backgroundTasks: set[asyncio.Task[Any]] = set()
         self._sessionUnsubscribe: Callable[[], None] | None = None
-        self._activeSelectorHandle: Any | None = None
         self._toolComponentsById: dict[str, ToolExecutionComponent] = {}
         self._handleClearCount = 0
         self.lastEscapeTime = float(getattr(self, "lastEscapeTime", 0))
@@ -2619,6 +2614,28 @@ class InteractiveMode:
         if clear_pending is not None:
             clear_pending()
         self.compactionQueuedMessages = []
+        # The bash blocks parked in pendingMessagesContainer went with that clear(). Whether
+        # they can be forgotten depends on who still owns the matching messages.
+        #
+        # A block is parked only while the session is streaming, and `recordBashResult` parks
+        # its message in `_pendingBashMessages` under exactly the same condition -- so it is
+        # NOT in the transcript this method redraws from. Forgetting the component there loses
+        # the output for good: `/reload` and the turn_end custom-message flush both reach this
+        # method mid-run, and the block would be detached with nothing left to re-add it.
+        # Re-attach instead, and let the session's own flush place it when the run settles.
+        #
+        # Once the session has nothing pending, the identity really did change (`/new`,
+        # `/resume`, fork) and keeping the references would re-add the previous session's
+        # output to a new chat, so they go.
+        # A property on AgentSession, not a method -- `_safe_call_bool` would call it and
+        # fall back to its default, silently taking the forget path every time.
+        if bool(getattr(self.session, "hasPendingBashMessages", False)):
+            add_pending = _callable_attr(self.pendingMessagesContainer, "addChild")
+            if add_pending is not None:
+                for component in self.pendingBashComponents:
+                    add_pending(component)
+        else:
+            self.pendingBashComponents = []
         self.streamingComponent = None
         self.streamingMessage = None
         self._toolComponentsById = {}
@@ -5666,21 +5683,11 @@ class InteractiveMode:
 
             _install_signal(signum, _handler)
 
-        def _register_stream_handler(stream: Any, handler: Callable[[Any], None]) -> None:
-            on = _callable_attr(stream, "on")
-            off = _callable_attr(stream, "off")
-            if on is None or off is None:
-                return
-            on("error", handler)
-            self.signalCleanupHandlers.append(lambda: off("error", handler))
-
-        def _terminal_error_handler(error: Any) -> None:
-            if _is_dead_terminal_error(error):
-                self.emergencyTerminalExit()
-            raise error
-
-        _register_stream_handler(sys.stdout, _terminal_error_handler)
-        _register_stream_handler(sys.stderr, _terminal_error_handler)
+        # pi installs a `process.stdout.on("error", ...)` handler here that turns EIO/EPIPE/
+        # ENOTCONN writes into `emergencyTerminalExit`. Python's `sys.stdout` is a
+        # `TextIOWrapper` with no `on`/`off`, so the port never registered anything; the
+        # capability would have to live at the write site (ProcessTerminal.write) instead.
+        # Dead terminal writes surface as OSError through `sys.excepthook` -> `uncaughtCrash`.
 
         previous_excepthook = sys.excepthook
 
@@ -5788,10 +5795,9 @@ class InteractiveMode:
         return ""
 
     def _clear_selector(self) -> None:
-        handle = self._activeSelectorHandle
-        self._activeSelectorHandle = None
-        if handle is not None and hasattr(handle, "hide"):
-            handle.hide()
+        # `showSelector` mounts into `editorContainer`, never an overlay, so there is no
+        # handle to hide here: the only overlay handle in this file belongs to
+        # `showExtensionCustom`, and `resetExtensionUI` closes that with `ui.hideOverlay()`.
         clear = _callable_attr(self.editorContainer, "clear")
         add_child = _callable_attr(self.editorContainer, "addChild")
         set_focus = _callable_attr(self.ui, "setFocus")
