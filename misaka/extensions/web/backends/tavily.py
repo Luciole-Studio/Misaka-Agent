@@ -1,10 +1,11 @@
-"""Tavily web search (keyed, or opt-in keyless).
+"""Tavily web search and page extraction (keyed, or opt-in keyless).
 
-Ported from Hermes' ``plugins/web/tavily/provider.py`` (search half).
+Ported from Hermes' ``plugins/web/tavily/provider.py``.
 
 Config keys this provider responds to (``~/.misaka/web.json``)::
 
     "search_backend": "tavily"     # explicit per-capability
+    "extract_backend": "tavily"    # explicit per-capability
     "backend": "tavily"            # shared fallback
     "provider_tier": {"tavily": "free"|"paid"}
 
@@ -101,6 +102,83 @@ async def tavily_request(
     return response.json()
 
 
+def _failed(url: str, error: str) -> dict[str, Any]:
+    """The contract entry for a page Tavily did not return.
+
+    An entry, never a hole in the list: the caller reassembles its argument list by
+    position, so a dropped failure hands it the next page's text under this page's
+    address.
+    """
+    return {
+        "url": url,
+        "title": "",
+        "content": "",
+        "raw_content": "",
+        "error": error,
+        "metadata": {"sourceURL": url},
+    }
+
+
+def normalize_extract_documents(
+    response: dict[str, Any], urls: list[str]
+) -> list[dict[str, Any]]:
+    """Map a Tavily ``/extract`` response onto *urls*: one entry each, in order.
+
+    Three lists carry the answer and all three have to be walked, because a URL named in
+    none of them is a URL Tavily dropped without saying so. ``results`` are the pages it
+    read -- ``raw_content`` preferred over ``content``, the same page untruncated;
+    ``failed_results`` carry their own error text, which is the only place the vendor says
+    *why*; and ``failed_urls`` is a bare list of strings with no reason attached at all,
+    hence the literal "extraction failed" Hermes uses for them.
+
+    Divergence from Hermes, deliberate. Its ``_normalize_tavily_documents`` appends the
+    three lists end to end, so a three-URL batch whose middle page failed answers with the
+    third page's text in the second position and every caller pairing by argument order
+    reads the wrong page under the wrong address. The reply is re-keyed onto *urls* here,
+    and a URL nobody asked for is dropped with a debug line rather than lengthening the
+    list past its request.
+
+    Hermes' ``fallback_url`` -- the address to file a result that names none under -- is
+    kept only for a single-URL request. In a batch there is no defensible position for an
+    unlabelled result, and giving it the first URL's is exactly the mispairing this
+    function exists to prevent.
+    """
+    fallback = urls[0] if len(urls) == 1 else ""
+    by_url: dict[str, dict[str, Any]] = {}
+
+    for result in response.get("results") or []:
+        if not isinstance(result, dict):
+            continue
+        url = str(result.get("url") or fallback)
+        title = str(result.get("title") or "")
+        content = str(result.get("raw_content") or result.get("content") or "")
+        by_url.setdefault(
+            url,
+            {
+                "url": url,
+                "title": title,
+                "content": content,
+                "raw_content": content,
+                "metadata": {"sourceURL": url, "title": title},
+            },
+        )
+    for failure in response.get("failed_results") or []:
+        if not isinstance(failure, dict):
+            continue
+        url = str(failure.get("url") or fallback)
+        by_url.setdefault(
+            url, _failed(url, str(failure.get("error") or "extraction failed"))
+        )
+    for failed_url in response.get("failed_urls") or []:
+        url = failed_url if isinstance(failed_url, str) else str(failed_url)
+        by_url.setdefault(url, _failed(url, "extraction failed"))
+
+    unrequested = sorted(set(by_url) - set(urls))
+    if unrequested:
+        logger.debug("tavily extract: reply named unrequested url(s) %s", unrequested)
+    return [by_url.get(url) or _failed(url, "no content returned") for url in urls]
+
+
 def normalize_search_results(response: dict[str, Any]) -> dict[str, Any]:
     """Map a Tavily ``/search`` response to ``{success, data: {web: [...]}}``."""
     web_results = []
@@ -142,6 +220,10 @@ class TavilyWebSearchProvider(WebSearchProvider):
         """
         return keyless_tier_enabled() and provider_tier("tavily") != "paid"
 
+    def supports_extract(self) -> bool:
+        """Tavily reads whole pages through ``/extract``; see :meth:`extract`."""
+        return True
+
     async def search(self, query: str, limit: int = 5) -> dict[str, Any]:
         """Execute a Tavily search: the keyed path, or the opt-in keyless one."""
         try:
@@ -172,11 +254,53 @@ class TavilyWebSearchProvider(WebSearchProvider):
             logger.warning("Tavily search error: %s", exc)
             return {"success": False, "error": f"Tavily search failed: {exc}"}
 
+    async def extract(
+        self, urls: list[str], *, format: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Read every URL through Tavily's ``/extract``, in one batched request.
+
+        *format* is ignored: Tavily returns one rendition per page, so ``content`` and
+        ``raw_content`` differ only in truncation, not in markup.
+
+        Keyless goes to Tavily's OWN endpoint, never the ring -- Tavily is deliberately
+        not a ring member (see the module docstring), and a keyless extract is one
+        request that can fail and be rescued rather than a walk that already spent every
+        free tier there is. That is the same routing :meth:`search` uses, decided by the
+        same ``use_keyless`` call.
+
+        Divergence from Hermes, deliberate: it catches the non-2xx ``ValueError`` from the
+        request helper and turns it into one error entry per URL. A rejected key or an
+        unreachable endpoint is a whole-backend failure, and raising is how the contract
+        says to report one -- the dispatcher catches it and may route the batch through
+        the keyless ring once. The missing-credential refusal below is the one that stays
+        per-entry, because it is a configuration answer rather than an outage.
+        """
+        api_key = provider_env("TAVILY_API_KEY")
+        force_keyless = use_keyless("tavily", api_key)
+        if not force_keyless and not api_key:
+            error = _missing_key_error("extract")
+            return [_failed(url, error) for url in urls]
+
+        logger.info(
+            "Tavily %sextract: %d URL(s)",
+            "keyless " if force_keyless else "",
+            len(urls),
+        )
+        raw = await tavily_request(
+            "extract",
+            {"urls": list(urls), "include_images": False},
+            api_key="" if force_keyless else api_key,
+        )
+        return normalize_extract_documents(raw, list(urls))
+
     def setup_hint(self) -> dict[str, Any]:
         return {
             "name": "Tavily",
             "badge": "free - key optional",
-            "tag": "Search. Works keyless; set TAVILY_API_KEY for higher limits.",
+            "tag": (
+                "Search and page extraction. Works keyless; set TAVILY_API_KEY "
+                "for higher limits."
+            ),
             "env_vars": [
                 {
                     "key": "TAVILY_API_KEY",

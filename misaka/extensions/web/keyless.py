@@ -1,13 +1,19 @@
-"""Keyless web search: four vendors' public free tiers, in a round-robin ring.
+"""Keyless web search and extract: four vendors' public free tiers, in a round-robin ring.
 
-Ported from Hermes' ``plugins/web/keyless_mcp.py`` (search half; the extract half is not
-ported, see :mod:`misaka.extensions.web.provider`). This is the module that makes a fresh
-install with **zero credentials** able to search at all:
+Ported from Hermes' ``plugins/web/keyless_mcp.py``. This is the module that makes a fresh
+install with **zero credentials** able to search the web and read pages at all:
 
 - Exa       https://mcp.exa.ai/mcp          JSON-RPC ``tools/call``, formatted text payload
 - Parallel  https://search.parallel.ai/mcp  JSON-RPC ``tools/call``, JSON payload
 - Firecrawl https://api.firecrawl.dev       public cloud API, no auth header
 - Keenable  https://api.keenable.ai         public endpoints, app-name header
+
+Both capabilities walk the same ring, in the same order, off the same cursor
+(:func:`ring_order` decides it once for either), but they fail over on different
+evidence. A search either answered or it did not, so one throttled vendor advances the
+walk. An extract answers per URL, so it advances only when EVERY page in the batch came
+back throttled: one page failing is that page's problem, and re-running the whole batch
+somewhere else would spend a second free tier on pages that already succeeded.
 
 The tier is resolved strictly LAST -- after every keyed backend and every configured
 one -- so it never pre-empts a deliberate setup. Requests carry no user identifiers.
@@ -161,6 +167,49 @@ async def mcp_call(
 
 
 # ---------------------------------------------------------------------------
+# Extract entries: one per requested URL, in the order it was asked for
+# ---------------------------------------------------------------------------
+#
+# The four vendors below answer a page fetch in four different shapes; these two
+# constructors are where they all become the list entry
+# :mod:`misaka.extensions.web.provider` documents, so a batch that fails over mid-flight
+# does not change shape halfway down.
+
+
+def _extract_entry(url: str, title: str, content: str) -> dict[str, Any]:
+    """A page that was read: the contract entry for *url*.
+
+    ``raw_content`` repeats ``content`` because none of the keyless endpoints offers a
+    second, untruncated rendition -- the field exists so the tool above never has to ask
+    which vendor served the entry before deciding what to read.
+    """
+    return {
+        "url": url,
+        "title": title,
+        "content": content,
+        "raw_content": content,
+        "metadata": {"sourceURL": url, "title": title},
+    }
+
+
+def _extract_error(url: str, error: str) -> dict[str, Any]:
+    """A page that was not read: the contract entry for *url*, carrying *error*.
+
+    An entry, never a hole in the list. The caller reassembles its argument list by
+    position, so dropping the failure would hand it the next page's text under this
+    page's address.
+    """
+    return {
+        "url": url,
+        "title": "",
+        "content": "",
+        "raw_content": "",
+        "error": error,
+        "metadata": {"sourceURL": url},
+    }
+
+
+# ---------------------------------------------------------------------------
 # Parallel (search.parallel.ai) -- JSON text payloads
 # ---------------------------------------------------------------------------
 
@@ -206,6 +255,67 @@ async def parallel_search_keyless(query: str, limit: int = 5) -> dict[str, Any]:
             "success": False,
             "error": f"Keyless Parallel search returned an unexpected payload: {exc}",
         }
+
+
+async def parallel_extract_keyless(urls: list[str]) -> list[dict[str, Any]]:
+    """Keyless Parallel web fetch -> one extract entry per requested URL.
+
+    The one batched member of the ring: ``web_fetch`` takes the whole list in a single
+    call. It also answers with fewer entries than it was given -- a page it could not
+    read comes back under ``errors``, and one it dropped comes back nowhere at all -- so
+    every requested URL with no entry in the reply is back-filled as "no content
+    returned". Hermes' back-fill, and the reason it exists: without it a five-URL request
+    can answer with three pages and the caller pairs them with the wrong addresses.
+
+    Divergence from Hermes, deliberate: it appends the reply in *vendor* order (fetched
+    pages, then errors, then the back-fill) and so breaks the very positional contract
+    the back-fill is there to protect. The reply is re-keyed onto the requested list here
+    instead. A URL in the reply that nobody asked for has no position to occupy and is
+    dropped with a debug line, rather than lengthening the list past its request.
+    """
+    try:
+        text = await mcp_call(
+            PARALLEL_MCP_URL,
+            "web_fetch",
+            {
+                "urls": list(urls),
+                "objective": "Full page content",
+                "session_id": _SESSION_ID,
+            },
+        )
+        data = json.loads(text)
+        if not isinstance(data, dict):
+            raise TypeError(f"expected a JSON object, got {type(data).__name__}")
+    except (KeylessError, json.JSONDecodeError, TypeError) as exc:
+        message = (
+            f"Keyless Parallel extract failed: {exc}. "
+            "Set PARALLEL_API_KEY (https://parallel.ai) or another web "
+            "backend via `~/.misaka/web.json` for reliable service."
+        )
+        return [_extract_error(url, message) for url in urls]
+
+    by_url: dict[str, dict[str, Any]] = {}
+    for result in data.get("results") or []:
+        if not isinstance(result, dict):
+            continue
+        url = str(result.get("url") or "")
+        content = (
+            result.get("full_content")
+            or result.get("content")
+            or "\n\n".join(result.get("excerpts") or [])
+        )
+        by_url.setdefault(url, _extract_entry(url, str(result.get("title") or ""), content))
+    for failure in data.get("errors") or []:
+        if not isinstance(failure, dict):
+            continue
+        url = str(failure.get("url") or "")
+        detail = failure.get("content") or failure.get("error_type") or "extraction failed"
+        by_url.setdefault(url, _extract_error(url, str(detail)))
+
+    unrequested = sorted(set(by_url) - set(urls))
+    if unrequested:
+        logger.debug("keyless parallel extract: reply named unrequested url(s) %s", unrequested)
+    return [by_url.get(url) or _extract_error(url, "no content returned") for url in urls]
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +389,47 @@ async def exa_search_keyless(query: str, limit: int = 5) -> dict[str, Any]:
     return {"success": True, "data": {"web": _parse_exa_search_text(text, limit)}}
 
 
+def _exa_fetch_title(text: str) -> str:
+    """The title at the top of an Exa fetch payload, or ``""``.
+
+    Whichever comes first: a Markdown ``# `` heading or a ``Title:`` line. Exa renders one
+    or the other depending on the page, and nothing else in the payload names the page.
+    """
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            return stripped[2:].strip()
+        if stripped.startswith("Title:"):
+            return stripped[len("Title:"):].strip()
+    return ""
+
+
+async def exa_extract_keyless(urls: list[str]) -> list[dict[str, Any]]:
+    """Keyless Exa web fetch -> one extract entry per requested URL.
+
+    ``web_fetch_exa`` accepts a ``urls`` array but answers with ONE combined text payload
+    and no marker saying where one page ends and the next begins, so a batched call would
+    give every URL the concatenation of all of them. One call per URL is what makes each
+    reply attributable -- Hermes does the same, for the same reason.
+    """
+    results: list[dict[str, Any]] = []
+    for url in urls:
+        try:
+            text = await mcp_call(EXA_MCP_URL, "web_fetch_exa", {"urls": [url]})
+        except KeylessError as exc:
+            results.append(
+                _extract_error(
+                    url,
+                    f"Keyless Exa extract failed: {exc}. "
+                    "Set EXA_API_KEY (https://exa.ai) or another web backend "
+                    "via `~/.misaka/web.json` for reliable service.",
+                )
+            )
+            continue
+        results.append(_extract_entry(url, _exa_fetch_title(text), text))
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Firecrawl keyless (public cloud API, no auth header)
 # ---------------------------------------------------------------------------
@@ -307,6 +458,50 @@ async def firecrawl_search_keyless(query: str, limit: int = 5) -> dict[str, Any]
                 "backend via `~/.misaka/web.json` for reliable service."
             ),
         }
+
+
+async def firecrawl_extract_keyless(urls: list[str]) -> list[dict[str, Any]]:
+    """Keyless Firecrawl cloud scrape -> one extract entry per requested URL.
+
+    Anonymous ``POST /v2/scrape`` against the public cloud, one URL per call, with no
+    Authorization header ever attached. Hermes reaches this through
+    ``_KeylessFirecrawlClient``, a duck-typed stand-in for the SDK; MISAKA carries no SDK
+    for anything to stand in for, so the request that class would have made is made here.
+
+    ``formats: ["markdown"]`` is what Hermes asks for, and the payload arrives either at
+    the top level or nested under ``data`` depending on which Firecrawl build answered
+    (its ``_extract_scrape_payload``). ``html`` is read as the fallback for a page whose
+    markdown conversion produced nothing.
+    """
+    results: list[dict[str, Any]] = []
+    for url in urls:
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
+                    f"{FIRECRAWL_API_URL}/v2/scrape",
+                    json={"url": url, "formats": ["markdown"]},
+                    headers={"Content-Type": "application/json"},
+                )
+                response.raise_for_status()
+                payload = response.json()
+            if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+                payload = payload["data"]
+            if not isinstance(payload, dict):
+                payload = {}
+            metadata = payload.get("metadata")
+            title = metadata.get("title") if isinstance(metadata, dict) else ""
+            content = payload.get("markdown") or payload.get("html") or ""
+            results.append(_extract_entry(url, str(title or ""), str(content)))
+        except Exception as exc:  # noqa: BLE001 - per-URL error entry, as in Hermes
+            results.append(
+                _extract_error(
+                    url,
+                    f"Keyless Firecrawl extract failed: {exc}. "
+                    "Set FIRECRAWL_API_KEY (https://firecrawl.dev) or another web "
+                    "backend via `~/.misaka/web.json` for reliable service.",
+                )
+            )
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +555,52 @@ async def keenable_search_keyless(query: str, limit: int = 5) -> dict[str, Any]:
     return {"success": True, "data": {"web": web_results}}
 
 
+async def keenable_extract_keyless(urls: list[str]) -> list[dict[str, Any]]:
+    """Keyless Keenable page fetch -> one extract entry per requested URL.
+
+    ``GET /v1/fetch/public?url=...`` answers ``{url, title, content}`` with the content in
+    markdown, one URL per call, carrying the app-identifier header their keyless tier
+    requires and no user identifier. A 4xx/5xx becomes that page's error entry rather than
+    an exception, so one unreachable page does not cost the rest of the batch.
+
+    Divergence from Hermes, small: the entry is filed under the URL that was *asked for*,
+    not the one Keenable echoes back. A redirect makes those two differ, and an entry
+    whose ``url`` is not the caller's is exactly the mispairing the positional contract
+    exists to prevent -- the other three ring members already answer this way.
+    """
+    results: list[dict[str, Any]] = []
+    for url in urls:
+        try:
+            async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
+                response = await client.get(
+                    f"{KEENABLE_API_URL}/v1/fetch/public",
+                    params={"url": url},
+                    headers={"X-Keenable-Title": CLIENT_NAME},
+                )
+            if response.status_code >= 400:
+                raise KeylessError(
+                    (response.text or "").strip() or f"HTTP {response.status_code}"
+                )
+            data = response.json()
+            if not isinstance(data, dict):
+                raise TypeError(f"expected a JSON object, got {type(data).__name__}")
+            results.append(
+                _extract_entry(
+                    url, str(data.get("title") or ""), str(data.get("content") or "")
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - per-URL error entry, as in Hermes
+            results.append(
+                _extract_error(
+                    url,
+                    f"Keyless Keenable extract failed: {exc}. "
+                    "Set KEENABLE_API_KEY (https://keenable.ai) or another web "
+                    "backend via `~/.misaka/web.json` for reliable service.",
+                )
+            )
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Round-robin ring + next-in-line failover (rate-limited free tiers)
 # ---------------------------------------------------------------------------
@@ -371,6 +612,13 @@ _KEYLESS_SEARCHERS = {
     "parallel": parallel_search_keyless,
     "firecrawl": firecrawl_search_keyless,
     "keenable": keenable_search_keyless,
+}
+
+_KEYLESS_EXTRACTORS = {
+    "exa": exa_extract_keyless,
+    "parallel": parallel_extract_keyless,
+    "firecrawl": firecrawl_extract_keyless,
+    "keenable": keenable_extract_keyless,
 }
 
 # Per-process round-robin cursor, seeded by the random session id so a fleet spreads
@@ -458,10 +706,73 @@ async def search_with_failover(name: str, query: str, limit: int = 5) -> dict[st
     return last
 
 
+def _note_served_by(results: list[dict[str, Any]], vendor: str) -> None:
+    """Record in each read page's ``metadata`` which ring vendor actually served it.
+
+    The extract counterpart of ``data["served_by"]`` on a search response: a list has no
+    envelope to hang one annotation on, so it goes per entry -- which is where Hermes puts
+    its own extract-level annotations (``rescued_from`` / ``backend_error`` in
+    ``_rescue_extract``). Failed entries are left alone, as Hermes leaves them: their
+    error text already names the vendor that produced it.
+    """
+    for entry in results:
+        if entry.get("error"):
+            continue
+        metadata = entry.setdefault("metadata", {})
+        if isinstance(metadata, dict):
+            metadata["served_by"] = vendor
+
+
+async def extract_with_failover(name: str, urls: list[str]) -> list[dict[str, Any]]:
+    """Keyless extract across the vendor ring, failing over per batch.
+
+    The extract twin of :func:`search_with_failover`, sharing its walk exactly:
+    :func:`ring_order` picks the same entry vendor (pinned, else the round-robin cursor)
+    and drops the same paid-pinned members, so a session's two capabilities never disagree
+    about which free tier is up next.
+
+    What differs is the evidence for moving on. A search advances on one throttled reply;
+    an extract advances only when EVERY URL in the batch came back rate-limit-shaped. One
+    page failing is that page's problem -- a 404, a login wall, a PDF the vendor could not
+    read -- and re-running the whole batch at the next vendor would spend its free tier on
+    pages that already succeeded, then hand the caller the second vendor's fresh failures
+    for them.
+
+    Divergence from Hermes, deliberate: when the walk runs out, the entries say so.
+    Hermes returns the last vendor's errors verbatim, which names one vendor for what was
+    really every vendor, so the same "(all keyless vendors throttled: ...)" note
+    :func:`search_with_failover` appends is appended here too.
+    """
+    order = ring_order(name)
+    if not order:
+        return [
+            _extract_error(url, "All keyless web providers are pinned to paid tiers.")
+            for url in urls
+        ]
+    last: list[dict[str, Any]] = []
+    for i, vendor in enumerate(order):
+        results = await _KEYLESS_EXTRACTORS[vendor](list(urls))
+        errors = [entry.get("error", "") for entry in results]
+        # An empty batch is nobody's throttle: `bool(results)` returns it as it is.
+        if not (results and all(e and is_rate_limitish(e) for e in errors)):
+            if vendor != name:
+                _note_served_by(results, vendor)
+            return results
+        last = results
+        nxt = order[i + 1] if i + 1 < len(order) else None
+        if nxt:
+            logger.info("keyless %s extract throttled; failing over to %s", vendor, nxt)
+    suffix = f" (all keyless vendors throttled: {', '.join(order)})"
+    for entry in last:
+        entry["error"] = f"{entry.get('error', '')}{suffix}"
+    return last
+
+
 __all__ = [
     "CLIENT_NAME",
     "KEYLESS_RING",
     "KeylessError",
+    "extract_with_failover",
     "is_rate_limitish",
     "keyless_walk_order",
     "mcp_call",

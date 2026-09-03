@@ -64,6 +64,10 @@ CFG = {
     # vendor credentials -- one file rather than an environment variable per vendor,
     # because a sub-agent child inherits a scrubbed environment but reads the same file.
     "web_config": os.environ.get("MISAKA_WEB_CONFIG", "~/.misaka/web.json"),
+    # Extracted page text, kept for a TTL so a re-read of the same URL costs nothing.
+    # Addressed here rather than expanded from ``~`` at the call site so a test run
+    # cannot reach the developer's own cache -- the same reason web_config is here.
+    "web_cache": os.environ.get("MISAKA_WEB_CACHE", "~/.misaka/cache/web"),
     "net_sock": os.environ.get("MISAKA_NET_SOCK", "~/.misaka/net.sock"),
     "net_snapshot": os.environ.get("MISAKA_NET_SNAPSHOT", "~/.misaka/net.json"),
     "tasks_root": os.path.expanduser(os.environ.get("MISAKA_TASKS", "~/.misaka/tasks")),

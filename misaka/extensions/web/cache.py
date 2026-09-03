@@ -1,7 +1,8 @@
-"""TTL memo and single-flight coalescing for search results.
+"""The two web result caches: a TTL memo for searches, a disk store for extractions.
 
-Ported from the search half of Hermes' ``tools/web_result_cache.py``. Keyed by
-(provider, normalized query, bucketed limit): identical queries inside the TTL -- the
+**Search memo** -- in memory, per process, ported from the search half of Hermes'
+``tools/web_result_cache.py``. Keyed by (provider, normalized query, bucketed limit):
+identical queries inside the TTL -- the
 fan-out of a research run, a model re-asking the same thing two turns later -- are served
 from memory instead of paid again, and concurrent identical queries share one request.
 
@@ -19,21 +20,42 @@ Disabled with ``cache_enabled: false`` in ``~/.misaka/web.json``; the TTL comes 
 the keyless ring rescued is never offered to :meth:`SearchMemo.store` by the tool -- see
 the note there.
 
-**Not ported:** the disk-backed extract cache that is the second half of the Hermes file
-(``extract_cache_get`` / ``extract_cache_put`` / the ``cache/web`` sidecar index and its
-local-dev and exempt-host rules). It caches ``web_extract`` page text, and MISAKA reaches
-pages through ``web_fetch`` instead; porting it would land a module nothing calls.
+**Extract cache** -- on disk under ``~/.misaka/cache/web``, ported from the second half of
+the same Hermes file. It outlives the process and every session on the machine shares it,
+which is the point: a repeat ``web_extract`` of a URL inside the TTL reads the stored clean
+text back instead of paying a vendor to render the page again. Keyed by
+(url, format, provider), all three -- an html extract is not a markdown one, and one
+backend's rendering of a page is not another's.
+
+Two rules narrow what it will hold, and both are about freshness rather than safety. A
+local or private-address URL is a dev server the user is editing, where serving a whole
+TTL of stale build output is the opposite of what the fetch was for. A host listed in
+``cache_exempt_hosts`` is a staging deploy or a tunnel: public DNS, so the local-address
+heuristic cannot see it, but every fetch still has to be live. The safety questions --
+is this URL an SSRF target, does it carry a credential, does the operator's blocklist
+refuse it -- are asked before anything reaches here, in ``misaka.core.tools._web``.
+
+Both halves read the same two config keys, so switching the cache off or retuning its TTL
+is one edit rather than two.
 """
 
 from __future__ import annotations
 
+import hashlib
+import ipaddress
 import json
 import logging
 import re
+import threading
 import time
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
+from misaka.config import expand_tilde_path
+from misaka.config.product import CFG
 from misaka.extensions.web.config import web_config
+from misaka.utils import atomic
 
 logger = logging.getLogger(__name__)
 
@@ -148,3 +170,308 @@ def slice_search_response(response: dict[str, Any], limit: int) -> dict[str, Any
     except Exception as exc:  # noqa: BLE001 - a malformed response is returned unsliced
         logger.debug("web_search response could not be sliced: %s", exc)
     return response
+
+
+# ── Extract cache (on disk, shared by every session on the machine) ───────────
+
+# The sidecar index inside the cache directory: digest -> {url, file, title, fetched_at}.
+_INDEX_FILENAME = "extract-index.json"
+
+# Entries kept in the index; a save past this evicts the oldest by ``fetched_at``. The
+# cap bounds the JSON document that every lookup parses, not the disk the entry files sit
+# on -- those are pruned by whatever cleans ``~/.misaka/cache``.
+_INDEX_MAX_ENTRIES = 500
+
+#: Longest page text one cache entry may hold. Hermes' number and Hermes' reasoning
+#: (``tools/web_tools.py``: 2MB of markdown is already far more than any one read-through
+#: needs, and some backends return very large pages), but a different rule on top of it:
+#: Hermes' truncate-store writes a *capped* copy with a marker saying so, while a page
+#: over this ceiling is not cached here at all. A capped copy served back through
+#: :func:`extract_cache_get` would look like the whole page and silently lose its tail.
+#: The extract tool imports this for its own stored copy, so the two agree on the number.
+MAX_STORED_TEXT_CHARS = 2_000_000
+
+# Guards the read-modify-write of the index, where the search memo above deliberately
+# holds no lock. The difference is that these two functions do blocking disk I/O, so the
+# tool above is expected to call them through ``asyncio.to_thread`` rather than stall the
+# loop on a page write -- which puts two concurrent extractions on two real threads. The
+# atomic replace in :func:`_save_index` already rules out a torn file; this rules out the
+# lost insert, where two threads each load the same index and the second write drops the
+# first one's entry. It says nothing about other processes: see :func:`_save_index`.
+_index_lock = threading.Lock()
+
+
+def _cache_dir() -> Path | None:
+    """``~/.misaka/cache/web``, created on demand; None when it cannot be.
+
+    ``~/.misaka/cache/<subsystem>/`` is the established layout (``extensions/mcp.py``,
+    ``skills/index.py``). Read from ``CFG`` on every call rather than expanded from a
+    literal once at import, for two reasons: a path frozen at import time would still
+    point at the developer's own cache after a test moved ``HOME``, and ``CFG`` is what
+    ``tests/conftest.py`` and every web test already redirect. A cache that escapes that
+    redirection writes the suite's pages into the developer's real home and then serves
+    them back to the next run.
+    """
+    try:
+        directory = Path(expand_tilde_path(str(CFG["web_cache"])))
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+    except OSError as exc:
+        logger.debug("web extract cache directory unavailable: %s", exc)
+        return None
+
+
+def _index_path() -> Path | None:
+    directory = _cache_dir()
+    return (directory / _INDEX_FILENAME) if directory is not None else None
+
+
+def _fetched_at(entry: object) -> float:
+    """An index entry's timestamp, or 0.0 for anything that is not one.
+
+    Both the freshness check and the eviction sort come through here because the index is
+    plain JSON that anything on the machine can edit: an entry whose ``fetched_at`` is a
+    string, or which is not a mapping at all, has to read as infinitely old -- a miss and
+    the first thing evicted -- rather than raise out of a cache lookup.
+    """
+    if not isinstance(entry, dict):
+        return 0.0
+    try:
+        return float(entry.get("fetched_at", 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _load_index() -> dict:
+    """The sidecar index, or ``{}``. A corrupt or unreadable one is an empty cache."""
+    path = _index_path()
+    if path is None or not path.exists():
+        return {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.debug("web extract cache index unreadable, treating as empty: %s", exc)
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _save_index(index: dict) -> None:
+    """Write the index back, evicting the oldest entries past the cap.
+
+    ``atomic.write_text`` writes a temp file whose name carries this process's pid and a
+    random suffix and then ``os.replace``s it, which is the property Hermes spells out by
+    hand: MISAKA runs several sessions against one home directory, and a shared fixed temp
+    name would let two of them truncate each other mid-write. Each writer's replace is
+    atomic, so the worst cross-process outcome is one writer's entry winning -- a lost
+    cache insert, never a half-written index.
+    """
+    path = _index_path()
+    if path is None:
+        return
+    try:
+        if len(index) > _INDEX_MAX_ENTRIES:
+            newest = sorted(index.items(), key=lambda kv: _fetched_at(kv[1]), reverse=True)
+            index = dict(newest[:_INDEX_MAX_ENTRIES])
+        # 0644, not the 0600 web.json gets: URLs and titles of public pages, no credentials.
+        atomic.write_text(path, json.dumps(index), mode=0o644)
+    except Exception as exc:  # noqa: BLE001 - a cache write never breaks the caller
+        logger.debug("web extract cache index could not be saved: %s", exc)
+
+
+def _url_digest(url: str, format: str | None, provider: str = "") -> str:
+    """The cache key for one extraction, as 16 hex digits.
+
+    All three parts participate. Hermes' own review found that a URL-only key let an html
+    extract and a markdown one of the same page overwrite each other, and that switching
+    extract backends inside the TTL served the old backend's rendering.
+    """
+    raw = f"{url}\n{format or 'markdown'}\n{provider or ''}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _hostname(url: str) -> str:
+    """The URL's lowercased hostname, or ``""`` when it has none.
+
+    ``urlparse`` raises on a malformed authority (a bad IPv6 literal is the usual one),
+    and each caller below has its own answer for "no host": do not cache it, do not
+    exempt it, name its file ``page``.
+    """
+    try:
+        return (urlparse(url).hostname or "").strip("[]").lower()
+    except ValueError:
+        return ""
+
+
+def _entry_file_path(url: str, format: str | None, provider: str) -> Path | None:
+    """The file holding one (url, format, provider) entry's text.
+
+    Deliberately NOT the file the extract tool's truncate-store writes, whose name keys on
+    the URL alone -- that file's job is to be the thing ``read_file`` pages through, and
+    two formats (or two providers') copies of one page would overwrite each other in it.
+    These carry the whole key in their name and exist only so a hit has something to read.
+    """
+    directory = _cache_dir()
+    if directory is None:
+        return None
+    slug = re.sub(r"[^A-Za-z0-9._-]", "-", _hostname(url) or "page")[:60].strip("-")
+    return directory / f"{slug or 'page'}-{_url_digest(url, format, provider)}.cache.md"
+
+
+def _host_matches_pattern(host: str, pattern: str) -> bool:
+    """Case-insensitive host match: exact, ``*.wildcard``, or bare-domain suffix.
+
+    ``mysite.dev`` therefore also matches ``preview.mysite.dev``, which is the shape a
+    user actually writes for a staging site. Matching is on label boundaries, so it does
+    not also catch ``evilmysite.dev``.
+    """
+    host = host.lower().strip(".")
+    pattern = (pattern or "").lower().strip().strip(".")
+    if not pattern:
+        return False
+    if pattern.startswith("*."):
+        base = pattern[2:]
+        return host == base or host.endswith("." + base)
+    return host == pattern or host.endswith("." + pattern)
+
+
+def _is_cache_exempt_host(url: str) -> bool:
+    """True when the URL's host matches ``cache_exempt_hosts`` in ``~/.misaka/web.json``.
+
+    For a site the user is developing but reaching over the public internet -- a staging
+    deploy, a tunnel URL, a preview build. Public DNS, so :func:`_is_local_dev_url` cannot
+    recognise it, yet every fetch has to be live. Checked at put *and* at get, so adding
+    an entry takes effect on the next lookup instead of after the current TTL.
+
+    Fails open to caching: a garbage value here means the user mistyped a config key, and
+    a stale page is a smaller harm than a cache that silently switches itself off.
+    """
+    patterns = web_config().get("cache_exempt_hosts")
+    if not isinstance(patterns, (list, tuple)) or not patterns:
+        return False
+    host = _hostname(url)
+    if not host:
+        return False
+    return any(_host_matches_pattern(host, str(pattern)) for pattern in patterns)
+
+
+def _is_local_dev_url(url: str) -> bool:
+    """True for a loopback, private or LAN URL -- never cached.
+
+    A page on a private address is one the user controls and is typically changing every
+    few seconds: a dev server with hot reload, a LAN preview app. Freshness is the entire
+    reason for fetching it, so the cache declines rather than pin a stale build for a
+    whole TTL.
+
+    Hostname heuristics only, and no DNS: this is a freshness decision, not a security
+    boundary. The security boundary is :mod:`misaka.core.tools._web.bounded`, which
+    resolves the name and pins the address -- and which refuses most of these outright
+    unless the operator opened the private ranges.
+    """
+    host = _hostname(url)
+    if not host:
+        return True  # unparseable, so nothing here can be reasoned about: do not cache
+    if host == "localhost" or host.endswith((".localhost", ".local")):
+        return True
+    # A single-label name is a LAN hostname, not public DNS.
+    if "." not in host and ":" not in host:
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False  # a public DNS name
+    return bool(
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_unspecified
+    )
+
+
+def extract_cache_get(
+    url: str,
+    *,
+    format: str | None = None,
+    provider: str = "",
+) -> dict | None:
+    """Return a fresh cached extraction of *url*, or None.
+
+    The hit is shaped like one entry of the provider contract in
+    :mod:`misaka.extensions.web.provider`, plus ``cached``: ``{"url", "title", "content",
+    "error": None, "cached": True}``. Every failure here -- disabled, exempt, expired,
+    tampered index, evicted file -- is the same None, because a caller that cannot tell
+    them apart cannot do anything different about them either.
+
+    Keyword-only where Hermes takes positionals, so a call site cannot silently pass a
+    provider name into the *format* slot.
+    """
+    if not cache_enabled():
+        return None
+    if _is_local_dev_url(url) or _is_cache_exempt_host(url):
+        return None
+    with _index_lock:
+        entry = _load_index().get(_url_digest(url, format, provider))
+    if not isinstance(entry, dict):
+        return None
+    if time.time() - _fetched_at(entry) >= ttl_seconds():
+        return None
+    try:
+        file_path = Path(str(entry.get("file", "")))
+        cache_root = _cache_dir()
+        # The index is plain JSON on disk. An entry edited to point somewhere else must
+        # not turn a cache lookup into an arbitrary file read, so the resolved path has
+        # to sit under the resolved cache directory -- which also settles the symlink
+        # case, since resolving follows one out of the directory.
+        if cache_root is None or cache_root.resolve() not in file_path.resolve().parents:
+            return None
+        content = file_path.read_text(encoding="utf-8")
+    except (OSError, ValueError) as exc:
+        logger.debug("web_extract cache entry for %s unreadable: %s", url, exc)
+        return None
+    logger.info("web_extract cache hit: %s", url)
+    return {
+        "url": url,
+        "title": str(entry.get("title", "") or ""),
+        "content": content,
+        "error": None,
+        "cached": True,
+    }
+
+
+def extract_cache_put(
+    url: str,
+    content: str,
+    *,
+    title: str = "",
+    format: str | None = None,
+    provider: str = "",
+) -> None:
+    """Store one successful extraction's clean text for TTL reuse. Best-effort.
+
+    Nothing here raises: a full disk, a read-only home, a cache directory somebody
+    replaced with a file -- each of those costs the next lookup a paid re-extraction and
+    is worth one debug line, never a failed tool call on a page that was fetched fine.
+    """
+    if not cache_enabled() or not content:
+        return
+    if _is_local_dev_url(url) or _is_cache_exempt_host(url):
+        return
+    if len(content) > MAX_STORED_TEXT_CHARS:
+        return
+    try:
+        file_path = _entry_file_path(url, format, provider)
+        if file_path is None:
+            return
+        # 0644 like the index: page text, not a credential.
+        atomic.write_text(file_path, content, mode=0o644)
+        with _index_lock:
+            index = _load_index()
+            index[_url_digest(url, format, provider)] = {
+                "url": url,
+                "file": str(file_path),
+                "title": title or "",
+                "fetched_at": time.time(),
+            }
+            _save_index(index)
+    except Exception as exc:  # noqa: BLE001 - a cache write never breaks the caller
+        logger.debug("web_extract could not be cached for %s: %s", url, exc)

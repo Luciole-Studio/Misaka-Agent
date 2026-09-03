@@ -70,6 +70,7 @@ Environment variables override the files (all optional):
 | `MISAKA_FORCE_MODEL` | none | overrides every model choice, card configuration included |
 | `MISAKA_CACHE_RETENTION` | `short` | `long` asks the provider for long prompt-cache retention |
 | `MISAKA_WEB_CONFIG` | `~/.misaka/web.json` | web search: backend choice, keyless tier, and vendor credentials |
+| `MISAKA_WEB_CACHE` | `~/.misaka/cache/web` | where web_extract keeps page text for its TTL |
 | `MISAKA_ALLOW_PRIVATE_URLS` | off | lets the web tools reach private and loopback addresses; cloud metadata endpoints stay blocked either way |
 
 Paths — each is a directory or file MISAKA owns:

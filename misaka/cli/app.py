@@ -149,8 +149,11 @@ def _parser():
 
     wb = sub.add_parser("web", help="Show or change web-search configuration (~/.misaka/web.json)")
     wb.add_argument("op", nargs="?", default="status", choices=["status", "set", "unset"])
-    wb.add_argument("key", nargs="?", help="backend | search_backend | keyless_fallback | "
-                                           "keyless_rescue | env.<VAR> | provider_tier.<vendor>")
+    wb.add_argument("key", nargs="?", help="backend | search_backend | extract_backend | "
+                                           "keyless_fallback | keyless_rescue | allow_private_urls | "
+                                           "cache_enabled | cache_ttl_minutes | cache_exempt_hosts | "
+                                           "extract_char_limit | env.<VAR> | provider_tier.<vendor> | "
+                                           "website_blocklist.<enabled|domains|shared_files> | xai.<key>")
     wb.add_argument("value", nargs="?", help="The value to set (omit for unset)")
 
 
@@ -521,16 +524,32 @@ def _cmd_web(args):
         print(f"Unset {args.key} in {path}")
         return
 
-    # status (default): what will actually serve a search, and why.
+    # status (default): what will actually serve a search and an extract, and why.
     registry.ensure_backends_registered()
     provider, backend, err = dispatch.resolve_provider()
     if provider is not None:
-        print(f"Backend: {backend}  ({'ready' if registry.provider_is_ready(provider) else 'not ready'})")
+        print(f"Search backend: {backend}  ({'ready' if registry.provider_is_ready(provider) else 'not ready'})")
     else:
-        print(f"Backend: {backend or 'none'}  — {err or 'no provider can serve'}")
+        print(f"Search backend: {backend or 'none'}  — {err or 'no provider can serve'}")
+    extractor, extract_backend, extract_err = dispatch.resolve_extractor()
+    if extractor is not None:
+        ready = "ready" if registry.provider_is_ready(extractor) else "not ready"
+        print(f"Extract backend: {extract_backend}  ({ready})")
+    else:
+        print(f"Extract backend: {extract_backend or 'none'}  — {extract_err}")
     print(f"Keyless ring: {'on' if web_config.keyless_tier_enabled() else 'off'}"
           f"   rescue: {'on' if web_config.keyless_rescue_enabled() else 'off'}")
     print(f"Searchable now: {'yes' if registry.web_search_available() else 'no'}")
+    # A tier pinned on a vendor nothing routes to is invisible until it surprises someone:
+    # `provider_tier.exa: free` still decides where the keyless ring starts its walk.
+    stale = [
+        vendor
+        for vendor in (web_config.web_config().get("provider_tier") or {})
+        if vendor not in {backend, extract_backend}
+    ]
+    if stale:
+        print(f"Tier pins on other vendors: {', '.join(sorted(stale))}"
+              "   (`misaka web unset provider_tier.<vendor>` to clear)")
     print("Credentials:")
     for name, is_set, source in web_config.credential_status():
         mark = "✓" if is_set else "·"

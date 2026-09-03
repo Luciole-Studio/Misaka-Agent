@@ -1,22 +1,32 @@
-"""Which backend serves a search, and whether anything can serve one at all.
+"""Which backend serves a search or an extract, and whether anything can serve one at all.
 
 Ported from Hermes' ``agent/web_search_registry.py`` plus the selection half of
 ``tools/web_tools.py`` (``_get_backend`` / ``_get_search_backend`` /
-``_is_backend_available`` / ``check_web_api_key``). Both halves are kept because they are
-not the same mechanism and Hermes runs both: the *selection ladder* answers "which name",
-strictly and without probing, so a broken stored selection surfaces the vendor's own
-error; the *resolution walk* answers "which registered provider", filtered by
-availability, and only runs when the ladder's name is not registered.
+``_get_extract_backend`` / ``_get_capability_backend`` / ``_is_backend_available`` /
+``check_web_api_key``). Both halves are kept because they are not the same mechanism and
+Hermes runs both: the *selection ladder* answers "which name", strictly and without
+probing, so a broken stored selection surfaces the vendor's own error; the *resolution
+walk* answers "which registered provider", filtered by availability, and only runs when
+the ladder's name is not registered.
 
-Hermes' registry is scoped (one map per plugin home) and capability-filtered (search vs
-extract). MISAKA has one process-wide set of backends and no extract capability, so both
-dimensions are gone; everything else -- the preference order, the "explicit config wins
-even when unavailable" rule, the last-resort keyless walk -- is carried over as it stands.
+Hermes' registry has two dimensions MISAKA's flat process-global table does not: it is
+scoped, one map per plugin home. The other one -- the capability filter -- is real here.
+Search and extract are separate questions with separate config keys, and the filter runs
+at *every* step of the walk, not just the configured one: a search-only backend named as
+``extract_backend`` has to fall through rather than be handed a batch of URLs it has no
+renderer for, and equally must not be reached by the single-eligible shortcut, the legacy
+preference order or the keyless ring. Everything else -- the preference order, the
+"explicit config wins even when unavailable" rule, the last-resort keyless walk -- is
+carried over as it stands.
 
-One name in Hermes' ladders is absent from the tables below rather than merely
-unimplemented: the Nous managed tool-gateway (``NOUS_MANAGED_PROVIDER``,
+Two names in Hermes' ladders are absent from the tables below rather than merely
+unimplemented. The Nous managed tool-gateway (``NOUS_MANAGED_PROVIDER``,
 ``_is_tool_gateway_ready``, the ``firecrawl`` gateway client) is Hermes' subscription
-product, and there is nothing to point it at.
+product, and there is nothing to point it at. ``_disabled_web_plugin_for`` -- which tells
+a user "you configured this backend but you also disabled its plugin" -- has nothing to
+key that diagnosis on here: no plugin identity, no enable/disable state, so the only way
+to name a backend that is not registered is a typo, which the dispatcher's existing error
+already says.
 
 ``xai`` is present, and -- as in Hermes -- is a selectable backend that the preference
 walk never reaches on its own. Hermes keeps it out of ``_LEGACY_PREFERENCE`` because its
@@ -167,7 +177,10 @@ def ddgs_package_importable() -> bool:
 
 
 def _tavily_explicitly_configured() -> bool:
-    return any(config_name(key) == "tavily" for key in ("backend", "search_backend"))
+    return any(
+        config_name(key) == "tavily"
+        for key in ("backend", "search_backend", "extract_backend")
+    )
 
 
 def _is_available_safe(provider: WebSearchProvider) -> bool:
@@ -291,9 +304,29 @@ def search_backend_name() -> str:
     return config_name("search_backend") or backend_name()
 
 
+def extract_backend_name() -> str:
+    """The backend name for extract: ``extract_backend``, else the shared ``backend``.
+
+    Hermes' ``_get_capability_backend("extract")``. Separate from search because the two
+    capabilities are commonly split -- a self-hosted SearXNG index cannot render a page,
+    so an install points ``search_backend`` at it and ``extract_backend`` at a vendor
+    that can. Strict in the same way its twin is: a stored name is returned unprobed.
+    """
+    return config_name("extract_backend") or backend_name()
+
+
 def selection_stored() -> bool:
-    """Whether the user ever named a backend, so an unknown name is their typo."""
-    return bool(config_name("backend") or config_name("search_backend"))
+    """Whether the user ever named a backend, so an unknown name is their typo.
+
+    All three keys count. An install that set only ``extract_backend`` has still made a
+    deliberate choice, and must get the strict "you named a backend that does not exist"
+    error rather than being quietly walked onto whatever else is registered.
+    """
+    return bool(
+        config_name("backend")
+        or config_name("search_backend")
+        or config_name("extract_backend")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -301,21 +334,27 @@ def selection_stored() -> bool:
 # ---------------------------------------------------------------------------
 
 
-def resolve_search_provider(configured: str | None = None) -> WebSearchProvider | None:
-    """Resolve the active search provider.
+def _resolve(configured: str | None, *, capability: str) -> WebSearchProvider | None:
+    """Resolve the active provider for *capability* (``"search"`` or ``"extract"``).
 
     1. **Explicit config wins, ignoring availability.** A configured name that is
-       registered is returned even when its :meth:`is_available` is False -- the
-       dispatcher then surfaces a precise "X_API_KEY is not set" error instead of
-       silently routing somewhere else.
-    2. **Single-provider shortcut.** When exactly one registered provider reports
-       available, use it.
-    3. **Legacy preference walk, filtered by availability** -- firecrawl, parallel,
-       tavily, exa, searxng, brave-free, ddgs. The path that fires when no config key is
-       set: pick the highest-priority backend the user actually has credentials for.
+       registered *and can serve this capability* is returned even when its
+       :meth:`is_available` is False -- the dispatcher then surfaces a precise
+       "X_API_KEY is not set" error instead of silently routing somewhere else.
+    2. **Single-provider shortcut.** When exactly one registered provider can serve this
+       capability and reports available, use it.
+    3. **Legacy preference walk, filtered by capability and availability** -- firecrawl,
+       parallel, tavily, exa, searxng, brave-free, ddgs. The path that fires when no
+       config key is set: pick the highest-priority backend the user actually has
+       credentials for.
     4. **Keyless walk.** No credentialed backend at all: fall back to a provider that can
        serve anonymously, unless the tier is disabled. Never pre-empts a keyed setup --
        it is only reachable when the walk above found nothing.
+
+    The capability filter runs at all four steps, as in Hermes' ``_resolve``. Skipping it
+    at any one of them would route a batch of URLs to a backend with no renderer, which is
+    worse than nothing: returning None lets the caller say "that backend is search-only"
+    while a wrong provider produces a plausible-looking empty answer.
 
     Returns None when nothing matches; the dispatcher then tells the user to set a
     provider up.
@@ -323,27 +362,39 @@ def resolve_search_provider(configured: str | None = None) -> WebSearchProvider 
     with _lock:
         snapshot = dict(_providers)
 
+    def _capable(provider: WebSearchProvider) -> bool:
+        if capability == "extract":
+            return bool(provider.supports_extract())
+        return bool(provider.supports_search())
+
     if configured:
         provider = snapshot.get(configured)
-        if provider is not None:
+        if provider is not None and _capable(provider):
             return provider
-        logger.debug(
-            "web backend '%s' configured but not registered; falling back", configured
-        )
+        if provider is None:
+            logger.debug(
+                "web backend '%s' configured but not registered; falling back", configured
+            )
+        else:
+            logger.debug(
+                "web backend '%s' configured but does not support '%s'; falling back",
+                configured,
+                capability,
+            )
 
-    eligible = [p for p in snapshot.values() if _is_available_safe(p)]
+    eligible = [p for p in snapshot.values() if _capable(p) and _is_available_safe(p)]
     if len(eligible) == 1:
         return eligible[0]
 
     for legacy in _LEGACY_PREFERENCE:
         provider = snapshot.get(legacy)
-        if provider is not None and _is_available_safe(provider):
+        if provider is not None and _capable(provider) and _is_available_safe(provider):
             return provider
 
     if keyless_tier_enabled():
         for name in keyless_walk_order():
             provider = snapshot.get(name)
-            if provider is None:
+            if provider is None or not _capable(provider):
                 continue
             try:
                 if provider.is_keyless_available():
@@ -354,9 +405,26 @@ def resolve_search_provider(configured: str | None = None) -> WebSearchProvider 
     return None
 
 
+def resolve_search_provider(configured: str | None = None) -> WebSearchProvider | None:
+    """Resolve the active search provider; see :func:`_resolve` for the four steps."""
+    return _resolve(configured, capability="search")
+
+
+def resolve_extract_provider(configured: str | None = None) -> WebSearchProvider | None:
+    """Resolve the active extract provider; see :func:`_resolve` for the four steps."""
+    return _resolve(configured, capability="extract")
+
+
 def active_search_provider() -> WebSearchProvider | None:
     """Resolve the currently-active search provider from config."""
     return resolve_search_provider(config_name("search_backend") or config_name("backend"))
+
+
+def active_extract_provider() -> WebSearchProvider | None:
+    """Resolve the currently-active extract provider from config."""
+    return resolve_extract_provider(
+        config_name("extract_backend") or config_name("backend")
+    )
 
 
 def provider_is_ready(provider: WebSearchProvider | None) -> bool:

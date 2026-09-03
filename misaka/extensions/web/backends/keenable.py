@@ -1,12 +1,13 @@
-"""Keenable web search (keyed, or keyless through the ring).
+"""Keenable web search and page fetch (keyed, or keyless through the ring).
 
-Ported from Hermes' ``plugins/web/keenable/provider.py`` (search half). Keenable
+Ported from Hermes' ``plugins/web/keenable/provider.py``. Keenable
 (https://keenable.ai) operates an independent web index for AI apps with public keyless
 endpoints (rate-limited free tier; keyed access via KEENABLE_API_KEY for higher limits).
 
 Config keys this provider responds to (``~/.misaka/web.json``)::
 
     "search_backend": "keenable"      # explicit per-capability
+    "extract_backend": "keenable"     # explicit per-capability
     "backend": "keenable"             # shared fallback
     "provider_tier": {"keenable": "free"|"paid"}
 
@@ -31,6 +32,7 @@ from misaka.extensions.web.config import (
 from misaka.extensions.web.keyless import (
     CLIENT_NAME,
     KEENABLE_API_URL,
+    extract_with_failover,
     search_with_failover,
 )
 from misaka.extensions.web.provider import WebSearchProvider
@@ -73,6 +75,10 @@ class KeenableWebSearchProvider(WebSearchProvider):
         """
         return keyless_tier_enabled() and provider_tier("keenable") != "paid"
 
+    def supports_extract(self) -> bool:
+        """Keenable reads whole pages through ``/v1/fetch``; see :meth:`extract`."""
+        return True
+
     async def search(self, query: str, limit: int = 5) -> dict[str, Any]:
         """Execute a Keenable search (keyed path or keyless ring)."""
         try:
@@ -110,13 +116,82 @@ class KeenableWebSearchProvider(WebSearchProvider):
             logger.warning("Keenable search error: %s", exc)
             return {"success": False, "error": f"Keenable search failed: {exc}"}
 
+    async def extract(
+        self, urls: list[str], *, format: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Fetch each URL through Keenable's ``/v1/fetch``, one request per URL.
+
+        Per-URL rather than batched because the endpoint is: it takes one ``url`` query
+        parameter and answers ``{url, title, content}`` with the content in markdown.
+        *format* is ignored -- there is no second rendition to choose between.
+
+        The try/except is per URL and that is the point: a 404, a login wall or a PDF
+        Keenable could not read is that page's error entry, and the remaining pages in the
+        batch still get fetched. A whole-backend failure has no such shape here, because
+        every request stands alone; the dispatcher's all-entries-failed check is what
+        turns "every page failed" back into the one-shot rescue.
+
+        Divergence from Hermes, small and matching what
+        :func:`misaka.extensions.web.keyless.keenable_extract_keyless` already does: the
+        entry is filed under the URL that was *asked for*, not the one Keenable echoes
+        back. A redirect makes the two differ, and an entry whose ``url`` is not the
+        caller's is exactly the mispairing the positional contract exists to prevent.
+        """
+        api_key = provider_env("KEENABLE_API_KEY")
+        if use_keyless("keenable", api_key):
+            # The same decision :meth:`search` makes, through the same chokepoint.
+            logger.info("Keenable keyless extract: %d URL(s)", len(urls))
+            return await extract_with_failover("keenable", list(urls))
+
+        logger.info("Keenable extract: %d URL(s)", len(urls))
+        results: list[dict[str, Any]] = []
+        for url in urls:
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    response = await client.get(
+                        f"{KEENABLE_API_URL}/v1/fetch",
+                        params={"url": url},
+                        headers=_keenable_headers(api_key),
+                    )
+                if response.status_code >= 400:
+                    raise ValueError(
+                        (response.text or "").strip() or f"HTTP {response.status_code}"
+                    )
+                data = response.json()
+                if not isinstance(data, dict):
+                    raise TypeError(f"expected a JSON object, got {type(data).__name__}")
+                title = str(data.get("title") or "")
+                content = str(data.get("content") or "")
+                results.append(
+                    {
+                        "url": url,
+                        "title": title,
+                        "content": content,
+                        "raw_content": content,
+                        "metadata": {"sourceURL": url, "title": title},
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001 - per-URL error entry, as in Hermes
+                logger.debug("Keenable fetch failed for %s: %s", url, exc)
+                results.append(
+                    {
+                        "url": url,
+                        "title": "",
+                        "content": "",
+                        "raw_content": "",
+                        "error": f"Keenable extract failed: {exc}",
+                        "metadata": {"sourceURL": url},
+                    }
+                )
+        return results
+
     def setup_hint(self) -> dict[str, Any]:
         return {
             "name": "Keenable - Free (keyless)",
             "badge": "free - no key",
             "tag": (
-                "Independent web index for AI apps - fast search on Keenable's "
-                "anonymous free tier."
+                "Independent web index for AI apps - fast search and page fetch on "
+                "Keenable's anonymous free tier."
             ),
             "env_vars": [
                 {

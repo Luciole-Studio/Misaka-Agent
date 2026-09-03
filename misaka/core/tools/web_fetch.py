@@ -16,9 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
-import os
-import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -40,6 +37,12 @@ from misaka.core.tools._web.bounded import (
     open_checked_stream,
     read_bounded,
 )
+
+# Aliased to the private names this module has always called them by: the evidence
+# writer moved out to be shared with web_extract, and nothing about the call sites --
+# including the tests that patch them here to watch which thread they run on -- changed.
+from misaka.core.tools._web.evidence import page_stem as _page_stem
+from misaka.core.tools._web.evidence import save_page as _save_page
 from misaka.core.tools._web.negative_cache import (
     record_failure,
     record_success,
@@ -48,8 +51,6 @@ from misaka.core.tools._web.negative_cache import (
 from misaka.core.tools._web.render_check import check_render
 from misaka.core.tools._web.screening import screen_url
 from misaka.core.tools._web.single_flight import single_flight
-from misaka.core.tools.download_file import DOWNLOAD_DIR_NAME
-from misaka.core.tools.path_utils import resolve_to_cwd
 from misaka.documents.htmltext import clip as _clip
 from misaka.documents.htmltext import readable as _readable
 from misaka.platform import budget
@@ -72,17 +73,6 @@ TOTAL_TIMEOUT_SECONDS = 120.0
 # still render to far more prose than a turn should carry. Roughly 10k tokens.
 # Upgrade path: W4's auxiliary-LLM condenser replaces the tail-drop with a summary.
 _MAX_TEXT_CHARS = 40_000
-
-# Where the complete extracted text of a fetched page is left, under the workspace.
-# Beside download_file's own output rather than in a directory of its own: both are
-# "a thing this session pulled off the internet and can be asked to cite".
-_PAGE_DIR = f"{DOWNLOAD_DIR_NAME}/pages"
-
-# Characters of the page digest used as the filename (see _page_stem): a page fetched
-# twice writes the same file rather than accumulating copies. 12 hex digits is 48 bits,
-# which is not a collision risk across one workspace's worth of pages and is short
-# enough that the model can carry the name back in a report.json entry.
-_PAGE_STEM_CHARS = 12
 
 # A Content-Type is a remote header quoted back at the model in this tool's own voice,
 # outside any fence. Same reasoning as the title, tighter bound: no real media type is
@@ -133,7 +123,10 @@ def _is_markup(content_type: str | None, text: str) -> bool:
     return text.lstrip().lstrip("\ufeff").lstrip().startswith("<")
 
 
-# --- what to fetch, and where the evidence lands -------------------------------------
+# --- what to fetch -------------------------------------------------------------------
+#
+# Where the evidence lands is _web/evidence.py: web_extract writes its pages through the
+# same writer, so one saved page is one workspace file whatever tool reached it.
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,85 +152,6 @@ class _Target:
             if self.url != self.requested:
                 out["routed_url"] = self.url
         return out
-
-
-def _page_stem(requested: str, final_url: str, body: bytes) -> str:
-    """The evidence file's name: a digest over the addresses *and* the bytes it documents.
-
-    Not the body's digest alone, for two reasons that are the same reason.
-
-    Two different URLs routinely serve byte-identical bodies -- the academic table sends
-    ``/pdf/`` and ``/abs/`` to one address, and a utm-tagged link returns the page the
-    plain link does -- and one file for both means the second fetch rewrites the
-    ``source_url`` a card has already cited: the delivered report then attributes a quote
-    to a URL it did not come from.
-
-    And in the other direction, everything written into the file is derived from these
-    three values, so one name can only ever hold one set of bytes. That is what lets two
-    research nodes fetch the same primary source in their own worktrees: ``branch_finish``
-    sweeps ``downloads/`` into a leftover commit and merges, and same-path-different-bytes
-    is an add/add conflict that parks the whole run. It is also why ``fetched_at`` is kept
-    out of the file entirely -- a clock reading is not a property of the page, and
-    ``runs.artifact_text`` re-checks the sha it registered.
-    """
-    digest = hashlib.sha256()
-    for address in (requested, final_url):
-        # NUL-separated: a URL cannot contain one, so no two field splits collide.
-        digest.update(address.encode() + b"\0")
-    digest.update(body)
-    return digest.hexdigest()[:_PAGE_STEM_CHARS]
-
-
-def _discard(path: str) -> None:
-    try:
-        os.unlink(path)
-    except OSError:
-        pass  # nothing to undo if the staging file is already gone
-
-
-def _save_page(cwd: str | None, stem: str, provenance: dict[str, Any], text: str) -> str | None:
-    """Write the complete extracted text into the workspace; return its relative path.
-
-    This is the half of a fetch that makes a page quotable. What enters the context is a
-    truncated rendering only this process ever saw, while ``research/ledger.py`` verifies
-    a quote against a *registered artifact* -- so without a file on disk a Sister has to
-    retype the page into her own markdown, and the "verbatim" check then compares her
-    transcription with itself. The file is plain UTF-8 under the workspace, which is
-    exactly what ``research/workflow.py``'s ``_register_task_artifacts`` accepts as-is
-    once the card lists the path in its ``report.json``.
-
-    Returns None when there is nowhere to write (a session with no workspace) or when the
-    write fails: a page that was fetched successfully is still reported successfully, so
-    a full disk costs the evidence file, never the fetch.
-    """
-    if not cwd:
-        return None
-    relative = f"{_PAGE_DIR}/{stem}.md"
-    path = resolve_to_cwd(relative, cwd)
-    directory = os.path.dirname(path)
-    # JSON scalars are valid YAML scalars, which is what keeps a page-written <title> or
-    # a query-laden URL from deciding how the frontmatter parses.
-    front = "\n".join(f"{key}: {json.dumps(value)}" for key, value in provenance.items())
-    document = f"---\n{front}\n---\n\n{text}\n"
-    try:
-        os.makedirs(directory, exist_ok=True)
-        handle, staging = tempfile.mkstemp(dir=directory, suffix=".part")
-    except OSError:
-        return None
-    try:
-        with os.fdopen(handle, "w", encoding="utf-8") as out:
-            out.write(document)
-        # mkstemp creates 0600; an evidence file is an ordinary workspace file, and the
-        # mode came from the staging file rather than from any decision about it.
-        os.chmod(staging, 0o644)
-        # Renamed into place rather than written in place: the name is a digest of the
-        # bytes being written, so two fetches can legitimately target it at once, and a
-        # reader must never meet a half-written provenance header.
-        os.replace(staging, path)
-    except OSError:
-        _discard(staging)
-        return None
-    return relative
 
 
 # --- fetch -------------------------------------------------------------------------
