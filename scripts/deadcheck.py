@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # Vendored or ported-generated: not ours to prune.
 SKIP_DIRS = (
-    "misaka/documents/pageindex",
+    "misaka/core/documents/pageindex",
     # Vendored verbatim from upstream hermes-lcm; pruning it would be a diff
     # against the very thing the next resync replays. host/ is ours and is checked.
     "misaka/core/lcm/vendor",

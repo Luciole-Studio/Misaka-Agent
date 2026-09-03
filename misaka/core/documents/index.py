@@ -17,8 +17,8 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 import zipfile
 
-from misaka.documents import htmltext
-from misaka.documents.pageindex import PageIndexUnavailable
+from misaka.core.documents import htmltext
+from misaka.core.documents.pageindex import PageIndexUnavailable
 from misaka.utils import atomic
 
 DOC_ID_RE = re.compile(r"^[0-9a-f]{12}$")

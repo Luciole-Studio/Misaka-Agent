@@ -4,10 +4,10 @@ import os
 import sys
 
 from misaka.config import CFG, VERSION, current_config
+from misaka.core.documents import index as corpus
 from misaka.core.network import board as tail
 from misaka.core.platform import budget
 from misaka.core.platform import tasks as db
-from misaka.documents import index as corpus
 from misaka.utils import atomic
 
 

@@ -38,6 +38,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from misaka.agent.types import AgentToolResult
 from misaka.ai.types import TextContent
+from misaka.core.documents import index as corpus
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.platform import budget
 from misaka.core.platform.prompt_guard import untrusted
@@ -45,7 +46,6 @@ from misaka.core.tools._web.bounded import UnsafeUrlError, open_checked_stream
 from misaka.core.tools._web.evidence import citable_url
 from misaka.core.tools._web.screening import screen_url
 from misaka.core.tools.path_utils import DOWNLOAD_DIR_NAME, resolve_to_cwd
-from misaka.documents import index as corpus
 from misaka.utils.values import signal_aborted
 
 #: Ceiling on one downloaded file. Sized for what research actually pulls -- a paper

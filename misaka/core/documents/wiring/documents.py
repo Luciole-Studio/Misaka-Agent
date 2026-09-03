@@ -6,13 +6,13 @@ from io import BytesIO
 from pydantic import BaseModel, Field
 
 from misaka.ai.types import ImageContent
+from misaka.core.documents import index as corpus
 from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.platform.toolkit import register_tool as _register
 
 # The read tool already answers "this model cannot see images" for every attachment MISAKA sends;
 # one wording for the whole product beats a second one that drifts. It has no public alias.
 from misaka.core.tools.read import _get_non_vision_image_note
-from misaka.documents import index as corpus
 from misaka.utils.image_resize import format_dimension_note, resize_image_bytes
 from misaka.utils.values import signal_aborted
 

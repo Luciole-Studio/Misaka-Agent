@@ -6,10 +6,10 @@ import os
 import secrets
 import socket
 
+from misaka.core.documents import workspace as ws_index
 from misaka.core.network import worker
 from misaka.core.platform import admission, budget
 from misaka.core.platform import tasks as db
-from misaka.documents import workspace as ws_index
 
 _skipped_logged = set()
 

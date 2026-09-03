@@ -11,9 +11,9 @@ from __future__ import annotations
 import hashlib
 import json
 
+from misaka.core.documents import index as corpus
+from misaka.core.documents.index import normalize_for_quote_match
 from misaka.core.research import runs
-from misaka.documents import index as corpus
-from misaka.documents.index import normalize_for_quote_match
 
 CLAIM_TYPES = {"fact", "inference", "interpretation", "normative"}
 MAX_FINDINGS = 32

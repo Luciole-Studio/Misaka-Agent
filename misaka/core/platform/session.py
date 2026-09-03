@@ -26,7 +26,7 @@ BOOKKEEPING_TOOLS = frozenset({
     "read", "grep", "find", "ls",
     # The card's own paperwork (misaka.core.network.todo.tools_for).
     "misaka_todo", "misaka_todo_list", "misaka_my_card", "misaka_card_note",
-    # Corpus and skill inspection (misaka.extensions.documents, .skills).
+    # Corpus and skill inspection (misaka.core.documents.wiring.documents, .skills).
     "doc_list", "doc_outline", "doc_read", "doc_find", "doc_verify",
     "skills_list", "skill_view",
     # The read-only view of a research run (misaka.core.research.tools).

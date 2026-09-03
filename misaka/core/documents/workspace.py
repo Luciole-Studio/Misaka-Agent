@@ -5,7 +5,7 @@ import logging
 import os
 
 from misaka.config import CFG
-from misaka.documents import index as corpus
+from misaka.core.documents import index as corpus
 
 logger = logging.getLogger(__name__)
 

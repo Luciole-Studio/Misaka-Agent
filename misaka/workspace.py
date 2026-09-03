@@ -1,7 +1,7 @@
 """Workspace navigation across the project brief, task cards, research runs, and indexed artifacts."""
 import os
 
-from misaka.documents import index as corpus
+from misaka.core.documents import index as corpus
 
 
 def _doc_node(m):

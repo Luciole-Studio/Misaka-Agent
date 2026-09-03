@@ -8,7 +8,7 @@ description = "MISAKA: a multi-agent research system for the humanities and soci
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [{ name = "makiko", email = "nishikinokki@gmail.com" }]
-# license: not chosen yet -- the vendored PageIndex tree carries its own MIT licence (misaka/documents/pageindex)
+# license: not chosen yet -- the vendored PageIndex tree carries its own MIT licence (misaka/core/documents/pageindex)
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",

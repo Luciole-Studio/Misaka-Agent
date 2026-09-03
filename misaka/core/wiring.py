@@ -61,7 +61,7 @@ REGISTRY: tuple[str, ...] = (
     "misaka.extensions.agent_state",
     "misaka.extensions.ask_user",
     "misaka.extensions.coverage",
-    "misaka.extensions.documents",
+    "misaka.core.documents.wiring.documents",
     "misaka.extensions.fork_split",
     "misaka.core.lcm",
     "misaka.extensions.llama",

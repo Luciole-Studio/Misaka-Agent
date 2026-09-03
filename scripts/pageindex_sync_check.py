@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Report how far the vendored PageIndex has drifted from upstream, and from its own record.
 
-The contract is in ``misaka/documents/pageindex/PORT_NOTES.md``. It is looser than
+The contract is in ``misaka/core/documents/pageindex/PORT_NOTES.md``. It is looser than
 hermes-lcm's byte-identity rule and deliberately so: the vendored tree was normalised by
 this repository's own lint pass, so almost every file differs from upstream while meaning
 exactly the same thing. Byte comparison against that would report 72 files and tell you
