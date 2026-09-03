@@ -211,12 +211,20 @@ def _cache_dir() -> Path | None:
     ``tests/conftest.py`` and every web test already redirect. A cache that escapes that
     redirection writes the suite's pages into the developer's real home and then serves
     them back to the next run.
+
+    Hermes' broad ``except`` is kept here rather than narrowed to ``OSError``, because the
+    failure set is not knowable from this frame: ``expand_tilde_path`` on a ``~`` path
+    reaches ``Path.home()``, which raises ``RuntimeError`` when ``HOME`` is unset and the
+    uid has no passwd entry -- a container run as ``--user 1000:1000``, an ``env -i``
+    subprocess. That is precisely a directory that "cannot be", and every caller below is
+    written for the None. Letting it out instead turns a cache lookup nobody asked for
+    into a failed ``web_extract`` of a batch of URLs that never needed the cache.
     """
     try:
         directory = Path(expand_tilde_path(str(CFG["web_cache"])))
         directory.mkdir(parents=True, exist_ok=True)
         return directory
-    except OSError as exc:
+    except Exception as exc:  # noqa: BLE001 - no cache directory is a miss, never a raise
         logger.debug("web extract cache directory unavailable: %s", exc)
         return None
 
@@ -243,13 +251,20 @@ def _fetched_at(entry: object) -> float:
 
 
 def _load_index() -> dict:
-    """The sidecar index, or ``{}``. A corrupt or unreadable one is an empty cache."""
+    """The sidecar index, or ``{}``. A corrupt or unreadable one is an empty cache.
+
+    Hermes' broad ``except`` again, and for the same reason as :func:`_cache_dir`: the
+    index is a plain JSON file anything on the machine can write, so what ``json.loads``
+    raises over it is not a set this frame can enumerate. A 60000-deep array of ``[``
+    raises ``RecursionError``, which is not a ``ValueError`` -- and a hostile index is the
+    one case this function exists to absorb.
+    """
     path = _index_path()
     if path is None or not path.exists():
         return {}
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
+    except Exception as exc:  # noqa: BLE001 - a corrupt index is an empty cache
         logger.debug("web extract cache index unreadable, treating as empty: %s", exc)
         return {}
     return loaded if isinstance(loaded, dict) else {}
