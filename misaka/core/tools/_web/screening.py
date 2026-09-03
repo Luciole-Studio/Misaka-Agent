@@ -99,7 +99,11 @@ def screen_url(url: str, *, third_party: bool = False) -> Screening:
     """
     normalized = normalize_url_for_request(url)
 
-    if _secret_in_url(normalized):
+    # Asked of the string as it arrived, not of the normalised one: ``secret_in_url``
+    # normalises internally and checks four forms, so passing the raw URL covers the
+    # normalised one too, while passing the normalised one drops the raw from the set.
+    # That is Hermes' own argument (``web_tools.py:1085-1097``) and it costs nothing.
+    if _secret_in_url(url):
         return Screening(normalized, _SECRET_REFUSAL)
 
     if third_party:
