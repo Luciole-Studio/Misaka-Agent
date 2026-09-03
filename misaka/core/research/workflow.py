@@ -138,7 +138,7 @@ async def _preflight_specs(run, cfg, worker, node, specs, *, progress):
     after. The window cannot simply be narrowed: a session's identity travels through the
     environment and is read out of it all the way through the turn -- ``budget.record_external_call``
     reads ``MISAKA_USAGE_DB``/``_TASK_ID``/``_GENERATION`` at every accounted call,
-    ``messages.register`` and ``roster`` read the card and the role, ``extensions.mcp`` reads the
+    ``messages.register`` and ``roster`` read the card and the role, ``core.mcp`` reads the
     profile, a spawned sub-agent re-reads all three -- and ``_run_session`` restores the keys it
     saved, which two overlapping sessions cannot both do. So overlapping the calls bought no
     wall-clock at all: they queued on that lock exactly as they had queued on each other.

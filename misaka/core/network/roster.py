@@ -42,7 +42,7 @@ Last Order reads this file to decide which tasks fit this Sister. Put personalit
 """
 
 
-# The only key `misaka/extensions/mcp.py:load_profile_config` reads out of a role's
+# The only key `misaka/core/mcp.py:load_profile_config` reads out of a role's
 # config.yaml is `mcp_servers`, and the only keys it reads out of one server entry are
 # command/args/env/cwd/disabled -- so those are the only keys the skeleton documents.
 # It is commented out end to end on purpose: an all-comment file parses to None, `_clean`

@@ -118,7 +118,7 @@ class AskUserQuestionComponent:
 
     def _key(self, question: Any | None = None) -> str:
         # Deliberately unsanitised: this is the identity the answers/annotations dicts are
-        # keyed by, and `extensions/ask_user` looks those up with the question text it sent.
+        # keyed by, and `core/ask_user` looks those up with the question text it sent.
         # Every caller that puts the result on screen must wrap it in `_sanitize` itself --
         # `_submit_lines` does, and `_nav_line` only uses it as a dict lookup. Adding a new
         # render site that prints a `_key()` without `_sanitize` reopens the OSC 52 hole.

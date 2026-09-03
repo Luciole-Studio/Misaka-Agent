@@ -278,7 +278,7 @@ def commit_agent_usage(con, token, task_id, generation, total_tokens):
 
 
 # Characters of the sha256 kept for the URL or query one external call was made
-# against. Same 16 as the repo's other privacy digests (extensions/mcp.py, the task
+# against. Same 16 as the repo's other privacy digests (core/mcp.py, the task
 # fingerprints in platform/tasks.py): enough that two different pages never collide in
 # one run's ledger, short enough that the row stays readable.
 _SUBJECT_DIGEST_CHARS = 16

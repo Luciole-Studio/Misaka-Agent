@@ -1272,7 +1272,7 @@ class SubagentManager:
             for spec in definition.mcp_servers
             for name in ([spec] if isinstance(spec, str) else list(spec) if isinstance(spec, dict) else [])
         ]
-        from misaka.extensions import mcp
+        from misaka.core import mcp
 
         configured = list(mcp.servers_for(self.role_context.profile_dir))
         missing_config = [
@@ -2689,7 +2689,7 @@ class SubagentManager:
     def _agent_mcp_config(self, task: AgentTask) -> str | None:
         if not task.definition.mcp_servers:
             return None
-        from misaka.extensions import mcp
+        from misaka.core import mcp
 
         available = mcp.servers_for(self.role_context.profile_dir)
         # Everything available, then whatever the definition spells out inline. A

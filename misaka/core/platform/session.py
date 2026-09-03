@@ -20,7 +20,7 @@ from misaka.core.platform.vocabulary import BOOKKEEPING_MANAGEMENT_TOOLS
 # OpenAlex), ``Agent`` (delegating is work even though the permission layer files it under
 # management), and every MCP or skill tool this list has never heard of. ``AskUserQuestion``
 # is deliberately absent too: it only exists where a person is watching
-# (``misaka.extensions.ask_user``), and waiting on a human is not idling.
+# (``misaka.core.ask_user``), and waiting on a human is not idling.
 BOOKKEEPING_TOOLS = frozenset({
     # Builtins that only look (misaka.core.tools).
     "read", "grep", "find", "ls",

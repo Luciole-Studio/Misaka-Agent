@@ -84,7 +84,7 @@ def activate(spec):
     ``download_file`` goes one step further for the formats the corpus can read: it indexes
     the file on arrival and hands back a document ID, because the alternative next step the
     model is left with is the read tool, which cannot open a PDF at all. That makes the
-    ``doc_*`` tools (registered by ``extensions/documents.py`` for every session kind here
+    ``doc_*`` tools (registered by ``core/documents/wiring/documents.py`` for every session kind here
     except ``bare``) the way a downloaded document is navigated and quoted.
     """
     from misaka.core.tools.download_file import create_download_file_tool_definition

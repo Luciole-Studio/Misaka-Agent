@@ -58,14 +58,14 @@ class SessionSpec:
 
 # Shared entries by name, then Last Order's, then the Sisters': the folder scan's order.
 REGISTRY: tuple[str, ...] = (
-    "misaka.extensions.agent_state",
-    "misaka.extensions.ask_user",
-    "misaka.extensions.coverage",
+    "misaka.core.panel.agent_state",
+    "misaka.core.ask_user",
+    "misaka.core.coverage",
     "misaka.core.documents.wiring.documents",
-    "misaka.extensions.fork_split",
+    "misaka.core.panel.fork_split",
     "misaka.core.lcm",
     "misaka.extensions.llama",
-    "misaka.extensions.mcp",
+    "misaka.core.mcp",
     "misaka.core.network.wiring.messages",
     "misaka.extensions.moa",
     "misaka.core.network.wiring.observe",

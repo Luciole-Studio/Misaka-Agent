@@ -172,7 +172,7 @@ def _doc_evidence(run, doc_id, page, quote):
     document id or a page number: these reasons travel back into a prompt.
 
     The roots searched here (``runs.evidence_roots``) and the candidate roots the doc_* tools
-    expand a session cwd into (``extensions/documents.py::_roots``) are one rule in two places:
+    expand a session cwd into (``core/documents/wiring/documents.py::_roots``) are one rule in two places:
     a doc_verify that refuses a citation this function would accept -- or the reverse -- breaks
     the verify-then-cite contract, so change them together.
     """

@@ -3,7 +3,7 @@
 ``asyncio`` defaults to 64 KiB. ``StreamReader.readline()`` on a longer line raises
 ``ValueError`` and the stream cannot be resynchronised afterwards -- the tail of the
 over-long line is still arriving -- so the only correct response is to treat that stream
-as finished and say why. ``misaka/extensions/mcp.py`` is the worked example; the gate
+as finished and say why. ``misaka/core/mcp.py`` is the worked example; the gate
 check is ``scripts/streamcheck.py``.
 """
 

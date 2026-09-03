@@ -7,7 +7,7 @@ which already have a correct implementation somewhere in this repo:
 
 1. ``asyncio``'s default ``limit`` is 64 KiB. ``StreamReader.readline()`` on a longer
    line raises ``ValueError`` and the stream can never resynchronise -- the tail of the
-   over-long line is still arriving. ``extensions/mcp.py`` is the model: it passes an
+   over-long line is still arriving. ``core/mcp.py`` is the model: it passes an
    explicit ``limit=`` and treats the ``ValueError`` as "this stream is finished",
    reporting a readable reason. Two P1s (grep dying on a minified file, the panel daemon
    dropping its own panel connection and killing every pane) were the same omission.
@@ -181,7 +181,7 @@ def main() -> int:
         print(
             "Pass limit= (see misaka/utils/streams.py STREAM_LIMIT) and catch the "
             "ValueError from readline() as an unrecoverable stream, the way "
-            "misaka/extensions/mcp.py does -- or add the site to STREAM_ALLOWED with why."
+            "misaka/core/mcp.py does -- or add the site to STREAM_ALLOWED with why."
         )
     if thread_problems:
         print("streamcheck: unjudged UI timer/thread site(s):")
