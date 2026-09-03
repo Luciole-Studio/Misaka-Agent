@@ -31,7 +31,7 @@ import unicodedata
 from collections.abc import Callable
 from pathlib import PurePosixPath
 from typing import Any
-from urllib.parse import unquote, urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -40,8 +40,9 @@ from misaka.agent.types import AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.tools._web.bounded import UnsafeUrlError, open_checked_stream
+from misaka.core.tools._web.evidence import citable_url
 from misaka.core.tools._web.screening import screen_url
-from misaka.core.tools.path_utils import resolve_to_cwd
+from misaka.core.tools.path_utils import DOWNLOAD_DIR_NAME, resolve_to_cwd
 from misaka.documents import index as corpus
 from misaka.platform import budget
 from misaka.platform.prompt_guard import untrusted
@@ -55,7 +56,6 @@ from misaka.utils.values import signal_aborted
 MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
 
 #: Downloads land here, under the workspace, and nowhere else.
-DOWNLOAD_DIR_NAME = "downloads"
 
 # Wall-clock ceiling for the whole transfer. The per-operation timeout below only
 # bounds a *stall*; a server that dribbles bytes forever passes it indefinitely.
@@ -249,21 +249,6 @@ def _publish(part: str, directory: str, name: str) -> str:
     raise _Refused(f"Could not find a free filename for {name} after {_MAX_COLLISIONS} tries.")
 
 
-def _provenance(url: str) -> str:
-    """A URL fit to put in front of the model and into the ledger.
-
-    The query is dropped because the *final* URL of a redirect chain is chosen by the
-    server, not by the caller, and the redirect that ends at a CDN commonly ends at a
-    presigned one -- ``?X-Amz-Signature=...`` is a live credential the model never saw
-    and must not be handed, still less written to a ledger that gets exported. The
-    path is what identifies the object, and the sha256 beside it is what locks the
-    evidence. The *requested* URL is left alone: the caller wrote it, already has it,
-    and its query is often the only thing that names the document.
-    """
-    parsed = urlsplit(url)
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
-
-
 def _discard(path: str) -> None:
     try:
         os.unlink(path)
@@ -404,7 +389,7 @@ async def _download(url: str, requested: str, directory: str, signal: Any) -> Ag
         _discard(part)
         raise
 
-    final_url = _provenance(str(response.url))
+    final_url = citable_url(str(response.url))
     details = {
         "url": url,
         "final_url": final_url,
@@ -419,7 +404,7 @@ async def _download(url: str, requested: str, directory: str, signal: Any) -> Ag
         f"  {total} bytes, type {content_type or 'unknown'}",
         f"  sha256: {sha256}",
     ]
-    if final_url != _provenance(url):
+    if final_url != citable_url(url):
         # Compared query-free on both sides: a request URL that carries its own query
         # is not a redirect, and reporting one would be a lie about where this came from.
         lines.insert(1, f"  redirected to: {final_url}")

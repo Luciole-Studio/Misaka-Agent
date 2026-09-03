@@ -41,6 +41,7 @@ from misaka.core.tools._web.bounded import (
 # Aliased to the private names this module has always called them by: the evidence
 # writer moved out to be shared with web_extract, and nothing about the call sites --
 # including the tests that patch them here to watch which thread they run on -- changed.
+from misaka.core.tools._web.evidence import citable_url
 from misaka.core.tools._web.evidence import page_stem as _page_stem
 from misaka.core.tools._web.evidence import save_page as _save_page
 from misaka.core.tools._web.negative_cache import (
@@ -231,7 +232,10 @@ def _extract(
         _page_stem(target.requested, final_url, body),
         {
             "source_url": target.requested,
-            "final_url": final_url,
+            # Query-stripped, for the reason download_file has always stripped it: the
+            # end of a redirect chain is chosen by the server and commonly presigned, and
+            # this header is written to disk and registered as an artifact.
+            "final_url": citable_url(final_url),
             "sha256": body_sha,
             "text_sha256": text_sha,
             "title": title,

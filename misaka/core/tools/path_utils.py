@@ -11,6 +11,12 @@ from misaka.utils.paths import normalize_path, resolve_path
 
 NARROW_NO_BREAK_SPACE = "\u202f"
 
+# The workspace directory everything pulled off the internet lands in: files from
+# download_file, page text from web_fetch and web_extract under ``pages/``. Named here
+# rather than in either of them because both need it and neither owns the other -- an
+# import in either direction is the circle this constant used to create.
+DOWNLOAD_DIR_NAME = "downloads"
+
 
 def try_macos_screenshot_path(file_path: str) -> str:
     return re.sub(
@@ -90,6 +96,7 @@ resolveReadPathAsync = resolve_read_path_async
 
 
 __all__ = [
+    "DOWNLOAD_DIR_NAME",
     "expandPath",
     "expand_path",
     "file_exists",

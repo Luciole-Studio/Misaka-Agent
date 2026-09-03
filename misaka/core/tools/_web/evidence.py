@@ -32,9 +32,9 @@ import logging
 import os
 import tempfile
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
-from misaka.core.tools.download_file import DOWNLOAD_DIR_NAME
-from misaka.core.tools.path_utils import resolve_to_cwd
+from misaka.core.tools.path_utils import DOWNLOAD_DIR_NAME, resolve_to_cwd
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,23 @@ _PAGE_DIR = f"{DOWNLOAD_DIR_NAME}/pages"
 # which is not a collision risk across one workspace's worth of pages and is short
 # enough that the model can carry the name back in a report.json entry.
 _PAGE_STEM_CHARS = 12
+
+
+def citable_url(url: str) -> str:
+    """*url* with its query dropped: the address a page may be reported and stored under.
+
+    Only ever applied to a *final* URL -- the one the server chose at the end of a
+    redirect chain, which commonly ends at a CDN and commonly ends presigned.
+    ``?X-Amz-Signature=...`` is a live credential the caller never saw and must not be
+    handed, still less written into a provenance header that outlives the session and gets
+    registered as an artifact. The path is what identifies the object and the digest
+    beside it is what locks the evidence.
+
+    The *requested* URL is deliberately not passed through this: the caller wrote it,
+    already has it, and its query is often the only thing that names the document.
+    """
+    parsed = urlsplit(url)
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
 
 
 def page_stem(requested: str, final_url: str, body: bytes) -> str:
@@ -165,4 +182,4 @@ def save_page(cwd: str | None, stem: str, provenance: dict[str, Any], text: str)
     return relative
 
 
-__all__ = ["frontmatter_line_count", "page_stem", "save_page"]
+__all__ = ["citable_url", "frontmatter_line_count", "page_stem", "save_page"]
