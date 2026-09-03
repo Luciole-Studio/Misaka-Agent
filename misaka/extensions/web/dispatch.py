@@ -1,4 +1,4 @@
-"""One search call: resolve the backend, run it, rescue it once if it failed.
+"""One search or extract call: resolve the backend, run it, rescue it once if it failed.
 
 This is the provider layer's entry point and the only function the tool above it needs.
 Ported from the dispatch half of Hermes' ``tools/web_tools.py`` -- the provider lookup at
@@ -13,13 +13,9 @@ contract. The one thing the tool must honour from here: a response carrying
 must never be cached, or a single failure would pin the query to the free tier for a
 whole TTL.
 
-Three pieces of Hermes' rescue machinery have no counterpart here, each because the thing
+Two pieces of Hermes' rescue machinery have no counterpart here, each because the thing
 they guard does not exist:
 
-* ``_rescue_extract`` and ``_policy_blocked_result`` -- the extract half. The latter's only
-  caller in the whole Hermes tree is ``_rescue_extract``: it keeps a page the user's
-  website policy deliberately refused from being re-fetched through the ring. There is no
-  page fetch on this path and no website-policy table to refuse with.
 * ``_disabled_web_plugin_for`` -- diagnoses "you configured this backend but disabled its
   plugin". MISAKA has no plugin-disable table, so the only way to name a backend that is
   not there is a typo, which is what :func:`resolve_provider` says instead.
@@ -38,11 +34,17 @@ from misaka.extensions.web.config import (
     provider_env,
     use_keyless,
 )
-from misaka.extensions.web.keyless import KEYLESS_RING, search_with_failover
+from misaka.extensions.web.keyless import (
+    KEYLESS_RING,
+    extract_with_failover,
+    search_with_failover,
+)
 from misaka.extensions.web.provider import WebSearchProvider
 from misaka.extensions.web.registry import (
+    active_extract_provider,
     active_search_provider,
     ensure_backends_registered,
+    extract_backend_name,
     get_provider,
     search_backend_name,
     selection_stored,
@@ -209,3 +211,134 @@ async def web_search(query: str, limit: int = 5) -> dict[str, Any]:
             provider.name, str(response.get("error", "")), query, limit
         )
     return response
+
+def policy_blocked(result: dict[str, Any]) -> bool:
+    """Whether an extract entry failed because the operator's blocklist said so.
+
+    A policy refusal is a decision, not an outage. Hermes' ``_policy_blocked_result``
+    (``tools/web_tools.py:523-530``) exists for exactly one caller -- the rescue below --
+    because routing a refused URL through the keyless ring would fetch the page the
+    operator just forbade, using a vendor they never configured. The string test is the
+    fallback for a provider that reports the block in prose rather than the flag.
+    """
+    if result.get("blocked_by_policy"):
+        return True
+    return "blocked by website policy" in str(result.get("error") or "").lower()
+
+
+async def rescue_extract(
+    provider_name: str, urls: list[str], results: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """One-shot keyless-ring rescue for an extract whose backend failed outright.
+
+    Fires only when EVERY page failed, which is what distinguishes a backend outage from
+    pages that are simply hard to read: a partial failure is passed through untouched,
+    because re-running the whole batch elsewhere would pay a second vendor for the pages
+    that already worked. Stateless, like the search rescue -- the next call attempts the
+    chosen backend again.
+
+    Policy refusals are partitioned out first and their original entries preserved
+    verbatim. Ported from Hermes' ``_rescue_extract`` (``tools/web_tools.py:533-578``),
+    including its defensive branch for a provider that broke order parity.
+    """
+    if len(results) == len(urls):
+        rescue_idx = [i for i, entry in enumerate(results) if not policy_blocked(entry)]
+    else:  # a provider that broke order parity: nothing can be paired, rescue them all
+        rescue_idx = list(range(len(results)))
+    if not rescue_idx:
+        return results  # every failure is an intentional policy block
+
+    rescue_urls = [urls[i] for i in rescue_idx] if len(results) == len(urls) else list(urls)
+    original_error = next(
+        (results[i].get("error") for i in rescue_idx if results[i].get("error")),
+        "extract failed",
+    )
+    logger.warning(
+        "web_extract backend '%s' failed all %d URL(s) (%s); one-shot keyless rescue",
+        provider_name,
+        len(rescue_urls),
+        (original_error or "")[:200],
+    )
+    rescued = await extract_with_failover(provider_name, list(rescue_urls))
+    if rescued and all(entry.get("error") for entry in rescued):
+        return results  # the ring failed everywhere too: keep the backend's own errors
+    for entry in rescued:
+        if not entry.get("error"):
+            meta = entry.setdefault("metadata", {})
+            if isinstance(meta, dict):
+                meta["rescued_from"] = provider_name
+                meta["backend_error"] = (original_error or "")[:300]
+    if len(rescued) == len(rescue_idx) and len(results) == len(urls):
+        merged = list(results)
+        for position, index in enumerate(rescue_idx):
+            merged[index] = rescued[position]
+        return merged
+    return rescued
+
+
+def resolve_extractor() -> tuple[WebSearchProvider | None, str, str]:
+    """The provider that should extract, its name, and any configuration error.
+
+    Named apart from the registry's ``resolve_extract_provider``, which it calls
+    through :func:`active_extract_provider`: that one answers "which provider", this
+    one answers "which provider, and if none, what do I tell the model".
+
+    Three refusals, in Hermes' order and with its distinctions intact
+    (``tools/web_tools.py:1163-1262``). A registered backend that cannot extract is named
+    as search-only rather than silently swapped for one that can -- swapping would answer
+    a question the user did not ask, from a vendor they did not choose. A stored name that
+    is registered nowhere is a typo. Nothing stored at all falls through to the
+    availability walk, as the search side does.
+    """
+    ensure_backends_registered()
+    backend = extract_backend_name()
+    provider = get_provider(backend) if backend else None
+    if provider is not None and not provider.supports_extract():
+        return None, backend, (
+            f"{provider.display_name} is a search-only backend and cannot extract URL "
+            "content. Set `extract_backend` in `~/.misaka/web.json` to firecrawl, tavily, "
+            "keenable, exa, or parallel."
+        )
+    if provider is not None:
+        return provider, backend, ""
+    if backend and selection_stored():
+        return None, backend, (
+            f"Web extract backend is set to '{backend}', but no registered web extract "
+            "provider has that name. Fix the `extract_backend` or `backend` entry in "
+            "`~/.misaka/web.json`."
+        )
+    provider = active_extract_provider()
+    if provider is None:
+        return None, backend, (
+            "No web extract provider configured. Set `extract_backend` in "
+            "`~/.misaka/web.json` to firecrawl, tavily, keenable, exa, or parallel."
+        )
+    return provider, provider.name, ""
+
+
+async def web_extract(
+    provider: WebSearchProvider, urls: list[str], *, format: str | None = None
+) -> tuple[list[dict[str, Any]], bool]:
+    """Run one extract batch through *provider*, rescuing it once if the backend failed.
+
+    Returns ``(results, rescued)``. The flag is the caller's, not decoration: a rescued
+    batch came from a ring vendor rather than the chosen backend and must never be
+    cached, or one bad minute would pin those pages to the free tier for a whole TTL.
+
+    A provider that raises is a whole-backend failure and is rescued if eligible; one that
+    reports every page as failed is the same event described differently, and Hermes
+    rescues both.
+    """
+    try:
+        results = await provider.extract(list(urls), format=format)
+    except Exception as exc:  # a backend that raises: rescue it, or let it out
+        if not rescue_eligible(provider):
+            raise
+        failed = [
+            {"url": url, "title": "", "content": "", "error": str(exc)} for url in urls
+        ]
+        return await rescue_extract(provider.name, list(urls), failed), True
+
+    if results and all(entry.get("error") for entry in results) and rescue_eligible(provider):
+        return await rescue_extract(provider.name, list(urls), results), True
+    return results, False

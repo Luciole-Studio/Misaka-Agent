@@ -218,21 +218,58 @@ def use_keyless(name: str, api_key: str) -> bool:
 # Read-only until here. The CLI (``misaka web``) is the one writer, so a user does not
 # have to hand-edit JSON; the file can hold vendor API keys, so it is written 0600.
 
-_BOOL_KEYS = frozenset({"keyless_fallback", "keyless_rescue", "cache_enabled"})
-_NESTED_KEYS = frozenset({"env", "provider_tier", "xai"})
-_SCALAR_KEYS = frozenset({"backend", "search_backend", "cache_ttl_minutes"})
+_BOOL_KEYS = frozenset(
+    {"keyless_fallback", "keyless_rescue", "cache_enabled", "allow_private_urls"}
+)
+_NESTED_KEYS = frozenset({"env", "provider_tier", "xai", "website_blocklist"})
+_SCALAR_KEYS = frozenset(
+    {"backend", "search_backend", "extract_backend", "cache_ttl_minutes", "extract_char_limit"}
+)
+# Written from the CLI as one comma-separated argument, stored as a JSON list. A host
+# pattern cannot contain a comma, so splitting on it costs nothing and spares the user a
+# text editor for what is usually one entry.
+_LIST_KEYS = frozenset({"cache_exempt_hosts"})
 _VALID_TIERS = frozenset({"free", "paid", "auto"})
 
+# Subkeys of a nested section that are not plain strings. Booleans have to be coerced or
+# ``config_flag`` reads the string "off" as truthy; lists have to be split or a blocklist
+# of three domains is stored as one 40-character "domain" that matches nothing.
+_NESTED_BOOL_KEYS = {("website_blocklist", "enabled")}
+_NESTED_LIST_KEYS = {
+    ("website_blocklist", "domains"),
+    ("website_blocklist", "shared_files"),
+    ("xai", "allowed_domains"),
+    ("xai", "excluded_domains"),
+}
 
-def _coerce(key: str, value: str) -> bool | str:
+
+def _as_bool(key: str, value: str) -> bool:
+    low = value.strip().lower()
+    if low in ("true", "on", "1", "yes"):
+        return True
+    if low in ("false", "off", "0", "no"):
+        return False
+    raise ValueError(f"{key} takes true/false, not {value!r}")
+
+
+def _as_list(value: str) -> list[str]:
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _coerce(key: str, value: str) -> bool | str | list[str]:
     if key in _BOOL_KEYS:
-        low = value.strip().lower()
-        if low in ("true", "on", "1", "yes"):
-            return True
-        if low in ("false", "off", "0", "no"):
-            return False
-        raise ValueError(f"{key} takes true/false, not {value!r}")
+        return _as_bool(key, value)
+    if key in _LIST_KEYS:
+        return _as_list(value)
     return value
+
+
+def _coerce_nested(section: str, key: str, value: str) -> bool | str | list[str]:
+    if (section, key) in _NESTED_BOOL_KEYS:
+        return _as_bool(f"{section}.{key}", value)
+    if (section, key) in _NESTED_LIST_KEYS:
+        return _as_list(value)
+    return value.strip() if section == "provider_tier" else value
 
 
 def _write(doc: dict) -> str:
@@ -246,10 +283,12 @@ def _write(doc: dict) -> str:
 def set_config(dotted_key: str, value: str) -> str:
     """Write one config value, addressed by ``key`` or ``section.key``. Returns the path.
 
-    ``section.key`` reaches the two nested maps a user needs -- ``env.TAVILY_API_KEY`` for
-    a credential, ``provider_tier.exa`` for a tier pin. Booleans are coerced for the two
-    flag keys so ``misaka web set keyless_rescue off`` does not store the string ``"off"``,
-    which :func:`config_flag` would read as truthy.
+    ``section.key`` reaches the nested maps a user needs -- ``env.TAVILY_API_KEY`` for a
+    credential, ``provider_tier.exa`` for a tier pin, ``website_blocklist.domains`` for a
+    blocklist, ``xai.model`` for the Grok model. Booleans are coerced so
+    ``misaka web set keyless_rescue off`` does not store the string ``"off"``, which
+    :func:`config_flag` would read as truthy, and list-valued keys are split on commas so
+    a blocklist of three domains is three rules rather than one long non-matching one.
     """
     parts = dotted_key.split(".")
     if len(parts) > 2:
@@ -258,9 +297,9 @@ def set_config(dotted_key: str, value: str) -> str:
         raise ValueError(f"{parts[0]!r} is not a nested section; try env.<VAR> or provider_tier.<vendor>")
     if len(parts) == 1 and parts[0] in _NESTED_KEYS:
         raise ValueError(f"{parts[0]!r} is a section; set {parts[0]}.<name> instead")
-    if len(parts) == 1 and parts[0] not in _SCALAR_KEYS | _BOOL_KEYS:
+    if len(parts) == 1 and parts[0] not in _SCALAR_KEYS | _BOOL_KEYS | _LIST_KEYS:
         # A misspelt top-level key would otherwise be written and silently never read.
-        known = sorted(_SCALAR_KEYS | _BOOL_KEYS | _NESTED_KEYS)
+        known = sorted(_SCALAR_KEYS | _BOOL_KEYS | _LIST_KEYS | _NESTED_KEYS)
         raise ValueError(f"unknown key {parts[0]!r}; known keys: {known}")
     if parts[0] == "provider_tier" and value.strip().lower() not in _VALID_TIERS:
         raise ValueError(f"tier must be one of {sorted(_VALID_TIERS)}, not {value!r}")
@@ -268,11 +307,22 @@ def set_config(dotted_key: str, value: str) -> str:
     doc = web_config()
     if len(parts) == 1:
         doc[parts[0]] = _coerce(parts[0], value)
+        if parts[0] in ("backend", "search_backend", "extract_backend"):
+            # Hermes' picker pops a stale tier pin when the chosen row has no tier of its
+            # own (``hermes_cli/tools_config.py:4733-4737``). Same reason here: a leftover
+            # ``provider_tier.<vendor>: free`` from an earlier choice silently decides
+            # where the keyless ring starts, and nothing in the config names it as the
+            # cause. Re-pin with ``misaka web set provider_tier.<vendor> free``.
+            tiers = doc.get("provider_tier")
+            if isinstance(tiers, dict):
+                tiers.pop(str(_coerce(parts[0], value)), None)
+                if not tiers:
+                    doc.pop("provider_tier", None)
     else:
         section = doc.get(parts[0])
         if not isinstance(section, dict):
             section = doc[parts[0]] = {}
-        section[parts[1]] = value.strip() if parts[0] == "provider_tier" else value
+        section[parts[1]] = _coerce_nested(parts[0], parts[1], value)
     return _write(doc)
 
 

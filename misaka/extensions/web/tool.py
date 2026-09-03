@@ -10,12 +10,12 @@ generated from a pydantic model on purpose: a model would rewrite the wording, r
 the keys, and add ``title`` fields, and that description -- the operator sentence, the
 1-100 range, the default of 5 -- is the part of the port a model actually reads.
 
-**Not ported:** ``_truncate_with_footer`` and ``_store_full_text`` (web_tools.py 635-810).
-Both are ``web_extract``'s per-page character budget: they cut one page's clean text into
-a head+tail window and spill the whole page to ``cache/web`` so ``read_file`` can page
-through the middle. A search result is a title, a URL, and a two-line description, and
-nothing on this path ever holds page text. What web_search does have in Hermes is the
-registry's ``max_result_size_chars=100_000``, and that is ported below.
+``_truncate_with_footer`` and ``_store_full_text`` (web_tools.py 635-810) are not here
+because they are not this tool's: they are ``web_extract``'s per-page character budget,
+and they live in :mod:`misaka.extensions.web.extract` beside the tool that needs them. A
+search result is a title, a URL and a two-line description; nothing on this path ever
+holds page text. What web_search does have in Hermes is the registry's
+``max_result_size_chars=100_000``, and that is ported below.
 """
 
 from __future__ import annotations
