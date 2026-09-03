@@ -724,8 +724,12 @@ def _catalog_model(slot) -> Model | None:
     return get_model(str(slot.get("provider") or ""), str(slot.get("model") or ""))
 
 
-def preset_models() -> list[Model]:
+def preset_models(configured=None) -> list[Model]:
     """Build one virtual `moa` Model per configured preset, sized from its aggregator.
+
+    With ``configured(provider_id) -> bool`` given (the registry's own credential check,
+    models.json keys included), a preset whose aggregator's provider is not configured is
+    left out: the registry lists what can run, and a bare setup stays empty.
 
     The sizes are not decoration: ``core/agent_session`` reads ``contextWindow`` for the
     auto-compaction threshold, the ``/context`` percentage and the footer. A preset whose
@@ -736,6 +740,8 @@ def preset_models() -> list[Model]:
     cfg = load_moa_config()
     out: list[Model] = []
     for name, preset in cfg["presets"].items():
+        if configured is not None and not configured(str(preset["aggregator"].get("provider") or "")):
+            continue
         # The resolver when a session has bound one, the builtin catalog otherwise. The
         # literals below stay the last resort for an aggregator in neither -- a local or
         # custom model the catalog has never heard of.

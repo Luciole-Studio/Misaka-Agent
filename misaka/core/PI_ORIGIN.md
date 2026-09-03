@@ -27,10 +27,11 @@
 
 | 文件 | 职责 |
 |---|---|
-| `wiring.py` | 会话装配：`SessionSpec`；`TOOL_MODULES` + `tools_for`——只贡献工具的 core 模块走 pi 的 SDK 门 `customTools`（与内置工具同一张表，来源 `<sdk:>`），不进扩展清单；`PART_MODULES` + `parts_for`——还要被内核在时刻叫到的 core 模块，做成会话的 **part**（`part(spec)` 返回带 `tools`、`commands` 与时刻方法的对象），工具同样走 `customTools`，时刻由内核经 `moments.py` 直接调用，斜杠命令由内核的 `prompt()` 直接执行；`build_extensions`——只剩进程入口注入的捆绑扩展（`bundled`），core 一条都不贡献；`assemble` 返回**惰性**的 `Assembly`（第一次读才构造：worker 是先装配、后在环境窗口里写 `os.environ` 的，part 和当年的扩展工厂一样要在环境就位后再建） |
+| `wiring.py` | 会话装配：`SessionSpec`；`TOOL_MODULES` + `tools_for`——只贡献工具的 core 模块走 pi 的 SDK 门 `customTools`（与内置工具同一张表，来源 `<sdk:>`），不进扩展清单；`PART_MODULES` + `parts_for`——还要被内核在时刻叫到的 core 模块，做成会话的 **part**（`part(spec)` 返回带 `tools`、`commands` 与时刻方法的对象），工具同样走 `customTools`，时刻由内核经 `moments.py` 直接调用，斜杠命令由内核的 `prompt()` 直接执行；`build_extensions`——只剩进程入口注入的捆绑扩展（`bundled`），core 一条都不贡献；`PROVIDER_MODULES` + `core_providers`——core 自己的 provider（moa），由注册表在每次重载时并入；`assemble` 返回**惰性**的 `Assembly`（第一次读才构造：worker 是先装配、后在环境窗口里写 `os.environ` 的，part 和当年的扩展工厂一样要在环境就位后再建） |
 | `moments.py` | 内核对 misaka 子系统的直接调用：`Moments` 持有会话的 parts，在 pi 内核标出的时刻（session_start/shutdown/compact/compact_failed、before_agent_start、agent_end、session_before_compact、tool_call/tool_result、input、context）先于 ExtensionRunner 叫它们，折叠规则与 runner 相同——对应 pi 内核自己在时刻里做事的写法（`_check_compaction` 那种直接调用），而不是把自己挂到 runner 上。part 在时刻之外要用的会话 API 也是 pi 现成的：`sendCustomMessage`/`sendUserMessage`（经 `Moments.send_message`/`send_user_message` 按 runner 的顺序调度）、`getActiveToolNames`、`registerCustomTools`/`refreshTools`（晚到的工具走 `customTools` 那扇门）。`CoreCommand` 是 part 的斜杠命令：`getSlashCommands` 以 source `core` 列出，`prompt()` 在扩展命令之前直接执行。接入点：`AgentSessionConfig.parts` ← `sdk`/`services` 的 `parts` 选项 ← `cli/engine.py` `parts=` ← `Assembly.parts`；改处都有 `# MISAKA fork:` |
 | `pi_manifest.py` `provider_display_names.py` `session_export.py` `settings_diagnostics.py` | 移植期加的小件 |
 | `mcp.py` | MCP 客户端与按角色的服务器配置（原 `extensions/mcp.py`） |
+| `moa/` | Mixture-of-Agents 虚拟 provider（原 `extensions/moa/`，2026-09-03 用户决定进 core）。core provider 走注册表的 `PROVIDER_MODULES` 通道：`model_registry._reloadLegacy` 每次重载末尾调 `core/wiring.core_providers(configured)` 把它并进表，和 pi 的内置 provider 一样在每个注册表里；只发布聚合器 provider 已配置凭据的预设（裸注册表保持为空，`No models available` 照常触发）；会话侧两个时刻是 `MoaPart` |
 
 ### `tools/` 里的 misaka 文件
 
@@ -72,7 +73,7 @@
 pi 意义上的**捆绑扩展**——自包含、只靠扩展 API、拔了无残留——按 misaka 原有的三层放：
 
 ```
-extensions/<module>             每个角色：llama/ moa/（provider）、agent_state fork_split（面板集成）、coverage observe
+extensions/<module>             每个角色：llama/（pi 自带的 provider）、agent_state fork_split（面板集成）、coverage observe
 extensions/last_order/<module>  只有 Last Order：peek
 extensions/sisters/             其他角色的槽位（subagent 是 C 类，在 core/subagent，仅对 Sisters 暴露）
 ```

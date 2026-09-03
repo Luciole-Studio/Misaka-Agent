@@ -546,7 +546,7 @@ def _cmd_moa(args):
     import json as _json
     import os as _os
 
-    from misaka.extensions.moa.provider import (
+    from misaka.core.moa.provider import (
         MOA_CONFIG_PATH,
         load_moa_config,
         slot_label,

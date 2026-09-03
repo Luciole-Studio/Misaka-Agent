@@ -762,6 +762,21 @@ class ModelRegistry:
                 self._modelsJsonProviders.get(provider_name),
                 config,
             )
+        # MISAKA fork: core's own providers are part of every registry, as pi's built-in
+        # providers are; recomputed here so what they publish follows the credentials of
+        # the moment (a /login refresh reaches them).
+        from misaka.core.wiring import core_providers
+
+        def provider_configured(provider_id: str) -> bool:
+            return any(self.hasConfiguredAuth(model) for model in self._models if model.provider == provider_id)
+
+        for provider_name, config in core_providers(provider_configured):
+            self._applyProviderConfig(provider_name, config)
+            self._recomposeLegacyProvider(
+                provider_name,
+                self._modelsJsonProviders.get(provider_name),
+                config,
+            )
 
     async def refresh(
         self,

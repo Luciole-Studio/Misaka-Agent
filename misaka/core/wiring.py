@@ -99,6 +99,7 @@ class ToolCollector:
 # ``part(spec) -> object | None`` with a ``tools`` list and the moment methods it needs.
 # Their tools take the same ``customTools`` door as ``TOOL_MODULES``. Order is call order.
 PART_MODULES: tuple[str, ...] = (
+    "misaka.core.moa",
     "misaka.core.mcp",
     "misaka.core.network.wiring.messages",
     "misaka.core.network.wiring.roster",
@@ -110,6 +111,24 @@ PART_MODULES: tuple[str, ...] = (
     "misaka.core.subagent",
     "misaka.core.lcm",
 )
+
+
+# Core modules that are providers (``provider_config(configured) -> (name, config) | None``,
+# ``configured(provider_id) -> bool`` being the registry's credential check): part of every
+# model registry, recomputed on each reload, as pi's built-in providers are.
+PROVIDER_MODULES: tuple[str, ...] = (
+    "misaka.core.moa",
+)
+
+
+def core_providers(configured: Callable[[str], bool]) -> list[tuple[str, dict[str, Any]]]:
+    """``(name, config)`` for each core provider that has something to publish right now."""
+    out: list[tuple[str, dict[str, Any]]] = []
+    for path in PROVIDER_MODULES:
+        entry = importlib.import_module(path).provider_config(configured)
+        if entry is not None:
+            out.append(entry)
+    return out
 
 
 def _qualifies(mod: Any, role: str, kind: str) -> bool:
@@ -239,6 +258,7 @@ __all__ = [
     "DEFAULT_KINDS",
     "KINDS",
     "PART_MODULES",
+    "PROVIDER_MODULES",
     "ROLE_KEYS",
     "TOOL_MODULES",
     "Assembly",
@@ -248,6 +268,7 @@ __all__ = [
     "assemble",
     "build_extensions",
     "bundled",
+    "core_providers",
     "delegates",
     "inline",
     "parts_for",
