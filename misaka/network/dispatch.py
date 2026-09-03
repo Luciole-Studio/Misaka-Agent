@@ -6,10 +6,10 @@ import os
 import secrets
 import socket
 
+from misaka.core.platform import admission, budget
+from misaka.core.platform import tasks as db
 from misaka.documents import workspace as ws_index
 from misaka.network import worker
-from misaka.platform import admission, budget
-from misaka.platform import tasks as db
 
 _skipped_logged = set()
 
@@ -94,8 +94,8 @@ def _worker_identity():
     prefix is a promise about the process group, so it is only made when it is true: claimed from
     inside someone else's group, it would aim ``terminate_orphaned_group`` at that group.
     """
+    from misaka.core.platform import processes as process_tree
     from misaka.extensions.sisters.subagent.child import PROCESS_GROUP_IDENTITY
-    from misaka.platform import processes as process_tree
     me = process_tree.identity(os.getpid())
     if not me:
         return None
@@ -109,9 +109,9 @@ def _worker_identity():
 def reconcile(con, cfg):
     import time as _time
 
+    from misaka.core.platform import processes as process_tree
     from misaka.extensions.sisters.subagent.child import PROCESS_GROUP_IDENTITY
     from misaka.network.sister_runtime import _claimer_alive, _owner_alive
-    from misaka.platform import processes as process_tree
 
     now = int(_time.time())
     for t in db.by_status(con, "running"):
@@ -197,7 +197,7 @@ def run_task(con, t, cfg):
     )
 
     task = dict(t)
-    from misaka.platform import cards as card_files
+    from misaka.core.platform import cards as card_files
     task["_attachments"] = card_files.attachment_list(run_dir, t["id"], workspace=workspace)
     bud = budget.status(con, cfg.get("token_cap"))
     if bud["mode"] == "stop":
@@ -301,7 +301,7 @@ def finish_abandoned(con, t):
     ``_reconcile_abandoned``): validate the dead worker's report and, under its exact ownership
     fence, block it, accept it (commit + corpus) or send it back. Returns ``"blocked"``,
     ``"submitted"``, ``"reclaimed"`` or ``None`` when someone else got there first."""
-    from misaka.platform import repo
+    from misaka.core.platform import repo
     ok, result = worker.check_report(db.workspace_for(t), con=con, task_id=t["id"], generation=t["generation"])
     fence = {"generation": t["generation"], "claim_lock": t["claim_lock"], "worker_pid": t["worker_pid"],
                  "worker_identity": t["worker_identity"], "claim_expires": t["claim_expires"]}
@@ -346,7 +346,7 @@ def accept(con, t, report, *, generation, claim_lock, workspace):
     lands with its submitted payload in one transaction. Git records the acceptance afterwards --
     only the CAS winner commits, so a losing owner can no longer leave a stale commit; a failed
     commit leaves a ``git_commit_pending`` event (the cards model: git is history, not a veto)."""
-    from misaka.platform import repo
+    from misaka.core.platform import repo
     if not _owned(con, t["id"], generation=generation, claim_lock=claim_lock):
         return False
     with db.write_txn(con):                                # done and its submitted payload land together

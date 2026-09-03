@@ -17,7 +17,7 @@ import sys
 import time
 
 from misaka.config import CFG, current_config
-from misaka.platform import tasks as task_store
+from misaka.core.platform import tasks as task_store
 from misaka.research import runs
 
 
@@ -62,7 +62,7 @@ class ProcessSpawner:
     def stop(self, proc):
         if proc.poll() is not None:
             return
-        from misaka.platform import processes
+        from misaka.core.platform import processes
         processes.terminate(proc.pid)      # the whole tree: a node's cards and LLM children must not outlive it
         try:
             proc.wait(5)
@@ -134,8 +134,8 @@ class HeadlessRunner:
         self._processes = ProcessSpawner()   # one place decides how a child of ours starts and dies
 
     async def launch_ready(self, *, task_ids, **_kwargs):
+        from misaka.core.platform import admission
         from misaka.network import dispatch
-        from misaka.platform import admission
         self._reap()                         # before reconcile: an unwaited-for child still answers to its pid
         # A card whose child died mid-turn comes back through the reconciler, exactly as it did
         # when a node ran its cards inline in one dispatch pass. finish_abandoned can reach git,

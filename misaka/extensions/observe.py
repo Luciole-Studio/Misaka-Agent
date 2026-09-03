@@ -3,7 +3,7 @@
 
 def register(harn):
     from misaka.config import CFG
-    from misaka.platform import tasks as db
+    from misaka.core.platform import tasks as db
 
     def _con():
         return db.connect(CFG["db"])

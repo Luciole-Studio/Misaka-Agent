@@ -21,12 +21,12 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from misaka.core.platform.prompt_guard import untrusted
+from misaka.core.platform.vocabulary import MANAGEMENT_TOOL_NAMES
 from misaka.extensions.sisters.subagent.hooks import (
     HOOK_DEFAULT_TIMEOUT,
     HOOK_DEFAULT_TIMEOUTS,
 )
-from misaka.platform.prompt_guard import untrusted
-from misaka.platform.vocabulary import MANAGEMENT_TOOL_NAMES
 from misaka.utils.values import read_field
 
 ALIASES = {"glob": "find"}

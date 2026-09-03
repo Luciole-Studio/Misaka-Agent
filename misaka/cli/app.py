@@ -4,10 +4,10 @@ import os
 import sys
 
 from misaka.config import CFG, VERSION, current_config
+from misaka.core.platform import budget
+from misaka.core.platform import tasks as db
 from misaka.documents import index as corpus
 from misaka.observability import board as tail
-from misaka.platform import budget
-from misaka.platform import tasks as db
 from misaka.utils import atomic
 
 
@@ -242,7 +242,7 @@ def _cmd_net(args):
 
 
 def _cmd_init(args):
-    from misaka.platform import cards
+    from misaka.core.platform import cards
     if args.migrate:
         written, existed, no_folder = cards.migrate(db.connect(CFG["db"]))
         print(f"migrated {written} card(s) to files ({existed} already had files, "
@@ -292,7 +292,7 @@ def _cmd_dm(args):
 
 
 def _cmd_task(args):
-    from misaka.platform import cards as card_files
+    from misaka.core.platform import cards as card_files
     con = db.connect(CFG["db"])
     row = db.get(con, args.task_id)
     ok, msg = (card_files.remove(con, row["workspace"], args.task_id) if row
@@ -356,7 +356,7 @@ def _cmd_research(args):
             # and where it is kept, so print that rather than a traceback around it.
             sys.exit(f"{err}\n\n(/login is typed inside `misaka chat`; "
                      f"`misaka auth check --provider {cfg['provider']}` verifies the result.)")
-        from misaka.platform import cards as card_files
+        from misaka.core.platform import cards as card_files
         card_files.init_project(os.getcwd())
         run = runs.create(con, workspace=os.getcwd(), question=args.goal,
                           limits={"max_depth": args.depth},

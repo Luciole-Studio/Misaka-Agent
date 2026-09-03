@@ -119,7 +119,7 @@ def write_report(workspace, exit_code, output, *, assignee, task_id=None, output
               "uncertain": [f"Output was produced by ally {assignee} and has not been independently reviewed."]}
     report_dir = workspace
     if task_id:
-        from misaka.platform import tasks
+        from misaka.core.platform import tasks
         report_dir = tasks.task_state_dir(task_id)
     os.makedirs(report_dir, exist_ok=True)
     with open(os.path.join(report_dir, "report.json"), "w", encoding="utf-8") as f:

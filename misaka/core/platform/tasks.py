@@ -358,7 +358,7 @@ def connect(path: str) -> sqlite3.Connection:
                 path, journal or "unknown",
             )
     con.executescript(SCHEMA)
-    from misaka.platform import notifications
+    from misaka.core.platform import notifications
     newest = con.execute("SELECT MAX(version) FROM schema_migrations WHERE component='tasks'").fetchone()[0]
     if newest is not None and int(newest) > TASK_SCHEMA_VERSION:
         con.close()
@@ -414,7 +414,7 @@ def _card_dispatchable(con, task_id):
     row = con.execute("SELECT workspace FROM tasks WHERE id=?", (task_id,)).fetchone()
     if row is None:
         return False
-    from misaka.platform import cards
+    from misaka.core.platform import cards
     return cards.dispatchable(con, row["workspace"], task_id)
 
 
@@ -638,7 +638,7 @@ def get(con, task_id):
 
 @_serialized
 def insert_index_row(con, fields, body, *, workspace):
-    """Restore one index row from a card file (misaka.platform.cards.rebuild). The file is
+    """Restore one index row from a card file (misaka.core.platform.cards.rebuild). The file is
     the truth; this only re-derives the index and never overwrites an existing row."""
     cur = con.execute(
         "INSERT OR IGNORE INTO tasks (id,title,body,assignee,reviewer,executor,model,"
@@ -670,7 +670,7 @@ def delete_task(con, task_id, *, allow_active=False):
     con.execute("DELETE FROM task_runs WHERE task_id=?", (task_id,))
     if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_run_tasks'").fetchone():
         con.execute("DELETE FROM research_run_tasks WHERE task_id=?", (task_id,))   # a link without its card is a trap for resume
-    from misaka.platform import cards
+    from misaka.core.platform import cards
     skipped = []
     for child in _children_of(con, task_id):
         # One child's accident is that child's alone. The handler lives inside the iteration on
@@ -733,7 +733,7 @@ def fair_ready(con, *, limit=None, lane="workers", advance=True, now=None, works
     """Return runnable cards round-robin across assignees, keeping priority order within each assignee."""
     now = int(time.time()) if now is None else int(now)
     workspace = canonical_workspace(workspace) if workspace is not None else None
-    from misaka.platform import cards
+    from misaka.core.platform import cards
     workspaces = ([workspace] if workspace is not None else
                   [row[0] for row in con.execute("SELECT DISTINCT workspace FROM tasks")])
     valid = set().union(*(cards.reconcile(con, item) for item in workspaces if item))
@@ -820,7 +820,7 @@ def link_tasks(con, parent_id, child_id) -> bool:
                     f"Dependency refused: {error} Its dependencies could decide whether this "
                     "link closes a cycle, so fix that card first."
                 ) from error
-    from misaka.platform import cards
+    from misaka.core.platform import cards
     cards.set_fields(child["workspace"], child_id, needs=[*needs, parent_id])
     with _write_txn(con):
         con.execute(
@@ -842,7 +842,7 @@ def _mirror_status(con, task_id, *, commit=False):
     row = get(con, task_id)
     if row is None or not row["workspace"]:
         return
-    from misaka.platform import cards, repo
+    from misaka.core.platform import cards, repo
     try:
         cards.set_fields(
             row["workspace"], task_id, status=row["status"], generation=int(row["generation"])
@@ -896,7 +896,7 @@ def parent_ids(con, task_id, *, strict=False):
     row = get(con, task_id)
     if row is None or not row["workspace"]:
         return []
-    from misaka.platform import cards
+    from misaka.core.platform import cards
     path = cards.card_path(row["workspace"], task_id)
     card = cards.try_read(path)
     if card is None:                        # unreadable: recorded in cards.invalid_cards()
@@ -912,7 +912,7 @@ def _children_of(con, parent_id):
     row = get(con, parent_id)
     if row is None or not row["workspace"]:
         return []
-    from misaka.platform import cards
+    from misaka.core.platform import cards
     out = []
     for tid, path in cards.iter_cards(row["workspace"]):
         card = cards.try_read(path)
@@ -1106,7 +1106,7 @@ def configure_review(con, task_id, reviewer=None) -> bool:
         if cur.rowcount == 1:
             add_event(con, task_id, "review_configured", {"reviewer": reviewer})
             if row["workspace"]:
-                from misaka.platform import cards
+                from misaka.core.platform import cards
                 cards.set_fields(row["workspace"], task_id, reviewer=reviewer)   # OSError rolls the change back
         return cur.rowcount == 1
 
@@ -1399,7 +1399,7 @@ def request_review_changes(
             ws_row = con.execute("SELECT workspace FROM tasks WHERE id=?", (task_id,)).fetchone()
             if ws_row is not None:
                 try:
-                    from misaka.platform import cards
+                    from misaka.core.platform import cards
                     cards.append_log(ws_row["workspace"], task_id,
                                      f"reviewer:{reviewer_row[0] if reviewer_row else 'unknown'}",
                                      f"[review] {feedback[:2000]}")

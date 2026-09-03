@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 
 from misaka.agent.guards import install_guards
 from misaka.agent.request_budget import install_turn_budget
-from misaka.platform.vocabulary import BOOKKEEPING_MANAGEMENT_TOOLS
+from misaka.core.platform.vocabulary import BOOKKEEPING_MANAGEMENT_TOOLS
 
 # ``NoProgressGuard``'s vocabulary: the tools a session can call all day without the world
 # changing or one new fact arriving. Assembled here because it is a fact about how this

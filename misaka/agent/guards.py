@@ -271,7 +271,7 @@ class FinalizationReserve:
     ratio. Both of misaka's readable allowances reduce to that shape:
     ``TurnBudgetLimiter`` (``limit - accounted`` over ``limit``, see
     ``misaka.agent.request_budget``) and a card lease (``claim_expires - now``
-    over its TTL, see ``misaka.platform.tasks``). Deliberately no lookup here:
+    over its TTL, see ``misaka.core.platform.tasks``). Deliberately no lookup here:
     a guard that opened the board database would be untestable and would tie
     the loop to a store it may not have.
 
@@ -338,7 +338,7 @@ class NoProgressGuard:
     corpus index, a file it could already see. The caller supplies it -- misaka's tool
     surface differs per session kind and grows at run time with MCP servers and
     skills, so the only place that knows the real list is where the session is
-    assembled (:mod:`misaka.platform.session`). A list frozen in here would be wrong
+    assembled (:mod:`misaka.core.platform.session`). A list frozen in here would be wrong
     within a release and unreachable from a test.
 
     A name the vocabulary has never heard of counts as work, and that asymmetry is the
@@ -590,7 +590,7 @@ def install_guards(
 
     ``bookkeeping_tools`` is ``NoProgressGuard``'s vocabulary, empty by default: a caller
     that cannot say which of its tools are paperwork gets no opinion about idling rather
-    than a guess. ``misaka.platform.session`` passes the real list.
+    than a guess. ``misaka.core.platform.session`` passes the real list.
     """
 
     agent = getattr(session, "agent", None)

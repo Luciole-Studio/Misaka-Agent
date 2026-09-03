@@ -29,7 +29,7 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 
-from misaka.platform.prompt_guard import untrusted
+from misaka.core.platform.prompt_guard import untrusted
 from misaka.utils.values import read_field
 
 from . import config_bridge, fence, ingest, llm, rollups

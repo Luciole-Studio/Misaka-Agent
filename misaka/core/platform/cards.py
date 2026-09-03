@@ -18,7 +18,7 @@ from pathlib import Path
 
 from ruamel.yaml import YAML
 
-from misaka.platform import repo, tasks
+from misaka.core.platform import repo, tasks
 from misaka.utils import atomic
 from misaka.utils.frontmatter import parse_frontmatter
 

@@ -41,9 +41,9 @@ def _log_warning(message: str) -> None:
     except Exception:  # noqa: BLE001, S110 - diagnostics must never break a turn
         pass
 
+from misaka.core.platform import processes as process_tree
+from misaka.core.platform.vocabulary import MANAGEMENT_TOOLS
 from misaka.extensions.sisters.subagent import agents as agent_roster
-from misaka.platform import processes as process_tree
-from misaka.platform.vocabulary import MANAGEMENT_TOOLS
 from misaka.utils import atomic
 from misaka.utils.values import read_field
 
@@ -376,7 +376,7 @@ def _write_usage_sink(context: RoleContext, task: AgentTask) -> bool:
         or context.usage_generation is None
     ):
         return False
-    from misaka.platform import budget
+    from misaka.core.platform import budget
 
     message_total = sum(
         int(message.get("usage", {}).get("totalTokens") or 0)
@@ -1575,7 +1575,7 @@ class SubagentManager:
             or context.usage_generation is None
         ):
             return
-        from misaka.platform import budget
+        from misaka.core.platform import budget
 
         pending = asyncio.create_task(
             asyncio.to_thread(
@@ -1612,7 +1612,7 @@ class SubagentManager:
             )
 
     async def _budget_heartbeat_loop(self, task: AgentTask) -> None:
-        from misaka.platform import budget
+        from misaka.core.platform import budget
 
         while task._budget_reservation and self.role_context.usage_db:
             await asyncio.sleep(BUDGET_HEARTBEAT_SECONDS)

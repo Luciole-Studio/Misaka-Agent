@@ -79,7 +79,7 @@ def call_llm(*, task="", messages=None, temperature=None, max_tokens=None,
     the next model, then to the deterministic fallback", which is the behaviour we want
     for a provider that timed out or returned nothing.
     """
-    from misaka.platform.session import run_text
+    from misaka.core.platform.session import run_text
 
     provider, model = _route(str(model or ""), str(provider or ""))
     profile = os.path.join(os.path.expanduser(current_config()["roles_root"]), SUMMARIZER_ROLE)

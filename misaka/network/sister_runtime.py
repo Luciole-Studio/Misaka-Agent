@@ -23,6 +23,9 @@ from xml.sax.saxutils import escape
 import psutil
 
 from misaka.config import profiles
+from misaka.core.platform import admission, budget, notifications
+from misaka.core.platform import processes as process_tree
+from misaka.core.platform import tasks as db
 from misaka.core.session_manager import find_most_recent_session
 from misaka.extensions.sisters.subagent.agents import AgentDefinition
 from misaka.extensions.sisters.subagent.runtime import (
@@ -32,9 +35,6 @@ from misaka.extensions.sisters.subagent.runtime import (
     clean_resume_transcript,
 )
 from misaka.network import worker
-from misaka.platform import admission, budget, notifications
-from misaka.platform import processes as process_tree
-from misaka.platform import tasks as db
 from misaka.skills import sandbox as skill_sandbox
 
 TERMINAL_BOARD_STATUSES = frozenset({"done", "failed", "stopped", "blocked", "triage"})
@@ -508,7 +508,7 @@ class SisterRuntime:
             dispatch.finish_abandoned(self.con, observed)
 
     def _prepare_card(self, row: Mapping[str, Any]) -> dict[str, Any] | None:
-        from misaka.platform import cards
+        from misaka.core.platform import cards
         task = dict(row)
         base = row["workspace"] or self._workspace(row["id"])
         task["_attachments"] = cards.attachment_list(base, row["id"], workspace=row["workspace"])

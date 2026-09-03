@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from misaka.config import CFG
 from misaka.core.extensions.types import ToolDefinition
-from misaka.platform import prompt_guard, tasks
+from misaka.core.platform import prompt_guard, tasks
 
 TaskId = Annotated[str, Field(pattern=r"^t_[0-9a-f]{6}$")]
 

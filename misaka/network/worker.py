@@ -6,9 +6,9 @@ import stat
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from misaka.config import profiles
-from misaka.platform import tasks as task_store
-from misaka.platform.session import run_coro, run_session
-from misaka.platform.vocabulary import MANAGEMENT_TOOLS
+from misaka.core.platform import tasks as task_store
+from misaka.core.platform.session import run_coro, run_session
+from misaka.core.platform.vocabulary import MANAGEMENT_TOOLS
 from misaka.skills import sandbox as skill_sandbox
 
 MAX_REPORT_BYTES = 256 * 1024
@@ -23,7 +23,7 @@ MAX_UNCERTAIN_ITEM_CHARS = 2_000
 def _reserve_usage(usage_db, usage_task_id, usage_generation, usage_token_cap, timeout):
     if not usage_db or not usage_task_id or usage_generation is None:
         return {"allowed": True, "token": None}
-    from misaka.platform import budget
+    from misaka.core.platform import budget
 
     return budget.reserve_agent_path(
         str(usage_db),
@@ -37,7 +37,7 @@ def _reserve_usage(usage_db, usage_task_id, usage_generation, usage_token_cap, t
 def _release_usage(usage_db, reading):
     token = reading.get("token") if isinstance(reading, dict) else None
     if token and usage_db:
-        from misaka.platform import budget
+        from misaka.core.platform import budget
 
         budget.release_agent_path(str(usage_db), token)
 
@@ -103,7 +103,7 @@ class _UsageRecorder:
     def settle(self, accounted_tokens=None):
         if not self.usage_db or not self.task_id or self.generation is None:
             return
-        from misaka.platform import budget
+        from misaka.core.platform import budget
 
         token = self.reservation.get("token") if self.reservation else None
         target = max(
@@ -157,7 +157,7 @@ def report_instructions(generation):
 
 def set_aside_report(task_id):
     """Alias of ``tasks.set_aside_report`` for the runtimes that import it from here."""
-    from misaka.platform import tasks
+    from misaka.core.platform import tasks
     tasks.set_aside_report(task_id)
 
 
@@ -185,7 +185,7 @@ def card_prompt(task):
         )
     prompt = body + report_instructions(task.get("generation"))
     if task.get("beast"):
-        from misaka.platform import budget as _b
+        from misaka.core.platform import budget as _b
 
         prompt += _b.BEAST_SUFFIX
     return prompt

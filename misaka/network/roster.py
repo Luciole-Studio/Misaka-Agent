@@ -79,7 +79,7 @@ def roster_names(root=None):
 def card_counts(sid, db_path=None):
     """Count a Sister's task cards by status."""
     from misaka.config import CFG
-    from misaka.platform import tasks as board_db
+    from misaka.core.platform import tasks as board_db
     path = os.path.expanduser(db_path or CFG["db"])
     if not os.path.exists(path):
         return {}

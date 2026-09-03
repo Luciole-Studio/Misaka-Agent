@@ -32,7 +32,7 @@ import json
 import logging
 
 from misaka.core.extensions.types import ToolDefinition
-from misaka.platform.toolkit import tool_definition
+from misaka.core.platform.toolkit import tool_definition
 
 from . import context_engine, fence, ingest
 

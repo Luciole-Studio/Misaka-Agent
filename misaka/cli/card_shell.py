@@ -16,8 +16,8 @@ import threading
 import time
 
 from misaka.config import CFG, current_config
+from misaka.core.platform import tasks as db
 from misaka.network import worker
-from misaka.platform import tasks as db
 
 ACTIVE_STATUSES = ("running", "review")
 
@@ -220,7 +220,7 @@ def launch(task_id, resume_only=False, say=None):
         # The card's folder is the project; a deleted or moved one is never recreated in silence.
         sys.exit(f"Card {task_id}: its folder {workspace} no longer exists.")
     run_dir = workspace
-    from misaka.platform import cards as card_files
+    from misaka.core.platform import cards as card_files
     task["_attachments"] = card_files.attachment_list(run_dir, task_id, workspace=workspace)
     profile_dir = os.path.join(os.path.expanduser(CFG["profiles_root"]), task["assignee"])
     if not os.path.isdir(profile_dir):

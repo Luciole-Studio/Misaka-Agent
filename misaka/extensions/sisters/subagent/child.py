@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from misaka.platform.vocabulary import MANAGEMENT_TOOL_NAMES, MANAGEMENT_TOOLS
+from misaka.core.platform.vocabulary import MANAGEMENT_TOOL_NAMES, MANAGEMENT_TOOLS
 from misaka.utils.values import read_field
 
 PROTOCOL_VERSION = 2
@@ -299,8 +299,8 @@ def _attach_durable_sister_owner() -> tuple[bool, str | None]:
     if os.name == "posix" and os.getpgrp() != os.getpid():
         return False, "Durable Sister root has no isolated process group"
 
-    from misaka.platform import processes as process_tree
-    from misaka.platform import tasks as db
+    from misaka.core.platform import processes as process_tree
+    from misaka.core.platform import tasks as db
 
     process_identity = process_tree.identity(os.getpid())
     if not process_identity:
@@ -330,10 +330,10 @@ async def amain() -> int:
         return 2
 
     from misaka.agent.request_budget import install_turn_budget
+    from misaka.core.platform import session as engine_session
     from misaka.extensions.sisters.subagent import extension as subagent
     from misaka.extensions.sisters.subagent import hooks as subagent_hooks
     from misaka.extensions.sisters.subagent import policy as subagent_policy
-    from misaka.platform import session as engine_session
 
     permission_waiters: dict[str, asyncio.Future[bool]] = {}
 

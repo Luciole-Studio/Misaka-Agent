@@ -18,7 +18,7 @@ def board_text(con, workspace=None):
 
     Cards are grouped by project folder; ``workspace`` limits the board to one folder.
     """
-    from misaka.platform import cards
+    from misaka.core.platform import cards
     workspaces = ([workspace] if workspace else
                   [row[0] for row in con.execute("SELECT DISTINCT workspace FROM tasks")])
     for project in workspaces:

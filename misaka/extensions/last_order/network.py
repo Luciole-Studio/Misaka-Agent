@@ -11,11 +11,11 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from misaka.config import CFG, current_config, sisters
+from misaka.core.platform import budget, toolkit
+from misaka.core.platform import tasks as db
+from misaka.core.platform.prompt_guard import untrusted
 from misaka.network import validate
 from misaka.network.sister_runtime import ACTIVE_BOARD_STATUSES, SisterRuntime
-from misaka.platform import budget, toolkit
-from misaka.platform import tasks as db
-from misaka.platform.prompt_guard import untrusted
 
 _CON = None
 # How many board rows one `misaka_board` result carries.
@@ -50,7 +50,7 @@ def _session_line(ctx, limit=10):
 
 def _card_log(workspace, task_id, author, text):
     """Append to the card file's ## log; a stray index row without a file must not fail the tool."""
-    from misaka.platform import cards as card_files
+    from misaka.core.platform import cards as card_files
     try:
         card_files.append_log(workspace, task_id, author, text)
     except OSError:
@@ -148,7 +148,7 @@ def register(harn):
     async def misaka_board(tool_call_id, params, signal, on_update, ctx):
         con = _con()
         workspace = _workspace(ctx)
-        from misaka.platform import cards as card_files
+        from misaka.core.platform import cards as card_files
         rows = card_files.board(con, workspace)
         if params.status:
             rows = [r for r in rows if r["status"] == params.status]
@@ -218,7 +218,7 @@ def register(harn):
         if params.reviewer == params.assignee:
             raise ValueError("The reviewer must be different from the assignee.")
         c = cards[0]
-        from misaka.platform import cards as card_files
+        from misaka.core.platform import cards as card_files
         tid = card_files.create(con, _workspace(ctx), c["title"], c["body"], c["assignee"],
                                 model=c["model"], priority=c["priority"], timeout_seconds=c["timeout"],
                                 reviewer=params.reviewer, origin_session=_session_id(ctx))
@@ -691,7 +691,7 @@ def register(harn):
         row = db.get(_con(), params.task_id)
         if row is None:
             raise ValueError(f"Task card not found: {params.task_id}")
-        from misaka.platform import cards as card_files
+        from misaka.core.platform import cards as card_files
         try:
             lines = card_files.read_log(row["workspace"], params.task_id)
         except OSError:
@@ -717,7 +717,7 @@ def register(harn):
         row = db.get(_con(), params.task_id)
         if row is None:
             raise ValueError(f"Task card not found: {params.task_id}")
-        from misaka.platform import cards as card_files
+        from misaka.core.platform import cards as card_files
         rel = await asyncio.to_thread(card_files.attach, row["workspace"], params.task_id, params.path)
         return _text(f"Attached {rel} to card {params.task_id} (a file in the project repository).")
 
@@ -736,7 +736,7 @@ def register(harn):
         row = db.get(_con(), params.task_id)
         if row is None:
             raise ValueError(f"Task card not found: {params.task_id}")
-        from misaka.platform import cards as card_files
+        from misaka.core.platform import cards as card_files
         card_files.attach_url(row["workspace"], params.task_id, params.url)
         return _text(f"Attached reference URL to card {params.task_id}.")
 
@@ -754,7 +754,7 @@ def register(harn):
         row = db.get(_con(), params.task_id)
         if row is None:
             raise ValueError(f"Task card not found: {params.task_id}")
-        from misaka.platform import cards as card_files
+        from misaka.core.platform import cards as card_files
         items = card_files.attachment_list(row["workspace"], params.task_id)
         return _text("\n".join(
             f"[{item['kind']}] {item['name']} — {item.get('path') or item.get('source')}"
@@ -800,7 +800,7 @@ def register(harn):
         row = db.get(_con(), params.task_id)
         if row is None:
             raise ValueError(f"Card not found: {params.task_id}")
-        from misaka.platform import cards as card_files
+        from misaka.core.platform import cards as card_files
         ok, msg = card_files.remove(_con(), row["workspace"], params.task_id)
         if not ok:
             raise ValueError(msg)

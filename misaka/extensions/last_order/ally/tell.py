@@ -8,7 +8,7 @@ def _task_from_cwd(cwd=None):
     """Find the ally card whose workspace or output_dir contains cwd; None if ambiguous."""
     here = os.path.realpath(cwd or os.getcwd())
     try:
-        from misaka.platform import tasks as db
+        from misaka.core.platform import tasks as db
         con = db.connect(os.path.expanduser(CFG["db"]))
         rows = con.execute(
             "SELECT id,workspace,output_dir FROM tasks WHERE executor IS NOT NULL"
@@ -35,7 +35,7 @@ def whoami(cwd=None):
     task_id = os.environ.get("MISAKA_USAGE_TASK_ID") or _task_from_cwd(cwd)
     if not sender and task_id:          # A sandbox may have cleared the env var: look the card up instead.
         try:
-            from misaka.platform import tasks as db
+            from misaka.core.platform import tasks as db
             con = db.connect(os.path.expanduser(CFG["db"]))
             row = db.get(con, task_id)
             con.close()

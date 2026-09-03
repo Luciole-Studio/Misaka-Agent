@@ -885,7 +885,7 @@ class Daemon:
 
     def _board(self):
         if self._con is None:
-            from misaka.platform import tasks as db
+            from misaka.core.platform import tasks as db
             self._con = db.connect(_expand(CFG["db"]))
         return self._con
 
@@ -904,14 +904,14 @@ class Daemon:
     def _card_workspace(self, row):
         """The card's folder is its project: a pane always runs there, and a folder that is
         gone is refused rather than recreated somewhere the user deleted it."""
-        from misaka.platform import tasks as db
+        from misaka.core.platform import tasks as db
         workspace = db.workspace_for(row)
         if not os.path.isdir(workspace):
             raise ValueError(f"Card {row['id']}: its folder {workspace} no longer exists.")
         return workspace
 
     def _card_env(self, row):
-        from misaka.platform import tasks as db
+        from misaka.core.platform import tasks as db
         return {
             "MISAKA_THEME": self._theme,    # card panes follow the session theme
             # misaka commands inside the pane (e.g. an ally's `misaka tell`) must use
@@ -926,8 +926,8 @@ class Daemon:
 
     def _settled_card_with_session(self, task_id):
         """A card whose session can be reopened: not live in a pane, with a saved transcript."""
+        from misaka.core.platform import tasks as db
         from misaka.network.sister_runtime import ACTIVE_BOARD_STATUSES
-        from misaka.platform import tasks as db
         row = db.get(self._board(), task_id)
         if row is None:
             raise ValueError(f"Card not found: {task_id}")
@@ -954,8 +954,8 @@ class Daemon:
         """Continue a settled card with a new model turn: the same ``claim_resume`` as the
         in-process Sister runtime (a new generation under our lock), after which the card
         shell's Supervisor settles the card exactly like a first run."""
-        from misaka.platform import admission
-        from misaka.platform import tasks as db
+        from misaka.core.platform import admission
+        from misaka.core.platform import tasks as db
         row = self._settled_card_with_session(task_id)
         con = self._board()
         lock = f"net:{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(4)}"
@@ -976,8 +976,8 @@ class Daemon:
             event="continued")
 
     def run_card(self, task_id, place=None) -> Pane:
-        from misaka.platform import admission
-        from misaka.platform import tasks as db
+        from misaka.core.platform import admission
+        from misaka.core.platform import tasks as db
 
         con = self._board()
         row = db.get(con, task_id)
@@ -1008,8 +1008,8 @@ class Daemon:
             if executor is None:
                 argv = [*CARD_SHELL, task_id]
             else:  # ally: the card contract is the prompt, run one non-interactive turn
+                from misaka.core.platform import cards
                 from misaka.extensions.last_order.ally import runner as ally_runner
-                from misaka.platform import cards
                 task = dict(row)
                 task["_attachments"] = cards.attachment_list(workspace, task_id, workspace=workspace)
                 argv = ally_runner.build_argv(executor, ally_runner.card_prompt(task))
@@ -1022,8 +1022,8 @@ class Daemon:
     def _host_card(self, con, row, lock, generation, argv, place, *, undo, env=None, event="claimed"):
         """Host a claimed card in a pane. The pane's environment carries the claim so the card
         drives itself (card_shell.Supervisor); ``undo`` releases the claim when no pane starts."""
-        from misaka.platform import processes as process_tree
-        from misaka.platform import tasks as db
+        from misaka.core.platform import processes as process_tree
+        from misaka.core.platform import tasks as db
         task_id = row["id"]
         pane = None
         # Everything below `create` is part of hosting too: `set_pid` writes the credential
@@ -1081,7 +1081,7 @@ class Daemon:
         """
         import importlib
 
-        from misaka.platform import tasks as db
+        from misaka.core.platform import tasks as db
 
         def still_ours(pane):
             return self.panes.get(pane.id) is pane and pane.claim_lock is not None
@@ -1232,7 +1232,7 @@ class Daemon:
             status, mail = {}, {}
             cards = [p.card for p in self.panes.values() if p.card]
             if cards:
-                from misaka.platform import tasks as db
+                from misaka.core.platform import tasks as db
                 con = self._board()
                 for card in cards:
                     row = db.get(con, card)
@@ -1276,7 +1276,7 @@ class Daemon:
             # The board's cards with what the panel's sessions list needs: the folder each
             # belongs to, whether it has a session to reopen, and which Last Order conversation
             # created it. Given a workspace, only that folder's cards.
-            from misaka.platform import tasks as db
+            from misaka.core.platform import tasks as db
             workspace = (db.canonical_workspace(params["workspace"])
                          if params.get("workspace") else None)
             sql = "SELECT id,status,title,assignee,workspace,origin_session FROM tasks"
@@ -1297,8 +1297,8 @@ class Daemon:
             if any(p.card == params["task_id"] and p.alive()
                    for p in self.panes.values()):
                 raise ValueError(f"Card {params['task_id']} is still running; stop it before deleting it.")
-            from misaka.platform import cards as card_files
-            from misaka.platform import tasks as db
+            from misaka.core.platform import cards as card_files
+            from misaka.core.platform import tasks as db
             row = db.get(self._board(), params["task_id"])
             ok, msg = (card_files.remove(self._board(), row["workspace"], params["task_id"]) if row
                        else (False, f"Card not found: {params['task_id']}"))
@@ -1334,7 +1334,7 @@ class Daemon:
             if pane is None:
                 raise ValueError(f"Pane not found: {params['id']}")
             if pane.card:
-                from misaka.platform import tasks as db
+                from misaka.core.platform import tasks as db
                 row = db.get(self._board(), pane.card)
                 pane.seen_status = row["status"] if row else None
             return {"seen": True}
@@ -1343,7 +1343,7 @@ class Daemon:
                          if p.card == params["task_id"]), None)
             if pane is None:
                 raise ValueError(f"Card {params['task_id']} is not running in a pane.")
-            from misaka.platform import tasks as db
+            from misaka.core.platform import tasks as db
             con = self._board()
             if pane.claim_lock:
                 db.add_event(con, pane.card, "stopped", {},

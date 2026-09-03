@@ -52,7 +52,7 @@ import logging
 from datetime import UTC, datetime
 
 from misaka.ai.types import TextContent, UserMessage
-from misaka.platform.prompt_guard import untrusted
+from misaka.core.platform.prompt_guard import untrusted
 from misaka.utils.values import read_field
 
 from . import context_engine, fence, ingest

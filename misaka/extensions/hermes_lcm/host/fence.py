@@ -41,7 +41,7 @@ import re
 import sqlite3
 from contextlib import AbstractContextManager
 
-from misaka.platform.prompt_guard import MARKER, untrusted
+from misaka.core.platform.prompt_guard import MARKER, untrusted
 
 logger = logging.getLogger(__name__)
 

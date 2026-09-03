@@ -27,6 +27,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from misaka.agent.types import AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
+from misaka.core.platform import budget
+from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.tools._web.academic import route_academic
 from misaka.core.tools._web.bounded import (
     DEFAULT_MAX_FETCH_BYTES,
@@ -54,8 +56,6 @@ from misaka.core.tools._web.screening import screen_url
 from misaka.core.tools._web.single_flight import single_flight
 from misaka.documents.htmltext import clip as _clip
 from misaka.documents.htmltext import readable as _readable
-from misaka.platform import budget
-from misaka.platform.prompt_guard import untrusted
 from misaka.utils.values import signal_aborted
 
 TIMEOUT_SECONDS = 30.0

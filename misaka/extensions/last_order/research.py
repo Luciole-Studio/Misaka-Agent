@@ -6,8 +6,8 @@ import os
 import shlex
 
 from misaka.config import CFG, current_config
-from misaka.platform import budget
-from misaka.platform import tasks as task_store
+from misaka.core.platform import budget
+from misaka.core.platform import tasks as task_store
 from misaka.research import node as research_node
 from misaka.research import planner, runs, workflow
 from misaka.research import tools as research_tools
@@ -187,7 +187,7 @@ Continue with `/research resume {run_id} YOUR_ANSWER`.""")
                       details={"stage": "brief_intake", "depth": depth})
         brief = await asyncio.to_thread(
             planner.ensure_project_brief, dict(_cfg()), worker, question, workspace)
-        from misaka.platform import cards as card_files
+        from misaka.core.platform import cards as card_files
         await asyncio.to_thread(card_files.init_project, workspace)     # the project is a git repository
         send_progress(f"Research intake | project brief ready at {brief}; creating the persistent run.",
                       details={"stage": "brief_ready", "depth": depth})

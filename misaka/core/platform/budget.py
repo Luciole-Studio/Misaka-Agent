@@ -320,7 +320,7 @@ def record_external_call(service, *, subject="", **facts):
             str(subject).encode("utf-8", "surrogatepass")
         ).hexdigest()[:_SUBJECT_DIGEST_CHARS]
     try:
-        from misaka.platform import tasks
+        from misaka.core.platform import tasks
 
         con = tasks.connect(path)
         try:
@@ -348,7 +348,7 @@ def record_external_call(service, *, subject="", **facts):
 
 
 def reserve_agent_path(path, cap, task_id, generation, ttl_seconds=1800):
-    from misaka.platform import tasks
+    from misaka.core.platform import tasks
 
     con = tasks.connect(path)
     try:
@@ -358,7 +358,7 @@ def reserve_agent_path(path, cap, task_id, generation, ttl_seconds=1800):
 
 
 def release_agent_path(path, token):
-    from misaka.platform import tasks
+    from misaka.core.platform import tasks
 
     con = tasks.connect(path)
     try:
@@ -368,7 +368,7 @@ def release_agent_path(path, token):
 
 
 def touch_agent_path(path, token, ttl_seconds=1800):
-    from misaka.platform import tasks
+    from misaka.core.platform import tasks
 
     con = tasks.connect(path)
     try:
@@ -378,7 +378,7 @@ def touch_agent_path(path, token, ttl_seconds=1800):
 
 
 def commit_agent_usage_path(path, token, task_id, generation, total_tokens):
-    from misaka.platform import tasks
+    from misaka.core.platform import tasks
 
     con = tasks.connect(path)
     try:

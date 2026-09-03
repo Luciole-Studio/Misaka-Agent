@@ -120,7 +120,7 @@ def tools_for(task_id, sender):
 
         from misaka.config import CFG
         from misaka.core.extensions.types import ToolDefinition
-        from misaka.platform import tasks as bdb
+        from misaka.core.platform import tasks as bdb
 
         state = {"con": None, "results": 0, "since_write": 0,
                  "empty_nagged": False, "stale_nags": 0}
@@ -193,7 +193,7 @@ def tools_for(task_id, sender):
             pass
 
         async def my_card_exec(tool_call_id, raw, signal, on_update, ctx):
-            from misaka.platform import cards
+            from misaka.core.platform import cards
             c = con()
             row = bdb.get(c, task_id)
             state, parents = bdb.dependency_state(c, task_id)
@@ -220,7 +220,7 @@ def tools_for(task_id, sender):
             text: str = Field(description="One line for the card's log: a decision, a change of course, a dead end.")
 
         async def note_exec(tool_call_id, raw, signal, on_update, ctx):
-            from misaka.platform import cards
+            from misaka.core.platform import cards
             p = raw if isinstance(raw, NoteParams) else NoteParams(**(raw or {}))
             row = bdb.get(con(), task_id)
             cards.append_log(row["workspace"], task_id, sender, p.text)

@@ -99,8 +99,8 @@ def deliver(to, message=None, sender=None, model=None, timeout=600,
     (messages back in the queue), 2 timed out (delivered; a late reply is not lost)."""
     from misaka.cli import chat
     from misaka.config import profiles, sisters
+    from misaka.core.platform.session import run_coro, run_session
     from misaka.network import messages
-    from misaka.platform.session import run_coro, run_session
 
     to = (to or "").strip()
     sender = (sender or "").strip() or None
@@ -162,7 +162,7 @@ def deliver(to, message=None, sender=None, model=None, timeout=600,
                                  extension_factories=factories, env=env))
         spent = int(r.get("budget_usage") or 0)
         if spent:
-            from misaka.platform import budget
+            from misaka.core.platform import budget
             budget.commit_agent_usage_path(
                 os.path.expanduser(CFG["db"]), None, f"dm:{to}", 0, spent)
         con = messages.connect()

@@ -10,7 +10,7 @@ import os
 
 from pydantic import BaseModel, Field
 
-from misaka.platform.toolkit import register_tool as _register
+from misaka.core.platform.toolkit import register_tool as _register
 
 
 def _text(s):
@@ -27,7 +27,7 @@ def _board():
     import os
 
     from misaka.config import CFG
-    from misaka.platform import tasks as db
+    from misaka.core.platform import tasks as db
     return db.connect(os.path.expanduser(CFG["db"]))
 
 
@@ -115,8 +115,8 @@ def register(harn):
         snippet="Create a card for a third-party agent",
         parameters=PeerCardParams)
     async def misaka_ally_card(tool_call_id, params, signal, on_update, ctx):
-        from misaka.platform import cards as card_files
-        from misaka.platform import tasks as db
+        from misaka.core.platform import cards as card_files
+        from misaka.core.platform import tasks as db
         workspace = db.canonical_workspace(getattr(ctx, "cwd", None) or os.getcwd())
         tid = card_files.create(                      # the one front door: index row + cards/<id>.md
             _board(), workspace, params.title, params.body, params.assignee,
@@ -183,7 +183,7 @@ def register(harn):
         snippet="Read an ally pane's output",
         parameters=PeerOutParams)
     async def misaka_ally_output(tool_call_id, params, signal, on_update, ctx):
-        from misaka.platform import prompt_guard
+        from misaka.core.platform import prompt_guard
         out = await asyncio.to_thread(_net().request, "pane.read", {
             "id": params.pane_id, "lines": params.lines, "strip": True})
         return _text(prompt_guard.untrusted(f"ally-pane:{params.pane_id}",

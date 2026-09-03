@@ -34,8 +34,8 @@ from pydantic import BaseModel
 
 from misaka.core.extensions import startup_sections
 from misaka.core.extensions.types import ToolDefinition
+from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.tools._common import abort_race
-from misaka.platform.prompt_guard import untrusted
 from misaka.utils.streams import STREAM_LIMIT
 from misaka.utils.values import signal_aborted
 

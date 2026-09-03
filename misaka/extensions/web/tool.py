@@ -25,14 +25,14 @@ import logging
 from typing import Any
 
 from misaka.core.extensions.types import ToolDefinition
+from misaka.core.platform import budget
+from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.tools._common import run_with_abort
 from misaka.core.tools._web.single_flight import single_flight
 from misaka.extensions.web import cache
 from misaka.extensions.web.config import redact_secrets
 from misaka.extensions.web.dispatch import memo_identity, resolve_provider
 from misaka.extensions.web.dispatch import web_search as dispatch_search
-from misaka.platform import budget
-from misaka.platform.prompt_guard import untrusted
 from misaka.utils.values import signal_aborted
 
 logger = logging.getLogger(__name__)

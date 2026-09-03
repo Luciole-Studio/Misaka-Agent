@@ -18,7 +18,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from misaka.platform import tasks as task_store
+from misaka.core.platform import tasks as task_store
 from misaka.utils import atomic
 
 SCHEMA = """
@@ -419,7 +419,7 @@ def _backfill_dependencies(con):
         task = task_store.get(con, row["task_id"])
         if task is None or task["status"] in SETTLED_TASK_STATUSES:
             continue
-        from misaka.platform import cards as card_files
+        from misaka.core.platform import cards as card_files
         if not os.path.isfile(card_files.card_path(task["workspace"], row["task_id"])):
             continue        # the card's line is gone (closed node): its `needs` cannot be read, so nothing moves
         existing = set(task_store.parent_ids(con, row["task_id"]))
@@ -490,7 +490,7 @@ def _atomic_write(path, content):
 
 def _commit(run, node, message):
     """Record the run's state on git: the project line always, the node's line when it has one."""
-    from misaka.platform import repo
+    from misaka.core.platform import repo
     # ponytail: only this run's prose and the project brief; cards commit themselves per transition.
     paths = [os.path.join("research", run["id"]), "PROJECT.md"]
     repo.commit(run["workspace"], paths, message)
@@ -685,7 +685,7 @@ def link_task(con, run_id, task_id, *, kind, node, preflight_artifact=None,
     # already-created cards here as before.
     task = task_store.get(con, task_id)
     if task is not None:
-        from misaka.platform import cards as card_files
+        from misaka.core.platform import cards as card_files
         card_exists = os.path.isfile(card_files.card_path(task["workspace"], task_id))
     else:
         card_exists = False

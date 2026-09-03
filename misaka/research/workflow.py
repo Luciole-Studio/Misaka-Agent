@@ -24,9 +24,9 @@ import sys
 from pathlib import Path
 
 from misaka import workspace as workspace_index
-from misaka.platform import budget, repo
-from misaka.platform import cards as card_files
-from misaka.platform import tasks as task_store
+from misaka.core.platform import budget, repo
+from misaka.core.platform import cards as card_files
+from misaka.core.platform import tasks as task_store
 from misaka.research import context as context_packet
 from misaka.research import ledger, planner, report, runs
 
@@ -945,7 +945,7 @@ def _record_runner(con, table, row_id, handle):
     pid = getattr(handle, "pid", None)
     if pid is None:
         return                                   # a pane handle: the panel daemon owns that process
-    from misaka.platform import processes
+    from misaka.core.platform import processes
     con.execute(f'UPDATE "{table}" SET runner_pid=?, runner_identity=? WHERE id=?',
                 (int(pid), processes.identity(int(pid)), row_id))
 
@@ -960,7 +960,7 @@ def _reap_orphan_runner(con, table, row):
     pid = row["runner_pid"] if "runner_pid" in keys else None
     identity = row["runner_identity"] if "runner_identity" in keys else None
     if pid and identity:
-        from misaka.platform import processes
+        from misaka.core.platform import processes
         if processes.identity_is_alive(int(pid), identity):
             processes.terminate(int(pid))
     if pid or identity:

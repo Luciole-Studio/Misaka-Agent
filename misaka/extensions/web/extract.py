@@ -47,6 +47,8 @@ import re
 from typing import Any
 
 from misaka.core.extensions.types import ToolDefinition
+from misaka.core.platform import budget
+from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.tools._common import run_with_abort
 from misaka.core.tools._web.bounded import UnsafeUrlError, vet_public_url
 from misaka.core.tools._web.evidence import (
@@ -61,8 +63,6 @@ from misaka.extensions.web.config import redact_secrets, web_config
 from misaka.extensions.web.dispatch import resolve_extractor
 from misaka.extensions.web.dispatch import web_extract as dispatch_extract
 from misaka.extensions.web.tool import tool_error
-from misaka.platform import budget
-from misaka.platform.prompt_guard import untrusted
 from misaka.utils.values import signal_aborted
 
 logger = logging.getLogger(__name__)

@@ -21,7 +21,7 @@ which is citation drift, not fabrication. See ``_REPORT_NUMBER_RE``.
 
 Messages here quote the report back at the caller, and a report can carry text a page wanted the
 model to repeat. Anything rendered from ``Problem`` into a model-facing prompt must go through
-``misaka.platform.prompt_guard.untrusted`` at the call site.
+``misaka.core.platform.prompt_guard.untrusted`` at the call site.
 """
 
 from __future__ import annotations
