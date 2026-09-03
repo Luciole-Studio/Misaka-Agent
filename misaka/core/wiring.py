@@ -6,7 +6,8 @@ MISAKA has roles and session kinds Pi does not, so its array is a registry whose
 qualify themselves: a module takes part by defining ``activate(spec) -> register | None``
 (``register(harn)`` installs it into the harness, ``None`` skips it for this session), and
 may declare ``ROLES`` (default: every role), ``SESSION_KINDS`` (default: every kind but
-``bare``), ``EXTENSION_NAME`` and ``HIDDEN``.
+``bare``), ``EXTENSION_NAME`` and ``HIDDEN``. Entries under ``misaka.core`` are hidden by
+construction: core does not appear on the startup screen, as Pi's built-ins do not.
 
 This was ``misaka.extensions.discover``, which found entries by scanning the
 ``extensions/`` folder and read a module's role off the sub-folder it sat in. The folder
@@ -117,7 +118,10 @@ def build_extensions(spec: SessionSpec) -> list[dict[str, Any]]:
                 inline(
                     getattr(mod, "EXTENSION_NAME", path.rsplit(".", 1)[-1]),
                     register,
-                    hidden=bool(getattr(mod, "HIDDEN", False)),
+                    # Core is not listed, the way Pi's own built-ins are not: the startup
+                    # screen's "Extensions" section is for what the user added. A bundled
+                    # extension under misaka.extensions decides for itself with HIDDEN.
+                    hidden=path.startswith("misaka.core.") or bool(getattr(mod, "HIDDEN", False)),
                 )
             )
     return out

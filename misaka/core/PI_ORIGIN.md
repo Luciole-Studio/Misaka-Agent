@@ -62,6 +62,11 @@
 这样 `build_extensions` 产出的名单与迁移前逐字相同。体包里已有同名模块（`network/messages.py` 与壳 `messages.py`）
 是子目录存在的原因。自包含的（web、subagent、lcm、ally、ask_user）activate 留在包的 `__init__.py`。
 
+**core 不在启动屏的「Extensions」里出现**（`core/wiring.py`：`misaka.core.*` 的条目一律 `hidden`），和 pi 的内置工具一样；
+那一区留给用户自己装的东西。`misaka/extensions/` 下的捆绑扩展各自用 `HIDDEN` 决定（pi 藏了它的 llama）。
+这只是显示：运行时对它们和对 pi 捆绑的 llama 一视同仁——settings 禁不掉、`--no-extensions` 丢不掉、不需要项目信任、
+钩子都由 ExtensionRunner 派发（pi 内核唯一的钩子通道，内置工具没有钩子所以用不到它）。
+
 ## `misaka/extensions/` 现在是什么
 
 pi 意义上的**捆绑扩展**：`llama/`（pi 自己唯一捆绑的那个）与 `moa/`。都由 `core/wiring.py` 的 `REGISTRY` 点名。
