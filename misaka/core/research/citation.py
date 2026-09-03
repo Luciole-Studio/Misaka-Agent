@@ -1,6 +1,6 @@
 """The last mile between a report and its evidence.
 
-The ledger (``misaka/research/ledger.py``) already pins every claim to a sha-locked verbatim
+The ledger (``misaka/core/research/ledger.py``) already pins every claim to a sha-locked verbatim
 quote, so the evidence end of the chain is hard. The other end was not checked at all: a report
 could cite ``[7]`` when only five sources exist, cite a source whose URL is not the one it names,
 or state a figure that appears in none of the evidence it points at. Prompts asked for care;

@@ -8,9 +8,9 @@ import shlex
 from misaka.config import CFG, current_config
 from misaka.core.platform import budget
 from misaka.core.platform import tasks as task_store
-from misaka.research import node as research_node
-from misaka.research import planner, runs, workflow
-from misaka.research import tools as research_tools
+from misaka.core.research import node as research_node
+from misaka.core.research import planner, runs, workflow
+from misaka.core.research import tools as research_tools
 from misaka.ui.tui.interactive.components.ask_user_question import (
     AskUserQuestionComponent,
 )

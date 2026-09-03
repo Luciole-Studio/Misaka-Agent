@@ -11,7 +11,7 @@ The layout mirrors the stable parts of hermes' system prompt:
    slot can be replaced wholesale by a user's SOUL.md.  Independent review is not
    a third one: it lives in the board tools, as ``misaka_card``'s optional
    ``reviewer`` parameter and ``misaka_card_request_review``
-   (extensions/last_order/network.py), and no charter sentence states it.
+   (core/network/wiring/network.py), and no charter sentence states it.
 3. The shared soul (~/.misaka/profiles/MISAKA.md) is handled by profiles.shared_soul.
 4. Tool discipline comes from each tool's promptGuidelines/promptSnippet at
    registration time, so no charter may name a tool to claim a role has it or

@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 
-from misaka.research import ledger, runs
+from misaka.core.research import ledger, runs
 
 
 def _branch_chain(con, branch):

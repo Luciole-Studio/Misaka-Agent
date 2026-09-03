@@ -29,7 +29,7 @@ BOOKKEEPING_TOOLS = frozenset({
     # Corpus and skill inspection (misaka.extensions.documents, .skills).
     "doc_list", "doc_outline", "doc_read", "doc_find", "doc_verify",
     "skills_list", "skill_view",
-    # The read-only view of a research run (misaka.research.tools).
+    # The read-only view of a research run (misaka.core.research.tools).
     "misaka_research_view",
     # Inbox and sub-agent management (misaka.core.network.messages, misaka.core.subagent),
     # spelled as the management vocabulary minus ``Agent`` so the exclusion noted above is

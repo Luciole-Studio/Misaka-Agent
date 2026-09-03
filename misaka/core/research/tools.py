@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from misaka.core.extensions.types import ToolDefinition
-from misaka.research import ledger, runs
+from misaka.core.research import ledger, runs
 
 
 def _text(value):

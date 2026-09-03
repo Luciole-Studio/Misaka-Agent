@@ -33,7 +33,7 @@ def _workspace(ctx):
 
 # -- which folders may own a document this session can cite ---------------------------------------
 #
-# Mirror of ``runs.evidence_roots`` (misaka/research/runs.py): the ledger accepts a doc citation
+# Mirror of ``runs.evidence_roots`` (misaka/core/research/runs.py): the ledger accepts a doc citation
 # under either the run's project folder or the run home that holds every node worktree, so the
 # doc_* tools must see the same set -- a doc_verify that answers "do not cite it" about a citation
 # ``ledger.ingest_report`` would accept kills the verify-then-cite loop for every below-root card.

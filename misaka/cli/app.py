@@ -309,8 +309,8 @@ def _cmd_research(args):
     import asyncio as _asyncio
 
     from misaka.core.network import worker as worker_mod
-    from misaka.research import node as research_node
-    from misaka.research import planner, runs, workflow
+    from misaka.core.research import node as research_node
+    from misaka.core.research import planner, runs, workflow
     if args.node:
         sys.exit(research_node.main(*args.node))
     if args.probe:

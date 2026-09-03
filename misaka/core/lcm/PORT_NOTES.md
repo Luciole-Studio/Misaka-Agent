@@ -77,7 +77,7 @@
 | `context_engine_abc.py` | Hermes `agent.context_engine.ContextEngine` 的桩(P0/A 号) |
 | `switch.py` | `context_engine` 选谁 + 磁盘上的 db 是哪一版 schema(`messages.conversation_id` 一列定乾坤) |
 | `config_bridge.py` | `MISAKA_LCM_*` → `LCM_*`;上游名优先,别名只在上游名缺席时临时铺进 `os.environ` 再撤掉 |
-| `llm.py` | `agent.auxiliary_client.call_llm` 桩 → `misaka.platform.session.run_text`;缺席时上游各处自带确定性回退 |
+| `llm.py` | `agent.auxiliary_client.call_llm` 桩 → `misaka.core.platform.session.run_text`;缺席时上游各处自带确定性回退 |
 | `ingest.py` | misaka `AgentMessage` → 上游 OpenAI 形状(内容拉平成文本、时间戳 ms→s、`tool_calls` 缺省给 `[]` 而不是 `None`) |
 | `context_engine.py` | 压缩缝:pi 定边界,引擎按边界摘要 |
 | `extension.py` | 事件订阅(ingest + 压缩 + P3 的 `context`);工具从 P2 起由 `tools.py` 注册 |

@@ -1,6 +1,6 @@
 """Research processes: a node (``misaka research --node RUN NODE``), Last Order's fork on
 one issue (``misaka research --probe RUN ISSUE``), and one card of theirs
-(``python -m misaka.research.node --run-card TASK_ID``, this module's own child).
+(``python -m misaka.core.research.node --run-card TASK_ID``, this module's own child).
 
 Inside the panel a node is a pane split beside the Last Order that started the run, a fork is
 a pane split beside its node (the fork rule: one line of context, one tab), and every Sister
@@ -18,7 +18,7 @@ import time
 
 from misaka.config import CFG, current_config
 from misaka.core.platform import tasks as task_store
-from misaka.research import runs
+from misaka.core.research import runs
 
 
 class PaneSpawner:
@@ -105,7 +105,7 @@ class PaneRunner:
             pass
 
 
-CARD_ARGV = [sys.executable, "-m", "misaka.research.node", "--run-card"]   # + the card's id
+CARD_ARGV = [sys.executable, "-m", "misaka.core.research.node", "--run-card"]   # + the card's id
 
 # A settled card's child is not finished: acceptance commits first, and only then does the child
 # commit the card's line and index its artifacts, which budgets up to 300s for a single PDF.
@@ -303,20 +303,20 @@ def main_card(task_id):
 def main(run_id, node_id):
     # Imported here, not at the top: a card child runs this module too, and the research
     # workflow is a second of imports it has no use for.
-    from misaka.research import workflow
+    from misaka.core.research import workflow
     return _run(f"node {node_id}", lambda con, cfg, runner, worker, progress: workflow.expand_node(
         con, cfg, runner, worker, run_id=run_id, node_id=node_id, spawner=spawner(), progress=progress))
 
 
 def main_probe(run_id, issue_id):
-    from misaka.research import workflow
+    from misaka.core.research import workflow
     return _run(f"fork {issue_id}", lambda con, cfg, runner, worker, progress: workflow.probe(
         con, cfg, runner, worker, run_id=run_id, issue_id=issue_id, progress=progress))
 
 
 if __name__ == "__main__":
-    # ``python -m misaka.research.node --run-card TASK_ID``. A node and a fork are user-facing
+    # ``python -m misaka.core.research.node --run-card TASK_ID``. A node and a fork are user-facing
     # and keep their CLI sub-command; a card child is this module's own and needs no CLI surface.
     if sys.argv[1:2] != ["--run-card"] or len(sys.argv) != 3:
-        sys.exit("usage: python -m misaka.research.node --run-card TASK_ID")
+        sys.exit("usage: python -m misaka.core.research.node --run-card TASK_ID")
     sys.exit(main_card(sys.argv[2]))

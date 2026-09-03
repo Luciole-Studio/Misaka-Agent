@@ -27,8 +27,8 @@ from misaka import workspace as workspace_index
 from misaka.core.platform import budget, repo
 from misaka.core.platform import cards as card_files
 from misaka.core.platform import tasks as task_store
-from misaka.research import context as context_packet
-from misaka.research import ledger, planner, report, runs
+from misaka.core.research import context as context_packet
+from misaka.core.research import ledger, planner, report, runs
 
 POLL_SECONDS = 2.0
 MAX_PROBE_ROUNDS = 3          # ponytail: a fork opens cards at most this many times before it must judge
@@ -855,7 +855,7 @@ async def _wait_probes_inner(con, cfg, spawner, run, handles, *, poll_seconds):
 
 
 async def expand_node(con, cfg, runner, worker, *, run_id, node_id, spawner, progress=None):
-    """One node's routine, as run by its own process (misaka.research.node)."""
+    """One node's routine, as run by its own process (misaka.core.research.node)."""
     runs.init(con)
     run, node = runs.get(con, run_id), runs.node(con, node_id)
     if not run or not node:
@@ -1048,7 +1048,7 @@ async def _wait_level(con, cfg, spawner, run, handles, *, poll_seconds, progress
 
 async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, progress=None):
     """Advance one persisted research run until it finishes, stops, or needs user input.
-    Nodes are processes (misaka.research.node); ``spawner`` starts one and says whether it lives."""
+    Nodes are processes (misaka.core.research.node); ``spawner`` starts one and says whether it lives."""
     runs.init(con)
     run = runs.get(con, run_id)
     if not run:

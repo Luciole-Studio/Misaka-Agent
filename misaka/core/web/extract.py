@@ -20,7 +20,7 @@ head+tail explanation -- is the part a model actually reads.
 ``_store_full_text`` inside the truncation branch, because the file exists to let the
 model page through a middle it was not shown. MISAKA writes every page through the same
 evidence writer ``web_fetch`` uses, because here the file has a second job:
-``misaka/research/ledger.py`` verifies a quote against a *registered artifact*, so a page
+``misaka/core/research/ledger.py`` verifies a quote against a *registered artifact*, so a page
 that fit under the budget still has to be on disk or it cannot be quoted. The path comes
 back on each entry as ``saved_path``, which is the addition to Hermes' result shape.
 
@@ -256,7 +256,7 @@ def _store_page(
 
     The same writer ``web_fetch`` uses, so a page reached either way is one kind of
     artifact with one kind of provenance -- which is what lets
-    ``misaka/research/ledger.py`` verify a quote against it. ``text_sha256`` is the digest
+    ``misaka/core/research/ledger.py`` verify a quote against it. ``text_sha256`` is the digest
     that check reads. Best-effort: a session with no workspace, or a full disk, costs the
     evidence file and not the extraction.
     """
