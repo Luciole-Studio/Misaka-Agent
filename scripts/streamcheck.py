@@ -36,7 +36,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 SKIP_DIRS = (
     "misaka/documents/pageindex",
-    "misaka/extensions/hermes_lcm/vendor",
+    "misaka/core/lcm/vendor",
     "tests/hermes_lcm_vendor",
 )
 

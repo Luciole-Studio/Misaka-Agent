@@ -63,7 +63,7 @@ REGISTRY: tuple[str, ...] = (
     "misaka.extensions.coverage",
     "misaka.extensions.documents",
     "misaka.extensions.fork_split",
-    "misaka.extensions.hermes_lcm",
+    "misaka.core.lcm",
     "misaka.extensions.llama",
     "misaka.extensions.mcp",
     "misaka.extensions.messages",

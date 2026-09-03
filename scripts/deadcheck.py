@@ -32,7 +32,7 @@ SKIP_DIRS = (
     "misaka/documents/pageindex",
     # Vendored verbatim from upstream hermes-lcm; pruning it would be a diff
     # against the very thing the next resync replays. host/ is ours and is checked.
-    "misaka/extensions/hermes_lcm/vendor",
+    "misaka/core/lcm/vendor",
     # Upstream's own suite, vendored with it: the harness only measures fidelity
     # while it stays byte-identical to what upstream runs.
     "tests/hermes_lcm_vendor",

@@ -10,7 +10,7 @@ test:
 	$(PY) -c "import pkgutil,importlib,misaka; [importlib.import_module(m.name) for m in pkgutil.walk_packages(misaka.__path__, 'misaka.') if not m.name.endswith('__main__')]; print('import sweep ok')"
 
 lint:
-	$(PY) -m ruff check misaka tests bench --exclude misaka/documents/pageindex --exclude misaka/extensions/hermes_lcm/vendor --exclude tests/hermes_lcm_vendor --exclude misaka/ai/models_generated.py --exclude misaka/ai/image_models_generated.py
+	$(PY) -m ruff check misaka tests bench --exclude misaka/documents/pageindex --exclude misaka/core/lcm/vendor --exclude tests/hermes_lcm_vendor --exclude misaka/ai/models_generated.py --exclude misaka/ai/image_models_generated.py
 
 # A module-level name nobody reads is rot; catching it here is cheaper than an audit.
 dead:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Report how far the vendored hermes-lcm has drifted from upstream, and from its own record.
 
-The port's contract (``misaka/extensions/hermes_lcm/PORT_NOTES.md``) is that every byte
+The port's contract (``misaka/core/lcm/PORT_NOTES.md``) is that every byte
 under ``vendor/`` and ``tests/hermes_lcm_vendor/`` matches the pinned upstream commit
 unless the change is registered. A registered change is replayed at the next resync; an
 unregistered one is silently lost there -- so the check that matters most is not "is
@@ -39,7 +39,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PORT_DIR = Path("misaka/extensions/hermes_lcm")
+PORT_DIR = Path("misaka/core/lcm")
 VENDOR_DIR = PORT_DIR / "vendor"
 VENDOR_TESTS_DIR = Path("tests/hermes_lcm_vendor")
 STUB_FILE = PORT_DIR / "host/context_engine_abc.py"

@@ -379,8 +379,8 @@ def _cmd_research(args):
 def _cmd_lcm(args):
     """The LCM operator surface: everything upstream's own `/lcm` offers, plus the four
     opt-in families upstream's doctor predates."""
-    from misaka.extensions.hermes_lcm.host import config_bridge as lcm_config
-    from misaka.extensions.hermes_lcm.host import operations as lcm_ops
+    from misaka.core.lcm.host import config_bridge as lcm_config
+    from misaka.core.lcm.host import operations as lcm_ops
 
     lcm_db = lcm_config.database_path()
 
@@ -389,7 +389,7 @@ def _cmd_lcm(args):
     elif args.op == "externalize-backfill":
         # Old rows do not benefit from switching externalization on; this is how they
         # catch up. Dry run first, like migrate: `--apply` is what rewrites anything.
-        from misaka.extensions.hermes_lcm.host import externalize as lcm_externalize
+        from misaka.core.lcm.host import externalize as lcm_externalize
         result = (lcm_externalize.run(args.limit) if args.apply
                   else lcm_externalize.plan(args.limit))
         print(f"Database {result['database'] or lcm_db}")
@@ -409,7 +409,7 @@ def _cmd_lcm(args):
     elif args.op == "embed":
         # Upstream's own `/lcm embed` implementation, forwarded whole: the dry run is the
         # default and `--apply` is what spends anything.
-        from misaka.extensions.hermes_lcm.host import embed as lcm_embed
+        from misaka.core.lcm.host import embed as lcm_embed
         if args.target not in {"warmup", "backfill"}:
             print("Usage: misaka lcm embed warmup|backfill [--apply] [--limit N]")
             sys.exit(2)
@@ -418,13 +418,13 @@ def _cmd_lcm(args):
         # Upstream's own `/lcm assertions rebuild`, forwarded whole. The dry run is the
         # default and never constructs an extractor; `--apply` is what calls a model, once
         # per source row it re-derives.
-        from misaka.extensions.hermes_lcm.host import assertions as lcm_assertions
+        from misaka.core.lcm.host import assertions as lcm_assertions
         if args.target not in {None, "rebuild"}:
             print("Usage: misaka lcm assertions rebuild [--apply] [--limit N]")
             sys.exit(2)
         print(lcm_assertions.rebuild(apply=args.apply, limit=args.limit))
     elif args.op == "rollups":
-        from misaka.extensions.hermes_lcm.host import rollups as lcm_rollups
+        from misaka.core.lcm.host import rollups as lcm_rollups
         # The engine resolves its database through `config_bridge.database_path()`, which lets
         # upstream's own `LCM_DATABASE_PATH` win. Reporting on `lcm_db` instead would
         # answer "nothing has been built" about a file the engine never opened -- and
@@ -462,13 +462,13 @@ def _cmd_lcm(args):
         # preview is the default and `--apply` is what writes the rolling backup and
         # advances the lifecycle frontier. The session is an argument because a CLI has
         # no active session for upstream to rotate.
-        from misaka.extensions.hermes_lcm.host import operations as lcm_operations
+        from misaka.core.lcm.host import operations as lcm_operations
         print(lcm_operations.rotate(args.target or "", apply=args.apply))
     elif args.op == "preset":
         # Upstream's benchmarked model-family presets, forwarded whole. Its `apply`
         # writes no configuration in any mode, so `--apply` gets the same preview plus a
         # line saying it had nothing to commit.
-        from misaka.extensions.hermes_lcm.host import operations as lcm_operations
+        from misaka.core.lcm.host import operations as lcm_operations
         if args.target not in {"show", "suggest", "apply"}:
             print("Usage: misaka lcm preset show|suggest|apply [NAME] [--apply]")
             sys.exit(2)

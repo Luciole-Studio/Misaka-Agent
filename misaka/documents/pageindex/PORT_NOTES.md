@@ -7,7 +7,7 @@
 
 ## 与 hermes-lcm 的契约差别
 
-`misaka/extensions/hermes_lcm/vendor/` 的契约是**逐字节相同**。这里不是，而且是有意的：
+`misaka/core/lcm/vendor/` 的契约是**逐字节相同**。这里不是，而且是有意的：
 
 vendored 树在收录时过了本仓库自己的 lint 规范化（import 排序、`UP`/`C4`/`SIM`/`RUF` 等自动修复），
 所以 79 个文件里几乎每一个都与上游有字节差异，而含义完全一样。对它做字节比较只会报出 72 个文件、
