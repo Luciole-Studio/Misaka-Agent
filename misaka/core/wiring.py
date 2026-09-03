@@ -7,16 +7,18 @@ qualify themselves: a module takes part by defining ``activate(spec) -> register
 (``register(harn)`` installs it into the harness, ``None`` skips it for this session), and
 may declare ``ROLES`` (default: every role), ``SESSION_KINDS`` (default: every kind but
 ``bare``) and ``EXTENSION_NAME``. Every entry is hidden: core does not appear on the startup
-screen, as Pi's built-ins do not. The bundled providers are not here -- they are Pi-style
-``builtInExtensions`` in ``misaka.extensions``, composed in by the session entry.
+screen, as Pi's built-ins do not.
 
 This was ``misaka.extensions.discover``, which found entries by scanning the
 ``extensions/`` folder and read a module's role off the sub-folder it sat in. The folder
 is Pi's and stays, but what the scan found was product wiring that other packages import
 as a library, not plug-ins, and a role was a fact about where a file lived rather than
 something the file said. Now the registry names each entry outright, the entry names its
-own roles, and ``extensions/`` holds what Pi's does: the bundled providers, which ``core``
-never refers to.
+own roles. ``misaka/extensions`` keeps its own folder scan for the bundled extensions --
+the ones that are plug-ins in Pi's sense -- and core never imports it: the process entry
+assigns that scan to ``bundled`` (``misaka.cli.bootstrap``), the way Pi's ``main.ts``
+composes ``builtInExtensions`` ahead of everything else, and ``build_extensions`` puts its
+result first.
 
 The registry is ordered and the order is load-bearing. Extension order is handler order
 for every event the runner folds (``before_agent_start`` threads each handler's system
@@ -61,22 +63,17 @@ class SessionSpec:
 
 # Shared entries by name, then Last Order's, then the Sisters': the folder scan's order.
 REGISTRY: tuple[str, ...] = (
-    "misaka.core.panel.agent_state",
     "misaka.core.ask_user",
-    "misaka.core.coverage",
     "misaka.core.documents.wiring.documents",
-    "misaka.core.panel.fork_split",
     "misaka.core.lcm",
     "misaka.core.mcp",
     "misaka.core.network.wiring.messages",
-    "misaka.core.network.wiring.observe",
     "misaka.core.network.wiring.roster",
     "misaka.core.skills.wiring.skills",
     "misaka.core.network.wiring.todo",
     "misaka.core.web",
     "misaka.core.network.ally",
     "misaka.core.network.wiring.network",
-    "misaka.core.network.wiring.peek",
     "misaka.core.research.wiring.research",
     "misaka.core.network.wiring.roster_admin",
     "misaka.core.subagent",
@@ -100,8 +97,18 @@ def role_key(spec: SessionSpec) -> str:
     return "last_order" if profiles.is_last_order(spec.profile_dir) else "sisters"
 
 
+def _no_bundled(spec: SessionSpec) -> list[dict[str, Any]]:
+    return []
+
+
+# The bundled extensions, composed in by the process entry (``misaka.cli.bootstrap``) --
+# core does not import ``misaka.extensions``. A process that never runs an entry, such
+# as a bare kernel run in a test, builds sessions without them.
+bundled: Callable[[SessionSpec], list[dict[str, Any]]] = _no_bundled
+
+
 def build_extensions(spec: SessionSpec) -> list[dict[str, Any]]:
-    """The inline extensions for one session, in registry order."""
+    """The inline extensions for one session: the bundled ones first, then core in registry order."""
     role = role_key(spec)
     kind = "bare" if role == "last_order" and spec.kind == "beast" else spec.kind  # a budget-less Last Order runs tool-less
     out: list[dict[str, Any]] = []
@@ -123,7 +130,7 @@ def build_extensions(spec: SessionSpec) -> list[dict[str, Any]]:
                     hidden=True,
                 )
             )
-    return out
+    return [*bundled(spec), *out]
 
 
 __all__ = [
@@ -134,6 +141,7 @@ __all__ = [
     "SessionKind",
     "SessionSpec",
     "build_extensions",
+    "bundled",
     "delegates",
     "inline",
     "role_key",

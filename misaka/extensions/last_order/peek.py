@@ -120,7 +120,6 @@ def register(harn):
 __all__ = ["register"]
 
 SESSION_KINDS = {"foreground", "dm"}
-ROLES = {"last_order"}
 
 
 def activate(spec):

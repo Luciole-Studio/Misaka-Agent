@@ -30,7 +30,6 @@
 | `wiring.py` | 会话装配：`SessionSpec` + `REGISTRY` + `build_extensions`。pi 的 `src/extensions/index.ts` 是硬编码数组，这里是自报 `ROLES`/`SESSION_KINDS` 的清单 |
 | `pi_manifest.py` `provider_display_names.py` `session_export.py` `settings_diagnostics.py` | 移植期加的小件 |
 | `mcp.py` | MCP 客户端与按角色的服务器配置（原 `extensions/mcp.py`） |
-| `coverage.py` | `coverage_scan` 工具（原 `extensions/coverage.py`） |
 
 ### `tools/` 里的 misaka 文件
 
@@ -45,14 +44,13 @@
 | 目录 | 原位置 | 内容 |
 |---|---|---|
 | `platform/` | `misaka/platform/` | 地板：board 的 SQLite、卡片、预算、进程树、会话适配器、提示围栏、工具注册接缝、管理工具名单 |
-| `network/` | `misaka/network/` + 7 个壳 + `extensions/last_order/ally/` + `misaka/observability/board.py` | board 的协调层；`wiring/` 是它的工具面（messages/todo/roster/roster_admin/observe/peek/network）；`ally/` 是把别人的 CLI 当 Sister 跑；`board.py` 是终端渲染 |
+| `network/` | `misaka/network/` + 5 个壳 + `extensions/last_order/ally/` + `misaka/observability/board.py` | board 的协调层；`wiring/` 是它的工具面（messages/todo/roster/roster_admin/network）；`ally/` 是把别人的 CLI 当 Sister 跑；`board.py` 是终端渲染（`misaka board` 与 `extensions/observe.py` 共用） |
 | `research/` | `misaka/research/` + `extensions/last_order/research.py` | 研究流程；`wiring/research.py` 是 Last Order 的 `misaka_research_view` |
 | `subagent/` | `extensions/sisters/subagent/` | 子代理运行时（runtime/child/policy/hooks/agents 与内置定义） |
 | `skills/` | `misaka/skills/` + `extensions/skills.py` | 分层技能索引，**整体替换**了 pi 的 `core/skills.ts`（审计 A-10）；`wiring/skills.py` 是三个工具与守卫 |
 | `web/` | `extensions/web/` | 搜索后端、注册表、分发、抓取、抽取；`tools/_web/` 是抓取工具用的安全层 |
 | `lcm/` | `extensions/hermes_lcm/` | LCM 上下文引擎；`vendor/` 是 hermes-lcm 上游原样（`UPSTREAM_COMMIT` 钉版本，`PORT_NOTES.md` 是再同步契约），`host/` 是适配 |
 | `documents/` | `misaka/documents/` + `extensions/documents.py` | 语料索引与工作区；`pageindex/` 是 vendored 的 PageIndex（自带 MIT 许可） |
-| `panel/` | `extensions/agent_state.py` `extensions/fork_split.py` | 会话这一侧的面板协议；面板本身在 `misaka/ui/panel/` |
 | `ask_user/` | `extensions/ask_user/` | `AskUserQuestion` 工具 |
 
 ### 壳（`wiring/`）的约定
@@ -69,9 +67,21 @@
 
 ## `misaka/extensions/` 现在是什么
 
-pi 意义上的**捆绑扩展**：`llama/`（pi 自己唯一捆绑的那个）与 `moa/`。`extensions/__init__.py` 就是 pi 的
-`src/extensions/index.ts`——`builtInExtensions = ({name, factory, hidden}, …)`，一字不差；把它接进会话的是
-`cli/engine.py`（misaka 的 `main.ts`）：`[*builtInExtensions, *调用方给的]`。**`core/` 对这个包零引用**，和 pi 一样。
+pi 意义上的**捆绑扩展**——自包含、只靠扩展 API、拔了无残留——按 misaka 原有的三层放：
+
+```
+extensions/<module>             每个角色：llama/ moa/（provider）、agent_state fork_split（面板集成）、coverage observe
+extensions/last_order/<module>  只有 Last Order：peek
+extensions/sisters/             其他角色的槽位（subagent 是 C 类，在 core/subagent，仅对 Sisters 暴露）
+```
+
+`extensions/__init__.py` 的 `discover(spec)` 扫文件夹、按文件夹定角色、按 `SESSION_KINDS` 门控——这是 misaka 加在 pi 之上的
+（pi 的 `src/extensions/index.ts` 是无角色的平铺数组）。**`core/` 对这个包零引用**：进程入口（`cli/app.py`、
+`cli/subagent_child.py`、`cli/research_node.py`）调 `cli/bootstrap.install()`，把 `discover` 赋给 `core/wiring.py` 的 `bundled`，
+`build_extensions(spec)` 把它的结果排在 core 条目之前——对应 pi `main.ts` 把 `builtInExtensions` 排在最前。
+pi 没有在 core 里起会话的进程，misaka 有（daemon 里的卡片、子代理子进程），所以需要这个注入点；这是此处唯一的创新。
+裸的内核入口（`engine.main()` 无 options，只有测试走）不装钩子，会话里没有捆绑扩展。
+
 pi 的 `pi install npm:/git:` 与 `~/.pi/agent/extensions/` 安装通道 misaka 未暴露（审计 A-11、A-1），
 `docs/plans/install-uninstall-design-2026-09-03.md` 是那件事的设计稿。
 
@@ -91,22 +101,20 @@ misaka/skills/                         → misaka/core/skills/
 misaka/documents/                      → misaka/core/documents/
 misaka/observability/board.py          → misaka/core/network/board.py
 misaka/app/composition.py              → misaka/core/wiring.py
-misaka/extensions/__init__.py:discover → misaka/core/wiring.py:build_extensions
+misaka/extensions/__init__.py:discover  留在原地（捆绑扩展的发现）；core 条目由 misaka/core/wiring.py:REGISTRY 点名
 misaka/extensions/web/                 → misaka/core/web/
 misaka/extensions/hermes_lcm/          → misaka/core/lcm/            （描述符名 hermes_lcm → lcm）
 misaka/extensions/sisters/subagent/    → misaka/core/subagent/
 misaka/extensions/last_order/ally/     → misaka/core/network/ally/
 misaka/extensions/ask_user/            → misaka/core/ask_user/
 misaka/extensions/mcp.py               → misaka/core/mcp.py
-misaka/extensions/coverage.py          → misaka/core/coverage.py
-misaka/extensions/agent_state.py       → misaka/core/panel/agent_state.py
-misaka/extensions/fork_split.py        → misaka/core/panel/fork_split.py
 misaka/extensions/skills.py            → misaka/core/skills/wiring/skills.py
 misaka/extensions/documents.py         → misaka/core/documents/wiring/documents.py
-misaka/extensions/{messages,todo,roster,observe}.py
+misaka/extensions/{messages,todo,roster}.py
                                        → misaka/core/network/wiring/{同名}.py
-misaka/extensions/last_order/{network,peek,roster_admin}.py
+misaka/extensions/last_order/{network,roster_admin}.py
                                        → misaka/core/network/wiring/{同名}.py
+（agent_state fork_split coverage observe peek 留在 extensions/，见上节）
 misaka/extensions/last_order/research.py
                                        → misaka/core/research/wiring/research.py
 ```

@@ -2090,7 +2090,7 @@ class SubagentManager:
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "-m",
-            "misaka.core.subagent.child",
+            "misaka.cli.subagent_child",
             *flags,
             cwd=task.cwd,
             env=env,

@@ -105,7 +105,7 @@ class PaneRunner:
             pass
 
 
-CARD_ARGV = [sys.executable, "-m", "misaka.core.research.node", "--run-card"]   # + the card's id
+CARD_ARGV = [sys.executable, "-m", "misaka.cli.research_node", "--run-card"]   # + the card's id
 
 # A settled card's child is not finished: acceptance commits first, and only then does the child
 # commit the card's line and index its artifacts, which budgets up to 300s for a single PDF.
@@ -313,10 +313,3 @@ def main_probe(run_id, issue_id):
     return _run(f"fork {issue_id}", lambda con, cfg, runner, worker, progress: workflow.probe(
         con, cfg, runner, worker, run_id=run_id, issue_id=issue_id, progress=progress))
 
-
-if __name__ == "__main__":
-    # ``python -m misaka.core.research.node --run-card TASK_ID``. A node and a fork are user-facing
-    # and keep their CLI sub-command; a card child is this module's own and needs no CLI surface.
-    if sys.argv[1:2] != ["--run-card"] or len(sys.argv) != 3:
-        sys.exit("usage: python -m misaka.core.research.node --run-card TASK_ID")
-    sys.exit(main_card(sys.argv[2]))

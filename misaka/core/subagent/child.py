@@ -953,6 +953,3 @@ async def amain() -> int:
         await asyncio.gather(parent_watch, return_exceptions=True)
         await engine_session.dispose(runtime)
 
-
-if __name__ == "__main__":
-    raise SystemExit(asyncio.run(amain()))

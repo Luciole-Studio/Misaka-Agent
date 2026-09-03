@@ -3,6 +3,7 @@ import argparse
 import os
 import sys
 
+from misaka.cli import bootstrap
 from misaka.config import CFG, VERSION, current_config
 from misaka.core.documents import index as corpus
 from misaka.core.network import board as tail
@@ -792,6 +793,7 @@ COMMANDS = {
 def main(argv=None):
     """The CLI entry point: one handler per sub-command (``COMMANDS``), each opening the board only
     if it uses it; ``argv`` defaults to the process arguments so tests can drive it directly."""
+    bootstrap.install()
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
         # No arguments: open the panel in a terminal, plain chat when piped.

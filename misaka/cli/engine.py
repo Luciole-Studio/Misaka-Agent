@@ -57,7 +57,6 @@ from misaka.core.settings_diagnostics import (
 )
 from misaka.core.settings_manager import SettingsManager
 from misaka.core.timings import printTimings, resetTimings, time
-from misaka.extensions import builtInExtensions
 from misaka.modes import runPrintMode as run_print_mode
 from misaka.ui.tui import TUI, ProcessTerminal, setCapabilityOverrides, setKeybindings
 from misaka.ui.tui.interactive import InteractiveMode
@@ -946,8 +945,7 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
             resolved_extension_paths=resolved_extension_paths,
             resolved_prompt_template_paths=resolved_prompt_template_paths,
             resolved_theme_paths=resolved_theme_paths,
-            # Pi main.ts: the bundled extensions go ahead of any the caller supplies.
-            extension_factories=[*builtInExtensions, *((options or {}).get("extensionFactories") or [])],
+            extension_factories=options.get("extensionFactories") if options else None,
             app_mode=(
                 "print"
                 if parsed.help or parsed.listModels is not None
