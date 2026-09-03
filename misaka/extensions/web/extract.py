@@ -245,16 +245,22 @@ def _store_page(cwd: str | None, entry: dict[str, Any], clean: str, backend: str
     evidence file and not the extraction.
     """
     url = entry.get("url", "")
-    metadata = entry.get("metadata")
-    final = (metadata or {}).get("sourceURL") if isinstance(metadata, dict) else None
+    metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+    final = metadata.get("sourceURL")
+    # The vendor that actually answered, not the one that was chosen. A rescued batch was
+    # served by a ring member, and the ring says which in ``served_by``; recording the
+    # chosen backend there would put a name on this page that never fetched it.
+    served_by = metadata.get("served_by") or backend
     provenance = {
         "source_url": url,
         "final_url": final or url,
-        "provider": backend,
+        "provider": served_by,
         "text_sha256": hashlib.sha256(clean.encode()).hexdigest(),
         "title": entry.get("title", ""),
     }
-    saved = save_page(cwd, page_stem(url, provenance["final_url"], clean.encode()), provenance, clean)
+    saved = save_page(
+        cwd, page_stem(url, str(provenance["final_url"]), clean.encode()), provenance, clean
+    )
     return saved, frontmatter_line_count(provenance)
 
 
