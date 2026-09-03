@@ -70,6 +70,8 @@ BUILTIN_SLASH_COMMANDS: tuple[BuiltinSlashCommand, ...] = (
 _LOCAL_ALIAS_SLASH_COMMANDS: tuple[BuiltinSlashCommand, ...] = (
     # MISAKA: /clear wipes the current session in place (same id, same file, history erased); /new starts a new session
     BuiltinSlashCommand("clear", "Wipe current session in place (same id, history erased)"),
+    # MISAKA: the task board of this project folder, read-only; a human's in-session view
+    BuiltinSlashCommand("board", "Show the read-only task board of this project folder"),
 )
 
 

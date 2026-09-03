@@ -3240,6 +3240,24 @@ class InteractiveMode:
             await self.handleFatalRuntimeError("Failed to start new session", error)
             return {"cancelled": True}
 
+    async def handleBoardCommand(self) -> None:
+        # MISAKA: the task board of this project folder, read-only. A built-in like /clear:
+        # the board is a product feature, and a human's view of it belongs to the TUI.
+        from contextlib import closing
+
+        from misaka.config import CFG
+        from misaka.core.network import board
+        from misaka.core.platform import tasks as db
+
+        cwd = getattr(self.session.extensionRunner, "cwd", None)
+
+        def render() -> str:
+            with closing(db.connect(CFG["db"])) as con:
+                return board.board_text(con, db.canonical_workspace(cwd))
+
+        text = await asyncio.to_thread(render)  # sqlite stays off the loop
+        self.showExtensionNotify(text or "(No task cards on the board.)", "info")
+
     async def handleClearCommand(self, notice: str = "✓ New session started") -> bool:
         if self.loadingAnimation is not None:
             stop = _callable_attr(self.loadingAnimation, "stop")
@@ -3461,6 +3479,10 @@ class InteractiveMode:
         if text == "/clear":
             self._set_editor_text("")
             await self.handleTrueClearCommand()
+            return
+        if text == "/board":
+            self._set_editor_text("")
+            await self.handleBoardCommand()
             return
         if text == "/compact" or text.startswith("/compact "):
             custom_instructions = text[9:].strip() if text.startswith("/compact ") else None
