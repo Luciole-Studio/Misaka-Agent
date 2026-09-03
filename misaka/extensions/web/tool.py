@@ -84,6 +84,24 @@ def tool_error(message: object, **extra: Any) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
+def _bound_error_field(response: dict[str, Any]) -> dict[str, Any]:
+    """Trim an oversized ``error`` string a provider put in its own failure response.
+
+    :func:`tool_error` caps the errors this module raises, but a backend that returns
+    ``{"success": False, "error": <vendor body>}`` bypasses it -- and the vendor body is
+    whatever the endpoint felt like sending, which for a proxy error page or an HTML
+    rate-limit notice can be megabytes. Hermes bounds this at its dispatch boundary
+    (``tools/registry.py:_bound_json_error_result``); MISAKA has no such boundary, so the
+    cap lands here, on the same number, before the response is rendered.
+    """
+    error = response.get("error")
+    if isinstance(error, str) and len(error) > _MAX_TOOL_ERROR_CHARS:
+        logger.debug("provider error body truncated for context (%d chars)", len(error))
+        response = dict(response)
+        response["error"] = error[:_MAX_TOOL_ERROR_CHARS] + _TOOL_ERROR_TRUNCATION_MARKER
+    return response
+
+
 def _redacted(value: Any) -> Any:
     """Strip configured credentials out of every string in a response, in place of nothing.
 
@@ -103,6 +121,21 @@ def _redacted(value: Any) -> Any:
     return value
 
 
+def _oversized_error(size: int) -> str:
+    """A parseable refusal for a response too large to trim into shape.
+
+    The hard cut this replaces spliced a JSON document mid-string and appended a marker,
+    handing the model bytes it could not parse -- the one outcome worse than losing the
+    results, because a model that cannot read a tool result retries the same call.
+    """
+    return tool_error(
+        f"The web search response was {size:,} characters, over the "
+        f"{MAX_RESULT_SIZE_CHARS:,}-character tool result limit, and had no result list "
+        "to trim. Retry with a smaller limit or a narrower query.",
+        success=False,
+    )
+
+
 def _bound_result_size(response: dict[str, Any], result_json: str) -> str:
     """Keep the rendered response under :data:`MAX_RESULT_SIZE_CHARS`.
 
@@ -117,7 +150,7 @@ def _bound_result_size(response: dict[str, Any], result_json: str) -> str:
         return result_json
     web = (response.get("data") or {}).get("web")
     if not isinstance(web, list) or not web:
-        return result_json[:MAX_RESULT_SIZE_CHARS] + _TOOL_ERROR_TRUNCATION_MARKER
+        return _oversized_error(len(result_json))
     kept = list(web)
     while kept:
         kept.pop()
@@ -131,7 +164,7 @@ def _bound_result_size(response: dict[str, Any], result_json: str) -> str:
         candidate = json.dumps(trimmed, indent=2, ensure_ascii=False)
         if len(candidate) <= MAX_RESULT_SIZE_CHARS:
             return candidate
-    return result_json[:MAX_RESULT_SIZE_CHARS] + _TOOL_ERROR_TRUNCATION_MARKER
+    return _oversized_error(len(result_json))
 
 
 async def web_search_tool(query: str, limit: int = 5, *, signal: Any = None) -> str:
@@ -202,7 +235,9 @@ async def web_search_tool(query: str, limit: int = 5, *, signal: Any = None) -> 
                 response_data = await single_flight(
                     cache.flight_key(name, query, limit), _paid_search
                 )
-        response_data = _redacted(cache.slice_search_response(response_data, limit))
+        response_data = _bound_error_field(
+            _redacted(cache.slice_search_response(response_data, limit))
+        )
         return _bound_result_size(
             response_data, json.dumps(response_data, indent=2, ensure_ascii=False)
         )

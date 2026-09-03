@@ -1,4 +1,4 @@
-"""Keyless web search: five vendors' public free tiers, in a round-robin ring.
+"""Keyless web search: four vendors' public free tiers, in a round-robin ring.
 
 Ported from Hermes' ``plugins/web/keyless_mcp.py`` (search half; the extract half is not
 ported, see :mod:`misaka.extensions.web.provider`). This is the module that makes a fresh
@@ -6,7 +6,6 @@ install with **zero credentials** able to search at all:
 
 - Exa       https://mcp.exa.ai/mcp          JSON-RPC ``tools/call``, formatted text payload
 - Parallel  https://search.parallel.ai/mcp  JSON-RPC ``tools/call``, JSON payload
-- Tavily    https://api.tavily.com          keyless access-mode header
 - Firecrawl https://api.firecrawl.dev       public cloud API, no auth header
 - Keenable  https://api.keenable.ai         public endpoints, app-name header
 
@@ -15,6 +14,12 @@ one -- so it never pre-empts a deliberate setup. Requests carry no user identifi
 Parallel's free tier asks for a ``session_id`` used for rate limiting; a random
 per-process UUID is sent (rotates every restart, never persisted). Their optional
 ``model_name`` analytics field is deliberately omitted.
+
+Tavily is deliberately **not** a ring member, matching Hermes: it serves keyless
+requests through its own endpoint, but only when the user selected it
+(``"backend": "tavily"``), never as one of the vendors a zero-credential install
+rotates through. That keyless path lives in :mod:`misaka.extensions.web.backends.tavily`
+next to the keyed one, because the two differ by one header.
 
 Disable the whole tier with ``"keyless_fallback": false`` in ``~/.misaka/web.json``.
 """
@@ -34,7 +39,6 @@ logger = logging.getLogger(__name__)
 
 EXA_MCP_URL = "https://mcp.exa.ai/mcp"
 PARALLEL_MCP_URL = "https://search.parallel.ai/mcp"
-TAVILY_API_URL = "https://api.tavily.com"
 FIRECRAWL_API_URL = "https://api.firecrawl.dev"
 KEENABLE_API_URL = "https://api.keenable.ai"
 
@@ -276,61 +280,6 @@ async def exa_search_keyless(query: str, limit: int = 5) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Tavily keyless (api.tavily.com -- X-Tavily-Access-Mode: keyless)
-# ---------------------------------------------------------------------------
-
-
-async def _tavily_keyless_post(endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """POST to Tavily with keyless headers; raise KeylessError on failure."""
-    try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
-            response = await client.post(
-                f"{TAVILY_API_URL}/{endpoint.lstrip('/')}",
-                json=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "X-Client-Name": CLIENT_NAME,
-                    "X-Tavily-Access-Mode": "keyless",
-                },
-            )
-    except httpx.HTTPError as exc:
-        raise KeylessError(f"request failed: {exc}") from exc
-    if response.status_code >= 400:
-        raise KeylessError((response.text or "").strip() or f"HTTP {response.status_code}")
-    return response.json()
-
-
-async def tavily_search_keyless(query: str, limit: int = 5) -> dict[str, Any]:
-    """Keyless Tavily search -> legacy search response shape."""
-    try:
-        data = await _tavily_keyless_post(
-            "search", {"query": query, "max_results": max(1, int(limit))}
-        )
-    except KeylessError as exc:
-        return {
-            "success": False,
-            "error": (
-                f"Keyless Tavily search failed: {exc}. "
-                "Set TAVILY_API_KEY (https://app.tavily.com) or another web "
-                "backend via `~/.misaka/web.json` for reliable service."
-            ),
-        }
-    except ValueError as exc:  # a 2xx body that was not JSON
-        return {"success": False, "error": f"Keyless Tavily search failed: {exc}."}
-    web_results = []
-    for i, result in enumerate(data.get("results") or []):
-        web_results.append(
-            {
-                "url": result.get("url") or "",
-                "title": result.get("title") or "",
-                "description": result.get("content") or "",
-                "position": i + 1,
-            }
-        )
-    return {"success": True, "data": {"web": web_results}}
-
-
-# ---------------------------------------------------------------------------
 # Firecrawl keyless (public cloud API, no auth header)
 # ---------------------------------------------------------------------------
 
@@ -415,18 +364,17 @@ async def keenable_search_keyless(query: str, limit: int = 5) -> dict[str, Any]:
 # Round-robin ring + next-in-line failover (rate-limited free tiers)
 # ---------------------------------------------------------------------------
 
-KEYLESS_RING = ("exa", "parallel", "tavily", "firecrawl", "keenable")
+KEYLESS_RING = ("exa", "parallel", "firecrawl", "keenable")
 
 _KEYLESS_SEARCHERS = {
     "exa": exa_search_keyless,
     "parallel": parallel_search_keyless,
-    "tavily": tavily_search_keyless,
     "firecrawl": firecrawl_search_keyless,
     "keenable": keenable_search_keyless,
 }
 
 # Per-process round-robin cursor, seeded by the random session id so a fleet spreads
-# evenly across all five free tiers; advances once per unpinned keyless request so a
+# evenly across all four free tiers; advances once per unpinned keyless request so a
 # single process also rotates. No lock: MISAKA drives tools from one event loop and the
 # read-modify-write below has no await in it.
 _ring_cursor = int(_SESSION_ID, 16) % len(KEYLESS_RING)

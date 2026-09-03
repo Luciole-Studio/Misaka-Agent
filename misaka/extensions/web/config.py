@@ -94,14 +94,43 @@ _CREDENTIAL_VARS = (
     "PARALLEL_API_KEY",
     "KEENABLE_API_KEY",
     "FIRECRAWL_API_KEY",
+    "XAI_API_KEY",
 )
 
 # Endpoint settings a user may legitimately write with credentials in the userinfo
 # (``http://user:pass@host``). Only the password half is secret: the host has to stay
 # readable, or "Could not reach SearXNG at ..." stops naming what it could not reach.
-_ENDPOINT_VARS = ("SEARXNG_URL", "TAVILY_BASE_URL", "FIRECRAWL_API_URL")
+_ENDPOINT_VARS = ("SEARXNG_URL", "TAVILY_BASE_URL", "FIRECRAWL_API_URL", "XAI_BASE_URL")
 
 REDACTED = "<redacted>"
+
+# Suffixes that make an environment variable name credential-shaped. Used only to decide
+# what a helper subprocess must NOT inherit, so a false positive costs a child a variable
+# it had no business reading and a false negative leaks a key.
+_SECRET_NAME_SUFFIXES = ("_API_KEY", "_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_CREDENTIALS")
+
+
+def without_credentials(env: dict[str, str]) -> dict[str, str]:
+    """Return *env* with every credential-shaped variable removed.
+
+    MISAKA spawns exactly one helper process from this package -- the ddgs search worker,
+    which runs a third-party library in-process. That library needs a search string and a
+    network route; it has no reason to see ``ANTHROPIC_API_KEY`` or ``EXA_API_KEY``, and a
+    compromised or merely careless dependency reading ``os.environ`` is the whole reason
+    Hermes runs its own search worker under ``_sanitize_subprocess_env``
+    (``tools/environments/local.py``).
+
+    A denylist rather than an allowlist, as in Hermes: an allowlist that forgets
+    ``HTTPS_PROXY`` or ``SSL_CERT_FILE`` breaks a working corporate install, and the cost
+    of that is worse than the residual risk of a credential named in some shape this misses.
+    Networking, locale and path variables pass through untouched.
+    """
+    denied = set(_CREDENTIAL_VARS) | set(_ENDPOINT_VARS)
+    return {
+        name: value
+        for name, value in env.items()
+        if name not in denied and not name.upper().endswith(_SECRET_NAME_SUFFIXES)
+    }
 
 # A one- or two-character "credential" would blank out half a sentence, and an empty one
 # would land between every pair of characters. No real key is this short.
@@ -189,9 +218,9 @@ def use_keyless(name: str, api_key: str) -> bool:
 # Read-only until here. The CLI (``misaka web``) is the one writer, so a user does not
 # have to hand-edit JSON; the file can hold vendor API keys, so it is written 0600.
 
-_BOOL_KEYS = frozenset({"keyless_fallback", "keyless_rescue"})
-_NESTED_KEYS = frozenset({"env", "provider_tier"})
-_SCALAR_KEYS = frozenset({"backend", "search_backend"})
+_BOOL_KEYS = frozenset({"keyless_fallback", "keyless_rescue", "cache_enabled"})
+_NESTED_KEYS = frozenset({"env", "provider_tier", "xai"})
+_SCALAR_KEYS = frozenset({"backend", "search_backend", "cache_ttl_minutes"})
 _VALID_TIERS = frozenset({"free", "paid", "auto"})
 
 

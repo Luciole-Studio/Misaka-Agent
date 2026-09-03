@@ -1,4 +1,4 @@
-"""Tavily web search (keyed, or keyless through the ring).
+"""Tavily web search (keyed, or opt-in keyless).
 
 Ported from Hermes' ``plugins/web/tavily/provider.py`` (search half).
 
@@ -14,7 +14,14 @@ Env vars::
     TAVILY_BASE_URL=...          # optional override of https://api.tavily.com
 
 Auth is header-based. A key uses ``Authorization: Bearer``; without a key the request is
-keyless (``X-Tavily-Access-Mode: keyless``), which is what the ring dispatches.
+keyless (``X-Tavily-Access-Mode: keyless``).
+
+Tavily is **not** a member of the zero-config keyless ring
+(:data:`misaka.extensions.web.keyless.KEYLESS_RING`), matching Hermes. Keyless access is
+opt-in: it serves an explicit ``"backend": "tavily"`` without a key, but a fresh install
+with no web credentials rotates across Exa / Parallel / Firecrawl / Keenable instead and
+never lands here. A ring vendor's failure is walked past to the next vendor; Tavily's is
+returned to the caller, which is what makes it eligible for the one-shot keyless rescue.
 """
 
 from __future__ import annotations
@@ -30,10 +37,32 @@ from misaka.extensions.web.config import (
     provider_tier,
     use_keyless,
 )
-from misaka.extensions.web.keyless import CLIENT_NAME, search_with_failover
+from misaka.extensions.web.keyless import CLIENT_NAME
 from misaka.extensions.web.provider import WebSearchProvider
 
 logger = logging.getLogger(__name__)
+
+# Sent on every search. Raw content and images are what make a Tavily response large;
+# the tool wants titles, URLs and two-line descriptions, and pays per call either way.
+_SEARCH_PAYLOAD = {
+    "include_raw_content": False,
+    "include_images": False,
+}
+
+
+def _missing_key_error(action: str) -> str:
+    """The refusal when Tavily can run neither keyed nor keyless.
+
+    Reached only when the user shut the keyless door themselves: ``provider_tier.tavily``
+    pinned to ``paid``, or ``keyless_fallback`` turned off. Naming both levers matters --
+    Hermes says "select Tavily in `hermes tools`", which is the wrong advice here because
+    selecting the backend is what got the caller to this line.
+    """
+    return (
+        "TAVILY_API_KEY is not set. Get a key at https://app.tavily.com/home, or allow "
+        f"opt-in keyless {action} in `~/.misaka/web.json`: unpin `provider_tier.tavily` "
+        "from `paid` and leave `keyless_fallback` on."
+    )
 
 
 def _tavily_headers(api_key: str) -> dict[str, str]:
@@ -46,14 +75,19 @@ def _tavily_headers(api_key: str) -> dict[str, str]:
     return headers
 
 
-async def tavily_request(endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
+async def tavily_request(
+    endpoint: str, payload: dict[str, Any], *, api_key: str | None = None
+) -> dict[str, Any]:
     """POST to the Tavily API and return the parsed JSON response.
 
-    Keyed when ``TAVILY_API_KEY`` is set (Bearer auth); otherwise keyless. Non-2xx
-    responses raise ``ValueError`` with the response body so Tavily's keyless rate-limit
-    and upgrade text reaches the model.
+    Keyed when *api_key* (or ``TAVILY_API_KEY``) is set (Bearer auth); otherwise keyless.
+    Pass ``api_key=""`` to force the keyless header even when a key is present, which is
+    what ``provider_tier.tavily: free`` asks for. Non-2xx responses raise ``ValueError``
+    with the response body so Tavily's keyless rate-limit and upgrade text reaches the
+    model.
     """
-    api_key = provider_env("TAVILY_API_KEY")
+    if api_key is None:
+        api_key = provider_env("TAVILY_API_KEY")
     base_url = provider_env("TAVILY_BASE_URL") or "https://api.tavily.com"
     url = f"{base_url}/{endpoint.lstrip('/')}"
     logger.info("Tavily %s request to %s", endpoint, url)
@@ -100,31 +134,36 @@ class TavilyWebSearchProvider(WebSearchProvider):
     def is_keyless_available(self) -> bool:
         """Tavily serves anonymous keyless requests (X-Tavily-Access-Mode).
 
-        Default-on ring member of the keyless free tier: fresh installs rotate across
-        Exa/Parallel/Tavily/Firecrawl/Keenable. False when the user pinned
-        ``"provider_tier": {"tavily": "paid"}`` -- an explicit paid selection opts the
-        free endpoint out.
+        Opt-in only -- Tavily is not a member of the zero-config keyless ring. This is True
+        so that an explicit ``"backend": "tavily"`` works without a key at all, which is the
+        only way the resolver reaches this provider unkeyed. False when the user pinned
+        ``"provider_tier": {"tavily": "paid"}`` -- an explicit paid selection opts the free
+        endpoint out.
         """
         return keyless_tier_enabled() and provider_tier("tavily") != "paid"
 
     async def search(self, query: str, limit: int = 5) -> dict[str, Any]:
-        """Execute a Tavily search."""
+        """Execute a Tavily search: the keyed path, or the opt-in keyless one."""
         try:
-            if use_keyless("tavily", provider_env("TAVILY_API_KEY")):
-                # Keyless free tier -- ring dispatch with next-in-line failover on rate
-                # limits.
-                logger.info("Tavily keyless search: '%s' (limit=%d)", query, limit)
-                return await search_with_failover("tavily", query, limit)
+            api_key = provider_env("TAVILY_API_KEY")
+            force_keyless = use_keyless("tavily", api_key)
+            if not force_keyless and not api_key:
+                return {"success": False, "error": _missing_key_error("search")}
 
-            logger.info("Tavily search: '%s' (limit=%d)", query, limit)
+            logger.info(
+                "Tavily %ssearch: '%s' (limit=%d)",
+                "keyless " if force_keyless else "",
+                query,
+                limit,
+            )
             raw = await tavily_request(
                 "search",
                 {
                     "query": query,
                     "max_results": min(limit, 20),
-                    "include_raw_content": False,
-                    "include_images": False,
+                    **_SEARCH_PAYLOAD,
                 },
+                api_key="" if force_keyless else api_key,
             )
             return normalize_search_results(raw)
         except ValueError as exc:

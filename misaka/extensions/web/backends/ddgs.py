@@ -23,6 +23,7 @@ import subprocess
 import sys
 from typing import Any
 
+from misaka.extensions.web.config import without_credentials
 from misaka.extensions.web.provider import WebSearchProvider
 
 logger = logging.getLogger(__name__)
@@ -71,16 +72,21 @@ def _worker_argv() -> list[str]:
 
 
 def _worker_env() -> dict[str, str]:
-    """Child environment with MISAKA importable.
+    """Child environment with MISAKA importable and no credentials in it.
 
     Running the worker as a script puts its own directory on ``sys.path[0]``, which is not
     enough to ``import misaka``; the repo (or site-packages) root is prepended instead,
     resolved from the live package rather than by counting ``dirname`` calls -- that stays
     correct for both a source checkout and an installed wheel.
+
+    Every credential-shaped variable is stripped first. Hermes runs this same worker under
+    ``_sanitize_subprocess_env`` for the same reason: the child exists to hand one query to
+    a third-party library, and that library reading ``os.environ`` is the only way any of
+    those keys could leave the machine on this path.
     """
     import misaka
 
-    env = dict(os.environ)
+    env = without_credentials(dict(os.environ))
     root = os.path.dirname(os.path.dirname(os.path.abspath(misaka.__file__)))
     existing = env.get("PYTHONPATH", "")
     if root and root not in existing.split(os.pathsep):

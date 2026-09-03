@@ -54,14 +54,19 @@ logger = logging.getLogger(__name__)
 _RING_KEY_VARS = {
     "exa": "EXA_API_KEY",
     "parallel": "PARALLEL_API_KEY",
-    "tavily": "TAVILY_API_KEY",
     "firecrawl": "FIRECRAWL_API_KEY",
     "keenable": "KEENABLE_API_KEY",
 }
 
 
 def serves_keyless(provider: WebSearchProvider | None) -> bool:
-    """Whether a call on *provider* will be dispatched through the keyless ring."""
+    """Whether a call on *provider* will be dispatched through the keyless ring.
+
+    Ring membership is the question, not "does this provider have a keyless mode".
+    Tavily has one and is deliberately outside the ring, so a keyless Tavily call is a
+    single vendor request that can fail and be rescued -- not a walk that already tried
+    every free tier there is.
+    """
     name = getattr(provider, "name", "")
     if name not in KEYLESS_RING:
         return False
@@ -96,15 +101,23 @@ def rescue_eligible(provider: WebSearchProvider | None) -> bool:
     """True when a failed call on *provider* should get a one-shot rescue.
 
     Eligible: the call ran a keyed or configured path -- either a non-ring backend
-    (searxng, brave-free, an externally registered one) or a ring vendor operating in
-    keyed mode. NOT eligible: the call already went through the keyless ring, because its
-    failure means the ring was walked and re-walking would just repeat it.
+    (searxng, brave-free, tavily, xai, an externally registered one) or a ring vendor
+    operating in keyed mode. NOT eligible: the call already went through the keyless ring,
+    because its failure means the ring was walked and re-walking would just repeat it.
+
+    Best-effort, as in Hermes: a config layer that throws while answering "is this vendor
+    keyless right now" must not turn a recoverable search failure into a raised exception.
+    An unanswerable question means not eligible.
     """
     if not keyless_rescue_enabled():
         return False
     if provider is None:
         return False
-    return not serves_keyless(provider)
+    try:
+        return not serves_keyless(provider)
+    except Exception as exc:  # noqa: BLE001 - rescue is best-effort, as in Hermes
+        logger.debug("rescue eligibility check failed: %s", exc)
+        return False
 
 
 async def rescue_search(
