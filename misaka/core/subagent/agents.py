@@ -1,7 +1,7 @@
 """Claude Code-style sub-agent definitions.
 
 Definitions are Markdown files with YAML frontmatter.  Built-ins ship with the
-package (``misaka/extensions/subagent/agents/``); users and projects may
+package (``misaka/core/subagent/agents/``); users and projects may
 override them by ``name`` from ``~/.misaka/agent/agents`` and ``.misaka/agents``
 respectively.
 """
