@@ -3925,13 +3925,7 @@ class InteractiveMode:
         if _is_unknown_model(previous_model):
             available_models = list(await maybe_await(self.session.modelRegistry.getAvailable()))
             provider_models = [model for model in available_models if read_field(model, "provider") == provider_id]
-            if provider_id == "llama.cpp":
-                selection_error = (
-                    f"{action_label}. No llama.cpp models are loaded. Use /llama to load a model, then /model to select it."
-                    if not provider_models
-                    else f"{action_label}. Use /model to select a loaded llama.cpp model, or /llama to manage models."
-                )
-            elif provider_id not in defaultModelPerProvider:
+            if provider_id not in defaultModelPerProvider:
                 selection_error = (
                     f'{action_label}, but no default model is configured for provider "{provider_id}". '
                     "Use /model to select a model."
