@@ -2924,20 +2924,10 @@ class AgentSession:
         return False
 
     async def _run_auto_compaction(self, reason: str, will_retry: bool) -> bool:
-        self._emit({"type": "compaction_start", "reason": reason})
-        self._auto_compaction_abort_controller = AbortController()
-
+        started = False
+        from_hook = False
         try:
             if self.model is None:
-                self._emit(
-                    {
-                        "type": "compaction_end",
-                        "reason": reason,
-                        "result": None,
-                        "aborted": False,
-                        "willRetry": False,
-                    }
-                )
                 return False
 
             auth = await self._get_compaction_request_auth(self.model)
@@ -2950,18 +2940,12 @@ class AgentSession:
             branch_entries = self.sessionManager.getBranch()
             preparation = prepare_compaction(branch_entries, settings)
             if preparation is None or _is_noop_compaction(preparation):
-                self._emit(
-                    {
-                        "type": "compaction_end",
-                        "reason": reason,
-                        "result": None,
-                        "aborted": False,
-                        "willRetry": False,
-                    }
-                )
                 return False
 
-            from_hook = False
+            # As pi: compaction_start only once there is something to compact.
+            self._emit({"type": "compaction_start", "reason": reason})
+            self._auto_compaction_abort_controller = AbortController()
+            started = True
             compact_event = {
                 "type": "session_before_compact",
                 "preparation": preparation,
@@ -3096,19 +3080,20 @@ class AgentSession:
                 if reason == "overflow"
                 else f"Auto-compaction failed: {error_message}"
             )
-            self._emit(
-                {
-                    "type": "compaction_end",
-                    "reason": reason,
-                    "result": None,
-                    "aborted": False,
-                    "willRetry": False,
-                    "errorMessage": formatted_error,
-                }
-            )
-            await self._emit_session_compact_failed(
-                reason=reason, aborted=False, will_retry=False,
-                error_message=formatted_error)
+            if started:
+                self._emit(
+                    {
+                        "type": "compaction_end",
+                        "reason": reason,
+                        "result": None,
+                        "aborted": False,
+                        "willRetry": False,
+                        "errorMessage": formatted_error,
+                    }
+                )
+                await self._emit_session_compact_failed(
+                    reason=reason, aborted=False, will_retry=False,
+                    error_message=formatted_error, from_extension=from_hook)
             return False
         finally:
             self._auto_compaction_abort_controller = None

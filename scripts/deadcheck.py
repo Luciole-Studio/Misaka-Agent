@@ -32,7 +32,7 @@ SKIP_DIRS = (
     "misaka/core/documents/pageindex",
     # Vendored verbatim from upstream hermes-lcm; pruning it would be a diff
     # against the very thing the next resync replays. host/ is ours and is checked.
-    "misaka/core/lcm/vendor",
+    "misaka/extensions/hermes_lcm/vendor",
     # Upstream's own suite, vendored with it: the harness only measures fidelity
     # while it stays byte-identical to what upstream runs.
     "tests/hermes_lcm_vendor",
@@ -72,7 +72,7 @@ _TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 def sources() -> list[Path]:
     out: list[Path] = []
-    for base in ("misaka", "tests", "scripts", "bench"):
+    for base in ("misaka", "tests", "scripts"):
         for path in sorted((ROOT / base).rglob("*.py")):
             rel = path.relative_to(ROOT).as_posix()
             if any(rel.startswith(skip) for skip in SKIP_DIRS) or path.name in SKIP_FILES:

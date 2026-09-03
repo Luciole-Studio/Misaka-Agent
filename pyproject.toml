@@ -74,6 +74,10 @@ dev = ["misaka[providers,pageindex]", "pytest>=8", "pytest-asyncio>=1", "ruff>=0
 # Every importable package at the repo root (exposed by the editable install; replaces a hand-written .pth)
 packages = ["misaka"]
 
+[tool.ruff]
+# Vendored verbatim from upstream hermes-lcm: linting it would be a diff against the pin.
+extend-exclude = ["misaka/extensions/hermes_lcm/vendor"]
+
 [tool.ruff.lint]
 # 默认集（E4/E7/E9/F）之外，只加"今天就是零命中"的阻塞调用棘轮：它挡不住我们自己的
 # 函数在内部阻塞（没有 linter 能知道），但能挡住新代码在 async 里直接调标准库的阻塞

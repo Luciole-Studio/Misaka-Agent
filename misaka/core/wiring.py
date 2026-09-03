@@ -109,7 +109,6 @@ PART_MODULES: tuple[str, ...] = (
     "misaka.core.skills.wiring.skills",
     "misaka.core.research.wiring.research",
     "misaka.core.subagent",
-    "misaka.core.lcm",
 )
 
 

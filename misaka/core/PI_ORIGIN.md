@@ -51,7 +51,6 @@
 | `subagent/` | `extensions/sisters/subagent/` | 子代理运行时（runtime/child/policy/hooks/agents 与内置定义） |
 | `skills/` | `misaka/skills/` + `extensions/skills.py` | 分层技能索引，**整体替换**了 pi 的 `core/skills.ts`（审计 A-10）；`wiring/skills.py` 是三个工具与守卫 |
 | `web/` | `extensions/web/` | 搜索后端、注册表、分发、抓取、抽取；`tools/_web/` 是抓取工具用的安全层 |
-| `lcm/` | `extensions/hermes_lcm/` | LCM 上下文引擎；`vendor/` 是 hermes-lcm 上游原样（`UPSTREAM_COMMIT` 钉版本，`PORT_NOTES.md` 是再同步契约），`host/` 是适配 |
 | `documents/` | `misaka/documents/` + `extensions/documents.py` | 语料索引与工作区；`pageindex/` 是 vendored 的 PageIndex（自带 MIT 许可） |
 | `ask_user/` | `extensions/ask_user/` | `AskUserQuestion` 工具 |
 
@@ -60,7 +59,7 @@
 原 `misaka/extensions/` 里的每个模块只是一个入口，真代码在别的包里。迁入时壳跟着体走，
 放在体包的 `wiring/` 子目录、**basename 不变**。体包里已有同名模块（`network/messages.py` 与壳 `messages.py`）
 是子目录存在的原因。壳的入口是 `part(spec)`（只贡献工具的是 `register(harn)`，`harn` 是 `ToolCollector`）；
-自包含的（web、subagent、lcm、ally、ask_user）入口留在包的 `__init__.py`。
+自包含的（web、subagent、ally、ask_user）入口留在包的 `__init__.py`。
 `part(spec)` 返回的对象：`tools`（`ToolDefinition` 列表）、`commands`（`CoreCommand` 列表）、可选的 `attach(session)`
 （拿到会话，之后直接调会话 API）、以及它需要的时刻方法 `async (event, ctx)`。`context` 是时刻名，part 不得拿它当属性名。
 
@@ -73,7 +72,7 @@
 pi 意义上的**捆绑扩展**——自包含、只靠扩展 API、拔了无残留——按 misaka 原有的三层放：
 
 ```
-extensions/<module>             每个角色：llama/（pi 自带的 provider）、agent_state fork_split（面板集成）、coverage observe
+extensions/<module>             每个角色：llama/（pi 自带的 provider）、hermes_lcm/（LCM 上下文引擎：vendor/ 是 hermes-lcm 上游原样，host/ 是对 pi 事件的适配；拔掉它 pi 原生压缩照常）、agent_state fork_split（面板集成）、coverage observe
 extensions/last_order/<module>  只有 Last Order：peek
 extensions/sisters/             其他角色的槽位（subagent 是 C 类，在 core/subagent，仅对 Sisters 暴露）
 ```
@@ -106,7 +105,7 @@ misaka/observability/board.py          → misaka/core/network/board.py
 misaka/app/composition.py              → misaka/core/wiring.py
 misaka/extensions/__init__.py:discover  留在原地（捆绑扩展的发现）；core 由 misaka/core/wiring.py 的 TOOL_MODULES / PART_MODULES 点名
 misaka/extensions/web/                 → misaka/core/web/
-misaka/extensions/hermes_lcm/          → misaka/core/lcm/            （描述符名 hermes_lcm → lcm）
+misaka/extensions/hermes_lcm/          留在原地：2026-09-03 用户决定 LCM 只是一个扩展（曾短暂迁入 core/lcm，同日迁回）
 misaka/extensions/sisters/subagent/    → misaka/core/subagent/
 misaka/extensions/last_order/ally/     → misaka/core/network/ally/
 misaka/extensions/ask_user/            → misaka/core/ask_user/

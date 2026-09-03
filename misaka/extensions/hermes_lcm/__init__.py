@@ -13,9 +13,12 @@ imports ``hermes_lcm`` -- its conftest aliases that name to ``vendor/``.
 SESSION_KINDS = {"foreground", "dm", "card", "beast"}
 
 
-def part(spec):
-    from .host.extension import LcmPart
+def activate(spec):
+    from .host.extension import register
 
     # Which of the fifteen tools the session is offered depends on its kind
     # (``host/tools.py`` ``withheld``); this is the one place that knows it.
-    return LcmPart(kind=spec.kind)
+    def register_for_session(harn):
+        return register(harn, kind=spec.kind)
+
+    return register_for_session
