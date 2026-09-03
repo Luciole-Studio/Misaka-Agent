@@ -29,6 +29,11 @@ from misaka.ai.types import (
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.config.product import current_config
+from misaka.core.moa.privacy import (
+    coerce_privacy_filter,
+    redact_advisor_text,
+    redact_outputs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +201,8 @@ def normalize_moa_config(raw) -> dict[str, Any]:
     return {
         "default_preset": default,
         "presets": presets,
+        # MoA-level, not per-preset, like save_traces: '' (off) | display | full.
+        "privacy_filter": coerce_privacy_filter(raw.get("privacy_filter")),
         "save_traces": bool(raw.get("save_traces")),
         "trace_dir": str(raw.get("trace_dir") or "").strip() or None,
     }
@@ -390,8 +397,15 @@ def _is_failed(text: str) -> bool:
     return s.startswith(("[failed:", "[skipped:"))
 
 
-def build_guidance(preset_name, preset, outputs) -> str | None:
-    """Build the private advisor block injected into the aggregator prompt."""
+def build_guidance(preset_name, preset, outputs, privacy="") -> str | None:
+    """Build the private advisor block injected into the aggregator prompt.
+
+    ``privacy="full"`` redacts the advice on the way in, which is the one mode that can
+    change the answer: the aggregator reasons from redacted text (Hermes moa_loop, the
+    literal ask of its issue #59959). ``display`` deliberately does not reach here.
+    """
+    if privacy == "full":
+        outputs = redact_outputs(list(outputs))
     ok = [(label, text) for label, text, _u in outputs if not _is_failed(text)]
     failed = [label for label, text, _u in outputs if _is_failed(text)]
     degraded = ""
@@ -524,6 +538,33 @@ def _save_trace(cfg, session_id, preset_name, advisor_traces, agg_slot,
         logger.debug("MoA trace write failed: %s", exc)
 
 
+def _redact_trace_messages(messages) -> Any:
+    """Redact the advisor input a trace keeps: it is the conversation, verbatim.
+
+    Hermes ``moa_loop._redact_trace_messages``. Both string content and content-part lists
+    are handled; an unknown shape passes through rather than being mangled.
+    """
+    if not isinstance(messages, list):
+        return messages
+    out: list[Any] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            out.append(message)
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            out.append({**message, "content": redact_advisor_text(content)})
+        elif isinstance(content, list):
+            out.append({**message, "content": [
+                {**part, "text": redact_advisor_text(part["text"])}
+                if isinstance(part, dict) and isinstance(part.get("text"), str) else part
+                for part in content
+            ]})
+        else:
+            out.append(message)
+    return out
+
+
 def _serialize_messages(messages) -> list[dict[str, Any]]:
     """Serialize typed messages for an auditable MoA trace."""
     out = []
@@ -604,6 +645,7 @@ def stream_simple_moa(model: Model, context: Context, options: SimpleStreamOptio
 
         try:
             cfg = load_moa_config()
+            privacy = cfg.get("privacy_filter") or ""
             preset_name, preset = resolve_moa_preset(model.id, config=cfg)
             refs = [s for s in preset["reference_models"] if s.get("enabled", True)]
             if not preset.get("enabled", True):
@@ -637,11 +679,17 @@ def stream_simple_moa(model: Model, context: Context, options: SimpleStreamOptio
                 for done_n, fut in enumerate(asyncio.as_completed([guarded(i, s) for i, s in enumerate(refs)]), 1):
                     idx, (label, text, usage, sent) = await fut
                     slot_results[idx] = (label, text, usage)
+                    # Both surfaces a person or a file keeps: the advisor block shown in
+                    # the thinking stream and the trace record. `display` covers them; the
+                    # aggregator still reasons from the raw text unless the mode is `full`.
+                    shown = redact_advisor_text(text) if privacy else text
                     advisor_traces.append({
-                        "label": label, "input_messages": sent, "output": text,
+                        "label": label,
+                        "input_messages": _redact_trace_messages(sent) if privacy else sent,
+                        "output": shown,
                         "usage": usage.model_dump() if usage else None})
                     push_thinking(
-                        f"\n\n── Advisor {done_n}/{len(refs)} — {label} ──\n{text}"
+                        f"\n\n── Advisor {done_n}/{len(refs)} — {label} ──\n{shown}"
                     )
                 outputs = [slot_results[i] for i in range(len(refs))]
                 advisor_models = [_resolve_slot_model(s) for s in refs]
@@ -651,7 +699,7 @@ def stream_simple_moa(model: Model, context: Context, options: SimpleStreamOptio
             if thinking_text:
                 outer.push(ThinkingEndEvent(contentIndex=0, content=thinking_text, partial=shell))
 
-            guidance = build_guidance(preset_name, preset, outputs) if outputs else None
+            guidance = build_guidance(preset_name, preset, outputs, privacy) if outputs else None
 
             agg_slot = preset["aggregator"]
             if str(agg_slot.get("provider", "")).lower() == "moa":

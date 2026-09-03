@@ -109,9 +109,9 @@ def _parser():
     sk.add_argument("--as", dest="role", default="sisters/10032",
                     help="Role whose skill stack to show")
 
-    mo = sub.add_parser("moa", help="List or delete Mixture-of-Agents presets")
-    mo.add_argument("op", nargs="?", default="list", choices=["list", "delete"])
-    mo.add_argument("name", nargs="?", help="Preset name (for delete)")
+    mo = sub.add_parser("moa", help="Configure, list, or delete Mixture-of-Agents presets")
+    mo.add_argument("op", nargs="?", default="list", choices=["list", "configure", "delete"])
+    mo.add_argument("name", nargs="?", help="Preset name (configure defaults to the default preset)")
 
     # Registered so `misaka --help` lists it, and so `misaka auth --help` is not an
     # "invalid choice" -- but it is never dispatched: `main` short-circuits `argv[0] ==
@@ -427,14 +427,19 @@ def _cmd_moa(args):
     import json as _json
     import os as _os
 
-    from misaka.core.moa.provider import (
-        MOA_CONFIG_PATH,
-        load_moa_config,
-        slot_label,
-    )
+    from misaka.core.moa.provider import MOA_CONFIG_PATH, load_moa_config
 
     path = _os.path.expanduser(MOA_CONFIG_PATH)
     cfg = load_moa_config()
+    if args.op == "configure":
+        from misaka.core.moa import configure as moa_configure
+        try:
+            moa_configure.configure(args.name)
+        except RuntimeError as error:
+            sys.exit(str(error))
+        except (EOFError, KeyboardInterrupt):
+            sys.exit("\nNothing was written.")
+        return
     if args.op == "delete":
         if not args.name:
             sys.exit("Usage: misaka moa delete <preset>")
@@ -464,16 +469,8 @@ def _cmd_moa(args):
         atomic.write_text(path, _json.dumps(raw, ensure_ascii=False, indent=2))
         print(f"Deleted preset '{args.name}'; default: {raw.get('default_preset')}")
     else:
-        print(f"MoA presets in {path}")
-        print("Use /model to select MoA·<preset>; every turn then runs the mixture until you switch away.")
-        for name, preset in cfg["presets"].items():
-            mark = "*" if name == cfg["default_preset"] else " "
-            state = "" if preset["enabled"] else " (disabled)"
-            print(f"\n{mark} {name}{state}  fanout={preset['fanout']}")
-            for i, slot in enumerate(preset["reference_models"], 1):
-                off = "" if slot.get("enabled", True) else " (disabled)"
-                print(f"    advisor{i}: {slot_label(slot)}{off}")
-            print(f"    aggregator: {slot_label(preset['aggregator'])}")
+        from misaka.core.moa import configure as moa_configure
+        moa_configure.describe(cfg, path, print)
 
 
 def _cmd_skills(args):
