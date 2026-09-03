@@ -1981,6 +1981,7 @@ class AgentSession:
         event_type = _event_type(event)
         if event_type == "agent_start":
             self._turnIndex = 0
+            await self.moments.agent_start({"type": "agent_start"})  # MISAKA fork
             await self._extensionRunner.emit({"type": "agent_start"})
         elif event_type == "agent_end":
             agent_end_event = {
@@ -2212,6 +2213,7 @@ class AgentSession:
         if self._extensionRunnerRef is not None:
             self._extensionRunnerRef["current"] = runner
             self._extensionRunnerRef["session"] = self  # MISAKA fork: sdk.transform_context reaches the parts
+            runner.moments = self.moments  # MISAKA fork: the runner's own ui_prompt events reach the parts
         return runner
 
     def _register_provider(self, name: str, config: dict[str, Any]) -> None:

@@ -10,5 +10,5 @@
 They meet in one place only: ``panel/geometry.py`` reads the chat palette from
 ``tui/interactive/theme`` so the chrome matches the panes. Nothing else crosses: a pane holds a
 chat as a process on a pseudo-terminal, and the chat reaches the daemon only through extensions
-(``extensions/agent_state.py``, ``extensions/fork_split.py``).
+(``core/network/wiring/panel.py``).
 """

@@ -192,16 +192,19 @@ class AgentSessionRuntime:
         options: dict[str, Any],
     ) -> dict[str, bool]:
         runner = self.session.extensionRunner
+        event = {
+            "type": "session_before_fork",
+            "entryId": entryId,
+            **options,
+        }
+        # MISAKA fork: the session's own parts may take the fork first (the panel splits it).
+        result = await self.session.moments.session_before_fork(event)
+        if _result_flag(result, "cancel", False) is True:
+            return {"cancelled": True}
         if not runner.hasHandlers("session_before_fork"):
             return {"cancelled": False}
 
-        result = await runner.emit(
-            {
-                "type": "session_before_fork",
-                "entryId": entryId,
-                **options,
-            }
-        )
+        result = await runner.emit(event)
         return {"cancelled": _result_flag(result, "cancel", False) is True}
 
     async def teardownCurrent(self, reason: str, targetSessionFile: str | None = None) -> None:

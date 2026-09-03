@@ -133,6 +133,26 @@ class Moments:
     async def session_compact_failed(self, event: dict[str, Any]) -> None:
         await self._notify("session_compact_failed", event)
 
+    async def agent_start(self, event: dict[str, Any]) -> None:
+        await self._notify("agent_start", event)
+
+    async def ui_prompt_start(self, event: dict[str, Any]) -> None:
+        await self._notify("ui_prompt_start", event)
+
+    async def ui_prompt_end(self, event: dict[str, Any]) -> None:
+        await self._notify("ui_prompt_end", event)
+
+    async def session_before_fork(self, event: dict[str, Any]) -> Any:
+        """Runner ``emit`` for this type: the first part to cancel wins."""
+        if not self.parts:
+            return None
+        ctx = self._ctx()
+        for part in self.parts:
+            result = await self._call(part, "session_before_fork", event, ctx)
+            if _field(result, "cancel", False):
+                return result
+        return None
+
     async def before_agent_start(
         self, prompt: str, images: Any, system_prompt: str, options: Any
     ) -> BeforeAgentStart:

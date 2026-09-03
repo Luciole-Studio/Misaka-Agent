@@ -869,7 +869,7 @@ def session_key(action):
 
 def session_arg(argv):
     """The session file a pane was launched on (``--session <path>``). Known the moment the
-    pane exists, long before the session inside reports itself (extensions/agent_state.py
+    pane exists, long before the session inside reports itself (core/network/wiring/panel.py
     needs the engine up, which can take a while): until this, clicking a starting session
     again opened it a second time. Pure, so testable."""
     argv = list(argv or ())
@@ -878,7 +878,7 @@ def session_arg(argv):
 
 def open_session_panes(listing):
     """session identity -> the live pane writing it: the card it runs, the session it reports
-    (extensions/agent_state.py), or failing that the one it was launched on. One session,
+    (core/network/wiring/panel.py), or failing that the one it was launched on. One session,
     one tab."""
     live = {}
     for pane in listing:

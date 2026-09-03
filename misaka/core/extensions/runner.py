@@ -475,6 +475,8 @@ class ExtensionRunner:
     commandDiagnostics: list[ResourceDiagnostic] = field(default_factory=list)
     staleMessage: str | None = None
     uiPromptDepth: int = field(default=0, init=False, repr=False)
+    # MISAKA fork: the session's parts (core.moments), so the runner's own ui_prompt events reach them.
+    moments: Any = field(default=None, init=False, repr=False)
     activeUIPrompt: tuple[UIPromptKind, str | None] | None = field(
         default=None, init=False, repr=False
     )
@@ -655,7 +657,14 @@ class ExtensionRunner:
         }
         if title:
             event["title"] = title
-        task = asyncio.create_task(self.emit(event))
+        moments = self.moments  # MISAKA fork: the session's parts hear it first
+
+        async def dispatch() -> None:
+            if moments is not None:
+                await getattr(moments, event_type)(dict(event))
+            await self.emit(event)
+
+        task = asyncio.create_task(dispatch())
         task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
 
     def get_ui_context(self) -> Any:
