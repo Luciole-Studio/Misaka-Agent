@@ -9,7 +9,7 @@ from misaka.config import profiles
 from misaka.core.platform import tasks as task_store
 from misaka.core.platform.session import run_coro, run_session
 from misaka.core.platform.vocabulary import MANAGEMENT_TOOLS
-from misaka.skills import sandbox as skill_sandbox
+from misaka.core.skills import sandbox as skill_sandbox
 
 MAX_REPORT_BYTES = 256 * 1024
 MAX_SUMMARY_CHARS = 2_000
@@ -416,7 +416,7 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
     else:
         # Regular cards run against read-only copies of the role's skill stack: skills are
         # read-only at run time (constitution), and a card never sees the live tree.
-        from misaka.skills import layers as skill_layers
+        from misaka.core.skills import layers as skill_layers
         skill_sandbox.readonly_copies(skill_layers.skills_stack(profile_dir, cwd=workspace), ro_root)
         skill_roots = (("sandbox", ro_root),)
     factories = build_extensions(SessionSpec(

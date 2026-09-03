@@ -70,7 +70,7 @@ REGISTRY: tuple[str, ...] = (
     "misaka.extensions.moa",
     "misaka.extensions.observe",
     "misaka.extensions.roster",
-    "misaka.extensions.skills",
+    "misaka.core.skills.wiring.skills",
     "misaka.extensions.todo",
     "misaka.extensions.web",
     "misaka.extensions.last_order.ally",

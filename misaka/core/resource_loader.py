@@ -709,7 +709,7 @@ class DefaultResourceLoader:
         ]
         # Trusted project prompts/themes are classified from package metadata above.
         # Only user roots need this fallback; project extensions/system prompts stay disabled,
-        # while skills remain owned by misaka.skills.layers.
+        # while skills remain owned by misaka.core.skills.layers.
         for root in agent_roots:
             if self._is_under_path(normalized_path, root):
                 return SourceInfo(path=file_path, source="local", scope="user", origin="top-level", baseDir=root)

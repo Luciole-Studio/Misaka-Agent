@@ -10,9 +10,9 @@ import os
 import shlex
 from pathlib import Path
 
-from misaka.skills import index as skill_index
-from misaka.skills.layers import SKILL_SUPPORT_DIRS, skill_roots
-from misaka.skills.manage import lookup_path_error
+from misaka.core.skills import index as skill_index
+from misaka.core.skills.layers import SKILL_SUPPORT_DIRS, skill_roots
+from misaka.core.skills.manage import lookup_path_error
 
 _SKILL_INVOCATION_PREFIX = "[IMPORTANT: The user has invoked the "
 _SINGLE_SKILL_MARKER = "The full skill content is loaded below.]"
@@ -48,7 +48,7 @@ def _slash_entries(entries):
 
 def _body(entry, session_id=None):
     """SKILL.md's body with template variables and inline shell applied."""
-    from misaka.skills.preprocessing import preprocess_skill_content
+    from misaka.core.skills.preprocessing import preprocess_skill_content
 
     raw = Path(entry["path"]).read_text(encoding="utf-8-sig", errors="replace")
     _, body = skill_index.parse_skill_markdown(raw)
@@ -150,11 +150,11 @@ def parse_skill_invocation_message(text):
 def register_for(roots, profile_dir, cwd=None, kind="foreground"):
     """Everything skills for one session, against these layer roots; writes (``skill_manage``,
     ``/learn``) go to the role's own ``skills/`` under ``profile_dir``. ``cwd`` is the
-    workspace the coding posture is judged in (misaka.skills.coding_context)."""
+    workspace the coding posture is judged in (misaka.core.skills.coding_context)."""
     from pydantic import BaseModel, ConfigDict, Field
 
     from misaka.core.extensions.types import ToolDefinition
-    from misaka.skills.coding_context import compact_skill_categories
+    from misaka.core.skills.coding_context import compact_skill_categories
 
     roots = list(roots)
     workspace = cwd or os.getcwd()
@@ -330,7 +330,7 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
             promptGuidelines=["When a task matches a skill description, load it with `skill_view` before acting."]))
 
         async def manage_execute(tool_call_id, raw, signal, on_update, ctx):
-            from misaka.skills import manage as skill_manage
+            from misaka.core.skills import manage as skill_manage
             args = raw if isinstance(raw, ManageParams) else ManageParams(**(raw or {}))
             result = skill_manage.manage(
                 args.action, args.name, profile_dir=profile_dir,
@@ -390,8 +390,8 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
             "description": "List skills, or invoke one with `/skill <name> [instruction]` in the current session."})
 
         async def learn_cmd(args, ctx):
-            from misaka.skills import write as skill_write
-            from misaka.skills.learn_prompt import build_learn_prompt
+            from misaka.core.skills import write as skill_write
+            from misaka.core.skills.learn_prompt import build_learn_prompt
             target = os.path.join(profile_dir, "skills")
             os.makedirs(target, exist_ok=True)
             prompt = build_learn_prompt(args or "", target_dir=target)
@@ -414,8 +414,8 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
 
         async def skill_mode_cmd(args, ctx):
             # Slash commands originate from user input, so this is the user-only write-mode entry point.
-            from misaka.skills import layers as skill_layers
-            from misaka.skills import write as skill_write
+            from misaka.core.skills import layers as skill_layers
+            from misaka.core.skills import write as skill_write
             value = (args or "").strip().lower()
             if not value:
                 mode = skill_write.write_mode()

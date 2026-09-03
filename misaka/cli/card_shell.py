@@ -261,7 +261,7 @@ def launch(task_id, resume_only=False, say=None):
         """What the supervisor runs in place of the ``finally`` below when it has to hard-exit."""
         from misaka.utils.shell import kill_tracked_detached_children
         kill_tracked_detached_children()
-        from misaka.skills import sandbox as skill_sandbox
+        from misaka.core.skills import sandbox as skill_sandbox
         skill_sandbox.cleanup(ro_root)
         sys.stdout.flush()
         sys.stderr.flush()
@@ -277,7 +277,7 @@ def launch(task_id, resume_only=False, say=None):
     finally:
         if supervisor is not None:
             supervisor.stop()
-        from misaka.skills import sandbox as skill_sandbox
+        from misaka.core.skills import sandbox as skill_sandbox
         skill_sandbox.cleanup(ro_root)
     if supervisor is not None and supervisor.timed_out:
         code = 124   # the session shut down on the supervisor's SIGTERM; keep the timeout's code

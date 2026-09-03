@@ -2,9 +2,9 @@
 
 Layers, in precedence order: the project folder's ``skills/``, the role's
 ``skills/``, the shared ``profiles/skills/``, then the read-only external
-directories listed in ``~/.misaka/skills.json`` (hermes ``skills.external_dirs``).
+directories listed in ``~/.misaka/core/skills.json`` (hermes ``skills.external_dirs``).
 Turning them into an index (one entry per name, the system-prompt section,
-lookups) is :mod:`misaka.skills.index`; this module only says where skills live
+lookups) is :mod:`misaka.core.skills.index`; this module only says where skills live
 and which directories count, plus the project-tier quarantine chokepoint.
 """
 import hashlib
@@ -148,7 +148,7 @@ def is_quarantined_project_skill(skill_md):
     """Fail closed when a project skill's full directory cannot scan or is dangerous."""
     skill_dir = Path(skill_md).parent
     try:
-        from misaka.skills import guard
+        from misaka.core.skills import guard
 
         # A project skill comes out of a repository the user merely cd'd into, so
         # the party that writes `.skillignore` is the party being scanned. On this
@@ -284,5 +284,5 @@ def skills_stack(profile_dir, cwd=None):
     """The skill directories a role sees, project first, one per name (the index decides
     who wins). Used where directories, not entries, are needed: the read-only copies a
     card runs against, and a sub-agent resolving the skills its definition names."""
-    from misaka.skills import index
+    from misaka.core.skills import index
     return [entry["dir"] for entry in index.build(skill_roots(profile_dir, cwd))]

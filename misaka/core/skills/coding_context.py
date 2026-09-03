@@ -4,13 +4,13 @@ Under the opt-in ``focus`` mode, a session sitting in a code workspace gets the
 non-coding skill categories demoted to names-only in the index -- never hidden:
 every name stays visible and loadable, only the descriptions are dropped.
 ``auto`` (the default) and ``on`` leave the index untouched; ``off`` disables
-detection. The mode is ``coding_context`` in ``~/.misaka/skills.json``.
+detection. The mode is ``coding_context`` in ``~/.misaka/core/skills.json``.
 """
 import os
 import tempfile
 from pathlib import Path
 
-from misaka.skills.layers import load_skills_config
+from misaka.core.skills.layers import load_skills_config
 
 # Project-root signals that mark a directory as a code workspace even when it
 # isn't (yet) a git repo. Cheap filename checks -- no parsing.

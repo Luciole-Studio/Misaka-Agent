@@ -24,7 +24,7 @@ INSTALL_POLICY = {
     "community":     ("allow",  "block",   "block"),
     # Agent-created: a dangerous verdict surfaces as an error to the agent,
     # which can retry without the flagged content. skill_manage treats the
-    # "ask" decision as a block (see misaka/skills/manage.py::_security_scan).
+    # "ask" decision as a block (see misaka/core/skills/manage.py::_security_scan).
     "agent-created": ("allow",  "allow",   "ask"),
 }
 
@@ -750,7 +750,7 @@ def scan_skill(skill_path: Path, source: str = "community", *, honor_ignore: boo
       `skill_manage` tool, the user's own layers. Their ignore file is a
       convenience and there is no adversary to defend against.
     * `honor_ignore=False` is for anything arriving from a repository the
-      user merely opened. `misaka/skills/layers.py` uses it for the
+      user merely opened. `misaka/core/skills/layers.py` uses it for the
       project-skill quarantine, so a `.skillignore` of `*` cannot switch
       off the content scan of `scripts/*.sh`. It also drops the
       `binary_file` downgrade, so a vendored `.dylib` quarantines a project

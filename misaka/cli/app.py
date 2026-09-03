@@ -597,9 +597,9 @@ def _cmd_moa(args):
 def _cmd_skills(args):
     import os as _os
 
-    from misaka.skills import layers as skill_layers
+    from misaka.core.skills import layers as skill_layers
     if args.op == "mode":
-        from misaka.skills import write as skill_write
+        from misaka.core.skills import write as skill_write
         if not args.name:
             mode = skill_write.write_mode()
             desc = {
@@ -622,7 +622,7 @@ def _cmd_skills(args):
             skill_layers.write_skills_config(cfg)
             print(f"Skill write mode set to {args.name} (effective immediately).")
     elif args.op in ("pending", "approve", "reject", "ledger", "rollback"):
-        from misaka.skills import write as skill_write
+        from misaka.core.skills import write as skill_write
         live = _os.path.join(CFG["roles_root"], args.role, "skills")
         if args.op in ("approve", "reject", "rollback") and skill_write.agent_session():
             sys.exit("Marked agent sessions do not make skill review decisions; this is a workflow guard, not an OS sandbox.")
@@ -632,7 +632,7 @@ def _cmd_skills(args):
             records = skill_write.list_pending()
             if not records:
                 print("No skills are awaiting review.")
-            from misaka.skills.linter import format_findings, lint_content
+            from misaka.core.skills.linter import format_findings, lint_content
             for r in records:
                 payload = r.get("payload") or {}
                 pending_id = r.get("_pending_file_id") or r.get("id") or "invalid"
@@ -653,7 +653,7 @@ def _cmd_skills(args):
         elif args.op == "approve":
             if not args.name:
                 sys.exit("Usage: misaka skills approve <pending-id>")
-            from misaka.skills import manage as skill_manage
+            from misaka.core.skills import manage as skill_manage
             record = skill_write.get_pending(args.name)
             if record is not None:
                 # Re-run the reviewed request through the normal validation path.
@@ -699,7 +699,7 @@ def _cmd_skills(args):
             print(why)
             sys.exit(0 if ok else 1)
     elif args.op == "scan":
-        from misaka.skills.guard import format_scan_report, scan_skill
+        from misaka.core.skills.guard import format_scan_report, scan_skill
         found = False
         for layer, root in skill_layers.skill_roots(None, cwd=args.dir or _os.getcwd()):
             if layer != "project":
@@ -710,7 +710,7 @@ def _cmd_skills(args):
         if not found:
             print("No project skills found under skills/.")
     else:
-        from misaka.skills import index as skill_index
+        from misaka.core.skills import index as skill_index
         prof = _os.path.join(_os.path.expanduser(CFG["roles_root"]), args.role)
         for e in skill_index.build(skill_layers.skill_roots(prof, cwd=_os.getcwd())):
             print(f"{e['layer']:<9}{e['category']}/{e['name']}  {e['description']}  ({e['dir']})")
@@ -803,7 +803,7 @@ def main(argv=None):
 
         return run_auth_command(argv[1:])
     args = _parser().parse_args(argv)
-    from misaka.skills.layers import SkillsConfigError
+    from misaka.core.skills.layers import SkillsConfigError
 
     try:
         return COMMANDS[args.cmd](args)

@@ -27,6 +27,7 @@ from misaka.core.platform import admission, budget, notifications
 from misaka.core.platform import processes as process_tree
 from misaka.core.platform import tasks as db
 from misaka.core.session_manager import find_most_recent_session
+from misaka.core.skills import sandbox as skill_sandbox
 from misaka.extensions.sisters.subagent.agents import AgentDefinition
 from misaka.extensions.sisters.subagent.runtime import (
     AgentTask,
@@ -35,7 +36,6 @@ from misaka.extensions.sisters.subagent.runtime import (
     clean_resume_transcript,
 )
 from misaka.network import worker
-from misaka.skills import sandbox as skill_sandbox
 
 TERMINAL_BOARD_STATUSES = frozenset({"done", "failed", "stopped", "blocked", "triage"})
 ACTIVE_BOARD_STATUSES = frozenset({"running", "review"})
@@ -260,7 +260,7 @@ class _SisterManager(SubagentManager):
             raise ValueError(f"Sister card cannot change identity to {requested!r}")
         # Identity comes first, followed by mandatory role instructions.
         from misaka.config import identity
-        from misaka.skills import layers as skill_layers
+        from misaka.core.skills import layers as skill_layers
         soul = "\n\n".join(
             [Path(profiles.shared_soul()).read_text(encoding="utf-8")]
             + identity.prompt_sections(self.profile_dir,

@@ -13,8 +13,8 @@ from pathlib import Path
 from misaka.config import CFG
 from misaka.core.platform import prompt_guard
 from misaka.core.session_manager import find_most_recent_session
+from misaka.core.skills import layers as skill_layers
 from misaka.research import ledger, runs
-from misaka.skills import layers as skill_layers
 from misaka.utils import atomic
 
 PROJECT_INTAKE_CONTRACT = """You are Last Order in Research mode. Draft the project brief (PROJECT.md) for the user's research question.
@@ -185,7 +185,7 @@ def sister_catalog(root=None):
 
 def method_catalog(profile_dir, cwd):
     """The research methods Last Order can plan with: her skill index in this folder."""
-    from misaka.skills import index as skill_index
+    from misaka.core.skills import index as skill_index
     return [{"name": e["name"], "description": e["description"], "path": e["path"]}
             for e in skill_index.build(skill_layers.skill_roots(profile_dir, cwd))]
 

@@ -18,7 +18,7 @@ _INLINE_SHELL_MAX_OUTPUT = 4000
 
 
 def load_skills_config():
-    from misaka.skills.layers import load_skills_config as _load
+    from misaka.core.skills.layers import load_skills_config as _load
     return _load()
 
 
@@ -110,7 +110,7 @@ def preprocess_skill_content(content, skill_dir, session_id=None, skills_cfg=Non
     """
     if not content:
         return content
-    from misaka.skills.layers import PERSONAL_LAYERS
+    from misaka.core.skills.layers import PERSONAL_LAYERS
 
     cfg = skills_cfg if isinstance(skills_cfg, dict) else load_skills_config()
     if cfg.get("template_vars", True):

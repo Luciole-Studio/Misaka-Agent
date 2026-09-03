@@ -5,8 +5,8 @@ import os
 import shutil
 from pathlib import Path
 
-from misaka.skills import write as skill_write
-from misaka.skills.linter import NAME_RE
+from misaka.core.skills import write as skill_write
+from misaka.core.skills.linter import NAME_RE
 from misaka.utils import atomic
 
 logger = logging.getLogger(__name__)
@@ -76,8 +76,8 @@ def validate_frontmatter(content, *, new_skill=False):
     """Return an error message if the SKILL.md is invalid, else None. The linter's error rules are
     the validator: what a write refuses is exactly what ``lint_skill`` would flag as an error,
     plus the size limits only a write enforces."""
-    from misaka.skills.index import SKILL_PROMPT_DESC_LIMIT
-    from misaka.skills.linter import lint_content
+    from misaka.core.skills.index import SKILL_PROMPT_DESC_LIMIT
+    from misaka.core.skills.linter import lint_content
     from misaka.utils.frontmatter import parse_frontmatter
 
     if not str(content or "").strip():
@@ -107,7 +107,7 @@ def validate_frontmatter(content, *, new_skill=False):
     # (index.parse_skill_markdown), so this only catches a disagreement between
     # the two YAML loaders; it is cheap, and it fails at write time where the
     # author can still see why.
-    from misaka.skills.index import parse_skill_markdown
+    from misaka.core.skills.index import parse_skill_markdown
     indexed = parse_skill_markdown(text)[0]
     if not str(indexed.get("name") or "").strip() or not str(indexed.get("description") or "").strip():
         return ("The skill index cannot read a name and description back out of this frontmatter. "
@@ -138,7 +138,7 @@ def _security_scan(skill_dir):
     """Run the skill security scan; return a blocking message, or None when allowed. A scanner
     that cannot run blocks too: a change nobody scanned is not a scanned change."""
     try:
-        from misaka.skills.guard import (
+        from misaka.core.skills.guard import (
             format_scan_report,
             scan_skill,
             should_allow_install,
@@ -156,7 +156,7 @@ def _security_scan(skill_dir):
 def _lint_findings(skill_md):
     """Lint the skill containing ``skill_md``; return findings as plain dicts, or [] on scanner failure."""
     try:
-        from misaka.skills.linter import lint_skill
+        from misaka.core.skills.linter import lint_skill
         found = lint_skill(Path(skill_md).parent)
     except Exception:  # noqa: BLE001
         return []
@@ -165,7 +165,7 @@ def _lint_findings(skill_md):
 
 def _description_preview(content):
     """Return the description exactly as the prompt index will display it."""
-    from misaka.skills.index import (
+    from misaka.core.skills.index import (
         is_skill_description_truncated,
         truncate_skill_description,
     )
@@ -178,14 +178,14 @@ def _description_preview(content):
 
 def _invalidate_index():
     """Drop the cached skill index so the next prompt build sees the change."""
-    from misaka.skills import index
+    from misaka.core.skills import index
     index.invalidate()
 
 
 def _normalize_visible_roots(profile_dir, roots):
     """Freeze session roots into the JSON shape carried by pending creates."""
     if roots is _VISIBLE_ROOTS_UNSET:
-        from misaka.skills.layers import skill_roots
+        from misaka.core.skills.layers import skill_roots
         roots = skill_roots(profile_dir)
     if not isinstance(roots, (list, tuple)):
         return None, "visible_roots must be a list of [layer, absolute path] pairs."
@@ -208,7 +208,7 @@ def _normalize_visible_roots(profile_dir, roots):
 
 def _visible_skill_conflict(name, visible_roots):
     """Return the visible skill that already claims ``name``, if any."""
-    from misaka.skills import index
+    from misaka.core.skills import index
 
     matches = index.candidates(visible_roots, name)
     return matches[0] if matches else None
@@ -274,7 +274,7 @@ def _resolve_target(skill_dir, file_path):
     err = lookup_path_error(file_path)
     if err:
         return None, err
-    from misaka.skills.guard import SKILL_IGNORE_FILENAMES
+    from misaka.core.skills.guard import SKILL_IGNORE_FILENAMES
     relative = Path(file_path)
     if relative.name in SKILL_IGNORE_FILENAMES:
         return None, f"{file_path} controls what the security scanner sees; it is not written through skill_manage."
@@ -326,7 +326,7 @@ def _read_text_file(path, label):
 
 def _support_file_error(text, label):
     """One limit for support files, the scanner's: what it would refuse to read is refused here."""
-    from misaka.skills.guard import MAX_SINGLE_FILE_KB
+    from misaka.core.skills.guard import MAX_SINGLE_FILE_KB
     if len(text.encode("utf-8")) > MAX_SINGLE_FILE_KB * 1024:
         return f"{label} exceeds {MAX_SINGLE_FILE_KB} KB, the security scanner's single-file limit."
     return None

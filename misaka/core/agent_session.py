@@ -232,7 +232,7 @@ def parse_skill_block(text: str) -> ParsedSkillBlock | None:
 
     # MISAKA keeps Pi's historical transcript renderer, while /skill now emits
     # Hermes' activation scaffold. Parse both so old and new sessions collapse.
-    from misaka.extensions.skills import parse_skill_invocation_message
+    from misaka.core.skills.wiring.skills import parse_skill_invocation_message
 
     parsed = parse_skill_invocation_message(text)
     if parsed is None:

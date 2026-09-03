@@ -2644,7 +2644,7 @@ class SubagentManager:
         return []
 
     def _skill_paths(self, definition: agent_roster.AgentDefinition) -> list[str]:
-        from misaka.skills import layers as skill_layers
+        from misaka.core.skills import layers as skill_layers
 
         # Children see the same project/role/shared stack as their parent.
         candidates = skill_layers.skills_stack(
@@ -2665,8 +2665,8 @@ class SubagentManager:
         """Point the child at the skills its definition names. It loads them on demand like any
         session -- ``skill_view`` for one in its index, ``read`` for a definition-local path --
         instead of every SKILL.md being inlined into its first message."""
-        from misaka.skills import index as skill_index
-        from misaka.skills import layers as skill_layers
+        from misaka.core.skills import index as skill_index
+        from misaka.core.skills import layers as skill_layers
         indexed = {Path(p).name for p in skill_layers.skills_stack(
             self.role_context.profile_dir or None, cwd=self.role_context.workspace or None)}
         lines: list[str] = []

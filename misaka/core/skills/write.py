@@ -339,7 +339,7 @@ def discard_pending(pending_id):
 
 def pending_diff(item):
     """Unified diff between the live skill tree and the pending write, for the user to review."""
-    from misaka.skills import manage
+    from misaka.core.skills import manage
     error = pending_integrity_error(
         item, file_id=item.get("_pending_file_id") if isinstance(item, dict) else None)
     if error:

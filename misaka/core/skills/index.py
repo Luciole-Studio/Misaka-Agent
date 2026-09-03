@@ -5,7 +5,7 @@ lookups. The prompt reads only frontmatter; ``skills_list`` reads the first pros
 line only when a description is missing, and the full body otherwise loads on
 demand through ``skill_view``. The engine's own skill loading is off for every
 MISAKA session: the extension in
-:mod:`misaka.extensions.skills` is the one consumer of this index, so a session's
+:mod:`misaka.core.skills.wiring.skills` is the one consumer of this index, so a session's
 skills are decided in exactly one place.
 
 Caching, as hermes: an in-process cache per roots and disabled list (dropped by
@@ -21,7 +21,7 @@ import re
 import sys
 from pathlib import Path
 
-from misaka.skills.layers import (
+from misaka.core.skills.layers import (
     PERSONAL_LAYERS,
     disabled_skill_names,
     home,

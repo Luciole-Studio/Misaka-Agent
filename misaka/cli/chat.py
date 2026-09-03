@@ -104,7 +104,7 @@ def launch(who, model=None, cont=False, pick=False, session=None):
         title = "MISAKA · Last Order"
     from misaka.config import identity
     # The engine has no skill loading of its own; the skills extension is the one place that
-    # decides what this session sees (misaka.skills.index).
+    # decides what this session sees (misaka.core.skills.index).
     flags = ["--provider", cfg["provider"], "--model", model or model_default,
              "--append-system-prompt", profiles.shared_soul()]
     for section in identity.prompt_sections(prof, profiles.role_of(prof)):

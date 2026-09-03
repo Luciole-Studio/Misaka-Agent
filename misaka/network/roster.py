@@ -167,7 +167,7 @@ def describe(sid, root=None):
 
 def describe_line(sid, root=None):
     """Return a concise roster description."""
-    from misaka.skills.index import truncate_skill_description
+    from misaka.core.skills.index import truncate_skill_description
     desc, _ = describe(sid, root)
     return truncate_skill_description(desc) if desc else None
 
