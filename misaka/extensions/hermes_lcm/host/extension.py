@@ -66,7 +66,7 @@ async def _off_loop(work, *args):
 def register(harn, *, kind: str):
     """Register the engine's tools for a session of ``kind`` and subscribe it to the events it needs.
 
-    ``kind`` is the session kind ``misaka.extensions.discover`` activated this extension
+    ``kind`` is the session kind ``misaka.core.wiring`` activated this extension
     for; ``tools.withheld`` turns it into the subset of the fifteen this session is offered.
     """
 

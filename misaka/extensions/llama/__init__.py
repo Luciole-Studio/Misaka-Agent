@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 
 from misaka.ai.models_runtime import AbortController
-from misaka.extensions import KINDS
+from misaka.core.wiring import KINDS
 
 from .client import (
     LlamaClient,

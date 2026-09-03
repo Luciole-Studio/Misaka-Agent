@@ -362,6 +362,7 @@ User clarification: {spec['clarification']}""", run["id"]))
     harn.on("session_shutdown", cleanup)
 
 SESSION_KINDS = {"foreground", "dm"}
+ROLES = {"last_order"}
 
 
 def activate(spec):

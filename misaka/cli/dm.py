@@ -141,7 +141,7 @@ def deliver(to, message=None, sender=None, model=None, timeout=600,
               "--session-dir", sess_dir]
     env = {"MISAKA_APP_TITLE": DM_TITLE, "MISAKA_WHO": to, "MISAKA_MCP_ROLE": role,
            "MISAKA_PROFILE_DIR": prof, "MISAKA_WORKSPACE": home}
-    from misaka.app.composition import SessionSpec, build_extensions
+    from misaka.core.wiring import SessionSpec, build_extensions
     factories = build_extensions(SessionSpec(
         profile_dir=prof,
         role=role,

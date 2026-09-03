@@ -43,11 +43,11 @@ SKIP_FILES = ("models_generated.py", "image_models_generated.py")
 ALLOWED: dict[str, str] = {
     # Console script and module entry points.
     "main": "console script (pyproject [project.scripts]) and python -m misaka",
-    # The extension loader discovers modules and calls these by name.
-    "register": "extension entry point, called by misaka.extensions loader",
-    "register_provider": "extension entry point, called by misaka.extensions loader",
-    "activate": "extension entry point, called by misaka.extensions loader",
-    "SESSION_KINDS": "read with getattr by misaka.extensions.discover",
+    # misaka.core.wiring imports each registry entry and calls these by name.
+    "register": "extension entry point, called by misaka.core.wiring",
+    "register_provider": "extension entry point, called by misaka.core.wiring",
+    "activate": "extension entry point, called by misaka.core.wiring",
+    "SESSION_KINDS": "read with getattr by misaka.core.wiring.build_extensions",
     "DEFAULT_KINDS": "extension-loader gating table",
     # pytest collects these by convention.
     "pytest_collection_modifyitems": "pytest hook",

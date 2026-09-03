@@ -872,6 +872,7 @@ def register(harn):
     harn.on("before_agent_start", _kickoff)     # a long-lived session hears about cards that finished meanwhile
 
 SESSION_KINDS = {"foreground", "dm"}
+ROLES = {"last_order"}
 
 
 def activate(spec):

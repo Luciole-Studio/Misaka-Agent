@@ -136,7 +136,7 @@ def launch(who, model=None, cont=False, pick=False, session=None):
         "MISAKA_INPUT_HISTORY": os.path.expanduser(f"~/.misaka/input-history/{who or 'last-order'}.json"),
         "MISAKA_CODING_AGENT": "true"})
 
-    from misaka.app.composition import SessionSpec, build_extensions
+    from misaka.core.wiring import SessionSpec, build_extensions
     factories = build_extensions(SessionSpec(
         profile_dir=prof,
         role=profile_role,

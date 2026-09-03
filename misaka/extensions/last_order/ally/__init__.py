@@ -11,6 +11,7 @@ and reads any session ID it needs out of the reply; MISAKA only executes.
 """
 
 SESSION_KINDS = {"foreground", "dm"}
+ROLES = {"last_order"}
 
 
 def activate(spec):

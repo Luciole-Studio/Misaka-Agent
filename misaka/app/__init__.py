@@ -1,2 +1,0 @@
-"""MISAKA composition root."""
-

@@ -12,7 +12,7 @@ from misaka.platform.vocabulary import BOOKKEEPING_MANAGEMENT_TOOLS
 
 # ``NoProgressGuard``'s vocabulary: the tools a session can call all day without the world
 # changing or one new fact arriving. Assembled here because it is a fact about how this
-# process composes a session (see ``misaka.app.composition`` for who registers what), not
+# process composes a session (see ``misaka.core.wiring`` for who registers what), not
 # about how the guard counts.
 #
 # Everything absent is work and resets the streak -- edit/write/bash, the web and download

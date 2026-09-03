@@ -1,7 +1,7 @@
 """Inter-agent messages: SendMessage plus, when asked, the inbox pump."""
 from functools import partial
 
-from misaka.extensions import delegates
+from misaka.core.wiring import delegates
 from misaka.network import messages
 
 

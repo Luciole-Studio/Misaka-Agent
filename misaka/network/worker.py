@@ -324,7 +324,7 @@ def run_llm_json(profile_dir, prompt, provider, default_model,
         flags.append("--no-session")
     workdir = cwd or os.getcwd()
     role = profiles.role_of(profile_dir)
-    from misaka.app.composition import SessionSpec, build_extensions
+    from misaka.core.wiring import SessionSpec, build_extensions
 
     allowed = list(tools or ())
     factories = build_extensions(SessionSpec(
@@ -401,7 +401,7 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
              "--session-dir", os.path.join(state_dir, "session")]
     ro_root = os.path.join(state_dir, ".skills-ro")
     sender = role.rsplit("/", 1)[-1]
-    from misaka.app.composition import SessionSpec, build_extensions
+    from misaka.core.wiring import SessionSpec, build_extensions
 
     kind = "beast" if beast else "card"
     delegates = not profiles.is_last_order(profile_dir)
