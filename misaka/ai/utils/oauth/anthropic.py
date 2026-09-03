@@ -105,6 +105,15 @@ def _format_error_details(error: Any) -> str:
 
 
 async def _start_callback_server(expected_state: str) -> _CallbackServerInfo:
+    """The local page the browser is redirected back to.
+
+    MISAKA fork of pi 0.84.4 ``auth/oauth/anthropic.js``: there, a callback carrying
+    ``error`` renders the failure page and returns without settling the wait, so declining
+    on Anthropic's consent screen leaves the login pending forever -- the browser says no,
+    the terminal keeps waiting, and the dialog looks frozen. The wait is ended here
+    instead. Only an explicit ``error`` ends it: a 404, a missing parameter or a stale
+    state is some other request arriving on this port, and must not kill a live login.
+    """
     loop = asyncio.get_running_loop()
     future: asyncio.Future[dict[str, str] | None] = loop.create_future()
 
@@ -129,12 +138,18 @@ async def _start_callback_server(expected_state: str) -> _CallbackServerInfo:
             params = parse_qs(parsed.query)
             status = 200
             body = ""
+            # Settled after the response is written, never before: ending the wait resumes
+            # the login, whose `finally` closes this server out from under the page the
+            # browser is still waiting for.
+            declined: Exception | None = None
             if parsed.path != CALLBACK_PATH:
                 status = 404
                 body = oauth_error_html("Callback route not found.")
             elif "error" in params:
                 status = 400
-                body = oauth_error_html("Anthropic authentication did not complete.", f"Error: {params['error'][0]}")
+                reason = params["error"][0]
+                body = oauth_error_html("Anthropic authentication did not complete.", f"Error: {reason}")
+                declined = RuntimeError(f"Anthropic authentication did not complete: {reason}")
             elif not params.get("code") or not params.get("state"):
                 status = 400
                 body = oauth_error_html("Missing code or state parameter.")
@@ -155,6 +170,8 @@ async def _start_callback_server(expected_state: str) -> _CallbackServerInfo:
             )
             writer.write(response.encode("utf-8"))
             await writer.drain()
+            if declined is not None and not future.done():
+                future.set_exception(declined)
         except Exception:  # noqa: BLE001 - a failing callback response must still get a 500 page
             response = (
                 "HTTP/1.1 500 Internal Server Error\r\n"
@@ -224,6 +241,9 @@ async def login_anthropic(options: dict[str, Any]) -> OAuthCredentials:
     code: str | None = None
     state: str | None = None
     redirect_uri_for_exchange = REDIRECT_URI
+    # The paste-box worker, cancelled with the server: whichever of the two answers first,
+    # the other is waiting on something nobody will deliver.
+    manual_task: asyncio.Task[None] | None = None
 
     try:
         auth_params = urlencode(
@@ -262,7 +282,7 @@ async def login_anthropic(options: dict[str, Any]) -> OAuthCredentials:
                     server.cancel_wait()
 
             manual_task = asyncio.create_task(manual_worker())
-            result = await server.wait_for_code()
+            result = await server.wait_for_code()   # may raise: the browser said no
 
             if manual_error is not None:
                 raise manual_error
@@ -310,6 +330,8 @@ async def login_anthropic(options: dict[str, Any]) -> OAuthCredentials:
             options["onProgress"]("Exchanging authorization code for tokens...")
         return await _exchange_authorization_code(code, state, verifier, redirect_uri_for_exchange)
     finally:
+        if manual_task is not None and not manual_task.done():
+            manual_task.cancel()
         await server.close()
 
 

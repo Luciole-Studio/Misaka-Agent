@@ -371,9 +371,20 @@ async def _start_local_oauth_server(state: str) -> _OAuthServerInfo:
             params = parse_qs(parsed.query)
             status = 200
             body = ""
+            # Settled after the response is written: see the Anthropic flow for why.
+            declined: Exception | None = None
             if parsed.path != "/auth/callback":
                 status = 404
                 body = oauth_error_html("Callback route not found.")
+            elif params.get("error", [None])[0]:
+                # As in the Anthropic flow: declining on the consent screen comes back here,
+                # and pi 0.84.4 renders the page without settling, so the terminal waits for
+                # a code the user already refused to give. Only an explicit `error` ends the
+                # wait; anything else arriving on this port may not kill a live login.
+                status = 400
+                reason = params["error"][0]
+                body = oauth_error_html("OpenAI authentication did not complete.", f"Error: {reason}")
+                declined = RuntimeError(f"OpenAI authentication did not complete: {reason}")
             elif params.get("state", [None])[0] != state:
                 status = 400
                 body = oauth_error_html("State mismatch.")
@@ -393,6 +404,8 @@ async def _start_local_oauth_server(state: str) -> _OAuthServerInfo:
             )
             writer.write(response.encode("utf-8"))
             await writer.drain()
+            if declined is not None and not future.done():
+                future.set_exception(declined)
         except Exception:  # noqa: BLE001 - a failing callback response must still get a 500 page
             body = oauth_error_html("Internal error while processing OAuth callback.")
             response = (

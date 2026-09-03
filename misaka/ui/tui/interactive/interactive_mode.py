@@ -3934,25 +3934,40 @@ class InteractiveMode:
 
         selected_model = None
         selection_error: str | None = None
-        if _is_unknown_model(previous_model):
-            available_models = list(await maybe_await(self.session.modelRegistry.getAvailable()))
+        available_models = list(await maybe_await(self.session.modelRegistry.getAvailable()))
+        # MISAKA fork: pi only adopts the new provider's model when the session is on the
+        # `unknown/unknown` sentinel, because that is the only modelless state pi can be in.
+        # MISAKA can be in another one: with no saved default, `config.product` starts a
+        # session on a hardcoded catalogue pair (anthropic/claude-sonnet-4-5), which is a
+        # perfectly *known* model that nothing can call. Logging in then changed nothing --
+        # the key was saved, the session stayed on the model it could not use, and the next
+        # message failed with "No API key found for anthropic". A session whose model is not
+        # in `getAvailable()` has no usable model, whatever its name says.
+        if not _is_unknown_model(previous_model) and previous_model is not None:
+            unusable = not any(
+                read_field(model, "provider") == read_field(previous_model, "provider")
+                and read_field(model, "id") == read_field(previous_model, "id")
+                for model in available_models
+            )
+        else:
+            unusable = True
+        if unusable:
             provider_models = [model for model in available_models if read_field(model, "provider") == provider_id]
-            if provider_id not in defaultModelPerProvider:
-                selection_error = (
-                    f'{action_label}, but no default model is configured for provider "{provider_id}". '
-                    "Use /model to select a model."
-                )
-            elif not provider_models:
+            if not provider_models:
                 selection_error = (
                     f"{action_label}, but no models are available for that provider. "
                     "Use /model to select a model."
                 )
             else:
-                default_model_id = defaultModelPerProvider[provider_id]
+                # A provider defined in models.json is in no built-in default map, and
+                # refusing to pick for it would strand exactly the person who just
+                # configured their own gateway: its first available model is a better
+                # answer than an error telling them to go do it by hand.
+                default_model_id = defaultModelPerProvider.get(provider_id)
                 selected_model = next(
                     (model for model in provider_models if read_field(model, "id") == default_model_id),
                     None,
-                )
+                ) or (provider_models[0] if default_model_id is None else None)
                 if selected_model is None:
                     selection_error = (
                         f'{action_label}, but its default model "{default_model_id}" is not available. '

@@ -40,6 +40,7 @@ class LoginDialogComponent(Container):
         self.onComplete = onComplete
         self.abortController = AbortController()
         self._inputFuture: asyncio.Future[str] | None = None
+        self._cancelled = False
 
         providerInfo = next((provider for provider in getOAuthProviders() if provider.id == providerId), None)
         providerName = providerNameOverride or getattr(providerInfo, "name", None)
@@ -80,6 +81,13 @@ class LoginDialogComponent(Container):
     def _set_future(self) -> asyncio.Future[str]:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[str] = loop.create_future()
+        # A cancel that lands before this step exists used to fall on the floor: `cancel`
+        # rejects whatever future is current, and between "show the URL" and "show the
+        # paste box" -- one event-loop hop, but the browser opens in it -- there is none.
+        # The login then waited on a box the user had already dismissed.
+        if self._cancelled:
+            future.set_exception(Exception("Login cancelled"))
+            return future
         self._inputFuture = future
         return future
 
@@ -104,6 +112,7 @@ class LoginDialogComponent(Container):
         self._inputFuture = None
 
     def cancel(self) -> None:
+        self._cancelled = True
         self.abortController.abort()
         self._reject_input(Exception("Login cancelled"))
         self.onComplete(False, "Login cancelled")
