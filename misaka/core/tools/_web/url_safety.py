@@ -21,6 +21,9 @@ Four pieces of the Hermes original were deliberately left behind:
 * ``_TRUSTED_PRIVATE_IP_HOSTS``, a Hermes-specific allowance for one QQ media domain.
 * ``get_hermes_home_override`` and its ``secret_scope`` multiplexed-profile handling --
   MISAKA serves one profile per process, so the opt-out has exactly one scope to resolve.
+
+One thing is deliberately *stricter* than the original, and it is the credential table's
+body length -- see :data:`_URL_BODY_MINIMUM`.
 """
 
 from __future__ import annotations
@@ -92,6 +95,10 @@ def normalize_url_for_request(url: str) -> str:
 # than no table. The one thing MISAKA does not inherit is the ``_PREFIX_SUBSTRINGS``
 # pre-screen the GitLab note below refers to -- that is a throughput optimisation for
 # redacting whole compaction payloads, and a URL is a few hundred bytes.
+#
+# The body lengths below are Hermes'. They are not the ones compiled into ``_PREFIX_RE``:
+# the table stays as it arrived so it can be diffed against its source, and the one place
+# MISAKA tightens it is :func:`_url_pattern`, immediately after.
 _PREFIX_PATTERNS = [
     r"sk-[A-Za-z0-9_-]{10,}",           # OpenAI / OpenRouter / Anthropic (sk-ant-*)
     r"ghp_[A-Za-z0-9]{10,}",            # GitHub PAT (classic)
@@ -154,12 +161,65 @@ _PREFIX_PATTERNS = [
     r"pk-lf-[A-Za-z0-9\-]{8,}",         # Langfuse public key (sk-lf- already covered by sk- pattern)
 ]
 
+#: Minimum token-body length this module will call a credential, raising the table's
+#: open-ended floors (mostly ``{10,}``, one ``{8,}``) where they fall below it.
+#:
+#: The table above is a *redaction* table: upstream it masks substrings of log and
+#: compaction text, where a false positive costs a few starred-out characters and the
+#: recall is worth it. MISAKA uses it as a refusal gate, where a false positive costs the
+#: whole fetch -- and, unlike Hermes, on first-party paths too. Hermes runs ``_PREFIX_RE``
+#: over a URL only where the URL is about to be handed to somebody else's server
+#: (``web_tools.py:1103-1106`` for the web_extract backends, ``browser_tool.py:4161``);
+#: it has no first-party fetch tool for the check to reach. MISAKA's ``web_fetch`` and
+#: ``download_file`` both screen through :func:`screening.screen_url`, so the same table
+#: now decides whether ordinary browsing happens at all.
+#:
+#: At ``{10,}`` a two-to-four character prefix plus ten word characters is the shape of an
+#: ordinary path slug, not of a key: ``/hsk-vocabulary``, ``/fc-bayernmunich``,
+#: ``/npm_dependencies``, ``/pypi-package-listing``, ``/rk_live_documentation`` all read as
+#: credentials and all are refused. Twenty is the number because no vendor in the table
+#: issues a key with fewer than twenty characters of body -- the shortest are GitLab's
+#: 20-character PATs and Stripe's 24 -- so raising the floor costs no detection at all
+#: while taking every one of those slugs back below it.
+_URL_BODY_MINIMUM = 20
+
+#: Prefixes left at Hermes' floor. ``sk-`` is the prefix of the keys an agent actually
+#: holds (OpenAI, Anthropic, OpenRouter, DeepSeek, and every ``sk-``-compatible gateway),
+#: so it is the one an exfiltration attempt is likeliest to carry, and it is also the one
+#: with the least to gain: the lookbehind already excludes the English words that end in
+#: it (``ask-``, ``basket-``, ``risk-``, ``task-``), and a path segment beginning with a
+#: bare ``sk-`` is not something ordinary URLs do.
+_UNRAISED_PREFIXES = frozenset({"sk-"})
+
+_BODY_FLOOR_RE = re.compile(r"\{(\d+),\}$")
+
+
+def _url_pattern(pattern: str) -> str:
+    """Return *pattern* with its open-ended body floor raised to the URL minimum.
+
+    Keyed on the literal characters before the pattern's first character class, so
+    ``sk_live_`` and ``sk_`` are distinct keys rather than one prefix of the other. A
+    pattern with a fixed count (``AKIA[A-Z0-9]{16}``) or an already-sufficient floor
+    (``AIza...{30,}``) comes back untouched, and so does one whose shape this no longer
+    recognises -- a table update that outruns this leaves Hermes' behaviour, which is the
+    safe direction to fail.
+    """
+    if pattern.split("[", 1)[0] in _UNRAISED_PREFIXES:
+        return pattern
+    floor = _BODY_FLOOR_RE.search(pattern)
+    if floor is None or int(floor.group(1)) >= _URL_BODY_MINIMUM:
+        return pattern
+    return f"{pattern[: floor.start()]}{{{_URL_BODY_MINIMUM},}}"
+
+
 # One alternation over the whole table, exactly as Hermes builds it at ``redact.py:542``.
 # The boundary assertions are the difference between a detector and a nuisance: without
 # the lookbehind, ``/ask-something-long`` reads as an ``sk-`` key, and without the
 # lookahead a prefix would claim a token that merely starts the way one does.
 _PREFIX_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])(" + "|".join(_PREFIX_PATTERNS) + r")(?![A-Za-z0-9_-])"
+    r"(?<![A-Za-z0-9_-])("
+    + "|".join(_url_pattern(pattern) for pattern in _PREFIX_PATTERNS)
+    + r")(?![A-Za-z0-9_-])"
 )
 
 
@@ -177,7 +237,10 @@ def secret_in_url(url: str) -> bool:
 
     A credential in a URL is an exfiltration channel, not a configuration mistake: the
     key ends up in the target's access log, its referrer chain, and any third-party
-    reader in between. Callers refuse the fetch rather than redacting and continuing.
+    reader in between. Callers refuse the fetch rather than redacting and continuing --
+    which is why the token bodies this answers True for are longer than the redactor's
+    (:data:`_URL_BODY_MINIMUM`): a refusal has to be right about an ordinary URL, not
+    merely cautious about one.
     """
     if not isinstance(url, str) or not url:
         return False
