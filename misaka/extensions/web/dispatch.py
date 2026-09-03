@@ -168,6 +168,23 @@ def resolve_provider() -> tuple[WebSearchProvider | None, str, str]:
     ensure_backends_registered()
     backend = search_backend_name()
     provider = get_provider(backend) if backend else None
+    if provider is not None and not provider.supports_search():
+        # The mirror of the search-only refusal in :func:`resolve_extractor`, and for the
+        # same reason: a registered name that cannot serve this capability is named as
+        # such rather than quietly swapped for one that can.
+        #
+        # Divergence from Hermes, deliberate. Hermes gates on the same flag
+        # (``tools/web_tools.py:907``) but then falls through to the capability-filtered
+        # walk and serves from whatever it finds, so the user's search works and their
+        # broken ``search_backend`` never surfaces. Its extract side, where incapable
+        # backends actually exist, names the problem instead -- and that is the better of
+        # its two answers, so both sides say it here. Reachable only through a
+        # third-party provider registered with ``supports_search() -> False``; every
+        # bundled backend searches.
+        return None, backend, (
+            f"{provider.display_name} is an extract-only backend and cannot search. "
+            "Set `search_backend` in `~/.misaka/web.json` to a backend that can."
+        )
     if provider is not None:
         return provider, backend, ""
     if backend and selection_stored():

@@ -66,6 +66,30 @@ async def abort_race(signal: Any | None) -> AsyncIterator[asyncio.Task[None] | N
             await asyncio.gather(task, return_exceptions=True)
 
 
+async def run_with_abort[T](work: Any, signal: Any | None) -> tuple[T | None, bool]:
+    """Run *work* to completion, cancelling it if the caller aborts.
+
+    Returns ``(result, False)``, or ``(None, True)`` when the abort won. The agent loop
+    awaits a tool call directly rather than running it as a task it can cancel
+    (``misaka/agent/agent_loop.py``), so a tool that only checks its signal between steps
+    cannot be interrupted *during* one: a single vendor call with a sixty-second ceiling
+    is a minute of a session that will not answer Ctrl-C, and five pages through such a
+    backend is five. A tool whose work is one long await races it instead of polling.
+
+    Nothing is left running: the losing side is cancelled and reaped before this returns.
+    """
+    task = asyncio.ensure_future(work)
+    async with abort_race(signal) as aborted:
+        if aborted is None:
+            return await task, False
+        done, _ = await asyncio.wait({task, aborted}, return_when=asyncio.FIRST_COMPLETED)
+        if task in done:
+            return task.result(), False
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    return None, True
+
+
 def _string_arg(value: object) -> str | None:
     if isinstance(value, str):
         return value

@@ -175,7 +175,11 @@ def save_page(cwd: str | None, stem: str, provenance: dict[str, Any], text: str)
         # bytes being written, so two fetches can legitimately target it at once, and a
         # reader must never meet a half-written provenance header.
         os.replace(staging, path)
-    except OSError as error:
+    except (OSError, UnicodeError) as error:
+        # UnicodeError as well as OSError: a vendor's JSON can legitimately carry a lone
+        # surrogate (json.loads accepts an unpaired \\ud83d), and writing it raises
+        # UnicodeEncodeError, which is not an OSError. Losing the evidence file is the
+        # documented cost of a failed write; losing the whole extraction is not.
         logger.debug("No evidence file for %s: %s", relative, error)
         _discard(staging)
         return None

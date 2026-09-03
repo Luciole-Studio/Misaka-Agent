@@ -220,8 +220,9 @@ class FirecrawlWebSearchProvider(WebSearchProvider):
                 return {
                     "success": False,
                     "error": (
-                        "FIRECRAWL_API_KEY environment variable not set. "
-                        "Get your API key at https://firecrawl.dev"
+                        "FIRECRAWL_API_KEY is not set, and neither is FIRECRAWL_API_URL. "
+                        "Get a cloud key at https://firecrawl.dev, or point FIRECRAWL_API_URL at a "
+                    "self-hosted instance."
                     ),
                 }
 
@@ -302,8 +303,9 @@ class FirecrawlWebSearchProvider(WebSearchProvider):
             return [
                 _failed(
                     url,
-                    "FIRECRAWL_API_KEY environment variable not set. "
-                    "Get your API key at https://firecrawl.dev",
+                    "FIRECRAWL_API_KEY is not set, and neither is FIRECRAWL_API_URL. "
+                    "Get a cloud key at https://firecrawl.dev, or point FIRECRAWL_API_URL at a "
+                    "self-hosted instance.",
                 )
                 for url in urls
             ]

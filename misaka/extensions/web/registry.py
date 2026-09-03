@@ -150,10 +150,21 @@ def ensure_backends_registered() -> None:
     with _lock:
         if _builtins_registered:
             return
-        _builtins_registered = True
     from misaka.extensions.web.backends import register_builtin_providers
 
-    register_builtin_providers()
+    try:
+        register_builtin_providers()
+    except Exception as exc:  # noqa: BLE001 - a broken backend must not cost the others
+        # Warning, not debug, and the flag stays down. Hermes' equivalent
+        # (``tools/web_tools.py:826-836``) is non-fatal for the same reason: an import
+        # that breaks halfway would otherwise leave the registry permanently
+        # half-populated, and the user would meet "no provider configured" for the rest
+        # of the session with nothing saying why. Registration skips names already
+        # present, so the retry this allows is free.
+        logger.warning("web backend registration failed: %s", exc)
+        return
+    with _lock:
+        _builtins_registered = True
 
 
 def reset_for_tests() -> None:
@@ -494,4 +505,10 @@ def web_search_available() -> bool:
     # backend_name() the probe order is irrelevant.
     if any(is_backend_available(backend) for backend in _BUILTIN_BACKENDS):
         return True
-    return provider_is_ready(active_search_provider())
+    # Both capabilities, as in Hermes (``tools/web_tools.py:1562-1566``). This one gate
+    # registers web_search AND web_extract, so an install whose only ready provider
+    # extracts would otherwise lose both tools rather than the one it cannot use -- and
+    # the one it can use is the one it configured.
+    return provider_is_ready(active_search_provider()) or provider_is_ready(
+        active_extract_provider()
+    )

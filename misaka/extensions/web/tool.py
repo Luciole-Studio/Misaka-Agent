@@ -25,6 +25,7 @@ import logging
 from typing import Any
 
 from misaka.core.extensions.types import ToolDefinition
+from misaka.core.tools._common import run_with_abort
 from misaka.core.tools._web.single_flight import single_flight
 from misaka.extensions.web import cache
 from misaka.extensions.web.config import redact_secrets
@@ -187,8 +188,10 @@ async def web_search_tool(query: str, limit: int = 5, *, signal: Any = None) -> 
 
     try:
         # Hermes checks its interrupt flag here, at the top of the tool, before any
-        # config or network work. MISAKA's equivalent is the caller's abort signal;
-        # cancellation also propagates through every ``await`` below on its own.
+        # config or network work. MISAKA's equivalent is the caller's abort signal. The
+        # check is not enough on its own -- the agent loop awaits this call rather than
+        # running it as a task it can cancel -- so the dispatch below is raced against
+        # the same signal.
         if signal_aborted(signal):
             return tool_error("Interrupted", success=False)
 
@@ -232,9 +235,12 @@ async def web_search_tool(query: str, limit: int = 5, *, signal: Any = None) -> 
 
             response_data = cache.search_memo.lookup(name, query, limit)
             if response_data is None:
-                response_data = await single_flight(
-                    cache.flight_key(name, query, limit), _paid_search
+                response_data, aborted = await run_with_abort(
+                    single_flight(cache.flight_key(name, query, limit), _paid_search),
+                    signal,
                 )
+                if aborted:
+                    return tool_error("Interrupted", success=False)
         response_data = _bound_error_field(
             _redacted(cache.slice_search_response(response_data, limit))
         )

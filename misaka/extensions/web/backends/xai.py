@@ -289,9 +289,9 @@ class XAIWebSearchProvider(WebSearchProvider):
     def supports_extract(self) -> bool:
         """No extract capability -- Grok searches, it does not hand back page content.
 
-        MISAKA's ABC does not model extraction yet (Hermes' does, and the port note in
-        ``provider.py`` says what adding it back costs). Declaring it now is free and
-        keeps this file honest the day the flag arrives.
+        Grok answers with an index's results, not with a page it rendered; there is
+        nothing here to extract a URL's text with. Hermes' xai provider says the same
+        (``plugins/web/xai/provider.py:213``).
         """
         return False
 

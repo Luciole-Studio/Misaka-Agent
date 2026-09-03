@@ -47,9 +47,14 @@ import re
 from typing import Any
 
 from misaka.core.extensions.types import ToolDefinition
-from misaka.core.tools._common import abort_race
+from misaka.core.tools._common import run_with_abort
 from misaka.core.tools._web.bounded import UnsafeUrlError, vet_public_url
-from misaka.core.tools._web.evidence import frontmatter_line_count, page_stem, save_page
+from misaka.core.tools._web.evidence import (
+    citable_url,
+    frontmatter_line_count,
+    page_stem,
+    save_page,
+)
 from misaka.core.tools._web.screening import screen_url
 from misaka.extensions.web import cache
 from misaka.extensions.web.config import redact_secrets, web_config
@@ -99,6 +104,15 @@ MAX_URLS = 5
 # The ceiling the whole rendered document has to fit under, matching the number Hermes
 # carries as ``max_result_size_chars`` on both web tools.
 MAX_RESULT_SIZE_CHARS = 100_000
+
+# Bounds on the two fields a vendor writes that the per-page budget does not govern.
+# An ``error`` is whatever the endpoint felt like sending -- an HTML rate-limit page,
+# a proxy's error document -- and a ``title`` is page-written; five unbounded ones
+# would carry the document past the ceiling that the content budget alone cannot pull
+# it back under. Same number Hermes bounds a tool error at.
+_MAX_ENTRY_ERROR_CHARS = 2048
+_MAX_ENTRY_TITLE_CHARS = 500
+_ELLIPSIS = "… [truncated]"
 
 
 def extract_url(value: Any) -> str | None:
@@ -235,7 +249,9 @@ def _invalid_entry(index: int) -> dict[str, Any]:
     }
 
 
-def _store_page(cwd: str | None, entry: dict[str, Any], clean: str, backend: str) -> tuple[str | None, int]:
+def _store_page(
+    cwd: str | None, entry: dict[str, Any], clean: str, backend: str
+) -> tuple[str | None, int]:
     """Write one extracted page into the workspace; return ``(path, frontmatter_lines)``.
 
     The same writer ``web_fetch`` uses, so a page reached either way is one kind of
@@ -244,22 +260,32 @@ def _store_page(cwd: str | None, entry: dict[str, Any], clean: str, backend: str
     that check reads. Best-effort: a session with no workspace, or a full disk, costs the
     evidence file and not the extraction.
     """
+    try:
+        body = clean.encode()
+    except UnicodeError as error:
+        # Same failure the writer guards against, one step earlier: the digest and the
+        # filename both encode. Best-effort means best-effort on every line of the path.
+        logger.debug("No evidence file for %s: %s", entry.get("url", ""), error)
+        return None, 0
     url = entry.get("url", "")
     metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
-    final = metadata.get("sourceURL")
+    # Query-stripped, for the reason web_fetch and download_file strip it: the address a
+    # vendor says it ended on is the server's choice and is commonly presigned, and this
+    # header is written to the workspace and registered as an artifact.
+    final = citable_url(metadata.get("sourceURL") or url)
     # The vendor that actually answered, not the one that was chosen. A rescued batch was
     # served by a ring member, and the ring says which in ``served_by``; recording the
     # chosen backend there would put a name on this page that never fetched it.
     served_by = metadata.get("served_by") or backend
     provenance = {
         "source_url": url,
-        "final_url": final or url,
+        "final_url": final,
         "provider": served_by,
-        "text_sha256": hashlib.sha256(clean.encode()).hexdigest(),
+        "text_sha256": hashlib.sha256(body).hexdigest(),
         "title": entry.get("title", ""),
     }
     saved = save_page(
-        cwd, page_stem(url, str(provenance["final_url"]), clean.encode()), provenance, clean
+        cwd, page_stem(url, str(provenance["final_url"]), body), provenance, clean
     )
     return saved, frontmatter_line_count(provenance)
 
@@ -342,7 +368,9 @@ async def web_extract_tool(
 
             to_fetch: list[tuple[int, str]] = []
             for index, url in vetted:
-                hit = cache.extract_cache_get(url, format=format, provider=provider.name)
+                hit = await asyncio.to_thread(
+                    cache.extract_cache_get, url, format=format, provider=provider.name
+                )
                 if hit is not None:
                     entries[index] = hit
                 else:
@@ -386,7 +414,8 @@ async def web_extract_tool(
                             continue
                         content = entry.get("raw_content") or entry.get("content") or ""
                         if content:
-                            cache.extract_cache_put(
+                            await asyncio.to_thread(
+                                cache.extract_cache_put,
                                 url,
                                 content,
                                 title=entry.get("title", ""),
@@ -395,7 +424,7 @@ async def web_extract_tool(
                             )
 
         results_in_order = [entries.get(index, _invalid_entry(index)) for index in range(len(items))]
-        return _render(results_in_order, char_limit, cwd, backend_name)
+        return await _render(results_in_order, char_limit, cwd, backend_name)
 
     except Exception as exc:  # noqa: BLE001 - an extraction failure is a result, not a crash
         error_msg = f"Error extracting content: {exc!s}"
@@ -414,16 +443,36 @@ async def _run_extract(
     minutes of a session that will not answer Ctrl-C, which is why this one is raced
     rather than polled.
     """
-    call = asyncio.ensure_future(dispatch_extract(provider, urls, format=format))
-    async with abort_race(signal) as aborted:
-        if aborted is None:
-            return await call
-        done, _ = await asyncio.wait({call, aborted}, return_when=asyncio.FIRST_COMPLETED)
-        if call in done:
-            return call.result()
-    call.cancel()
-    await asyncio.gather(call, return_exceptions=True)
-    return None, False
+    outcome, aborted = await run_with_abort(
+        dispatch_extract(provider, urls, format=format), signal
+    )
+    return (None, False) if aborted else outcome
+
+
+def _capped(clean: str) -> str:
+    """One page's text, bounded before anything stores or truncates it.
+
+    Hermes' ``MAX_STORED_TEXT_CHARS`` (``tools/web_tools.py:637-644``), with its reason
+    intact: some backends answer a long page with multiple megabytes of markdown, and
+    without a ceiling every extract writes all of it to the workspace. The model never
+    sees more than its per-page budget either way, so the cap costs it nothing; the marker
+    is there so a reader of the file knows it is not the literal complete page.
+
+    Capped before the digest rather than after, so ``text_sha256`` describes the bytes
+    that are actually on disk -- which is what ``research/ledger.py`` re-hashes.
+    """
+    if len(clean) <= cache.MAX_STORED_TEXT_CHARS:
+        return clean
+    return clean[: cache.MAX_STORED_TEXT_CHARS] + (
+        f"\n\n[... stored copy truncated at {cache.MAX_STORED_TEXT_CHARS:,} chars "
+        f"of {len(clean):,}; re-extract a more specific URL for the rest ...]"
+    )
+
+
+def _bounded(value: object, limit: int) -> str:
+    """A vendor-written string cut to *limit*, marked when it was."""
+    text = str(value or "")
+    return text if len(text) <= limit else text[:limit] + _ELLIPSIS
 
 
 def _prepare(
@@ -442,7 +491,7 @@ def _prepare(
         raw = entry.get("raw_content") or entry.get("content") or ""
         if not raw:
             continue
-        clean = convert_base64_images_to_links(raw)
+        clean = _capped(convert_base64_images_to_links(raw))
         saved, frontmatter_lines = _store_page(cwd, entry, clean, backend)
         prepared[index] = (clean, saved, frontmatter_lines)
     return prepared
@@ -456,11 +505,12 @@ def _trim(
     """Hermes' minimal per-entry shape, with the page cut to *per_page* characters."""
     trimmed: list[dict[str, Any]] = []
     for index, entry in enumerate(results):
+        error = entry.get("error")
         out: dict[str, Any] = {
             "url": entry.get("url", ""),
-            "title": entry.get("title", ""),
+            "title": _bounded(entry.get("title"), _MAX_ENTRY_TITLE_CHARS),
             "content": entry.get("content", ""),
-            "error": entry.get("error"),
+            "error": _bounded(error, _MAX_ENTRY_ERROR_CHARS) if error else error,
         }
         if "blocked_by_policy" in entry:
             out["blocked_by_policy"] = entry["blocked_by_policy"]
@@ -477,7 +527,7 @@ def _trim(
     return trimmed
 
 
-def _render(
+async def _render(
     results: list[dict[str, Any]], char_limit: int | None, cwd: str | None, backend: str
 ) -> str:
     """Store, truncate and serialise, shrinking the per-page budget until it all fits.
@@ -487,7 +537,9 @@ def _render(
     Two or three passes over at most five pages costs nothing measurable, and every pass
     is deterministic.
     """
-    prepared = _prepare(results, cwd, backend)
+    # Off the loop: storing five pages is five file writes plus their digests, and the
+    # cache's own index lock (cache.py) exists precisely because this runs on a thread.
+    prepared = await asyncio.to_thread(_prepare, results, cwd, backend)
     limit = char_limit if char_limit is not None else extract_char_limit()
     try:
         limit = max(_MIN_CHAR_LIMIT, min(int(limit), _MAX_CHAR_LIMIT))
