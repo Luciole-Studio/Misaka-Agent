@@ -259,6 +259,21 @@ def isApiKeyLoginProvider(
     return providerId not in oauthProviderIds
 
 
+def _spread_tool_result(raw: Any, is_error: bool) -> dict[str, Any]:
+    """pi interactive-mode.ts ``{ ...event.result, isError }`` for a result of either shape.
+
+    The agent loop hands the TUI an ``AgentToolResult`` -- a slotted dataclass -- and a
+    JavaScript spread has no Python spelling that accepts one: ``dict(result)`` raised
+    ``'AgentToolResult' object is not iterable`` on every tool call, and the notice went
+    to the screen as a bare error line. The three keys are the ones ``updateResult`` reads.
+    """
+    return {
+        "content": list(read_field(raw, "content", []) or []),
+        "details": read_field(raw, "details"),
+        "isError": is_error,
+    }
+
+
 def _is_unknown_model(model: Any) -> bool:
     return (
         model is not None
@@ -4625,9 +4640,7 @@ class InteractiveMode:
         if event_type == "tool_execution_update":
             component = self._toolComponentsById.get(str(read_field(event, "toolCallId", "")))
             if component is not None:
-                partial = dict(read_field(event, "partialResult", {}) or {})
-                partial["isError"] = False
-                component.updateResult(partial, True)
+                component.updateResult(_spread_tool_result(read_field(event, "partialResult"), False), True)
                 self.footer.invalidate()
                 self._request_render()
             return
@@ -4635,9 +4648,9 @@ class InteractiveMode:
             tool_call_id = str(read_field(event, "toolCallId", ""))
             component = self._toolComponentsById.get(tool_call_id)
             if component is not None:
-                result = dict(read_field(event, "result", {}) or {})
-                result["isError"] = bool(read_field(event, "isError", False))
-                component.updateResult(result)
+                component.updateResult(
+                    _spread_tool_result(read_field(event, "result"), bool(read_field(event, "isError", False)))
+                )
                 self._toolComponentsById.pop(tool_call_id, None)
                 self.footer.invalidate()
                 self._request_render()
