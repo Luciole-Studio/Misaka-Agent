@@ -8,9 +8,18 @@ so both halves live in one JSON document, ``~/.misaka/web.json``:
     {
       "backend": "tavily",            // shared fallback selection
       "search_backend": "searxng",    // per-capability override, wins over `backend`
+      "extract_backend": "firecrawl", // the other capability; searxng cannot render a page
       "keyless_fallback": true,       // the no-key vendor ring (default on)
       "keyless_rescue": true,         // one-shot ring rescue for a failed backend
       "provider_tier": {"exa": "free"},
+      "cache_enabled": true,          // the search memo and the extract disk cache
+      "cache_ttl_minutes": 20,
+      "cache_exempt_hosts": ["staging.example"],  // public DNS, but must always be live
+      "extract_char_limit": 15000,    // per-page budget web_extract sends the model
+      "allow_private_urls": false,    // let the web tools reach private addresses
+      "website_blocklist": {"enabled": true, "domains": ["ads.example"],
+                            "shared_files": ["blocked.txt"]},
+      "xai": {"model": "grok-build-0.1", "excluded_domains": ["example.com"]},
       "env": {"TAVILY_API_KEY": "tvly-..."}
     }
 
