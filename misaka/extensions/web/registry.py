@@ -13,17 +13,15 @@ extract). MISAKA has one process-wide set of backends and no extract capability,
 dimensions are gone; everything else -- the preference order, the "explicit config wins
 even when unavailable" rule, the last-resort keyless walk -- is carried over as it stands.
 
-Two names in Hermes' ladders are absent from the tables below rather than merely
-unimplemented:
+One name in Hermes' ladders is absent from the tables below rather than merely
+unimplemented: the Nous managed tool-gateway (``NOUS_MANAGED_PROVIDER``,
+``_is_tool_gateway_ready``, the ``firecrawl`` gateway client) is Hermes' subscription
+product, and there is nothing to point it at.
 
-* ``xai`` sits in its ``_LEGACY_WEB_BACKENDS`` (though not in its preference walk) and is
-  probed through ``has_xai_credentials()`` -- an OAuth token store with refresh, which
-  MISAKA does not have. Its results are also model-generated rather than index-backed,
-  which Hermes' own docs flag as a different trust model. Adding it means adding the
-  credential layer first.
-* the Nous managed tool-gateway (``NOUS_MANAGED_PROVIDER``, ``_is_tool_gateway_ready``,
-  the ``firecrawl`` gateway client) is Hermes' subscription product. There is nothing to
-  point it at.
+``xai`` is present, and -- as in Hermes -- is a selectable backend that the preference
+walk never reaches on its own. Hermes keeps it out of ``_LEGACY_PREFERENCE`` because its
+results are model-generated rather than index-backed, a different trust model that should
+be chosen deliberately rather than inherited from an availability scan.
 """
 
 from __future__ import annotations
@@ -50,7 +48,17 @@ _builtins_registered = False
 # and is resolved through its own ``is_available()`` instead. Kept as one named constant
 # so the whitelist early-returns and the availability chokepoint stay in sync.
 _BUILTIN_BACKENDS = frozenset(
-    {"parallel", "firecrawl", "tavily", "exa", "searxng", "brave-free", "ddgs", "keenable"}
+    {
+        "parallel",
+        "firecrawl",
+        "tavily",
+        "exa",
+        "searxng",
+        "brave-free",
+        "ddgs",
+        "keenable",
+        "xai",
+    }
 )
 
 # Legacy preference order -- preserves behaviour for users who set no backend config key
@@ -206,6 +214,14 @@ def is_backend_available(backend: str) -> bool:
         return has_env("BRAVE_SEARCH_API_KEY")
     if backend == "ddgs":
         return ddgs_package_importable()
+    if backend == "xai":
+        # Delegated rather than probed with ``has_env`` because the credential may be an
+        # OAuth grant in the auth store instead of ``XAI_API_KEY``; the provider's own
+        # probe reads both and is documented as taking no lock and touching no network,
+        # which is what makes it callable from here. Hermes delegates the same way, to
+        # ``has_xai_credentials()``.
+        provider = get_provider("xai")
+        return _is_available_safe(provider) if provider is not None else False
     return False
 
 
