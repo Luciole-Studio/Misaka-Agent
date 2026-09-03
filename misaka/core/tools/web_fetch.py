@@ -46,6 +46,7 @@ from misaka.core.tools._web.negative_cache import (
     skip_reason,
 )
 from misaka.core.tools._web.render_check import check_render
+from misaka.core.tools._web.screening import screen_url
 from misaka.core.tools._web.single_flight import single_flight
 from misaka.core.tools.download_file import DOWNLOAD_DIR_NAME
 from misaka.core.tools.path_utils import resolve_to_cwd
@@ -566,6 +567,15 @@ def create_web_fetch_tool_definition(
             # A bare host from a search snippet is the common shape; assuming https is
             # what the browser does, and vet_public_url still judges the result.
             url = f"https://{url}"
+
+        # Credential and policy screening comes before everything else, routing included:
+        # a refusal must not cost a DNS lookup, and the academic table must rewrite the
+        # normalised address rather than whatever IRI the model typed. `screening.url` is
+        # the one dialled from here on.
+        screened = screen_url(url)
+        if not screened.allowed:
+            return _result(_Outcome(screened.refusal, {"url": url, "refused": True}))
+        url = screened.url
 
         # Routing comes first, before the negative cache and before single flight, so
         # that all three agree on one address. A publisher landing page, a PubMed record

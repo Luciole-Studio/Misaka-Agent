@@ -7,6 +7,14 @@ are inseparable: vetting only the first URL is defeated by a 302 to a metadata
 endpoint, vetting a *name* and then letting the client resolve it again is
 defeated by a resolver that answers twice, and an unbounded read turns any URL
 into a memory bomb.
+
+One operator escape hatch, ported from Hermes' ``security.allow_private_urls``:
+:func:`misaka.core.tools._web.url_safety.allow_private_urls` opens the private
+address classes for installs whose DNS legitimately answers with them -- an
+OpenWrt router, a corporate resolver, a VPN on 100.64/10. It opens exactly those:
+the cloud metadata hostnames and addresses stay refused whatever it is set to,
+because no agent fetch has ever had a reason to read instance credentials, and
+the address is still pinned so the opt-out cannot become a rebinding hole.
 """
 
 from __future__ import annotations
@@ -20,6 +28,12 @@ from contextlib import asynccontextmanager
 
 import httpx
 
+from misaka.core.tools._web.url_safety import (
+    CGNAT_NETWORK,
+    allow_private_urls,
+    always_blocked_address,
+    always_blocked_host,
+)
 from misaka.utils.values import signal_aborted
 
 #: Bytes of one response body a caller keeps by default. Callers that stream to
@@ -54,7 +68,7 @@ class UnsafeUrlError(ValueError):
     """A URL, or a redirect hop, that must not be fetched."""
 
 
-def _is_public_address(raw: str) -> bool:
+def _is_public_address(raw: str, *, allow_private: bool = False) -> bool:
     """Whether one resolved address may be dialled.
 
     ``is_global`` alone is not the test, in either direction: CPython reports
@@ -62,8 +76,19 @@ def _is_public_address(raw: str) -> bool:
     deprecated IPv6 site-local (``fec0::/10``, an intranet range), so every
     non-public class is named explicitly rather than assumed to be covered.
     ``is_site_local`` exists only on IPv6 addresses, hence the ``getattr``.
+    CGNAT (``100.64.0.0/10``) is named too: CPython answers False to both
+    ``is_private`` and ``is_global`` for it, so neither test alone catches it.
+
+    *allow_private* is the operator opt-out. It drops the address-class test and
+    nothing else: :func:`always_blocked_address` still refuses the metadata
+    endpoints and the whole link-local range underneath it, which is the floor
+    Hermes keeps closed for the same reason (``tools/url_safety.py:479-494``).
     """
     address = ipaddress.ip_address(raw.split("%", 1)[0])
+    if always_blocked_address(address):
+        return False
+    if allow_private:
+        return True
     return address.is_global and not (
         address.is_multicast
         or address.is_reserved
@@ -71,6 +96,7 @@ def _is_public_address(raw: str) -> bool:
         or address.is_link_local
         or address.is_private
         or address.is_unspecified
+        or address in CGNAT_NETWORK
         or getattr(address, "is_site_local", False)
     )
 
@@ -117,7 +143,10 @@ async def vet_public_url(url: str) -> tuple[str, ...]:
         raise UnsafeUrlError("URL must use http or https")
     if parsed.username or parsed.password:
         raise UnsafeUrlError("URL credentials are not allowed")
-    if host == "localhost" or host.endswith(".localhost"):
+    if always_blocked_host(host):
+        raise UnsafeUrlError("URL targets a cloud metadata endpoint")
+    allow_private = allow_private_urls()
+    if not allow_private and (host == "localhost" or host.endswith(".localhost")):
         raise UnsafeUrlError("URL resolves to a local address")
     try:
         addresses = await _resolve_host(host, port)
@@ -126,7 +155,7 @@ async def vet_public_url(url: str) -> tuple[str, ...]:
     if not addresses:
         raise UnsafeUrlError("host did not resolve")
     for raw in addresses:
-        if not _is_public_address(raw):
+        if not _is_public_address(raw, allow_private=allow_private):
             raise UnsafeUrlError("URL resolves to a local or private address")
     return _ipv4_first(addresses)
 

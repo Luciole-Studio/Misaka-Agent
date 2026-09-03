@@ -40,6 +40,7 @@ from misaka.agent.types import AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.tools._web.bounded import UnsafeUrlError, open_checked_stream
+from misaka.core.tools._web.screening import screen_url
 from misaka.core.tools.path_utils import resolve_to_cwd
 from misaka.documents import index as corpus
 from misaka.platform import budget
@@ -467,6 +468,14 @@ def create_download_file_tool_definition(
             return _result("download_file needs a URL. Call it again with the http(s) address of the file.")
         if signal_aborted(signal):
             raise RuntimeError("Operation aborted")
+
+        # A download writes the URL into the file's provenance sidecar, so a credential in
+        # the address would outlive the request on disk. Screened before anything resolves
+        # it, on the same terms as web_fetch.
+        screened = screen_url(url)
+        if not screened.allowed:
+            return _result(screened.refusal)
+        url = screened.url
 
         directory = resolve_to_cwd(DOWNLOAD_DIR_NAME, cwd)
         try:
