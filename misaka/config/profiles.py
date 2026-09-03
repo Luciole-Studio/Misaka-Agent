@@ -7,6 +7,7 @@ source tree. Built-in subagent types ship with the package
 
 ``<role>`` is a path relative to profiles/, e.g. ``last_order`` or ``sisters/10032``.
 """
+import json
 import os
 
 
@@ -26,6 +27,44 @@ def is_last_order(profile_dir):
 def config_yaml(profile_dir):
     """Return the path of the role's config.yaml (MCP server definitions and the like)."""
     return os.path.join(profile_dir, "config.yaml")
+
+
+def persist_role_default_model(profile_dir, model_id):
+    """Record a newly chosen default model for the roles that start on their own pin.
+
+    ``misaka chat`` starts Last Order on the model pinned in her ``config.json``
+    (``config.product._models``), which is read *ahead* of ``settings.json``. So a default
+    set in her session -- Ctrl+S in the model selector, or adopting a provider's default
+    right after ``/login`` -- has to land there too, or the next launch quietly ignores it
+    and she comes back on the old model.
+
+    Every other role starts on the global default the session has already written to
+    settings.json, so nothing more is owed. A Sister's ``config.json`` model is
+    deliberately left alone: that one is what her *task cards* run
+    (``network.sister_runtime``), and changing the model of her chat must not silently
+    change the model her unattended work runs on.
+    """
+    if not profile_dir or not model_id or not is_last_order(profile_dir):
+        return False
+    path = os.path.join(profile_dir, "config.json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    if data.get("model") == model_id:
+        return False
+    data["model"] = model_id
+    try:
+        os.makedirs(profile_dir, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+    except OSError:
+        # The pin is a convenience, not the record: settings.json already has the default.
+        return False
+    return True
 
 
 SHARED_SOUL_TEMPLATE = """# MISAKA Network · Shared identity

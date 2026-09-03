@@ -3964,6 +3964,7 @@ class InteractiveMode:
                         # the one interactive path pi persists (interactive-mode.ts:5665
                         # `{ persist: true }`).
                         await maybe_await(self.session.setModel(selected_model, persist=True))
+                        self._persist_role_default_model(selected_model)
                     except Exception as error:  # noqa: BLE001
                         selected_model = None
                         selection_error = (
@@ -5846,6 +5847,20 @@ class InteractiveMode:
         self.updateEditorBorderColor()
         self.showStatus(f"Thinking level: {level}")
 
+    def _persist_role_default_model(self, model: Any) -> None:
+        """MISAKA fork: also pin the new default where this role's launcher reads it.
+
+        ``misaka chat`` starts Last Order on the model pinned in her profile, which
+        ``config.product`` reads ahead of settings.json. Without this the selector would
+        report "Default model: X" and the next launch would come back on the old one.
+        """
+        from misaka.config import profiles
+
+        profiles.persist_role_default_model(
+            os.environ.get("MISAKA_PROFILE_DIR") or "",
+            str(read_field(model, "id", "") or ""),
+        )
+
     async def _handle_model_select(
         self,
         model: Any,
@@ -5855,6 +5870,8 @@ class InteractiveMode:
     ) -> None:
         try:
             await self.session.setModel(model, persist=persist)
+            if persist:
+                self._persist_role_default_model(model)
             await maybe_await(self.updateAvailableProviderCount())
             self.footer.invalidate()
             self.updateEditorBorderColor()
