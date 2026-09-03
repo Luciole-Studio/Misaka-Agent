@@ -4,7 +4,7 @@ import os
 import sys
 
 from misaka.cli import bootstrap
-from misaka.config import CFG, VERSION, current_config
+from misaka.config import CFG, VERSION, current_config, layout
 from misaka.core.documents import index as corpus
 from misaka.core.network import board as tail
 from misaka.core.platform import budget
@@ -672,6 +672,9 @@ def main(argv=None):
     if it uses it; ``argv`` defaults to the process arguments so tests can drive it directly."""
     bootstrap.install()
     argv = list(sys.argv[1:] if argv is None else argv)
+    # The profiles tree is the half a person edits, and nothing else creates it:
+    # see config.layout. Idempotent, never raises.
+    layout.ensure()
     if not argv:
         # No arguments: open the panel in a terminal, plain chat when piped.
         argv = ["panel"] if sys.stdin.isatty() and sys.stdout.isatty() else ["chat"]

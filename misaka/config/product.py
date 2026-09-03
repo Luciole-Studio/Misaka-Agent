@@ -12,7 +12,9 @@ import os
 
 from misaka.config.engine import get_agent_dir
 
-ROLES_ROOT = os.path.expanduser("~/.misaka/profiles")
+# The one path in ~/.misaka that had no override, which is also the one a test run
+# reaches by accident: every sibling below is redirectable, so this is too.
+ROLES_ROOT = os.path.expanduser(os.environ.get("MISAKA_PROFILES") or "~/.misaka/profiles")
 
 
 def _json(path):
