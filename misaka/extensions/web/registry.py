@@ -85,6 +85,13 @@ _LEGACY_PREFERENCE = (
     "ddgs",
 )
 
+# The shared name when nothing decided one. Two branches of the ladder end here -- a
+# configured section whose shared key is blank, and a walk that found nothing -- and they
+# have to agree, or the answer would depend on which one ran. Firecrawl for backward
+# compatibility, as in Hermes, and it serves both capabilities, which is what a blank
+# shared key needs it to do.
+_DEFAULT_BACKEND = "firecrawl"
+
 
 def register_provider(provider: WebSearchProvider) -> None:
     """Register a web search provider.
@@ -243,6 +250,25 @@ def is_backend_available(backend: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def selection_stored() -> bool:
+    """Whether the user ever named a backend, so an unknown name is their typo.
+
+    All three keys count. An install that set only ``extract_backend`` has still made a
+    deliberate choice, and must get the strict "you named a backend that does not exist"
+    error rather than being quietly walked onto whatever else is registered.
+
+    Hermes' ``selection_exists("web")`` (``tools/tool_backend_helpers.py:381-402``),
+    minus the two signals that have no counterpart here: the ``use_gateway`` legacy key
+    and the ``nous`` managed row, both of which belong to the subscription product this
+    port does not carry.
+    """
+    return bool(
+        config_name("backend")
+        or config_name("search_backend")
+        or config_name("extract_backend")
+    )
+
+
 def backend_name() -> str:
     """Determine the shared backend name.
 
@@ -251,10 +277,26 @@ def backend_name() -> str:
     through the credential ladder. The ladder runs ONLY when nothing was ever stored:
     explicit credentials first (a deliberate setup is not pre-empted), free tiers behind
     them, externally-registered providers after that, and the keyless ring last of all.
+
+    "Nothing was ever stored" is :func:`selection_stored`, all three keys -- Hermes'
+    ``selection_exists("web")`` branch (``tools/web_tools.py:246-250``). An install that
+    named only a per-capability backend HAS configured its web section, so the shared
+    name it left blank falls to the plain default instead of to whatever credential the
+    environment happens to hold. That branch is what keeps a split config working: a
+    ``search_backend: searxng`` install with no extract half asks this function for the
+    extract name, and the ladder would answer "searxng" off ``SEARXNG_URL`` -- a
+    search-only backend, so ``web_extract`` would refuse every call for want of exactly
+    the renderer the default names.
     """
     configured = config_name("backend")
     if configured:
         return configured
+
+    if selection_stored():
+        # A per-capability key is set but the shared name is empty: configured, so the
+        # autodetect ladder is not this install's answer. Same value the walk below ends
+        # on, reached without consulting the environment.
+        return _DEFAULT_BACKEND
 
     for candidate, available in (
         ("tavily", has_env("TAVILY_API_KEY")),
@@ -296,7 +338,7 @@ def backend_name() -> str:
             except Exception as exc:  # noqa: BLE001 - skip a broken provider
                 logger.debug("provider %r.is_keyless_available() raised: %s", name, exc)
 
-    return "firecrawl"  # default (backward compat)
+    return _DEFAULT_BACKEND  # default (backward compat)
 
 
 def search_backend_name() -> str:
@@ -313,20 +355,6 @@ def extract_backend_name() -> str:
     that can. Strict in the same way its twin is: a stored name is returned unprobed.
     """
     return config_name("extract_backend") or backend_name()
-
-
-def selection_stored() -> bool:
-    """Whether the user ever named a backend, so an unknown name is their typo.
-
-    All three keys count. An install that set only ``extract_backend`` has still made a
-    deliberate choice, and must get the strict "you named a backend that does not exist"
-    error rather than being quietly walked onto whatever else is registered.
-    """
-    return bool(
-        config_name("backend")
-        or config_name("search_backend")
-        or config_name("extract_backend")
-    )
 
 
 # ---------------------------------------------------------------------------

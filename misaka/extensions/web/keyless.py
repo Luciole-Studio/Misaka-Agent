@@ -632,12 +632,23 @@ def _vendor_pinned(name: str) -> bool:
     """True when config explicitly routes web traffic to *name*.
 
     A pinned vendor starts every keyless request (rotation off); the ring is only walked
-    past it on throttle. Pin signals: ``backend`` / ``search_backend`` naming the vendor,
-    or a free-tier pin in ``provider_tier``.
+    past it on throttle. Pin signals: ``backend`` / ``search_backend`` /
+    ``extract_backend`` naming the vendor, or a free-tier pin in ``provider_tier``.
+
+    All three name keys count, as in Hermes, and one function answers for both
+    capabilities because :func:`ring_order` is shared: an install that named a vendor
+    under only ``extract_backend`` has still chosen it, exactly as
+    :func:`misaka.extensions.web.registry.selection_stored` reads that key. The
+    cross-capability reach is the point rather than a side effect -- a pin is a statement
+    about which free tier this install is willing to spend, and rotating search through
+    three others while extract sits on the named one would spend the three it declined.
     """
     if provider_tier(name) == "free":
         return True
-    return any(config_name(key) == name for key in ("backend", "search_backend"))
+    return any(
+        config_name(key) == name
+        for key in ("backend", "search_backend", "extract_backend")
+    )
 
 
 def ring_order(name: str) -> list[str]:
