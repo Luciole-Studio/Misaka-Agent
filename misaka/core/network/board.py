@@ -13,6 +13,17 @@ def _c(kind, text):
     return text
 
 
+def board_for(cwd=None):
+    """The board of the project folder ``cwd`` is in, as one text: what ``/board`` shows in a session."""
+    from contextlib import closing
+
+    from misaka.config import CFG
+    from misaka.core.platform import tasks as db
+
+    with closing(db.connect(CFG["db"])) as con:
+        return board_text(con, db.canonical_workspace(cwd))
+
+
 def board_text(con, workspace=None):
     """Board text shared by the /board slash command and the CLI; returned, not printed.
 

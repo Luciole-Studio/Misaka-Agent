@@ -3241,21 +3241,11 @@ class InteractiveMode:
             return {"cancelled": True}
 
     async def handleBoardCommand(self) -> None:
-        # MISAKA: the task board of this project folder, read-only. A built-in like /clear:
-        # the board is a product feature, and a human's view of it belongs to the TUI.
-        from contextlib import closing
-
-        from misaka.config import CFG
+        # MISAKA: /board is a built-in like /clear; the board itself is core/network's.
         from misaka.core.network import board
-        from misaka.core.platform import tasks as db
 
         cwd = getattr(self.session.extensionRunner, "cwd", None)
-
-        def render() -> str:
-            with closing(db.connect(CFG["db"])) as con:
-                return board.board_text(con, db.canonical_workspace(cwd))
-
-        text = await asyncio.to_thread(render)  # sqlite stays off the loop
+        text = await asyncio.to_thread(board.board_for, cwd)  # sqlite stays off the loop
         self.showExtensionNotify(text or "(No task cards on the board.)", "info")
 
     async def handleClearCommand(self, notice: str = "✓ New session started") -> bool:
