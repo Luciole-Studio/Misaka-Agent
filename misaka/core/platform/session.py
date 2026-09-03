@@ -31,7 +31,7 @@ BOOKKEEPING_TOOLS = frozenset({
     "skills_list", "skill_view",
     # The read-only view of a research run (misaka.research.tools).
     "misaka_research_view",
-    # Inbox and sub-agent management (misaka.network.messages, .extensions.sisters.subagent),
+    # Inbox and sub-agent management (misaka.network.messages, misaka.core.subagent),
     # spelled as the management vocabulary minus ``Agent`` so the exclusion noted above is
     # something this set performs rather than something a comment promises.
     *BOOKKEEPING_MANAGEMENT_TOOLS,
@@ -227,7 +227,7 @@ async def _run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
             # One-shot worker sessions cannot outlive their event loop.  Keep
             # them open long enough for detached agents, their completion
             # notification, and the model's follow-up turn to settle.
-            from misaka.extensions.sisters.subagent import extension as subagent
+            from misaka.core.subagent import extension as subagent
 
             if not (
                 subagent.has_background_task_records()

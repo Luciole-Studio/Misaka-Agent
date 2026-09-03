@@ -78,7 +78,7 @@ REGISTRY: tuple[str, ...] = (
     "misaka.extensions.last_order.peek",
     "misaka.extensions.last_order.research",
     "misaka.extensions.last_order.roster_admin",
-    "misaka.extensions.sisters.subagent",
+    "misaka.core.subagent",
 )
 
 

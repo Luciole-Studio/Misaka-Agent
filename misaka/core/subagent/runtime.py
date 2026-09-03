@@ -1,6 +1,6 @@
 """Process-isolated runtime for the Claude Code-style sub-agent tools.
 
-The public tool adapter lives in :mod:`misaka.extensions.sisters.subagent`; this module
+The public tool adapter lives in :mod:`misaka.core.subagent`; this module
 owns task state, side-chain transcripts, continuation, notifications and git
 worktrees.  A child process runs exactly one turn at a time, then exits.  A
 later ``SendMessage`` opens the same transcript and therefore keeps the same
@@ -43,7 +43,7 @@ def _log_warning(message: str) -> None:
 
 from misaka.core.platform import processes as process_tree
 from misaka.core.platform.vocabulary import MANAGEMENT_TOOLS
-from misaka.extensions.sisters.subagent import agents as agent_roster
+from misaka.core.subagent import agents as agent_roster
 from misaka.utils import atomic
 from misaka.utils.values import read_field
 
@@ -1773,7 +1773,7 @@ class SubagentManager:
         hook_stop_epoch: int | None = None,
         expected_turn_id: str | None = None,
     ) -> None:
-        from misaka.extensions.sisters.subagent import hooks as subagent_hooks
+        from misaka.core.subagent import hooks as subagent_hooks
 
         request: Mapping[str, Any] = event
         request_file = event.get("requestFile")
@@ -2090,7 +2090,7 @@ class SubagentManager:
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "-m",
-            "misaka.extensions.sisters.subagent.child",
+            "misaka.core.subagent.child",
             *flags,
             cwd=task.cwd,
             env=env,
@@ -2353,7 +2353,7 @@ class SubagentManager:
 
             # This manager may itself live in a headless child.  Relay through
             # that child's JSONL broker until the request reaches the root UI.
-            from misaka.extensions.sisters.subagent import policy as subagent_policy
+            from misaka.core.subagent import policy as subagent_policy
 
             return await subagent_policy.request_permission(
                 {
@@ -2571,7 +2571,7 @@ class SubagentManager:
         ``runAgent``, so the parent's session rules and SDK/CLI rules survive.
         """
 
-        from misaka.extensions.sisters.subagent.policy import normalize_rule
+        from misaka.core.subagent.policy import normalize_rule
 
         layers: list[list[str]] = []
         if self.role_context.cli_tool_rules:

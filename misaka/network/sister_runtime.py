@@ -28,8 +28,8 @@ from misaka.core.platform import processes as process_tree
 from misaka.core.platform import tasks as db
 from misaka.core.session_manager import find_most_recent_session
 from misaka.core.skills import sandbox as skill_sandbox
-from misaka.extensions.sisters.subagent.agents import AgentDefinition
-from misaka.extensions.sisters.subagent.runtime import (
+from misaka.core.subagent.agents import AgentDefinition
+from misaka.core.subagent.runtime import (
     AgentTask,
     RoleContext,
     SubagentManager,
@@ -42,7 +42,7 @@ ACTIVE_BOARD_STATUSES = frozenset({"running", "review"})
 # `output`'s fallback tick. A run this process owns wakes it through `handle.done`; the poll
 # is only there for a card another process settles, so it is a backstop, not the mechanism.
 _OUTPUT_POLL_SECONDS = 1.0
-from misaka.extensions.sisters.subagent.child import (
+from misaka.core.subagent.child import (
     PROCESS_GROUP_IDENTITY,  # single source of truth for the wire constant
 )
 

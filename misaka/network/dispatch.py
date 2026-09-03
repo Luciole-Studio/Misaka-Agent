@@ -95,7 +95,7 @@ def _worker_identity():
     inside someone else's group, it would aim ``terminate_orphaned_group`` at that group.
     """
     from misaka.core.platform import processes as process_tree
-    from misaka.extensions.sisters.subagent.child import PROCESS_GROUP_IDENTITY
+    from misaka.core.subagent.child import PROCESS_GROUP_IDENTITY
     me = process_tree.identity(os.getpid())
     if not me:
         return None
@@ -110,7 +110,7 @@ def reconcile(con, cfg):
     import time as _time
 
     from misaka.core.platform import processes as process_tree
-    from misaka.extensions.sisters.subagent.child import PROCESS_GROUP_IDENTITY
+    from misaka.core.subagent.child import PROCESS_GROUP_IDENTITY
     from misaka.network.sister_runtime import _claimer_alive, _owner_alive
 
     now = int(_time.time())

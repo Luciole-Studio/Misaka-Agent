@@ -23,7 +23,7 @@ from typing import Any
 
 from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.platform.vocabulary import MANAGEMENT_TOOL_NAMES
-from misaka.extensions.sisters.subagent.hooks import (
+from misaka.core.subagent.hooks import (
     HOOK_DEFAULT_TIMEOUT,
     HOOK_DEFAULT_TIMEOUTS,
 )
@@ -1111,7 +1111,7 @@ class AgentPolicy:
     async def _execute_hook_with_outcome(
         self, hook: Mapping[str, Any], payload: Mapping[str, Any]
     ) -> tuple[dict[str, Any], bool]:
-        from misaka.extensions.sisters.subagent import hooks as subagent_hooks
+        from misaka.core.subagent import hooks as subagent_hooks
 
         async def execute() -> tuple[dict[str, Any], bool]:
             kind = str(hook.get("type") or "command").casefold()

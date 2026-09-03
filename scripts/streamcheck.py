@@ -60,10 +60,10 @@ STREAM_ALLOWED = {
     ("misaka/ui/tui/autocomplete.py", "create_subprocess_exec"): "whole-stream read",
     ("misaka/ui/tui/interactive/interactive_mode.py", "create_subprocess_exec"): "communicate() with timeout",
     ("misaka/ui/tui/interactive/components/extension_editor.py", "create_subprocess_exec"): "editor exit status only",
-    ("misaka/extensions/sisters/subagent/hooks.py", "create_subprocess_exec"): "communicate()",
-    ("misaka/extensions/sisters/subagent/hooks.py", "create_subprocess_shell"): "communicate()",
+    ("misaka/core/subagent/hooks.py", "create_subprocess_exec"): "communicate()",
+    ("misaka/core/subagent/hooks.py", "create_subprocess_shell"): "communicate()",
     ("misaka/core/web/backends/ddgs.py", "create_subprocess_exec"): "communicate()",
-    ("misaka/extensions/sisters/subagent/runtime.py", "create_subprocess_exec"): "git helper, communicate()",
+    ("misaka/core/subagent/runtime.py", "create_subprocess_exec"): "git helper, communicate()",
     # PENDING -- audit findings that will remove these entries:
     ("misaka/ai/utils/oauth/anthropic.py", "start_server"): "PENDING cross-cutting-01 (OAuth callback)",
     ("misaka/ai/utils/oauth/openai_codex.py", "start_server"): "PENDING cross-cutting-01 (OAuth callback)",

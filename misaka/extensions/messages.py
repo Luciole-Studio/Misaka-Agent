@@ -11,7 +11,7 @@ def activate(spec):
         return None
     route = None
     if can_delegate:
-        from misaka.extensions.sisters.subagent import extension as subagent
+        from misaka.core.subagent import extension as subagent
         route = subagent.route_to_children
     return partial(messages.register, sender=(spec.sender or spec.role.rsplit("/", 1)[-1]),
                    route=route, receive=spec.receive_messages)

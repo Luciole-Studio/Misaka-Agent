@@ -3,7 +3,7 @@
 As in pi, personality (SOUL.md, config.json) and skills/MCP (skills/, mcp/,
 config.yaml) are user data that share one role directory; nothing lives in the
 source tree. Built-in subagent types ship with the package
-(misaka/extensions/sisters/subagent/agents/) and can be overridden in ~/.misaka/agent/agents/.
+(misaka/core/subagent/agents/) and can be overridden in ~/.misaka/agent/agents/.
 
 ``<role>`` is a path relative to profiles/, e.g. ``last_order`` or ``sisters/10032``.
 """

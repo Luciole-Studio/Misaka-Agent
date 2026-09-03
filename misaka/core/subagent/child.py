@@ -331,9 +331,9 @@ async def amain() -> int:
 
     from misaka.agent.request_budget import install_turn_budget
     from misaka.core.platform import session as engine_session
-    from misaka.extensions.sisters.subagent import extension as subagent
-    from misaka.extensions.sisters.subagent import hooks as subagent_hooks
-    from misaka.extensions.sisters.subagent import policy as subagent_policy
+    from misaka.core.subagent import extension as subagent
+    from misaka.core.subagent import hooks as subagent_hooks
+    from misaka.core.subagent import policy as subagent_policy
 
     permission_waiters: dict[str, asyncio.Future[bool]] = {}
 
@@ -462,7 +462,7 @@ async def amain() -> int:
 
         from misaka.agent.agent import Agent, AgentOptions
         from misaka.agent.types import BeforeToolCallResult
-        from misaka.extensions.sisters.subagent.runtime import (
+        from misaka.core.subagent.runtime import (
             RoleContext,
             resolve_model_spec,
         )
