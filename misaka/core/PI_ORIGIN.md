@@ -27,8 +27,8 @@
 
 | 文件 | 职责 |
 |---|---|
-| `wiring.py` | 会话装配：`SessionSpec`；`TOOL_MODULES` + `tools_for`——只贡献工具的 core 模块走 pi 的 SDK 门 `customTools`（与内置工具同一张表，来源 `<sdk:>`），不进扩展清单；`PART_MODULES` + `parts_for`——还要被内核在时刻叫到的 core 模块，做成会话的 **part**（`part(spec)` 返回带 `tools` 与时刻方法的对象），工具同样走 `customTools`，时刻由内核经 `moments.py` 直接调用；`REGISTRY` + `build_extensions`——尚未迁成 part 的 core 模块，暂以 inline 扩展接入（C 计划逐个清空）；`bundled` 钩子由进程入口注入；`assemble` 把三者合成一个 `Assembly` 交给会话构造器 |
-| `moments.py` | 内核对 misaka 子系统的直接调用：`Moments` 持有会话的 parts，在 pi 内核标出的时刻（session_start/shutdown/compact/compact_failed、before_agent_start、agent_end、session_before_compact、context）先于 ExtensionRunner 叫它们，折叠规则与 runner 相同——对应 pi 内核自己在时刻里做事的写法（`_check_compaction` 那种直接调用），而不是把自己挂到 runner 上。接入点：`AgentSessionConfig.parts` ← `sdk`/`services` 的 `parts` 选项 ← `cli/engine.py` `parts=` ← `Assembly.parts`；改处都有 `# MISAKA fork:` |
+| `wiring.py` | 会话装配：`SessionSpec`；`TOOL_MODULES` + `tools_for`——只贡献工具的 core 模块走 pi 的 SDK 门 `customTools`（与内置工具同一张表，来源 `<sdk:>`），不进扩展清单；`PART_MODULES` + `parts_for`——还要被内核在时刻叫到的 core 模块，做成会话的 **part**（`part(spec)` 返回带 `tools`、`commands` 与时刻方法的对象），工具同样走 `customTools`，时刻由内核经 `moments.py` 直接调用，斜杠命令由内核的 `prompt()` 直接执行；`build_extensions`——只剩进程入口注入的捆绑扩展（`bundled`），core 一条都不贡献；`assemble` 返回**惰性**的 `Assembly`（第一次读才构造：worker 是先装配、后在环境窗口里写 `os.environ` 的，part 和当年的扩展工厂一样要在环境就位后再建） |
+| `moments.py` | 内核对 misaka 子系统的直接调用：`Moments` 持有会话的 parts，在 pi 内核标出的时刻（session_start/shutdown/compact/compact_failed、before_agent_start、agent_end、session_before_compact、tool_call/tool_result、input、context）先于 ExtensionRunner 叫它们，折叠规则与 runner 相同——对应 pi 内核自己在时刻里做事的写法（`_check_compaction` 那种直接调用），而不是把自己挂到 runner 上。part 在时刻之外要用的会话 API 也是 pi 现成的：`sendCustomMessage`/`sendUserMessage`（经 `Moments.send_message`/`send_user_message` 按 runner 的顺序调度）、`getActiveToolNames`、`registerCustomTools`/`refreshTools`（晚到的工具走 `customTools` 那扇门）。`CoreCommand` 是 part 的斜杠命令：`getSlashCommands` 以 source `core` 列出，`prompt()` 在扩展命令之前直接执行。接入点：`AgentSessionConfig.parts` ← `sdk`/`services` 的 `parts` 选项 ← `cli/engine.py` `parts=` ← `Assembly.parts`；改处都有 `# MISAKA fork:` |
 | `pi_manifest.py` `provider_display_names.py` `session_export.py` `settings_diagnostics.py` | 移植期加的小件 |
 | `mcp.py` | MCP 客户端与按角色的服务器配置（原 `extensions/mcp.py`） |
 
@@ -56,16 +56,16 @@
 
 ### 壳（`wiring/`）的约定
 
-原 `misaka/extensions/` 里的每个模块只是一个 `activate(spec)` 入口，真代码在别的包里。迁入时壳跟着体走，
-放在体包的 `wiring/` 子目录、**basename 不变**——`core/wiring.py` 用 basename 当描述符名，
-这样 `build_extensions` 产出的名单与迁移前逐字相同。体包里已有同名模块（`network/messages.py` 与壳 `messages.py`）
-是子目录存在的原因。自包含的（web、subagent、lcm、ally、ask_user）activate 留在包的 `__init__.py`。
+原 `misaka/extensions/` 里的每个模块只是一个入口，真代码在别的包里。迁入时壳跟着体走，
+放在体包的 `wiring/` 子目录、**basename 不变**。体包里已有同名模块（`network/messages.py` 与壳 `messages.py`）
+是子目录存在的原因。壳的入口是 `part(spec)`（只贡献工具的是 `register(harn)`，`harn` 是 `ToolCollector`）；
+自包含的（web、subagent、lcm、ally、ask_user）入口留在包的 `__init__.py`。
+`part(spec)` 返回的对象：`tools`（`ToolDefinition` 列表）、`commands`（`CoreCommand` 列表）、可选的 `attach(session)`
+（拿到会话，之后直接调会话 API）、以及它需要的时刻方法 `async (event, ctx)`。`context` 是时刻名，part 不得拿它当属性名。
 
-**core 不在启动屏的「Extensions」里出现**（`core/wiring.py`：`misaka.core.*` 的条目一律 `hidden`），和 pi 的内置工具一样；
-那一区留给用户自己装的东西。`misaka/extensions/` 下的捆绑扩展各自用 `HIDDEN` 决定（pi 藏了它的 llama）。
-已迁成 part 的（`PART_MODULES`：lcm）根本不在扩展清单里：工具走 `customTools`，时刻由内核直接调（`moments.py`）。
-还在 `REGISTRY` 里的那些是过渡态：运行时对它们和对 pi 捆绑的 llama 一视同仁——settings 禁不掉、`--no-extensions` 丢不掉、不需要项目信任、
-钩子由 ExtensionRunner 派发。
+**core 不在扩展清单里**：它的工具走 `customTools`（来源 `<sdk:>`），时刻由内核直接调（`moments.py`），命令由 `prompt()` 直接执行——
+和 pi 的 core 从不把自己挂到 ExtensionRunner 上是同一件事。启动屏的「Extensions」一区只剩用户装的和捆绑的；
+`misaka/extensions/` 下的捆绑扩展各自用 `HIDDEN` 决定显示与否（pi 藏了它的 llama）。
 
 ## `misaka/extensions/` 现在是什么
 
@@ -103,7 +103,7 @@ misaka/skills/                         → misaka/core/skills/
 misaka/documents/                      → misaka/core/documents/
 misaka/observability/board.py          → misaka/core/network/board.py
 misaka/app/composition.py              → misaka/core/wiring.py
-misaka/extensions/__init__.py:discover  留在原地（捆绑扩展的发现）；core 条目由 misaka/core/wiring.py:REGISTRY 点名
+misaka/extensions/__init__.py:discover  留在原地（捆绑扩展的发现）；core 由 misaka/core/wiring.py 的 TOOL_MODULES / PART_MODULES 点名
 misaka/extensions/web/                 → misaka/core/web/
 misaka/extensions/hermes_lcm/          → misaka/core/lcm/            （描述符名 hermes_lcm → lcm）
 misaka/extensions/sisters/subagent/    → misaka/core/subagent/

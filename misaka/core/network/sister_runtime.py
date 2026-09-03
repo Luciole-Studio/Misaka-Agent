@@ -188,7 +188,7 @@ def _sister_notification(data: Mapping[str, Any]) -> str:
 class _SisterManager(SubagentManager):
     """One manager per board card: a stable side session that outlives any Last Order chat session."""
 
-    def __init__(self, harness: Any, cfg: Mapping[str, Any], row: Mapping[str, Any], workspace: str):
+    def __init__(self, session: Any, cfg: Mapping[str, Any], row: Mapping[str, Any], workspace: str):
         self.cfg = cfg
         self.board_id = str(row["id"])
         self.sister = str(row["assignee"])
@@ -218,7 +218,7 @@ class _SisterManager(SubagentManager):
         self.model = str(model or cfg.get("default_model") or "") or None
         role = profiles.role_of(self.profile_dir)
         super().__init__(
-            harness,
+            session,
             RoleContext(
                 role=role,
                 profile_dir=self.profile_dir,
@@ -369,8 +369,9 @@ class _CountingSemaphore(asyncio.Semaphore):
 class SisterRuntime:
     """Session-local supervisor backed by durable board rows and transcripts."""
 
-    def __init__(self, harness: Any, con_factory: Any, cfg_factory: Any):
-        self.harness = harness
+    def __init__(self, session: Any, con_factory: Any, cfg_factory: Any):
+        # The session this runtime serves; None until the part that owns it is attached.
+        self.session = session
         self._con_factory = con_factory
         self._cfg_factory = cfg_factory
         self._handles: dict[str, SisterHandle] = {}
@@ -672,7 +673,7 @@ class SisterRuntime:
                         manager = None
                         resumed = False
                 if not resumed:
-                    manager = _SisterManager(self.harness, self.cfg, prepared, workspace)
+                    manager = _SisterManager(self.session, self.cfg, prepared, workspace)
                     manager._semaphore = self._sister_semaphore  # one cap across all named Sisters
                     manager.beast = bool(prepared.get("beast"))
                     definition = manager.resolve_definition(manager.agent_type, workspace)
@@ -1124,7 +1125,7 @@ class SisterRuntime:
         frozen.update(generation=generation, status=status)
         data = self._snapshot_row(frozen)
         try:
-            self.harness.sendMessage(
+            self.session.moments.send_message(
                 {
                     "customType": "sister-notification",
                     "content": _sister_notification(data),
@@ -1315,7 +1316,7 @@ class SisterRuntime:
             return current
         if not row["agent_id"] or not row["workspace"]:
             raise ValueError(f"Card {task_id} has no resumable Sister session.")
-        manager = _SisterManager(self.harness, self.cfg, row, row["workspace"])
+        manager = _SisterManager(self.session, self.cfg, row, row["workspace"])
         manager._semaphore = self._sister_semaphore
         manager._session_paths(context)
         agent = await manager._find_task_async(row["agent_id"], context)

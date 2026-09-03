@@ -8,7 +8,7 @@ from typing import Literal, NotRequired, TypedDict
 from misaka.config import APP_NAME
 from misaka.core.source_info import SourceInfo
 
-type SlashCommandSource = Literal["extension", "prompt", "skill"]
+type SlashCommandSource = Literal["extension", "prompt", "skill", "core"]  # MISAKA fork: "core" = a part's command
 
 
 class SlashCommandInfo(TypedDict):

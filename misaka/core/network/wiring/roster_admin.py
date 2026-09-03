@@ -3,6 +3,6 @@ SESSION_KINDS = {"foreground", "dm"}
 ROLES = {"last_order"}
 
 
-def activate(spec):
+def part(spec):
     from misaka.core.network import roster
-    return roster.register
+    return roster.RosterPart()

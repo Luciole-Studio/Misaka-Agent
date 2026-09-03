@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import importlib
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from misaka.config import profiles
@@ -63,17 +63,6 @@ class SessionSpec:
 
 
 # Shared entries by name, then Last Order's, then the Sisters': the folder scan's order.
-REGISTRY: tuple[str, ...] = (
-    "misaka.core.mcp",
-    "misaka.core.network.wiring.messages",
-    "misaka.core.network.wiring.roster",
-    "misaka.core.skills.wiring.skills",
-    "misaka.core.network.wiring.todo",
-    "misaka.core.network.wiring.network",
-    "misaka.core.research.wiring.research",
-    "misaka.core.network.wiring.roster_admin",
-    "misaka.core.subagent",
-)
 
 
 # Core modules whose whole contribution is tools. Pi's built-ins reach the tool table by
@@ -110,6 +99,15 @@ class ToolCollector:
 # ``part(spec) -> object | None`` with a ``tools`` list and the moment methods it needs.
 # Their tools take the same ``customTools`` door as ``TOOL_MODULES``. Order is call order.
 PART_MODULES: tuple[str, ...] = (
+    "misaka.core.mcp",
+    "misaka.core.network.wiring.messages",
+    "misaka.core.network.wiring.roster",
+    "misaka.core.network.wiring.todo",
+    "misaka.core.network.wiring.network",
+    "misaka.core.network.wiring.roster_admin",
+    "misaka.core.skills.wiring.skills",
+    "misaka.core.research.wiring.research",
+    "misaka.core.subagent",
     "misaka.core.lcm",
 )
 
@@ -148,13 +146,46 @@ def parts_for(spec: SessionSpec) -> list[Any]:
     return parts
 
 
-@dataclass(frozen=True, slots=True)
 class Assembly:
-    """Everything a session is handed for its spec, in the two shapes Pi's SDK takes them."""
+    """What a session is made of; each piece is built when first read.
 
-    extension_factories: list[dict[str, Any]]
-    custom_tools: list[ToolDefinition]
-    parts: list[Any] = field(default_factory=list)
+    Built late on purpose: a worker applies the session's environment (``platform.session``'s
+    environment window) after it assembled, and a part reads that environment when it is
+    built -- as an extension factory used to, at load time. Pass the pieces explicitly to
+    bypass the build (tests, a bare engine).
+    """
+
+    def __init__(
+        self,
+        extension_factories: list[dict[str, Any]] | None = None,
+        custom_tools: list[ToolDefinition] | None = None,
+        parts: list[Any] | None = None,
+        *,
+        spec: SessionSpec | None = None,
+    ) -> None:
+        self.spec = spec
+        self._extension_factories = extension_factories
+        self._custom_tools = custom_tools
+        self._parts = parts
+
+    @property
+    def extension_factories(self) -> list[dict[str, Any]]:
+        if self._extension_factories is None:
+            self._extension_factories = build_extensions(self.spec) if self.spec else []
+        return self._extension_factories
+
+    @property
+    def parts(self) -> list[Any]:
+        if self._parts is None:
+            self._parts = parts_for(self.spec) if self.spec else []
+        return self._parts
+
+    @property
+    def custom_tools(self) -> list[ToolDefinition]:
+        if self._custom_tools is None:
+            own = tools_for(self.spec) if self.spec else []
+            self._custom_tools = [*own, *(tool for part in self.parts for tool in part.tools)]
+        return self._custom_tools
 
     def engine_options(self) -> dict[str, Any]:
         return {
@@ -165,12 +196,7 @@ class Assembly:
 
 
 def assemble(spec: SessionSpec) -> Assembly:
-    parts = parts_for(spec)
-    return Assembly(
-        extension_factories=build_extensions(spec),
-        custom_tools=[*tools_for(spec), *(tool for part in parts for tool in part.tools)],
-        parts=parts,
-    )
+    return Assembly(spec=spec)
 
 
 def inline(
@@ -201,36 +227,18 @@ bundled: Callable[[SessionSpec], list[dict[str, Any]]] = _no_bundled
 
 
 def build_extensions(spec: SessionSpec) -> list[dict[str, Any]]:
-    """The inline extensions for one session: the bundled ones first, then core in registry order."""
-    role = role_key(spec)
-    kind = "bare" if role == "last_order" and spec.kind == "beast" else spec.kind  # a budget-less Last Order runs tool-less
-    out: list[dict[str, Any]] = []
-    for path in REGISTRY:
-        mod = importlib.import_module(path)
-        activate = getattr(mod, "activate", None)
-        if activate is None:
-            continue
-        if not _qualifies(mod, role, kind):
-            continue
-        register = activate(spec)
-        if register is not None:
-            out.append(
-                inline(
-                    getattr(mod, "EXTENSION_NAME", path.rsplit(".", 1)[-1]),
-                    register,
-                    # Core is not listed, the way Pi's own built-ins are not: the startup
-                    # screen's "Extensions" section is for what the user added.
-                    hidden=True,
-                )
-            )
-    return [*bundled(spec), *out]
+    """The inline extensions for one session: the bundled ones the process entry installed.
+
+    Core contributes none: its tools take ``customTools`` and its moments are called by the
+    kernel (``PART_MODULES``), the way pi's core never sits on its own extension runner.
+    """
+    return list(bundled(spec))
 
 
 __all__ = [
     "DEFAULT_KINDS",
     "KINDS",
     "PART_MODULES",
-    "REGISTRY",
     "ROLE_KEYS",
     "TOOL_MODULES",
     "Assembly",

@@ -2,6 +2,8 @@
 import os
 import sys
 
+from misaka.core.moments import CoreCommand
+
 
 def _roster():
     from misaka.config import sisters
@@ -12,7 +14,7 @@ def _current():
     return os.environ.get("MISAKA_WHO") or "last-order"
 
 
-def register(harn):
+def _sister_command():
     async def misaka_switch(args, ctx):
         roster, cur = _roster(), _current()
         raw = (args or "").strip()
@@ -67,13 +69,23 @@ def register(harn):
         ctx.ui.notify(f"Switching to {name}…", "info")
         os.execv(sys.executable, argv)
 
-    harn.registerCommand("sister", {
-        "description": "List roles or switch between Last Order and a Sister; use `/sister last-order` to return.",
-        "handler": misaka_switch,
-    })
+    return CoreCommand(
+        "sister",
+        "List roles or switch between Last Order and a Sister; use `/sister last-order` to return.",
+        misaka_switch,
+    )
+
+
+class SisterSwitchPart:
+    """``/sister``: one command, no tools."""
+
+    def __init__(self):
+        self.tools = []
+        self.commands = [_sister_command()]
+
 
 SESSION_KINDS = {"foreground", "dm"}
 
 
-def activate(spec):
-    return register
+def part(spec):
+    return SisterSwitchPart()

@@ -7,20 +7,27 @@ process entry (``core.wiring.assemble``), handed in through ``AgentSessionConfig
 and called from here, ahead of the runner, with the same event payload and the same
 folding the runner applies -- so an extension still sees the session as core left it.
 
-A part is an object with a ``tools`` list and any of the methods named below, each
-``async (event, ctx) -> dict | None``. A method a part does not define is skipped. A
-raising part is logged and skipped, as the runner does for a raising extension: a
-subsystem failing at a moment is a bug to fix, not a reason to end the user's turn.
+A part is an object with a ``tools`` list, a ``commands`` list (``CoreCommand``), and
+any of the methods named below, each ``async (event, ctx) -> dict | None``. A method a
+part does not define is skipped. A raising part is logged and skipped, as the runner
+does for a raising extension: a subsystem failing at a moment is a bug to fix, not a
+reason to end the user's turn (``tool_call`` is the one fail-closed exception, as in
+the runner). A part that defines ``attach(session)`` is handed the session when the
+session is built; between moments it calls the session directly -- ``sendCustomMessage``
+through ``Moments.send_message``, ``getActiveToolNames``, ``registerCustomTools``.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+_MISSING = object()
 
 
 def _field(result: Any, name: str, default: Any = None) -> Any:
@@ -40,19 +47,63 @@ class BeforeAgentStart:
     reason: str | None = None
 
 
+@dataclass(slots=True, frozen=True)
+class CoreCommand:
+    """A slash command a part offers; ``handler(args, ctx)`` runs like an extension command."""
+
+    name: str
+    description: str
+    handler: Callable[..., Any]
+    argument_hint: str | None = None
+
+
 class Moments:
     """One session's parts, and the kernel's way of calling them."""
 
     def __init__(self, session: Any, parts: list[Any]) -> None:
         self.session = session
         self.parts = list(parts)
+        for part in self.parts:
+            attach = getattr(part, "attach", None)
+            if attach is not None:
+                attach(session)
 
     def _ctx(self) -> Any:
         return self.session.extensionRunner.create_context()
 
+    # -- what a part calls between moments (the runtime actions the runner binds, by direct call) --
+
+    def send_message(self, message: Any, options: dict[str, Any] | None = None) -> None:
+        """``sendCustomMessage`` scheduled the way the runner's ``sendMessage`` is: in order, off the caller."""
+
+        async def _run() -> None:
+            try:
+                await self.session.sendCustomMessage(message, options)
+            except Exception:
+                logger.warning("a core part's message was not delivered", exc_info=True)
+
+        self.session._spawn_extension_message(_run())
+
+    def send_user_message(self, content: Any, options: dict[str, Any] | None = None) -> None:
+        async def _run() -> None:
+            try:
+                await self.session.sendUserMessage(content, options)
+            except Exception:
+                logger.warning("a core part's user message was not delivered", exc_info=True)
+
+        self.session._spawn_extension_message(_run())
+
+    # -- commands --
+
+    def commands(self) -> list[CoreCommand]:
+        return [command for part in self.parts for command in getattr(part, "commands", ())]
+
+    def command(self, name: str) -> CoreCommand | None:
+        return next((command for command in self.commands() if command.name == name), None)
+
     async def _call(self, part: Any, name: str, event: dict[str, Any], ctx: Any) -> Any:
         method = getattr(part, name, None)
-        if method is None:
+        if method is None or not callable(method):
             return None
         try:
             result = method(event, ctx)
@@ -135,6 +186,70 @@ class Moments:
                 return result
         return None
 
+    async def tool_call(self, event: dict[str, Any]) -> Any:
+        """Runner ``emit_tool_call``: the last answer stands, a block returns at once, a crash is fatal."""
+        if not self.parts:
+            return None
+        ctx = self._ctx()
+        result: Any = None
+        for part in self.parts:
+            method = getattr(part, "tool_call", None)
+            if method is None:
+                continue
+            answer = method(event, ctx)
+            if hasattr(answer, "__await__"):
+                answer = await answer
+            if answer:
+                result = answer
+                if _field(result, "block", False):
+                    return result
+        return result
+
+    async def tool_result(self, event: dict[str, Any]) -> Any:
+        """Runner ``emit_tool_result``: parts may replace content, details, isError, usage."""
+        if not self.parts:
+            return None
+        ctx = self._ctx()
+        current = dict(event)
+        modified = False
+        for part in self.parts:
+            result = await self._call(part, "tool_result", current, ctx)
+            if result is None:
+                continue
+            for name in ("content", "details", "isError", "usage"):
+                value = _field(result, name, _MISSING)
+                if value is not _MISSING:
+                    current[name] = value
+                    modified = True
+        if not modified:
+            return None
+        return {name: current.get(name) for name in ("content", "details", "isError", "usage")}
+
+    async def input(self, text: str, images: Any, source: Any, streaming_behavior: Any) -> dict[str, Any]:
+        """Runner ``emit_input``: the first part to handle the input wins; transforms chain."""
+        current_text, current_images = text, images
+        if self.parts:
+            ctx = self._ctx()
+            for part in self.parts:
+                result = await self._call(part, "input", {
+                    "type": "input",
+                    "text": current_text,
+                    "images": current_images,
+                    "source": source,
+                    "streamingBehavior": streaming_behavior,
+                }, ctx)
+                action = _field(result, "action")
+                if action == "handled":
+                    return result
+                if action == "transform":
+                    current_text = _field(result, "text", current_text)
+                    replaced = _field(result, "images", _MISSING)
+                    if replaced is not _MISSING and replaced is not None:
+                        current_images = replaced
+        if current_text != text or current_images != images:
+            return {"action": "transform", "text": current_text, "images": current_images}
+        return {"action": "continue"}
+
     async def context(self, messages: list[Any]) -> list[Any]:
         """Runner ``emit_context``: each part rewrites the list the previous one produced."""
         if not self.parts:
@@ -149,4 +264,4 @@ class Moments:
         return current
 
 
-__all__ = ["BeforeAgentStart", "Moments"]
+__all__ = ["BeforeAgentStart", "CoreCommand", "Moments"]

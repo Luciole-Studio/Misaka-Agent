@@ -7,5 +7,5 @@ from misaka.core.network import todo
 SESSION_KINDS = {"card"}
 
 
-def activate(spec):
-    return todo.tools_for(spec.task_id, spec.sender or spec.role.rsplit("/", 1)[-1]) if spec.task_id else None
+def part(spec):
+    return todo.TodoPart(spec.task_id, spec.sender or spec.role.rsplit("/", 1)[-1]) if spec.task_id else None

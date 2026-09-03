@@ -1090,7 +1090,10 @@ class InteractiveMode:
             return False
         space_index = text.find(" ")
         command_name = text[1:] if space_index == -1 else text[1:space_index]
-        return bool(get_command(command_name))
+        if get_command(command_name):
+            return True
+        moments = getattr(self.session, "moments", None)  # MISAKA fork: a part's command runs the same way
+        return moments is not None and moments.command(command_name) is not None
 
     def isPromptTemplate(self, text: str) -> bool:
         """Whether this names a prompt template, which the menu offers and prompt() expands."""

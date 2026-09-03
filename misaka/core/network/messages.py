@@ -103,30 +103,60 @@ def ack(con, ids):
                     [int(time.time()), *[int(i) for i in ids]])
 
 
-def register(harn, *, sender, route=None, receive=False):
-    """Register the SendMessage tool; with ``receive``, also poll this sender's inbox and deliver queued messages into the session."""
-    card_task = os.environ.get("MISAKA_USAGE_TASK_ID") or None
-    raw_gen = os.environ.get("MISAKA_USAGE_GENERATION", "")
-    card_gen = int(raw_gen) if raw_gen.isdigit() else None
+class SendMessageParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
-    class SendMessageParams(BaseModel):
-        model_config = ConfigDict(extra="forbid")
+    to: str = Field(description="Agent ID or registered agent name")
+    message: str = Field(description="Plain text message content")
+    summary: str = Field(description="Short, non-empty preview shown in the UI")
 
-        to: str = Field(description="Agent ID or registered agent name")
-        message: str = Field(description="Plain text message content")
-        summary: str = Field(description="Short, non-empty preview shown in the UI")
+    @field_validator("message", "summary")
+    @classmethod
+    def nonempty(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be empty")
+        return value
 
-        @field_validator("message", "summary")
-        @classmethod
-        def nonempty(cls, value: str) -> str:
-            value = value.strip()
-            if not value:
-                raise ValueError("must not be empty")
-            return value
 
-    async def execute(tool_call_id, raw, signal, on_update, ctx):
+class MessagesPart:
+    """The SendMessage tool and, with ``receive``, the inbox pump that delivers this sender's queued messages into the session."""
+
+    def __init__(self, *, sender, route=None, receive=False):
+        self.sender = sender
+        self.route = route
+        self.receive = receive
+        self.session = None
+        self.card_task = os.environ.get("MISAKA_USAGE_TASK_ID") or None
+        raw_gen = os.environ.get("MISAKA_USAGE_GENERATION", "")
+        self.card_gen = int(raw_gen) if raw_gen.isdigit() else None
+        self._stop = asyncio.Event()
+        self._job = None
+        self.commands = []
+        self.tools = [ToolDefinition(
+            name="SendMessage",
+            label="Send Message",
+            description=(
+                "Send a message to a running agent at its next tool boundary, or wake a durable "
+                "Last Order or Sister session for one asynchronous turn. Messages do not change "
+                "task-card state or authorize work."
+            ),
+            parameters=SendMessageParams.model_json_schema(),
+            execute=self._send,
+            promptSnippet="Send a message to another agent",
+            promptGuidelines=(
+                ["Use SendMessage to alert Last Order when evidence overturns the card premise or external input is required.",
+                 "SendMessage is only communication; complete and submit the task through the normal report path."]
+                if self.card_task else []),
+        )]
+
+    def attach(self, session):
+        self.session = session
+
+    async def _send(self, tool_call_id, raw, signal, on_update, ctx):
         args = raw if isinstance(raw, SendMessageParams) else SendMessageParams(**(raw or {}))
         addr = args.to.strip()
+        sender = self.sender
         known = {"last-order"} | sisters()
         if addr in known and addr != sender:
             # The message is durable before anyone is woken: a queued row is delivered by the
@@ -140,7 +170,7 @@ def register(harn, *, sender, route=None, receive=False):
                 con = connect()
                 try:
                     return send(con, addr, args.message, summary=args.summary, sender=sender,
-                                task_id=card_task, generation=card_gen)
+                                task_id=self.card_task, generation=self.card_gen)
                 finally:
                     con.close()
 
@@ -156,8 +186,8 @@ def register(harn, *, sender, route=None, receive=False):
                 f"Message #{mid} queued for {addr} and its session woken. Continue working without waiting "
                 "for a reply; delivery does not change task-card state or authorize new work.")}],
                 "details": {"to": addr, "message_id": mid}}
-        if route is not None:
-            hit = await route(args.to, args.message, args.summary, ctx)
+        if self.route is not None:
+            hit = await self.route(args.to, args.message, args.summary, ctx)
             if hit is not None:
                 return {"content": [{"type": "text", "text": json.dumps(hit, ensure_ascii=False)}],
                         "details": hit}
@@ -165,35 +195,12 @@ def register(harn, *, sender, route=None, receive=False):
             f"Unknown recipient '{addr}'. Available recipients: "
             f"{', '.join(sorted(known - {sender}))}.")
 
-    harn.registerTool(ToolDefinition(
-        name="SendMessage",
-        label="Send Message",
-        description=(
-            "Send a message to a running agent at its next tool boundary, or wake a durable "
-            "Last Order or Sister session for one asynchronous turn. Messages do not change "
-            "task-card state or authorize work."
-        ),
-        parameters=SendMessageParams.model_json_schema(),
-        execute=execute,
-        promptSnippet="Send a message to another agent",
-        promptGuidelines=(
-            ["Use SendMessage to alert Last Order when evidence overturns the card premise or external input is required.",
-             "SendMessage is only communication; complete and submit the task through the normal report path."]
-            if card_task else []),
-    ))
-
-    if not receive:
-        return
-
-    stop = asyncio.Event()
-    job = None
-
-    async def pump():
+    async def _pump(self):
         # `connect` opens the file, runs the schema script and sweeps delivered rows: all
         # blocking, all on this session's loop unless it is handed to a thread.
         con = await asyncio.to_thread(connect)
         try:
-            while not stop.is_set():
+            while not self._stop.is_set():
                 # One bad poll must not end the inbox. Everything below -- pending/claim/ack --
                 # is synchronous sqlite against a database several processes write (Last Order,
                 # every Sister session, every ``misaka dm`` child), so an OperationalError past
@@ -202,21 +209,21 @@ def register(harn, *, sender, route=None, receive=False):
                 # senders kept getting "queued and its session woken". Log it and poll again;
                 # unacked rows keep their lease and come back when it expires.
                 try:
-                    await deliver_once(con)
+                    await self._deliver_once(con)
                 except Exception:
-                    logger.warning("Message poll for %s failed; retrying", sender, exc_info=True)
+                    logger.warning("Message poll for %s failed; retrying", self.sender, exc_info=True)
                 try:
-                    await asyncio.wait_for(stop.wait(), POLL_SECONDS)
+                    await asyncio.wait_for(self._stop.wait(), POLL_SECONDS)
                 except TimeoutError:
                     pass
         finally:
             await asyncio.to_thread(con.close)
 
-    async def deliver_once(con):
+    async def _deliver_once(self, con):
         # Every sqlite call below waits on a lock other processes hold; none of them may run
         # on the loop. The connection is opened with check_same_thread=False and only this
         # task uses it, and these awaits are sequential, so it is never touched concurrently.
-        rows = await asyncio.to_thread(pending, con, sender)
+        rows = await asyncio.to_thread(pending, con, self.sender)
         won = await asyncio.to_thread(claim, con, [r["id"] for r in rows], ttl_seconds=60)
         mine = [r for r in rows if r["id"] in won]
         if not mine:
@@ -238,7 +245,7 @@ def register(harn, *, sender, route=None, receive=False):
                   "normal card, message, and stop tools, including required user confirmation.</notice>"),
                   "</agent-messages>"]
         try:
-            harn.sendMessage(
+            self.session.moments.send_message(
                 {"customType": "agent-messages", "content": "\n".join(lines),
                  "display": True, "details": {"count": len(mine)}},
                 {"deliverAs": "followUp", "triggerTurn": True})
@@ -247,22 +254,22 @@ def register(harn, *, sender, route=None, receive=False):
         else:
             await asyncio.to_thread(ack, con, [r["id"] for r in mine])
 
-    def _report(task):
-        # The only reader of this task's result is ``shutdown``'s return_exceptions=True gather,
-        # which discards it. A pump that ended on its own is a session that stopped receiving
-        # mail; say so rather than leaving the senders' "queued and woken" receipts to lie.
+    def _report(self, task):
+        # The only reader of this task's result is ``session_shutdown``'s return_exceptions=True
+        # gather, which discards it. A pump that ended on its own is a session that stopped
+        # receiving mail; say so rather than leaving the senders' "queued and woken" receipts to lie.
         if not task.cancelled() and task.exception() is not None:
-            logger.warning("Message inbox for %s stopped", sender, exc_info=task.exception())
+            logger.warning("Message inbox for %s stopped", self.sender, exc_info=task.exception())
 
-    async def kickoff(_event, _ctx):
-        nonlocal job
-        job = asyncio.ensure_future(pump())
-        job.add_done_callback(_report)
+    async def session_start(self, event, ctx):
+        if not self.receive:
+            return
+        self._job = asyncio.ensure_future(self._pump())
+        self._job.add_done_callback(self._report)
 
-    async def shutdown(_event, _ctx):
-        stop.set()
-        if job:
-            await asyncio.gather(job, return_exceptions=True)
-
-    harn.on("session_start", kickoff)
-    harn.on("session_shutdown", shutdown)
+    async def session_shutdown(self, event, ctx):
+        if not self.receive:
+            return
+        self._stop.set()
+        if self._job:
+            await asyncio.gather(self._job, return_exceptions=True)

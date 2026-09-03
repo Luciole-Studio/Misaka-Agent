@@ -958,7 +958,7 @@ class AgentPolicy:
         if not isinstance(hooks, dict):
             raise ValueError("Agent hooks must be an event mapping")  # noqa: TRY004 - callers treat bad input as ValueError
         self.hooks: dict[str, Any] = hooks
-        self.harness: Any = None
+        self.session: Any = None
         raw_once_path = os.environ.get("MISAKA_SUBAGENT_HOOK_ONCE_FILE")
         self.once_path = (
             Path(raw_once_path).expanduser() if raw_once_path else None
@@ -1179,9 +1179,9 @@ class AgentPolicy:
                 )
                 if not hook.get("asyncRewake") or exit_code != 2:
                     return
-                sender = getattr(self.harness, "sendMessage", None)
-                if callable(sender):
-                    sender(
+                moments = getattr(self.session, "moments", None)
+                if moments is not None:
+                    moments.send_message(
                         {
                             "customType": "hook-notification",
                             "content": result["reason"] or "Asynchronous agent hook blocked",
@@ -1484,8 +1484,12 @@ class AgentPolicy:
         return None
 
 
-def register(harness: Any, context: Any) -> AgentPolicy | None:
-    """Attach policy only when this process represents a configured agent."""
+def policy_for(context: Any) -> AgentPolicy | None:
+    """The policy of a configured agent, or None when this process represents none.
+
+    The owning part calls ``before_agent``, ``before_tool``, ``after_tool`` and ``on_event``
+    at the kernel's moments and sets ``policy.session`` when the session is attached.
+    """
 
     if not (
         getattr(context, "tool_rule_layers", ())
@@ -1493,20 +1497,14 @@ def register(harness: Any, context: Any) -> AgentPolicy | None:
         or getattr(context, "agent_hooks", None)
     ):
         return None
-    policy = AgentPolicy(context)
-    policy.harness = harness
-    harness.on("before_agent_start", policy.before_agent)
-    harness.on("tool_call", policy.before_tool)
-    harness.on("tool_result", policy.after_tool)
-    harness.on("agent_end", policy.on_event)
-    return policy
+    return AgentPolicy(context)
 
 
 __all__ = [
     "AgentPolicy",
     "classify_permission",
     "normalize_rule",
-    "register",
+    "policy_for",
     "request_permission",
     "rule_matches",
     "set_async_hook_broker",

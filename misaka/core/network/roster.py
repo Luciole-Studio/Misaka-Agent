@@ -7,6 +7,7 @@ import sys
 
 from misaka.config import profiles
 from misaka.config.product import CFG, current_config
+from misaka.core.moments import CoreCommand
 
 ROOT = CFG["profiles_root"]
 ACTIVE = ("running", "review", "ready", "todo", "blocked", "triage")   # anything a Sister still owes
@@ -190,7 +191,8 @@ def remove_sister(sid, root=None, db_path=None):
 # ── TUI: /create and /remove (configuration wizard) ────────────────────────
 
 
-def register(harn):
+def commands():
+    """``/create`` and ``/remove`` as the part's commands."""
     async def create_cmd(args, ctx):
         sid = (args or "").strip()
         if not sid:
@@ -258,14 +260,18 @@ def register(harn):
         ok, msg = remove_sister(sid)
         ctx.ui.notify(msg, "info" if ok else "error")
 
-    harn.registerCommand("create", {
-        "description": "Create a Sister profile with an ID, description, and model under ~/.misaka/profiles/sisters/.",
-        "handler": create_cmd,
-    })
-    harn.registerCommand("remove", {
-        "description": "Remove a Sister profile; task history and workspaces remain, and active Sisters are protected.",
-        "handler": remove_cmd,
-    })
+    return [
+        CoreCommand("create", "Create a Sister profile with an ID, description, and model under ~/.misaka/profiles/sisters/.", create_cmd),
+        CoreCommand("remove", "Remove a Sister profile; task history and workspaces remain, and active Sisters are protected.", remove_cmd),
+    ]
+
+
+class RosterPart:
+    """Only Last Order grows or prunes the Sister roster: two commands, no tools."""
+
+    def __init__(self):
+        self.tools = []
+        self.commands = commands()
 
 
 # ── CLI: misaka create / misaka remove ──────────────────────────────

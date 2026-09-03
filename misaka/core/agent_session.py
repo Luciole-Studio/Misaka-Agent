@@ -557,7 +557,10 @@ class AgentSession:
             if (
                 resolved.expandPromptTemplates
                 and text.startswith("/")
-                and await self._try_execute_extension_command(text)
+                and (
+                    await self._try_execute_core_command(text)  # MISAKA fork: a part's command first
+                    or await self._try_execute_extension_command(text)
+                )
             ):
                 report_preflight(True)
                 return
@@ -574,6 +577,22 @@ class AgentSession:
 
             current_text = text
             current_images = None if resolved.images is None else list(resolved.images)
+            # MISAKA fork: the parts see the input first; an extension sees what they left.
+            input_result = await self.moments.input(
+                current_text,
+                current_images,
+                resolved.source,
+                resolved.streamingBehavior if self.isStreaming else None,
+            )
+            action = _event_field(input_result, "action", "continue")
+            if action == "handled":
+                report_preflight(True)
+                return
+            if action == "transform":
+                current_text = _event_field(input_result, "text", current_text)
+                transformed_images = _event_field(input_result, "images", None)
+                if transformed_images is not None:
+                    current_images = list(transformed_images)
             if self._extensionRunner.has_handlers("input"):
                 input_result = await self._extensionRunner.emit_input(
                     current_text,
@@ -945,6 +964,17 @@ class AgentSession:
         self.agent.followUpMode = mode
         self.settingsManager.setFollowUpMode(mode)
 
+    def registerCustomTools(self, definitions: list[Any]) -> None:
+        # MISAKA fork: a part adding tools after startup (an MCP server that answered late)
+        # takes the door ``customTools`` took, then the refresh an extension's registerTool gets.
+        self._customTools.extend(definitions)
+        self.refreshTools()
+
+    def refreshTools(self) -> None:
+        # MISAKA fork: the runtime action of the same name, callable by a part that changed a
+        # definition it already registered (a description that depends on the session).
+        self._refresh_tool_registry()
+
     def getActiveToolNames(self) -> list[str]:
         return [tool.name for tool in self.agent.state.tools]
 
@@ -980,6 +1010,16 @@ class AgentSession:
                         {"source": "inline", "scope": "temporary", "origin": "extension"},
                     ),
                     read_field(command, "description"),
+                )
+            )
+
+        for core_command in self.moments.commands():  # MISAKA fork: the parts' commands
+            commands.append(
+                _make_slash_command_info(
+                    core_command.name,
+                    "core",
+                    create_synthetic_source_info(f"<core-command:{core_command.name}>", {"source": "sdk"}),
+                    core_command.description,
                 )
             )
 
@@ -1828,6 +1868,28 @@ class AgentSession:
         for listener in self._eventListeners:
             listener(event)
 
+    async def _try_execute_core_command(self, text: str) -> bool:
+        # MISAKA fork: a part's command runs like an extension command, without the runner.
+        if not text.startswith("/"):
+            return False
+        command_name, _, raw_args = text[1:].partition(" ")
+        resolved = self.moments.command(command_name)
+        if resolved is None:
+            return False
+        try:
+            result = resolved.handler(raw_args, self._extensionRunner.create_command_context())
+            if inspect.isawaitable(result):
+                await result
+        except Exception as error:  # noqa: BLE001 - reported through the same channel as an extension command
+            self._extensionRunner.emit_error(
+                ExtensionError(
+                    extensionPath=f"command:{command_name}",
+                    event="command",
+                    error=str(error),
+                )
+            )
+        return True
+
     async def _try_execute_extension_command(self, text: str) -> bool:
         if not text.startswith("/"):
             return False
@@ -2387,37 +2449,47 @@ class AgentSession:
     def _install_agent_tool_hooks(self) -> None:
         async def before_tool_call(payload: Any, _signal: Any | None = None) -> Any:
             runner = self._extensionRunner
-            if not runner.has_handlers("tool_call"):
+            # MISAKA fork: the parts are asked first; a block from them is final.
+            if not self.moments.parts and not runner.has_handlers("tool_call"):
                 return None
             tool_call = _event_field(payload, "toolCall")
             args = _event_field(payload, "args")
-            return await runner.emit_tool_call(  # type: ignore[attr-defined]
-                {
-                    "type": "tool_call",
-                    "toolName": read_field(tool_call, "name"),
-                    "toolCallId": read_field(tool_call, "id"),
-                    "input": args,
-                }
-            )
+            event = {
+                "type": "tool_call",
+                "toolName": read_field(tool_call, "name"),
+                "toolCallId": read_field(tool_call, "id"),
+                "input": args,
+            }
+            result = await self.moments.tool_call(event)
+            if _event_field(result, "block", False) or not runner.has_handlers("tool_call"):
+                return result
+            extension_result = await runner.emit_tool_call(event)  # type: ignore[attr-defined]
+            return extension_result if extension_result else result
 
         async def after_tool_call(payload: Any, _signal: Any | None = None) -> Any:
             runner = self._extensionRunner
             result = _event_field(payload, "result")
             tool_call = _event_field(payload, "toolCall")
             hook_result = None
-            if runner.has_handlers("tool_result"):
-                hook_result = await runner.emit_tool_result(  # type: ignore[attr-defined]
-                    {
-                        "type": "tool_result",
-                        "toolName": read_field(tool_call, "name"),
-                        "toolCallId": read_field(tool_call, "id"),
-                        "input": _event_field(payload, "args"),
-                        "content": _event_field(result, "content"),
-                        "details": _event_field(result, "details"),
-                        "isError": bool(_event_field(payload, "isError")),
-                        "usage": _event_field(result, "usage"),
-                    }
-                )
+            if self.moments.parts or runner.has_handlers("tool_result"):
+                event = {
+                    "type": "tool_result",
+                    "toolName": read_field(tool_call, "name"),
+                    "toolCallId": read_field(tool_call, "id"),
+                    "input": _event_field(payload, "args"),
+                    "content": _event_field(result, "content"),
+                    "details": _event_field(result, "details"),
+                    "isError": bool(_event_field(payload, "isError")),
+                    "usage": _event_field(result, "usage"),
+                }
+                # MISAKA fork: the parts rewrite the result first; extensions see their version.
+                hook_result = await self.moments.tool_result(event)
+                if hook_result is not None:
+                    event.update(hook_result)
+                if runner.has_handlers("tool_result"):
+                    extension_result = await runner.emit_tool_result(event)  # type: ignore[attr-defined]
+                    if extension_result is not None:
+                        hook_result = extension_result
 
             result_content = _event_field(result, "content")
             content = (

@@ -1150,8 +1150,9 @@ class AgentTask:
 class SubagentManager:
     """Session-local task registry with persisted transcript side chains."""
 
-    def __init__(self, harness: Any, role_context: RoleContext | None = None) -> None:
-        self.harness = harness
+    def __init__(self, session: Any, role_context: RoleContext | None = None) -> None:
+        # The session this manager serves; None until the part that owns it is attached.
+        self.session = session
         self.role_context = role_context or RoleContext.capture()
         limit = max(1, int(os.environ.get("MISAKA_MAX_CONCURRENT_SUBAGENTS", DEFAULT_MAX_CONCURRENCY)))
         self._semaphore = asyncio.Semaphore(limit)
@@ -1427,7 +1428,7 @@ class SubagentManager:
     ) -> AgentTask:
         active: list[str] = []
         try:
-            for tool in self.harness.getActiveTools():
+            for tool in self.session.getActiveToolNames():
                 if isinstance(tool, str):
                     active.append(tool)
                     continue
@@ -2325,7 +2326,7 @@ class SubagentManager:
     ) -> bool:
         """Bubble a synchronous/bubble agent permission to the parent UI."""
 
-        resolver = getattr(self.harness, "requestAgentPermission", None)
+        resolver = getattr(self.session, "requestAgentPermission", None)
         if callable(resolver):
             try:
                 value = resolver(task, dict(event))
@@ -2595,7 +2596,7 @@ class SubagentManager:
 
         inherited = self.role_context.tool_vocabulary
         try:
-            own = [str(name) for name in self.harness.getActiveTools()]
+            own = [str(name) for name in self.session.getActiveToolNames()]
         except Exception:  # noqa: BLE001 - an unreadable tool list keeps the pre-inheritance behaviour
             # Dropping the variable would tell the child it is a root, and a
             # root intersects with nothing: one unreadable tool list would hand
@@ -2835,7 +2836,7 @@ class SubagentManager:
             details = task.notification_data()
             message = build_task_notification(details)
             try:
-                self.harness.sendMessage(
+                self.session.moments.send_message(
                     {
                         "customType": "task-notification",
                         "content": message,

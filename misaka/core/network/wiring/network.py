@@ -16,6 +16,7 @@ from misaka.core.network.sister_runtime import ACTIVE_BOARD_STATUSES, SisterRunt
 from misaka.core.platform import budget, toolkit
 from misaka.core.platform import tasks as db
 from misaka.core.platform.prompt_guard import untrusted
+from misaka.core.wiring import ToolCollector
 
 _CON = None
 # How many board rows one `misaka_board` result carries.
@@ -126,8 +127,8 @@ def _register(harn, name, label, description, parameters, snippet=None, guidelin
     )
 
 
-def register(harn):
-    runtime = SisterRuntime(harn, _con, _cfg)
+def _install(harn, runtime):
+    """Register the board tools on ``harn`` (a ToolCollector) against ``runtime``."""
 
     class StrictParams(BaseModel):
         model_config = ConfigDict(extra="forbid")
@@ -576,58 +577,8 @@ def register(harn):
         return _text(f"Reopened card {params.task_id}'s session in pane {out['pane_id']} (a tab of its own).")
 
 
-    async def resume_briefing(event, ctx):
-        """A resumed conversation is told which cards it created and where they stand, so Last
-        Order brings the right Sisters back herself (misaka_sister_resume) instead of guessing
-        from the transcript. Nothing is said when the conversation has no cards. A fork is
-        the same living line twice over: its cards come via _session_line, and the in-place
-        fork restart itself needs no briefing (nothing was forgotten)."""
-        if (event or {}).get("reason") in ("reload", "fork"):
-            return
-        mine = _session_line(ctx)
-        if not mine:
-            return
-        rows = _con().execute(
-            "SELECT id,status,assignee,title FROM tasks WHERE origin_session IN "
-            f"({','.join('?' * len(mine))}) AND workspace=? ORDER BY created_at",
-            [*mine, _workspace(ctx)],
-        ).fetchall()
-        if not rows:
-            return
-        open_cards = set()
-        if os.environ.get("MISAKA_NET_PANE"):
-            try:
-                from misaka.ui.panel import client as net
-                open_cards = {p["card"] for p in net.request("panes.list")["panes"]
-                              if p.get("card") and p.get("alive")}
-            except Exception:  # noqa: BLE001, S110 - the daemon may be gone; the briefing still lists the cards
-                pass
-        lines = [f"  {r['id']}  {r['status']:<10} {r['assignee']:<8} {r['title'][:50]}"
-                 + ("  (open in a pane)" if r["id"] in open_cards else "") for r in rows]
-        harn.sendMessage(
-            {"customType": "resume-briefing",
-             "content": "<resume-briefing>\nCards created in this conversation:\n"
-                        + "\n".join(lines)
-                        + "\nReopen a closed one in its own tab with misaka_sister_resume; steer it with "
-                          "misaka_sister_message (a finished card restarts only on the user's nod).\n"
-                          "</resume-briefing>",
-             "display": True, "details": {"cards": [r["id"] for r in rows]}},
-            {"triggerTurn": False})
-
-    harn.on("session_start", resume_briefing)
 
 
-    async def settle_orphans(_event, _ctx):
-        """kill -9 leaves a running card with a live-looking claim and nobody driving it
-        (the card drives itself now; the daemon only hosts panes). Settle those whenever a
-        coordinator session starts: dispatch.reconcile checks leases and process identity."""
-        try:
-            from misaka.core.network import dispatch
-            await asyncio.to_thread(dispatch.reconcile, _con(), _cfg())
-        except Exception:  # noqa: BLE001, S110 - reconciliation is a safety net at startup, never a blocker
-            pass
-
-    harn.on("session_start", settle_orphans)
 
 
     class SisterStopParams(StrictParams):
@@ -845,19 +796,89 @@ def register(harn):
                     f"\nNo capability profile is available. Add one to profiles/sisters/{sid}/DESCRIBE.md.")
         )
 
-    async def cleanup(_event, _ctx):
-        await runtime.close()
 
-    harn.on("session_shutdown", cleanup)
+class NetworkPart:
+    """Last Order's board: the coordination tools, the Sister runtime behind them, and what a session hears at its start."""
 
-    async def collect_pending(ctx):
+    def __init__(self):
+        self.session = None
+        self.commands = []
+        self.runtime = SisterRuntime(None, _con, _cfg)
+        collector = ToolCollector()
+        _install(collector, self.runtime)
+        self.tools = collector.tools
+
+    def attach(self, session):
+        self.session = session
+        self.runtime.session = session
+
+    async def session_start(self, event, ctx):
+        await self._resume_briefing(event, ctx)
+        await self._settle_orphans()
+        asyncio.ensure_future(self._collect_pending(ctx))
+
+    async def before_agent_start(self, event, ctx):
+        asyncio.ensure_future(self._collect_pending(ctx))   # a long-lived session hears about cards that finished meanwhile
+
+    async def session_shutdown(self, event, ctx):
+        await self.runtime.close()
+
+    async def _resume_briefing(self, event, ctx):
+        """A resumed conversation is told which cards it created and where they stand, so Last
+        Order brings the right Sisters back herself (misaka_sister_resume) instead of guessing
+        from the transcript. Nothing is said when the conversation has no cards. A fork is
+        the same living line twice over: its cards come via _session_line, and the in-place
+        fork restart itself needs no briefing (nothing was forgotten)."""
+        if (event or {}).get("reason") in ("reload", "fork"):
+            return
+        mine = _session_line(ctx)
+        if not mine:
+            return
+        rows = _con().execute(
+            "SELECT id,status,assignee,title FROM tasks WHERE origin_session IN "
+            f"({','.join('?' * len(mine))}) AND workspace=? ORDER BY created_at",
+            [*mine, _workspace(ctx)],
+        ).fetchall()
+        if not rows:
+            return
+        open_cards = set()
+        if os.environ.get("MISAKA_NET_PANE"):
+            try:
+                from misaka.ui.panel import client as net
+                open_cards = {p["card"] for p in net.request("panes.list")["panes"]
+                              if p.get("card") and p.get("alive")}
+            except Exception:  # noqa: BLE001, S110 - the daemon may be gone; the briefing still lists the cards
+                pass
+        lines = [f"  {r['id']}  {r['status']:<10} {r['assignee']:<8} {r['title'][:50]}"
+                 + ("  (open in a pane)" if r["id"] in open_cards else "") for r in rows]
+        self.session.moments.send_message(
+            {"customType": "resume-briefing",
+             "content": "<resume-briefing>\nCards created in this conversation:\n"
+                        + "\n".join(lines)
+                        + "\nReopen a closed one in its own tab with misaka_sister_resume; steer it with "
+                          "misaka_sister_message (a finished card restarts only on the user's nod).\n"
+                          "</resume-briefing>",
+             "display": True, "details": {"cards": [r["id"] for r in rows]}},
+            {"triggerTurn": False})
+
+    async def _settle_orphans(self):
+        """kill -9 leaves a running card with a live-looking claim and nobody driving it
+        (the card drives itself now; the daemon only hosts panes). Settle those whenever a
+        coordinator session starts: dispatch.reconcile checks leases and process identity."""
+        try:
+            from misaka.core.network import dispatch
+            await asyncio.to_thread(dispatch.reconcile, _con(), _cfg())
+        except Exception:  # noqa: BLE001, S110 - reconciliation is a safety net at startup, never a blocker
+            pass
+
+    async def _collect_pending(self, ctx):
         """Deliver terminal-card notifications queued while no session was running, then hint about cards awaiting review."""
         con = _con()
         workspace = _workspace(ctx)
-        runtime.deliver_pending(workspace)
+        self.runtime.deliver_pending(workspace)
         reviewing = [r["id"] for r in db.by_status(con, "review", workspace=workspace)]
         if reviewing:
-            harn.sendMessage(
+            self.session.moments.send_message(
                 {"customType": "board-hint", "display": True,
                  "content": f"{len(reviewing)} task cards await independent review "
                             f"({', '.join(reviewing[:5])}{'…' if len(reviewing) > 5 else ''}).",
@@ -865,15 +886,10 @@ def register(harn):
                 {"deliverAs": "followUp", "triggerTurn": False},
             )
 
-    async def _kickoff(_event, _ctx):
-        asyncio.ensure_future(collect_pending(_ctx))
-
-    harn.on("session_start", _kickoff)
-    harn.on("before_agent_start", _kickoff)     # a long-lived session hears about cards that finished meanwhile
 
 SESSION_KINDS = {"foreground", "dm"}
 ROLES = {"last_order"}
 
 
-def activate(spec):
-    return register
+def part(spec):
+    return NetworkPart()

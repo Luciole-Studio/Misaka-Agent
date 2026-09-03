@@ -17,6 +17,7 @@ same tools, including named child agents.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 from typing import Any, Literal
@@ -191,178 +192,206 @@ Usage notes:
 """
 
 
-def _register(harn: Any, context: RoleContext, permitted: bool) -> None:
-    # In a child process these values come from the selected agent definition.
-    # Register before the management tools so scoped argument rules and hooks
-    # govern the complete child tool pool.
-    from misaka.core.subagent import policy as subagent_policy
+class SubagentPart:
+    """Agent / TaskOutput / TaskStop for one role, the manager behind them, and the role's agent policy."""
 
-    subagent_policy.register(harn, context)
-    if not permitted:
-        return
+    def __init__(self, context: RoleContext, permitted: bool) -> None:
+        from misaka.core.subagent import policy as subagent_policy
 
-    manager = SubagentManager(harn, context)
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:  # registration-only embedders/tests
-        loop = None
-    if loop is not None:
-        _ACTIVE_MANAGERS.setdefault(loop, set()).add(manager)
+        self.role_context = context
+        self.session: Any = None
+        self.commands: list[Any] = []
+        self.tools: list[ToolDefinition] = []
+        self.policy = subagent_policy.policy_for(context)
+        self.manager: SubagentManager | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        if not permitted:
+            return
+        manager = self.manager = SubagentManager(None, context)
 
-    async def launch_agent(tool_call_id: str, raw: Any, signal: Any, on_update: Any, ctx: Any) -> dict[str, Any]:
-        params = _coerce(AgentParams, raw)
-        assert isinstance(params, AgentParams)
-        if params.cwd and params.isolation:
-            raise ValueError('cwd and isolation="worktree" are mutually exclusive')
-        if params.cwd and not os.path.isabs(os.path.expanduser(params.cwd)):
-            raise ValueError("cwd must be an absolute path")
+        async def launch_agent(tool_call_id: str, raw: Any, signal: Any, on_update: Any, ctx: Any) -> dict[str, Any]:
+            params = _coerce(AgentParams, raw)
+            assert isinstance(params, AgentParams)
+            if params.cwd and params.isolation:
+                raise ValueError('cwd and isolation="worktree" are mutually exclusive')
+            if params.cwd and not os.path.isabs(os.path.expanduser(params.cwd)):
+                raise ValueError("cwd must be an absolute path")
 
-        session_cwd = getattr(ctx, "cwd", None) or context.workspace
-        call_cwd = params.cwd or session_cwd
-        session_project_trusted = manager._context_project_trusted(
-            ctx,
-            context.project_trusted,
+            session_cwd = getattr(ctx, "cwd", None) or context.workspace
+            call_cwd = params.cwd or session_cwd
+            session_project_trusted = manager._context_project_trusted(
+                ctx,
+                context.project_trusted,
+            )
+            include_project, _ = manager._project_trust_for_cwd(
+                call_cwd,
+                session_project_trusted=session_project_trusted,
+                explicit_cwd=params.cwd is not None,
+                session_cwd=session_cwd,
+            )
+            definition = manager.resolve_definition(
+                params.subagent_type,
+                call_cwd,
+                include_project,
+            )
+            await manager.require_mcp(definition)
+            task = await manager.create_task(
+                definition=definition,
+                description=params.description,
+                prompt=params.prompt,
+                model=params.model,
+                background=params.run_in_background,
+                name=params.name,
+                isolation=params.isolation,
+                cwd=params.cwd,
+                tool_call_id=tool_call_id,
+                context=ctx,
+                on_update=on_update,
+                session_project_trusted=session_project_trusted,
+                project_cwd_explicit=params.cwd is not None,
+            )
+
+            if params.run_in_background or bool(manager.field(definition, "background", False)):
+                manager.run_background(task, params.prompt)
+                data = task.async_result()
+                return _text_result(format_async_launch(data), data)
+
+            try:
+                await manager.run_foreground(task, params.prompt, signal)
+            except AgentCancelled:
+                raise asyncio.CancelledError from None
+            data = task.completed_result()
+            return _text_result(format_sync_result(data), data)
+
+        async def task_output(_tool_call_id: str, raw: Any, signal: Any, _on_update: Any, ctx: Any) -> dict[str, Any]:
+            params = _coerce(TaskOutputParams, raw)
+            assert isinstance(params, TaskOutputParams)
+            data = await manager.task_output(
+                params.task_id,
+                block=params.block,
+                timeout_ms=params.timeout,
+                signal=signal,
+                context=ctx,
+            )
+            return _text_result(format_task_output(data), data)
+
+        async def stop_task(_tool_call_id: str, raw: Any, _signal: Any, _on_update: Any, ctx: Any) -> dict[str, Any]:
+            params = _coerce(TaskStopParams, raw)
+            assert isinstance(params, TaskStopParams)
+            task_id = params.task_id
+            if not task_id:
+                raise ValueError("Missing required parameter: task_id")
+            data = await manager.stop_task(task_id, context=ctx)
+            return _text_result(json.dumps(data, ensure_ascii=False), data)
+
+        self.agent_tool = ToolDefinition(
+            name=AGENT_TOOL_NAME,
+            label="Agent",
+            description=_agent_prompt(context, False),
+            parameters=AgentParams.model_json_schema(),
+            execute=launch_agent,
+            renderResult=_render_result,
+            promptSnippet="Delegate one task to an autonomous agent",
+            promptGuidelines=[
+                "Give fresh agents all relevant context; they do not see the parent conversation.",
+                "Use multiple Agent tool calls in one message for independent parallel work.",
+                "Use background only when useful work remains for you to do in parallel.",
+                "Completion arrives as a <task-notification>; never sleep or poll. TaskOutput reads a result, SendMessage continues the same agent, TaskStop stops one that is still running.",
+                "Findings a delegate brings back need the same source verification as your own before you cite them.",
+            ],
         )
-        include_project, _ = manager._project_trust_for_cwd(
-            call_cwd,
-            session_project_trusted=session_project_trusted,
-            explicit_cwd=params.cwd is not None,
-            session_cwd=session_cwd,
-        )
-        definition = manager.resolve_definition(
-            params.subagent_type,
-            call_cwd,
-            include_project,
-        )
-        await manager.require_mcp(definition)
-        task = await manager.create_task(
-            definition=definition,
-            description=params.description,
-            prompt=params.prompt,
-            model=params.model,
-            background=params.run_in_background,
-            name=params.name,
-            isolation=params.isolation,
-            cwd=params.cwd,
-            tool_call_id=tool_call_id,
-            context=ctx,
-            on_update=on_update,
-            session_project_trusted=session_project_trusted,
-            project_cwd_explicit=params.cwd is not None,
-        )
-
-        if params.run_in_background or bool(manager.field(definition, "background", False)):
-            manager.run_background(task, params.prompt)
-            data = task.async_result()
-            return _text_result(format_async_launch(data), data)
-
-        try:
-            await manager.run_foreground(task, params.prompt, signal)
-        except AgentCancelled:
-            raise asyncio.CancelledError from None
-        data = task.completed_result()
-        return _text_result(format_sync_result(data), data)
-
-    async def task_output(_tool_call_id: str, raw: Any, signal: Any, _on_update: Any, ctx: Any) -> dict[str, Any]:
-        params = _coerce(TaskOutputParams, raw)
-        assert isinstance(params, TaskOutputParams)
-        data = await manager.task_output(
-            params.task_id,
-            block=params.block,
-            timeout_ms=params.timeout,
-            signal=signal,
-            context=ctx,
-        )
-        return _text_result(format_task_output(data), data)
-
-    async def stop_task(_tool_call_id: str, raw: Any, _signal: Any, _on_update: Any, ctx: Any) -> dict[str, Any]:
-        params = _coerce(TaskStopParams, raw)
-        assert isinstance(params, TaskStopParams)
-        task_id = params.task_id
-        if not task_id:
-            raise ValueError("Missing required parameter: task_id")
-        data = await manager.stop_task(task_id, context=ctx)
-        return _text_result(json.dumps(data, ensure_ascii=False), data)
-
-    agent_tool = ToolDefinition(
-        name=AGENT_TOOL_NAME,
-        label="Agent",
-        # The factory also runs during the pre-trust pass. The final session_start
-        # event replaces this conservative roster after ctx.isProjectTrusted() binds.
-        description=_agent_prompt(context, False),
-        parameters=AgentParams.model_json_schema(),
-        execute=launch_agent,
-        renderResult=_render_result,
-        promptSnippet="Delegate one task to an autonomous agent",
-        promptGuidelines=[
-            "Give fresh agents all relevant context; they do not see the parent conversation.",
-            "Use multiple Agent tool calls in one message for independent parallel work.",
-            "Use background only when useful work remains for you to do in parallel.",
-            "Completion arrives as a <task-notification>; never sleep or poll. TaskOutput reads a result, SendMessage continues the same agent, TaskStop stops one that is still running.",
-            "Findings a delegate brings back need the same source verification as your own before you cite them.",
-        ],
-    )
-    harn.registerTool(agent_tool)
-
-    async def refresh_agent_prompt(_event: Any, ctx: Any) -> None:
-        description = _agent_prompt(
-            context,
-            ctx.isProjectTrusted(),
-            getattr(ctx, "cwd", None) or context.workspace,
-        )
-        if description != agent_tool.description:
-            agent_tool.description = description
-            # Re-register so the session wraps the tool with its final description.
-            harn.registerTool(agent_tool)
-
-    harn.on("session_start", refresh_agent_prompt)
-    harn.registerTool(
-        ToolDefinition(
-            name=TASK_OUTPUT_TOOL_NAME,
-            label="Task Output",
-            description=(
-                "Read or wait for a registered background task. block=true waits up to timeout ms; "
-                "block=false returns its current state."
+        self.tools = [
+            self.agent_tool,
+            ToolDefinition(
+                name=TASK_OUTPUT_TOOL_NAME,
+                label="Task Output",
+                description=(
+                    "Read or wait for a registered background task. block=true waits up to timeout ms; "
+                    "block=false returns its current state."
+                ),
+                parameters=TaskOutputParams.model_json_schema(),
+                execute=task_output,
+                renderResult=_render_result,
+                promptSnippet="Read output from a background task",
             ),
-            parameters=TaskOutputParams.model_json_schema(),
-            execute=task_output,
-            renderResult=_render_result,
-            promptSnippet="Read output from a background task",
-        )
-    )
-    harn.registerTool(
-        ToolDefinition(
-            name=TASK_STOP_TOOL_NAME,
-            label="Stop Task",
-            description="Stop a running background task by ID",
-            parameters=TaskStopParams.model_json_schema(),
-            execute=stop_task,
-            renderResult=_render_result,
-            promptSnippet="Stop a running task",
-        )
-    )
+            ToolDefinition(
+                name=TASK_STOP_TOOL_NAME,
+                label="Stop Task",
+                description="Stop a running background task by ID",
+                parameters=TaskStopParams.model_json_schema(),
+                execute=stop_task,
+                renderResult=_render_result,
+                promptSnippet="Stop a running task",
+            ),
+        ]
 
-    async def cleanup(_event: Any, _ctx: Any) -> None:
+    def attach(self, session: Any) -> None:
+        self.session = session
+        if self.manager is not None:
+            self.manager.session = session
+        if self.policy is not None:
+            self.policy.session = session
+
+    async def _policy(self, name: str, event: Any, ctx: Any) -> Any:
+        if self.policy is None:
+            return None
+        result = getattr(self.policy, name)(event, ctx)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    async def before_agent_start(self, event: Any, ctx: Any) -> Any:
+        return await self._policy("before_agent", event, ctx)
+
+    async def tool_call(self, event: Any, ctx: Any) -> Any:
+        return await self._policy("before_tool", event, ctx)
+
+    async def tool_result(self, event: Any, ctx: Any) -> Any:
+        return await self._policy("after_tool", event, ctx)
+
+    async def agent_end(self, event: Any, ctx: Any) -> Any:
+        return await self._policy("on_event", event, ctx)
+
+    async def session_start(self, _event: Any, ctx: Any) -> None:
+        manager = self.manager
+        if manager is None:
+            return
+        # The loop the session runs on is known here, not when the part was built:
+        # ``route_to_children`` and the drains below find this manager through it.
+        self._loop = asyncio.get_running_loop()
+        _ACTIVE_MANAGERS.setdefault(self._loop, set()).add(manager)
+        description = _agent_prompt(
+            self.role_context,
+            ctx.isProjectTrusted(),
+            getattr(ctx, "cwd", None) or self.role_context.workspace,
+        )
+        if description != self.agent_tool.description:
+            self.agent_tool.description = description
+            if self.session is not None:
+                self.session.refreshTools()
+
+    async def session_shutdown(self, _event: Any, _ctx: Any) -> None:
+        manager = self.manager
+        if manager is None:
+            return
         try:
             await manager.close()
         finally:
-            managers = _ACTIVE_MANAGERS.get(loop) if loop is not None else None
+            managers = _ACTIVE_MANAGERS.get(self._loop) if self._loop is not None else None
             if managers is not None:
                 managers.discard(manager)
                 if not managers:
-                    _ACTIVE_MANAGERS.pop(loop, None)
-
-    harn.on("session_shutdown", cleanup)
+                    _ACTIVE_MANAGERS.pop(self._loop, None)
 
 
-def bind(
+def part_for(
     profile_dir: str,
     role: str,
     workspace: str,
     mcp_role: str | None = None,
     tool_ceiling: tuple[str, ...] | list[str] | None | object = _TOOL_CEILING_UNSET,
-):
-    """Return a factory bound to an immutable role/workspace snapshot."""
+) -> SubagentPart:
+    """The part for an immutable role/workspace snapshot."""
 
     capture_args = {
         "profile_dir": profile_dir,
@@ -373,14 +402,7 @@ def bind(
     if tool_ceiling is not _TOOL_CEILING_UNSET:
         capture_args["tool_ceiling"] = tool_ceiling
     context = RoleContext.capture(**capture_args)
-    # An explicit binding is the trusted session snapshot.  Re-reading the
-    # process-global role here would couple concurrent in-process sessions.
-    permitted = allows_subagents(profile_dir, role, _env_role=role)
-
-    def bound(harn: Any) -> None:
-        _register(harn, context, permitted)
-
-    return bound
+    return SubagentPart(context, allows_subagents(profile_dir, role, _env_role=role))
 
 
 async def wait_for_background_tasks() -> None:
@@ -492,13 +514,14 @@ __all__ = [
     "TASK_OUTPUT_TOOL_NAME",
     "TASK_STOP_TOOL_NAME",
     "AgentParams",
+    "SubagentPart",
     "TaskOutputParams",
     "TaskStopParams",
     "allows_subagents",
-    "bind",
     "has_async_hooks",
     "has_background_task_records",
     "has_background_tasks",
+    "part_for",
     "route_to_children",
     "wait_for_async_hooks",
     "wait_for_background_tasks",

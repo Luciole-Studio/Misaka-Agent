@@ -10,6 +10,7 @@ import os
 import shlex
 from pathlib import Path
 
+from misaka.core.moments import CoreCommand
 from misaka.core.skills import index as skill_index
 from misaka.core.skills.layers import SKILL_SUPPORT_DIRS, skill_roots
 from misaka.core.skills.manage import lookup_path_error
@@ -147,64 +148,68 @@ def parse_skill_invocation_message(text):
             "user_instruction": instruction}
 
 
-def register_for(roots, profile_dir, cwd=None, kind="foreground"):
+class SkillsPart:
     """Everything skills for one session, against these layer roots; writes (``skill_manage``,
     ``/learn``) go to the role's own ``skills/`` under ``profile_dir``. ``cwd`` is the
     workspace the coding posture is judged in (misaka.core.skills.coding_context)."""
-    from pydantic import BaseModel, ConfigDict, Field
 
-    from misaka.core.extensions.types import ToolDefinition
-    from misaka.core.skills.coding_context import compact_skill_categories
+    def __init__(self, roots, profile_dir, cwd=None, kind="foreground"):
+        self.session = None
+        self.tools = []
+        self.commands = []
+        from pydantic import BaseModel, ConfigDict, Field
 
-    roots = list(roots)
-    workspace = cwd or os.getcwd()
+        from misaka.core.extensions.types import ToolDefinition
+        from misaka.core.skills.coding_context import compact_skill_categories
 
-    def entries():
-        return skill_index.runtime_build(roots)
+        roots = list(roots)
+        workspace = cwd or os.getcwd()
 
-    def prompt_entries():
-        return skill_index.build(roots)
+        def entries():
+            return skill_index.runtime_build(roots)
 
-    def session_id(ctx):
-        try:
-            return str(ctx.sessionManager.getSessionId())
-        except Exception:  # noqa: BLE001 - a missing session ID should not block loading
-            return None
+        def prompt_entries():
+            return skill_index.build(roots)
 
-    class ListParams(BaseModel):
-        model_config = ConfigDict(extra="forbid")
-        category: str = Field("", description="Optional category filter to narrow results.")
+        def session_id(ctx):
+            try:
+                return str(ctx.sessionManager.getSessionId())
+            except Exception:  # noqa: BLE001 - a missing session ID should not block loading
+                return None
 
-    class ViewParams(BaseModel):
-        model_config = ConfigDict(extra="forbid")
-        name: str = Field(description="The skill name (use skills_list to see available skills).")
-        file_path: str = Field(
-            "", description="OPTIONAL: Path to a linked file within the skill (e.g., 'references/api.md', "
-                            "'templates/config.yaml', 'scripts/validate.py'). Omit to get the main SKILL.md content.")
+        class ListParams(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+            category: str = Field("", description="Optional category filter to narrow results.")
 
-    class ManageParams(BaseModel):
-        model_config = ConfigDict(extra="forbid")
-        action: str = Field(description="Operation: create, edit, patch, delete, write_file, or remove_file.")
-        name: str = Field(description="Lowercase kebab-case skill name and directory name.")
-        content: str = Field("", description="Complete SKILL.md text for create or edit.")
-        file_path: str = Field("", description="Relative support-file path, or optional patch target.")
-        file_content: str = Field("", description="Complete content for write_file.")
-        old_string: str = Field("", description="Exact text to replace; must match uniquely unless replace_all is true.")
-        new_string: str = Field("", description="Replacement text; use an empty string to remove the match.")
-        replace_all: bool = Field(False, description="Replace every match instead of requiring one unique match.")
-        absorbed_into: str = Field("", description="For delete, optional existing skill that absorbed this skill's useful content.")
+        class ViewParams(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+            name: str = Field(description="The skill name (use skills_list to see available skills).")
+            file_path: str = Field(
+                "", description="OPTIONAL: Path to a linked file within the skill (e.g., 'references/api.md', "
+                                "'templates/config.yaml', 'scripts/validate.py'). Omit to get the main SKILL.md content.")
 
-    def register(harn):
+        class ManageParams(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+            action: str = Field(description="Operation: create, edit, patch, delete, write_file, or remove_file.")
+            name: str = Field(description="Lowercase kebab-case skill name and directory name.")
+            content: str = Field("", description="Complete SKILL.md text for create or edit.")
+            file_path: str = Field("", description="Relative support-file path, or optional patch target.")
+            file_content: str = Field("", description="Complete content for write_file.")
+            old_string: str = Field("", description="Exact text to replace; must match uniquely unless replace_all is true.")
+            new_string: str = Field("", description="Replacement text; use an empty string to remove the match.")
+            replace_all: bool = Field(False, description="Replace every match instead of requiring one unique match.")
+            absorbed_into: str = Field("", description="For delete, optional existing skill that absorbed this skill's useful content.")
+
         # ── the index in the system prompt (hermes build_skills_system_prompt) ──
         async def advertise(event, _ctx):
-            get_active = getattr(harn, "getActiveTools", None)
-            if callable(get_active):
+            active = None
+            if self.session is not None:
                 try:
-                    active = set(get_active())
-                except Exception:  # noqa: BLE001 - old/simple harnesses fail open
+                    active = set(self.session.getActiveToolNames())
+                except Exception:  # noqa: BLE001 - a session that cannot say fails open
                     active = None
-                if active is not None and not ({"skills_list", "skill_view", "skill_manage"} & active):
-                    return None
+            if active is not None and not ({"skills_list", "skill_view", "skill_manage"} & active):
+                return None
             section = skill_index.render_prompt(prompt_entries(), skill_index.categories(roots),
                                                 compact_skill_categories(workspace))
             if section:
@@ -213,8 +218,7 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
         async def fresh(_event, _ctx):
             skill_index.invalidate()
 
-        harn.on("before_agent_start", advertise)
-        harn.on("session_start", fresh)
+        self._advertise, self._fresh = advertise, fresh
 
         # Live skill trees change only through skill_manage (gate, scan, ledger): the generic file
         # and shell tools are refused on them in every kind of session. A card's sandbox copies are
@@ -242,7 +246,7 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
                 )}
             return None
 
-        harn.on("tool_call", guard_live_skills)
+        self._guard = guard_live_skills
 
         # ── the [Skills] block on the startup screen ──
         # The engine loads no skills of its own, so it has no section to show; this one takes
@@ -278,7 +282,7 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
                     "details": {"count": len(found),
                                 "categories": sorted({e["category"] for e in found})}}
 
-        harn.registerTool(ToolDefinition(
+        self.tools.append(ToolDefinition(
             name="skills_list", label="List skills",
             description="List available skills (name + description). Use skill_view(name) to load full content.",
             parameters=ListParams.model_json_schema(), execute=list_execute,
@@ -322,7 +326,7 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
             return {"content": [{"type": "text", "text": text}],
                     "details": {"skill": _runtime_name(entry), "linked_files": linked}}
 
-        harn.registerTool(ToolDefinition(
+        self.tools.append(ToolDefinition(
             name="skill_view", label="View skill",
             description="Skills allow for loading information about specific tasks and workflows, as well as scripts and templates. Load a skill's full content or access its linked files (references, templates, scripts). First call returns SKILL.md content plus a 'linked_files' index showing available references/templates/scripts. To access those, call again with file_path parameter.",
             parameters=ViewParams.model_json_schema(), execute=view_execute,
@@ -352,7 +356,7 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
                     "details": {k: v for k, v in result.items() if k != "message"}}
 
         if kind not in ("card", "child"):   # skills are read-only at run time inside a card and its children
-            harn.registerTool(ToolDefinition(
+            self.tools.append(ToolDefinition(
                 name="skill_manage", label="Manage skills",
                 description="Create, update, or delete a reusable skill; every change goes through approval, validation, the security scan, and the rollback ledger.",
                 parameters=ManageParams.model_json_schema(), execute=manage_execute,
@@ -385,9 +389,8 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
             await ctx.sendUserMessage(build_skill_message(
                 entry, user_instruction=instruction.strip(), session_id=session_id(ctx)))
 
-        harn.registerCommand("skill", {
-            "handler": skill_cmd,
-            "description": "List skills, or invoke one with `/skill <name> [instruction]` in the current session."})
+        self.commands.append(CoreCommand(
+            "skill", "List skills, or invoke one with `/skill <name> [instruction]` in the current session.", skill_cmd))
 
         async def learn_cmd(args, ctx):
             from misaka.core.skills import write as skill_write
@@ -441,15 +444,26 @@ def register_for(roots, profile_dir, cwd=None, kind="foreground"):
             ctx.ui.notify(f"Skill write mode set to {value}; it takes effect immediately.", "info")
 
         if kind == "foreground":         # the write mode is the user's to set, at the keyboard
-            harn.registerCommand("skill-mode", {
-                "handler": skill_mode_cmd,
-                "description": "Show or change the skill write mode: off, forbid / ask (writes wait for your review), or allow."})
+            self.commands.append(CoreCommand(
+                "skill-mode",
+                "Show or change the skill write mode: off, forbid / ask (writes wait for your review), or allow.",
+                skill_mode_cmd))
         if kind not in ("card", "child"):
-            harn.registerCommand("learn", {
-                "handler": learn_cmd,
-                "description": "Create or improve a reusable skill from files, links, notes, or the workflow just completed."})
+            self.commands.append(CoreCommand(
+                "learn", "Create or improve a reusable skill from files, links, notes, or the workflow just completed.", learn_cmd))
 
-    return register
+
+    def attach(self, session):
+        self.session = session
+
+    async def before_agent_start(self, event, ctx):
+        return await self._advertise(event, ctx)
+
+    async def session_start(self, event, ctx):
+        await self._fresh(event, ctx)
+
+    async def tool_call(self, event, ctx):
+        return await self._guard(event, ctx)
 
 
 SESSION_KINDS = {"foreground", "dm", "card", "child"}
@@ -493,7 +507,7 @@ def _command_touches(command, workspace, live_roots):
     return False
 
 
-def activate(spec):
+def part(spec):
     roots = (list(spec.skill_roots) if spec.skill_roots is not None
              else skill_roots(spec.profile_dir, spec.workspace))
-    return register_for(roots, spec.profile_dir, cwd=spec.workspace, kind=spec.kind)
+    return SkillsPart(roots, spec.profile_dir, cwd=spec.workspace, kind=spec.kind)

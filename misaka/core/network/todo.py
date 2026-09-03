@@ -110,10 +110,17 @@ NAG_EMPTY_AFTER = 10
 NAG_STALE_AFTER = 25
 
 
-def tools_for(task_id, sender):
-    """Return a registrar that adds the ``misaka_todo`` tools and reminder hooks for one task card."""
+def _field(event, key, default=None):
+    try:
+        return event.get(key, default)
+    except AttributeError:
+        return getattr(event, key, default)
 
-    def register(harn):
+
+class TodoPart:
+    """The ``misaka_todo`` tools and reminder nudges for one task card."""
+
+    def __init__(self, task_id, sender):
         from typing import Literal
 
         from pydantic import BaseModel, Field
@@ -122,13 +129,20 @@ def tools_for(task_id, sender):
         from misaka.core.extensions.types import ToolDefinition
         from misaka.core.platform import tasks as bdb
 
-        state = {"con": None, "results": 0, "since_write": 0,
-                 "empty_nagged": False, "stale_nags": 0}
+        self.task_id = task_id
+        self.sender = sender
+        self.session = None
+        self.commands = []
+        self._db_path = CFG["db"]
+        self._bdb = bdb
+        self._con = None
+        self._results = 0
+        self._since_write = 0
+        self._empty_nagged = False
+        self._stale_nags = 0
 
         def con():
-            if state["con"] is None:
-                state["con"] = bdb.connect(CFG["db"])
-            return state["con"]
+            return self.con()
 
         def _text(s):
             return {"content": [{"type": "text", "text": s}], "details": {}}
@@ -159,35 +173,15 @@ def tools_for(task_id, sender):
                 ok, err = mark(con(), task_id, op.id, op.status,
                                note=op.note, owner=op.owner)
                 out.append(f"✓ {op.id} → {op.status}" if ok else f"✗ {op.id}: {err}")
-            state["since_write"] = 0
+            self._since_write = 0
             return _text(("\n".join(out) + "\n\n" if out else "")
                          + "Current list:\n" + render(con(), task_id))
-
-        harn.registerTool(ToolDefinition(
-            name="misaka_todo", label="Update task to-do list",
-            description="Add, assign, and update the task card's nested to-do items; progress appears in the global execution tree.",
-            parameters=TodoParams.model_json_schema(), execute=todo_exec,
-            promptSnippet="Create or update this task card's to-do list",
-            promptGuidelines=[
-                "Before substantial work, create a short to-do list and mark one or two immediate items doing.",
-                "Update items as work progresses: doing when started, done only after completion.",
-                "Use blocked with a concrete note when work cannot proceed, then continue independent items.",
-                "When delegating an item, set its owner to the agent name and mark it doing.",
-                "Before submission, no item may remain doing: mark it done, return it to open, or block it with a note.",
-            ]))
 
         class ListParams(BaseModel):
             pass
 
         async def list_exec(tool_call_id, raw, signal, on_update, ctx):
             return _text("Current list:\n" + render(con(), task_id))
-
-        harn.registerTool(ToolDefinition(
-            name="misaka_todo_list", label="View task to-do list",
-            description="Show this task card's nested to-do items, owners, statuses, and blocker notes.",
-            parameters=ListParams.model_json_schema(), execute=list_exec,
-            promptSnippet='Check the list of sub-tasks for this card',
-            promptGuidelines=["After context compaction, use `misaka_todo_list` to recover the task's current work state."]))
 
         class MyCardParams(BaseModel):
             pass
@@ -208,14 +202,6 @@ def tools_for(task_id, sender):
                 lines += ["log:", *(f"  {line}" for line in log[-20:])]
             return _text("\n".join(lines))
 
-        harn.registerTool(ToolDefinition(
-            name="misaka_my_card", label="View my card",
-            description="This card as the board sees it: status, dependencies and whether they are done, the reviewer "
-                        "if one is named, a block reason, and the last lines of the card's log.",
-            parameters=MyCardParams.model_json_schema(), execute=my_card_exec,
-            promptSnippet="Check this card's status, dependencies, and log",
-            promptGuidelines=["Check the card before waiting on something: a blocked dependency or a named reviewer changes what to do next."]))
-
         class NoteParams(BaseModel):
             text: str = Field(description="One line for the card's log: a decision, a change of course, a dead end.")
 
@@ -226,57 +212,81 @@ def tools_for(task_id, sender):
             cards.append_log(row["workspace"], task_id, sender, p.text)
             return _text("Logged on the card.")
 
-        harn.registerTool(ToolDefinition(
-            name="misaka_card_note", label="Log a note on the card",
-            description="Append one line to this card's log (its `## log` section in the card file): a decision, a change "
-                        "of course, a dead end. Last Order reads the log when she looks at the card.",
-            parameters=NoteParams.model_json_schema(), execute=note_exec,
-            promptSnippet="Log a decision or change of course on this card",
-            promptGuidelines=["Log why you changed course or dropped a line of inquiry as it happens; report.json is for the end."]))
+        self.tools = [
+            ToolDefinition(
+                name="misaka_todo", label="Update task to-do list",
+                description="Add, assign, and update the task card's nested to-do items; progress appears in the global execution tree.",
+                parameters=TodoParams.model_json_schema(), execute=todo_exec,
+                promptSnippet="Create or update this task card's to-do list",
+                promptGuidelines=[
+                    "Before substantial work, create a short to-do list and mark one or two immediate items doing.",
+                    "Update items as work progresses: doing when started, done only after completion.",
+                    "Use blocked with a concrete note when work cannot proceed, then continue independent items.",
+                    "When delegating an item, set its owner to the agent name and mark it doing.",
+                    "Before submission, no item may remain doing: mark it done, return it to open, or block it with a note.",
+                ]),
+            ToolDefinition(
+                name="misaka_todo_list", label="View task to-do list",
+                description="Show this task card's nested to-do items, owners, statuses, and blocker notes.",
+                parameters=ListParams.model_json_schema(), execute=list_exec,
+                promptSnippet='Check the list of sub-tasks for this card',
+                promptGuidelines=["After context compaction, use `misaka_todo_list` to recover the task's current work state."]),
+            ToolDefinition(
+                name="misaka_my_card", label="View my card",
+                description="This card as the board sees it: status, dependencies and whether they are done, the reviewer "
+                            "if one is named, a block reason, and the last lines of the card's log.",
+                parameters=MyCardParams.model_json_schema(), execute=my_card_exec,
+                promptSnippet="Check this card's status, dependencies, and log",
+                promptGuidelines=["Check the card before waiting on something: a blocked dependency or a named reviewer changes what to do next."]),
+            ToolDefinition(
+                name="misaka_card_note", label="Log a note on the card",
+                description="Append one line to this card's log (its `## log` section in the card file): a decision, a change "
+                            "of course, a dead end. Last Order reads the log when she looks at the card.",
+                parameters=NoteParams.model_json_schema(), execute=note_exec,
+                promptSnippet="Log a decision or change of course on this card",
+                promptGuidelines=["Log why you changed course or dropped a line of inquiry as it happens; report.json is for the end."]),
+        ]
 
-        def _field(event, key, default=None):
-            try:
-                return event.get(key, default)
-            except AttributeError:
-                return getattr(event, key, default)
+    def attach(self, session):
+        self.session = session
 
-        def _nag(text):
-            try:
-                harn.sendMessage(
-                    {"customType": "todo-reminder", "display": True,
-                     "content": "[To-do reminder] " + text, "details": {}},
-                    {"deliverAs": "followUp", "triggerTurn": False})
-            except Exception:  # noqa: BLE001, S110 - reminders must never interrupt work
-                pass
+    def con(self):
+        if self._con is None:
+            self._con = self._bdb.connect(self._db_path)
+        return self._con
 
-        async def on_result(event, _ctx=None):
-            name = str(_field(event, "toolName", "") or "")
-            if name in ("misaka_todo", "misaka_todo_list"):
-                state["since_write"] = 0
-                return
-            state["results"] += 1
-            state["since_write"] += 1
-            s = stats(con(), task_id)
-            if (not state["empty_nagged"] and s["total"] == 0
-                    and state["results"] >= NAG_EMPTY_AFTER):
-                state["empty_nagged"] = True
-                _nag(
-                    f"No to-do list after {state['results']} tool results. Use `misaka_todo` to break this card into trackable steps."
-                )
-            elif (s["doing"] and state["since_write"] >= NAG_STALE_AFTER
-                    and state["stale_nags"] < 2):
-                state["stale_nags"] += 1
-                state["since_write"] = 0
-                _nag(
-                    "No to-do activity for a while. Still doing: " + "; ".join(s["doing"][:3])
-                    + ". Mark completed work done, or mark a blocker with a note."
-                )
+    def _nag(self, text):
+        try:
+            self.session.moments.send_message(
+                {"customType": "todo-reminder", "display": True,
+                 "content": "[To-do reminder] " + text, "details": {}},
+                {"deliverAs": "followUp", "triggerTurn": False})
+        except Exception:  # noqa: BLE001, S110 - reminders must never interrupt work
+            pass
 
-        async def on_shutdown(_event=None, _ctx=None):
-            if state["con"] is not None:
-                state["con"].close()
+    async def tool_result(self, event, ctx=None):
+        name = str(_field(event, "toolName", "") or "")
+        if name in ("misaka_todo", "misaka_todo_list"):
+            self._since_write = 0
+            return
+        self._results += 1
+        self._since_write += 1
+        s = stats(self.con(), self.task_id)
+        if (not self._empty_nagged and s["total"] == 0
+                and self._results >= NAG_EMPTY_AFTER):
+            self._empty_nagged = True
+            self._nag(
+                f"No to-do list after {self._results} tool results. Use `misaka_todo` to break this card into trackable steps."
+            )
+        elif (s["doing"] and self._since_write >= NAG_STALE_AFTER
+                and self._stale_nags < 2):
+            self._stale_nags += 1
+            self._since_write = 0
+            self._nag(
+                "No to-do activity for a while. Still doing: " + "; ".join(s["doing"][:3])
+                + ". Mark completed work done, or mark a blocker with a note."
+            )
 
-        harn.on("tool_result", on_result)
-        harn.on("session_shutdown", on_shutdown)
-
-    return register
+    async def session_shutdown(self, event=None, ctx=None):
+        if self._con is not None:
+            self._con.close()
