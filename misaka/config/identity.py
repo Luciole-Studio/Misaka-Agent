@@ -5,13 +5,24 @@ The layout mirrors the stable parts of hermes' system prompt:
 1. Identity slot: the role's SOUL.md if it has content, otherwise the role's
    default from ROLE_IDENTITY, otherwise DEFAULT_IDENTITY.  SOUL.md is a pure
    user-customisation slot and *replaces* the default; leaving it empty is fine.
-2. Charter: ROLE_CHARTER is appended unconditionally.  Constitutional duties
-   (Last Order delegates rather than doing the work, spending needs the user's
-   nod, acceptance goes through a reviewing Sister) live here precisely because the
-   identity slot can be replaced wholesale by a user's SOUL.md.
+2. Charter: ROLE_CHARTER is appended unconditionally.  The two constitutional
+   duties it actually carries -- Last Order delegates rather than doing the work,
+   and spending needs the user's nod -- live here precisely because the identity
+   slot can be replaced wholesale by a user's SOUL.md.  Independent review is not
+   a third one: it lives in the board tools, as ``misaka_card``'s optional
+   ``reviewer`` parameter and ``misaka_card_request_review``
+   (extensions/last_order/network.py), and no charter sentence states it.
 3. The shared soul (~/.misaka/profiles/MISAKA.md) is handled by profiles.shared_soul.
 4. Tool discipline comes from each tool's promptGuidelines/promptSnippet at
-   registration time, so no role file should hand-copy a tool list.
+   registration time, so no charter may name a tool to claim a role has it or
+   lacks it -- not a list, not a single name.  Such a sentence is unverifiable
+   prose sitting beside a registry that moves without it, and this one did move:
+   the coordinator charter denied Last Order a messaging tool that the messaging
+   layer (network/messages.py) had been registering for every role all along, so
+   the prompt talked her out of a capability sitting in her own tools array.
+   State the rule instead ("you do not spawn sub-agents"), and leave the names to
+   platform.vocabulary, which the registration sites read.  The invariant is a
+   test now, not a habit: tests/test_role_tool_consistency.py.
 """
 
 import os
@@ -43,9 +54,9 @@ ROLE_CHARTER = {
 
 Your `misaka_*` tools are the dedicated control surface for registered Sisters, not a generic
 sub-agent facility: they only operate on cards that are already on the board with an acceptance
-contract. You do **not** have the `Agent / TaskOutput / SendMessage / TaskStop` sub-agent tools.
-**The Sisters are your sub-agents.** The only way to hand work off is to create a card (with an
-acceptance contract); you may not spin up a clone outside the board.
+contract. You do **not** spawn sub-agents of your own. **The Sisters are your sub-agents.** The
+only way to hand work off is to create a card (with an acceptance contract); you may not spin up a
+clone outside the board.
 
 Working method:
 1. **Find out what is wanted before acting.** When the user says "research X", ask about what is

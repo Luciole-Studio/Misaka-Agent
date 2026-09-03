@@ -388,9 +388,9 @@ def remove(con, workspace, task_id):
             return False, f"Card {task_id} was deleted but its attachments remain ({error}): {attachments}"
     if tracked and not repo.commit(workspace, git_paths, f"card {task_id}: delete"):
         return False, f"Card {task_id} was deleted but the deletion could not be committed to git; commit it by hand."
-    # Only say the file survives in git when git actually had it. `misaka add` never commits
-    # cards/, so for a card created from the CLI the file is simply gone -- say so rather than
-    # send the user to a history that holds nothing.
+    # Only say the file survives in git when git actually had it. `create()` never commits
+    # cards/, so unless something committed the card later the file is simply gone -- say so
+    # rather than send the user to a history that holds nothing.
     msg += (" Its file, log, and attachments stay in the project repository's history."
             if tracked else
             " Its file, log, and attachments were deleted from disk; they were never committed "

@@ -709,7 +709,7 @@ def delete_task(con, task_id, *, allow_active=False):
     shutil.rmtree(task_state_dir(task_id), ignore_errors=True)
     # Nothing here touches the card *file*; only cards.remove does, and only it knows whether
     # git was ever given a copy. Claiming anything about the file from in here was a lie for
-    # every card `misaka add` created, because nothing commits cards/ on the way in.
+    # every card `cards.create` makes, because nothing commits cards/ on the way in.
     message = (f"Card {task_id} and its runs, dependencies, events, budget, and to-do items "
                "were deleted.")
     if skipped:

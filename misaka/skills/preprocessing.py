@@ -100,14 +100,22 @@ def expand_inline_shell(content, skill_dir, timeout):
     return _INLINE_SHELL_RE.sub(_replace, content)
 
 
-def preprocess_skill_content(content, skill_dir, session_id=None, skills_cfg=None):
-    """Apply configured SKILL.md template and inline-shell preprocessing."""
+def preprocess_skill_content(content, skill_dir, session_id=None, skills_cfg=None, *, layer=None):
+    """Apply configured SKILL.md template and inline-shell preprocessing.
+
+    ``layer`` is where discovery found the skill. Inline shell expands only in the layers
+    the user edits (``PERSONAL_LAYERS``): a project skill arrived with a repository the user
+    merely opened, and an external directory is read-only by definition, so a `!`cmd`` in
+    either stays the text it is. No layer given means no expansion.
+    """
     if not content:
         return content
+    from misaka.skills.layers import PERSONAL_LAYERS
+
     cfg = skills_cfg if isinstance(skills_cfg, dict) else load_skills_config()
     if cfg.get("template_vars", True):
         content = substitute_template_vars(content, skill_dir, session_id)
-    if cfg.get("inline_shell", False):
+    if cfg.get("inline_shell", False) and layer in PERSONAL_LAYERS:
         timeout = int(cfg.get("inline_shell_timeout", 10) or 10)
         content = expand_inline_shell(content, skill_dir, timeout)
     return content

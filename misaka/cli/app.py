@@ -26,15 +26,6 @@ def _parser():
     p.add_argument("--version", "-V", action="version", version=VERSION)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    a = sub.add_parser("add", help="Create a task card")
-    a.add_argument("title")
-    a.add_argument("--body", default="")
-    a.add_argument("--body-file")
-    a.add_argument("--assignee", required=True)
-    a.add_argument("--model")
-    a.add_argument("--priority", type=int, default=0)
-    a.add_argument("--timeout", type=int, default=900)
-
     tk = sub.add_parser("task", help="Manage task cards")
     tk.add_argument("task_id")
     tk.add_argument("--delete", action="store_true", required=True,
@@ -285,39 +276,6 @@ def _cmd_remove(args):
     sys.exit(roster.cli_remove(args.sid, yes=args.yes))
 
 
-def _cmd_add(args):
-    from misaka.config.product import sisters
-    from misaka.platform import cards
-    # A card addressed to nobody is dispatched by nobody: it sits at ready forever with no
-    # diagnosis anywhere. The check lives here rather than in create_task because Last Order
-    # and the research workflow pick their assignees from the roster already, and the board
-    # library is also how tests and repairs put rows back for Sisters that have since retired.
-    roster = sisters()
-    if args.assignee not in roster:
-        if roster:
-            sys.exit(f'No Sister named "{args.assignee}"; the card would sit at ready forever. '
-                     f"Registered Sisters: {', '.join(sorted(roster))}.")
-        sys.exit(f'No Sister named "{args.assignee}": the roster is empty. '
-                 "Create one with `misaka create <id>` first.")
-    body = args.body
-    if args.body_file:
-        # A card body that cannot be read is a user mistake (typo, wrong folder), not a
-        # bug: report the path and the reason instead of a traceback.
-        try:
-            with open(args.body_file, encoding="utf-8") as f:
-                body = f.read()
-        except OSError as err:
-            sys.exit(f"Cannot read --body-file {args.body_file}: {err.strerror or err}")
-        except UnicodeDecodeError:
-            # Not an OSError: the file opened fine and is simply not text. Pointing a card body
-            # at a binary is the same class of mistake as pointing it at nothing.
-            sys.exit(f"Cannot read --body-file {args.body_file}: not UTF-8 text")
-    tid = cards.create(db.connect(CFG["db"]), os.getcwd(), args.title, body, args.assignee,
-                       model=args.model, priority=args.priority,
-                       timeout_seconds=args.timeout)
-    print(tid)
-
-
 def _cmd_tell(args):
     from misaka.extensions.last_order.ally import tell as ally_tell
     ok, msg = ally_tell.tell(args.message, to_addr=args.to, summary=args.summary)
@@ -362,17 +320,33 @@ def _cmd_research(args):
     # inside the workflow (planner._roster), after the workspace has been git-initialised
     # and committed into, and the message that surfaces there names neither the roster nor
     # the command that fills it.
-    if not planner.sister_catalog(cfg.get("profiles_root")):
-        sys.exit("The Sister roster is empty; research tasks cannot be assigned.\n"
-                 "Create at least one Sister first, for example: misaka create 10032")
+    roster = {sister["id"] for sister in planner.sister_catalog(cfg.get("profiles_root"))}
+    empty_roster = ("The Sister roster is empty; research tasks cannot be assigned.\n"
+                    "Create at least one Sister first, for example: misaka create 10032")
     con = db.connect(cfg["db"])
     runs.init(con)
     if args.resume:
         run = runs.get(con, args.resume)
         if not run:
             sys.exit(f"Research run not found: {args.resume}")
-        runs.resume(con, run["id"])
+        # A resumed run keeps its cards, so what it needs is the Sisters those cards name,
+        # not any Sister: `misaka create 10032` would satisfy an empty-roster check and still
+        # leave every card assigned to somebody who no longer exists.
+        assigned = sorted({row["assignee"] for row in runs.tasks(con, run["id"]) if row["assignee"]})
+        missing = [sid for sid in assigned if sid not in roster]
+        if missing:
+            sys.exit(f"Research run {run['id']} is assigned to Sisters {', '.join(assigned)}; "
+                     f"not in the roster now: {', '.join(missing)}.\n"
+                     f"Recreate them first, for example: misaka create {missing[0]}")
+        if not assigned and not roster:
+            sys.exit(empty_roster)
+        try:
+            runs.resume(con, run["id"])
+        except ValueError as err:      # a finished run refuses in its own words
+            sys.exit(str(err))
     else:
+        if not roster:
+            sys.exit(empty_roster)
         if not args.goal:
             sys.exit("A new research run requires a question; use --resume RUN_ID to continue one.")
         try:
@@ -752,11 +726,19 @@ def _cmd_doc(args):
         structure = "with PageIndex structure" if has else "page navigation only"
         print(f"Added {os.path.basename(args.arg)} as {did}: {n} pages, {structure}.")
     elif args.action == "scan":
-        ingested, skipped = corpus.scan(args.arg or os.getcwd(), with_tree=not args.no_tree)
+        target = args.arg or os.getcwd()
+        ingested, skipped = corpus.scan(target, with_tree=not args.no_tree)
         for did, path in ingested:
             print(f"  {did}  {path}")
         for path, reason in skipped:
             print(f"  skipped {path}: {reason}")
+        if not ingested:
+            # A scan that indexed nothing failed at its one job, whatever the reason: a
+            # script trusting exit 0 would go on to search a corpus this never filled.
+            if skipped:
+                sys.exit(f"Indexed 0 file(s); all {len(skipped)} candidate(s) were skipped.")
+            sys.exit(f"Nothing to index under {target}: no files with a readable suffix "
+                     f"({', '.join(sorted(corpus.SCAN_SUFFIXES))}).")
         print(f"Indexed {len(ingested)} file(s); skipped {len(skipped)}.")
     elif args.action == "list":
         for d_ in corpus.docs(workspace=db.canonical_workspace()):
@@ -794,7 +776,6 @@ COMMANDS = {
     "init": _cmd_init,
     "create": _cmd_create,
     "remove": _cmd_remove,
-    "add": _cmd_add,
     "tell": _cmd_tell,
     "dm": _cmd_dm,
     "task": _cmd_task,

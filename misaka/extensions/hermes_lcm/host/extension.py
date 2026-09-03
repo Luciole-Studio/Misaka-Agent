@@ -63,8 +63,12 @@ async def _off_loop(work, *args):
     return await asyncio.to_thread(_locked)
 
 
-def register(harn):
-    """Register the engine's tools and subscribe it to the session events it needs."""
+def register(harn, *, kind: str):
+    """Register the engine's tools for a session of ``kind`` and subscribe it to the events it needs.
+
+    ``kind`` is the session kind ``misaka.extensions.discover`` activated this extension
+    for; ``tools.withheld`` turns it into the subset of the fifteen this session is offered.
+    """
 
     async def session_start(event, ctx):
         try:
@@ -120,7 +124,7 @@ def register(harn):
             return None
 
     try:
-        tools.register(harn)
+        tools.register(harn, withhold=tools.withheld(kind, context_engine.engine()))
     except Exception:
         logger.warning("LCM tools were not registered; this session runs without them.", exc_info=True)
 

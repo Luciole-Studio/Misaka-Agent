@@ -18,11 +18,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from misaka.platform.vocabulary import MANAGEMENT_TOOL_NAMES, MANAGEMENT_TOOLS
 from misaka.utils.values import read_field
 
 PROTOCOL_VERSION = 2
 PROCESS_GROUP_IDENTITY = "process-group|"
-MANAGEMENT_TOOLS = ("Agent", "TaskOutput", "SendMessage", "TaskStop")
 
 _SMALL_FAST_DEFAULTS: dict[str, tuple[str, ...]] = {
     "anthropic": (
@@ -87,16 +87,30 @@ def _runtime_flags(argv: list[str]) -> tuple[list[str], int | None]:
     return flags, max_turns
 
 
+def _requested_tool_names(flags: list[str]) -> list[str]:
+    """The tool names the parent named on ``-t``, or ``[]`` for an inherited pool.
+
+    The runtime writes this list itself (``runtime._child_flags``), one ``-t``
+    with a comma-separated value, so a positional scan reads it back exactly;
+    a later ``-t`` wins, the way ``cli.args`` resolves a repeated flag.
+    """
+
+    names: list[str] = []
+    for index, flag in enumerate(flags[:-1]):
+        if flag in {"--tools", "-t"}:
+            names = [item.strip() for item in flags[index + 1].split(",") if item.strip()]
+    return names
+
+
 def _hook_tools(kind: str, tools: list[Any]) -> list[Any]:
     """Prompt hooks are tool-free; agent hooks cannot spawn descendants."""
 
     if kind == "prompt":
         return []
-    management = {name.casefold() for name in MANAGEMENT_TOOLS}
     return [
         tool
         for tool in tools
-        if str(read_field(tool, "name", "")).casefold() not in management
+        if str(read_field(tool, "name", "")).casefold() not in MANAGEMENT_TOOL_NAMES
     ]
 
 
@@ -817,6 +831,25 @@ async def amain() -> int:
             return 2
         await asyncio.sleep(0.1)
     active_mcp_servers = mcp_server_names()
+
+    # ``agent_session`` matches the ``-t`` allowlist against the registry and drops
+    # every name it does not recognize, without a word.  A typo in an ``agents/*.md``
+    # ``tools:`` line, or a tool since renamed, therefore costs the child that tool
+    # and reads exactly like a model that chose not to use it.  This is the last
+    # moment before the handshake, so what is missing here is missing for good --
+    # except for MCP tools, which the parent names on purpose before their server
+    # has registered (``runtime._child_flags``) and which are not late by accident.
+    requested_tools = _requested_tool_names(flags)
+    if requested_tools:
+        assembled = {tool.name for tool in session.getAllTools()}
+        missing = [
+            name
+            for name in requested_tools
+            if name not in assembled and not name.startswith("mcp__")
+        ]
+        if missing:
+            _emit({"type": "child_tools_missing", "tools": missing})
+
     _emit(
         {
             "type": "child_ready",

@@ -25,7 +25,6 @@ from misaka.skills.layers import (
     PERSONAL_LAYERS,
     disabled_skill_names,
     home,
-    inline_shell_enabled,
     iter_project_skill_files,
     iter_skill_files,
     project_skill_tree_fingerprint,
@@ -288,10 +287,7 @@ def _cached(roots):
     filesystem metadata reads instead of YAML parsing and security scans.
     """
     normalized_roots, disabled = _key(roots)
-    # inline_shell is part of the key because the project quarantine consults it:
-    # turning the setting on must re-run the scan, and the tree it scans has not
-    # changed, so nothing else in this key would move.
-    key = (normalized_roots, disabled, inline_shell_enabled(),
+    key = (normalized_roots, disabled,
            tuple(sorted((layer, _root_fingerprint(layer, root))
                         for layer, root in normalized_roots)))
     entry = _CACHE.get(key)

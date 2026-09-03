@@ -6181,6 +6181,9 @@ class InteractiveMode:
                         defaultProjectTrust=default_project_trust,
                         clearOnShrink=_safe_call_bool(self.settingsManager, "getClearOnShrink", False),
                         showTerminalProgress=_safe_call_bool(self.settingsManager, "getShowTerminalProgress", False),
+                        enableInstallTelemetry=_safe_call_bool(
+                            self.settingsManager, "getEnableInstallTelemetry", False
+                        ),
                         warnings=dict(get_warnings() or {}) if get_warnings is not None else {},
                     ),
                     SettingsCallbacks(
@@ -6279,6 +6282,10 @@ class InteractiveMode:
                         onShowTerminalProgressChange=lambda enabled: (
                             _callable_attr(self.settingsManager, "setShowTerminalProgress")
                             and self.settingsManager.setShowTerminalProgress(enabled)
+                        ),
+                        onEnableInstallTelemetryChange=lambda enabled: (
+                            _callable_attr(self.settingsManager, "setEnableInstallTelemetry")
+                            and self.settingsManager.setEnableInstallTelemetry(enabled)
                         ),
                         onWarningsChange=lambda warnings: (
                             _callable_attr(self.settingsManager, "setWarnings")

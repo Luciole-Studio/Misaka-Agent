@@ -11,10 +11,9 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from misaka.config import CFG, current_config, sisters
-from misaka.core.extensions.types import ToolDefinition
 from misaka.network import validate
 from misaka.network.sister_runtime import ACTIVE_BOARD_STATUSES, SisterRuntime
-from misaka.platform import budget
+from misaka.platform import budget, toolkit
 from misaka.platform import tasks as db
 from misaka.platform.prompt_guard import untrusted
 
@@ -113,19 +112,18 @@ def _require_project_tasks(ctx, args):
 
 
 def _register(harn, name, label, description, parameters, snippet=None, guidelines=None):
-    """Decorator: register ``fn`` as a harness tool whose raw arguments are parsed into ``parameters``."""
-    def deco(fn):
-        async def execute(tool_call_id, raw, signal, on_update, ctx):
-            args = raw if isinstance(raw, parameters) else parameters(**(raw or {}))
-            _require_project_tasks(ctx, args)
-            return await fn(tool_call_id, args, signal, on_update, ctx)
-        harn.registerTool(ToolDefinition(
-            name=name, label=label, description=description,
-            parameters=_schema(parameters), execute=execute,
-            promptSnippet=snippet, promptGuidelines=list(guidelines or []),
-        ))
-        return fn
-    return deco
+    """Decorator: register ``fn`` as a harness tool whose raw arguments are parsed into ``parameters``.
+
+    The shared seam does the registering, so no board tool can reach the ``tools``
+    array while missing from the prompt inventory. What this file adds on top is its
+    own schema conversion and the project-ownership check, which has to run on the
+    parsed arguments and before the handler sees them."""
+    return toolkit.register_tool(
+        harn,
+        name=name, label=label, description=description, parameters=parameters,
+        snippet=snippet, guidelines=guidelines,
+        schema=_schema, before=_require_project_tasks,
+    )
 
 
 def register(harn):
@@ -190,6 +188,11 @@ def register(harn):
             None, description="Optional independent reviewer; must be a different Sister from the assignee."
         )
         priority: int = Field(0, description="Relative priority; higher values run first.")
+        model: str | None = Field(
+            None, description="Model for this card only, in the form `misaka create --model` takes; "
+                              "default: the Sister's own configured model."
+        )
+        timeout: int = Field(900, ge=60, le=3600, description="Seconds one attempt may run, 60–3600.")
 
 
     @_register(
@@ -206,7 +209,8 @@ def register(harn):
         con = _con()
         cards, errs = validate.validate_cards(
             [{"title": params.title, "body": params.body, "assignee": params.assignee,
-              "priority": params.priority}], set(_sisters()))
+              "priority": params.priority, "model": params.model, "timeout": params.timeout}],
+            set(_sisters()))
         if errs:
             raise ValueError(';'.join(errs))
         if params.reviewer and params.reviewer not in set(_sisters()):
@@ -216,7 +220,7 @@ def register(harn):
         c = cards[0]
         from misaka.platform import cards as card_files
         tid = card_files.create(con, _workspace(ctx), c["title"], c["body"], c["assignee"],
-                                priority=c["priority"], timeout_seconds=c["timeout"],
+                                model=c["model"], priority=c["priority"], timeout_seconds=c["timeout"],
                                 reviewer=params.reviewer, origin_session=_session_id(ctx))
         review = f" → reviewer {params.reviewer}" if params.reviewer else ""
         return _text(
@@ -431,9 +435,19 @@ def register(harn):
 
 
     class SisterOutputParams(StrictParams):
+        # The default is the non-blocking read. Progress arrives on its own as a
+        # <sister-notification>, and Last Order's charter tells her not to poll while
+        # work is running, so a bare call is asking "where is this card now" -- it must
+        # not quietly hold the turn for thirty seconds waiting for an answer.
         task_id: TaskId = Field(description="Sister task-card ID.")
-        block: bool = Field(True, description="Wait for a terminal acceptance state when true.")
-        timeout: int = Field(30_000, ge=0, le=600_000, description="Maximum wait in milliseconds.")
+        block: bool = Field(False, description=(
+            "Leave false to inspect the task's current state and return immediately. "
+            "Set true only when the user asked to wait for the result: the call then "
+            "holds until the task reaches an accepted, failed, or stopped state."
+        ))
+        timeout: int = Field(30_000, ge=0, le=600_000, description=(
+            "Maximum wait in milliseconds; applies only when block is true."
+        ))
 
 
     @_register(

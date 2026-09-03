@@ -6,13 +6,13 @@ from io import BytesIO
 from pydantic import BaseModel, Field
 
 from misaka.ai.types import ImageContent
-from misaka.core.extensions.types import ToolDefinition
 
 # The read tool already answers "this model cannot see images" for every attachment MISAKA sends;
 # one wording for the whole product beats a second one that drifts. It has no public alias.
 from misaka.core.tools.read import _get_non_vision_image_note
 from misaka.documents import index as corpus
 from misaka.platform.prompt_guard import untrusted
+from misaka.platform.toolkit import register_tool as _register
 from misaka.utils.image_resize import format_dimension_note, resize_image_bytes
 from misaka.utils.values import signal_aborted
 
@@ -243,19 +243,6 @@ def _render_page(pdf_path, page, scale):
         return buffer.getvalue(), count
     finally:
         pdf.close()
-
-
-def _register(harn, name, label, description, parameters, snippet=None, guidelines=None):
-    def deco(fn):
-        async def execute(tool_call_id, raw, signal, on_update, ctx):
-            args = raw if isinstance(raw, parameters) else parameters(**(raw or {}))
-            return await fn(tool_call_id, args, signal, on_update, ctx)
-        harn.registerTool(ToolDefinition(
-            name=name, label=label, description=description,
-            parameters=parameters.model_json_schema(), execute=execute,
-            promptSnippet=snippet, promptGuidelines=list(guidelines or [])))
-        return fn
-    return deco
 
 
 def register(harn):

@@ -15,6 +15,14 @@ full-text scan; upstream opens its store, DAG and lifecycle connections with
 Every result leaves through ``fence.refence``. A tool that replays -- or summarises --
 text misaka had fenced as untrusted must hand it back fenced, and putting that at the one
 exit rather than inside fifteen handlers is what makes "all fifteen" true by construction.
+
+The definitions are built by ``platform.toolkit`` rather than by ``ToolDefinition``
+directly, for the same reason: ``promptSnippet`` is optional, and a definition without one
+is dropped from the system prompt's ``Available tools:`` inventory silently -- these
+fifteen were fully callable and named nowhere in it, while being the largest block in the
+``tools`` array. ``tool_definition`` derives the snippet from the description, which is
+what keeps the fix here at zero restatements: this module says nothing about what any of
+the fifteen do, so upstream can rename or re-word a tool without a second copy going stale.
 """
 
 from __future__ import annotations
@@ -24,6 +32,7 @@ import json
 import logging
 
 from misaka.core.extensions.types import ToolDefinition
+from misaka.platform.toolkit import tool_definition
 
 from . import context_engine, fence, ingest
 
@@ -106,11 +115,14 @@ def _definition(schema: dict) -> ToolDefinition:
 
     ``parameters`` takes the upstream dict as it stands -- it is already JSON Schema, and
     restating it as a pydantic model would be a second copy of the contract to keep in
-    step with upstream. ``executionMode`` stays unset: recall is a read, and several of
-    these tools are worth running beside each other.
+    step with upstream. The prompt snippet is left to ``tool_definition`` to derive from
+    the description for the same reason: fifteen hand-written lines would be that second
+    copy in prose, and a derived one cannot fall out of step with what upstream says.
+    ``executionMode`` stays unset: recall is a read, and several of these tools are worth
+    running beside each other.
     """
     name = str(schema["name"])
-    return ToolDefinition(
+    return tool_definition(
         name=name,
         label="LCM " + name.removeprefix("lcm_").replace("_", " "),
         description=str(schema.get("description") or ""),
@@ -119,11 +131,50 @@ def _definition(schema: dict) -> ToolDefinition:
     )
 
 
-def register(harn) -> None:
-    """Register whatever tools this engine build offers, or none if it has no engine."""
+# Which of the fifteen a session is offered is a fact about the session, not about the
+# engine, so it is decided in ``withheld`` and handed to ``register`` rather than read
+# inside it: the adapter registers what it is given, and the tests that pin "all
+# fifteen" keep meaning exactly that.
+
+# Health, lineage and diagnostics of the store itself. They answer a person at the
+# keyboard asking "is memory working"; a Sister on a card, or a role answering mail,
+# has no use for a database check-up beside her research tools -- and every line in
+# the ``tools`` array is paid for on every request.
+_OPERATOR_TOOLS = frozenset({"lcm_status", "lcm_inspect", "lcm_doctor"})
+
+# The one tool that cannot answer without the V4 assertion sidecar: it reads
+# ``engine._assertions`` and returns "not enabled for this profile" when there is none
+# (vendor/tools.py ``lcm_query_state``). ``lcm_compute`` reaches for the sidecar too but
+# grounds on the message store without it, so it stays. A tool whose only possible
+# answer is an error is worse offered than withheld.
+_SIDECAR_TOOLS = frozenset({"lcm_query_state"})
+
+
+def withheld(kind: str, engine) -> frozenset[str]:
+    """The upstream tool names a session of ``kind`` is not offered.
+
+    ``engine`` is what ``context_engine.engine()`` returned; ``None`` withholds nothing,
+    since nothing will be registered either. The sidecar flag is read off the engine's
+    own config the way ``context_engine.compact`` reads it -- upstream's plugin reaches
+    it as ``_config`` and there is no other accessor.
+    """
+    if engine is None:
+        return frozenset()
+    names: set[str] = set()
+    if kind != "foreground":
+        names |= _OPERATOR_TOOLS
+    if not bool(getattr(getattr(engine, "_config", None), "assertions_enabled", False)):
+        names |= _SIDECAR_TOOLS
+    return frozenset(names)
+
+
+def register(harn, *, withhold: frozenset[str] = frozenset()) -> None:
+    """Register the tools this engine build offers, less ``withhold``; none if it has no engine."""
     engine = context_engine.engine()
     if engine is None:
         logger.warning("LCM has no usable engine; its tools are not registered.")
         return
     for schema in engine.get_tool_schemas():
+        if schema["name"] in withhold:
+            continue
         harn.registerTool(_definition(schema))

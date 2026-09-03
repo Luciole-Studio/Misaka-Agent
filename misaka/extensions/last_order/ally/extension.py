@@ -10,26 +10,12 @@ import os
 
 from pydantic import BaseModel, Field
 
-from misaka.core.extensions.types import ToolDefinition
+from misaka.platform.toolkit import register_tool as _register
 
 
 def _text(s):
     # Same content-block shape as the board tools; an {"output": ...} dict renders as blank.
     return {"content": [{"type": "text", "text": s}], "details": {}}
-
-
-def _register(harn, name, label, description, parameters, snippet=None, guidelines=None):
-    def deco(fn):
-        async def execute(tool_call_id, raw, signal, on_update, ctx):
-            args = raw if isinstance(raw, parameters) else parameters(**(raw or {}))
-            return await fn(tool_call_id, args, signal, on_update, ctx)
-        harn.registerTool(ToolDefinition(
-            name=name, label=label, description=description,
-            parameters=parameters.model_json_schema(), execute=execute,
-            promptSnippet=snippet, promptGuidelines=list(guidelines or []),
-        ))
-        return fn
-    return deco
 
 
 def _net():

@@ -730,11 +730,11 @@ class SettingsManager:
         self._set_global_value("quietStartup", quiet)
 
     def getEnableInstallTelemetry(self) -> bool:
-        # Defaults to true, as upstream: the setting answers "may this install be
-        # identified to a service", and pi ships attribution headers on that answer.
-        # MISAKA sends nothing of its own; the answer exists so an extension that does
-        # has one place to ask.
-        return self._nullish(self.settings.get("enableInstallTelemetry"), True)
+        # The setting answers "may this install be identified to a service". All that rides
+        # on it is `core/provider_attribution.py` naming the client "misaka" to aggregator
+        # gateways; nothing else is sent. Upstream defaults it on; MISAKA defaults it off,
+        # so being named is something the user turns on rather than something they find.
+        return self._nullish(self.settings.get("enableInstallTelemetry"), False)
 
     def setEnableInstallTelemetry(self, enabled: bool) -> None:
         self._set_global_value("enableInstallTelemetry", enabled)

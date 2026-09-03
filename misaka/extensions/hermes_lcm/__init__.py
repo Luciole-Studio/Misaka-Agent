@@ -15,4 +15,9 @@ SESSION_KINDS = {"foreground", "dm", "card", "beast"}
 def activate(spec):
     from .host.extension import register
 
-    return register
+    # Which of the fifteen tools the session is offered depends on its kind
+    # (``host/tools.py`` ``withheld``); this is the one place that knows it.
+    def register_for_session(harn):
+        return register(harn, kind=spec.kind)
+
+    return register_for_session

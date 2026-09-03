@@ -43,6 +43,7 @@ def _log_warning(message: str) -> None:
 
 from misaka.extensions.sisters.subagent import agents as agent_roster
 from misaka.platform import processes as process_tree
+from misaka.platform.vocabulary import MANAGEMENT_TOOLS
 from misaka.utils import atomic
 from misaka.utils.values import read_field
 
@@ -58,7 +59,6 @@ def turn_outcome(stop_requested, error, error_message, stop_reason, background):
     if error or stop_reason in {"error", "aborted"}:
         return "failed", error or error_message or f"request {stop_reason}", not background
     return "completed", None, True
-MANAGEMENT_TOOLS = ("Agent", "TaskOutput", "SendMessage", "TaskStop")
 _TOOL_CEILING_UNSET = object()
 DEFAULT_MAX_CONCURRENCY = 20
 MAX_TASKS_PER_SESSION = 200
@@ -2140,6 +2140,15 @@ class SubagentManager:
                 event_type = event.get("type")
                 if event_type in {"child_error", "child_protocol_error"}:
                     raise RuntimeError(str(event.get("error") or "sub-agent child failed"))
+                if event_type == "child_tools_missing":
+                    # Names this definition asked for that the child's registry never
+                    # had.  The turn is still worth running with what it did get, so
+                    # this is a warning about the definition, not a failed spawn.
+                    names = ", ".join(str(name) for name in event.get("tools") or [])
+                    _log_warning(
+                        f"agent {task.definition.name} requested unknown tools: {names}"
+                    )
+                    continue
                 if event_type == "child_ready":
                     ready = True
                     if task._stop_requested:

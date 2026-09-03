@@ -8,9 +8,9 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from misaka.config import profiles
 from misaka.platform import tasks as task_store
 from misaka.platform.session import run_coro, run_session
+from misaka.platform.vocabulary import MANAGEMENT_TOOLS
 from misaka.skills import sandbox as skill_sandbox
 
-SUBAGENT_TOOLS = ("Agent", "TaskOutput", "SendMessage", "TaskStop")
 MAX_REPORT_BYTES = 256 * 1024
 MAX_SUMMARY_CHARS = 2_000
 MAX_NOTES_CHARS = 32_000
@@ -407,10 +407,10 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
     delegates = not profiles.is_last_order(profile_dir)
     skill_roots = None
     if beast:
-        # Beast mode gets no builtin tools: with DELEGATE it keeps only the subagent
+        # Beast mode gets no builtin tools: with DELEGATE it keeps only the child-management
         # tools, otherwise none (Last Order has no DELEGATE, so it runs tool-less).
         if delegates:
-            flags += ["-t", ",".join(SUBAGENT_TOOLS)]
+            flags += ["-t", ",".join(MANAGEMENT_TOOLS)]
         else:
             flags += ["-nt"]
     else:
@@ -427,7 +427,7 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
         sender=sender,
         receive_messages=True,          # a card hears Last Order (and her Sisters) at its next tool boundary
         task_id=task.get("id"),
-        tool_ceiling=SUBAGENT_TOOLS if beast and delegates else None,
+        tool_ceiling=MANAGEMENT_TOOLS if beast and delegates else None,
         skill_roots=skill_roots,
     )) or None
     flags += ["--append-system-prompt", profiles.shared_soul()]

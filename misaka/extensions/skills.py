@@ -53,7 +53,8 @@ def _body(entry, session_id=None):
     raw = Path(entry["path"]).read_text(encoding="utf-8-sig", errors="replace")
     _, body = skill_index.parse_skill_markdown(raw)
     body = (body or "").strip()
-    return preprocess_skill_content(body, Path(entry["dir"]), session_id=session_id).strip()
+    return preprocess_skill_content(body, Path(entry["dir"]), session_id=session_id,
+                                    layer=entry.get("layer")).strip()
 
 
 def collect_linked_files(skill_dir):

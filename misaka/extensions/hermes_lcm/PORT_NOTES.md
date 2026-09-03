@@ -82,7 +82,7 @@
 | `context_engine.py` | 压缩缝:pi 定边界,引擎按边界摘要 |
 | `extension.py` | 事件订阅(ingest + 压缩 + P3 的 `context`);工具从 P2 起由 `tools.py` 注册 |
 | `migrate.py` | D4 迁移器,挂在 `misaka lcm migrate [--apply]` |
-| `tools.py` | P2:上游 15 个 `lcm_*` schema → misaka `ToolDefinition`,统一走 `handle_tool_call` + `fence.refence` |
+| `tools.py` | P2:上游 15 个 `lcm_*` schema → misaka `ToolDefinition`,统一走 `handle_tool_call` + `fence.refence`;目录行(`promptSnippet`)由 `platform.toolkit` 从 description 派生,不手抄;`withheld(kind, engine)` 按会话类型扣留——运维三件套(`lcm_status/inspect/doctor`)只给 foreground,`lcm_query_state` 只在 `LCM_ASSERTIONS_ENABLED` 时给,其余十一个每种会话都有 |
 | `fence.py` | P2:misaka 的不可信围栏,重新盖回 LCM 交给模型的东西上 |
 | `externalize.py` | P3 保护层的两条 misaka 专属缝:活动上下文换 stub(`context` 事件)+ 老库补外部化(`misaka lcm externalize-backfill`) |
 | `rollups.py` | P4 时间记忆的两件事:每轮压缩后的 `nudge`(misaka 一次会话只绑一次)+ `misaka lcm rollups [--rebuild]` |

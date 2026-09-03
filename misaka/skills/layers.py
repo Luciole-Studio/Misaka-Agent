@@ -163,39 +163,18 @@ def is_quarantined_project_skill(skill_md):
         # the user can override deliberately, a bypass is not something they can
         # see. `skill_manage` keeps `honor_ignore=True` for skills the user owns.
         result = guard.scan_skill(skill_dir, source=_PROJECT_SCAN_SOURCE, honor_ignore=False)
-        verdict, summary, findings = result.verdict, result.summary, result.findings
+        verdict, summary = result.verdict, result.summary
     except Exception:
         logger.warning("Project skill scan failed; quarantining: %s", skill_dir, exc_info=True)
         return True
     if verdict in ("safe", "caution"):
-        # One finding outranks its severity here. `skill_inline_shell` is medium
-        # — informational, so the verdict stays safe — because in the user's own
-        # layers `!`cmd`` is a feature they asked for, and blocking every skill
-        # that uses it would be wrong. A project skill is different: it comes
-        # from a repository the user opened, nobody approved it, and reading it
-        # is what runs the command. So when the feature is switched on, the
-        # presence of an inline snippet quarantines the project skill even
-        # though the same snippet elsewhere is fine.
-        #
-        # The check is conditional on the setting rather than unconditional
-        # because with `inline_shell` off the snippet is inert text, and
-        # quarantining inert text would only cost the user a skill.
-        if inline_shell_enabled() and any(
-            f.pattern_id == "skill_inline_shell" for f in findings
-        ):
-            logger.warning(
-                "Project skill quarantined: %s - inline shell runs on load and "
-                "skills.json has inline_shell enabled", skill_dir,
-            )
-            return True
+        # `skill_inline_shell` is medium, so on its own it leaves the verdict at safe, and
+        # that is right for a project skill too: `preprocess_skill_content` expands `!`cmd``
+        # only in the user's own layers, so here the snippet is inert text whatever
+        # skills.json says, and quarantining inert text would only cost the user a skill.
         return False
     logger.warning("Project skill quarantined: %s - %s", skill_dir, summary)
     return True
-
-
-def inline_shell_enabled():
-    """Whether ``skills.json`` arms SKILL.md's inline-shell expansion (default off)."""
-    return bool(load_skills_config().get("inline_shell", False))
 
 
 def iter_project_skill_files(root):

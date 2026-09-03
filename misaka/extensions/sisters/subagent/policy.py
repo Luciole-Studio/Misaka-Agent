@@ -26,9 +26,9 @@ from misaka.extensions.sisters.subagent.hooks import (
     HOOK_DEFAULT_TIMEOUTS,
 )
 from misaka.platform.prompt_guard import untrusted
+from misaka.platform.vocabulary import MANAGEMENT_TOOL_NAMES
 from misaka.utils.values import read_field
 
-MANAGEMENT_TOOLS = frozenset({"agent", "taskoutput", "sendmessage", "taskstop"})
 ALIASES = {"glob": "find"}
 PLAN_READ_COMMANDS = frozenset(
     {"cat", "df", "du", "file", "find", "grep", "head", "ls", "pwd", "rg", "stat", "tail", "type", "wc", "which"}
@@ -882,7 +882,7 @@ def _permission_action(
 
     effective = mode or "default"
     name = _tool_name(tool_name)
-    if name in MANAGEMENT_TOOLS or effective == "bypassPermissions":
+    if name in MANAGEMENT_TOOL_NAMES or effective == "bypassPermissions":
         return "allow", None
 
     if effective == "plan":
