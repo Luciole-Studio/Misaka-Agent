@@ -15,15 +15,17 @@ from misaka.core.wiring import KINDS
 SESSION_KINDS = KINDS  # a configured ``provider=moa`` must resolve in every session, bare ones included
 
 
-def provider_config(configured):
+def provider_config(configured, find=None):
     """``("moa", config)`` for the registry, or None when no preset is runnable.
 
-    ``configured(provider_id) -> bool`` is the registry's credential check for a provider.
+    ``configured(provider_id) -> bool`` is the registry's credential check for a provider,
+    and ``find(provider_id, model_id)`` its lookup -- the only one that can size a preset
+    whose aggregator is a custom provider from models.json.
     """
     from . import provider
 
     models = []
-    for model in provider.preset_models(configured):
+    for model in provider.preset_models(configured, find):
         models.append({
             "id": model.id,
             "name": model.name or model.id,
@@ -57,6 +59,7 @@ class MoaPart:
         from . import provider
 
         provider.set_model_resolver(session.modelRegistry.find)
+        provider.set_auth_resolver(session.modelRegistry.getAuth)
 
     async def session_shutdown(self, event, ctx):
         from . import provider

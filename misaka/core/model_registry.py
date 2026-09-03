@@ -702,6 +702,8 @@ class ModelRegistry:
         self._providerRequestConfigs: dict[str, _ProviderRequestConfig] = {}
         self._modelRequestHeaders: dict[str, dict[str, str]] = {}
         self._registeredProviders: dict[str, ProviderConfigInput] = {}
+        # MISAKA fork: which of the registered providers came from core this pass.
+        self._coreProviderNames: set[str] = set()
         self._legacyPreviousProviders: dict[str, RuntimeProvider | None] = {}
         self._nativeProviderIds: dict[str, None] = {}
         self._nativePreviousProviders: dict[str, RuntimeProvider | None] = {}
@@ -747,6 +749,12 @@ class ModelRegistry:
         return cls(authStorage, None, InMemoryModelsStore())
 
     def _reloadLegacy(self) -> None:
+        # MISAKA fork: core's own providers are rebuilt from scratch below, so retire the
+        # previous pass's registrations first and let the restore loop undo what they
+        # composed. A core provider that stops being runnable then leaves nothing behind.
+        for provider_name in self._coreProviderNames:
+            self._registeredProviders.pop(provider_name, None)
+        self._coreProviderNames = set()
         for provider_name in list(self._legacyPreviousProviders):
             if provider_name not in self._registeredProviders:
                 self._restoreLegacyProvider(provider_name)
@@ -770,7 +778,19 @@ class ModelRegistry:
         def provider_configured(provider_id: str) -> bool:
             return any(self.hasConfiguredAuth(model) for model in self._models if model.provider == provider_id)
 
-        for provider_name, config in core_providers(provider_configured):
+        def provider_find(provider_id: str, model_id: str) -> Model | None:
+            return next(
+                (model for model in self._models
+                 if model.provider == provider_id and model.id == model_id),
+                None,
+            )
+
+        for provider_name, config in core_providers(provider_configured, provider_find):
+            # Recorded as a registered provider, not merely applied: ``streamSimple``
+            # dispatches to a provider instance only for a name this registry owns, and a
+            # virtual provider has no API in the api registry to fall back to.
+            self._coreProviderNames.add(provider_name)
+            self._registeredProviders[provider_name] = config
             self._applyProviderConfig(provider_name, config)
             self._recomposeLegacyProvider(
                 provider_name,

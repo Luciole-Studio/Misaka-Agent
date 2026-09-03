@@ -28,6 +28,7 @@ from misaka.ai.types import (
     UserMessage,
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
+from misaka.ai.utils.headers import provider_headers_to_record
 from misaka.config.product import current_config
 from misaka.core.moa.privacy import (
     coerce_privacy_filter,
@@ -324,6 +325,41 @@ def set_model_resolver(fn: Callable[[str, str], Model | None]) -> None:
     _MODEL_RESOLVER = fn
 
 
+_AUTH_RESOLVER: Any = None
+
+
+def set_auth_resolver(fn) -> None:
+    """Bind the session's ``modelRegistry.getAuth`` so each slot can be paid for on its own.
+
+    A mixture calls models from providers the session itself is not using -- the session's
+    model *is* ``moa``, whose api key is the virtual provider's placeholder. Sending that
+    to a real endpoint is a 401, so every advisor and the aggregator resolve their own
+    provider's credentials here, the way ``core/sdk``'s stream function does for a turn.
+    """
+    global _AUTH_RESOLVER
+    _AUTH_RESOLVER = fn
+
+
+async def _slot_auth(model: Model) -> tuple[Model, dict[str, Any]]:
+    """``(model to call, request options)`` for one slot: its own key, headers and baseUrl."""
+    if _AUTH_RESOLVER is None:
+        return model, {}
+    try:
+        resolution = await _AUTH_RESOLVER(model)
+    except Exception:  # noqa: BLE001 - an unresolvable slot fails on its own call, with the provider's message
+        return model, {}
+    if resolution is None:
+        return model, {}
+    auth = resolution.auth
+    if auth.baseUrl:
+        model = model.model_copy(update={"baseUrl": auth.baseUrl})
+    return model, {
+        "apiKey": auth.apiKey,
+        "headers": provider_headers_to_record(auth.headers),
+        "env": resolution.env,
+    }
+
+
 def _resolve_slot_model(slot) -> Model | None:
     if _MODEL_RESOLVER is None:
         return None
@@ -367,6 +403,7 @@ async def _run_reference(slot, view, *, preset, options) -> tuple[str, str, Usag
     m = _resolve_slot_model(slot)
     if m is None:
         return label, f"[failed: model slot is unavailable: {label}]", None, None
+    m, auth = await _slot_auth(m)
     reserve = slot.get("max_tokens") or preset.get("reference_max_tokens")
     trimmed = trim_view_for_window(view, m.contextWindow, reserve=reserve)
     ctx = Context(systemPrompt=REFERENCE_SYSTEM_PROMPT, messages=_typed_view(trimmed))
@@ -380,7 +417,7 @@ async def _run_reference(slot, view, *, preset, options) -> tuple[str, str, Usag
         signal=getattr(options, "signal", None),
         sessionId=getattr(options, "sessionId", None),
         cacheRetention=getattr(options, "cacheRetention", None),
-        apiKey=None,
+        **auth,
     )
     sent = [{"role": "system", "content": REFERENCE_SYSTEM_PROMPT}, *trimmed]
     try:
@@ -713,12 +750,16 @@ def stream_simple_moa(model: Model, context: Context, options: SimpleStreamOptio
                 agg_messages = attach_guidance(agg_messages, guidance)
             agg_ctx = Context(systemPrompt=context.systemPrompt, messages=agg_messages,
                               tools=context.tools)
+            # The session's own credentials belong to `moa`, whose key is a placeholder;
+            # the aggregator is a real model at a real provider and pays its own way.
+            agg_model, agg_auth = await _slot_auth(agg_model)
             agg_opts = opts.model_copy(update={
                 # A preset temperature overrides the session value.
                 "temperature": preset.get("aggregator_temperature")
                 if preset.get("aggregator_temperature") is not None else opts.temperature,
                 # A slot-specific reasoning depth overrides the session value.
                 "reasoning": agg_slot.get("reasoning_effort") or opts.reasoning,
+                **agg_auth,
             })
 
             inner = stream_simple(agg_model, agg_ctx, agg_opts)
@@ -757,6 +798,16 @@ def stream_simple_moa(model: Model, context: Context, options: SimpleStreamOptio
 # Configured presets exposed as virtual registry models.
 
 
+def _registry_model(find, slot) -> Model | None:
+    """The model registry's own entry for a slot, when the registry is the one asking."""
+    if find is None:
+        return None
+    try:
+        return find(str(slot.get("provider") or ""), str(slot.get("model") or ""))
+    except Exception:  # noqa: BLE001 - a registry mid-rebuild answers for nothing; fall through
+        return None
+
+
 def _catalog_model(slot) -> Model | None:
     """The builtin catalog's entry for a slot, for sizes a registry lookup cannot supply.
 
@@ -772,7 +823,7 @@ def _catalog_model(slot) -> Model | None:
     return get_model(str(slot.get("provider") or ""), str(slot.get("model") or ""))
 
 
-def preset_models(configured=None) -> list[Model]:
+def preset_models(configured=None, find=None) -> list[Model]:
     """Build one virtual `moa` Model per configured preset, sized from its aggregator.
 
     With ``configured(provider_id) -> bool`` given (the registry's own credential check,
@@ -784,16 +835,22 @@ def preset_models(configured=None) -> list[Model]:
     aggregator holds 128k while its virtual model claims 200k does not compact until the
     turn is already over the provider's limit, and one whose aggregator holds 1M compacts
     long before it needs to.
+
+    ``find(provider, model_id)`` is the registry asking on its own behalf, and it is the
+    only lookup that answers for an aggregator defined in models.json: the builtin catalog
+    has never heard of a custom provider, and no session has bound a resolver this early.
     """
     cfg = load_moa_config()
     out: list[Model] = []
     for name, preset in cfg["presets"].items():
         if configured is not None and not configured(str(preset["aggregator"].get("provider") or "")):
             continue
-        # The resolver when a session has bound one, the builtin catalog otherwise. The
-        # literals below stay the last resort for an aggregator in neither -- a local or
-        # custom model the catalog has never heard of.
-        agg = _resolve_slot_model(preset["aggregator"]) or _catalog_model(preset["aggregator"])
+        # The registry first (it holds models.json's custom providers), then a
+        # session-bound resolver, then the builtin catalog. The literals below stay the
+        # last resort for an aggregator none of the three has heard of.
+        agg = (_registry_model(find, preset["aggregator"])
+               or _resolve_slot_model(preset["aggregator"])
+               or _catalog_model(preset["aggregator"]))
         out.append(Model(
             id=name, name=f"MoA·{name}", api="moa", provider="moa",
             baseUrl="moa://local", reasoning=True, input=["text", "image"],

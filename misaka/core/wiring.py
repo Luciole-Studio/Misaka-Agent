@@ -113,19 +113,26 @@ PART_MODULES: tuple[str, ...] = (
 )
 
 
-# Core modules that are providers (``provider_config(configured) -> (name, config) | None``,
-# ``configured(provider_id) -> bool`` being the registry's credential check): part of every
-# model registry, recomputed on each reload, as pi's built-in providers are.
+# Core modules that are providers (``provider_config(configured, find) -> (name, config) | None``,
+# with the registry's own credential check and model lookup): part of every model registry,
+# recomputed on each reload, as pi's built-in providers are.
 PROVIDER_MODULES: tuple[str, ...] = (
     "misaka.core.moa",
 )
 
 
-def core_providers(configured: Callable[[str], bool]) -> list[tuple[str, dict[str, Any]]]:
-    """``(name, config)`` for each core provider that has something to publish right now."""
+def core_providers(
+    configured: Callable[[str], bool],
+    find: Callable[[str, str], Any] | None = None,
+) -> list[tuple[str, dict[str, Any]]]:
+    """``(name, config)`` for each core provider that has something to publish right now.
+
+    ``configured`` is the registry's credential check and ``find`` its model lookup; a
+    provider that composes other models needs the second to size itself.
+    """
     out: list[tuple[str, dict[str, Any]]] = []
     for path in PROVIDER_MODULES:
-        entry = importlib.import_module(path).provider_config(configured)
+        entry = importlib.import_module(path).provider_config(configured, find)
         if entry is not None:
             out.append(entry)
     return out
