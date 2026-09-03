@@ -39,7 +39,10 @@ def assembly(who, cfg=None):
         prof = os.path.join(cfg["profiles_root"], who)
         if not os.path.isdir(prof):
             sys.exit(f"Unknown Sister {who!r}. Roster: {', '.join(sorted(sisters()))}")
-        return prof, cfg["default_model"]
+        # Her own pin first: one Sister, one model, set from her own session's
+        # /model selector (config.profiles.persist_role_default_model). The
+        # product-wide default is only the fallback for a Sister who has none.
+        return prof, profiles.pinned_model(prof) or cfg["default_model"]
     prof = os.path.join(cfg["roles_root"], "last_order")
     return prof, cfg["lo_model"]
 

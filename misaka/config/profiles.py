@@ -29,22 +29,35 @@ def config_yaml(profile_dir):
     return os.path.join(profile_dir, "config.yaml")
 
 
-def persist_role_default_model(profile_dir, model_id):
-    """Record a newly chosen default model for the roles that start on their own pin.
+def pinned_model(profile_dir):
+    """Return the model this role runs on, or ``""`` when she has none of her own.
 
-    ``misaka chat`` starts Last Order on the model pinned in her ``config.json``
-    (``config.product._models``), which is read *ahead* of ``settings.json``. So a default
-    set in her session -- Ctrl+S in the model selector, or adopting a provider's default
-    right after ``/login`` -- has to land there too, or the next launch quietly ignores it
-    and she comes back on the old model.
-
-    Every other role starts on the global default the session has already written to
-    settings.json, so nothing more is owed. A Sister's ``config.json`` model is
-    deliberately left alone: that one is what her *task cards* run
-    (``network.sister_runtime``), and changing the model of her chat must not silently
-    change the model her unattended work runs on.
+    One role, one model: her chat starts on it (``cli.chat.assembly``), her task cards
+    run on it (``network.sister_runtime``), and the model selector writes it back
+    (:func:`persist_role_default_model`). Without a pin the role falls back to the
+    product-wide default, which is the global ``settings.json`` one.
     """
-    if not profile_dir or not model_id or not is_last_order(profile_dir):
+    if not profile_dir:
+        return ""
+    try:
+        with open(os.path.join(profile_dir, "config.json"), encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return ""
+    return str(data.get("model") or "").strip() if isinstance(data, dict) else ""
+
+
+def persist_role_default_model(profile_dir, model_id):
+    """Record a newly chosen default model as this role's own pin.
+
+    Every role starts on her own pin, so a default set in her session -- Ctrl+S in the
+    model selector, or adopting a provider's default right after ``/login`` -- has to land
+    there or the next launch quietly ignores it and she comes back on the old model. pi's
+    ``setModel(persist=True)`` writes only the global ``settings.json`` default, which is
+    one value for the whole install: without this, setting a default for one Sister would
+    set it for every Sister and for Last Order too.
+    """
+    if not profile_dir or not model_id:
         return False
     path = os.path.join(profile_dir, "config.json")
     try:
