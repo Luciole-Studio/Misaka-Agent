@@ -23,19 +23,19 @@ from typing import Any
 
 import httpx
 
-from misaka.extensions.web.config import (
+from misaka.core.web.config import (
     keyless_tier_enabled,
     provider_env,
     provider_tier,
     use_keyless,
 )
-from misaka.extensions.web.keyless import (
+from misaka.core.web.keyless import (
     CLIENT_NAME,
     KEENABLE_API_URL,
     extract_with_failover,
     search_with_failover,
 )
-from misaka.extensions.web.provider import WebSearchProvider
+from misaka.core.web.provider import WebSearchProvider
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +132,7 @@ class KeenableWebSearchProvider(WebSearchProvider):
         turns "every page failed" back into the one-shot rescue.
 
         Divergence from Hermes, small and matching what
-        :func:`misaka.extensions.web.keyless.keenable_extract_keyless` already does: the
+        :func:`misaka.core.web.keyless.keenable_extract_keyless` already does: the
         entry is filed under the URL that was *asked for*, not the one Keenable echoes
         back. A redirect makes the two differ, and an entry whose ``url`` is not the
         caller's is exactly the mispairing the positional contract exists to prevent.

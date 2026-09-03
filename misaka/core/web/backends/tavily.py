@@ -18,7 +18,7 @@ Auth is header-based. A key uses ``Authorization: Bearer``; without a key the re
 keyless (``X-Tavily-Access-Mode: keyless``).
 
 Tavily is **not** a member of the zero-config keyless ring
-(:data:`misaka.extensions.web.keyless.KEYLESS_RING`), matching Hermes. Keyless access is
+(:data:`misaka.core.web.keyless.KEYLESS_RING`), matching Hermes. Keyless access is
 opt-in: it serves an explicit ``"backend": "tavily"`` without a key, but a fresh install
 with no web credentials rotates across Exa / Parallel / Firecrawl / Keenable instead and
 never lands here. A ring vendor's failure is walked past to the next vendor; Tavily's is
@@ -32,14 +32,14 @@ from typing import Any
 
 import httpx
 
-from misaka.extensions.web.config import (
+from misaka.core.web.config import (
     keyless_tier_enabled,
     provider_env,
     provider_tier,
     use_keyless,
 )
-from misaka.extensions.web.keyless import CLIENT_NAME
-from misaka.extensions.web.provider import WebSearchProvider
+from misaka.core.web.keyless import CLIENT_NAME
+from misaka.core.web.provider import WebSearchProvider
 
 logger = logging.getLogger(__name__)
 

@@ -31,14 +31,14 @@ import asyncio
 import logging
 from typing import Any
 
-from misaka.extensions.web.config import (
+from misaka.core.web.config import (
     keyless_tier_enabled,
     provider_env,
     provider_tier,
     use_keyless,
 )
-from misaka.extensions.web.keyless import extract_with_failover, search_with_failover
-from misaka.extensions.web.provider import WebSearchProvider
+from misaka.core.web.keyless import extract_with_failover, search_with_failover
+from misaka.core.web.provider import WebSearchProvider
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +198,7 @@ class ParallelWebSearchProvider(WebSearchProvider):
         order reads the wrong page under the wrong address. Both lists are re-keyed onto
         the requested URLs here, a URL named in neither becomes that URL's error entry,
         and one nobody asked for is dropped with a debug line. Same fix, same reason, as
-        :func:`misaka.extensions.web.keyless.parallel_extract_keyless`.
+        :func:`misaka.core.web.keyless.parallel_extract_keyless`.
         """
         api_key = provider_env("PARALLEL_API_KEY")
         if use_keyless("parallel", api_key):

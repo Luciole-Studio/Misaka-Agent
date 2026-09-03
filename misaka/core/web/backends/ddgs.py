@@ -23,8 +23,8 @@ import subprocess
 import sys
 from typing import Any
 
-from misaka.extensions.web.config import without_credentials
-from misaka.extensions.web.provider import WebSearchProvider
+from misaka.core.web.config import without_credentials
+from misaka.core.web.provider import WebSearchProvider
 
 logger = logging.getLogger(__name__)
 

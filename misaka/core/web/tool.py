@@ -12,7 +12,7 @@ the keys, and add ``title`` fields, and that description -- the operator sentenc
 
 ``_truncate_with_footer`` and ``_store_full_text`` (web_tools.py 635-810) are not here
 because they are not this tool's: they are ``web_extract``'s per-page character budget,
-and they live in :mod:`misaka.extensions.web.extract` beside the tool that needs them. A
+and they live in :mod:`misaka.core.web.extract` beside the tool that needs them. A
 search result is a title, a URL and a two-line description; nothing on this path ever
 holds page text. What web_search does have in Hermes is the registry's
 ``max_result_size_chars=100_000``, and that is ported below.
@@ -29,10 +29,10 @@ from misaka.core.platform import budget
 from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.tools._common import run_with_abort
 from misaka.core.tools._web.single_flight import single_flight
-from misaka.extensions.web import cache
-from misaka.extensions.web.config import redact_secrets
-from misaka.extensions.web.dispatch import memo_identity, resolve_provider
-from misaka.extensions.web.dispatch import web_search as dispatch_search
+from misaka.core.web import cache
+from misaka.core.web.config import redact_secrets
+from misaka.core.web.dispatch import memo_identity, resolve_provider
+from misaka.core.web.dispatch import web_search as dispatch_search
 from misaka.utils.values import signal_aborted
 
 logger = logging.getLogger(__name__)

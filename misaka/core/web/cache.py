@@ -54,7 +54,7 @@ from urllib.parse import urlparse
 
 from misaka.config import expand_tilde_path
 from misaka.config.product import CFG
-from misaka.extensions.web.config import web_config
+from misaka.core.web.config import web_config
 from misaka.utils import atomic
 
 logger = logging.getLogger(__name__)
@@ -412,7 +412,7 @@ def extract_cache_get(
     """Return a fresh cached extraction of *url*, or None.
 
     The hit is shaped like one entry of the provider contract in
-    :mod:`misaka.extensions.web.provider`, plus ``cached``: ``{"url", "title", "content",
+    :mod:`misaka.core.web.provider`, plus ``cached``: ``{"url", "title", "content",
     "error": None, "cached": True}``. Every failure here -- disabled, exempt, expired,
     tampered index, evicted file -- is the same None, because a caller that cannot tell
     them apart cannot do anything different about them either.

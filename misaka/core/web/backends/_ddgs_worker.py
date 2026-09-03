@@ -1,6 +1,6 @@
 """DDGS search child-process entrypoint.
 
-Invoked as ``python misaka/extensions/web/backends/_ddgs_worker.py`` (script path from the
+Invoked as ``python misaka/core/web/backends/_ddgs_worker.py`` (script path from the
 parent provider). Reads one JSON request from stdin, writes one JSON envelope to stdout,
 then exits.
 
@@ -15,7 +15,7 @@ Envelope::
 
 It exists because ``ddgs``/``primp`` can block inside native code while holding the GIL:
 in that state no in-process timeout can fire, so the only reliable deadline is a process
-the parent can kill. See :mod:`misaka.extensions.web.backends.ddgs`.
+the parent can kill. See :mod:`misaka.core.web.backends.ddgs`.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ def main() -> int:
     try:
         # Imported inside main so startup stays light and the parent's module (which the
         # test seam patches) is the one that defines the search.
-        from misaka.extensions.web.backends.ddgs import _run_ddgs_search
+        from misaka.core.web.backends.ddgs import _run_ddgs_search
 
         results = _run_ddgs_search(query, safe_limit)
         _write_envelope({"ok": True, "results": results})

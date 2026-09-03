@@ -27,7 +27,7 @@ back on each entry as ``saved_path``, which is the addition to Hermes' result sh
 *The per-page budget is squeezed to fit the whole call.* Hermes clamps ``char_limit`` to
 2000-500k and lets its registry spill an oversized result to a file, handing the model a
 pointer. MISAKA has no tool-result store to spill into (see
-:mod:`misaka.extensions.web.tool`), so the budget is divided across the pages in the call
+:mod:`misaka.core.web.tool`), so the budget is divided across the pages in the call
 and shrunk until the rendered document fits. The outcome is the one Hermes engineers --
 the model sees a bounded document and a pointer to the rest -- reached with the mechanism
 MISAKA has, and no page is dropped to get there.
@@ -58,11 +58,11 @@ from misaka.core.tools._web.evidence import (
     save_page,
 )
 from misaka.core.tools._web.screening import screen_url
-from misaka.extensions.web import cache
-from misaka.extensions.web.config import redact_secrets, web_config
-from misaka.extensions.web.dispatch import resolve_extractor
-from misaka.extensions.web.dispatch import web_extract as dispatch_extract
-from misaka.extensions.web.tool import tool_error
+from misaka.core.web import cache
+from misaka.core.web.config import redact_secrets, web_config
+from misaka.core.web.dispatch import resolve_extractor
+from misaka.core.web.dispatch import web_extract as dispatch_extract
+from misaka.core.web.tool import tool_error
 from misaka.utils.values import signal_aborted
 
 logger = logging.getLogger(__name__)

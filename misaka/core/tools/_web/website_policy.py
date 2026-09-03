@@ -17,7 +17,7 @@ the policy is read from a top-level ``website_blocklist`` key there::
                            "shared_files": ["blocked.txt"]}}
 
 That document is read here directly rather than through
-:func:`misaka.extensions.web.config.web_config`, for two reasons. That helper folds every
+:func:`misaka.core.web.config.web_config`, for two reasons. That helper folds every
 read and parse failure into ``{}``, which is precisely the condition this module exists to
 be able to report; and ``core/`` must not import from ``extensions/`` -- the enforcement
 points are core tools that run whether or not the web extension ever loaded.

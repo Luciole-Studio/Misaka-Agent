@@ -70,7 +70,7 @@ def config_flag(key: str, default: bool = True) -> bool:
 
     Truthiness, not type, as in Hermes (``bool(web_cfg.get("keyless_fallback", True))``),
     so ``0`` and ``""`` switch a tier off the way ``false`` does -- and so this agrees
-    with :func:`misaka.extensions.web.cache.cache_enabled`, which reads the same document.
+    with :func:`misaka.core.web.cache.cache_enabled`, which reads the same document.
     ``null`` is the one departure: YAML has no way to write it that is not also "absent",
     JSON does, and a key written as null reads as never set.
     """

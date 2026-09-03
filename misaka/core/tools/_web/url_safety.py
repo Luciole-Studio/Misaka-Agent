@@ -34,6 +34,8 @@ import os
 import re
 from urllib.parse import parse_qsl, quote, unquote, urlsplit, urlunsplit
 
+from misaka.core.web.config import web_config
+
 logger = logging.getLogger(__name__)
 
 
@@ -419,7 +421,7 @@ def allow_private_urls() -> bool:
 
     Deliberately not cached, unlike Hermes, which memoises for the process lifetime.
     Every other read of ``web.json`` in MISAKA is uncached and takes effect on the next
-    call (see :func:`misaka.extensions.web.config.web_config`), and a security toggle
+    call (see :func:`misaka.core.web.config.web_config`), and a security toggle
     that alone ignores the file the user just edited -- with no way to tell from the
     outside that a restart is what is missing -- is a support nightmare. The cost is one
     stat and a few hundred bytes of JSON next to a network round trip.
@@ -433,11 +435,6 @@ def allow_private_urls() -> bool:
         return False
 
     try:
-        # Function-local: ``core`` importing an extension at module import time is a
-        # layering inversion, and this module is imported by the fetch path whether or
-        # not the web extension is loaded at all.
-        from misaka.extensions.web.config import web_config
-
         value = web_config().get("allow_private_urls")
     except Exception as error:  # noqa: BLE001 - a missing or broken config must not break a fetch
         logger.debug("allow_private_urls: config unreadable (%s); staying closed", error)

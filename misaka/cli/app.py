@@ -476,8 +476,8 @@ def _cmd_lcm(args):
 
 
 def _cmd_web(args):
-    from misaka.extensions.web import config as web_config
-    from misaka.extensions.web import dispatch, registry
+    from misaka.core.web import config as web_config
+    from misaka.core.web import dispatch, registry
 
     if args.op == "set":
         if not args.key or args.value is None:

@@ -24,7 +24,7 @@ per-process UUID is sent (rotates every restart, never persisted). Their optiona
 Tavily is deliberately **not** a ring member, matching Hermes: it serves keyless
 requests through its own endpoint, but only when the user selected it
 (``"backend": "tavily"``), never as one of the vendors a zero-credential install
-rotates through. That keyless path lives in :mod:`misaka.extensions.web.backends.tavily`
+rotates through. That keyless path lives in :mod:`misaka.core.web.backends.tavily`
 next to the keyed one, because the two differ by one header.
 
 Disable the whole tier with ``"keyless_fallback": false`` in ``~/.misaka/web.json``.
@@ -39,7 +39,7 @@ from typing import Any
 
 import httpx
 
-from misaka.extensions.web.config import config_name, provider_tier
+from misaka.core.web.config import config_name, provider_tier
 
 logger = logging.getLogger(__name__)
 
@@ -172,7 +172,7 @@ async def mcp_call(
 #
 # The four vendors below answer a page fetch in four different shapes; these two
 # constructors are where they all become the list entry
-# :mod:`misaka.extensions.web.provider` documents, so a batch that fails over mid-flight
+# :mod:`misaka.core.web.provider` documents, so a batch that fails over mid-flight
 # does not change shape halfway down.
 
 
@@ -437,7 +437,7 @@ async def exa_extract_keyless(urls: list[str]) -> list[dict[str, Any]]:
 
 async def firecrawl_search_keyless(query: str, limit: int = 5) -> dict[str, Any]:
     """Keyless Firecrawl cloud search -> legacy search response shape."""
-    from misaka.extensions.web.backends.firecrawl import normalize_search_results
+    from misaka.core.web.backends.firecrawl import normalize_search_results
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -638,7 +638,7 @@ def _vendor_pinned(name: str) -> bool:
     All three name keys count, as in Hermes, and one function answers for both
     capabilities because :func:`ring_order` is shared: an install that named a vendor
     under only ``extract_backend`` has still chosen it, exactly as
-    :func:`misaka.extensions.web.registry.selection_stored` reads that key. The
+    :func:`misaka.core.web.registry.selection_stored` reads that key. The
     cross-capability reach is the point rather than a side effect -- a pin is a statement
     about which free tier this install is willing to spend, and rotating search through
     three others while extract sits on the named one would spend the three it declined.

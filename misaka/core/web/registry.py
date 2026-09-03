@@ -39,13 +39,13 @@ from __future__ import annotations
 import logging
 import threading
 
-from misaka.extensions.web.config import (
+from misaka.core.web.config import (
     config_name,
     has_env,
     keyless_tier_enabled,
 )
-from misaka.extensions.web.keyless import keyless_walk_order
-from misaka.extensions.web.provider import WebSearchProvider
+from misaka.core.web.keyless import keyless_walk_order
+from misaka.core.web.provider import WebSearchProvider
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +150,7 @@ def ensure_backends_registered() -> None:
     with _lock:
         if _builtins_registered:
             return
-    from misaka.extensions.web.backends import register_builtin_providers
+    from misaka.core.web.backends import register_builtin_providers
 
     try:
         register_builtin_providers()

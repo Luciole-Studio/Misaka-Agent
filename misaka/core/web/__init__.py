@@ -23,7 +23,7 @@ here, because ``web_fetch`` and ``download_file`` need them too: ``url_safety.py
 that makes a fetched or extracted page quotable.
 
 The tool bodies (schema, rendering, caching) call into
-:mod:`misaka.extensions.web.dispatch`; nothing above the dispatch layer is allowed to
+:mod:`misaka.core.web.dispatch`; nothing above the dispatch layer is allowed to
 reshape what a provider returned, because that shape is the contract.
 
 **Deliberately not ported from Hermes**, each because the thing it depends on does not
@@ -89,9 +89,9 @@ def activate(spec):
     """
     from misaka.core.tools.download_file import create_download_file_tool_definition
     from misaka.core.tools.web_fetch import create_web_fetch_tool_definition
-    from misaka.extensions.web.extract import register as register_extract
-    from misaka.extensions.web.registry import web_search_available
-    from misaka.extensions.web.tool import register as register_search
+    from misaka.core.web.extract import register as register_extract
+    from misaka.core.web.registry import web_search_available
+    from misaka.core.web.tool import register as register_search
 
     searchable = web_search_available()
 

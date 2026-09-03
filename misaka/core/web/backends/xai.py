@@ -57,9 +57,9 @@ import httpx
 from misaka.ai.utils.oauth import OAuthCredentials, getOAuthProvider
 from misaka.config import get_auth_path
 from misaka.core.auth_storage import AuthStorage
-from misaka.extensions.web.config import provider_env, web_config
-from misaka.extensions.web.keyless import CLIENT_NAME
-from misaka.extensions.web.provider import WebSearchProvider
+from misaka.core.web.config import provider_env, web_config
+from misaka.core.web.keyless import CLIENT_NAME
+from misaka.core.web.provider import WebSearchProvider
 
 logger = logging.getLogger(__name__)
 

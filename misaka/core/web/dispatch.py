@@ -29,18 +29,18 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from misaka.extensions.web.config import (
+from misaka.core.web.config import (
     keyless_rescue_enabled,
     provider_env,
     use_keyless,
 )
-from misaka.extensions.web.keyless import (
+from misaka.core.web.keyless import (
     KEYLESS_RING,
     extract_with_failover,
     search_with_failover,
 )
-from misaka.extensions.web.provider import WebSearchProvider
-from misaka.extensions.web.registry import (
+from misaka.core.web.provider import WebSearchProvider
+from misaka.core.web.registry import (
     active_extract_provider,
     active_search_provider,
     ensure_backends_registered,

@@ -19,8 +19,8 @@ from typing import Any
 
 import httpx
 
-from misaka.extensions.web.config import provider_env
-from misaka.extensions.web.provider import WebSearchProvider
+from misaka.core.web.config import provider_env
+from misaka.core.web.provider import WebSearchProvider
 
 logger = logging.getLogger(__name__)
 

@@ -29,18 +29,18 @@ from typing import Any
 
 import httpx
 
-from misaka.extensions.web.config import (
+from misaka.core.web.config import (
     keyless_tier_enabled,
     provider_env,
     provider_tier,
     use_keyless,
 )
-from misaka.extensions.web.keyless import (
+from misaka.core.web.keyless import (
     CLIENT_NAME,
     extract_with_failover,
     search_with_failover,
 )
-from misaka.extensions.web.provider import WebSearchProvider
+from misaka.core.web.provider import WebSearchProvider
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +168,7 @@ class ExaWebSearchProvider(WebSearchProvider):
         reply is re-keyed onto the requested list here, a URL Exa named nothing for
         becomes that URL's error entry, and a URL nobody asked for is dropped with a debug
         line rather than lengthening the list past its request. This is the same back-fill
-        :func:`misaka.extensions.web.keyless.parallel_extract_keyless` already performs,
+        :func:`misaka.core.web.keyless.parallel_extract_keyless` already performs,
         for the same reason.
         """
         api_key = provider_env("EXA_API_KEY")

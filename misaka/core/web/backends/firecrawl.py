@@ -35,18 +35,18 @@ import httpx
 
 from misaka.core.tools._web.bounded import UnsafeUrlError, vet_public_url
 from misaka.core.tools._web.website_policy import check_website_access
-from misaka.extensions.web.config import (
+from misaka.core.web.config import (
     keyless_tier_enabled,
     provider_env,
     provider_tier,
     use_keyless,
 )
-from misaka.extensions.web.keyless import (
+from misaka.core.web.keyless import (
     FIRECRAWL_API_URL,
     extract_with_failover,
     search_with_failover,
 )
-from misaka.extensions.web.provider import WebSearchProvider
+from misaka.core.web.provider import WebSearchProvider
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +127,7 @@ def _blocked(
     """The entry for a page the operator's blocklist refused.
 
     ``blocked_by_policy`` is not decoration: it is what
-    :func:`misaka.extensions.web.dispatch.policy_blocked` reads to keep the keyless rescue
+    :func:`misaka.core.web.dispatch.policy_blocked` reads to keep the keyless rescue
     from re-fetching, through a vendor the user never configured, the very page the user
     forbade. The rule and its source travel with it because the user is owed the pattern
     and the file that stopped their fetch, or they cannot undo it.
@@ -272,7 +272,7 @@ class FirecrawlWebSearchProvider(WebSearchProvider):
         the one-shot keyless rescue.
 
         Divergence from Hermes, deliberate and the same one
-        :func:`misaka.extensions.web.keyless.keenable_extract_keyless` records: an entry's
+        :func:`misaka.core.web.keyless.keenable_extract_keyless` records: an entry's
         ``url`` is the URL the caller asked for, not the redirect target Hermes puts
         there. The list is reassembled by position and an entry addressed elsewhere is the
         mispairing the contract exists to prevent; where the bytes actually came from

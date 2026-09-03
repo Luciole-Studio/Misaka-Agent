@@ -62,7 +62,7 @@ STREAM_ALLOWED = {
     ("misaka/ui/tui/interactive/components/extension_editor.py", "create_subprocess_exec"): "editor exit status only",
     ("misaka/extensions/sisters/subagent/hooks.py", "create_subprocess_exec"): "communicate()",
     ("misaka/extensions/sisters/subagent/hooks.py", "create_subprocess_shell"): "communicate()",
-    ("misaka/extensions/web/backends/ddgs.py", "create_subprocess_exec"): "communicate()",
+    ("misaka/core/web/backends/ddgs.py", "create_subprocess_exec"): "communicate()",
     ("misaka/extensions/sisters/subagent/runtime.py", "create_subprocess_exec"): "git helper, communicate()",
     # PENDING -- audit findings that will remove these entries:
     ("misaka/ai/utils/oauth/anthropic.py", "start_server"): "PENDING cross-cutting-01 (OAuth callback)",
