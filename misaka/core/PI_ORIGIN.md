@@ -69,7 +69,9 @@
 
 ## `misaka/extensions/` 现在是什么
 
-pi 意义上的**捆绑扩展**：`llama/`（pi 自己唯一捆绑的那个）与 `moa/`。都由 `core/wiring.py` 的 `REGISTRY` 点名。
+pi 意义上的**捆绑扩展**：`llama/`（pi 自己唯一捆绑的那个）与 `moa/`。`extensions/__init__.py` 就是 pi 的
+`src/extensions/index.ts`——`builtInExtensions = ({name, factory, hidden}, …)`，一字不差；把它接进会话的是
+`cli/engine.py`（misaka 的 `main.ts`）：`[*builtInExtensions, *调用方给的]`。**`core/` 对这个包零引用**，和 pi 一样。
 pi 的 `pi install npm:/git:` 与 `~/.pi/agent/extensions/` 安装通道 misaka 未暴露（审计 A-11、A-1），
 `docs/plans/install-uninstall-design-2026-09-03.md` 是那件事的设计稿。
 

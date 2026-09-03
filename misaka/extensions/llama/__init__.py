@@ -8,7 +8,6 @@ from typing import Any
 import httpx
 
 from misaka.ai.models_runtime import AbortController
-from misaka.core.wiring import KINDS
 
 from .client import (
     LlamaClient,
@@ -19,10 +18,6 @@ from .client import (
 from .huggingface import HuggingFaceClient, findHuggingFaceToken
 from .provider import LLAMA_PROVIDER_ID, createLlamaProvider
 from .ui import LlamaUi, runWithProgress, showLlamaUi
-
-EXTENSION_NAME = LLAMA_PROVIDER_ID
-HIDDEN = True
-SESSION_KINDS = KINDS
 
 
 def _model_is_loaded(model: LlamaModelInfo) -> bool:
@@ -299,8 +294,4 @@ def register(harn: Any) -> None:
     )
 
 
-def activate(_spec: Any):
-    return register
-
-
-__all__ = ["EXTENSION_NAME", "HIDDEN", "SESSION_KINDS", "activate", "register"]
+__all__ = ["register"]

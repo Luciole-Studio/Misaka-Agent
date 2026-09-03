@@ -6,15 +6,17 @@ MISAKA has roles and session kinds Pi does not, so its array is a registry whose
 qualify themselves: a module takes part by defining ``activate(spec) -> register | None``
 (``register(harn)`` installs it into the harness, ``None`` skips it for this session), and
 may declare ``ROLES`` (default: every role), ``SESSION_KINDS`` (default: every kind but
-``bare``), ``EXTENSION_NAME`` and ``HIDDEN``. Entries under ``misaka.core`` are hidden by
-construction: core does not appear on the startup screen, as Pi's built-ins do not.
+``bare``) and ``EXTENSION_NAME``. Every entry is hidden: core does not appear on the startup
+screen, as Pi's built-ins do not. The bundled providers are not here -- they are Pi-style
+``builtInExtensions`` in ``misaka.extensions``, composed in by the session entry.
 
 This was ``misaka.extensions.discover``, which found entries by scanning the
 ``extensions/`` folder and read a module's role off the sub-folder it sat in. The folder
 is Pi's and stays, but what the scan found was product wiring that other packages import
 as a library, not plug-ins, and a role was a fact about where a file lived rather than
 something the file said. Now the registry names each entry outright, the entry names its
-own roles, and ``extensions/`` is left holding what Pi's does: the bundled providers.
+own roles, and ``extensions/`` holds what Pi's does: the bundled providers, which ``core``
+never refers to.
 
 The registry is ordered and the order is load-bearing. Extension order is handler order
 for every event the runner folds (``before_agent_start`` threads each handler's system
@@ -65,10 +67,8 @@ REGISTRY: tuple[str, ...] = (
     "misaka.core.documents.wiring.documents",
     "misaka.core.panel.fork_split",
     "misaka.core.lcm",
-    "misaka.extensions.llama",
     "misaka.core.mcp",
     "misaka.core.network.wiring.messages",
-    "misaka.extensions.moa",
     "misaka.core.network.wiring.observe",
     "misaka.core.network.wiring.roster",
     "misaka.core.skills.wiring.skills",
@@ -119,9 +119,8 @@ def build_extensions(spec: SessionSpec) -> list[dict[str, Any]]:
                     getattr(mod, "EXTENSION_NAME", path.rsplit(".", 1)[-1]),
                     register,
                     # Core is not listed, the way Pi's own built-ins are not: the startup
-                    # screen's "Extensions" section is for what the user added. A bundled
-                    # extension under misaka.extensions decides for itself with HIDDEN.
-                    hidden=path.startswith("misaka.core.") or bool(getattr(mod, "HIDDEN", False)),
+                    # screen's "Extensions" section is for what the user added.
+                    hidden=True,
                 )
             )
     return out
