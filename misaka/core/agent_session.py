@@ -94,6 +94,7 @@ from misaka.core.extensions.types import (
 from misaka.core.extensions.wrapper import wrap_registered_tool
 from misaka.core.messages import BashExecutionMessage
 from misaka.core.model_registry import ModelRegistry
+from misaka.core.moments import Moments
 from misaka.core.prompt_templates import PromptTemplate, expand_prompt_template
 from misaka.core.resource_loader import ResourceLoaderLike
 from misaka.core.session_export import export_session_to_jsonl
@@ -154,6 +155,8 @@ class AgentSessionConfig:
     modelRegistry: ModelRegistry
     scopedModels: list[dict[str, Any]] = field(default_factory=list)
     customTools: list[Any] = field(default_factory=list)
+    # MISAKA fork: the session's own subsystems, called from core.moments ahead of extensions.
+    parts: list[Any] = field(default_factory=list)
     initialActiveToolNames: list[str] | None = None
     allowedToolNames: list[str] | None = None
     baseToolsOverride: dict[str, AgentTool] | None = None
@@ -246,6 +249,9 @@ def parse_skill_block(text: str) -> ParsedSkillBlock | None:
 
 
 class AgentSession:
+    # MISAKA fork: a session built without __init__ (test doubles) has no parts.
+    moments: Moments = Moments(None, [])
+
     def __init__(self, config: AgentSessionConfig | dict[str, Any]) -> None:
         resolved = config if isinstance(config, AgentSessionConfig) else AgentSessionConfig(**config)
         self.agent = resolved.agent
@@ -256,6 +262,7 @@ class AgentSession:
         self._modelRegistry = resolved.modelRegistry
         self._scopedModels = list(resolved.scopedModels)
         self._customTools = list(resolved.customTools)
+        self.moments = Moments(self, list(resolved.parts))  # MISAKA fork
         self._initialActiveToolNames = (
             list(resolved.initialActiveToolNames) if resolved.initialActiveToolNames is not None else None
         )
@@ -630,11 +637,24 @@ class AgentSession:
             messages.append(self._build_user_message(current_text, current_images))
             messages.extend(self._pendingNextTurnMessages)
             self._pendingNextTurnMessages = []
+            # MISAKA fork: the session's own parts run first; an extension sees the prompt
+            # and the messages as core left them.
+            core = await self.moments.before_agent_start(
+                current_text,
+                current_images,
+                self._baseSystemPrompt,
+                self._baseSystemPromptOptions,
+            )
+            if core.block:
+                raise RuntimeError(core.reason or "a core part blocked the turn")
+            base_system_prompt = core.system_prompt
+            contributed: list[Any] = list(core.messages)
+            system_prompt: Any = base_system_prompt if core.system_prompt_changed else None
             if self._extensionRunner.has_handlers("before_agent_start"):
                 before_result = await self._extensionRunner.emit_before_agent_start(
                     current_text,
                     current_images,
-                    self._baseSystemPrompt,
+                    base_system_prompt,
                     self._baseSystemPromptOptions,
                 )
                 if before_result and _event_field(before_result, "block", False):
@@ -647,28 +667,26 @@ class AgentSession:
                             )
                         )
                     )
-                extension_messages = _event_field(before_result, "messages") or []
-                for message in extension_messages:
-                    normalized_message = _message_dict(message)
-                    messages.append(
-                        _normalize_nullish_message_content(
-                            {
-                                "role": "custom",
-                                "customType": read_field(normalized_message, "customType"),
-                                "content": _message_content(normalized_message),
-                                "display": bool(read_field(normalized_message, "display")),
-                                "details": read_field(normalized_message, "details"),
-                                "timestamp": int(time.time() * 1000),
-                            }
-                        )
+                contributed.extend(_event_field(before_result, "messages") or [])
+                if _event_field(before_result, "systemPrompt") is not None:
+                    system_prompt = _event_field(before_result, "systemPrompt")
+            for message in contributed:
+                normalized_message = _message_dict(message)
+                messages.append(
+                    _normalize_nullish_message_content(
+                        {
+                            "role": "custom",
+                            "customType": read_field(normalized_message, "customType"),
+                            "content": _message_content(normalized_message),
+                            "display": bool(read_field(normalized_message, "display")),
+                            "details": read_field(normalized_message, "details"),
+                            "timestamp": int(time.time() * 1000),
+                        }
                     )
-                system_prompt = _event_field(before_result, "systemPrompt")
-                if system_prompt is not None:
-                    self._systemPromptOverride = str(system_prompt)
-                    self.agent.state.systemPrompt = self._systemPromptOverride
-                else:
-                    self._systemPromptOverride = None
-                    self.agent.state.systemPrompt = self._baseSystemPrompt
+                )
+            if system_prompt is not None:
+                self._systemPromptOverride = str(system_prompt)
+                self.agent.state.systemPrompt = self._systemPromptOverride
             else:
                 self._systemPromptOverride = None
                 self.agent.state.systemPrompt = self._baseSystemPrompt
@@ -1026,6 +1044,7 @@ class AgentSession:
         if resolved.onError is not None:
             self._extensionErrorListener = resolved.onError
         self._apply_extension_bindings(self._extensionRunner)
+        await self.moments.session_start(dict(self._sessionStartEvent))  # MISAKA fork
         await self._extensionRunner.emit(dict(self._sessionStartEvent))
         await self._extend_resources_from_extensions(
             "reload" if _event_field(self._sessionStartEvent, "reason") == "reload" else "startup"
@@ -1033,6 +1052,7 @@ class AgentSession:
 
     async def reload(self, options: dict[str, Any] | None = None) -> None:
         previous_flag_values = self._extensionRunner.get_flag_values()
+        await self.moments.session_shutdown({"type": "session_shutdown", "reason": "reload"})  # MISAKA fork
         await emit_session_shutdown_event(self._extensionRunner, {"type": "session_shutdown", "reason": "reload"})
         # The old runner must unsubscribe from the shared event bus, or every
         # /reload leaks one more layer of handlers (pi #7656/6ca423447).
@@ -1065,6 +1085,7 @@ class AgentSession:
                 result = before_session_start()
                 if inspect.isawaitable(result):
                     await result
+            await self.moments.session_start({"type": "session_start", "reason": "reload"})  # MISAKA fork
             await self._extensionRunner.emit({"type": "session_start", "reason": "reload"})
             await self._extend_resources_from_extensions("reload")
 
@@ -1272,22 +1293,23 @@ class AgentSession:
                     raise RuntimeError("Already compacted")
                 raise RuntimeError("Nothing to compact (session too small)")
 
-            hook_result = None
             from_hook = False
-            if self._extensionRunner.has_handlers("session_before_compact"):
-                hook_result = await self._extensionRunner.emit(
-                    {
-                        "type": "session_before_compact",
-                        "preparation": preparation,
-                        "branchEntries": branch_entries,
-                        "customInstructions": customInstructions,
-                        "reason": "manual",
-                        "willRetry": False,
-                        "signal": self._compactionAbortController.signal,
-                    }
-                )
-                if _result_flag(hook_result, "cancel", False):
-                    raise RuntimeError("Compaction cancelled")
+            compact_event = {
+                "type": "session_before_compact",
+                "preparation": preparation,
+                "branchEntries": branch_entries,
+                "customInstructions": customInstructions,
+                "reason": "manual",
+                "willRetry": False,
+                "signal": self._compactionAbortController.signal,
+            }
+            # MISAKA fork: the session's own parts get the compaction first; an extension is
+            # asked only if none took it.
+            hook_result = await self.moments.session_before_compact(compact_event)
+            if hook_result is None and self._extensionRunner.has_handlers("session_before_compact"):
+                hook_result = await self._extensionRunner.emit(compact_event)
+            if _result_flag(hook_result, "cancel", False):
+                raise RuntimeError("Compaction cancelled")
 
             provided = _result_flag(hook_result, "compaction")
             if provided is not None:
@@ -1343,6 +1365,10 @@ class AgentSession:
                 None,
             )
             if saved_entry is not None:
+                await self.moments.session_compact({  # MISAKA fork
+                    "type": "session_compact", "compactionEntry": saved_entry, "fromExtension": from_hook,
+                    "reason": "manual", "willRetry": False,
+                })
                 await self._extensionRunner.emit(
                     {
                         "type": "session_compact",
@@ -1396,18 +1422,19 @@ class AgentSession:
         Lets extensions such as telemetry or LCM pair a session_before_compact
         attempt with its outcome; previously failures only reached the UI.
         """
+        failed_event = {
+            "type": "session_compact_failed",
+            "reason": reason,
+            "errorMessage": error_message,
+            "aborted": aborted,
+            "willRetry": will_retry,
+            "fromExtension": from_extension,
+        }
+        # MISAKA fork: core parts hear it whether or not an extension is listening.
+        await self.moments.session_compact_failed(failed_event)
         if not self._extensionRunner.has_handlers("session_compact_failed"):
             return
-        await self._extensionRunner.emit(
-            {
-                "type": "session_compact_failed",
-                "reason": reason,
-                "errorMessage": error_message,
-                "aborted": aborted,
-                "willRetry": will_retry,
-                "fromExtension": from_extension,
-            }
-        )
+        await self._extensionRunner.emit(failed_event)
 
     def abortCompaction(self) -> None:
         if self._compactionAbortController is not None:
@@ -1893,12 +1920,14 @@ class AgentSession:
             self._turnIndex = 0
             await self._extensionRunner.emit({"type": "agent_start"})
         elif event_type == "agent_end":
-            hook_result = await self._extensionRunner.emit_agent_end(
-                {
-                    "type": "agent_end",
-                    "messages": list(_event_field(event, "messages", []) or []),
-                }
-            )
+            agent_end_event = {
+                "type": "agent_end",
+                "messages": list(_event_field(event, "messages", []) or []),
+            }
+            # MISAKA fork: a core part may block first; extensions are asked only if none did.
+            hook_result = await self.moments.agent_end(agent_end_event)
+            if not _event_field(hook_result, "block", False):
+                hook_result = await self._extensionRunner.emit_agent_end(agent_end_event)
             if _event_field(hook_result, "block", False):
                 reason = str(
                     _event_field(
@@ -2119,6 +2148,7 @@ class AgentSession:
         self._bind_extension_core(runner)
         if self._extensionRunnerRef is not None:
             self._extensionRunnerRef["current"] = runner
+            self._extensionRunnerRef["session"] = self  # MISAKA fork: sdk.transform_context reaches the parts
         return runner
 
     def _register_provider(self, name: str, config: dict[str, Any]) -> None:
@@ -2859,33 +2889,34 @@ class AgentSession:
                 )
                 return False
 
-            hook_result = None
             from_hook = False
-            if self._extensionRunner.has_handlers("session_before_compact"):
-                hook_result = await self._extensionRunner.emit(
+            compact_event = {
+                "type": "session_before_compact",
+                "preparation": preparation,
+                "branchEntries": branch_entries,
+                "customInstructions": None,
+                "reason": reason,
+                "willRetry": will_retry,
+                "signal": self._auto_compaction_abort_controller.signal,
+            }
+            # MISAKA fork: the session's own parts get the compaction first; an extension is
+            # asked only if none took it.
+            hook_result = await self.moments.session_before_compact(compact_event)
+            if hook_result is None and self._extensionRunner.has_handlers("session_before_compact"):
+                hook_result = await self._extensionRunner.emit(compact_event)
+            if _result_flag(hook_result, "cancel", False):
+                self._emit(
                     {
-                        "type": "session_before_compact",
-                        "preparation": preparation,
-                        "branchEntries": branch_entries,
-                        "customInstructions": None,
+                        "type": "compaction_end",
                         "reason": reason,
-                        "willRetry": will_retry,
-                        "signal": self._auto_compaction_abort_controller.signal,
+                        "result": None,
+                        "aborted": True,
+                        "willRetry": False,
                     }
                 )
-                if _result_flag(hook_result, "cancel", False):
-                    self._emit(
-                        {
-                            "type": "compaction_end",
-                            "reason": reason,
-                            "result": None,
-                            "aborted": True,
-                            "willRetry": False,
-                        }
-                    )
-                    await self._emit_session_compact_failed(
-                        reason=reason, aborted=True, will_retry=False)
-                    return False
+                await self._emit_session_compact_failed(
+                    reason=reason, aborted=True, will_retry=False)
+                return False
 
             provided = _result_flag(hook_result, "compaction")
             if provided is not None:
@@ -2953,6 +2984,10 @@ class AgentSession:
                 None,
             )
             if saved_entry is not None:
+                await self.moments.session_compact({  # MISAKA fork
+                    "type": "session_compact", "compactionEntry": saved_entry, "fromExtension": from_hook,
+                    "reason": reason, "willRetry": will_retry,
+                })
                 await self._extensionRunner.emit(
                     {
                         "type": "session_compact",

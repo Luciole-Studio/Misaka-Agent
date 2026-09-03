@@ -15,6 +15,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from misaka.core.wiring import ToolCollector
+
 from . import context_engine, externalize, preanswer, tools
 
 logger = logging.getLogger(__name__)
@@ -63,35 +65,56 @@ async def _off_loop(work, *args):
     return await asyncio.to_thread(_locked)
 
 
-def register(harn, *, kind: str):
-    """Register the engine's tools for a session of ``kind`` and subscribe it to the events it needs.
+class LcmPart:
+    """The engine's tools for one session of ``kind``, and what it does at the kernel's moments.
 
-    ``kind`` is the session kind ``misaka.core.wiring`` activated this extension
-    for; ``tools.withheld`` turns it into the subset of the fifteen this session is offered.
+    ``kind`` is the session kind ``core.wiring`` assembled this part for; ``tools.withheld``
+    turns it into the subset of the fifteen this session is offered. The moment methods
+    are what the kernel calls (``core.moments``). Each fails open, three times over: a
+    session must start, a missed ingest is repaired at the next bind, and a failed
+    compaction leaves pi's native summariser to it.
     """
 
-    async def session_start(event, ctx):
+    def __init__(self, *, kind: str) -> None:
+        collector = ToolCollector()
+        try:
+            tools.register(collector, withhold=tools.withheld(kind, context_engine.engine()))
+        except Exception:
+            logger.warning("LCM tools were not registered; this session runs without them.", exc_info=True)
+        self.tools = collector.tools
+
+    async def session_start(self, event, ctx):
         try:
             await _off_loop(context_engine.start, ctx)
-        # Fail open, three times over: a session must start, a missed ingest is repaired
-        # at the next bind, and a failed compaction leaves pi's native summariser to it.
         except Exception:
             logger.warning("LCM session bind failed; this session runs without LCM.", exc_info=True)
 
-    async def sync_event(event, ctx):
+    async def _sync(self, ctx):
         try:
             await _off_loop(context_engine.sync, ctx)
         except Exception:
             logger.warning("LCM ingest failed; the transcript is unaffected.", exc_info=True)
 
-    async def before_compact(event, ctx):
+    async def before_agent_start(self, event, ctx):
+        await self._sync(ctx)
+
+    async def agent_end(self, event, ctx):
+        await self._sync(ctx)
+
+    async def session_shutdown(self, event, ctx):
+        await self._sync(ctx)
+
+    async def session_compact(self, event, ctx):
+        await self._sync(ctx)
+
+    async def session_before_compact(self, event, ctx):
         try:
             return await _off_loop(context_engine.compact, event, ctx)
         except Exception:
             logger.warning("LCM compaction failed; keeping the native summariser.", exc_info=True)
             return None
 
-    async def compact_failed(event, ctx):
+    async def session_compact_failed(self, event, ctx):
         # The engine committed its side of a compaction pi then threw away (an abort
         # during the round, or a later failure), so its ingest cursor now points past
         # messages that are still in the live context. Rebinding the session is how
@@ -103,37 +126,23 @@ def register(harn, *, kind: str):
             logger.warning("LCM could not reset its ingest cursor after a discarded "
                            "compaction; the store may take duplicate rows.", exc_info=True)
 
-    async def transform_context(event, ctx):
+    async def context(self, event, ctx):
         # The last seam before the provider, and the only one that can rewrite a message
-        # `pi` is keeping -- which is what active-replay stubbing is. Off unless
+        # `pi` is keeping. Two steps, in this order on purpose: the stubber's protected
+        # fresh tail is counted from the end of the list, and appending the brief first
+        # would move that boundary. The stubber is off unless
         # LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED says otherwise.
-        try:
-            return await _off_loop(externalize.stub_replay, event, ctx)
-        except Exception:
-            logger.warning("LCM could not stub the live context; it goes out in full.", exc_info=True)
-            return None
-
-    async def preanswer_context(event, ctx):
-        # The same seam again, and second on purpose: the runner threads each handler's
-        # messages into the next, and the stubber's protected fresh tail is counted from
-        # the end of the list. Appending the brief first would move that boundary.
-        try:
-            return await _off_loop(preanswer.inject, event, ctx)
-        except Exception:
-            logger.warning("LCM pre-answer evidence failed; the turn goes out unchanged.", exc_info=True)
-            return None
-
-    try:
-        tools.register(harn, withhold=tools.withheld(kind, context_engine.engine()))
-    except Exception:
-        logger.warning("LCM tools were not registered; this session runs without them.", exc_info=True)
-
-    harn.on("session_start", session_start)
-    harn.on("before_agent_start", sync_event)
-    harn.on("agent_end", sync_event)
-    harn.on("session_shutdown", sync_event)
-    harn.on("session_before_compact", before_compact)
-    harn.on("session_compact", sync_event)
-    harn.on("session_compact_failed", compact_failed)
-    harn.on("context", transform_context)
-    harn.on("context", preanswer_context)
+        messages = event.get("messages", []) if isinstance(event, dict) else []
+        for step, failure in (
+            (externalize.stub_replay, "LCM could not stub the live context; it goes out in full."),
+            (preanswer.inject, "LCM pre-answer evidence failed; the turn goes out unchanged."),
+        ):
+            try:
+                result = await _off_loop(step, {"type": "context", "messages": messages}, ctx)
+            except Exception:
+                logger.warning(failure, exc_info=True)
+                continue
+            replaced = result.get("messages") if isinstance(result, dict) else None
+            if replaced is not None:
+                messages = replaced
+        return {"messages": messages}

@@ -208,14 +208,13 @@ class AgentSessionRuntime:
         # Settle any active response first so the aborted turn (including tool
         # results) is persisted to the outgoing session before it is replaced.
         await self.session.abort()
-        await emit_session_shutdown_event(
-            self.session.extensionRunner,
-            {
-                "type": "session_shutdown",
-                "reason": reason,
-                "targetSessionFile": targetSessionFile,
-            },
-        )
+        shutdown_event = {
+            "type": "session_shutdown",
+            "reason": reason,
+            "targetSessionFile": targetSessionFile,
+        }
+        await self.session.moments.session_shutdown(shutdown_event)  # MISAKA fork
+        await emit_session_shutdown_event(self.session.extensionRunner, shutdown_event)
         if self.beforeSessionInvalidate is not None:
             self.beforeSessionInvalidate()
         self.session.dispose()
@@ -510,13 +509,9 @@ class AgentSessionRuntime:
         return {"cancelled": False}
 
     async def dispose(self) -> None:
-        await emit_session_shutdown_event(
-            self.session.extensionRunner,
-            {
-                "type": "session_shutdown",
-                "reason": "quit",
-            },
-        )
+        shutdown_event = {"type": "session_shutdown", "reason": "quit"}
+        await self.session.moments.session_shutdown(shutdown_event)  # MISAKA fork
+        await emit_session_shutdown_event(self.session.extensionRunner, shutdown_event)
         if self.beforeSessionInvalidate is not None:
             self.beforeSessionInvalidate()
         self.session.dispose()

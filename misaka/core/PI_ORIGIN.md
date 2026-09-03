@@ -27,7 +27,8 @@
 
 | 文件 | 职责 |
 |---|---|
-| `wiring.py` | 会话装配：`SessionSpec`；`TOOL_MODULES` + `tools_for`——只贡献工具的 core 模块走 pi 的 SDK 门 `customTools`（与内置工具同一张表，来源 `<sdk:>`），不进扩展清单；`REGISTRY` + `build_extensions`——还要被内核在时刻叫到的 core 模块，暂以 inline 扩展接入（见 B/C 计划）；`bundled` 钩子由进程入口注入；`assemble` 把两者合成一个 `Assembly` 交给会话构造器 |
+| `wiring.py` | 会话装配：`SessionSpec`；`TOOL_MODULES` + `tools_for`——只贡献工具的 core 模块走 pi 的 SDK 门 `customTools`（与内置工具同一张表，来源 `<sdk:>`），不进扩展清单；`PART_MODULES` + `parts_for`——还要被内核在时刻叫到的 core 模块，做成会话的 **part**（`part(spec)` 返回带 `tools` 与时刻方法的对象），工具同样走 `customTools`，时刻由内核经 `moments.py` 直接调用；`REGISTRY` + `build_extensions`——尚未迁成 part 的 core 模块，暂以 inline 扩展接入（C 计划逐个清空）；`bundled` 钩子由进程入口注入；`assemble` 把三者合成一个 `Assembly` 交给会话构造器 |
+| `moments.py` | 内核对 misaka 子系统的直接调用：`Moments` 持有会话的 parts，在 pi 内核标出的时刻（session_start/shutdown/compact/compact_failed、before_agent_start、agent_end、session_before_compact、context）先于 ExtensionRunner 叫它们，折叠规则与 runner 相同——对应 pi 内核自己在时刻里做事的写法（`_check_compaction` 那种直接调用），而不是把自己挂到 runner 上。接入点：`AgentSessionConfig.parts` ← `sdk`/`services` 的 `parts` 选项 ← `cli/engine.py` `parts=` ← `Assembly.parts`；改处都有 `# MISAKA fork:` |
 | `pi_manifest.py` `provider_display_names.py` `session_export.py` `settings_diagnostics.py` | 移植期加的小件 |
 | `mcp.py` | MCP 客户端与按角色的服务器配置（原 `extensions/mcp.py`） |
 
@@ -62,8 +63,9 @@
 
 **core 不在启动屏的「Extensions」里出现**（`core/wiring.py`：`misaka.core.*` 的条目一律 `hidden`），和 pi 的内置工具一样；
 那一区留给用户自己装的东西。`misaka/extensions/` 下的捆绑扩展各自用 `HIDDEN` 决定（pi 藏了它的 llama）。
-这只是显示：运行时对它们和对 pi 捆绑的 llama 一视同仁——settings 禁不掉、`--no-extensions` 丢不掉、不需要项目信任、
-钩子都由 ExtensionRunner 派发（pi 内核唯一的钩子通道，内置工具没有钩子所以用不到它）。
+已迁成 part 的（`PART_MODULES`：lcm）根本不在扩展清单里：工具走 `customTools`，时刻由内核直接调（`moments.py`）。
+还在 `REGISTRY` 里的那些是过渡态：运行时对它们和对 pi 捆绑的 llama 一视同仁——settings 禁不掉、`--no-extensions` 丢不掉、不需要项目信任、
+钩子由 ExtensionRunner 派发。
 
 ## `misaka/extensions/` 现在是什么
 

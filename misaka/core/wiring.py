@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import importlib
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from misaka.config import profiles
@@ -64,7 +64,6 @@ class SessionSpec:
 
 # Shared entries by name, then Last Order's, then the Sisters': the folder scan's order.
 REGISTRY: tuple[str, ...] = (
-    "misaka.core.lcm",
     "misaka.core.mcp",
     "misaka.core.network.wiring.messages",
     "misaka.core.network.wiring.roster",
@@ -89,7 +88,7 @@ TOOL_MODULES: tuple[str, ...] = (
 )
 
 
-class _ToolCollector:
+class ToolCollector:
     """The one harness capability a tool-only module may use: registering tools.
 
     Anything else -- an event subscription, a command, a message -- is not a tool and
@@ -107,6 +106,14 @@ class _ToolCollector:
         raise AttributeError(f"a tool-only module asked the harness for {name!r}; only registerTool is available here")
 
 
+# Core modules the kernel calls at its moments (``core.moments``): each exposes
+# ``part(spec) -> object | None`` with a ``tools`` list and the moment methods it needs.
+# Their tools take the same ``customTools`` door as ``TOOL_MODULES``. Order is call order.
+PART_MODULES: tuple[str, ...] = (
+    "misaka.core.lcm",
+)
+
+
 def _qualifies(mod: Any, role: str, kind: str) -> bool:
     return role in getattr(mod, "ROLES", ROLE_KEYS) and kind in getattr(mod, "SESSION_KINDS", DEFAULT_KINDS)
 
@@ -115,7 +122,7 @@ def tools_for(spec: SessionSpec) -> list[ToolDefinition]:
     """The core tools a session gets through Pi's ``customTools`` door, in ``TOOL_MODULES`` order."""
     role = role_key(spec)
     kind = "bare" if role == "last_order" and spec.kind == "beast" else spec.kind
-    collector = _ToolCollector()
+    collector = ToolCollector()
     for path in TOOL_MODULES:
         mod = importlib.import_module(path)
         if not _qualifies(mod, role, kind):
@@ -126,19 +133,44 @@ def tools_for(spec: SessionSpec) -> list[ToolDefinition]:
     return collector.tools
 
 
+def parts_for(spec: SessionSpec) -> list[Any]:
+    """The parts a session gets, in ``PART_MODULES`` order."""
+    role = role_key(spec)
+    kind = "bare" if role == "last_order" and spec.kind == "beast" else spec.kind
+    parts: list[Any] = []
+    for path in PART_MODULES:
+        mod = importlib.import_module(path)
+        if not _qualifies(mod, role, kind):
+            continue
+        part = mod.part(spec)
+        if part is not None:
+            parts.append(part)
+    return parts
+
+
 @dataclass(frozen=True, slots=True)
 class Assembly:
     """Everything a session is handed for its spec, in the two shapes Pi's SDK takes them."""
 
     extension_factories: list[dict[str, Any]]
     custom_tools: list[ToolDefinition]
+    parts: list[Any] = field(default_factory=list)
 
     def engine_options(self) -> dict[str, Any]:
-        return {"extensionFactories": self.extension_factories, "customTools": self.custom_tools}
+        return {
+            "extensionFactories": self.extension_factories,
+            "customTools": self.custom_tools,
+            "parts": self.parts,
+        }
 
 
 def assemble(spec: SessionSpec) -> Assembly:
-    return Assembly(extension_factories=build_extensions(spec), custom_tools=tools_for(spec))
+    parts = parts_for(spec)
+    return Assembly(
+        extension_factories=build_extensions(spec),
+        custom_tools=[*tools_for(spec), *(tool for part in parts for tool in part.tools)],
+        parts=parts,
+    )
 
 
 def inline(
@@ -197,17 +229,20 @@ def build_extensions(spec: SessionSpec) -> list[dict[str, Any]]:
 __all__ = [
     "DEFAULT_KINDS",
     "KINDS",
+    "PART_MODULES",
     "REGISTRY",
     "ROLE_KEYS",
     "TOOL_MODULES",
     "Assembly",
     "SessionKind",
     "SessionSpec",
+    "ToolCollector",
     "assemble",
     "build_extensions",
     "bundled",
     "delegates",
     "inline",
+    "parts_for",
     "role_key",
     "tools_for",
 ]

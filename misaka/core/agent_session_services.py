@@ -65,6 +65,7 @@ class CreateAgentSessionFromServicesOptions(TypedDict):
     excludeTools: NotRequired[list[str]]
     noTools: NotRequired[Literal["all", "builtin"]]
     customTools: NotRequired[list[ToolDefinition[Any, Any] | Any]]
+    parts: NotRequired[list[Any]]
 
 
 def apply_extension_flag_values(
@@ -203,6 +204,7 @@ async def create_agent_session_from_services(
             "excludeTools": options.get("excludeTools"),
             "noTools": options.get("noTools"),
             "customTools": options.get("customTools"),
+            "parts": options.get("parts"),
             "sessionStartEvent": options.get("sessionStartEvent"),
         }
     )

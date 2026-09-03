@@ -108,6 +108,7 @@ class CreateAgentSessionOptions(TypedDict, total=False):
     tools: list[str]
     excludeTools: list[str]
     customTools: list[ToolDefinition[Any, Any]]
+    parts: list[Any]
     resourceLoader: ResourceLoader
     sessionManager: SessionManager
     settingsManager: SettingsManager
@@ -344,6 +345,10 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
         )
 
     async def transform_context(messages: list[AgentMessage], _signal: Any | None = None) -> list[AgentMessage]:
+        session = extension_runner_ref.get("session")
+        if session is not None:
+            # MISAKA fork: the session's parts rewrite the context first; extensions see their output.
+            messages = await session.moments.context(messages)
         runner = extension_runner_ref.get("current")
         if runner is None:
             return messages
@@ -392,6 +397,7 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
             "scopedModels": resolved_options.get("scopedModels") or [],
             "resourceLoader": resource_loader,
             "customTools": resolved_options.get("customTools") or [],
+            "parts": resolved_options.get("parts") or [],
             "modelRegistry": model_registry,
             "initialActiveToolNames": initial_active_tool_names,
             "allowedToolNames": allowed_tool_names,

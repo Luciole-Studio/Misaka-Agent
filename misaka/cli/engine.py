@@ -544,6 +544,7 @@ def create_runtime_factory(
     resolved_theme_paths: list[str] | None = None,
     extension_factories: list[Any] | None = None,
     custom_tools: list[Any] | None = None,
+    parts: list[Any] | None = None,
     app_mode: AppMode = "print",
     startup_settings_manager: SettingsManager | None = None,
 ) -> Callable[[dict[str, Any]], Awaitable[CreateAgentSessionRuntimeResult]]:
@@ -716,6 +717,7 @@ def create_runtime_factory(
                 "excludeTools": session_options.options.get("excludeTools"),
                 "noTools": session_options.options.get("noTools"),
                 "customTools": custom_tools,
+                "parts": parts,
             }
         )
         session = created["session"] if isinstance(created, dict) else created.session
@@ -948,6 +950,7 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
             resolved_theme_paths=resolved_theme_paths,
             extension_factories=options.get("extensionFactories") if options else None,
             custom_tools=options.get("customTools") if options else None,
+            parts=options.get("parts") if options else None,
             app_mode=(
                 "print"
                 if parsed.help or parsed.listModels is not None

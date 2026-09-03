@@ -124,6 +124,7 @@ async def open_session(flags, cwd, assembly=None):
             resolved_theme_paths=resolve_cli_paths(cwd, parsed.themes),
             extension_factories=list(assembly.extension_factories) if assembly else None,
             custom_tools=list(assembly.custom_tools) if assembly else None,
+            parts=list(assembly.parts) if assembly else None,
         ),
         {"cwd": sm.getCwd(), "agentDir": get_agent_dir(), "sessionManager": sm},
     )
