@@ -151,8 +151,12 @@ _FG = {"black": 30, "red": 31, "green": 32, "brown": 33, "blue": 34, "magenta": 
 
 
 def _render_row(screen, row):
-    """Render one emulated screen row as an ANSI string (SGR only on attribute change, reset at end of row)."""
-    line = screen.buffer[row]
+    """Render one live screen row; see ``_render_line``."""
+    return _render_line(screen, screen.buffer[row])
+
+
+def _render_line(screen, line):
+    """Render one emulated line (a live row or a history line) as an ANSI string (SGR only on attribute change, reset at end of row)."""
     out, last, skip_stub = [], None, False
     for col in range(screen.columns):
         if skip_stub:  # wide (CJK) characters span two columns; pyte leaves a placeholder cell after them
@@ -433,37 +437,74 @@ def _busy_reason(pane):
     return f"Agent pane: last output was {quiet:.1f}s ago with no spinner; classified as idle."
 
 
-def _scroll_metrics(pane):
-    """Scrollback position, total scrollable lines, and viewport rows (herdr's ScrollMetrics).
+class PaneScreen(pyte.HistoryScreen):
+    """pyte's history screen, plus a count of the lines it has pushed into history.
 
-    pyte's HistoryScreen keeps history in two deques, ``top`` and ``bottom``;
-    scrolling back moves lines from top to bottom, so the offset from the
-    bottom is ``len(bottom)``.
+    The daemon never pages this screen: pyte's ``prev_page`` moves history lines into the
+    live buffer, and its ``before_event`` snaps back to the bottom on *every* later event
+    -- a spinner redraw included -- so a pane could not be scrolled while its app was
+    working. The viewport is the daemon's own (``Pane.view_offset``); this counter is what
+    lets it stay anchored to content while output keeps arriving.
     """
-    screen = pane.screen
-    top = len(getattr(screen, "history", None).top) if hasattr(screen, "history") else 0
-    bottom = len(screen.history.bottom) if hasattr(screen, "history") else 0
-    return {"offset_from_bottom": bottom,
-            "max_offset_from_bottom": top + bottom,
-            "viewport_rows": screen.lines}
+
+    def __init__(self, *args, **kwargs):
+        self.pushed = 0
+        super().__init__(*args, **kwargs)
+
+    def index(self):
+        _top, bottom = self.margins or (0, self.lines - 1)
+        if self.cursor.y == bottom:
+            self.pushed += 1
+        super().index()
+
+
+def _follow_history(pane):
+    """Content stays put while scrolled back: every line the app pushed into history since
+    the last look moves the viewport's anchor one line further from the bottom (what a
+    terminal, tmux and herdr do; the old pyte paging snapped to the bottom instead)."""
+    screen = pane.primary
+    grown = screen.pushed - pane.pushed_seen
+    pane.pushed_seen = screen.pushed
+    if pane.view_offset and not pane.alt_screen:
+        pane.view_offset = min(pane.view_offset + grown, len(screen.history.top))
+
+
+def _scroll_metrics(pane):
+    """Scrollback position, total scrollable lines, and viewport rows (herdr's ScrollMetrics)."""
+    if pane.alt_screen:
+        return {"offset_from_bottom": 0, "max_offset_from_bottom": 0, "viewport_rows": pane.screen.lines}
+    return {"offset_from_bottom": pane.view_offset,
+            "max_offset_from_bottom": len(pane.primary.history.top),
+            "viewport_rows": pane.screen.lines}
 
 
 def _scroll_pane(pane, delta=0, to=None):
-    """Scroll by whole lines. pyte pages by ratio*lines; the screen is built with ratio=1/lines, so one page is one line."""
-    screen = pane.screen
-    if not hasattr(screen, "history"):
-        return
+    """Move the viewport by whole lines: negative ``delta`` goes back into history, "bottom" returns to the live screen."""
+    if pane.alt_screen:
+        return                          # a full-screen app scrolls itself
+    _follow_history(pane)
+    limit = len(pane.primary.history.top)
     if to == "bottom":
-        while screen.history.bottom:
-            screen.next_page()
-        return
-    step = screen.next_page if delta > 0 else screen.prev_page
-    for _ in range(abs(int(delta))):
-        before = (len(screen.history.top), len(screen.history.bottom))
-        step()
-        if (len(screen.history.top), len(screen.history.bottom)) == before:
-            break   # reached the end
-    screen.dirty.update(range(screen.lines))
+        pane.view_offset = 0
+    else:
+        pane.view_offset = max(0, min(limit, pane.view_offset - int(delta)))
+    pane.sent_cursor = None             # visibility changes with the offset; resend it
+
+
+def _viewport_lines(pane):
+    """The lines the viewer sees: the live buffer, or a window into history ending inside it."""
+    screen = pane.screen
+    if not pane.view_offset or pane.alt_screen:
+        return [screen.buffer[r] for r in range(screen.lines)]
+    history = list(pane.primary.history.top)
+    offset = min(pane.view_offset, len(history))
+    start = len(history) - offset
+    return [history[j] if j < len(history) else screen.buffer[j - len(history)]
+            for j in range(start, start + screen.lines)]
+
+
+def _rows_for(pane):
+    return [_render_line(pane.screen, line) for line in _viewport_lines(pane)]
 
 
 def _seated_pane_ids(spaces):
@@ -499,6 +540,7 @@ class Pane:
         "last_output",
         "primary",
         "proc",
+        "pushed_seen",
         "reported",
         "screen",
         "seen_status",
@@ -509,6 +551,7 @@ class Pane:
         "submitted",
         "theme",
         "title",
+        "view_offset",
     )
 
     def __init__(self, pane_id, title, argv, cwd, card=None):
@@ -522,8 +565,10 @@ class Pane:
         self.submitted = False
         self.seen_status = None       # board status seen while focused ("finished but not yet looked at")
         # HistoryScreen keeps scrollback (the scrollbar needs it); ratio=1/rows makes paging line-granular
-        self.primary = pyte.HistoryScreen(DEFAULT_COLS, DEFAULT_ROWS,
-                                          history=SCROLLBACK_LINES, ratio=1 / DEFAULT_ROWS)
+        self.primary = PaneScreen(DEFAULT_COLS, DEFAULT_ROWS,
+                                  history=SCROLLBACK_LINES, ratio=1 / DEFAULT_ROWS)
+        self.view_offset = 0          # lines scrolled back from the live screen (0 = following output)
+        self.pushed_seen = 0          # history pushes accounted for in view_offset
         self.alt = None               # alternate-screen buffer, made on the first ?1049h
         self.screen = self.primary
         self.stream = pyte.ByteStream(self.screen)
@@ -554,6 +599,7 @@ class Pane:
         if bool(to_alt) == bool(self.alt_screen):
             return
         self.alt_screen = bool(to_alt)
+        self.view_offset = 0          # the alternate screen has no history; the primary comes back live
         if to_alt:
             if self.alt is None:
                 self.alt = pyte.Screen(self.primary.columns, self.primary.lines)
@@ -576,6 +622,7 @@ class Pane:
         """
         self.primary.resize(rows, cols)
         self.primary.history = self.primary.history._replace(ratio=1 / max(1, rows))
+        self.view_offset = min(self.view_offset, len(self.primary.history.top))
         if self.alt is not None:
             self.alt.resize(rows, cols)
         self.screen.dirty.clear()
@@ -695,6 +742,21 @@ class Daemon:
         if not self._attached:
             pane.screen.dirty.clear()
             return
+        _follow_history(pane)
+        if pane.view_offset:
+            # Scrolled back: the frame is the whole window into history, and the cursor
+            # belongs to the live screen -- hidden, as herdr and pi hide it while scrolled.
+            pane.screen.dirty.clear()
+            pane.sent_cursor = None
+            self._broadcast(pane.id, {
+                "event": "screen", "id": pane.id,
+                "rows": {str(r): line for r, line in enumerate(_rows_for(pane))},
+                "cursor": [pane.screen.cursor.x, pane.screen.cursor.y],
+                "cursor_hidden": True,
+                "scroll": _scroll_metrics(pane),
+                "alt_screen": pane.alt_screen,
+            })
+            return
         dirty = sorted(pane.screen.dirty)
         pane.screen.dirty.clear()
         cursor = ([pane.screen.cursor.x, pane.screen.cursor.y],
@@ -714,6 +776,14 @@ class Daemon:
             "scroll": _scroll_metrics(pane),
             "alt_screen": pane.alt_screen,
         })
+
+    def _leave_scrollback(self, pane: Pane):
+        if not pane.view_offset:
+            return
+        _scroll_pane(pane, to="bottom")
+        pane.screen.dirty.update(range(pane.screen.lines))
+        if self._attached and pane.flush is None:
+            pane.flush = asyncio.get_running_loop().call_later(FRAME_SECONDS, self._flush, pane)
 
     def _broadcast(self, pane_id, payload):
         line = (json.dumps(payload, ensure_ascii=False) + "\n").encode()
@@ -1397,6 +1467,7 @@ class Daemon:
             pane = self.panes.get(params["id"])
             if pane is None or pane.fd is None:
                 raise ValueError(f"Pane is missing or has exited: {params['id']}")
+            self._leave_scrollback(pane)   # a keystroke into the app returns to the live screen, as in a terminal
             _write_pty(pane.fd, base64.b64decode(params["data"]))
             return {"sent": True}
         if method == "pane.resize":
@@ -1421,10 +1492,10 @@ class Daemon:
             if pane is None:
                 raise ValueError(f"Pane not found: {params['id']}")
             pane.screen.dirty.clear()
-            return {"rows": [_render_row(pane.screen, r)
-                             for r in range(pane.screen.lines)],
+            _follow_history(pane)
+            return {"rows": _rows_for(pane),
                     "cursor": [pane.screen.cursor.x, pane.screen.cursor.y],
-                    "cursor_hidden": bool(pane.screen.cursor.hidden),
+                    "cursor_hidden": bool(pane.screen.cursor.hidden) or bool(pane.view_offset),
                     "size": [pane.screen.lines, pane.screen.columns],
                     "scroll": _scroll_metrics(pane),
                     "alt_screen": pane.alt_screen}
@@ -1434,9 +1505,7 @@ class Daemon:
             if pane is None:
                 raise ValueError(f"Pane not found: {params['id']}")
             _scroll_pane(pane, params.get("delta", 0), params.get("to"))
-            return {"scroll": _scroll_metrics(pane),
-                    "rows": [_render_row(pane.screen, r)
-                             for r in range(pane.screen.lines)]}
+            return {"scroll": _scroll_metrics(pane), "rows": _rows_for(pane)}
         if method == "pane.close":
             self.close(params["id"])
             return {"closed": True}
