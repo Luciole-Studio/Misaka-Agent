@@ -6,10 +6,10 @@ import os
 import secrets
 import socket
 
+from misaka.core.network import worker
 from misaka.core.platform import admission, budget
 from misaka.core.platform import tasks as db
 from misaka.documents import workspace as ws_index
-from misaka.network import worker
 
 _skipped_logged = set()
 
@@ -109,9 +109,9 @@ def _worker_identity():
 def reconcile(con, cfg):
     import time as _time
 
+    from misaka.core.network.sister_runtime import _claimer_alive, _owner_alive
     from misaka.core.platform import processes as process_tree
     from misaka.core.subagent.child import PROCESS_GROUP_IDENTITY
-    from misaka.network.sister_runtime import _claimer_alive, _owner_alive
 
     now = int(_time.time())
     for t in db.by_status(con, "running"):

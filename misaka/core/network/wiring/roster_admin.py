@@ -4,5 +4,5 @@ ROLES = {"last_order"}
 
 
 def activate(spec):
-    from misaka.network import roster
+    from misaka.core.network import roster
     return roster.register

@@ -99,8 +99,8 @@ def deliver(to, message=None, sender=None, model=None, timeout=600,
     (messages back in the queue), 2 timed out (delivered; a late reply is not lost)."""
     from misaka.cli import chat
     from misaka.config import profiles, sisters
+    from misaka.core.network import messages
     from misaka.core.platform.session import run_coro, run_session
-    from misaka.network import messages
 
     to = (to or "").strip()
     sender = (sender or "").strip() or None

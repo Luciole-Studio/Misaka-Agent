@@ -16,8 +16,8 @@ import threading
 import time
 
 from misaka.config import CFG, current_config
+from misaka.core.network import worker
 from misaka.core.platform import tasks as db
-from misaka.network import worker
 
 ACTIVE_STATUSES = ("running", "review")
 
@@ -49,7 +49,7 @@ class Supervisor:
         return self
 
     def _submit(self, con, report):
-        from misaka.network import dispatch
+        from misaka.core.network import dispatch
         dispatch.accept(con, self.task, report, generation=self.generation, claim_lock=self.lock,
                         workspace=self.run_dir)
         self.submitted = True

@@ -69,7 +69,7 @@ class CustomMessageComponent(Container):
         self.box.clear()
         # A custom message reaches the default renderer in either shape: the CustomMessage the
         # type hint promises, or the plain dict an extension handed to ``sendMessage`` (see
-        # misaka/network/messages.py's agent-messages payload). Every other reader of this
+        # misaka/core/network/messages.py's agent-messages payload). Every other reader of this
         # message -- interactive_mode's dispatch immediately above this component -- already
         # uses read_field for exactly that reason; attribute access here raised a bare
         # AttributeError that the pane surfaced to the user verbatim.

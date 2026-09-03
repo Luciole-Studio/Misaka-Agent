@@ -897,7 +897,7 @@ class Daemon:
         daemon's single event loop (audit 2026-09-02, ui-panel-08).
         """
         if self._mcon is None:
-            from misaka.network import messages
+            from misaka.core.network import messages
             self._mcon = messages.connect()
         return self._mcon
 
@@ -926,8 +926,8 @@ class Daemon:
 
     def _settled_card_with_session(self, task_id):
         """A card whose session can be reopened: not live in a pane, with a saved transcript."""
+        from misaka.core.network.sister_runtime import ACTIVE_BOARD_STATUSES
         from misaka.core.platform import tasks as db
-        from misaka.network.sister_runtime import ACTIVE_BOARD_STATUSES
         row = db.get(self._board(), task_id)
         if row is None:
             raise ValueError(f"Card not found: {task_id}")
@@ -1008,8 +1008,8 @@ class Daemon:
             if executor is None:
                 argv = [*CARD_SHELL, task_id]
             else:  # ally: the card contract is the prompt, run one non-interactive turn
+                from misaka.core.network.ally import runner as ally_runner
                 from misaka.core.platform import cards
-                from misaka.extensions.last_order.ally import runner as ally_runner
                 task = dict(row)
                 task["_attachments"] = cards.attachment_list(workspace, task_id, workspace=workspace)
                 argv = ally_runner.build_argv(executor, ally_runner.card_prompt(task))
@@ -1092,7 +1092,7 @@ class Daemon:
             if allies and worker is None:
                 # ~1s of engine imports: loaded only when an ally card pane actually
                 # exists, never at daemon startup (it blocked the first ping for 0.7s).
-                worker = await asyncio.to_thread(importlib.import_module, "misaka.network.worker")
+                worker = await asyncio.to_thread(importlib.import_module, "misaka.core.network.worker")
             for pane in allies:
                 if not still_ours(pane):
                     continue
@@ -1109,7 +1109,7 @@ class Daemon:
                         # both kinds of executor (the board is the single bus).
                         ally_runner = await asyncio.to_thread(
                             importlib.import_module,
-                            "misaka.extensions.last_order.ally.runner")
+                            "misaka.core.network.ally.runner")
                         # The tail is snapshotted here, on the loop's thread: decoding the
                         # live bytearray from the worker would race _pump's append.
                         tail = pane.buf.decode("utf-8", errors="replace")
@@ -1165,7 +1165,7 @@ class Daemon:
                         continue
                     if ok:
                         dispatch = await asyncio.to_thread(
-                            importlib.import_module, "misaka.network.dispatch")
+                            importlib.import_module, "misaka.core.network.dispatch")
                         claim_lock = pane.claim_lock
                         await asyncio.to_thread(
                             dispatch.accept, con, row, report, generation=pane.generation,

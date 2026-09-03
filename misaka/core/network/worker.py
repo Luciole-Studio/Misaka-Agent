@@ -293,7 +293,7 @@ def check_report(workspace, con=None, task_id=None, generation=None):
         if linked and linked["kind"] == "research" and not isinstance(report.get("findings"), list):
             return False, "research report.json must include a `findings` array"
     if con is not None and task_id:
-        from misaka.network import todo
+        from misaka.core.network import todo
         doing = todo.stats(con, task_id)["doing"]
         if doing:
             return False, (
@@ -311,7 +311,7 @@ def run_llm_json(profile_dir, prompt, provider, default_model,
                  thinking="low"):
     """Run a bare session under ``profile_dir`` (only the tools listed, no delegation) and extract
     the first JSON object from its output. Returns ``(obj, raw_text, error)``."""
-    from misaka.network import validate
+    from misaka.core.network import validate
 
     _soul_path, cfg = _load_profile(profile_dir)
     model = os.environ.get("MISAKA_FORCE_MODEL") or model or cfg.get("model") or default_model

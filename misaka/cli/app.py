@@ -4,10 +4,10 @@ import os
 import sys
 
 from misaka.config import CFG, VERSION, current_config
+from misaka.core.network import board as tail
 from misaka.core.platform import budget
 from misaka.core.platform import tasks as db
 from misaka.documents import index as corpus
-from misaka.observability import board as tail
 from misaka.utils import atomic
 
 
@@ -267,17 +267,17 @@ def _cmd_init(args):
 
 
 def _cmd_create(args):
-    from misaka.network import roster
+    from misaka.core.network import roster
     sys.exit(roster.cli_create(args.sid, desc=args.desc, model=args.model))
 
 
 def _cmd_remove(args):
-    from misaka.network import roster
+    from misaka.core.network import roster
     sys.exit(roster.cli_remove(args.sid, yes=args.yes))
 
 
 def _cmd_tell(args):
-    from misaka.extensions.last_order.ally import tell as ally_tell
+    from misaka.core.network.ally import tell as ally_tell
     ok, msg = ally_tell.tell(args.message, to_addr=args.to, summary=args.summary)
     print(msg)
     sys.exit(0 if ok else 1)
@@ -308,7 +308,7 @@ def _cmd_board(args):
 def _cmd_research(args):
     import asyncio as _asyncio
 
-    from misaka.network import worker as worker_mod
+    from misaka.core.network import worker as worker_mod
     from misaka.research import node as research_node
     from misaka.research import planner, runs, workflow
     if args.node:

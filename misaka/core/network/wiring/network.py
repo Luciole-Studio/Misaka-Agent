@@ -11,11 +11,11 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from misaka.config import CFG, current_config, sisters
+from misaka.core.network import validate
+from misaka.core.network.sister_runtime import ACTIVE_BOARD_STATUSES, SisterRuntime
 from misaka.core.platform import budget, toolkit
 from misaka.core.platform import tasks as db
 from misaka.core.platform.prompt_guard import untrusted
-from misaka.network import validate
-from misaka.network.sister_runtime import ACTIVE_BOARD_STATUSES, SisterRuntime
 
 _CON = None
 # How many board rows one `misaka_board` result carries.
@@ -168,7 +168,7 @@ def register(harn):
         if mine and any(line.startswith("*") for line in lines):
             lines.append("* = created in this conversation")
         b = budget.status(con, _cfg()["token_cap"])
-        from misaka.network import roster as roster_mod
+        from misaka.core.network import roster as roster_mod
         named = ", ".join(
             f"{s} ({roster_mod.describe_line(s, root=_cfg()['profiles_root']) or 'no description'})"
             for s in _sisters())
@@ -305,7 +305,7 @@ def register(harn):
                         summary=params.feedback,
                     )
                     if done:
-                        from misaka.network import dispatch
+                        from misaka.core.network import dispatch
                         dispatch.index_after_review(con, params.task_id, int(row["generation"]))
                 else:
                     done = db.request_review_changes(
@@ -547,7 +547,7 @@ def register(harn):
         snippet="Check a card's to-do list",
         parameters=CardTodosParams)
     async def misaka_card_todos(tool_call_id, params, signal, on_update, ctx):
-        from misaka.network import todo
+        from misaka.core.network import todo
         return _text(todo.render(_con(), params.task_id))
 
 
@@ -622,7 +622,7 @@ def register(harn):
         (the card drives itself now; the daemon only hosts panes). Settle those whenever a
         coordinator session starts: dispatch.reconcile checks leases and process identity."""
         try:
-            from misaka.network import dispatch
+            from misaka.core.network import dispatch
             await asyncio.to_thread(dispatch.reconcile, _con(), _cfg())
         except Exception:  # noqa: BLE001, S110 - reconciliation is a safety net at startup, never a blocker
             pass
@@ -817,7 +817,7 @@ def register(harn):
         guidelines=["When assignment is uncertain, inspect relevant Sister profiles instead of guessing from an ID."],
         parameters=SisterViewParams)
     async def misaka_sister_view(tool_call_id, params, signal, on_update, ctx):
-        from misaka.network import roster as roster_mod
+        from misaka.core.network import roster as roster_mod
         sid = params.sister.strip()
         if sid not in set(_sisters()):
             return _text(f"Sister {sid} is not in the roster ({', '.join(_sisters())}).")

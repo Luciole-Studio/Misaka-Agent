@@ -14,7 +14,7 @@ def register(harn):
     async def board_cmd(args, ctx):
         from contextlib import closing
 
-        from misaka.observability import board as tail
+        from misaka.core.network import board as tail
         with closing(_con()) as con:
             text = tail.board_text(con, _workspace(ctx))
         ctx.ui.notify(text or "(No task cards on the board.)", "info")

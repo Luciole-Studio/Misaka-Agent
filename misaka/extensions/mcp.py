@@ -150,7 +150,7 @@ def load_profile_config(profile_dir):
         # behaves exactly as it did a moment ago; the user simply now has the file they were
         # told to edit. Failure to write is not worth failing a session over.
         try:
-            from misaka.network import roster
+            from misaka.core.network import roster
 
             roster.ensure_config_yaml(profile_dir, os.path.basename(profile_dir.rstrip(os.sep)))
         except Exception:  # noqa: BLE001, S110 - a convenience, never a reason to break loading

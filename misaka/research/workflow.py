@@ -312,7 +312,7 @@ async def _drive_tasks(con, cfg, runner, run_id, *, scope, context=None,
                 # path that settles a card whose worker is gone -- each under that card's exact
                 # ownership fence -- and it validates reports and can reach git, so it goes off
                 # the loop thread.
-                from misaka.network import dispatch
+                from misaka.core.network import dispatch
                 await asyncio.to_thread(dispatch.reconcile, con, cfg)
                 linked = [row for row in runs.tasks(con, run_id) if row["id"] in scope]
             await asyncio.to_thread(_stop_pending, con, linked)

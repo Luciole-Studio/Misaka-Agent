@@ -57,7 +57,7 @@ def tell(body, *, to_addr="last-order", summary=None, cwd=None):
             "is not inside any card's workspace. Run this from the card's workspace."
         )
     from misaka.config import sisters
-    from misaka.network import messages
+    from misaka.core.network import messages
     con = messages.connect()
     try:
         known = {"last-order"} | set(sisters())    # Same roster messages.register uses.

@@ -46,7 +46,7 @@ async def _off_loop(work, *args):
     these handlers *do* run inside ``platform.session.run_session``'s environment window.
     Bundled extensions reach a session as ``extension_factories``, and two live callers
     pass exactly that to ``run_session`` -- ``misaka/cli/dm.py`` and
-    ``misaka/network/worker.py``, both under ``run_coro``. So the nesting is real:
+    ``misaka/core/network/worker.py``, both under ``run_coro``. So the nesting is real:
     ``to_thread`` copies ``_ENV_WINDOW_OWNER`` into this worker, the summariser's
     ``run_coro`` finds no loop here, and ``_env_window`` must recognise the nested session
     as re-entrant or it will wait on the ``_ENV_LOCK`` its own caller holds. The no-loop

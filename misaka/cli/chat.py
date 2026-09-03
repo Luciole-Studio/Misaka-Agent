@@ -121,7 +121,7 @@ def launch(who, model=None, cont=False, pick=False, session=None):
     session_role = who or "last-order"
     workspace = os.getcwd()
     if who:
-        from misaka.network.roster import describe_line
+        from misaka.core.network.roster import describe_line
         blurb = (describe_line(who, root=cfg["profiles_root"])
                  or "Ask her to read papers, look things up, or get work done.")
     tagline = ("Last Order, Misaka Network coordinator, standing by. She asks questions, splits work into cards, and calls Sisters once you approve. /sister shows the roster; /sister 10032 opens a direct chat."

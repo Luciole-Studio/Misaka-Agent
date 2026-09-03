@@ -134,8 +134,8 @@ class HeadlessRunner:
         self._processes = ProcessSpawner()   # one place decides how a child of ours starts and dies
 
     async def launch_ready(self, *, task_ids, **_kwargs):
+        from misaka.core.network import dispatch
         from misaka.core.platform import admission
-        from misaka.network import dispatch
         self._reap()                         # before reconcile: an unwaited-for child still answers to its pid
         # A card whose child died mid-turn comes back through the reconciler, exactly as it did
         # when a node ran its cards inline in one dispatch pass. finish_abandoned can reach git,
@@ -246,7 +246,7 @@ class Reporter:
 
 def _run(label, routine):
     """Common shell of both processes: connect, report, run the coroutine, map its result to an exit code."""
-    from misaka.network import worker
+    from misaka.core.network import worker
     con = task_store.connect(os.path.expanduser(CFG["db"]))
     runs.init(con)
     cfg = current_config()
@@ -288,7 +288,7 @@ def main_card(task_id):
     card started this way is the same card the daemon or a pane would have run. Exit 0 when
     this process ran the card, 1 when it did not (no such card, someone else holds the claim,
     the budget stopped, the assignee has no profile)."""
-    from misaka.network import dispatch
+    from misaka.core.network import dispatch
     con = task_store.connect(os.path.expanduser(CFG["db"]))
     try:
         row = task_store.get(con, task_id)

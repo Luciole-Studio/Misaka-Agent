@@ -366,5 +366,5 @@ ROLES = {"last_order"}
 
 
 def activate(spec):
-    from misaka.network import worker
+    from misaka.core.network import worker
     return bind(worker)

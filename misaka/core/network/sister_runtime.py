@@ -23,6 +23,7 @@ from xml.sax.saxutils import escape
 import psutil
 
 from misaka.config import profiles
+from misaka.core.network import worker
 from misaka.core.platform import admission, budget, notifications
 from misaka.core.platform import processes as process_tree
 from misaka.core.platform import tasks as db
@@ -35,7 +36,6 @@ from misaka.core.subagent.runtime import (
     SubagentManager,
     clean_resume_transcript,
 )
-from misaka.network import worker
 
 TERMINAL_BOARD_STATUSES = frozenset({"done", "failed", "stopped", "blocked", "triage"})
 ACTIVE_BOARD_STATUSES = frozenset({"running", "review"})
@@ -504,7 +504,7 @@ class SisterRuntime:
                     # Never publish a replacement workspace owner while an old
                     # writer group remains observable.
                     continue
-            from misaka.network import dispatch
+            from misaka.core.network import dispatch
             dispatch.finish_abandoned(self.con, observed)
 
     def _prepare_card(self, row: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -1026,7 +1026,7 @@ class SisterRuntime:
                         if changed:
                             await self._notify(handle, token)
                         return
-                    from misaka.network import dispatch
+                    from misaka.core.network import dispatch
                     # accept() is the whole acceptance chain, PageIndex included:
                     # index_artifacts -> ingest_artifacts -> documents.index.ingest ->
                     # build_tree, which is a synchronous parse measured at 14s on a 758-page

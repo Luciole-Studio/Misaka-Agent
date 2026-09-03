@@ -21,7 +21,7 @@ def register(harn):
 
         if not name:
             from misaka.config import CFG
-            from misaka.network.roster import describe_line
+            from misaka.core.network.roster import describe_line
 
             def _label(n):
                 bits = (["current"] if n == cur else []) + list(filter(None, [

@@ -47,7 +47,7 @@ exist here rather than because it was skipped:
 from __future__ import annotations
 
 # Which sessions actually receive the tool. ``beast`` is left out because a beast session
-# is started with ``-t <subagent tools>`` or ``-nt`` (misaka/network/worker.py), so
+# is started with ``-t <subagent tools>`` or ``-nt`` (misaka/core/network/worker.py), so
 # declaring it would only produce a tool the ceiling then hides -- the reasoning todo.py
 # already states. ``bare`` is IN, unlike documents.py and skills.py, because a bare
 # session is not tool-less: ``run_llm_json`` builds ``-t <explicit list>`` out of its

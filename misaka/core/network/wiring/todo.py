@@ -1,5 +1,5 @@
 """Per-card to-do tools; only a session that owns a card has a list to keep."""
-from misaka.network import todo
+from misaka.core.network import todo
 
 # Not "beast": a beast session is a card under budget pressure, and it is started with
 # `-t Agent,TaskOutput,SendMessage,TaskStop` (or `-nt`). Registering four todo tools and

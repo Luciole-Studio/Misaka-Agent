@@ -39,7 +39,7 @@ def notify(task_id, text, *, sender, to_addr="last-order"):
     them and Last Order receives both through the same path. Failures are reported
     too: a login or command error must reach Last Order rather than vanish.
     """
-    from misaka.network import messages
+    from misaka.core.network import messages
     con = messages.connect()
     try:
         messages.send(con, to_addr, text, summary=f"ally {sender}·card {task_id}",
