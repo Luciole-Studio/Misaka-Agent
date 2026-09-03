@@ -73,7 +73,7 @@ pi 意义上的**捆绑扩展**——自包含、只靠扩展 API、拔了无残
 
 ```
 extensions/<module>             每个角色：llama/（pi 自带的 provider）、hermes_lcm/（LCM 上下文引擎：vendor/ 是 hermes-lcm 上游原样，host/ 是对 pi 事件的适配；拔掉它 pi 原生压缩照常）、coverage（coverage_scan 工具）
-extensions/last_order/<module>  只有 Last Order：peek
+extensions/last_order/<module>  只有 Last Order 的槽位（现在是空的）
 extensions/sisters/             其他角色的槽位（subagent 是 C 类，在 core/subagent，仅对 Sisters 暴露）
 ```
 
@@ -116,7 +116,8 @@ misaka/extensions/{messages,todo,roster}.py
                                        → misaka/core/network/wiring/{同名}.py
 misaka/extensions/last_order/{network,roster_admin}.py
                                        → misaka/core/network/wiring/{同名}.py
-（coverage、peek 留在 extensions/；agent_state、fork_split → core/network/wiring/panel.py（PanelPart，2026-09-03）；observe → TUI 内置 /board）
+（coverage 留在 extensions/；agent_state、fork_split → core/network/wiring/panel.py（PanelPart，2026-09-03）；
+ peek → core/network/wiring/network.py 的 misaka_sister_peek + sister_runtime.peek/transcript_tail；observe → TUI 内置 /board）
 misaka/extensions/last_order/research.py
                                        → misaka/core/research/wiring/research.py
 ```

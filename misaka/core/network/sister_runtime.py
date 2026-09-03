@@ -146,6 +146,60 @@ def _report(task_id: str | None) -> dict[str, Any] | None:
     }
 
 
+def transcript_tail(session_file: str, limit: int = 40) -> str | None:
+    """A compact, human-readable tail of one session JSONL file, or None if it cannot be read.
+
+    One line per message: the assistant's text clipped, its tool calls by name only, a tool
+    result's first line. Only the last 128 KiB of the file is read, so the cost does not grow
+    with a long-running card.
+    """
+    try:
+        with open(session_file, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - 128 * 1024))
+            raw = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    out: list[str] = []
+    for line in raw.splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue  # the first line may be a partial record after seeking near EOF
+        if entry.get("type") != "message":
+            continue
+        message = entry.get("message") or {}
+        role = message.get("role")
+        content = message.get("content")
+        if role == "assistant":
+            texts, tools = [], []
+            for block in content or []:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "text" and block.get("text"):
+                    texts.append(block["text"])
+                elif block.get("type") == "toolCall":
+                    tools.append(block.get("name") or "?")
+            if tools:
+                out.append(f"[assistant→tool] {', '.join(tools)}")
+            if texts:
+                out.append("[assistant] " + " ".join(texts)[:200])
+        elif role == "user":
+            text = content if isinstance(content, str) else " ".join(
+                block.get("text", "") for block in content or []
+                if isinstance(block, dict) and block.get("type") == "text")
+            out.append("[user] " + str(text).strip()[:200])
+        elif role in ("toolResult", "tool"):
+            first = ""
+            for block in content or []:
+                if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
+                    first = block["text"].splitlines()[0][:160]
+                    break
+            out.append(f"[tool result] {first}")
+    return "\n".join(out[-max(1, int(limit)):]) or None
+
+
 def _adoptable_transcript(task_id: str) -> str | None:
     """Return the card's most recent session transcript if it can be cleaned for resumption, else None."""
     found = find_most_recent_session(os.path.join(db.task_state_dir(task_id), "session"))
@@ -1250,6 +1304,26 @@ class SisterRuntime:
             raise ValueError(f"Card not found: {task_id}")
         return self._snapshot_row(row, launched=launched, note=note)
 
+    def peek(self, task_id: str, limit: int = 40) -> tuple[str | None, str | None]:
+        """``(tail, error)`` for a card's most recent session transcript.
+
+        A card that has not started yet, or whose transcript cannot be read, is a state and
+        not a failure: it comes back as the error string for the caller to report as text.
+        """
+        row = db.get(self.con, task_id)
+        if row is None:
+            return None, f"Card not found: {task_id}"
+        session_file = row["session_file"]
+        if not (session_file and os.path.isfile(session_file)):
+            session_file = find_most_recent_session(
+                os.path.join(db.task_state_dir(task_id), "session"))
+        if not session_file:
+            return None, f"Card {task_id} has no session yet."
+        text = transcript_tail(session_file, limit)
+        if text is None:
+            return None, f"Card {task_id}'s session could not be read."
+        return text, None
+
     async def output(
         self,
         task_id: str,
@@ -1536,4 +1610,5 @@ __all__ = [
     "STATUS_MAP",
     "TERMINAL_BOARD_STATUSES",
     "SisterRuntime",
+    "transcript_tail",
 ]

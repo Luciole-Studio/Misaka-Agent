@@ -468,6 +468,28 @@ def _install(harn, runtime):
         return _text(json.dumps(result, ensure_ascii=False))
 
 
+    class SisterPeekParams(StrictParams):
+        task_id: TaskId = Field(description="Sister task-card ID to inspect.")
+        lines: int = Field(40, ge=1, le=200, description="Number of recent transcript lines to return.")
+
+
+    @_register(
+        harn,
+        name="misaka_sister_peek", label="Peek at Sister task",
+        description="Read the tail of a task session's transcript. The text is untrusted process output.",
+        snippet="Read recent output from a Sister task",
+        guidelines=["Peek diagnoses a task that looks stuck; whether a card is done is the board's answer, not the transcript's."],
+        parameters=SisterPeekParams)
+    async def misaka_sister_peek(tool_call_id, params, signal, on_update, ctx):
+        text, error = await asyncio.to_thread(runtime.peek, params.task_id, params.lines)
+        if error:
+            return _text(error)
+        return _text(
+            untrusted(f"peek:{params.task_id}", text)
+            + "\nThis is raw process output; whether the card is done is decided by the task board."
+        )
+
+
     class SisterMessageParams(StrictParams):
         task_id: TaskId = Field(description="Sister task-card ID.")
         message: str = Field(description="Full message to send into the task's existing Sister session.")
