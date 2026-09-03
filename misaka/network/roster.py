@@ -94,6 +94,28 @@ def card_counts(sid, db_path=None):
         con.close()
 
 
+def ensure_config_yaml(profile_dir, sid):
+    """Write the commented MCP skeleton if this profile has none. Returns True if it wrote one.
+
+    Sisters made before `create` started writing this file have no config.yaml, and nothing
+    else creates one — so the instruction every Sister's creation message gives ("configure
+    MCP servers in config.yaml") pointed at a file that was not there. The skeleton is
+    commented end to end and parses to no servers, so writing one changes no behaviour: it
+    only gives the user the file the product told them to edit.
+    """
+    from misaka.config import profiles
+
+    path = profiles.config_yaml(profile_dir)
+    if os.path.exists(path):
+        return False
+    try:
+        with open(path, "x", encoding="utf-8") as f:   # x: never clobber a race's winner
+            f.write(CONFIG_YAML_TEMPLATE.format(sid=sid))
+    except OSError:
+        return False
+    return True
+
+
 def create_sister(sid, root=None, specialty=None, model=None):
     """Create a Sister profile and return ``(success, message)``."""
     root = root or ROOT

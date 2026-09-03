@@ -144,6 +144,17 @@ def load_profile_config(profile_dir):
     from misaka.config import profiles
     p = profiles.config_yaml(profile_dir)
     if not os.path.isfile(p):
+        # A Sister made before `create` started writing this file has none, and every Sister's
+        # creation message tells the user to edit it -- so put the commented skeleton there the
+        # first time the profile is actually loaded. It parses to no servers, so this profile
+        # behaves exactly as it did a moment ago; the user simply now has the file they were
+        # told to edit. Failure to write is not worth failing a session over.
+        try:
+            from misaka.network import roster
+
+            roster.ensure_config_yaml(profile_dir, os.path.basename(profile_dir.rstrip(os.sep)))
+        except Exception:  # noqa: BLE001, S110 - a convenience, never a reason to break loading
+            pass
         return {}
     try:
         import yaml

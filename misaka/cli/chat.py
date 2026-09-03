@@ -64,13 +64,16 @@ def resolve_session(session, who):
 def launch(who, model=None, cont=False, pick=False, session=None):
     """Assemble the session and run interactive mode until it exits. ``who=None`` means Last Order."""
     from misaka.core.session_manager import get_session_dir_for_cwd, read_session_header
-    # The session picker is a full-screen TUI: it registers stdin with the event loop, which
-    # fails with a bare OSError(EINVAL) when stdin is a pipe or /dev/null. Refuse early and
-    # name the two ways to resume without a terminal.
-    if pick and not sys.stdin.isatty():
-        sys.exit("--pick needs a terminal; stdin is not a TTY.\n"
-                 "Resume a known session with --session <id>, the last one with -c, "
-                 "or run misaka chat --pick in a terminal.")
+    # `chat` is a full-screen TUI in every form, not just under --pick. Without a terminal the
+    # picker died on a bare OSError(EINVAL) from registering stdin with the event loop, while
+    # every other form exited 0 having printed nothing at all -- so a piped `misaka chat` looked
+    # like it had worked. Both are the same missing precondition, so both are refused here.
+    #
+    # Naming --session or -c as the way out would be wrong: they are equally interactive, and
+    # recommending them is what the earlier --pick-only guard did.
+    if not sys.stdin.isatty():
+        sys.exit("misaka chat needs a terminal; stdin is not a TTY.\n"
+                 "For a scripted, non-interactive turn use `misaka dm <who> \"<message>\"`.")
     resumed_session_id = None
     if session:
         session = resolve_session(session, who)
