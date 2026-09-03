@@ -130,7 +130,7 @@ REPORT_INSTRUCTIONS = """
 
 ---
 ## Submission contract
-When the task is complete, write UTF-8 JSON to `$MISAKA_TASK_DIR/report.json`:
+When the task is complete, write UTF-8 JSON to `__REPORT_PATH__`:
 {"schema_version": 1, "generation": __GENERATION__, "status": "done", "summary": "Concise description of the work",
  "artifacts": ["path relative to the workspace"],
  "uncertain": ["One to three specific weak points, such as a second-hand date or fragile estimate"],
@@ -141,6 +141,8 @@ When the task is complete, write UTF-8 JSON to `$MISAKA_TASK_DIR/report.json`:
 - Use `done` only when every listed artifact exists.
 - `uncertain` is required. Name concrete doubts, not generic caveats. Honest uncertainty does not count against you;
   hiding it delays review.
+- Write it to that exact path. The same directory is exported as `$MISAKA_TASK_DIR` for shell commands only:
+  the `write` tool does not expand variables, and a report anywhere else is never seen.
 
 ## Report blockers immediately
 If a premise collapses, external input is indispensable, or a decision is needed, use `SendMessage` to notify
@@ -149,10 +151,22 @@ Continue any work that remains valid, then submit through `report.json`.
 """
 
 
-def report_instructions(generation):
+def report_instructions(generation, task_id=None):
     """The submission contract for one attempt: the generation stamp is what keeps a stale
-    report.json from passing as this attempt's proof."""
-    return REPORT_INSTRUCTIONS.replace("__GENERATION__", str(int(generation or 1)))
+    report.json from passing as this attempt's proof.
+
+    The report's path is spelled out in full when the card is known. It used to be given
+    only as ``$MISAKA_TASK_DIR/report.json``: the variable is exported to the card's
+    process, but a Sister writes with the ``write`` tool, which expands nothing, and the
+    model cannot see the value -- so she guessed ``research/report.json`` in the
+    workspace, ``check_report`` never found it, and the card ran to its timeout while Last
+    Order waited for a result that had been finished for a quarter of an hour.
+    """
+    path = (os.path.join(task_store.task_state_dir(task_id), "report.json")
+            if task_id else "$MISAKA_TASK_DIR/report.json")
+    return (REPORT_INSTRUCTIONS
+            .replace("__GENERATION__", str(int(generation or 1)))
+            .replace("__REPORT_PATH__", path))
 
 
 def set_aside_report(task_id):
@@ -183,7 +197,7 @@ def card_prompt(task):
             f"Write every new deliverable under `{output_dir}`. In `report.json`, list each artifact "
             "using its path relative to the current workspace."
         )
-    prompt = body + report_instructions(task.get("generation"))
+    prompt = body + report_instructions(task.get("generation"), task.get("id"))
     if task.get("beast"):
         from misaka.core.platform import budget as _b
 

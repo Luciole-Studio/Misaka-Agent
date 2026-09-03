@@ -1450,7 +1450,7 @@ class SisterRuntime:
                 was_live = handle.agent.status in {"running", "pending"}
                 if not was_live:
                     worker.set_aside_report(task_id)
-                    message = message + worker.report_instructions(handle.generation)
+                    message = message + worker.report_instructions(handle.generation, task_id)
                 try:
                     await handle.manager.send_message(
                         handle.agent.id, message, context=context, notify=False
@@ -1503,7 +1503,7 @@ class SisterRuntime:
             handle.context = context
             handle.manager.beast = reading["mode"] == "beast"
             worker.set_aside_report(task_id)
-            prompt = message + worker.report_instructions(generation)
+            prompt = message + worker.report_instructions(generation, task_id)
             try:
                 await handle.manager.send_message(
                     handle.agent.id, prompt, context=context, notify=False

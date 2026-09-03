@@ -822,9 +822,15 @@ def _install(harn, runtime):
 class NetworkPart:
     """Last Order's board: the coordination tools, the Sister runtime behind them, and what a session hears at its start."""
 
+    # How often a live coordinator session looks at the notification outbox. The card
+    # shell polls its own report on the same cadence, so a card is announced within
+    # seconds of settling rather than at Last Order's next turn.
+    PENDING_POLL_SECONDS = 5.0
+
     def __init__(self):
         self.session = None
         self.commands = []
+        self._pending_watch = None
         self.runtime = SisterRuntime(None, _con, _cfg)
         collector = ToolCollector()
         _install(collector, self.runtime)
@@ -838,12 +844,35 @@ class NetworkPart:
         await self._resume_briefing(event, ctx)
         await self._settle_orphans()
         asyncio.ensure_future(self._collect_pending(ctx))
+        self._pending_watch = asyncio.ensure_future(self._watch_pending(ctx))
 
     async def before_agent_start(self, event, ctx):
         asyncio.ensure_future(self._collect_pending(ctx))   # a long-lived session hears about cards that finished meanwhile
 
     async def session_shutdown(self, event, ctx):
+        if self._pending_watch is not None:
+            self._pending_watch.cancel()
+            self._pending_watch = None
         await self.runtime.close()
+
+    async def _watch_pending(self, ctx):
+        """Announce a card the moment it settles, not at Last Order's next turn.
+
+        A card in a daemon pane is driven by its own card shell; nothing in this process
+        sees it finish. Its terminal event lands in the durable outbox, and until this
+        loop the only readers were session start and ``before_agent_start`` -- so a
+        coordinator who said "wait for the notification" and then waited was never told.
+        The runtime's own in-process cards (``_notify``) deliver at once; this is the
+        same delivery for the cards it does not drive. The outbox leases and ACKs, so a
+        second reader is harmless. The runtime's connection is used on this loop only.
+        """
+        workspace = _workspace(ctx)
+        while True:
+            await asyncio.sleep(self.PENDING_POLL_SECONDS)
+            try:
+                self.runtime.deliver_pending(workspace)
+            except Exception:  # noqa: BLE001, S110 - a failed pass is retried on the next tick; the outbox keeps the event
+                pass
 
     async def _resume_briefing(self, event, ctx):
         """A resumed conversation is told which cards it created and where they stand, so Last
