@@ -99,26 +99,6 @@ def _parser():
                     help="(internal) run Last Order's fork on one issue in this process")
 
 
-    lc = sub.add_parser("lcm", help="Inspect, back up, and maintain the LCM context database")
-    lc.add_argument("op", nargs="?", default="status",
-                    choices=["status", "doctor", "backup", "embed",
-                             "rollups", "externalize-backfill", "assertions", "rotate", "preset"])
-    lc.add_argument("target", nargs="?",
-                    help="warmup|backfill for embed; rebuild for assertions; "
-                         "session id for rotate; show|suggest|apply for preset")
-    lc.add_argument("name", nargs="?",
-                    help="preset: which preset show or apply reports on (show defaults to the active one)")
-    lc.add_argument("--apply", action="store_true",
-                    help="embed/externalize backfill/assertions/rotate: do it for real "
-                         "(the default only prints the plan); preset has nothing to commit and "
-                         "says so")
-    lc.add_argument("--limit", type=int,
-                    help="embed/externalize backfill: how many rows to move in this run; "
-                         "assertions: how many source rows one --apply pass may re-derive, "
-                         "one auxiliary model call each (upstream default 100, maximum 500)")
-    lc.add_argument("--rebuild", action="store_true",
-                    help="rollups: re-seed and rebuild every temporal rollup (calls the summariser)")
-
     sk = sub.add_parser("skills", help="Discover, review, approve, and manage skills")
     sk.add_argument("op", nargs="?", default="list",
                     choices=["list", "scan", "pending", "approve", "reject",
@@ -375,105 +355,6 @@ def _cmd_research(args):
     final = out.get("final") or {}
     if final.get("path"):
         print(final["path"])
-
-
-def _cmd_lcm(args):
-    """The LCM operator surface: everything upstream's own `/lcm` offers, plus the four
-    opt-in families upstream's doctor predates."""
-    from misaka.extensions.hermes_lcm.host import config_bridge as lcm_config
-    from misaka.extensions.hermes_lcm.host import operations as lcm_ops
-
-    lcm_db = lcm_config.database_path()
-
-    if args.op in {"status", "doctor", "backup"}:
-        print(lcm_ops.report(args.op))
-    elif args.op == "externalize-backfill":
-        # Old rows do not benefit from switching externalization on; this is how they
-        # catch up. Dry run first, like migrate: `--apply` is what rewrites anything.
-        from misaka.extensions.hermes_lcm.host import externalize as lcm_externalize
-        result = (lcm_externalize.run(args.limit) if args.apply
-                  else lcm_externalize.plan(args.limit))
-        print(f"Database {result['database'] or lcm_db}")
-        if result["note"]:
-            print(result["note"])
-        print(f"Payload directory {result['directory'] or '(unset)'} | threshold "
-              f"{result['threshold_chars']:,} chars")
-        if result.get("applied"):
-            print(f"{result['moved']} tool result(s) moved to payload files; "
-                  f"{result['chars_moved']:,} characters left the database, "
-                  f"{result['bytes']:,} bytes reclaimed on disk.")
-        else:
-            print(f"{result['rows']} tool result(s) totalling {result['chars']:,} characters "
-                  "would move to payload files.")
-            if not args.apply:
-                print("Dry run; nothing was written. Re-run with --apply to externalize.")
-    elif args.op == "embed":
-        # Upstream's own `/lcm embed` implementation, forwarded whole: the dry run is the
-        # default and `--apply` is what spends anything.
-        from misaka.extensions.hermes_lcm.host import embed as lcm_embed
-        if args.target not in {"warmup", "backfill"}:
-            print("Usage: misaka lcm embed warmup|backfill [--apply] [--limit N]")
-            sys.exit(2)
-        print(lcm_embed.run(args.target, apply=args.apply, limit=args.limit))
-    elif args.op == "assertions":
-        # Upstream's own `/lcm assertions rebuild`, forwarded whole. The dry run is the
-        # default and never constructs an extractor; `--apply` is what calls a model, once
-        # per source row it re-derives.
-        from misaka.extensions.hermes_lcm.host import assertions as lcm_assertions
-        if args.target not in {None, "rebuild"}:
-            print("Usage: misaka lcm assertions rebuild [--apply] [--limit N]")
-            sys.exit(2)
-        print(lcm_assertions.rebuild(apply=args.apply, limit=args.limit))
-    elif args.op == "rollups":
-        from misaka.extensions.hermes_lcm.host import rollups as lcm_rollups
-        # The engine resolves its database through `config_bridge.database_path()`, which lets
-        # upstream's own `LCM_DATABASE_PATH` win. Reporting on `lcm_db` instead would
-        # answer "nothing has been built" about a file the engine never opened -- and
-        # `--rebuild` would build into one database and print a status from another.
-        rollup_db = lcm_db
-        if args.rebuild:
-            outcome = lcm_rollups.rebuild(rollup_db)
-            if outcome.get("error"):
-                print(f"Database {rollup_db}\n{outcome['error']}")
-                sys.exit(2)
-            print(f"Seeded {sum(outcome['seeded'].values())} periods in "
-                  f"{len(outcome['seeded'])} scopes; built {outcome['built']}.")
-            for scope in outcome["exhausted"]:
-                print(f"  {scope}: still had work when the pass budget ran out; run it again.")
-            report = outcome["status"]
-        else:
-            report = lcm_rollups.status(rollup_db)
-        state = "enabled" if report["enabled"] else "disabled (set LCM_TEMPORAL_ROLLUPS_ENABLED=true)"
-        print(f"Database {report['database']} | temporal rollups {state} | "
-              f"{report['pending_invalidations']} pending invalidations")
-        if not report["installed"]:
-            print("No rollup tables in this database yet; nothing has been built.")
-        for scope, kinds in sorted(report["scopes"].items()):
-            counted = " | ".join(
-                f"{kind}: " + ", ".join(f"{state} {count}" for state, count in sorted(states.items()))
-                for kind, states in sorted(kinds.items())
-            )
-            oldest = report["oldest_stale"].get(scope)
-            print(f"  {scope}  {counted}" + (f"  (oldest stale {oldest})" if oldest else ""))
-        if report["last_error"]:
-            print(f"Last build error: {report['last_error']}")
-    elif args.op == "rotate":
-        # Upstream's own in-place compact, forwarded whole: same session id, same
-        # conversation id, no summariser call, and the raw rows stay recoverable. The
-        # preview is the default and `--apply` is what writes the rolling backup and
-        # advances the lifecycle frontier. The session is an argument because a CLI has
-        # no active session for upstream to rotate.
-        from misaka.extensions.hermes_lcm.host import operations as lcm_operations
-        print(lcm_operations.rotate(args.target or "", apply=args.apply))
-    elif args.op == "preset":
-        # Upstream's benchmarked model-family presets, forwarded whole. Its `apply`
-        # writes no configuration in any mode, so `--apply` gets the same preview plus a
-        # line saying it had nothing to commit.
-        from misaka.extensions.hermes_lcm.host import operations as lcm_operations
-        if args.target not in {"show", "suggest", "apply"}:
-            print("Usage: misaka lcm preset show|suggest|apply [NAME] [--apply]")
-            sys.exit(2)
-        print(lcm_operations.preset(args.target, args.name or "", apply=args.apply))
 
 
 def _cmd_web(args):
@@ -782,7 +663,6 @@ COMMANDS = {
     "task": _cmd_task,
     "board": _cmd_board,
     "research": _cmd_research,
-    "lcm": _cmd_lcm,
     "web": _cmd_web,
     "moa": _cmd_moa,
     "skills": _cmd_skills,

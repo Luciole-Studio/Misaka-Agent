@@ -1130,6 +1130,7 @@ class ExtensionRunner:
         ctx = self.create_context()
         prompt_paths: list[dict[str, str]] = []
         theme_paths: list[dict[str, str]] = []
+        skill_paths: list[dict[str, str]] = []
         for extension in self.extensions:
             for handler in extension.handlers.get("resources_discover", []):
                 try:
@@ -1143,6 +1144,7 @@ class ExtensionRunner:
                     for field_name, target in (
                         ("promptPaths", prompt_paths),
                         ("themePaths", theme_paths),
+                        ("skillPaths", skill_paths),
                     ):
                         for path in _result_flag(handler_result, field_name, []) or []:
                             target.append({"path": path, "extensionPath": extension.path})
@@ -1151,6 +1153,7 @@ class ExtensionRunner:
         return {
             "promptPaths": prompt_paths,
             "themePaths": theme_paths,
+            "skillPaths": skill_paths,
         }
 
     async def emit_input(

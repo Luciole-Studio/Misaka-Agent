@@ -68,6 +68,26 @@
 `evidence_pack` `reasoning` `model_routing` + `agent.auxiliary_client` 那个已有接缝)整个落在
 已 vendored 的集合里,补拷后不需要再扩闭包。
 
+## vendor/skills/hermes-lcm(2026-09-03)
+
+上游插件入口用 `register_skill("hermes-lcm", <plugin>/skills/hermes-lcm)` 注册它自带的技能;这份技能目录
+原样拷在 `vendor/skills/hermes-lcm/`(`SKILL.md` + `references/`),不在 `lcm_sync_check.py` 的 `*.py` 巡检里,
+再同步时 `diff -r` 一下。misaka 侧走 pi 的 `resources_discover` 事件报 `skillPaths`(pi 0.84 的 types 里有这个键),
+内核把它交给 `resource_loader.extendResources`,`core/skills` 的 SkillsPart 在每回合前把它当 `extension` 层收进索引。
+
+## 与 hermes 插件入口逐项对照(2026-09-03)
+
+| hermes `__init__.register(ctx)` | misaka 的 `host/extension.register(harn, kind)` |
+|---|---|
+| `register_context_engine`:`on_session_start` / `ingest` / `compress` | `session_start` → `context_engine.start`;`before_agent_start`/`agent_end`/`session_compact` → `sync`(ingest);`session_before_compact` → `compact` |
+| `on_session_end` | `session_shutdown` → `sync` 再 `context_engine.end` |
+| `update_from_response(usage)` | `message_end`(assistant)→ `context_engine.usage` |
+| `pre_llm_call`:recall 策略 + 证据简报 | `context` → `externalize.stub_replay`、`preanswer.inject`(策略文本刻意不搬,见 `host/preanswer.py`) |
+| `register_skill("hermes-lcm")` | `resources_discover` → `skillPaths` |
+| `subagent_start` / `subagent_stop` 血缘钩子 | hermes 在父进程里发;misaka 的子代理是独立进程,子进程在 `context_engine.start` 里从 `MISAKA_SUBAGENT_PARENT_SESSION_ID` / `MISAKA_SUBAGENT_ID` / `MISAKA_WHO` 自己记 `record_subagent_start`,`end` 时 `record_subagent_stop` |
+| `/lcm` 命令 | `registerCommand("lcm")` → `host/slash.py`(pi 的 llama 也是这样暴露 `/llama`;没有 CLI 子命令) |
+| 引擎自己判断何时压缩(`should_compress`) | 不用:压缩时机由 pi 决定,引擎只在 pi 要压时给摘要 |
+
 ## host/ 适配层(P1 接线了什么)
 
 `host/` 是 misaka 写的新代码(ruff + deadcheck 照常检查),`vendor/` 一个字节没动。

@@ -1,4 +1,4 @@
-"""``misaka lcm embed`` -- upstream's own embedding operations, on misaka's CLI.
+"""``/lcm embed`` -- upstream's own embedding operations, as the extension's command.
 
 Upstream ships warmup and backfill as ``/lcm embed ...`` inside ``vendor/command.py``,
 and that implementation is the whole of the contract: provider resolution, the dimension
@@ -9,7 +9,7 @@ it here would be a second copy of a contract upstream keeps changing -- and the 
 a rewrite got wrong is money.
 
 Only ``embed`` is forwarded. The rest of upstream's operations surface (``status``,
-``doctor``, ``rotate``, ``preset``, ...) is a later phase's; ``misaka lcm`` keeps its own
+``doctor``, ``rotate``, ``preset``, ...) is a later phase's; ``/lcm`` keeps its own
 operations until then.
 """
 
@@ -27,7 +27,7 @@ def run(subcommand: str, *, apply: bool = False, limit: int | None = None) -> st
         )
     tokens = ["embed", subcommand]
     # `warmup` takes no flags and upstream answers a flagged one with its help text, so
-    # the two flags `misaka lcm` shares across its ops are forwarded only where they mean
+    # the two flags `/lcm` shares across its ops are forwarded only where they mean
     # something.
     if subcommand == "backfill":
         if apply:

@@ -163,6 +163,7 @@ class SkillsPart:
         from misaka.core.skills.coding_context import compact_skill_categories
 
         roots = list(roots)
+        self._roots = roots
         workspace = cwd or os.getcwd()
 
         def entries():
@@ -456,10 +457,28 @@ class SkillsPart:
     def attach(self, session):
         self.session = session
 
+    def _adopt_extension_skills(self):
+        # Skill roots an extension contributed through pi's resources_discover door
+        # (resource_loader.getExtensionSkillPaths); they join the layers as "extension".
+        loader = getattr(self.session, "resourceLoader", None)
+        paths = getattr(loader, "getExtensionSkillPaths", None)
+        if paths is None:
+            return
+        known = {os.path.abspath(root) for _layer, root in self._roots}
+        added = False
+        for path in paths():
+            if os.path.isdir(path) and os.path.abspath(path) not in known:
+                self._roots.append(("extension", path))
+                added = True
+        if added:
+            skill_index.invalidate()
+
     async def before_agent_start(self, event, ctx):
+        self._adopt_extension_skills()
         return await self._advertise(event, ctx)
 
     async def session_start(self, event, ctx):
+        self._adopt_extension_skills()
         await self._fresh(event, ctx)
 
     async def tool_call(self, event, ctx):

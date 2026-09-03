@@ -24,6 +24,7 @@ durable store keeps the originals either way.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import sqlite3
 import threading
@@ -32,6 +33,7 @@ from contextlib import contextmanager
 from misaka.core.platform.prompt_guard import untrusted
 from misaka.utils.values import read_field
 
+from ..vendor import aux_session
 from . import config_bridge, fence, ingest, llm, rollups
 
 logger = logging.getLogger(__name__)
@@ -151,13 +153,62 @@ def _guarded_summary(built, summary: str) -> str:
     return untrusted(f"lcm:compaction:{built.current_session_id}", summary)
 
 
+def _lineage(session_id: str) -> dict | None:
+    """The explicit child-to-parent link hermes's ``subagent_start`` hook carries.
+
+    hermes raises that hook in the parent's process; a misaka child is its own process,
+    so the child records the same link about itself from the environment the runtime
+    gave it, before the engine's ``on_session_start`` consumes it.
+    """
+    parent = os.environ.get("MISAKA_SUBAGENT_PARENT_SESSION_ID") or ""
+    if not parent:
+        return None
+    return {
+        "child_session_id": session_id,
+        "parent_session_id": parent,
+        "child_subagent_id": os.environ.get("MISAKA_SUBAGENT_ID") or "",
+        "parent_subagent_id": "",
+        "child_role": os.environ.get("MISAKA_WHO") or "",
+    }
+
+
 def start(ctx) -> str:
     """Bind the engine to this misaka session. Returns the session id, or ``""``."""
     session_id = ingest.session_id(ctx)
     built = engine()
     if session_id and built is not None:
+        lineage = _lineage(session_id)
+        if lineage is not None:
+            aux_session.record_subagent_start(lineage)
         built.on_session_start(session_id, platform="misaka")
     return session_id
+
+
+def end(ctx) -> None:
+    """hermes's ``on_session_end``: the engine sees the final context once, then the lineage record goes."""
+    session_id = ingest.session_id(ctx)
+    built = engine()
+    if not session_id or built is None:
+        return
+    try:
+        built.on_session_end(session_id, ingest.upstream_messages(ctx.sessionManager.buildSessionContext().messages))
+    finally:
+        aux_session.record_subagent_stop({"child_session_id": session_id})
+
+
+def usage(message) -> None:
+    """hermes's ``update_from_response``: the provider usage of one assistant response."""
+    built = engine()
+    reported = read_field(message, "usage")
+    if built is None or reported is None:
+        return
+    prompt = sum(int(read_field(reported, name, 0) or 0) for name in ("input", "cacheRead", "cacheWrite"))
+    completion = int(read_field(reported, "output", 0) or 0)
+    built.update_from_response({
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": int(read_field(reported, "totalTokens", 0) or 0) or prompt + completion,
+    })
 
 
 def sync(ctx) -> None:

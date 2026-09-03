@@ -1,7 +1,7 @@
 """Upstream's temporal rollups (day/week/month) on misaka's shapes.
 
 Two things live here, and nothing else: the one call that keeps rollups being built in a
-misaka-shaped session, and the operator surface behind `misaka lcm rollups`.
+misaka-shaped session, and the operator surface behind `/lcm rollups`.
 
 **The build seam.** Upstream builds rollups in exactly one place: `_bind_lifecycle_state`
 schedules a bounded background pass on every `on_session_start`. Nothing else in the

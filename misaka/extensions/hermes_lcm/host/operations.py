@@ -1,4 +1,4 @@
-"""``misaka lcm status`` / ``doctor`` / ``rotate`` / ``preset`` -- upstream's operator surface.
+"""``/lcm status`` / ``doctor`` / ``rotate`` / ``preset`` -- upstream's operator surface.
 
 The four operations here are the last of ``vendor/command.py`` that misaka had no door
 for, and they are forwarded whole for the same reason ``host/embed.py`` and
@@ -12,7 +12,7 @@ Two things here are not forwarding, and both exist because misaka's shape differ
 the host upstream was written for.
 
 **status and doctor are a fork in the road, not an addition.** Two implementations own
-the name ``misaka lcm``: the pre-port mini one and the ported engine. Their reports have
+the name ``/lcm``: the pre-port mini one and the ported engine. Their reports have
 nothing in common -- the mini one counts rows, upstream's names sixty runtime fields --
 so ``report`` answers with whichever implementation ``context_engine`` actually selected
 and leaves the other's output alone. Forcing one shape onto both would mean throwing away
@@ -39,13 +39,13 @@ import sqlite3
 
 from . import config_bridge, context_engine, rollups
 
-# How many sessions a bare `misaka lcm rotate` lists before it stops. Long enough to
+# How many sessions a bare `/lcm rotate` lists before it stops. Long enough to
 # recognise the one you meant, short enough not to be the reason you scroll.
 _LISTED_SESSIONS = 20
 
 _NO_ENGINE = (
     "No usable LCM engine for {db}. A pre-port database has to be rebuilt first: "
-    "`misaka lcm migrate --apply`."
+    "`/lcm migrate --apply`."
 )
 
 
@@ -132,7 +132,7 @@ def _sessions_text(rows: list, reason: str) -> str:
         "status: refused",
         f"reason: {reason}",
         ("note: upstream rotates the session its host has open; a CLI has none, so "
-         "`misaka lcm rotate SESSION_ID` takes it as an argument"),
+         "`/lcm rotate SESSION_ID` takes it as an argument"),
     ]
     if not rows:
         lines.append(f"note: no sessions in {config_bridge.database_path()} to rotate")
@@ -198,7 +198,7 @@ def _families(built) -> list[str]:
         + f" | over {threshold:,} chars | active-replay stubbing "
         + ("on" if config.large_output_active_replay_stubbing_enabled else "off")
         + " | payload counts above",
-        "  -> misaka lcm externalize-backfill [--apply] [--limit N]",
+        "  -> /lcm externalize-backfill [--apply] [--limit N]",
     ]
 
     rollup = rollups.status(built._store.db_path)
@@ -214,7 +214,7 @@ def _families(built) -> list[str]:
            " | " + (", ".join(f"{count} {state}" for state, count in sorted(counted.items())) or "nothing built")
            + f" across {len(rollup['scopes'])} scope(s)"
            + f" | {rollup['pending_invalidations']} pending invalidation(s)"),
-        "  -> misaka lcm rollups [--rebuild]",
+        "  -> /lcm rollups [--rebuild]",
     ]
     if rollup["last_error"]:
         lines.append(f"  last build error: {rollup['last_error']}")
@@ -229,7 +229,7 @@ def _families(built) -> list[str]:
         + _state(config.embeddings_enabled, "LCM_EMBEDDINGS_ENABLED")
         + f" | configured {config.embedding_provider or '(unset)'}/{config.embedding_model or '(unset)'}"
         + f" | {vectors} summary vector(s) for {nodes} summary node(s), {chunks} chunk vector(s)",
-        "  -> misaka lcm embed warmup | misaka lcm embed backfill [--apply] [--limit N]",
+        "  -> /lcm embed warmup | /lcm embed backfill [--apply] [--limit N]",
     ]
     for task, provider, model_name, dim, dtype, active in profiles:
         lines.append(
@@ -237,7 +237,7 @@ def _families(built) -> list[str]:
             + ("" if active else " (archived)")
         )
     if config.embeddings_enabled and not profiles:
-        lines.append("  no profile registered yet; `misaka lcm embed warmup` locks the dimension")
+        lines.append("  no profile registered yet; `/lcm embed warmup` locks the dimension")
 
     from ..vendor.assertion_store import CURRENT_EXTRACTION_VERSION
 
@@ -250,7 +250,7 @@ def _families(built) -> list[str]:
         + " | extraction " + _state(config.assertion_extraction_enabled, "LCM_ASSERTION_EXTRACTION_ENABLED")
         + f" | {int(totals[0]) if totals else 0} assertion(s) from "
         + f"{int(totals[1]) if totals else 0} source row(s)",
-        "  -> misaka lcm assertions rebuild [--apply] [--limit N]",
+        "  -> /lcm assertions rebuild [--apply] [--limit N]",
     ]
     # Only the versions that are *not* current earn a line: rows left behind by a moved
     # `CURRENT_EXTRACTION_VERSION` are the health signal, and "all of them are current"

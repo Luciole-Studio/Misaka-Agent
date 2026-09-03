@@ -14,9 +14,10 @@ concern lives:
     rollups.py            temporal rollups: the build nudge misaka's session shape needs
     externalize.py        large-output refs in the live prompt, and a backfill for old rows
     preanswer.py          V4 pre-answer evidence: one bounded cited brief before the answer
-    embed.py              upstream's own `/lcm embed`, on `misaka lcm embed`
-    assertions.py         upstream's own `/lcm assertions rebuild`, on `misaka lcm assertions`
-    operations.py         the `misaka lcm` CLI ops: status/doctor/backup/rotate/preset
+    embed.py              upstream's own `/lcm embed`, forwarded whole
+    assertions.py         upstream's own `/lcm assertions rebuild`, forwarded whole
+    operations.py         the `/lcm` ops: status/doctor/backup/rotate/preset
+    slash.py              the `/lcm` command: the operator surface, as pi's llama exposes `/llama`
     extension.py          the event subscriptions all of the above are reached through
 
 Keeping the two apart is what makes "port" mean something: an upstream release changes

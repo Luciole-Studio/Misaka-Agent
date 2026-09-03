@@ -1,4 +1,4 @@
-"""``misaka lcm assertions`` -- upstream's own assertion rebuild, on misaka's CLI.
+"""``/lcm assertions`` -- upstream's own assertion rebuild, as the extension's command.
 
 The V4 assertion sidecar needs no host wiring to *run*: ``LCM_ASSERTIONS_ENABLED``
 materialises the store inside ``_bind_storage``, ``LCM_ASSERTION_EXTRACTION_ENABLED``
@@ -15,7 +15,7 @@ digest, the late source-hash CAS, the bounded batch), and a rewrite would be a s
 copy of it that costs model calls when it drifts.
 
 Dry run is the default at both ends. Upstream's plan mode never constructs an extractor,
-so `misaka lcm assertions rebuild` cannot spend anything; ``--apply`` is refused outright
+so `/lcm assertions rebuild` cannot spend anything; ``--apply`` is refused outright
 unless extraction is enabled, which is the same gate the compaction path answers to.
 
 ``--apply`` is also the one place in this family where the per-pass bound is *not* four:

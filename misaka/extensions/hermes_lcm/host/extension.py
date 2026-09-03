@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import shlex
 
-from . import context_engine, externalize, preanswer, tools
+from . import context_engine, externalize, preanswer, slash, tools
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +115,34 @@ def register(harn, *, kind: str):
             logger.warning("LCM could not stub the live context; it goes out in full.", exc_info=True)
             return None
 
+    async def session_end(event, ctx):
+        await sync_event(event, ctx)
+        try:
+            await _off_loop(context_engine.end, ctx)
+        except Exception:
+            logger.warning("LCM session end failed; the store keeps what was ingested.", exc_info=True)
+
+    async def response_usage(event, ctx):
+        message = event.get("message") if isinstance(event, dict) else getattr(event, "message", None)
+        if getattr(message, "role", None) != "assistant" and not (isinstance(message, dict) and message.get("role") == "assistant"):
+            return
+        try:
+            await _off_loop(context_engine.usage, message)
+        except Exception:
+            logger.warning("LCM usage update failed; the next one repairs it.", exc_info=True)
+
+    async def discover_resources(event, ctx):
+        # hermes registers its bundled skill through the plugin's register_skill; pi's door
+        # for a skill root an extension ships is resources_discover.
+        return {"skillPaths": [os.path.join(os.path.dirname(os.path.dirname(__file__)), "vendor", "skills")]}
+
+    async def lcm_command(args, ctx):
+        try:
+            text = await asyncio.to_thread(slash.run, shlex.split(args or ""))
+        except (SystemExit, ValueError):
+            text = slash.USAGE
+        ctx.ui.notify(text, "info")
+
     async def preanswer_context(event, ctx):
         # The same seam again, and second on purpose: the runner threads each handler's
         # messages into the next, and the stubber's protected fresh tail is counted from
@@ -131,7 +161,13 @@ def register(harn, *, kind: str):
     harn.on("session_start", session_start)
     harn.on("before_agent_start", sync_event)
     harn.on("agent_end", sync_event)
-    harn.on("session_shutdown", sync_event)
+    harn.on("session_shutdown", session_end)
+    harn.on("message_end", response_usage)
+    harn.on("resources_discover", discover_resources)
+    harn.registerCommand("lcm", {
+        "description": "Inspect, back up, and maintain the LCM context database.",
+        "handler": lcm_command,
+    })
     harn.on("session_before_compact", before_compact)
     harn.on("session_compact", sync_event)
     harn.on("session_compact_failed", compact_failed)

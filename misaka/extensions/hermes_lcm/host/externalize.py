@@ -155,7 +155,7 @@ def _report(engine, rows) -> dict:
 # `run` are called against a live engine that the caller keeps using -- plan, apply, plan again to
 # show there is nothing left, which is how idempotence is checked and what this family's own tests
 # do. Closing here would leave that caller holding an engine whose store connection is None. The
-# lifetime belongs to the CLI branch that builds it (`misaka lcm externalize-backfill` in
+# lifetime belongs to the CLI branch that builds it (`/lcm externalize-backfill` in
 # cli/app.py), not to the two functions it calls. `run`'s VACUUM already folds the WAL back in.
 def plan(limit: int | None = None) -> dict:
     """What a backfill would move, without writing anything."""

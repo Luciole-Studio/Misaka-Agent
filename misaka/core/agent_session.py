@@ -1940,13 +1940,14 @@ class AgentSession:
             return
 
         discovered = await self._extensionRunner.emit_resources_discover(self._cwd, reason)
-        if not discovered["promptPaths"] and not discovered["themePaths"]:
+        if not discovered["promptPaths"] and not discovered["themePaths"] and not discovered.get("skillPaths"):
             return
 
         self._resourceLoader.extendResources(
             {
                 "promptPaths": self._build_extension_resource_paths(discovered["promptPaths"]),
                 "themePaths": self._build_extension_resource_paths(discovered["themePaths"]),
+                "skillPaths": self._build_extension_resource_paths(discovered.get("skillPaths", [])),
             }
         )
         self._baseSystemPrompt = self._rebuild_system_prompt(self.getActiveToolNames())
