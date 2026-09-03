@@ -324,17 +324,17 @@ def run_llm_json(profile_dir, prompt, provider, default_model,
         flags.append("--no-session")
     workdir = cwd or os.getcwd()
     role = profiles.role_of(profile_dir)
-    from misaka.core.wiring import SessionSpec, build_extensions
+    from misaka.core.wiring import SessionSpec, assemble
 
     allowed = list(tools or ())
-    factories = build_extensions(SessionSpec(
+    assembly = assemble(SessionSpec(
         profile_dir=profile_dir,
         role=role,
         workspace=workdir,
         kind="bare",
         sender=role.rsplit("/", 1)[-1],
         tool_ceiling=None,
-    )) or None
+    ))
     flags += ["-t", ",".join(dict.fromkeys(allowed))] if allowed else ["-nt"]
     if soul:
         from misaka.config import identity
@@ -364,7 +364,7 @@ def run_llm_json(profile_dir, prompt, provider, default_model,
     r = None
     try:
         r = run_coro(run_session(
-            flags, prompt, workdir, timeout=timeout, extension_factories=factories,
+            flags, prompt, workdir, timeout=timeout, assembly=assembly,
             env=env, on_event=recorder))
     finally:
         recorder.settle(
@@ -401,7 +401,7 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
              "--session-dir", os.path.join(state_dir, "session")]
     ro_root = os.path.join(state_dir, ".skills-ro")
     sender = role.rsplit("/", 1)[-1]
-    from misaka.core.wiring import SessionSpec, build_extensions
+    from misaka.core.wiring import SessionSpec, assemble
 
     kind = "beast" if beast else "card"
     delegates = not profiles.is_last_order(profile_dir)
@@ -419,7 +419,7 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
         from misaka.core.skills import layers as skill_layers
         skill_sandbox.readonly_copies(skill_layers.skills_stack(profile_dir, cwd=workspace), ro_root)
         skill_roots = (("sandbox", ro_root),)
-    factories = build_extensions(SessionSpec(
+    assembly = assemble(SessionSpec(
         profile_dir=profile_dir,
         role=role,
         workspace=workspace,
@@ -429,12 +429,12 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
         task_id=task.get("id"),
         tool_ceiling=MANAGEMENT_TOOLS if beast and delegates else None,
         skill_roots=skill_roots,
-    )) or None
+    ))
     flags += ["--append-system-prompt", profiles.shared_soul()]
     from misaka.config import identity
     for section in identity.prompt_sections(profile_dir, role):
         flags += ["--append-system-prompt", section]
-    return flags, factories, prompt, ro_root, role
+    return flags, assembly, prompt, ro_root, role
 
 
 def run_card(
@@ -453,7 +453,7 @@ def run_card(
 ):
     """Run one task card in a headless session and validate its report; return a verdict dict."""
     task_id = task.get("id") if isinstance(task, dict) else None
-    flags, factories, prompt, ro_root, role = card_session_setup(
+    flags, assembly, prompt, ro_root, role = card_session_setup(
         task, workspace, profile_dir, provider, default_model
     )
     env = {"MISAKA_PROFILE_DIR": profile_dir,
@@ -498,7 +498,7 @@ def run_card(
     try:
         r = run_coro(run_session(
             flags, prompt, workspace, on_event=recorder,
-            timeout=task["timeout_seconds"], extension_factories=factories,
+            timeout=task["timeout_seconds"], assembly=assembly,
             env=env))
     finally:
         recorder.settle(

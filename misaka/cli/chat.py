@@ -136,8 +136,8 @@ def launch(who, model=None, cont=False, pick=False, session=None):
         "MISAKA_INPUT_HISTORY": os.path.expanduser(f"~/.misaka/input-history/{who or 'last-order'}.json"),
         "MISAKA_CODING_AGENT": "true"})
 
-    from misaka.core.wiring import SessionSpec, build_extensions
-    factories = build_extensions(SessionSpec(
+    from misaka.core.wiring import SessionSpec, assemble
+    session_assembly = assemble(SessionSpec(
         profile_dir=prof,
         role=profile_role,
         workspace=workspace,
@@ -148,4 +148,4 @@ def launch(who, model=None, cont=False, pick=False, session=None):
     ))
 
     from misaka.cli.engine import main as engine_main
-    sys.exit(asyncio.run(engine_main(flags, {"extensionFactories": factories})))
+    sys.exit(asyncio.run(engine_main(flags, session_assembly.engine_options())))

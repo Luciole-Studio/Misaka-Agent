@@ -27,7 +27,7 @@
 
 | 文件 | 职责 |
 |---|---|
-| `wiring.py` | 会话装配：`SessionSpec` + `REGISTRY` + `build_extensions`。pi 的 `src/extensions/index.ts` 是硬编码数组，这里是自报 `ROLES`/`SESSION_KINDS` 的清单 |
+| `wiring.py` | 会话装配：`SessionSpec`；`TOOL_MODULES` + `tools_for`——只贡献工具的 core 模块走 pi 的 SDK 门 `customTools`（与内置工具同一张表，来源 `<sdk:>`），不进扩展清单；`REGISTRY` + `build_extensions`——还要被内核在时刻叫到的 core 模块，暂以 inline 扩展接入（见 B/C 计划）；`bundled` 钩子由进程入口注入；`assemble` 把两者合成一个 `Assembly` 交给会话构造器 |
 | `pi_manifest.py` `provider_display_names.py` `session_export.py` `settings_diagnostics.py` | 移植期加的小件 |
 | `mcp.py` | MCP 客户端与按角色的服务器配置（原 `extensions/mcp.py`） |
 

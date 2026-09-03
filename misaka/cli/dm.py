@@ -141,8 +141,8 @@ def deliver(to, message=None, sender=None, model=None, timeout=600,
               "--session-dir", sess_dir]
     env = {"MISAKA_APP_TITLE": DM_TITLE, "MISAKA_WHO": to, "MISAKA_MCP_ROLE": role,
            "MISAKA_PROFILE_DIR": prof, "MISAKA_WORKSPACE": home}
-    from misaka.core.wiring import SessionSpec, build_extensions
-    factories = build_extensions(SessionSpec(
+    from misaka.core.wiring import SessionSpec, assemble
+    session_assembly = assemble(SessionSpec(
         profile_dir=prof,
         role=role,
         workspace=home,
@@ -159,7 +159,7 @@ def deliver(to, message=None, sender=None, model=None, timeout=600,
         except OSError:
             pass
         r = run_coro(run_session(flags, text, home, timeout=timeout,
-                                 extension_factories=factories, env=env))
+                                 assembly=session_assembly, env=env))
         spent = int(r.get("budget_usage") or 0)
         if spent:
             from misaka.core.platform import budget

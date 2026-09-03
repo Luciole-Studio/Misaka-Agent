@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from misaka.config import profiles
+from misaka.core.extensions.types import ToolDefinition
 
 type SessionKind = Literal["foreground", "dm", "card", "child", "beast", "bare"]
 
@@ -63,21 +64,81 @@ class SessionSpec:
 
 # Shared entries by name, then Last Order's, then the Sisters': the folder scan's order.
 REGISTRY: tuple[str, ...] = (
-    "misaka.core.ask_user",
-    "misaka.core.documents.wiring.documents",
     "misaka.core.lcm",
     "misaka.core.mcp",
     "misaka.core.network.wiring.messages",
     "misaka.core.network.wiring.roster",
     "misaka.core.skills.wiring.skills",
     "misaka.core.network.wiring.todo",
-    "misaka.core.web",
-    "misaka.core.network.ally",
     "misaka.core.network.wiring.network",
     "misaka.core.research.wiring.research",
     "misaka.core.network.wiring.roster_admin",
     "misaka.core.subagent",
 )
+
+
+# Core modules whose whole contribution is tools. Pi's built-ins reach the tool table by
+# direct construction; the SDK door for an embedder's tools is ``customTools``, which lands
+# in the same table under ``<sdk:name>``. These take that door and never appear as
+# extensions. Order is the tools-array order.
+TOOL_MODULES: tuple[str, ...] = (
+    "misaka.core.ask_user",
+    "misaka.core.documents.wiring.documents",
+    "misaka.core.web",
+    "misaka.core.network.ally",
+)
+
+
+class _ToolCollector:
+    """The one harness capability a tool-only module may use: registering tools.
+
+    Anything else -- an event subscription, a command, a message -- is not a tool and
+    would have to reach the kernel another way; asking for it here fails at assembly,
+    before a session exists, instead of silently doing nothing.
+    """
+
+    def __init__(self) -> None:
+        self.tools: list[ToolDefinition] = []
+
+    def registerTool(self, definition: ToolDefinition) -> None:
+        self.tools.append(definition)
+
+    def __getattr__(self, name: str) -> Any:
+        raise AttributeError(f"a tool-only module asked the harness for {name!r}; only registerTool is available here")
+
+
+def _qualifies(mod: Any, role: str, kind: str) -> bool:
+    return role in getattr(mod, "ROLES", ROLE_KEYS) and kind in getattr(mod, "SESSION_KINDS", DEFAULT_KINDS)
+
+
+def tools_for(spec: SessionSpec) -> list[ToolDefinition]:
+    """The core tools a session gets through Pi's ``customTools`` door, in ``TOOL_MODULES`` order."""
+    role = role_key(spec)
+    kind = "bare" if role == "last_order" and spec.kind == "beast" else spec.kind
+    collector = _ToolCollector()
+    for path in TOOL_MODULES:
+        mod = importlib.import_module(path)
+        if not _qualifies(mod, role, kind):
+            continue
+        register = mod.activate(spec)
+        if register is not None:
+            register(collector)
+    return collector.tools
+
+
+@dataclass(frozen=True, slots=True)
+class Assembly:
+    """Everything a session is handed for its spec, in the two shapes Pi's SDK takes them."""
+
+    extension_factories: list[dict[str, Any]]
+    custom_tools: list[ToolDefinition]
+
+    def engine_options(self) -> dict[str, Any]:
+        return {"extensionFactories": self.extension_factories, "customTools": self.custom_tools}
+
+
+def assemble(spec: SessionSpec) -> Assembly:
+    return Assembly(extension_factories=build_extensions(spec), custom_tools=tools_for(spec))
 
 
 def inline(
@@ -117,7 +178,7 @@ def build_extensions(spec: SessionSpec) -> list[dict[str, Any]]:
         activate = getattr(mod, "activate", None)
         if activate is None:
             continue
-        if role not in getattr(mod, "ROLES", ROLE_KEYS) or kind not in getattr(mod, "SESSION_KINDS", DEFAULT_KINDS):
+        if not _qualifies(mod, role, kind):
             continue
         register = activate(spec)
         if register is not None:
@@ -138,11 +199,15 @@ __all__ = [
     "KINDS",
     "REGISTRY",
     "ROLE_KEYS",
+    "TOOL_MODULES",
+    "Assembly",
     "SessionKind",
     "SessionSpec",
+    "assemble",
     "build_extensions",
     "bundled",
     "delegates",
     "inline",
     "role_key",
+    "tools_for",
 ]

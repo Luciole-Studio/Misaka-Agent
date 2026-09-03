@@ -89,7 +89,7 @@ def run_coro(coro):
     return box["r"]
 
 
-async def open_session(flags, cwd, extension_factories=None):
+async def open_session(flags, cwd, assembly=None):
     """Open a session and return ``(runtime, session, error)``."""
     from misaka.cli.args import parse_args
     from misaka.cli.engine import create_runtime_factory, resolve_cli_paths
@@ -122,7 +122,8 @@ async def open_session(flags, cwd, extension_factories=None):
             resolved_extension_paths=resolve_cli_paths(cwd, parsed.extensions),
             resolved_prompt_template_paths=resolve_cli_paths(cwd, parsed.promptTemplates),
             resolved_theme_paths=resolve_cli_paths(cwd, parsed.themes),
-            extension_factories=list(extension_factories) if extension_factories else None,
+            extension_factories=list(assembly.extension_factories) if assembly else None,
+            custom_tools=list(assembly.custom_tools) if assembly else None,
         ),
         {"cwd": sm.getCwd(), "agentDir": get_agent_dir(), "sessionManager": sm},
     )
@@ -188,7 +189,7 @@ async def _env_window():
 
 
 async def run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
-                      extension_factories=None):
+                      assembly=None):
     """Run one prompt in a throwaway session and return its final text, timeout flag, error, and token usage.
 
     The session's identity (role, profile, workspace, usage lease, MCP config) travels through
@@ -197,11 +198,11 @@ async def run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
     (nodes, cards) are naturally isolated."""
     async with _env_window():
         return await _run_session(flags, prompt, cwd, on_event=on_event, timeout=timeout, env=env,
-                                  extension_factories=extension_factories)
+                                  assembly=assembly)
 
 
 async def _run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
-                       extension_factories=None):
+                       assembly=None):
     old_env = {}
     for k, v in (env or {}).items():
         old_env[k] = os.environ.get(k)
@@ -210,7 +211,7 @@ async def _run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
     limiter = None
     timed_out = False
     try:
-        runtime, session, err = await open_session(flags, cwd, extension_factories)
+        runtime, session, err = await open_session(flags, cwd, assembly)
         if err:
             return {"text": None, "timed_out": False, "error": err, "budget_usage": None}
         limiter = install_turn_budget(session)

@@ -227,7 +227,7 @@ def launch(task_id, resume_only=False, say=None):
         sys.exit(f"Sister {task['assignee']} is not in the roster.")
 
     cfg = current_config()
-    flags, factories, prompt, ro_root, role = worker.card_session_setup(
+    flags, assembly, prompt, ro_root, role = worker.card_session_setup(
         task, workspace, profile_dir, cfg["provider"], cfg["default_model"]
     )
     session_dir = os.path.join(db.task_state_dir(task_id), "session")
@@ -273,7 +273,7 @@ def launch(task_id, resume_only=False, say=None):
 
     from misaka.cli.engine import main as engine_main
     try:
-        code = asyncio.run(engine_main(flags, {"extensionFactories": factories or []}))
+        code = asyncio.run(engine_main(flags, assembly.engine_options()))
     finally:
         if supervisor is not None:
             supervisor.stop()
