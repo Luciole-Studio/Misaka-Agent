@@ -509,12 +509,22 @@ def _cmd_web(args):
         if not args.key or args.value is None:
             print("Usage: misaka web set <key> <value>")
             sys.exit(2)
+        before = dict(web_config.web_config().get("provider_tier") or {})
         try:
             path = web_config.set_config(args.key, args.value)
         except ValueError as err:
             print(err)
             sys.exit(2)
         print(f"Set {args.key} in {path}")
+        # Choosing a backend clears that backend's own tier pin, the way Hermes' picker
+        # does for a row that names no tier. Saying so out loud is the difference between
+        # a rule and a surprise: a user who pinned the tier first would otherwise watch it
+        # vanish for no visible reason.
+        after = web_config.web_config().get("provider_tier") or {}
+        cleared = sorted(set(before) - set(after))
+        if cleared:
+            print(f"Cleared tier pin on {', '.join(cleared)} "
+                  f"(re-pin with `misaka web set provider_tier.{cleared[0]} free`)")
         return
     if args.op == "unset":
         if not args.key:
