@@ -176,6 +176,18 @@ def migrate_legacy_session_buckets() -> int:
     return moved
 
 
+def _worker_alive(row) -> bool:
+    columns = row.keys()               # a sqlite3.Row: `in` tests values, not names
+    pid = row["worker_pid"] if "worker_pid" in columns else None
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def migrate_sessions_into_role_tree() -> int:
     """Bring every conversation under the one root ``config.sessions`` describes.
 
@@ -231,7 +243,10 @@ def migrate_sessions_into_role_tree() -> int:
                 if not old.is_dir():
                     continue
                 row = task_store.get(con, state_dir.name)
-                if row is None or row["status"] in ("running", "review"):
+                if row is None or row["status"] not in ("done", "failed", "stopped") or _worker_alive(row):
+                    # Only a settled card with no shell behind it. A running or reviewing card
+                    # is being written; a parked one (blocked/triage) keeps its session open
+                    # for the person's answer, and a live worker pid says so either way.
                     continue
                 target_dir = sessions.card_session_dir(row)
                 recorded = row["session_file"] or ""
