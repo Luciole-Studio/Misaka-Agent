@@ -20,8 +20,9 @@ from misaka.ui.tui.interactive.components.ask_user_question import (
 _CON = None
 _DEPTH_QUESTION = "How deep should this research run go?"
 USAGE = (
-    "Usage: /research [DEPTH]                 enter research mode; omit DEPTH to pick 2, 5, 10, or type your own.\n"
-    "                                         Your next regular message becomes the research question.\n"
+    f"Usage: /research [DEPTH] [QUESTION]      start research on QUESTION at once (DEPTH defaults to {runs.DEFAULT_LIMITS['max_depth']}), or\n"
+    "                                         omit QUESTION to enter research mode: pick a depth, then your\n"
+    "                                         next regular message becomes the research question.\n"
     "       /research status [RUN_ID]          show the latest run of this folder, or the run you name\n"
     "       /research stop [RUN_ID]            ask the latest active run (or RUN_ID) to stop\n"
     "       /research resume [RUN_ID] [ANSWER] resume a paused run, optionally answering its clarification questions"
@@ -42,10 +43,20 @@ def _cfg():
 
 
 def parse_command(raw):
-    try:
-        tokens = shlex.split(raw or "")
-    except ValueError as error:
-        raise ValueError(f"Unclosed quote in arguments: {error}") from error
+    line = (raw or "").strip()
+    head = line.split(None, 1)[0] if line else ""
+    tokens: list[str] = []
+    if head == "resume":
+        # `resume [RUN_ID] [ANSWER...]`: the answer is free text, taken from the raw line.
+        words = line.split(None, 2)
+        run_id = words[1] if len(words) > 1 and words[1].startswith("r_") else None
+        rest = (words[2] if len(words) > 2 else "") if run_id else line[len("resume"):]
+        return {"action": "resume", "run_id": run_id, "clarification": rest.strip()}
+    if head in {"help", "-h", "--help", "status", "stop"}:
+        try:
+            tokens = shlex.split(line)
+        except ValueError as error:
+            raise ValueError(f"Unclosed quote in arguments: {error}") from error
     if tokens and tokens[0] in {"help", "-h", "--help"}:
         return {"action": "help"}
     if tokens and tokens[0] == "status":
@@ -56,23 +67,30 @@ def parse_command(raw):
         if len(tokens) > 2:
             raise ValueError(USAGE)
         return {"action": "stop", "run_id": tokens[1] if len(tokens) == 2 else None}
-    if tokens and tokens[0] == "resume":
-        run_id = tokens[1] if len(tokens) > 1 and tokens[1].startswith("r_") else None
-        rest = tokens[2:] if run_id else tokens[1:]
-        return {"action": "resume", "run_id": run_id, "clarification": " ".join(rest).strip()}
-    if tokens and tokens[0] == "start":
-        tokens.pop(0)
-    explicit = bool(tokens)
-    if len(tokens) == 2 and tokens[0] == "--depth":
-        tokens = tokens[1:]
-    if len(tokens) > 1:
-        raise ValueError(f"/research accepts only a depth here; use status, stop, or resume for everything else.\n{USAGE}")
-    try:
-        depth = int(tokens[0]) if tokens else runs.DEFAULT_LIMITS["max_depth"]
-    except ValueError as error:
-        raise ValueError(f"Depth must be an integer.\n{USAGE}") from error
+    # Activation: [start] [--depth] [DEPTH] [QUESTION...]. The question is taken from the raw
+    # line, not the shlex tokens: an apostrophe in "Stalin's constitution" is not an open quote.
+    line = (raw or "").strip()
+    words = line.split(None, 1)
+    if words and words[0] == "start":
+        line = words[1].strip() if len(words) > 1 else ""
+        words = line.split(None, 1)
+    explicit = bool(words)
+    if words and words[0] == "--depth":
+        line = words[1].strip() if len(words) > 1 else ""
+        words = line.split(None, 1)
+    question = ""
+    if not words:
+        depth = runs.DEFAULT_LIMITS["max_depth"]
+    else:
+        try:
+            depth = int(words[0])
+        except ValueError:
+            depth = runs.DEFAULT_LIMITS["max_depth"]    # no depth given: the whole line is the question
+            question = line
+        else:
+            question = words[1].strip() if len(words) > 1 else ""
     depth = runs.normalize_limits({"max_depth": depth})["max_depth"]
-    return {"action": "activate", "depth": depth, "explicit": explicit}
+    return {"action": "activate", "depth": depth, "explicit": explicit, "question": question}
 
 
 def _workspace(ctx):
@@ -223,6 +241,24 @@ class ResearchPart:
                     details={"stage": "intake_error", "depth": depth},
                 )
 
+        def start_intake(question, depth, workspace, ctx):
+            """Echo the question, then draft the brief in the background.
+
+            Whether it arrived on the /research line or as the next message, the question
+            never becomes a chat turn: the intake consumes it. Without the echo it vanished
+            from the screen the moment it was sent, with only a transient status line to
+            show it had been taken. It is shown where the progress notices go.
+            """
+            self.session.moments.send_message(
+                {"customType": "research-question", "display": True,
+                 "content": f"Research question | {question}",
+                 "details": {"question": question, "depth": depth, "workspace": workspace}},
+                {"deliverAs": "followUp", "triggerTurn": False},
+            )
+            task = asyncio.create_task(begin_safely(question, depth, workspace, ctx))
+            intakes.add(task)
+            task.add_done_callback(intakes.discard)
+
         async def capture_question(event, ctx):
             if pending["depth"] is None or event.get("source") == "extension":
                 return {"action": "continue"}
@@ -231,9 +267,7 @@ class ResearchPart:
                 return {"action": "handled"}
             depth, workspace = pending["depth"], pending["workspace"]
             pending.update(depth=None, workspace=None)
-            task = asyncio.create_task(begin_safely(question, depth, workspace, ctx))
-            intakes.add(task)
-            task.add_done_callback(intakes.discard)
+            start_intake(question, depth, workspace, ctx)
             return {"action": "handled"}
 
         self._capture_question = capture_question
@@ -298,6 +332,11 @@ class ResearchPart:
                 if pending["depth"] is not None and not spec["explicit"]:
                     pending.update(depth=None, workspace=None)
                     ctx.ui.notify("Research mode closed.", "info")
+                    return
+                if spec.get("question"):
+                    # `/research [DEPTH] QUESTION`: no picker, no waiting for the next message.
+                    pending.update(depth=None, workspace=None)
+                    start_intake(spec["question"], spec["depth"], _workspace(ctx), ctx)
                     return
                 if not spec["explicit"]:
                     result = await ctx.ui.custom(
