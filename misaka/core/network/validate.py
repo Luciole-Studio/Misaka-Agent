@@ -3,8 +3,16 @@ import json
 
 
 def extract_json(text):
-    """Extract the first decodable JSON object or array from model output."""
-    dec = json.JSONDecoder()
+    """Extract the first decodable JSON object or array from model output.
+
+    ``strict=False``: a model writing a long Markdown document into a JSON string will,
+    now and then, put a real newline or tab inside it instead of ``\\n`` -- Last Order's
+    PROJECT.md draft came back with four, and the strict decoder answered "no json in
+    output" for a document that was otherwise complete. Non-strict decoding differs from
+    strict in exactly that one way (control characters inside strings are accepted); every
+    strictly valid document decodes the same.
+    """
+    dec = json.JSONDecoder(strict=False)
     for i, ch in enumerate(text or ""):
         if ch in "[{":
             try:
