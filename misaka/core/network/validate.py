@@ -19,8 +19,60 @@ def extract_json(text):
                 obj, _ = dec.raw_decode(text[i:])
                 return obj
             except ValueError:
+                pass
+            try:
+                obj, _ = dec.raw_decode(_escape_prose_quotes(text[i:]))
+                return obj
+            except ValueError:
                 continue
     return None
+
+
+def _escape_prose_quotes(text):
+    """Escape the double quotes a model leaves bare inside JSON string values.
+
+    A research plan came back as one ``{"plan_markdown": "..."}`` whose Markdown quoted a
+    phrase -- ``默认接受"埃及成功、印度失败"的通行叙事`` -- with the quotes unescaped. The
+    object failed to decode, the scan above moved on *into* it and returned the first
+    fragment that did decode, ``"clarifying_questions": []`` -- an empty list -- and the
+    planner reported "planning output is not an object" for a plan that was all there.
+
+    The rule is the one a reader applies: inside a string, a quote followed (after
+    whitespace) by a structural character -- ``,`` ``}`` ``]`` ``:`` -- or by the end of
+    the text closes the string; any other quote is part of the prose and gets escaped.
+    A prose quote that happens to sit right before a comma is misread as a terminator,
+    and the decode then fails as it did before; nothing valid is ever changed, because a
+    valid document's string-closing quotes all satisfy the rule.
+    """
+    out = []
+    in_string = False
+    escaped = False
+    for index, ch in enumerate(text):
+        if not in_string:
+            if ch == '"':
+                in_string = True
+            out.append(ch)
+            continue
+        if escaped:
+            out.append(ch)
+            escaped = False
+            continue
+        if ch == "\\":
+            out.append(ch)
+            escaped = True
+            continue
+        if ch == '"':
+            after = index + 1
+            while after < len(text) and text[after] in " \t\r\n":
+                after += 1
+            if after >= len(text) or text[after] in ",}]:":
+                in_string = False
+                out.append(ch)
+            else:
+                out.append('\\"')
+            continue
+        out.append(ch)
+    return "".join(out)
 
 
 def validate_cards(obj, sisters):
