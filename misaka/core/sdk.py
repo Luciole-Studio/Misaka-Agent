@@ -148,7 +148,10 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
     settings_manager = resolved_options.get("settingsManager") or SettingsManager.create(cwd, agent_dir)
     applyHttpProxySettings(settings_manager.getGlobalSettings().get("httpProxy"))
     model_registry = resolved_options.get("modelRegistry") or ModelRegistry.create(auth_storage, models_path)
-    session_manager = explicit_session_manager or SessionManager.create(cwd, get_default_session_dir(cwd, agent_dir))
+    # The engine home only decides the session store when the caller named one; otherwise
+    # sessions go to the product tree (config.sessions), where /resume and the panel look.
+    session_manager = explicit_session_manager or SessionManager.create(
+        cwd, get_default_session_dir(cwd, resolved_options.get("agentDir") and agent_dir))
 
     if resource_loader is None:
         resource_loader = DefaultResourceLoader(

@@ -411,8 +411,10 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
     role = profiles.role_of(profile_dir)
     # The engine has no skill loading of its own; the skills extension reads the
     # card's sandbox (SessionSpec.skill_roots) and nothing else.
+    from misaka.config import sessions as session_roots
+
     flags = ["--provider", provider, "--model", model, "--thinking", "low",
-             "--session-dir", os.path.join(state_dir, "session")]
+             "--session-dir", session_roots.card_session_dir(task)]
     ro_root = os.path.join(state_dir, ".skills-ro")
     sender = role.rsplit("/", 1)[-1]
     from misaka.core.wiring import SessionSpec, assemble

@@ -25,7 +25,7 @@ from misaka.agent.harness.session.uuid import uuidv7
 from misaka.agent.harness.types import SessionContext
 from misaka.agent.types import AgentMessage
 from misaka.ai.types import ImageContent, MessageValue, TextContent, Usage
-from misaka.config import get_agent_dir, get_sessions_dir
+from misaka.config import get_sessions_dir
 from misaka.utils import atomic
 from misaka.utils.paths import canonicalize_path, normalize_path, resolve_path
 from misaka.utils.values import read_field
@@ -394,8 +394,16 @@ def get_session_dir_for_cwd(cwd: str, sessions_root: str) -> str:
 
 
 def get_default_session_dir(cwd: str, agent_dir: str | None = None) -> str:
-    resolved_agent_dir = resolve_path(get_agent_dir() if agent_dir is None else agent_dir)
-    return get_session_dir_for_cwd(cwd, os.path.join(resolved_agent_dir, "sessions"))
+    """The bucket for ``cwd`` when no session directory was given.
+
+    With an ``agent_dir`` named by the caller -- an embedder running the engine out of its
+    own home, or a test -- the layout is pi's: ``<agent_dir>/sessions/<bucket>``. Without
+    one, the store is ``get_sessions_dir()``: MISAKA's product tree (see
+    ``config.sessions``), never ``~/.misaka/agent/sessions``, which nothing lists.
+    """
+    if agent_dir is not None:
+        return get_session_dir_for_cwd(cwd, os.path.join(resolve_path(agent_dir), "sessions"))
+    return get_session_dir_for_cwd(cwd, get_sessions_dir())
 
 
 def sessions_root_of(session_dir: str | None) -> str | None:

@@ -81,10 +81,19 @@ def get_export_template_dir() -> str:
 
 
 def get_sessions_dir() -> str:
+    """The store of sessions created without an explicit directory.
+
+    pi's is ``<agent dir>/sessions``. MISAKA's is the coordinator's root in the product
+    tree (``config.sessions``): a session that names no role is Last Order's, and it has
+    to land where ``/resume`` and the panel look. ``MISAKA_CODING_AGENT_SESSION_DIR``
+    still overrides, as in pi.
+    """
     env_dir = os.environ.get(ENV_SESSION_DIR)
     if env_dir:
         return expand_tilde_path(env_dir)
-    return str(Path(get_agent_dir()) / "sessions")
+    from misaka.config import sessions
+
+    return sessions.role_dir()
 
 
 __all__ = [

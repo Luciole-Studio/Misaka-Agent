@@ -215,12 +215,13 @@ def _call(worker, cfg, prompt, *, cwd, session_dir, continue_session=False,
 
 
 def intake_session_dir(cfg, workspace):
-    """Where the PROJECT.md intake conversation is kept: under the runs root, never inside the
-    project folder (a fresh project is committed wholesale by ``misaka init``)."""
-    import hashlib
-    root = (cfg or {}).get("tasks_root") or os.path.expanduser("~/.misaka/tasks")
-    digest = hashlib.sha256(str(Path(workspace).expanduser().resolve()).encode("utf-8")).hexdigest()[:12]
-    return os.path.join(root, "intake", digest)
+    """Where the PROJECT.md intake conversation is kept: under Last Order's bucket for the
+    folder (``config.sessions``), never inside the project folder (a fresh project is
+    committed wholesale by ``misaka init``). ``cfg`` is unused since the move out of the
+    runs root; kept for the callers."""
+    from misaka.config import sessions
+
+    return sessions.intake_session_dir(str(Path(workspace).expanduser().resolve()))
 
 
 def ensure_project_brief(cfg, worker, question, workspace):

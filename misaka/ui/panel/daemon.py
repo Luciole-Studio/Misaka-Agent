@@ -30,6 +30,7 @@ import psutil
 import pyte
 
 from misaka.config import CFG
+from misaka.config import sessions as session_roots
 from misaka.ui.panel import (
     geometry as hui,  # layout.rs port: split_at / remove_pane / pane_ids
 )
@@ -1003,7 +1004,7 @@ class Daemon:
             raise ValueError(f"Card not found: {task_id}")
         if row["status"] in ACTIVE_BOARD_STATUSES:
             raise ValueError(f"Card {task_id} is still {row['status']}; steer its running pane instead.")
-        session = os.path.join(db.task_state_dir(task_id), "session")
+        session = session_roots.card_session_dir(row)
         if not (os.path.isdir(session) and any(n.endswith(".jsonl") for n in os.listdir(session))):
             raise ValueError(f"Card {task_id} has no saved session to reopen.")
         return row
@@ -1356,7 +1357,7 @@ class Daemon:
                 args.append(workspace)
             cards = []
             for r in self._board().execute(sql + " ORDER BY created_at", args):
-                sess = os.path.join(db.task_state_dir(r["id"]), "session")
+                sess = session_roots.card_session_dir(r)
                 cards.append({"id": r["id"], "status": r["status"], "title": r["title"],
                               "assignee": r["assignee"], "workspace": r["workspace"],
                               "origin_session": r["origin_session"],

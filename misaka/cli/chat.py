@@ -7,7 +7,7 @@ import asyncio
 import os
 import sys
 
-from misaka.config import current_config, profiles, sisters
+from misaka.config import current_config, profiles, sessions, sisters
 
 
 def _session_by_id(session_dir, session_id):
@@ -52,12 +52,10 @@ def resolve_session(session, who):
     once, here, before the folder changes -- so a prefix is not mistaken for a file and a relative
     path is not resolved twice. Returns the absolute session file."""
     from misaka.cli.engine import resolve_session_path
-    from misaka.core.session_manager import get_session_dir_for_cwd
     explicit_path = "/" in session or "\\" in session or session.endswith(".jsonl")
     bucket = None
     if not explicit_path:
-        root = os.path.expanduser(f"~/.misaka/sessions/{who or 'last-order'}")
-        bucket = get_session_dir_for_cwd(os.getcwd(), root)
+        bucket = sessions.chat_dir(who, os.getcwd())
     resolved = asyncio.run(resolve_session_path(session, os.getcwd(), bucket))
     if not resolved.path:
         sys.exit(f"No session found matching '{session}'.")
@@ -66,7 +64,7 @@ def resolve_session(session, who):
 
 def launch(who, model=None, cont=False, pick=False, session=None):
     """Assemble the session and run interactive mode until it exits. ``who=None`` means Last Order."""
-    from misaka.core.session_manager import get_session_dir_for_cwd, read_session_header
+    from misaka.core.session_manager import read_session_header
     # `chat` is a full-screen TUI in every form, not just under --pick. Without a terminal the
     # picker died on a bare OSError(EINVAL) from registering stdin with the event loop, while
     # every other form exited 0 having printed nothing at all -- so a piped `misaka chat` looked
@@ -93,10 +91,7 @@ def launch(who, model=None, cont=False, pick=False, session=None):
     prof, model_default = assembly(who, cfg)
     # Sessions are bucketed per role and per folder, like pi's per-cwd sessions:
     # `-c` resumes this role's conversation about *this* project.
-    sess = get_session_dir_for_cwd(
-        os.getcwd(),
-        os.path.expanduser(f"~/.misaka/sessions/{who or 'last-order'}"),
-    )
+    sess = sessions.chat_dir(who, os.getcwd())
     if session and not os.path.isfile(session):
         session = _session_by_id(sess, resumed_session_id)
         if not session:

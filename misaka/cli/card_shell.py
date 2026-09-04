@@ -230,7 +230,9 @@ def launch(task_id, resume_only=False, say=None):
     flags, assembly, prompt, ro_root, role = worker.card_session_setup(
         task, workspace, profile_dir, cfg["provider"], cfg["default_model"]
     )
-    session_dir = os.path.join(db.task_state_dir(task_id), "session")
+    from misaka.config import sessions as session_roots
+
+    session_dir = session_roots.card_session_dir(task)
     cont = continue_flags(task["session_file"], session_dir)
     if resume_only:
         # Open the existing session only; never resend the contract, which would rerun the card.

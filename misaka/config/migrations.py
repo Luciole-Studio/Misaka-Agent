@@ -119,6 +119,9 @@ def migrate_legacy_session_buckets() -> int:
     could collide before that). This used to run inside every session-directory lookup --
     twice per ``misaka chat`` launch, and once per panel session-list refresh.
     """
+    # Two roots hold cwd buckets: the engine's own (agent/sessions) and the product's
+    # per-role tree (~/.misaka/sessions/<role>/). Both were named the old way.
+    from misaka.config import sessions as session_roots
     from misaka.core.session_manager import (
         _canonical_cwd,
         _legacy_encode_cwd,
@@ -126,9 +129,7 @@ def migrate_legacy_session_buckets() -> int:
         read_session_header,
     )
 
-    # Two roots hold cwd buckets: the engine's own (agent/sessions) and the product's
-    # per-role tree (~/.misaka/sessions/<role>/). Both were named the old way.
-    roots = [Path(get_agent_dir()) / "sessions", Path.home() / CONFIG_DIR_NAME / "sessions"]
+    roots = [Path(get_agent_dir()) / "sessions", Path(session_roots.sessions_root())]
     role_dirs = [entry for root in roots if root.is_dir()
                  for entry in sorted(root.iterdir()) if entry.is_dir()]
     moved = 0
@@ -172,6 +173,95 @@ def migrate_legacy_session_buckets() -> int:
                     continue
             with contextlib.suppress(OSError):
                 bucket.rmdir()                     # only when it is empty
+    return moved
+
+
+def migrate_sessions_into_role_tree() -> int:
+    """Bring every conversation under the one root ``config.sessions`` describes.
+
+    Three places used to hold sessions the product never listed together: the engine's own
+    default (``<agent dir>/sessions/<bucket>``, reached by anything that created a session
+    without naming a directory), a card's ``tasks/<id>/session/``, and the intake drafts in
+    ``tasks/intake/<hash>/``. Each file is moved to its place in the role tree -- a chat by
+    the cwd in its header, a card by its board row, an intake draft by its header's cwd --
+    and a board row pointing at a moved file is updated. A card still running or in
+    review is left alone: its shell is writing that file. Returns the number moved.
+    """
+    from misaka.config import CFG, sessions
+    from misaka.core.platform import tasks as task_store
+    from misaka.core.session_manager import read_session_header
+
+    moved = 0
+
+    def move(source: Path, target_dir: str) -> bool:
+        nonlocal moved
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+            target = Path(target_dir) / source.name
+            if target.exists():
+                return False
+            source.rename(target)
+        except OSError:
+            return False
+        moved += 1
+        return True
+
+    # 1. the engine default: chats that fell through to pi's layout
+    engine_store = Path(get_agent_dir()) / "sessions"
+    try:
+        buckets = [p for p in engine_store.iterdir() if p.is_dir()]
+    except OSError:
+        buckets = []
+    for bucket in buckets:
+        for file in sorted(bucket.glob("*.jsonl")):
+            cwd = read_session_header(str(file)).get("cwd")
+            if isinstance(cwd, str) and cwd:
+                move(file, sessions.chat_dir(None, cwd))
+
+    tasks_root = Path(os.path.expanduser(CFG.get("tasks_root", "~/.misaka/tasks")))
+    # 2. cards: one directory each, now under the Sister's bucket
+    try:
+        con = task_store.connect(os.path.expanduser(CFG["db"]))
+    except Exception:  # noqa: BLE001 - no board, nothing to move by
+        con = None
+    if con is not None:
+        try:
+            for state_dir in sorted(tasks_root.glob("t_*")):
+                old = state_dir / "session"
+                if not old.is_dir():
+                    continue
+                row = task_store.get(con, state_dir.name)
+                if row is None or row["status"] in ("running", "review"):
+                    continue
+                target_dir = sessions.card_session_dir(row)
+                recorded = row["session_file"] or ""
+                for file in sorted(old.glob("*.jsonl")):
+                    was = str(file)
+                    if move(file, target_dir) and recorded == was:
+                        con.execute("UPDATE tasks SET session_file=? WHERE id=?",
+                                    (os.path.join(target_dir, file.name), row["id"]))
+                        con.commit()
+                try:
+                    old.rmdir()          # only when it emptied
+                except OSError:
+                    pass
+        finally:
+            con.close()
+    # 3. intake drafts, by the workspace in their header
+    intake_root = tasks_root / "intake"
+    try:
+        drafts = [p for p in intake_root.iterdir() if p.is_dir()]
+    except OSError:
+        drafts = []
+    for draft_dir in drafts:
+        for file in sorted(draft_dir.glob("*.jsonl")):
+            cwd = read_session_header(str(file)).get("cwd")
+            if isinstance(cwd, str) and cwd:
+                move(file, sessions.intake_session_dir(cwd))
+        try:
+            draft_dir.rmdir()
+        except OSError:
+            pass
     return moved
 
 
@@ -292,6 +382,7 @@ def run_migrations(cwd: str) -> dict[str, list[str] | int]:
     migrated_auth_providers = migrate_auth_to_auth_json()
     migrate_sessions_from_agent_root()
     moved_sessions = migrate_legacy_session_buckets()
+    moved_sessions += migrate_sessions_into_role_tree()
     migrate_settings_file()
     migrate_tools_to_bin()
     migrate_keybindings_config_file()

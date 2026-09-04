@@ -81,6 +81,7 @@ Paths — each is a directory or file MISAKA owns:
 | `MISAKA_DB` / `MISAKA_MESSAGES` / `MISAKA_LCM_DB` | `~/.misaka/{board,messages,lcm}.db` | task board, message queue, compaction store |
 | `MISAKA_TASKS` | `~/.misaka/tasks` | per-card state: sessions, reports, locks |
 | `MISAKA_PROFILES` | `~/.misaka/profiles` | roles: personalities, skills, MCP config (created on first run) |
+| `MISAKA_SESSIONS` | `~/.misaka/sessions` | every conversation: `<role>/<folder bucket>/`, with a card's under `cards/<id>/` and intake drafts under `intake/` |
 | `MISAKA_SUBAGENT_DIR` | `~/.misaka/subagents` | subagent state |
 | `MISAKA_PAGEINDEX` | `~/.misaka/pageindex` | the document corpus index |
 | `MISAKA_OCR_LANGS` | `eng+chi_sim+jpn` | tesseract language codes for scanned PDFs, joined with `+`; needs `ocrmypdf` on PATH (`brew install ocrmypdf`) |

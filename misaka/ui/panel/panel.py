@@ -1659,7 +1659,8 @@ def launch():
         raw = effective_space_folder(spaces, listing, focused, side["ws"])   # the folder the row shows
         folder = os.path.realpath(raw)
         everything = side["sess_mode"] == "all"
-        root = os.path.expanduser("~/.misaka/sessions")
+        from misaka.config import sessions as session_roots
+        root = session_roots.sessions_root()
 
         def files(role):
             if everything:

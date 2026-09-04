@@ -74,7 +74,9 @@ def protocol_file():
 
 
 def dm_session_dir(to):
-    return os.path.expanduser(f"~/.misaka/sessions/{to}/dm")
+    from misaka.config import sessions
+
+    return sessions.dm_dir(to)
 
 
 @contextmanager

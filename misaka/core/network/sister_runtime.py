@@ -23,6 +23,7 @@ from xml.sax.saxutils import escape
 import psutil
 
 from misaka.config import profiles
+from misaka.config import sessions as session_roots
 from misaka.core.network import worker
 from misaka.core.platform import admission, budget, notifications
 from misaka.core.platform import processes as process_tree
@@ -200,9 +201,11 @@ def transcript_tail(session_file: str, limit: int = 40) -> str | None:
     return "\n".join(out[-max(1, int(limit)):]) or None
 
 
-def _adoptable_transcript(task_id: str) -> str | None:
-    """Return the card's most recent session transcript if it can be cleaned for resumption, else None."""
-    found = find_most_recent_session(os.path.join(db.task_state_dir(task_id), "session"))
+def _adoptable_transcript(task) -> str | None:
+    """Return the card's most recent session transcript if it can be cleaned for resumption, else None.
+
+    ``task`` is the board row: the card's directory hangs off its Sister and workspace."""
+    found = find_most_recent_session(session_roots.card_session_dir(task))
     if not found:
         return None
     try:
@@ -697,7 +700,7 @@ class SisterRuntime:
                         )
                         if not broken:
                             raise
-                        session_root = Path(db.task_state_dir(task_id)) / "session"
+                        session_root = Path(session_roots.card_session_dir(row))
                         metadata = getattr(agent, "metadata_path", None) or next(
                             (candidate for candidate in (
                                 session_root / f"agent-{row['agent_id']}.meta.json",
@@ -744,7 +747,7 @@ class SisterRuntime:
                         context=context,
                         on_update=on_update,
                     )
-                    orphan = await asyncio.to_thread(_adoptable_transcript, task_id)
+                    orphan = await asyncio.to_thread(_adoptable_transcript, row)
                     if orphan:
                         await asyncio.to_thread(
                             os.replace, orphan, str(agent.transcript))
@@ -1315,8 +1318,7 @@ class SisterRuntime:
             return None, f"Card not found: {task_id}"
         session_file = row["session_file"]
         if not (session_file and os.path.isfile(session_file)):
-            session_file = find_most_recent_session(
-                os.path.join(db.task_state_dir(task_id), "session"))
+            session_file = find_most_recent_session(session_roots.card_session_dir(row))
         if not session_file:
             return None, f"Card {task_id} has no session yet."
         text = transcript_tail(session_file, limit)
