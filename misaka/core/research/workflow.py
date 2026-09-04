@@ -586,7 +586,7 @@ async def _expand(con, cfg, runner, worker, run, node, *, spawner, context, tool
                             runs.set_issue(con, issue["id"], "probing")
                             await asyncio.to_thread(_reap_orphan_runner, con, "research_issues", issue)
                             handle = spawner.spawn(_probe_argv(run, issue), cwd=run["workspace"],
-                                                   title=f"LO·{nid}·{issue['id']}", place="split")
+                                                   title=f"LO·{nid}·{issue['id']}", place="tab")
                             handles[issue["id"]] = handle
                             _record_runner(con, "research_issues", issue["id"], handle)
                     except BaseException:
@@ -999,8 +999,10 @@ async def _expand_level(con, cfg, spawner, run, level, *, poll_seconds, progress
         try:
             for node in batch:                          # registered one by one: a failed spawn stops the started ones
                 await asyncio.to_thread(_reap_orphan_runner, con, "research_branches", node)
+                # A tab, not a split: split beside Last Order's chat at 50/50, then narrowed
+                # by every later layout change, the node pane ended up ten columns wide.
                 handle = spawner.spawn(_node_argv(run, node), cwd=run["workspace"],
-                                       title=f"LO·{node['id']}", place="split")
+                                       title=f"LO·{node['id']}", place="tab")
                 handles[node["id"]] = handle
                 _record_runner(con, "research_branches", node["id"], handle)
             outcome = await _wait_level(con, cfg, spawner, run, handles, poll_seconds=poll_seconds,

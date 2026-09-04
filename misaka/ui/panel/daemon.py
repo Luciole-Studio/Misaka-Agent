@@ -1071,7 +1071,7 @@ class Daemon:
                         ttl_seconds=max(1800, int(row["timeout_seconds"]) + 60),
                         generation=generation, pid=os.getpid(),
                         host_cap=host_cap, assignee_cap=assignee_cap):
-            raise ValueError(f"Card {task_id} was claimed by another dispatcher.")
+            raise ValueError(db.claim_refusal(task_id) or f"Card {task_id} was claimed by another dispatcher.")
         undo = lambda: db.back_to_ready(con, task_id, generation=generation, claim_lock=lock)
         try:
             workspace = self._card_workspace(row)

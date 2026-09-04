@@ -584,6 +584,24 @@ def _finish_current_run(
     )
 
 
+_LAST_REFUSAL: dict[str, str] = {}
+
+
+def _note_refusal(task_id, reason):
+    _LAST_REFUSAL[str(task_id)] = reason
+
+
+def claim_refusal(task_id):
+    """Why the last ``claim`` of this card said no, when it was an admission limit.
+
+    ``claim`` answers a bare False for every reason -- taken by another dispatcher, wrong
+    generation, a cooldown, a full host, a Sister at her cap -- and its callers reported all
+    of them as "claimed by another dispatcher". The two admission limits are the ones a
+    person can do something about, so they are kept here for the message. Cleared on read.
+    """
+    return _LAST_REFUSAL.pop(str(task_id), None)
+
+
 @_serialized
 def claim(
     con,
@@ -607,16 +625,22 @@ def claim(
             return False
         if row["next_attempt_at"] is not None and int(row["next_attempt_at"]) > now:
             return False
-        if host_cap is not None and con.execute(
-            "SELECT COUNT(*) FROM tasks WHERE status='running' AND claim_lock IS NOT NULL"
-        ).fetchone()[0] >= max(0, int(host_cap)):
-            return False
-        if assignee_cap is not None and con.execute(
-            "SELECT COUNT(*) FROM tasks WHERE status='running' AND claim_lock IS NOT NULL "
-            "AND assignee=?",
-            (row["assignee"],),
-        ).fetchone()[0] >= max(0, int(assignee_cap)):
-            return False
+        if host_cap is not None:
+            running = con.execute(
+                "SELECT COUNT(*) FROM tasks WHERE status='running' AND claim_lock IS NOT NULL"
+            ).fetchone()[0]
+            if running >= max(0, int(host_cap)):
+                _note_refusal(task_id, f"{running} cards are running on this host (limit {int(host_cap)}); waiting for a slot")
+                return False
+        if assignee_cap is not None:
+            hers = con.execute(
+                "SELECT COUNT(*) FROM tasks WHERE status='running' AND claim_lock IS NOT NULL "
+                "AND assignee=?",
+                (row["assignee"],),
+            ).fetchone()[0]
+            if hers >= max(0, int(assignee_cap)):
+                _note_refusal(task_id, f"Sister {row['assignee']} is already running {hers} cards (limit {int(assignee_cap)}); waiting for a slot")
+                return False
         actual_generation = int(row["generation"])
         cur = con.execute(
             "UPDATE tasks SET status='running', claim_lock=?, claim_expires=?, started_at=?, "

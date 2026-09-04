@@ -103,8 +103,8 @@ Budget, concurrency, and limits:
 | `MISAKA_BEAST_AT` | `0.85` | fraction of the cap at which a card drops to beast mode |
 | `MISAKA_SUBAGENT_TOKEN_RESERVATION` | `32768` | tokens held back for a subagent |
 | `MISAKA_TURN_TOKEN_LIMIT` | none | per-turn token ceiling |
-| `MISAKA_MAX_CONCURRENT_SISTERS` | host CPUs | Sisters running at once |
-| `MISAKA_MAX_CONCURRENT_PER_SISTER` | `min(2, CPUs)` | cards one Sister runs at once |
+| `MISAKA_MAX_CONCURRENT_SISTERS` | free memory / 256 MiB, 4–12 | cards running at once on this host |
+| `MISAKA_MAX_CONCURRENT_PER_SISTER` | the host cap | cards one Sister runs at once |
 | `MISAKA_MAX_CONCURRENT_SUBAGENTS` | host CPUs | subagents one session runs at once |
 | `MISAKA_SUBAGENT_TOOL_CEILING` | none | comma-separated tools a subagent may not exceed |
 | `MISAKA_TASK_MAX_OUTPUT` | `32000` (max `160000`) | characters of a subagent's output kept |

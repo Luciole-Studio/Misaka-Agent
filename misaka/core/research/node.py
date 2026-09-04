@@ -82,6 +82,7 @@ class PaneRunner:
 
     def __init__(self, con, cfg, label, pane):
         self.con, self.cfg, self.label, self.pane = con, cfg, label, pane
+        self._said = {}       # card id -> the last refusal printed; a 2-second poll must not repeat it
 
     async def launch_ready(self, *, task_ids, **_kwargs):
         from misaka.ui.panel import client as net
@@ -94,8 +95,11 @@ class PaneRunner:
                     await asyncio.to_thread(net.request, "pane.run_card", {
                         "task_id": tid,
                         "place": {"tab": self.pane, "name": f"{self.label}·{row['assignee']}·{tid}"}})
+                    self._said.pop(tid, None)
                 except (RuntimeError, ConnectionError) as error:
-                    print(f"card {tid}: {error}", flush=True)
+                    if self._said.get(tid) != str(error):
+                        self._said[tid] = str(error)
+                        print(f"card {tid}: {error}", flush=True)
 
     async def stop(self, task_id, **_kwargs):
         from misaka.ui.panel import client as net

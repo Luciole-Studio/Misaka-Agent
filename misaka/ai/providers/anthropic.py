@@ -1037,6 +1037,7 @@ def stream_anthropic(
             timestamp=time.time_ns() // 1_000_000,
         )
         raw_response: Any = None
+        owned_client: Any = None       # a client made here is closed here
 
         try:
             auth_extra_headers: dict[str, Any] | None = None
@@ -1066,6 +1067,7 @@ def stream_anthropic(
                     copilot_dynamic_headers,
                     cache_session_id,
                 )
+                owned_client = client
             else:
                 is_oauth = False
 
@@ -1222,6 +1224,16 @@ def stream_anthropic(
             stream.push(ErrorEvent(reason=output.stopReason, error=output))
         finally:
             await _close_stream(raw_response)
+            if owned_client is not None:
+                # Closed while the loop that made it is still running. Left to the garbage
+                # collector, httpx closes the pool from its finaliser: in a one-shot helper
+                # loop (`platform.session.run_coro`) that loop is gone by then, and every
+                # call printed "Event loop is closed" through asyncio's default handler --
+                # a full traceback per request in every research node pane.
+                try:
+                    await owned_client.close()
+                except Exception:  # noqa: BLE001, S110 - closing is best-effort; the stream has already ended
+                    pass
             stream.end()
 
     spawn_stream_task(run())
