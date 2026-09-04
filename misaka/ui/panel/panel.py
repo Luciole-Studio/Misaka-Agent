@@ -228,6 +228,23 @@ def _space_label(folder):
     return "~" if folder == home else (os.path.basename(folder.rstrip(os.sep)) or folder)
 
 
+def effective_space_folder(spaces, listing, focused_id, active_id):
+    """The folder the active space *shows*: its root pane's foreground job's cwd, else that
+    pane's cwd, else the folder it was created in -- the identity cwd of ``sidebar_model``.
+
+    The sessions list used the creation folder while the label followed the foreground job,
+    so a shell that ``cd ~``'d was labelled ``~`` over a list of the old folder's sessions:
+    zero, for a home folder that had several. One folder feeds both. With no active space,
+    the focused pane's folder -- never the folder the panel was launched in.
+    """
+    rows, _agents = sidebar_model(spaces, listing, focused_id, active_id)
+    row = next((row for row in rows if row["key"] == active_id), None)
+    if row is not None:
+        return row["folder"]
+    current = next((p for p in listing if p["id"] == focused_id), None)
+    return (current or {}).get("cwd") or os.getcwd()
+
+
 def sidebar_model(spaces, listing, focused_id, active_id):
     """Shape herdr's two lists from explicit spaces (herdr Workspace: ``{"id", "folder",
     "name", "tabs": [trees]}``) and the pane listing. A space row is labelled by its custom
@@ -1440,6 +1457,13 @@ def launch():
                 got.append({"id": space["id"], "folder": space["folder"], "name": space.get("name"),
                             "tabs": trees, "tab_names": names})
         spaces[:] = got
+        if side["ws"] is not None and side["ws"] not in {space["id"] for space in spaces}:
+            # The active space left the layout (its last pane died): `active_space()` was None
+            # from here on, no row was highlighted, and the sessions list fell back to the
+            # folder the panel was launched in -- for a `~` space that read as zero sessions.
+            side["ws"] = space_of(focused) or (spaces[0]["id"] if spaces else None)
+            refresh_sessions()
+            chrome_cache["rows"] = []
         return before != _layout_snapshot()
 
     def push_layout():
@@ -1632,8 +1656,7 @@ def launch():
         Every item carries the folder it worked in: reopening always goes back there."""
         from misaka.config import sisters as roster
         from misaka.core.session_manager import get_session_dir_for_cwd
-        space = active_space()
-        raw = space["folder"] if space else os.getcwd()
+        raw = effective_space_folder(spaces, listing, focused, side["ws"])   # the folder the row shows
         folder = os.path.realpath(raw)
         everything = side["sess_mode"] == "all"
         root = os.path.expanduser("~/.misaka/sessions")
@@ -2783,6 +2806,8 @@ def launch():
         if key is not None and key != side["ws"]:   # herdr: focusing a pane in another workspace activates it
             side["ws"] = key
             force_layout = True
+            refresh_sessions()          # the sessions list belongs to the space's folder (as switch_space)
+            chrome_cache["rows"] = []
         last_focus[side["ws"]] = pane_id
         changed = focused != pane_id
         focused = pane_id
