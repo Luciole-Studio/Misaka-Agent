@@ -22,6 +22,10 @@ misaka research "How did the Japanese public library movement change between 192
 
 That last command opens a conversation, not a progress bar. Read on for why.
 
+<p align="center">
+  <img src="assets/setup.png" alt="misaka setup — environment checks and provider configuration" width="820">
+</p>
+
 ## How a run works
 
 Two roles do the work.
@@ -144,6 +148,10 @@ misaka web status      # active search backend and credentials
 `moa`, `lcm`, `auth`, `remove`.
 
 ## The panel
+
+<p align="center">
+  <img src="assets/tui.png" alt="the misaka panel — spaces, sessions and the Sisters roster beside an interactive Last Order" width="820">
+</p>
 
 Running `misaka` in a terminal opens a multi-pane panel. A research branch that forks
 gets its own tab: the node process runs its Last Order as an interactive window there,

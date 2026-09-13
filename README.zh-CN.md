@@ -21,6 +21,10 @@ misaka research "日本的公共图书馆运动在 1920 到 1950 年间发生了
 
 最后那条命令打开的是一场对话，不是进度条。原因见下。
 
+<p align="center">
+  <img src="assets/setup.png" alt="misaka setup — 环境自检与模型配置" width="820">
+</p>
+
 ## 一次运行是怎么走的
 
 干活的是两个角色。
@@ -132,6 +136,10 @@ misaka web status      # 当前搜索后端与凭据
 `moa`、`lcm`、`auth`、`remove`。
 
 ## 面板
+
+<p align="center">
+  <img src="assets/tui.png" alt="misaka 面板 — 空间、会话与 Sisters 名册，旁边是可交互的 Last Order" width="820">
+</p>
 
 在终端里直接跑 `misaka` 会打开一个多窗格面板。研究分支 fork 出去后会拿到自己的标签页：
 节点进程把它的 Last Order 作为交互窗口跑在那里，她的 Sisters 在旁边分格排开。你在那个

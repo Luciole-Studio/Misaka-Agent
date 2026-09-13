@@ -22,6 +22,10 @@ misaka research "日本の公共図書館運動は1920年から1950年にかけ�
 
 最後のコマンドが開くのはプログレスバーではなく、一つの対話です。理由は以下に書きます。
 
+<p align="center">
+  <img src="assets/setup.png" alt="misaka setup — 環境チェックとプロバイダ設定" width="820">
+</p>
+
 ## 実行の流れ
 
 作業を担うのは二つの役割です。
@@ -143,6 +147,10 @@ misaka web status      # 現在の検索バックエンドと認証情報
 `moa`、`lcm`、`auth`、`remove`。
 
 ## パネル
+
+<p align="center">
+  <img src="assets/tui.png" alt="misaka のパネル — スペース、セッション、Sisters の名簿と対話中の Last Order" width="820">
+</p>
 
 端末で `misaka` をそのまま実行すると、複数ペインのパネルが開きます。fork した研究の枝は
 自分のタブを持ちます。ノードのプロセスがそこで Last Order を対話ウィンドウとして走らせ、
