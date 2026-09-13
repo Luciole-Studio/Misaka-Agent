@@ -216,7 +216,16 @@ def _cmd_chat(args):
 
 def _cmd_panel(args):
     from misaka.ui.panel import panel
-    panel.launch()
+    try:
+        panel.launch()
+    except RuntimeError as error:
+        # The panel is the last step of a first run, straight after the wizard's summary.
+        # A daemon that will not start already explains itself (and names its log); letting
+        # the exception out replaces that explanation, and the summary above it, with a
+        # traceback whose first readable line is somewhere on page two.
+        print(f"The panel could not start: {error}", file=sys.stderr)
+        print("`misaka chat` opens plain chat with Last Order in the meantime.", file=sys.stderr)
+        sys.exit(1)
 
 
 def _cmd_net_daemon(args):

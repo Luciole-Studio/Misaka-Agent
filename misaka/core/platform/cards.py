@@ -683,6 +683,7 @@ def init_project(folder, *, draft_brief=True):
     cards/) and its cards indexed. Only a repository this call itself created gets the
     initial commit; an existing repository is never committed to."""
     folder = tasks.canonical_workspace(folder)
+    _refuse_whole_home(folder)
     actions = []
     fresh = not repo.enabled(folder)  # a worktree's .git is a file, not a directory
     if fresh:
@@ -701,11 +702,38 @@ def init_project(folder, *, draft_brief=True):
     if restored:
         actions.append(f"{restored} card(s) indexed from cards/")
     if fresh:
-        _git(folder, "add", "-A")
+        # Only the skeleton this call wrote, never `git add -A`. A folder that is not
+        # already a repository may be full of things that are not project material, and
+        # the first commit is the one place nobody reviews: run in a home directory,
+        # `add -A` quietly commits ssh keys, .env files and whatever is in Downloads.
+        # Existing repositories are not committed to at all, so this is the only path.
+        skeleton = [name for name in ("PROJECT.md", "cards")
+                    if os.path.exists(os.path.join(folder, name))]
+        if skeleton:
+            _git(folder, "add", "--", *skeleton)
         _git(folder, "-c", "user.name=misaka", "-c", "user.email=misaka@local",
              "commit", "--allow-empty", "-q", "-m", "misaka init: project skeleton")
         actions.append("initial commit")
     return actions or ["already initialized"]
+
+
+def _refuse_whole_home(folder):
+    """A project is a folder of its own. Turning a home directory or a filesystem root into
+    one is never what was meant -- it is what pressing Enter at the wizard's folder prompt
+    would do from a fresh shell -- and everything downstream (indexing, git, the board's
+    workspace identity) then treats every file on the machine as project material."""
+    if folder == os.path.dirname(folder):
+        raise RuntimeError(
+            f"{folder} is a filesystem root; a project has to be a folder of its own.")
+    try:
+        home = str(Path.home().resolve())
+    except (OSError, RuntimeError):
+        return
+    if folder == home:
+        raise RuntimeError(
+            f"{folder} is your home directory; a project has to be a folder of its own. "
+            "Make one and initialize that instead, for example:\n"
+            "  mkdir ~/research && cd ~/research && misaka init")
 
 
 def _cfg_db():

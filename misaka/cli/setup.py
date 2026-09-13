@@ -17,7 +17,10 @@ What each section touches, and nothing else:
   least one Sister a research run has nobody to hand cards to.
 - documents: the optional PDF outline extra and the office libraries, checked by import.
 - web: ``~/.misaka/web.json`` -- a pinned search backend and its key, or the keyless ring.
-- project: ``misaka init`` on a folder.
+- research: nothing; it explains the shape of a run and the approval gate, which is the one
+  behaviour a first run meets without warning.
+- project: ``misaka init`` on a folder, and optionally a first pass of ``misaka doc`` over a
+  folder of sources.
 
 Bare ``misaka`` runs the wizard by itself when no credential is configured anywhere.
 """
@@ -40,7 +43,7 @@ from misaka.cli.setup_ui import (
     prompt_yes_no,
 )
 
-SECTIONS = ("environment", "model", "sisters", "documents", "web", "project")
+SECTIONS = ("environment", "model", "sisters", "documents", "web", "research", "project")
 
 # The providers a fresh install is most likely to want, in the order they are offered; every
 # other provider the registry knows is one menu entry further ("Another provider...").
@@ -54,6 +57,21 @@ WEB_BACKENDS = (
 )
 
 PAGEINDEX_PACKAGES = ("PyPDF2==3.0.1", "pypdfium2==4.30.0", "regex>=2024.0.0", "sortedcontainers==2.4.0")
+
+# PyPI's ``misaka`` is an unrelated package, so a ``misaka[extra]`` requirement only resolves
+# from a checkout or straight from the repository -- the address the README installs from.
+REPO_URL = "git+https://github.com/Luciole-Studio/Misaka-Agent.git"
+
+
+def _tilde(path: str) -> str:
+    """``~/.misaka/...`` rather than the absolute path: these are lines to read, not to copy."""
+    home = os.path.expanduser("~")
+    return "~" + path[len(home):] if path == home or path.startswith(home + os.sep) else path
+
+
+def _requirement(package: str) -> str:
+    """``misaka[anthropic]`` as something pip can actually resolve; anything else unchanged."""
+    return f"{package} @ {REPO_URL}" if package == "misaka" or package.startswith("misaka[") else package
 
 
 def _install_command(binary: str) -> str:
@@ -94,8 +112,11 @@ class Wizard:
         has_panel = os.path.isfile(library)
         ui.print_check(has_panel, "panel terminal",
                        "libghostty-vt: the panel's terminal emulator" if has_panel else
-                       f"libghostty-vt not found at {library}; `misaka` opens plain chat until it is built or "
-                       "MISAKA_GHOSTTY_VT points at a build")
+                       "no build for this platform; `misaka` opens plain chat, everything else works")
+        if not has_panel:
+            ui.print_info(f"    looked in {library}",
+                          "    macOS and Linux on x86_64 and arm64 ship a build; point MISAKA_GHOSTTY_VT",
+                          "    at your own build of ghostty's libghostty-vt to use the panel elsewhere.")
         self.state["missing"] = missing
         self.state["panel"] = has_panel
         if "git" in missing:
@@ -207,14 +228,35 @@ class Wizard:
             ui.print_error(f"Login failed: {error}")
 
     def _pick_model(self, registry, provider: str, cfg: dict) -> str:
-        models = [model for model in registry.getAll() if model.provider == provider]
+        models = self._model_choices([m for m in registry.getAll() if m.provider == provider],
+                                     cfg["default_model"] if cfg["provider"] == provider else None)
         ids = [model.id for model in models]
         if not ids:
             return prompt("Model id", cfg["default_model"])
         current = cfg["default_model"] if cfg["provider"] == provider else None
         default = ids.index(current) if current in ids else 0
-        labels = [f"{model.id}" + (f"  — {model.name}" if model.name and model.name != model.id else "") for model in models]
-        return ids[prompt_choice(f"Default model for {provider}", labels, default)]
+        labels = []
+        for index, model in enumerate(models):
+            name = f"  — {model.name}" if model.name and model.name != model.id else ""
+            labels.append(model.id + name + ("   (this install's default)" if index == default else ""))
+        return ids[prompt_choice(
+            f"Default model for {provider}", labels, default,
+            "Last Order plans and writes with this; the Sisters use it too unless you pin theirs below.")]
+
+    @staticmethod
+    def _model_choices(models: list, current: str | None) -> list:
+        """The catalog with dated aliases folded away. Anthropic alone lists both
+        ``claude-sonnet-4-5`` and ``claude-sonnet-4-5-20250929``; a first run should not have to
+        work out that those are one model. A dated id survives only when its undated form is
+        absent from the catalog, or when it is the one already configured."""
+        known = {model.id for model in models}
+
+        def dated_alias(model_id: str) -> bool:
+            head, _, tail = model_id.rpartition("-")
+            return len(tail) == 8 and tail.isdigit() and head in known
+
+        kept = [model for model in models if model.id == current or not dated_alias(model.id)]
+        return kept or list(models)
 
     def _verify(self, registry, provider: str, model_id: str) -> None:
         if not prompt_yes_no("Send one tiny request now to confirm the credential works?", True):
@@ -247,23 +289,35 @@ class Wizard:
     # -- 3. sisters ---------------------------------------------------------------------------
 
     def sisters(self) -> None:
+        from misaka.config import CFG, profiles
         from misaka.core.network import roster
-        ui.print_header("Sisters")
+        ui.print_header("Roles")
+        roles_root = os.path.expanduser(CFG["roles_root"])
+        # The identity files shape every run and are seeded silently on first start, so a
+        # wizard that never names them leaves the most useful edit undiscoverable.
+        ui.print_info("Two roles do the work, and both read plain files you can edit:",
+                      f"  {_tilde(profiles.shared_soul())}",
+                      "      the shared identity every role loads first",
+                      f"  {_tilde(os.path.join(roles_root, 'last_order'))}/",
+                      "      Last Order, the coordinator: config.yaml for MCP servers, skills/ for her skills",
+                      f"  {_tilde(os.path.join(roles_root, 'sisters'))}/<id>/",
+                      "      one folder per Sister: DESCRIBE.md routes work to her, SOUL.md is her voice", "")
         existing = roster.roster_names()
         if existing:
-            ui.print_success(f"Registered: {', '.join(existing)}")
+            ui.print_success(f"Registered Sisters: {', '.join(existing)}")
         else:
             ui.print_info("No Sister yet. Last Order hands research cards to Sisters; without at least one,",
                           "a research run has nobody to send out. Two is a good start (one can red-team the other).")
         if existing and not prompt_yes_no("Add another Sister?", False):
             return
+        model = self._sister_model()
         next_id = 10032
         while any(str(next_id) == name for name in existing):
             next_id += 1
         while True:
             sid = prompt("Sister ID", str(next_id))
             specialty = prompt("Her specialty, for Last Order's routing (optional)", "")
-            ok, message = roster.create_sister(sid, specialty=specialty or None)
+            ok, message = roster.create_sister(sid, specialty=specialty or None, model=model)
             (ui.print_success if ok else ui.print_error)(message)
             if ok:
                 existing.append(sid)
@@ -271,6 +325,30 @@ class Wizard:
             if not prompt_yes_no("Add another?", len(existing) < 2):
                 break
         self.state["sisters"] = existing
+
+    def _sister_model(self) -> str | None:
+        """A model pinned into each new Sister's ``config.json``, or None to follow the default.
+
+        Sisters do the reading and the legwork while Last Order plans and writes the
+        conclusion, so running them on a cheaper model is the common shape of a real install;
+        ``create_sister`` has always taken the argument, and nothing offered it."""
+        from misaka.cli.auth import _create_runtime
+        from misaka.config import current_config
+        cfg = current_config()
+        default_label = f"The same as Last Order ({cfg['provider']} / {cfg['default_model']})"
+        if prompt_choice("Which model should the Sisters run?", [default_label, "Pin a different one"], 0,
+                         "Sisters read and gather; Last Order plans and writes. A cheaper model here is normal.") == 0:
+            return None
+        try:
+            registry = _create_runtime(read_only=True).registry
+        except Exception as error:  # noqa: BLE001 - a registry that will not open is not worth failing the section for
+            ui.print_warning(f"The model catalog could not be read ({error}); the Sisters follow the default.")
+            return None
+        models = self._model_choices([m for m in registry.getAll() if m.provider == cfg["provider"]], None)
+        if not models:
+            return prompt("Model id for the Sisters", "") or None
+        labels = [m.id + (f"  — {m.name}" if m.name and m.name != m.id else "") for m in models]
+        return models[prompt_choice(f"Model for the Sisters ({cfg['provider']})", labels, 0)].id
 
     # -- 4. documents -------------------------------------------------------------------------
 
@@ -313,7 +391,18 @@ class Wizard:
             return
         name, env = WEB_BACKENDS[choice - 1]
         label = "SearXNG instance URL" if env == "SEARXNG_URL" else f"{name} API key ({env})"
+        if config.has_env(env):
+            ui.print_success(f"{env} is already set; Enter keeps it.")
         value = prompt(label, password=(env != "SEARXNG_URL"))
+        if not value and not config.has_env(env):
+            # Pinning without a credential is worse than not pinning: the resolver takes an
+            # explicit backend "ignoring availability", so every later search fails on the
+            # missing key instead of falling back. A zero-config install that worked would
+            # come out of this wizard broken, under a line that said it had been saved.
+            ui.print_warning(f"No {env} given, so {name} was not pinned: the keyless ring stays in charge.")
+            ui.print_info(f"Add it later with `misaka web set env.{env} <value>` and `misaka web set backend {name}`.")
+            self.state["web"] = "keyless ring"
+            return
         changes = {"backend": name}
         if value:
             changes[f"env.{env}"] = value
@@ -321,7 +410,34 @@ class Wizard:
         ui.print_success(f"{name} saved in {path}")
         self.state["web"] = name
 
-    # -- 6. project ---------------------------------------------------------------------------
+    # -- 6. research --------------------------------------------------------------------------
+
+    def research(self) -> None:
+        """Nothing to configure, everything to say. A run's limits are per-run flags with
+        defaults in code, and the approval gate is an environment variable, so this section
+        reports rather than writes -- but a first run walks into the gate within minutes, and
+        a wizard that never mentions it is where the "it just stopped" reports come from."""
+        from misaka.config import CFG
+        from misaka.core.research import runs
+        ui.print_header("How a research run behaves")
+        limits = runs.DEFAULT_LIMITS
+        ui.print_info("Last Order turns your question into a plan, the plan into cards, and hands the",
+                      "cards to the Sisters. Per run, unless you pass the flags:", "")
+        ui.print_check(True, "parallel cards", f"{limits['parallel']}    (`--parallel`)")
+        ui.print_check(True, "follow-up rounds", f"{limits['max_followups']}    extra rounds a node may run before concluding (`--followups`)")
+        ui.print_check(True, "sub-question depth", f"{limits['max_depth']}    (`--depth`)")
+        gate = bool(CFG.get("research_plan_approval", True))
+        ui.print_check(gate, "plan approval",
+                       "every node's plan waits for you, in a conversation with Last Order; she starts the "
+                       "run herself once you agree" if gate else
+                       "off (MISAKA_RESEARCH_PLAN_APPROVAL=0): plans run unattended")
+        if gate:
+            ui.print_info("", "So a run pauses and talks to you before it spends anything. There is no approve",
+                          "command and no keyword: you discuss the plan and she goes when you are satisfied.",
+                          "Set MISAKA_RESEARCH_PLAN_APPROVAL=0 for unattended runs.")
+        self.state["approval"] = gate
+
+    # -- 7. project ---------------------------------------------------------------------------
 
     def project(self) -> None:
         from misaka.core.platform import cards
@@ -340,6 +456,37 @@ class Wizard:
             self.state["project"] = folder
         except RuntimeError as error:
             ui.print_error(str(error))
+            return
+        self._index_sources(folder)
+
+    def _index_sources(self, folder: str) -> None:
+        """`misaka doc add` is step two of the quickstart and the whole point of the document
+        stack; the wizard used to check that the libraries imported and stop there."""
+        ui.print_info("", "Research reads an indexed corpus: PDFs, Office files and text you have already",
+                      "collected. Indexing extracts their text (and, with the PageIndex extra, an outline)",
+                      "so a Sister can cite a page instead of guessing.")
+        if not prompt_yes_no("Index a folder of sources into this project now?", False):
+            ui.print_info(f"Later: cd {folder} && misaka doc scan <folder>")
+            return
+        source = os.path.expanduser(prompt("Folder to index", os.path.join(folder, "sources")))
+        if not os.path.isdir(source):
+            ui.print_error(f"{source} is not a folder; skipping. Run `misaka doc scan <folder>` when it exists.")
+            return
+        from misaka.core.documents import index as corpus
+        ui.print_info(f"Indexing {source}... (this reads every file; large corpora take a while)")
+        try:
+            ingested, skipped = corpus.scan(source, workspace=folder)
+        except Exception as error:  # noqa: BLE001 - one unreadable corpus does not fail the wizard
+            ui.print_error(f"Indexing failed: {error}")
+            return
+        for path, reason in skipped[:5]:
+            ui.print_info(ui.color(f"    skipped {os.path.basename(path)}: {reason}", ui.DIM))
+        if len(skipped) > 5:
+            ui.print_info(ui.color(f"    ... and {len(skipped) - 5} more skipped", ui.DIM))
+        (ui.print_success if ingested else ui.print_warning)(
+            f"{len(ingested)} document(s) indexed, {len(skipped)} skipped."
+            if ingested else f"Nothing was indexed; all {len(skipped)} candidate(s) were skipped.")
+        self.state["documents"] = len(ingested)
 
     # -- summary ------------------------------------------------------------------------------
 
@@ -347,8 +494,14 @@ class Wizard:
         from misaka.core.network import roster
         state = self.state
         ui.print_banner("✓ Setup complete")
-        ui.print_check(bool(state.get("provider")), "model",
-                       f"{state.get('provider')} / {state.get('model')}" + ("" if state.get("verified", True) else "  (request failed)")
+        # `verified` is None when the check was declined and False when the request failed.
+        # Ticking on "a provider was chosen" reported a broken key as a finished step, which is
+        # the one line of this screen a person actually reads.
+        verified = state.get("verified")
+        ui.print_check(bool(state.get("provider")) and verified is not False, "model",
+                       f"{state.get('provider')} / {state.get('model')}"
+                       + ("  (the test request failed; the key is stored but does not work)" if verified is False else
+                          "  (not tested)" if verified is None else "")
                        if state.get("provider") else "run `misaka setup model`")
         names = roster.roster_names()
         ui.print_check(bool(names), "sisters", ", ".join(names) if names else "none: run `misaka setup sisters`")
@@ -356,9 +509,15 @@ class Wizard:
             ui.print_check(shutil.which(binary) is not None, binary, "" if shutil.which(binary) else _install_command(binary))
         ui.print_check(state.get("pageindex", None), "PDF outlines", "" if state.get("pageindex") else "optional")
         ui.print_check(state.get("web") is not None, "web search", str(state.get("web") or "keyless ring"))
+        indexed = state.get("documents")
+        ui.print_check(bool(indexed) if indexed is not None else None, "documents",
+                       f"{indexed} indexed" if indexed else "none indexed yet: `misaka doc scan <folder>`")
         ui.print_check(bool(state.get("project")), "project", state.get("project") or "run `misaka init` in a folder")
+        project = state.get("project") or "<project>"
         ui.print_info("", "Next:",
-                      f"  cd {state.get('project') or '<project>'} && misaka      the panel (Last Order, the Sisters, the board)",
+                      f"  cd {project} && misaka                       the panel (Last Order, the Sisters, the board)",
+                      "  misaka doc scan <folder>                     index sources; research reads what is indexed",
+                      '  misaka research "your question"              a run: plan, your go-ahead, cards, red team',
                       "  misaka chat                                  plain chat with Last Order",
                       "  misaka setup <section>                       revisit one section: " + " | ".join(SECTIONS),
                       "  misaka auth check                            credentials, per provider", "")
@@ -375,15 +534,24 @@ class Wizard:
 
     @staticmethod
     def _pip_install(packages: list[str], *, from_checkout: bool = False) -> None:
-        """Install into this interpreter. ``misaka[...]`` extras are only meaningful from a
-        checkout (PyPI's ``misaka`` is an unrelated package), so those are installed as
-        ``.[extra]`` from the current directory when it is one, and printed otherwise."""
-        if from_checkout:
-            if os.path.isfile("pyproject.toml"):
-                packages = [p.replace("misaka[", ".[") for p in packages]
-            else:
-                ui.print_info("Run from the misaka checkout: " + " ".join(f"pip install '{p.replace('misaka[', '.[')}'" for p in packages))
-                return
+        """Install into this interpreter, or say what to run by hand when it cannot.
+
+        ``misaka[...]`` extras become ``.[extra]`` inside a checkout; everywhere else they are
+        printed against the repository URL, because telling someone who installed from git to
+        run ``pip install '.[anthropic]'`` names a directory they do not have."""
+        import importlib.util
+        if from_checkout and os.path.isfile("pyproject.toml"):
+            packages = [package.replace("misaka[", ".[") for package in packages]
+        elif from_checkout:
+            ui.print_info("Install it with:", *[f"  pip install '{_requirement(p)}'" for p in packages])
+            return
+        if importlib.util.find_spec("pip") is None:
+            # Normal for `uv tool install` and pipx: the tool environment is managed, and
+            # pip-installing into it is either impossible or undone by the next upgrade.
+            ui.print_warning("This interpreter has no pip, which is how `uv tool` and pipx installs look.")
+            ui.print_info("Add it through the tool that installed misaka, for example:",
+                          *[f"  uv tool install --force '{_requirement(p)}'" for p in packages])
+            return
         command = [sys.executable, "-m", "pip", "install", *packages]
         ui.print_info(color_dim(" ".join(command)))
         try:
@@ -421,8 +589,9 @@ def run(section: str | None = None) -> int:
               "  misaka auth check", file=sys.stderr)
         return 1
     wizard = Wizard()
-    steps = [("Environment", wizard.environment), ("Model & Provider", wizard.model), ("Sisters", wizard.sisters),
-             ("Documents", wizard.documents), ("Web search", wizard.web), ("Project", wizard.project)]
+    steps = [("Environment", wizard.environment), ("Model & Provider", wizard.model), ("Roles", wizard.sisters),
+             ("Documents", wizard.documents), ("Web search", wizard.web), ("Research", wizard.research),
+             ("Project", wizard.project)]
     by_key = dict(zip(SECTIONS, steps, strict=True))
     try:
         if section:
@@ -434,7 +603,7 @@ def run(section: str | None = None) -> int:
             ui.run_steps([(label, action)])
             ui.print_success(f"{label} done.")
             return 0
-        ui.print_logo("Setup", "Configure this install: model, Sisters, documents, web, project.",
+        ui.print_logo("Setup", "Configure this install: model, roles, documents, web, project.",
                       "Enter keeps a current value · ← previous section · Esc or Ctrl+C exits.")
         if configured_anywhere():
             ui.print_info("", "A provider is already configured: each prompt shows the current value.")

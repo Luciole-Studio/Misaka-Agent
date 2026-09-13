@@ -1823,6 +1823,8 @@ class Daemon:
                     os.unlink(self.sock_path)
                 except FileNotFoundError:
                     pass
+            from misaka.ui.panel.client import check_sock_path
+            check_sock_path()   # a path over sun_path's limit binds with a bare OSError
             # A request line is one whole JSON object -- `pane.send` carries arbitrary user text,
             # `layout.set` a whole space tree -- so asyncio's 64 KiB default is far too small.
             old_umask = os.umask(0o177)

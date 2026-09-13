@@ -14,6 +14,24 @@ def _sock_path():
     return os.path.expanduser(CFG["net_sock"])
 
 
+# sockaddr_un.sun_path: 104 bytes on the BSDs and macOS, 108 on Linux, terminator included.
+_SUN_PATH_MAX = 103 if sys.platform == "darwin" else 107
+
+
+def check_sock_path():
+    """Raise before a bind that cannot succeed. A path over the kernel's limit makes
+    ``bind`` fail with a bare ``OSError: AF_UNIX path too long`` from inside asyncio, which
+    reaches the user as a daemon traceback naming neither the path nor the way out."""
+    path = _sock_path()
+    length = len(os.fsencode(path))
+    if length > _SUN_PATH_MAX:
+        raise RuntimeError(
+            f"The panel's socket path is {length} bytes, and a unix socket allows "
+            f"{_SUN_PATH_MAX}:\n  {path}\n"
+            "Point MISAKA_NET_SOCK at a shorter path, for example "
+            "MISAKA_NET_SOCK=/tmp/misaka-net.sock.")
+
+
 def request(method, params=None, *, timeout=10):
     """Send one request and return its result. Raises ConnectionError if the daemon is not running."""
     con = socket.socket(socket.AF_UNIX)
@@ -106,6 +124,7 @@ def ensure(timeout=8.0):
     """
     from misaka.ui.panel import daemon as _d
 
+    check_sock_path()
     try:
         info = request("ping", timeout=2)
     except (ConnectionError, FileNotFoundError, OSError):

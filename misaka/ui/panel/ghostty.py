@@ -8,9 +8,11 @@ characters cut at the edge. This module is the same wrapper for Python: one ``Te
 per pane, a ``RenderState`` to read the viewport the way herdr's renderer does, and the
 formatter for text extraction.
 
-The shared library is built from the source herdr vendors (``scripts/build_libghostty_vt.sh``)
-and shipped as ``lib/libghostty-vt.<ext>`` next to this file; ``MISAKA_GHOSTTY_VT`` points
-at another build. ghostty is MIT-licensed (Mitchell Hashimoto and contributors).
+The shared library is built from the source herdr vendors and shipped under ``lib/`` next to
+this file, one per platform (``libghostty-vt-<os>-<arch>.<ext>``: macOS and Linux, arm64 and
+x86_64). Anywhere else, build ghostty's libghostty-vt yourself and point ``MISAKA_GHOSTTY_VT``
+at it; without one the panel is unavailable and ``misaka`` opens plain chat instead. ghostty is
+MIT-licensed (Mitchell Hashimoto and contributors).
 """
 import ctypes
 import os
