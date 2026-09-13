@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 480" width="480" height="480">
+  <title>Luciole Studio</title>
+  <!-- The mark is three concentric circles: a white disc, a notch bitten out of the top
+       (radius a quarter of the disc's, tangent to it) and a larger bite below, which is what
+       leaves the crescent and its spark. Coordinates are the studio's 4800x4800 master at
+       one tenth scale; the ground is #cb3862, the same rose MISAKA's interface runs on. -->
+  <rect width="480" height="480" fill="#cb3862"/>
+  <circle cx="240" cy="244.13" r="115.98" fill="#ffffff"/>
+  <circle cx="240" cy="157.12" r="29.10" fill="#cb3862"/>
+  <circle cx="240" cy="293.44" r="72.62" fill="#cb3862"/>
+</svg>

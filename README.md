@@ -1,8 +1,11 @@
-# MISAKA
+<h1 align="center">
+  <img src="assets/logo.svg" alt="" width="96" height="96"><br>
+  MISAKA
+</h1>
 
-**A multi-agent research system for the humanities and social sciences.**
+<p align="center"><strong>A multi-agent research system for the humanities and social sciences.</strong></p>
 
-English · [简体中文](README.zh-CN.md) · [日本語](README.ja.md)
+<p align="center">English · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a></p>
 
 You give it a research question. It breaks the question into assignments, runs a
 team of agents against them in parallel, has a red team attack the result, and

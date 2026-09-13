@@ -38,26 +38,32 @@ class SetupGoBack(Exception):
 
 BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
 
-# dark.json's vars, used when the theme file cannot be read.
+# dark.json's vars, used when the theme file cannot be read. Its accent is the studio's own
+# rose: the master artwork's ground is #cb3862 to the byte.
 _FALLBACK_VARS = {"accent": "#cb3862", "roseLite": "#e8698c", "roseDeep": "#8f2545", "green": "#7fa87f",
                   "amber": "#d99a4e", "red": "#e05252", "selectedBg": "#3d2029"}
-_EMBLEM_INK = (244, 240, 241)      # the mark's white, slightly warm like the studio's avatar
+_EMBLEM_INK = (255, 255, 255)      # the mark's white, as in the master
 
 WORDMARK = ("█▀▄▀█ █ █▀▀ ▄▀█ █▄▀ ▄▀█",
             "█ ▀ █ █ ▄██ █▀█ █ █ █▀█")
 
-# Luciole Studio's mark: a white disc with a round notch bitten out of the top and a larger
-# one out of the bottom, which is what leaves the crescent and its spark. Three concentric
-# circles, measured off the studio's own artwork (a 460x460 avatar, white above luminance
-# 160) and written here as fractions of the outer disc's radius, so the mark can be drawn at
-# any size instead of being frozen into one bitmap:
+# Luciole Studio's mark: a white disc with a round notch bitten out of the top and a larger one
+# out of the bottom, which is what leaves the crescent and its spark. Three concentric circles,
+# least-squares fitted to the studio's 4800x4800 master -- the same file ``assets/logo.svg``
+# transcribes, and the fit differs from it only along the antialiased rim -- and written here as
+# fractions of the outer disc's radius, so the mark can be drawn at whatever size the window
+# allows instead of being frozen into one bitmap:
 #
-#   outer disc   centre (229.5, 234.0)  r 111.6   ->  (0,  0     )  r 1
-#   top notch    centre (229.5, 148.8)  r  28.0   ->  (0, -0.7634)  r 0.2509
-#   bottom bite  centre (229.5, 281.2)  r  69.8   ->  (0,  0.4229)  r 0.6255
-_NOTCH = (0.0, -0.7634, 0.2509)
-_BITE = (0.0, 0.4229, 0.6255)
-_MARGIN = 1.30                 # half-width of the drawn square, in outer radii: the badge's rose border
+#   outer disc   centre (2400, 2441.27)  r 1159.78  ->  (0,  0      )  r 1
+#   top notch    centre (2400, 1571.18)  r  291.00  ->  (0, -0.75022)  r 0.25091
+#   bottom bite  centre (2400, 2934.44)  r  726.19  ->  (0,  0.42523)  r 0.62615
+#
+# The notch is a quarter of the disc's radius and tangent to its top: that tangency is what
+# breaks the outline into two horns. The master frames the mark at 2.07 radii of rose; the badge
+# here crops to 1.30 because 22 terminal cells are not 4800 pixels.
+_NOTCH = (0.0, -0.75022, 0.25091)
+_BITE = (0.0, 0.42523, 0.62615)
+_MARGIN = 1.30                 # half-width of the drawn square, in outer radii
 
 
 # -- palette ----------------------------------------------------------------------------------

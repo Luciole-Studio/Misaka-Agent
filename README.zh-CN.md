@@ -1,8 +1,11 @@
-# MISAKA
+<h1 align="center">
+  <img src="assets/logo.svg" alt="" width="96" height="96"><br>
+  MISAKA
+</h1>
 
-**面向人文与社会科学的多智能体研究系统。**
+<p align="center"><strong>面向人文与社会科学的多智能体研究系统。</strong></p>
 
-[English](README.md) · 简体中文 · [日本語](README.ja.md)
+<p align="center"><a href="README.md">English</a> · 简体中文 · <a href="README.ja.md">日本語</a></p>
 
 你给它一个研究问题。它把问题拆成任务，派一队智能体并行去做，让红队反过来攻击结论，
 最后把成果写进你的项目文件夹，并把结论所依据的材料放在旁边。

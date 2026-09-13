@@ -1,8 +1,11 @@
-# MISAKA
+<h1 align="center">
+  <img src="assets/logo.svg" alt="" width="96" height="96"><br>
+  MISAKA
+</h1>
 
-**人文・社会科学のためのマルチエージェント研究システム。**
+<p align="center"><strong>人文・社会科学のためのマルチエージェント研究システム。</strong></p>
 
-[English](README.md) · [简体中文](README.zh-CN.md) · 日本語
+<p align="center"><a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · 日本語</p>
 
 調べたい問いを渡すと、MISAKA はそれを課題に分解し、エージェントのチームを並列で走らせ、
 出てきた結論をレッドチームに攻撃させたうえで、成果をプロジェクトフォルダに書き出します。
