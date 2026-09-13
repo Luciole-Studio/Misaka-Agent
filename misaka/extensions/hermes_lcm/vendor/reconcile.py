@@ -53,6 +53,8 @@ _PRESERVED_OBJECTIVE_CONTEXT_PREFIX = "[Current user objective preserved from co
 
 
 class ReconcileMixin:
+    active_store_ids: Optional[set[int]] = None  # misaka: optional host branch scope
+
     @staticmethod
     def _canonicalize_tool_call_identity_value(value: Any) -> Any:
         if isinstance(value, dict):
@@ -974,6 +976,8 @@ class ReconcileMixin:
                 break
             candidates.extend(page)
             next_candidate_after = page[-1]["store_id"]
+        if self.active_store_ids is not None:  # misaka: identical sibling text is not this branch
+            candidates = [row for row in candidates if row["store_id"] in self.active_store_ids]
         active_identity_counts: dict[tuple[Any, ...], int] = {}
         for msg in messages:
             identity = self._message_replay_identity(msg)

@@ -23,6 +23,8 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from misaka.utils import atomic
+from misaka.utils.async_lifecycle import settle
+from misaka.utils.values import signal_aborted
 
 try:  # POSIX only; on Windows there is no O_NONBLOCK to clear either.
     import fcntl
@@ -79,15 +81,25 @@ async def run_with_abort[T](work: Any, signal: Any | None) -> tuple[T | None, bo
     Nothing is left running: the losing side is cancelled and reaped before this returns.
     """
     task = asyncio.ensure_future(work)
-    async with abort_race(signal) as aborted:
+    aborted = None
+    try:
+        aborted = abort_wait_task(signal)
+        if signal_aborted(signal):
+            return None, True
         if aborted is None:
-            return await task, False
+            return await asyncio.shield(task), False
         done, _ = await asyncio.wait({task, aborted}, return_when=asyncio.FIRST_COMPLETED)
-        if task in done:
-            return task.result(), False
-    task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
-    return None, True
+        if aborted in done:
+            return None, True
+        return task.result(), False
+    finally:
+        owned = [task] if aborted is None else [task, aborted]
+        for pending in owned:
+            if not pending.done():
+                pending.cancel()
+        _, cancelled = await settle(asyncio.gather(*owned, return_exceptions=True))
+        if cancelled is not None:
+            raise cancelled
 
 
 def _string_arg(value: object) -> str | None:

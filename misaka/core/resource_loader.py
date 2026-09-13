@@ -95,6 +95,10 @@ class AgentsFilesResult(TypedDict):
 class ResourceLoader(Protocol):
     def getExtensions(self) -> LoadExtensionsResult: ...
 
+    def getExtensionSkillPaths(self) -> list[str]: ...
+
+    def getExtensionSkillResources(self) -> list[ResourcePathEntry]: ...
+
     def getPrompts(self) -> PromptsResult: ...
 
     def getThemes(self) -> ThemesResult: ...
@@ -227,6 +231,7 @@ class DefaultResourceLoader:
     lastPromptPaths: list[str] = field(default_factory=list)
     lastThemePaths: list[str] = field(default_factory=list)
     extensionSkillPaths: list[str] = field(default_factory=list)
+    extensionSkillResources: list[ResourcePathEntry] = field(default_factory=list)
     extensionPromptSourceInfos: dict[str, SourceInfo] = field(default_factory=dict)
     extensionThemeSourceInfos: dict[str, SourceInfo] = field(default_factory=dict)
     resourceMetadataByPath: dict[str, PathMetadata] = field(default_factory=dict)
@@ -269,6 +274,7 @@ class DefaultResourceLoader:
         self.lastPromptPaths = []
         self.lastThemePaths = []
         self.extensionSkillPaths = []
+        self.extensionSkillResources = []
         self.extensionPromptSourceInfos = {}
         self.extensionThemeSourceInfos = {}
         self.resourceMetadataByPath = {}
@@ -319,12 +325,18 @@ class DefaultResourceLoader:
         # the roots an extension contributes are kept here for that system to read.
         skill_paths = self._normalize_extension_paths(paths.get("skillPaths", []))
         if skill_paths:
+            for entry in skill_paths:
+                if entry not in self.extensionSkillResources:
+                    self.extensionSkillResources.append(entry)
             self.extensionSkillPaths = self._merge_paths(
                 self.getExtensionSkillPaths(), [entry["path"] for entry in skill_paths]
             )
 
     def getExtensionSkillPaths(self) -> list[str]:
         return list(self.extensionSkillPaths)
+
+    def getExtensionSkillResources(self) -> list[ResourcePathEntry]:
+        return [{"path": e["path"], "metadata": dict(e["metadata"])} for e in self.extensionSkillResources]
 
     async def loadProjectTrustExtensions(self) -> LoadExtensionsResult:
         """Bootstrap only user/CLI/inline extensions while project settings are gated."""
@@ -352,6 +364,8 @@ class DefaultResourceLoader:
 
         self.resourceMetadataByPath = {}
         metadata_by_path = self.resourceMetadataByPath
+        self.extensionSkillPaths = []
+        self.extensionSkillResources = []
         self.extensionPromptSourceInfos = {}
         self.extensionThemeSourceInfos = {}
 

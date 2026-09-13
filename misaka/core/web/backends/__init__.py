@@ -1,16 +1,12 @@
-"""The bundled search backends, one module per vendor.
+"""Bundled providers form each Web scope's base; session extensions overlay them.
 
-Hermes discovers these as plugins under ``plugins/web/<vendor>/`` with a ``register(ctx)``
-entry point. MISAKA's extension loader only discovers session extensions, not backends, so
-registration is an explicit list here -- the same nine vendors, registered in one call.
-
-Order in the list is irrelevant: preference lives in
-:data:`misaka.core.web.registry._LEGACY_PREFERENCE` and in the keyless ring.
+Order here does not select a backend: the registry's preference ladder and keyless
+ring do that. Built-ins never overwrite an explicit registration or extension owner.
 """
 
 from __future__ import annotations
 
-from misaka.core.web.registry import get_provider, register_provider
+from misaka.core.web.scope import current_scope
 
 
 def register_builtin_providers() -> None:
@@ -24,9 +20,13 @@ def register_builtin_providers() -> None:
     from misaka.core.web.backends.brave_free import BraveFreeWebSearchProvider
     from misaka.core.web.backends.ddgs import DDGSWebSearchProvider
     from misaka.core.web.backends.exa import ExaWebSearchProvider
-    from misaka.core.web.backends.firecrawl import FirecrawlWebSearchProvider
+    from misaka.core.web.backends.firecrawl import (
+        FirecrawlWebSearchProvider,
+        NousWebSearchProvider,
+    )
     from misaka.core.web.backends.keenable import KeenableWebSearchProvider
     from misaka.core.web.backends.parallel import ParallelWebSearchProvider
+    from misaka.core.web.backends.perplexity import PerplexityWebSearchProvider
     from misaka.core.web.backends.searxng import SearXNGWebSearchProvider
     from misaka.core.web.backends.tavily import TavilyWebSearchProvider
     from misaka.core.web.backends.xai import XAIWebSearchProvider
@@ -36,11 +36,15 @@ def register_builtin_providers() -> None:
         DDGSWebSearchProvider(),
         ExaWebSearchProvider(),
         FirecrawlWebSearchProvider(),
+        NousWebSearchProvider(),
         KeenableWebSearchProvider(),
         ParallelWebSearchProvider(),
+        PerplexityWebSearchProvider(),
         SearXNGWebSearchProvider(),
         TavilyWebSearchProvider(),
         XAIWebSearchProvider(),
     ):
-        if get_provider(provider.name) is None:
-            register_provider(provider)
+        scope = current_scope()
+        with scope.lock:
+            scope.builtins.setdefault(provider.name, provider)
+            scope.providers.setdefault(provider.name, scope.builtins[provider.name])

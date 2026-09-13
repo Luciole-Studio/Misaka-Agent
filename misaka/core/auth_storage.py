@@ -33,6 +33,7 @@ from misaka.ai.utils.abort import race_with_abort_signal
 from misaka.ai.utils.abort import sleep as abortable_sleep
 from misaka.ai.utils.oauth import (
     OAuthCredentials,
+    _call_refresh_token,
     getOAuthApiKey,
     getOAuthProvider,
     getOAuthProviders,
@@ -396,6 +397,15 @@ def _coerce_storage_object(value: Any) -> dict[str, Any]:
     return {}
 
 
+def oauth_account_key(provider: str, account: str | None = None) -> str:
+    """Named grants share the existing atomic auth store and its refresh lock."""
+    if account is None:
+        return provider
+    if not account or len(account) > 64 or any(not (c.isascii() and (c.isalnum() or c in "-_.")) for c in account):
+        raise ValueError("OAuth account names take 1–64 ASCII letters, digits, dots, underscores or hyphens")
+    return f"{provider}:{account}"
+
+
 class AuthStorage:
     def __init__(self, storage: AuthStorageBackend):
         self.data: Any = {}
@@ -651,7 +661,7 @@ class AuthStorage:
         self.persistProviderChange(provider, None)
 
     def list(self) -> list[str]:
-        return list(_coerce_storage_object(self.data).keys())
+        return [key for key in _coerce_storage_object(self.data) if key != '_credential_pools']
 
     def has(self, provider: str) -> bool:
         return provider in _coerce_storage_object(self.data)
@@ -687,12 +697,13 @@ class AuthStorage:
     def getAll(self) -> AuthStorageData:
         return dict(_coerce_storage_object(self.data))
 
-    async def login(self, providerId: str, callbacks: Any) -> None:
+    async def login(self, providerId: str, callbacks: Any, *, account: str | None = None) -> None:
+        key = oauth_account_key(providerId, account)
         provider = getOAuthProvider(providerId)
         if provider is None:
             raise RuntimeError(f"Unknown OAuth provider: {providerId}")
         credentials = await provider.login(callbacks)
-        self.set(providerId, {"type": "oauth", **credentials.model_dump(exclude_none=False)})
+        self.set(key, {"type": "oauth", **credentials.model_dump(exclude_none=False)})
 
     def logout(self, provider: str) -> None:
         self.remove(provider)
@@ -714,8 +725,12 @@ class AuthStorage:
         self,
         providerId: str,
         options: AuthOperationOptions | None = None,
+        *,
+        rejected_api_key: str | None = None,
+        account: str | None = None,
     ) -> dict[str, Any] | None:
         _throw_if_aborted(options)
+        credential_key = oauth_account_key(providerId, account)
         provider = getOAuthProvider(providerId)
         if provider is None:
             return None
@@ -725,7 +740,7 @@ class AuthStorage:
             nonlocal publish
             current_data_raw = self._parse_storage_data(current)
             current_data = _coerce_storage_object(current_data_raw)
-            credential = current_data.get(providerId)
+            credential = current_data.get(credential_key)
             if not isinstance(credential, dict) or credential.get("type") != "oauth":
                 publish = _once_callback(
                     lambda: self._replace_cached_data(current_data_raw)
@@ -736,7 +751,11 @@ class AuthStorage:
                 )
 
             oauth_credential = _coerce_oauth_credentials(credential)
-            if not self._oauthExpiresSoon(oauth_credential):
+            force = (
+                rejected_api_key is not None
+                and provider.getApiKey(oauth_credential) == rejected_api_key
+            )
+            if not force and not self._oauthExpiresSoon(oauth_credential):
                 publish = _once_callback(
                     lambda: self._replace_cached_data(current_data_raw)
                 )
@@ -753,11 +772,19 @@ class AuthStorage:
                 if isinstance(value, dict) and value.get("type") == "oauth":
                     oauth_credentials[key] = _coerce_oauth_credentials(value)
 
-            refreshed = await getOAuthApiKey(
-                providerId,
-                oauth_credentials,
-                options.signal if options is not None else None,
-            )
+            # A 401 refresh uses the same authoritative read/write lock as expiry.
+            # A logout or replacement login that won the lock must never be overwritten
+            # with credentials captured before the request.
+            if force or account is not None:
+                credentials = await _call_refresh_token(provider.refreshToken, oauth_credential, options.signal if options else None)
+                _throw_if_aborted(options)
+                refreshed = {"apiKey": provider.getApiKey(credentials), "newCredentials": credentials}
+            else:
+                refreshed = await getOAuthApiKey(
+                    providerId,
+                    oauth_credentials,
+                    options.signal if options is not None else None,
+                )
             if refreshed is None:
                 publish = _once_callback(
                     lambda: self._replace_cached_data(current_data_raw)
@@ -768,7 +795,7 @@ class AuthStorage:
                 )
 
             merged = dict(current_data)
-            merged[providerId] = {
+            merged[credential_key] = {
                 "type": "oauth",
                 **refreshed["newCredentials"].model_dump(exclude_none=False),
             }

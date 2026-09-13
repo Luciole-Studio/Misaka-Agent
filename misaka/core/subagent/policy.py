@@ -23,10 +23,6 @@ from typing import Any
 
 from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.platform.vocabulary import MANAGEMENT_TOOL_NAMES
-from misaka.core.subagent.hooks import (
-    HOOK_DEFAULT_TIMEOUT,
-    HOOK_DEFAULT_TIMEOUTS,
-)
 from misaka.utils.values import read_field
 
 ALIASES = {"glob": "find"}
@@ -40,7 +36,13 @@ READ_ONLY_TOOLS = frozenset({"find", "grep", "glob", "ls", "read"})
 # Tools that carry their own per-action classification further down
 # ``_permission_action``.  Inheriting one of these names from the parent
 # session must never short-circuit that classification.
-CLASSIFIED_TOOLS = frozenset({"bash", "powershell", "edit", "write"})
+CLASSIFIED_TOOLS = frozenset({"bash", "powershell", "edit", "write", "office", "browser_exec",
+    "browser_click", "browser_type", "browser_press", "browser_console", "browser_cdp", "browser_dialog", "browser_navigate", "browser_back"})
+# The tools whose whole purpose is to put bytes at a path. They share plan-mode denial, the
+# workspace path guard and the acceptEdits allowance -- ``office`` writes a .docx exactly
+# the way ``write`` writes a .txt, and a guard that named only the older two would have let
+# a deliverable be written anywhere on disk.
+MUTATING_PATH_TOOLS = frozenset({"edit", "write", "office"})
 ACCEPT_EDITS_COMMANDS = frozenset({"cp", "mkdir", "mv", "rm", "rmdir", "sed", "touch"})
 SENSITIVE_DIRECTORIES = frozenset({".claude", ".git", ".idea", ".ssh", ".vscode"})
 SENSITIVE_FILES = frozenset(
@@ -58,8 +60,44 @@ SENSITIVE_FILES = frozenset(
 
 _permission_broker: Any = None
 _permission_classifier: Any = None
+_permission_settings_provider: Any = None
 _async_hook_broker: Any = None
 OnceKey = tuple[str, int, int, str]
+
+
+def set_permission_settings_provider(callback: Any) -> None:
+    global _permission_settings_provider
+    _permission_settings_provider = callback
+
+
+async def refresh_inherited_permissions() -> list[dict[str, Any]]:
+    from misaka.core.subagent.configuration import (
+        inherited_permissions,
+        validate_permission_mode,
+    )
+
+    if _permission_settings_provider is not None:
+        value = await _permission_settings_provider()
+        # Validate before replacing the last accepted snapshot. Malformed or lost
+        # parent replies stop the call, rather than silently using stale grants.
+        mode = None
+        if isinstance(value, dict):
+            mode = validate_permission_mode(value.get("mode"))
+            value = value.get("settings")
+        previous = os.environ.get("MISAKA_SUBAGENT_PERMISSION_SETTINGS")
+        try:
+            os.environ["MISAKA_SUBAGENT_PERMISSION_SETTINGS"] = json.dumps(value)
+            accepted = inherited_permissions()
+            if mode is not None:
+                os.environ["MISAKA_SUBAGENT_PERMISSION_MODE"] = mode
+            return accepted
+        except BaseException:
+            if previous is None:
+                os.environ.pop("MISAKA_SUBAGENT_PERMISSION_SETTINGS", None)
+            else:
+                os.environ["MISAKA_SUBAGENT_PERMISSION_SETTINGS"] = previous
+            raise
+    return inherited_permissions()
 
 
 def set_permission_broker(callback: Any) -> None:
@@ -195,7 +233,7 @@ def _has_shell_expansion(command: str) -> bool:
 
 def _plan_denial(tool_name: str, tool_input: Mapping[str, Any]) -> str | None:
     name = _tool_name(tool_name)
-    if name in {"edit", "write"}:
+    if name in MUTATING_PATH_TOOLS:
         return f"permissionMode=plan denied mutating tool {tool_name}"
     # PowerShell has different tokenization, aliases and pipelines.  Until its
     # own read-only classifier exists, plan mode cannot prove a command safe.
@@ -239,6 +277,13 @@ def _path_in_workspace(raw: str, workspace: str) -> bool:
         return False
 
 
+def _path_in_working_directories(raw: str, workspace: str, additional_dirs: Sequence[str]) -> bool:
+    candidate = _resolved_path(raw, workspace)
+    return candidate is not None and any(
+        _path_in_workspace(str(candidate), root) for root in (workspace, *additional_dirs)
+    )
+
+
 def _resolved_path(raw: str, workspace: str) -> Path | None:
     try:
         root = Path(workspace).expanduser().resolve()
@@ -280,12 +325,12 @@ def _path_rule_allows(
     )
 
 
-def _edit_in_workspace(tool_input: Mapping[str, Any], workspace: str) -> bool:
+def _edit_in_workspace(tool_input: Mapping[str, Any], workspace: str, additional_dirs: Sequence[str] = ()) -> bool:
     raw = tool_input.get("path") or tool_input.get("file_path")
     return (
         isinstance(raw, str)
         and bool(raw.strip())
-        and _path_in_workspace(raw, workspace)
+        and _path_in_working_directories(raw, workspace, additional_dirs)
         and not _sensitive_path(raw, workspace)
     )
 
@@ -585,7 +630,7 @@ def _bash_read_paths(command: str) -> list[str] | None:
 
 
 def _bash_has_restricted_path(
-    command: str, workspace: str, layers: Sequence[Sequence[str]]
+    command: str, workspace: str, layers: Sequence[Sequence[str]], additional_dirs: Sequence[str] = ()
 ) -> bool:
     paths = _bash_read_paths(command)
     if paths is None:
@@ -629,7 +674,7 @@ def _bash_has_restricted_path(
     for raw in paths:
         if _sensitive_path(raw, workspace):
             return True
-        if not _path_in_workspace(raw, workspace) and not _path_rule_allows(
+        if not _path_in_working_directories(raw, workspace, additional_dirs) and not _path_rule_allows(
             layers, "read", raw, workspace
         ):
             return True
@@ -707,7 +752,7 @@ def _safe_sed_script(script: str) -> bool:
     return True
 
 
-def _accept_edits_bash(command: str, workspace: str) -> bool:
+def _accept_edits_bash(command: str, workspace: str, additional_dirs: Sequence[str] = ()) -> bool:
     if not command.strip() or re.search(r"[`\n<>$*?\[\]{}]|\$\(", command):
         return False
     pieces = [
@@ -820,11 +865,20 @@ def _accept_edits_bash(command: str, workspace: str) -> bool:
         ):
             return False
         for operand in operands:
-            if not _path_in_workspace(operand, workspace) or _sensitive_path(
+            if not _path_in_working_directories(operand, workspace, additional_dirs) or _sensitive_path(
                 operand, workspace
             ):
                 return False
     return True
+
+
+def _memory_path(tool_name: str, tool_input: Mapping[str, Any], workspace: str, memory_dir: str | None) -> bool:
+    """Only this agent's file tools gain access to its explicitly configured memory."""
+    raw = tool_input.get("path") or tool_input.get("file_path")
+    if not memory_dir or tool_name not in {"read", "edit", "write"} or not isinstance(raw, str) or not raw.strip():
+        return False
+    candidate = _resolved_path(raw, workspace)
+    return candidate is not None and _path_in_workspace(str(candidate), memory_dir)
 
 
 def _permission_restriction(
@@ -833,11 +887,15 @@ def _permission_restriction(
     tool_input: Mapping[str, Any],
     workspace: str,
     vocabulary: frozenset[str] = frozenset(),
+    memory_dir: str | None = None,
+    additional_dirs: Sequence[str] = (),
 ) -> str | None:
     """Return a workspace/protected-path guard that grants cannot bypass."""
 
     name = _tool_name(tool_name)
     raw = tool_input.get("path") or tool_input.get("file_path")
+    if _memory_path(name, tool_input, workspace, memory_dir) and not _sensitive_path(raw, workspace):
+        return None
     # An inherited tool reaches the same path guard as the built-in read
     # tools: gaining a name must never gain a way out of the workspace.
     guarded = name in READ_ONLY_TOOLS or (
@@ -846,20 +904,20 @@ def _permission_restriction(
     if guarded and isinstance(raw, str) and raw.strip():
         if _sensitive_path(raw, workspace):
             return f"protected path requires approval: {raw}"
-        if not _path_in_workspace(raw, workspace) and not _path_rule_allows(
+        if not _path_in_working_directories(raw, workspace, additional_dirs) and not _path_rule_allows(
             layers, name, raw, workspace
         ):
             return f"path is outside the agent workspace: {raw}"
-    if name in {"edit", "write"}:
+    if name in MUTATING_PATH_TOOLS:
         if not isinstance(raw, str) or not raw.strip():
             return "mutating tool did not provide a valid path"
         if _sensitive_path(raw, workspace):
             return f"protected path requires approval: {raw}"
-        if not _path_in_workspace(raw, workspace):
+        if not _path_in_working_directories(raw, workspace, additional_dirs):
             return f"path is outside the agent workspace: {raw}"
     if name == "bash":
         command = str(tool_input.get("command") or "")
-        if _bash_has_restricted_path(command, workspace, layers):
+        if _bash_has_restricted_path(command, workspace, layers, additional_dirs):
             return "bash command has an external, protected, or ambiguous path"
     return None
 
@@ -871,6 +929,8 @@ def _permission_action(
     tool_input: Mapping[str, Any],
     workspace: str,
     vocabulary: frozenset[str] = frozenset(),
+    memory_dir: str | None = None,
+    additional_dirs: Sequence[str] = (),
 ) -> tuple[str, str | None]:
     """Return ``allow``, ``ask``, ``classify`` or ``deny`` by mode precedence.
 
@@ -885,6 +945,12 @@ def _permission_action(
     if name in MANAGEMENT_TOOL_NAMES or effective == "bypassPermissions":
         return "allow", None
 
+    if name == "browser_exec":
+        # Terminal-capable Python gets the existing Bash argument/mode classification,
+        # not a blanket allow from inheriting a new tool name.
+        command = "python -c " + shlex.quote(str(tool_input.get("code", "")))
+        return _permission_action(mode, layers, "bash", {"command": command}, workspace, vocabulary, memory_dir, additional_dirs)
+
     if effective == "plan":
         reason = _plan_denial(name, tool_input)
         if reason:
@@ -898,7 +964,7 @@ def _permission_action(
             return "deny", f"permissionMode=plan denied non-read-only tool {tool_name}"
 
     restriction = _permission_restriction(
-        layers, name, tool_input, workspace, vocabulary
+        layers, name, tool_input, workspace, vocabulary, memory_dir, additional_dirs
     )
     if restriction:
         reason = f"Workspace safety requires approval: {restriction}"
@@ -908,7 +974,7 @@ def _permission_action(
 
     if effective == "plan":
         return "allow", None
-    if _rule_allows(layers, name, tool_input):
+    if _memory_path(name, tool_input, workspace, memory_dir) or _rule_allows(layers, name, tool_input):
         return "allow", None
     # plan mode above keeps the strict built-in read-only table on purpose; an
     # inherited name is not evidence that a tool only reads.  Under ``auto`` it
@@ -924,10 +990,10 @@ def _permission_action(
         return "allow", None
 
     if effective in {"acceptEdits", "auto"}:
-        if name in {"edit", "write"} and _edit_in_workspace(tool_input, workspace):
+        if name in MUTATING_PATH_TOOLS and _edit_in_workspace(tool_input, workspace, additional_dirs):
             return "allow", None
         if name == "bash" and _accept_edits_bash(
-            str(tool_input.get("command") or ""), workspace
+            str(tool_input.get("command") or ""), workspace, additional_dirs
         ):
             return "allow", None
     if effective == "auto":
@@ -938,11 +1004,35 @@ def _permission_action(
     return "ask", f"permissionMode={effective} requires parent approval for {tool_name}"
 
 
+async def hook_tool_permission(session, context, name, tool_input, workspace, *, transcript_read=False):
+    """Source execAgentHook: dontAsk plus transcript allow, never above deny/ask."""
+    from misaka.core.subagent.configuration import (
+        permission_decision,
+        permission_settings,
+    )
+
+    permissions = [*await refresh_inherited_permissions(), *permission_settings(session)]
+    decision = permission_decision(permissions, name, tool_input)
+    if decision in {"deny", "ask"}:
+        return "deny", "Agent hook tool is restricted by current permission settings"
+    if transcript_read:
+        return "allow", None
+    directories = tuple(path for layer in permissions for path in layer.get("additionalDirectories", []))
+    layers = getattr(context, "tool_rule_layers", ())
+    action, reason = _permission_action("dontAsk", layers, name, tool_input, workspace,
+                                        additional_dirs=directories)
+    if decision == "allow" and not _permission_restriction(layers, name, tool_input, workspace,
+                                                           additional_dirs=directories):
+        return "allow", None
+    return action, reason
+
+
 class AgentPolicy:
     def __init__(self, context: Any) -> None:
         self.context = context
         self.layers = tuple(tuple(layer) for layer in getattr(context, "tool_rule_layers", ()) or ())
         self.permission_mode = getattr(context, "permission_mode", None)
+        self.memory_dir = getattr(context, "memory_dir", None)
         # Names this child inherited from its parent session.  Absent means the
         # parent could not report one, and the hard-coded tables decide alone.
         self.vocabulary = frozenset(
@@ -958,7 +1048,20 @@ class AgentPolicy:
         if not isinstance(hooks, dict):
             raise ValueError("Agent hooks must be an event mapping")  # noqa: TRY004 - callers treat bad input as ValueError
         self.hooks: dict[str, Any] = hooks
+        host_hooks = getattr(context, "host_hooks", None)
+        self.host_hooks = json.loads(host_hooks) if host_hooks else {}
+        from misaka.core.subagent.hooks import validate_hooks
+
+        self.host_hooks = validate_hooks(self.host_hooks)
         self.session: Any = None
+        try:
+            self.inherited_permissions = json.loads(os.environ.get("MISAKA_SUBAGENT_PERMISSION_SETTINGS", "[]"))
+            if not isinstance(self.inherited_permissions, list) or any(
+                not isinstance(layer, Mapping) for layer in self.inherited_permissions
+            ):
+                raise ValueError("Inherited permission settings must be a list of objects")
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"Invalid inherited permission settings: {error}") from error
         raw_once_path = os.environ.get("MISAKA_SUBAGENT_HOOK_ONCE_FILE")
         self.once_path = (
             Path(raw_once_path).expanduser() if raw_once_path else None
@@ -1030,56 +1133,46 @@ class AgentPolicy:
                 pass
 
     def _validate_hooks(self) -> None:
-        for event, matchers in self.hooks.items():
-            if not isinstance(matchers, list):
-                raise ValueError(f"Agent hooks.{event} must be a list")  # noqa: TRY004 - callers treat bad input as ValueError
-            for matcher in matchers:
-                commands = matcher.get("hooks") if isinstance(matcher, dict) else None
-                if not isinstance(commands, list):
-                    raise ValueError(f"Agent hooks.{event} entries need a hooks list")  # noqa: TRY004 - callers treat bad input as ValueError
-                for hook in commands:
-                    if not isinstance(hook, dict):
-                        raise ValueError(f"Agent hooks.{event} entries must be objects")  # noqa: TRY004 - callers treat bad input as ValueError
-                    kind = str(hook.get("type") or "command")
-                    if kind not in {"command", "prompt", "agent", "http"}:
-                        raise ValueError(f"Agent hooks.{event} has unsupported type {kind!r}")
-                    required = "url" if kind == "http" else "command" if kind == "command" else "prompt"
-                    if not isinstance(hook.get(required), str) or not str(hook[required]).strip():
-                        raise ValueError(
-                            f"Agent hooks.{event} {kind} hook needs a non-empty {required}"
-                        )
-                    try:
-                        raw_timeout = hook.get("timeout")
-                        timeout = (HOOK_DEFAULT_TIMEOUTS.get(str(kind), HOOK_DEFAULT_TIMEOUT)
-                                   if raw_timeout is None else float(raw_timeout))
-                    except (TypeError, ValueError) as error:
-                        raise ValueError(
-                            f"Agent hooks.{event} has an invalid timeout"
-                        ) from error
-                    if timeout <= 0:
-                        raise ValueError(f"Agent hooks.{event} timeout must be positive")
-                    if kind != "command" and (
-                        hook.get("async") or hook.get("asyncRewake")
-                    ):
-                        raise ValueError(
-                            f"Agent hooks.{event} {kind} hooks cannot run asynchronously"
-                        )
+        from misaka.core.subagent.hooks import validate_hooks
+
+        self.hooks = validate_hooks(self.hooks)
 
     @staticmethod
     def _matcher_matches(pattern: Any, subject: str) -> bool:
         if pattern in (None, "", "*"):
             return True
+        from misaka.core.subagent.tool_policy import canonical_tool_name
+
+        legacy = {"Task": "Agent", "AgentOutputTool": "TaskOutput", "BashOutputTool": "TaskOutput", "KillShell": "TaskStop"}
+        canonical = canonical_tool_name(subject)
+        if re.fullmatch(r"[a-zA-Z0-9_|]+", str(pattern)):
+            return canonical in [canonical_tool_name(legacy.get(item, item)) for item in str(pattern).split("|")]
         try:
-            return re.search(str(pattern), subject, re.IGNORECASE) is not None
+            candidates = {subject, canonical, *(name for name, current in legacy.items() if current == canonical)}
+            return any(re.search(str(pattern), value) is not None for value in candidates)
         except re.error:
-            return fnmatch.fnmatchcase(subject.casefold(), str(pattern).casefold())
+            return False
 
     def _iter_hooks(
         self, event_name: str, subject: str, tool_name: str = "", tool_input: Mapping[str, Any] | None = None
     ) -> Iterable[tuple[OnceKey, Mapping[str, Any]]]:
+        from misaka.core.subagent.configuration import hook_controls
+
+        disabled, managed_only = hook_controls(self.session)
+        if disabled or os.environ.get("MISAKA_SUBAGENT_HOOKS_DISABLED") == "1":
+            return
+        managed_only = managed_only or os.environ.get("MISAKA_SUBAGENT_MANAGED_HOOKS_ONLY") == "1"
         names = (event_name, "Stop") if event_name == "SubagentStop" else (event_name,)
         for name in names:
-            for matcher_index, matcher in enumerate(self.hooks.get(name, ())):
+            from misaka.core.subagent.configuration import configured_hooks
+
+            global_hooks = configured_hooks(self.session)
+            matchers = [*self.host_hooks.get(name, ()), *global_hooks.get(name, ())]
+            # CCB runs SubagentStart before registering frontmatter hooks;
+            # StopFailure is outside the agent-scoped hook registry at this pin.
+            if not managed_only and event_name not in {"SubagentStart", "StopFailure"}:
+                matchers.extend(self.hooks.get(name, ()))
+            for matcher_index, matcher in enumerate(matchers):
                 if not self._matcher_matches(matcher.get("matcher"), subject):
                     continue
                 for hook_index, hook in enumerate(matcher["hooks"]):
@@ -1231,6 +1324,30 @@ class AgentPolicy:
         )
         if not matched:
             return []
+        try:
+            self.inherited_permissions = await refresh_inherited_permissions()
+            from misaka.core.subagent.configuration import current_permission_mode
+
+            self.permission_mode = current_permission_mode(self.session, self.permission_mode)
+            payload = {**payload, "permission_mode": self.permission_mode}
+        except BaseException:
+            for key, hook in matched:
+                self._settle_once(key, hook, False)
+            raise
+        # CCB hooks.ts: source-root + shell/body/if identity, last scope wins.
+        unique: dict[tuple[str, ...], tuple[OnceKey, Mapping[str, Any]]] = {}
+        for key, hook in matched:
+            kind = str(hook.get("type") or "command")
+            identity = (kind, str(hook.get("pluginRoot") or hook.get("skillRoot") or ""),
+                        str(hook.get("shell") or "bash") if kind == "command" else "",
+                        str(hook.get("command") if kind == "command" else hook.get("url") if kind == "http" else hook.get("prompt")),
+                        str(hook.get("if") or ""))
+            previous = unique.get(identity)
+            if previous is not None:
+                self._settle_once(*previous, False)
+            unique[identity] = (key, hook)
+        kinds = {"command": 0, "prompt": 1, "agent": 2, "http": 3}
+        matched = sorted(unique.values(), key=lambda item: kinds.get(str(item[1].get("type") or "command"), 4))
 
         async def run(
             key: OnceKey, hook: Mapping[str, Any]
@@ -1276,11 +1393,6 @@ class AgentPolicy:
             payload,
         )
         for result in results:
-            if result["decision"] in {"deny", "ask"} or not result["allowed"]:
-                return {
-                    "block": True,
-                    "reason": result["reason"] or "SubagentStart hook blocked",
-                }
             if result["additional_context"]:
                 context.append(str(result["additional_context"]))
         if not context:
@@ -1313,18 +1425,34 @@ class AgentPolicy:
             "PreToolUse", name, payload, name, tool_input
         )
         hook_decision = "passthrough"
+        updated_input = None
+        await self._publish_hook_context(hook_results)
         for result in hook_results:
+            if "updated_input" in result:
+                updated_input = tool_input = result["updated_input"]
             decision = str(result["decision"])
             if decision == "deny":
                 return {
                     "block": True,
                     "reason": result["reason"] or "PreToolUse hook blocked",
+                    "terminate": result.get("prevent_continuation"),
                 }
             if decision == "ask":
                 hook_decision = "ask"
             elif decision == "allow" and hook_decision != "ask":
                 hook_decision = "allow"
 
+        try:
+            self.inherited_permissions = await refresh_inherited_permissions()
+            from misaka.core.subagent.configuration import current_permission_mode
+
+            self.permission_mode = current_permission_mode(self.session, self.permission_mode)
+        except Exception as error:  # noqa: BLE001 - permission channel failures stop execution
+            return {"block": True, "reason": f"Parent permission refresh failed: {type(error).__name__}"}
+        from misaka.core.subagent.configuration import permission_settings
+        current_permissions = [*self.inherited_permissions, *permission_settings(self.session)]
+        additional_dirs = tuple(dict.fromkeys(path for layer in current_permissions
+                                             for path in layer.get("additionalDirectories", [])))
         action, reason = _permission_action(
             self.permission_mode,
             self.layers,
@@ -1332,14 +1460,24 @@ class AgentPolicy:
             tool_input,
             workspace,
             self.vocabulary,
+            self.memory_dir,
+            additional_dirs,
         )
         restriction = _permission_restriction(
-            self.layers, name, tool_input, workspace, self.vocabulary
+            self.layers, name, tool_input, workspace, self.vocabulary, self.memory_dir, additional_dirs
         )
+        configured = self._configured_permission(name, tool_input, current_permissions)
+        if configured == "deny":
+            return {"block": True, "reason": "Tool call denied by the current permission settings"}
+        if self.permission_mode != "bypassPermissions":
+            if configured == "ask" and action != "deny":
+                action = "ask"
+            elif configured == "allow" and (action != "deny" or self.permission_mode == "dontAsk") and not restriction:
+                action, reason = "allow", None
         if hook_decision == "ask" and action != "deny":
             action = "ask"
             reason = reason or "PreToolUse hook requested parent approval"
-        elif hook_decision == "allow" and action in {"ask", "classify"} and not restriction:
+        elif hook_decision == "allow" and configured != "ask" and action in {"ask", "classify"} and not restriction:
             action = "allow"
             reason = None
         if action == "classify":
@@ -1377,7 +1515,23 @@ class AgentPolicy:
                 "PermissionRequest", name, permission_payload, name, tool_input
             )
             permission_allow = False
+            await self._publish_hook_context(permission_results)
             for result in permission_results:
+                if "updated_input" in result:
+                    updated_input = tool_input = result["updated_input"]
+                    restriction = _permission_restriction(
+                        self.layers, name, tool_input, workspace, self.vocabulary, self.memory_dir, additional_dirs
+                    )
+                    if self._configured_permission(name, tool_input, current_permissions) == "deny":
+                        return {"block": True, "reason": "Updated hook input is denied by the current permission settings"}
+                    # Rewrites are new actions: an approved read must not turn
+                    # into a plan-mode mutation or bypass a role/path ceiling.
+                    rewritten_action, rewritten_reason = _permission_action(
+                        self.permission_mode, self.layers, name, tool_input,
+                        workspace, self.vocabulary, self.memory_dir, additional_dirs,
+                    )
+                    if rewritten_action == "deny":
+                        return {"block": True, "reason": rewritten_reason}
                 decision = str(result["decision"])
                 if decision == "deny":
                     return {
@@ -1417,9 +1571,27 @@ class AgentPolicy:
                         "block": True,
                         "reason": reason or "Parent denied agent permission",
                     }
-        return None
+        return {"updatedInput": updated_input} if updated_input is not None else None
 
-    async def after_tool(self, event: Any) -> None:
+    def _configured_permission(self, name: str, tool_input: Mapping[str, Any], permissions=None) -> str | None:
+        from misaka.core.subagent.configuration import (
+            permission_decision,
+            permission_settings,
+        )
+
+        if permissions is None:
+            permissions = [*self.inherited_permissions, *permission_settings(self.session)]
+        return permission_decision(permissions, name, tool_input)
+
+    async def _publish_hook_context(self, results: Sequence[Mapping[str, Any]]) -> None:
+        context = [str(result["additional_context"]) for result in results if result.get("additional_context")]
+        if context and self.session is not None:
+            await self.session.sendCustomMessage({
+                "customType": "hook_additional_context", "display": False,
+                "content": [{"type": "text", "text": untrusted("hook", "\n".join(context))}],
+            }, {"triggerTurn": False})
+
+    async def after_tool(self, event: Any) -> Any:
         name = str(read_field(event, "toolName", ""))
         tool_input = read_field(event, "input", {})
         tool_input = tool_input if isinstance(tool_input, Mapping) else {}
@@ -1435,7 +1607,16 @@ class AgentPolicy:
                 "is_error": bool(read_field(event, "isError", False)),
             },
         )
-        await self._execute_hooks(event_name, name, payload, name, tool_input)
+        results = await self._execute_hooks(event_name, name, payload, name, tool_input)
+        await self._publish_hook_context(results)
+        updated = {}
+        for result in results:
+            if result.get("prevent_continuation"):
+                updated["terminate"] = True
+            if name.startswith("mcp__") and "updated_mcp_tool_output" in result:
+                value = result["updated_mcp_tool_output"]
+                updated["content"] = value["content"] if isinstance(value, Mapping) and isinstance(value.get("content"), list) else [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}]
+        return updated or None
 
     async def on_event(self, event: Any, _context: Any = None) -> Any:
         if read_field(event, "type") != "agent_end":
@@ -1445,8 +1626,23 @@ class AgentPolicy:
             for message in reversed(messages):
                 if str(read_field(message, "role", "")) != "assistant":
                     continue
-                if str(read_field(message, "stopReason", "")) in {"error", "aborted"}:
+                stop_reason = str(read_field(message, "stopReason", ""))
+                if stop_reason in {"error", "aborted"}:
                     self.stop_hook_active = False
+                    if stop_reason == "error":
+                        error = str(read_field(message, "error", None) or "unknown")
+                        content = read_field(message, "content", [])
+                        text = content if isinstance(content, str) else "\n".join(
+                            str(read_field(block, "text", "")) for block in content
+                            if read_field(block, "type") == "text")
+                        payload = self._payload(
+                            "StopFailure", error=error,
+                            error_details=read_field(message, "errorMessage"),
+                            last_assistant_message=text.strip() or None,
+                        )
+                        # CCB executes these outside the agent registry. A failure
+                        # hook cannot restart a failed model turn or veto shutdown.
+                        await self._execute_hooks("StopFailure", error, payload)
                     return None
                 break
         last_assistant_message = None
@@ -1495,6 +1691,7 @@ def policy_for(context: Any) -> AgentPolicy | None:
         getattr(context, "tool_rule_layers", ())
         or getattr(context, "permission_mode", None)
         or getattr(context, "agent_hooks", None)
+        or getattr(context, "host_hooks", None)
     ):
         return None
     return AgentPolicy(context)

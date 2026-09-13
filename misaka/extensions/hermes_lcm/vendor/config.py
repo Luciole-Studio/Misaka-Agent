@@ -230,8 +230,8 @@ def _hermes_compression_threshold(default: float) -> float:
     return value
 
 
-def _hermes_compression_threshold_with_source(default: float) -> tuple[float, str]:
-    cfg = _load_hermes_config_yaml()
+def _hermes_compression_threshold_with_source(default: float, cfg=None) -> tuple[float, str]:
+    cfg = cfg if cfg is not None else _load_hermes_config_yaml()  # misaka: explicit host config
     try:
         lcm_section = cfg.get("lcm") or {}
         if isinstance(lcm_section, dict):
@@ -263,8 +263,8 @@ def _hermes_auxiliary_compression_timeout_ms(default: int) -> int:
     return value
 
 
-def _hermes_auxiliary_compression_timeout_ms_with_source(default: int) -> tuple[int, str]:
-    cfg = _load_hermes_config_yaml()
+def _hermes_auxiliary_compression_timeout_ms_with_source(default: int, cfg=None) -> tuple[int, str]:
+    cfg = cfg if cfg is not None else _load_hermes_config_yaml()  # misaka: explicit host config
     try:
         auxiliary = cfg.get("auxiliary") or {}
         if not isinstance(auxiliary, dict):
@@ -280,8 +280,8 @@ def _hermes_auxiliary_compression_timeout_ms_with_source(default: int) -> tuple[
         return default, "default"
 
 
-def _hermes_codex_gpt55_autoraise_with_source(default: bool) -> tuple[bool, str]:
-    cfg = _load_hermes_config_yaml()
+def _hermes_codex_gpt55_autoraise_with_source(default: bool, cfg=None) -> tuple[bool, str]:
+    cfg = cfg if cfg is not None else _load_hermes_config_yaml()  # misaka: explicit host config
     try:
         compression = cfg.get("compression") or {}
         if not isinstance(compression, dict):
@@ -777,7 +777,7 @@ class LCMConfig:
     ignored_config_yaml_lcm_keys: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_env(cls) -> "LCMConfig":
+    def from_env(cls, *, host_config: dict[str, Any] | None = None) -> "LCMConfig":  # misaka: host ownership
         """Build config from environment variables (LCM_ prefix)."""
         c = cls()
         config_sources: dict[str, str] = {}
@@ -788,7 +788,7 @@ class LCMConfig:
             if warning:
                 config_source_warnings.append(warning)
 
-        c.ignored_config_yaml_lcm_keys = _ignored_lcm_config_yaml_keys()
+        c.ignored_config_yaml_lcm_keys = _ignored_lcm_config_yaml_keys(host_config)
 
         # Source-tracked fields (provenance recording and/or a computed default)
         # stay explicit; the uniform loop below skips them.
@@ -805,7 +805,7 @@ class LCMConfig:
             "LCM_LEAF_CHUNK_TOKENS", c.leaf_chunk_tokens
         )
         _record("leaf_chunk_tokens", source, warning)
-        context_default, context_source = _hermes_compression_threshold_with_source(c.context_threshold)
+        context_default, context_source = _hermes_compression_threshold_with_source(c.context_threshold, host_config)
         c.context_threshold, source, warning = _parse_float_env_with_source(
             "LCM_CONTEXT_THRESHOLD",
             context_default,
@@ -813,7 +813,7 @@ class LCMConfig:
         )
         _record("context_threshold", source, warning)
         c.codex_gpt55_autoraise_enabled, source = _hermes_codex_gpt55_autoraise_with_source(
-            c.codex_gpt55_autoraise_enabled
+            c.codex_gpt55_autoraise_enabled, host_config
         )
         _record("codex_gpt55_autoraise_enabled", source)
         c.summary_spend_max_calls, source, warning = _parse_int_env_with_source(
@@ -832,7 +832,7 @@ class LCMConfig:
         )
         _record("summary_spend_backoff_seconds", source, warning)
         summary_timeout_default, summary_timeout_source = _hermes_auxiliary_compression_timeout_ms_with_source(
-            c.summary_timeout_ms
+            c.summary_timeout_ms, host_config
         )
         c.summary_timeout_ms, source, warning = _parse_int_env_with_source(
             "LCM_SUMMARY_TIMEOUT_MS",

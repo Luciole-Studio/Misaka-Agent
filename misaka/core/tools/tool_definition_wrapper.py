@@ -32,6 +32,7 @@ def wrap_tool_definition[TDetails](
 
     return AgentTool(
         name=definition.name,
+        aliases=definition.aliases,
         label=definition.label,
         description=definition.description,
         parameters=definition.parameters,
@@ -61,6 +62,7 @@ def create_tool_definition_from_agent_tool(tool: Any) -> ToolDefinition[Any, Any
 
     return ToolDefinition(
         name=tool.name,
+        aliases=getattr(tool, "aliases", ()),
         label=tool.label,
         description=tool.description,
         parameters=tool.parameters,

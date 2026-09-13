@@ -54,7 +54,9 @@ from urllib.parse import urlparse
 
 from misaka.config import expand_tilde_path
 from misaka.config.product import CFG
+from misaka.core.tools._web.evidence import citable_url
 from misaka.core.web.config import web_config
+from misaka.core.web.scope import cache_namespace
 from misaka.utils import atomic
 
 logger = logging.getLogger(__name__)
@@ -99,33 +101,27 @@ def normalize_query(query: str) -> str:
 
 
 class SearchMemo:
-    """TTL memo for search responses.
-
-    No lock, where Hermes holds a ``threading.Lock``: Hermes dispatches tools from a
-    thread pool, MISAKA drives every tool from one event loop, and there is no ``await``
-    between any read and its matching write below. The same argument the ring cursor and
-    ``_web/single_flight.py`` already make. Coalescing of concurrent identical calls is
-    not this class's job either -- that is ``single_flight`` around the whole miss path,
-    which is the async equivalent of Hermes' per-key flight lock.
-    """
+    """TTL memo shared only by the same profile/config/provider identity, across loops."""
 
     def __init__(self) -> None:
         self._store: dict[tuple, tuple[float, dict]] = {}
+        self._lock = threading.Lock()
 
     def _key(self, provider: str, query: str, limit: int) -> tuple:
-        return (provider, normalize_query(query), bucket_limit(limit))
+        return (cache_namespace(), provider, normalize_query(query), bucket_limit(limit))
 
     def lookup(self, provider: str, query: str, limit: int) -> dict | None:
         if not cache_enabled():
             return None
         key = self._key(provider, query, limit)
-        hit = self._store.get(key)
-        if hit is None:
-            return None
-        expires, response = hit
-        if time.monotonic() >= expires:
-            del self._store[key]
-            return None
+        with self._lock:
+            hit = self._store.get(key)
+            if hit is None:
+                return None
+            expires, response = hit
+            if time.monotonic() >= expires:
+                del self._store[key]
+                return None
         logger.info("web_search cache hit: %r via %s", query, provider)
         return json.loads(json.dumps(response))  # defensive copy
 
@@ -138,13 +134,16 @@ class SearchMemo:
         key = self._key(provider, query, limit)
         # Opportunistic expiry sweep to bound memory.
         now = time.monotonic()
-        for expired in [k for k, (exp, _) in self._store.items() if now >= exp]:
-            del self._store[expired]
-        self._store[key] = (now + ttl_seconds(), json.loads(json.dumps(response)))
+        entry = (now + ttl_seconds(), json.loads(json.dumps(response)))
+        with self._lock:
+            for expired in [k for k, (exp, _) in self._store.items() if now >= exp]:
+                del self._store[expired]
+            self._store[key] = entry
 
     def clear(self) -> None:
         """Drop every cached entry (tests; a config change)."""
-        self._store.clear()
+        with self._lock:
+            self._store.clear()
 
 
 search_memo = SearchMemo()
@@ -156,7 +155,7 @@ def flight_key(provider: str, query: str, limit: int) -> str:
     ``_web/single_flight.py`` keys on a string, and it has to agree with the memo or two
     callers whose requests would share a cache entry would still both pay for it.
     """
-    return f"web-search\x1f{provider}\x1f{bucket_limit(limit)}\x1f{normalize_query(query)}"
+    return f"web-search\x1f{cache_namespace()}\x1f{provider}\x1f{bucket_limit(limit)}\x1f{normalize_query(query)}"
 
 
 def slice_search_response(response: dict[str, Any], limit: int) -> dict[str, Any]:
@@ -167,8 +166,8 @@ def slice_search_response(response: dict[str, Any], limit: int) -> dict[str, Any
             out = json.loads(json.dumps(response))
             out["data"]["web"] = out["data"]["web"][:limit]
             return out
-    except Exception as exc:  # noqa: BLE001 - a malformed response is returned unsliced
-        logger.debug("web_search response could not be sliced: %s", exc)
+    except Exception:  # noqa: BLE001, S110 - a malformed response is returned unsliced
+        pass
     return response
 
 
@@ -224,8 +223,7 @@ def _cache_dir() -> Path | None:
         directory = Path(expand_tilde_path(str(CFG["web_cache"])))
         directory.mkdir(parents=True, exist_ok=True)
         return directory
-    except Exception as exc:  # noqa: BLE001 - no cache directory is a miss, never a raise
-        logger.debug("web extract cache directory unavailable: %s", exc)
+    except Exception:  # noqa: BLE001 - no cache directory is a miss, never a raise
         return None
 
 
@@ -264,8 +262,7 @@ def _load_index() -> dict:
         return {}
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001 - a corrupt index is an empty cache
-        logger.debug("web extract cache index unreadable, treating as empty: %s", exc)
+    except Exception:  # noqa: BLE001 - a corrupt index is an empty cache
         return {}
     return loaded if isinstance(loaded, dict) else {}
 
@@ -287,10 +284,10 @@ def _save_index(index: dict) -> None:
         if len(index) > _INDEX_MAX_ENTRIES:
             newest = sorted(index.items(), key=lambda kv: _fetched_at(kv[1]), reverse=True)
             index = dict(newest[:_INDEX_MAX_ENTRIES])
-        # 0644, not the 0600 web.json gets: URLs and titles of public pages, no credentials.
-        atomic.write_text(path, json.dumps(index), mode=0o644)
-    except Exception as exc:  # noqa: BLE001 - a cache write never breaks the caller
-        logger.debug("web extract cache index could not be saved: %s", exc)
+        # A configured provider/extension can return account-private material and URLs.
+        atomic.write_text(path, json.dumps(index), mode=0o600)
+    except Exception:  # noqa: BLE001, S110 - a cache write never breaks the caller
+        pass
 
 
 def _url_digest(url: str, format: str | None, provider: str = "") -> str:
@@ -300,7 +297,7 @@ def _url_digest(url: str, format: str | None, provider: str = "") -> str:
     extract and a markdown one of the same page overwrite each other, and that switching
     extract backends inside the TTL served the old backend's rendering.
     """
-    raw = f"{url}\n{format or 'markdown'}\n{provider or ''}"
+    raw = f"{cache_namespace()}\n{url}\n{format or 'markdown'}\n{provider or ''}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
@@ -318,18 +315,12 @@ def _hostname(url: str) -> str:
 
 
 def _entry_file_path(url: str, format: str | None, provider: str) -> Path | None:
-    """The file holding one (url, format, provider) entry's text.
-
-    Deliberately NOT the file the extract tool's truncate-store writes, whose name keys on
-    the URL alone -- that file's job is to be the thing ``read_file`` pages through, and
-    two formats (or two providers') copies of one page would overwrite each other in it.
-    These carry the whole key in their name and exist only so a hit has something to read.
-    """
+    """One atomic cache envelope per (URL, format, provider), separate from evidence."""
     directory = _cache_dir()
     if directory is None:
         return None
     slug = re.sub(r"[^A-Za-z0-9._-]", "-", _hostname(url) or "page")[:60].strip("-")
-    return directory / f"{slug or 'page'}-{_url_digest(url, format, provider)}.cache.md"
+    return directory / f"{slug or 'page'}-{_url_digest(url, format, provider)}.cache.json"
 
 
 def _host_matches_pattern(host: str, pattern: str) -> bool:
@@ -413,7 +404,7 @@ def extract_cache_get(
 
     The hit is shaped like one entry of the provider contract in
     :mod:`misaka.core.web.provider`, plus ``cached``: ``{"url", "title", "content",
-    "error": None, "cached": True}``. Every failure here -- disabled, exempt, expired,
+    "error": None, "cached": True, "metadata"}``. Every failure here -- disabled, exempt, expired,
     tampered index, evicted file -- is the same None, because a caller that cannot tell
     them apart cannot do anything different about them either.
 
@@ -439,17 +430,21 @@ def extract_cache_get(
         # case, since resolving follows one out of the directory.
         if cache_root is None or cache_root.resolve() not in file_path.resolve().parents:
             return None
-        content = file_path.read_text(encoding="utf-8")
-    except (OSError, ValueError) as exc:
-        logger.debug("web_extract cache entry for %s unreadable: %s", url, exc)
+        page = json.loads(file_path.read_text(encoding="utf-8"))
+        if (not isinstance(page, dict) or page.get("url") != url
+                or not isinstance(page.get("content"), str)
+                or not isinstance(page.get("metadata"), dict)):
+            return None
+    except (OSError, ValueError, RecursionError):
         return None
     logger.info("web_extract cache hit: %s", url)
     return {
         "url": url,
-        "title": str(entry.get("title", "") or ""),
-        "content": content,
+        "title": str(page.get("title", "") or ""),
+        "content": page["content"],
         "error": None,
         "cached": True,
+        "metadata": page["metadata"],
     }
 
 
@@ -460,6 +455,7 @@ def extract_cache_put(
     title: str = "",
     format: str | None = None,
     provider: str = "",
+    metadata: dict | None = None,
 ) -> None:
     """Store one successful extraction's clean text for TTL reuse. Best-effort.
 
@@ -477,16 +473,24 @@ def extract_cache_put(
         file_path = _entry_file_path(url, format, provider)
         if file_path is None:
             return
-        # 0644 like the index: page text, not a credential.
-        atomic.write_text(file_path, content, mode=0o644)
+        # Publish body and provenance together. Independent file/index writes can
+        # otherwise pair one writer's body with another writer's title and source.
+        page = {
+            "url": url, "title": title or "", "content": content,
+            "metadata": {
+                "sourceURL": citable_url((metadata or {}).get("sourceURL") or url),
+                "served_by": (metadata or {}).get("served_by") or provider,
+                **({"content_kind": metadata["content_kind"]} if metadata and "content_kind" in metadata else {}),
+            },
+        }
+        atomic.write_text(file_path, json.dumps(page), mode=0o600)
         with _index_lock:
             index = _load_index()
             index[_url_digest(url, format, provider)] = {
                 "url": url,
                 "file": str(file_path),
-                "title": title or "",
                 "fetched_at": time.time(),
             }
             _save_index(index)
-    except Exception as exc:  # noqa: BLE001 - a cache write never breaks the caller
-        logger.debug("web_extract could not be cached for %s: %s", url, exc)
+    except Exception:  # noqa: BLE001, S110 - a cache write never breaks the caller
+        pass

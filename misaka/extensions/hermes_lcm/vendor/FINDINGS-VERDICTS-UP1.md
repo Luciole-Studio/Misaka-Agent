@@ -1,0 +1,13 @@
+# FINDINGS-VERDICTS-UP1
+- Source head: `ccc76ee4f30fa6203d50e73fb0eeb0eb8983b2aa`; branch `fix/upstream-followup-1`.
+- 3649814070 VALIDATED/FIXED: finite coverage now counts distinct grounded `exact_ref` values.
+- 3672539167 VALIDATED/FIXED: hit CAS checks generation/rowcount and re-reads readiness before returning `hit`.
+- 3672539173 VALIDATED/FIXED: persisted slot refs are intersected with the selected evidence set.
+- 3668416705 VALIDATED/FIXED: existing trajectory schema version is rejected before schema/FTS repair DDL.
+- 3672539191 VALIDATED/FIXED: deadline-expired paths skip `COUNT(*)`; in-memory totals remain meaningful.
+- Focused regressions: 9 passed; see `laneUP1-logs/focused-up1.xml`.
+- Ruff: whole repository clean; see `laneUP1-logs/ruff-up1.txt`.
+- Full suite: 2709 passed, 35 failed, 1 skipped, 12 xfailed; 0 new and 0 missing failure names vs baseline.
+- Full-suite evidence: `laneUP1-logs/full-suite-up1.xml` and `full-suite-up1-comparison.txt`.
+- Surface verdict: no validation evidence contradicted the NON-V1-delivery triage classification.
+- No push, merge, release, deploy, or runtime mutation performed.

@@ -634,6 +634,31 @@ def remove_pane(node, target):
     return None
 
 
+def _even(children, direction):
+    """A right-leaning split of ``children`` (leaves or subtrees) into equal shares along
+    ``direction``: the first takes 1/n and the rest split the remaining n-1/n evenly, so every
+    child ends up the same size."""
+    if len(children) == 1:
+        return children[0]
+    return ("split", direction, valid_split_ratio(1 / len(children)),
+            children[0], _even(children[1:], direction))
+
+
+def grid_tree(pane_ids):
+    """A balanced grid of the panes, as an ordinary split tree (misaka addition; herdr has only
+    manual BSP splits). N<=3 is a single row; otherwise cols = ceil(sqrt(N)) and rows =
+    ceil(N/cols), filled row by row. Rows stack vertically ('v'), the columns of a row sit side
+    by side ('h'), all with even ratios -- so the panes are equal and only the last row may be
+    short (2->[2], 3->[3], 4->[2,2], 5->[3,2], 6->[3,3], 7->[3,3,1], 8->[3,3,2], 9->[3,3,3]).
+    Being a plain split tree, every layout path (collect_panes, pane_ids, rendering) just works."""
+    ids = list(pane_ids)
+    if len(ids) <= 1:
+        return ("pane", ids[0]) if ids else None
+    cols = len(ids) if len(ids) <= 3 else math.ceil(math.sqrt(len(ids)))
+    rows = [ids[i:i + cols] for i in range(0, len(ids), cols)]
+    return _even([_even([("pane", pid) for pid in row], "h") for row in rows], "v")
+
+
 def split_rect(area, direction, ratio):
     """src/layout.rs:691-710: cut a rectangle in two by ratio (h = side by side, v = stacked)."""
     if direction == "h":

@@ -6,14 +6,30 @@ The engine has no skill loading of its own: this extension is the only
 thing that decides which skills a session sees -- the role's three layers, or the
 read-only sandbox a card runs against (``SessionSpec.skill_roots``).
 """
+import asyncio
+import json
 import os
 import shlex
+import tempfile
+import threading
 from pathlib import Path
 
 from misaka.core.moments import CoreCommand
+from misaka.core.skills import bundles, reader, sandbox, visibility
 from misaka.core.skills import index as skill_index
-from misaka.core.skills.layers import SKILL_SUPPORT_DIRS, skill_roots
-from misaka.core.skills.manage import lookup_path_error
+from misaka.core.skills.layers import (
+    extension_resources,
+    extension_roots,
+    parse_skill_name,
+    skill_roots,
+)
+from misaka.core.skills.manage import (
+    MANAGE_PARAMETERS,
+    lookup_path_error,
+    prepare_arguments,
+)
+from misaka.core.skills.vendor import commands as hermes_commands
+from misaka.utils.async_lifecycle import run_in_thread, settle
 
 _SKILL_INVOCATION_PREFIX = "[IMPORTANT: The user has invoked the "
 _SINGLE_SKILL_MARKER = "The full skill content is loaded below.]"
@@ -47,86 +63,61 @@ def _slash_entries(entries):
     return out
 
 
-def _body(entry, session_id=None):
-    """SKILL.md's body with template variables and inline shell applied."""
+def _render_loaded(loaded, entry, *, activation_note, user_instruction="", session_id=None):
+    from misaka.core.skills.layers import config_path, load_skills_config
     from misaka.core.skills.preprocessing import preprocess_skill_content
+    from misaka.core.skills.vendor.metadata import (
+        extract_skill_config_vars,
+        resolve_skill_config_values,
+    )
+    from misaka.utils.prompt_cache_boundary import register_stable_prefix
 
-    raw = Path(entry["path"]).read_text(encoding="utf-8-sig", errors="replace")
-    _, body = skill_index.parse_skill_markdown(raw)
-    body = (body or "").strip()
-    return preprocess_skill_content(body, Path(entry["dir"]), session_id=session_id,
-                                    layer=entry.get("layer")).strip()
+    def inject_config(payload, parts):
+        fm, _ = skill_index.parse_skill_markdown(payload["content"])
+        config = resolve_skill_config_values(extract_skill_config_vars(fm), {"skills": load_skills_config()})
+        if config:
+            parts += ["", f"[Skill config (from {config_path()}):"]
+            parts += [f"  {key} = {value if value is not None and value != '' else '(not set)'}" for key, value in config.items()]
+            parts.append("]")
+
+    def preprocess(content, directory, task_id):
+        return preprocess_skill_content(content, directory, task_id,
+                                        layer=entry.get("origin_layer", entry.get("layer")))
+
+    # One raw read, one preprocessing pass. Native ordering/markers are preserved;
+    # only explicit host config, linked-file containment and source identity differ.
+    return hermes_commands._build_skill_message(
+        loaded, Path(entry["dir"]), activation_note, user_instruction=user_instruction, session_id=session_id,
+        preprocess=preprocess, inject_config=inject_config,
+        support_files=[p for files in (loaded.get("linked_files") or {}).values() for p in files],
+        skill_view_target=_runtime_name(entry), skill_view_source=entry.get("origin_path", entry["path"]),
+        register_prefix=register_stable_prefix)
 
 
-def collect_linked_files(skill_dir):
-    """The skill's support files grouped by support directory (symlinks never listed)."""
-    root = Path(skill_dir)
-    out = {}
-    for category in sorted(SKILL_SUPPORT_DIRS):
-        sub = root / category
-        if not sub.is_dir():
-            continue
-        files = [str(f.relative_to(root)) for f in sorted(sub.rglob("*"))
-                 if f.is_file() and not f.is_symlink()]
-        if files:
-            out[category] = files
-    return out
-
-
-def read_support_file(skill_dir, file_path):
-    """Read one support file from inside the skill directory; return ``(text, error)``."""
-    err = lookup_path_error(file_path)
-    if err:
-        return None, err
-    root = Path(skill_dir).resolve()
-    target = (root / file_path).resolve()
+def build_skill_message(entry, *, user_instruction="", session_id=None, activation_note=None, profile_dir=None, runtime=None):
+    from misaka.core.skills.runtime import SkillRuntime, using_runtime
+    owned = runtime is None
+    runtime = SkillRuntime(profile_dir) if owned else runtime
     try:
-        target.relative_to(root)
-    except ValueError:
-        return None, f"File is outside the skill directory: {file_path}"
-    if not target.is_file():
-        return None, f"Skill support file not found: {file_path}"
-    try:
-        data = target.read_bytes()
-    except OSError as e:
-        return None, str(e)
-    try:
-        return data.decode("utf-8-sig"), None
-    except UnicodeDecodeError:
-        return f"[Binary file: {target.name}, {len(data)} bytes]", None
-
-
-def skill_content(entry, session_id=None):
-    """What ``skill_view`` returns for SKILL.md (hermes: content plus linked_files): the
-    processed body, the skill directory for relative paths, and the support-file index."""
-    linked = collect_linked_files(entry["dir"])
-    lines = [_body(entry, session_id), "", f"[Skill directory: {entry['dir']}]",
-             "Resolve relative paths in the skill against that directory."]
-    if linked:
-        lines += ["", "[Linked files: load one with skill_view(name=..., file_path=...)]"]
-        lines += [f"- {c}: {', '.join(fs)}" for c, fs in linked.items()]
-    return "\n".join(lines), linked
-
-
-def build_skill_message(entry, *, user_instruction="", session_id=None):
-    """The ``/skill`` activation message: the processed skill plus the user's instruction."""
-    skill_dir = Path(entry["dir"])
-    parts = [f'{_SKILL_INVOCATION_PREFIX}"{_runtime_name(entry)}"{_SINGLE_SKILL_ACTIVATION_SUFFIX}',
-             "", _body(entry, session_id), "", f"{_SKILL_DIRECTORY_PREFIX}{skill_dir}]",
-             _SKILL_DIRECTORY_INSTRUCTION]
-    supporting = [f for files in collect_linked_files(skill_dir).values() for f in files]
-    if supporting:
-        parts += ["", "[This skill has supporting files:]"]
-        parts += [f"- {sf}  ->  {skill_dir / sf}" for sf in supporting]
-    if user_instruction:
-        parts += ["", f"{_SINGLE_SKILL_INSTRUCTION}{user_instruction}"]
-    return "\n".join(parts)
+        # Keep the same owner through readiness AND message preprocessing.
+        with using_runtime(runtime):
+            loaded = reader.load(entry, session_id, profile_dir=profile_dir, preprocess=False, runtime=runtime)
+            if not loaded.get("success"):
+                raise ValueError(loaded.get("error", "Skill loading failed."))
+            note = activation_note or f'{_SKILL_INVOCATION_PREFIX}"{_runtime_name(entry)}"{_SINGLE_SKILL_ACTIVATION_SUFFIX}'
+            return _render_loaded(loaded, entry, activation_note=note, user_instruction=user_instruction, session_id=session_id)
+    finally:
+        if owned:
+            runtime.close()
 
 
 def parse_skill_invocation_message(text):
     """Parse the Hermes single-skill scaffold for the Pi-derived TUI adapter."""
     if not isinstance(text, str):
         return None
+    if text.startswith(_SKILL_INVOCATION_PREFIX) and ' skill bundle,' in text.split("\n", 1)[0]:
+        return {"name": hermes_commands.describe_skill_invocation(text) or "skills", "location": "",
+                "content": text, "user_instruction": hermes_commands.extract_user_instruction_from_skill_message(text)}
     first, separator, rest = text.partition("\n\n")
     prefix = f'{_SKILL_INVOCATION_PREFIX}"'
     suffix = '"' + _SINGLE_SKILL_ACTIVATION_SUFFIX
@@ -144,7 +135,7 @@ def parse_skill_invocation_message(text):
     if instruction_marker in after:
         _, _, instruction = after.partition(instruction_marker)
         instruction = instruction.strip() or None
-    return {"name": name, "location": location, "content": content,
+    return {"name": name, "location": location, "content": skill_index.parse_skill_markdown(content)[1].strip(),
             "user_instruction": instruction}
 
 
@@ -153,30 +144,49 @@ class SkillsPart:
     ``/learn``) go to the role's own ``skills/`` under ``profile_dir``. ``cwd`` is the
     workspace the coding posture is judged in (misaka.core.skills.coding_context)."""
 
-    def __init__(self, roots, profile_dir, cwd=None, kind="foreground"):
+    def __init__(self, roots, profile_dir, cwd=None, kind="foreground", *, platform="cli", startup_skills=(), runtime=None):
         self.session = None
+        self._kind = kind
+        self._platform = platform
+        from misaka.core.skills.runtime import SkillRuntime
+        self.runtime = runtime if runtime is not None else SkillRuntime(profile_dir, platform=platform)
+        self._dedup = {}
+        from misaka.core.skills.scope import SkillScope
+        self.scope = SkillScope(profile_dir, Path(cwd or os.getcwd()))
+        self._startup_skills = tuple(startup_skills)
+        self._startup_prompt = None
+        self._command_snapshot = {}
+        self._read_lock = asyncio.Lock()
+        self._execution_tmp = None
+        self._copy_lock = threading.RLock()
+        self._closed = False
+        self._curator_task = None
+        self._review_scope = None
+        self._curator_lock = asyncio.Lock()
+        from misaka.core.skills.sync_owner import SyncOwner
+        self._sync_owner = SyncOwner(self.scope)
+        self._sync_started = False
+        self._activated_providers = set()
+        self._sealed_root = None
         self.tools = []
-        self.commands = []
+        self._commands = []
         from pydantic import BaseModel, ConfigDict, Field
 
         from misaka.core.extensions.types import ToolDefinition
         from misaka.core.skills.coding_context import compact_skill_categories
 
-        roots = list(roots)
+        self._base_roots = None if roots is None else list(roots)
+        roots = list(roots or ())
         self._roots = roots
         workspace = cwd or os.getcwd()
+        self._profile_dir, self._workspace = profile_dir, workspace
+        self._live_roots = set()
 
         def entries():
-            return skill_index.runtime_build(roots)
+            return self._entries()
 
         def prompt_entries():
-            return skill_index.build(roots)
-
-        def session_id(ctx):
-            try:
-                return str(ctx.sessionManager.getSessionId())
-            except Exception:  # noqa: BLE001 - a missing session ID should not block loading
-                return None
+            return self._entries(prompt=True)
 
         class ListParams(BaseModel):
             model_config = ConfigDict(extra="forbid")
@@ -185,36 +195,24 @@ class SkillsPart:
         class ViewParams(BaseModel):
             model_config = ConfigDict(extra="forbid")
             name: str = Field(description="The skill name (use skills_list to see available skills).")
+            source: str = Field("", description="For a name collision, the exact indexed SKILL.md path shown as source in the list or error. Does not allow arbitrary files.")
             file_path: str = Field(
                 "", description="OPTIONAL: Path to a linked file within the skill (e.g., 'references/api.md', "
                                 "'templates/config.yaml', 'scripts/validate.py'). Omit to get the main SKILL.md content.")
 
-        class ManageParams(BaseModel):
-            model_config = ConfigDict(extra="forbid")
-            action: str = Field(description="Operation: create, edit, patch, delete, write_file, or remove_file.")
-            name: str = Field(description="Lowercase kebab-case skill name and directory name.")
-            content: str = Field("", description="Complete SKILL.md text for create or edit.")
-            file_path: str = Field("", description="Relative support-file path, or optional patch target.")
-            file_content: str = Field("", description="Complete content for write_file.")
-            old_string: str = Field("", description="Exact text to replace; must match uniquely unless replace_all is true.")
-            new_string: str = Field("", description="Replacement text; use an empty string to remove the match.")
-            replace_all: bool = Field(False, description="Replace every match instead of requiring one unique match.")
-            absorbed_into: str = Field("", description="For delete, optional existing skill that absorbed this skill's useful content.")
-
         # ── the index in the system prompt (hermes build_skills_system_prompt) ──
         async def advertise(event, _ctx):
-            active = None
-            if self.session is not None:
-                try:
-                    active = set(self.session.getActiveToolNames())
-                except Exception:  # noqa: BLE001 - a session that cannot say fails open
-                    active = None
-            if active is not None and not ({"skills_list", "skill_view", "skill_manage"} & active):
-                return None
+            active = self._active_tools()
+            if active is not None and "skill_view" not in active:
+                return ({"systemPrompt": event["systemPrompt"].rstrip() + "\n\n" + self._startup_prompt}
+                        if self._startup_prompt else None)
             section = skill_index.render_prompt(prompt_entries(), skill_index.categories(roots),
-                                                compact_skill_categories(workspace))
-            if section:
-                return {"systemPrompt": event["systemPrompt"].rstrip() + "\n\n" + section}
+                                                compact_skill_categories(workspace, platform=self._platform),
+                                                can_manage=("skill_manage" in active if active is not None
+                                                            else kind not in ("card", "child")), available_tools=active)
+            sections = [s for s in (section, self._startup_prompt) if s]
+            if sections:
+                return {"systemPrompt": event["systemPrompt"].rstrip() + "\n\n" + "\n\n".join(sections)}
 
         async def fresh(_event, _ctx):
             skill_index.invalidate()
@@ -224,9 +222,8 @@ class SkillsPart:
         # Live skill trees change only through skill_manage (gate, scan, ledger): the generic file
         # and shell tools are refused on them in every kind of session. A card's sandbox copies are
         # not live trees, so reading them stays possible.
-        live_roots = set()
-        for _layer, root in skill_roots(profile_dir, workspace):
-            live_roots.update({os.path.abspath(root), os.path.realpath(root)})
+        live_roots = self._live_roots
+        self._refresh_roots()
 
         def _touches_live_skills(tool, args):
             if tool in ("write", "edit"):
@@ -271,17 +268,13 @@ class SkillsPart:
         # ── tools ──
         async def list_execute(tool_call_id, raw, signal, on_update, ctx):
             args = raw if isinstance(raw, ListParams) else ListParams(**(raw or {}))
-            found = [e for e in entries() if not args.category or e["category"] == args.category]
-            if not found:
-                return {"content": [{"type": "text", "text": "No skills are available."}],
-                        "details": {"count": 0, "categories": []}}
-            text = ("Available skills (use skill_view(name) to load full content):\n"
-                    + "\n".join(skill_index.index_lines(
-                        found, skill_index.categories(roots),
-                        name_key="runtime_name", description_key="list_description")))
-            return {"content": [{"type": "text", "text": text}],
-                    "details": {"count": len(found),
-                                "categories": sorted({e["category"] for e in found})}}
+            from misaka.core.skills.vendor.view import skills_list
+            rows = [{"name": _runtime_name(e), "description": e["list_description"], "category": e["category"],
+                     **({"source": e["source"]} if e.get("source") else {})} for e in entries()]
+            payload = json.loads(skills_list(rows, args.category or None))
+            return {"content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}],
+                    "details": {"count": len(payload.get("skills", [])), **payload},
+                    "isError": not payload.get("success")}
 
         self.tools.append(ToolDefinition(
             name="skills_list", label="List skills",
@@ -294,59 +287,64 @@ class SkillsPart:
             err = lookup_path_error(args.name)
             if err:
                 return {"content": [{"type": "text", "text": err}], "isError": True}
-            # hermes collision rule: a bare name that several layers claim is refused rather
-            # than guessed -- unless one of them is the project's, which overrides on purpose.
-            found = skill_index.candidates(roots, args.name)
-            exact = [e for e in found if e["rel"] == args.name.strip()]   # the directory path inside a layer
-            found = exact or found
-            found = [e for e in found if e["layer"] == "project"] or found   # the index's promise: project shadows the rest
-            if len({e["dir"] for e in found}) > 1:
-                paths = "; ".join(e["path"] for e in found)
-                return {"content": [{"type": "text", "text": (
-                    f"Ambiguous skill name '{args.name}': {len(found)} skills match across your "
-                    f"layers. Refusing to guess — pass the skill's path inside its layer instead "
-                    f"of the bare name (e.g. 'category/skill-name'). Matches: {paths}")}],
-                        "isError": True}
-            entry = found[0] if found else None
-            if entry is None:
-                names = ", ".join(sorted(_runtime_name(e) for e in entries())) or "none"
-                return {"content": [{"type": "text",
-                                     "text": f"Unknown skill '{args.name}'. Available: {names}"}],
-                        "isError": True}
-            if not entry.get("runtime_compatible", True):
-                return {"content": [{"type": "text",
-                                     "text": f"Skill '{_runtime_name(entry)}' is not supported on this platform."}],
-                        "isError": True}
-            if args.file_path:
-                content, err = read_support_file(entry["dir"], args.file_path)
-                if err:
-                    return {"content": [{"type": "text", "text": err}], "isError": True}
-                return {"content": [{"type": "text", "text": content}],
-                        "details": {"skill": _runtime_name(entry), "file": args.file_path}}
-            text, linked = skill_content(entry, session_id(ctx))
-            return {"content": [{"type": "text", "text": text}],
-                    "details": {"skill": _runtime_name(entry), "linked_files": linked}}
+            try:
+                await self._prepare_provider(args.name, source=args.source)
+            except ValueError as error:
+                return {"content": [{"type": "text", "text": str(error)}], "isError": True}
+            self._refresh_roots()
+            entry, err = skill_index.resolve(roots, args.name, source=args.source or None, platform=self._platform)
+            if err:
+                return {"content": [{"type": "text", "text": err}], "isError": True}
+            async with self._read_lock:
+                # Resolve identity BEFORE dedup: same names across sources never
+                # share state, and disabled/quarantined entries cannot hit a stub.
+                source = Path(entry["dir"]) / args.file_path if args.file_path else Path(entry["path"])
+                try:
+                    st = source.stat()
+                    fingerprint = (str(source), st.st_mtime_ns, st.st_size)
+                except OSError:
+                    fingerprint = None
+                key = (entry["path"], args.file_path)
+                from misaka.core.skills.layers import load_skills_config
+                # Setup/config can change without touching SKILL.md.
+                ready = reader.readiness(entry.get("frontmatter", {}), profile_dir, runtime=self.runtime)
+                state = (fingerprint, json.dumps(load_skills_config(), sort_keys=True),
+                         tuple((e["name"], bool(self.runtime.load_env().get(e["name"]))) for e in ready["required_environment_variables"]),
+                         tuple(map(str, ready["missing_credential_files"])))
+                if fingerprint is not None and self._dedup.get(key) == state:
+                    payload = {"success": True, "status": "unchanged", "name": _runtime_name(entry),
+                               "file": args.file_path or "SKILL.md", "dedup": True, "content_returned": False,
+                               "message": "Skill content unchanged since it was loaded earlier in this conversation — refer to the earlier skill_view result; it is still current and complete. (Re-issued after context compression, this returns the full content again.)"}
+                else:
+                    payload = await self._run_activation(self._load_payload, entry, self._session_id(ctx), file_path=args.file_path or None, _ctx=ctx)
+                    if payload.get("success") and not payload.get("setup_needed"):
+                        self._dedup[key] = state
+                        while len(self._dedup) > 200:
+                            self._dedup.pop(next(iter(self._dedup)))
+                return {"content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}],
+                        "details": {**payload, "skill": _runtime_name(entry)}, "isError": not payload.get("success")}
 
         self.tools.append(ToolDefinition(
             name="skill_view", label="View skill",
             description="Skills allow for loading information about specific tasks and workflows, as well as scripts and templates. Load a skill's full content or access its linked files (references, templates, scripts). First call returns SKILL.md content plus a 'linked_files' index showing available references/templates/scripts. To access those, call again with file_path parameter.",
             parameters=ViewParams.model_json_schema(), execute=view_execute,
-            promptSnippet="Load a skill's full instructions",
-            promptGuidelines=["When a task matches a skill description, load it with `skill_view` before acting."]))
+            promptSnippet="Load a skill's full instructions"))
 
         async def manage_execute(tool_call_id, raw, signal, on_update, ctx):
             from misaka.core.skills import manage as skill_manage
-            args = raw if isinstance(raw, ManageParams) else ManageParams(**(raw or {}))
-            result = skill_manage.manage(
-                args.action, args.name, profile_dir=profile_dir,
-                content=args.content or None, file_path=args.file_path or None,
-                file_content=args.file_content if args.action == "write_file" else None,
-                old_string=args.old_string or None,
-                new_string=args.new_string if args.action == "patch" else None,
-                replace_all=args.replace_all,
-                absorbed_into=args.absorbed_into if args.action == "delete" else None,
-                visible_roots=roots)
-            lines = [result.get("message") or result.get("error") or ""]
+            args = skill_manage.prepare_arguments(raw or {})
+            if not isinstance(args, dict) or args.keys() - {"operations"}:
+                return {"content": [{"type": "text", "text": "Unknown Skill manage arguments; expected operations."}], "isError": True}
+            self._refresh_roots()
+            from misaka.core.skills.scope import using_scope
+            def managed():
+                with using_scope(self.scope):
+                    return skill_manage.manage(operations=args.get("operations"),
+                        profile_dir=profile_dir, workspace=workspace, visible_roots=list(roots))
+            result = await run_in_thread(managed)
+            if result.get("success"):
+                await self._sync_owner.schedule()
+            lines = [result.get("message") or result.get("error") or json.dumps(result, ensure_ascii=False)]
             for key in ("gist", "description_preview", "hint", "lint_hint"):
                 if result.get(key):
                     lines.append(str(result[key]))
@@ -360,7 +358,9 @@ class SkillsPart:
             self.tools.append(ToolDefinition(
                 name="skill_manage", label="Manage skills",
                 description="Create, update, or delete a reusable skill; every change goes through approval, validation, the security scan, and the rollback ledger.",
-                parameters=ManageParams.model_json_schema(), execute=manage_execute,
+                parameters=MANAGE_PARAMETERS,
+                prepareArguments=prepare_arguments,
+                execute=manage_execute,
                 promptSnippet="Create or update a reusable skill",
                 promptGuidelines=[
                     "New skill descriptions must be one sentence of at most 60 characters; put detail in the body.",
@@ -376,29 +376,44 @@ class SkillsPart:
                 if not found:
                     ctx.ui.notify("No skills are available in the current skill stack.", "info")
                     return
-                lines = [f"/skill {skill_index.slug(_runtime_name(e))}"
+                lines = [f"/skill {shlex.quote(_runtime_name(e))}"
                          + (f" — {e['list_description']}" if e.get("list_description") else "")
                          for e in sorted(found, key=_runtime_name)]
                 ctx.ui.notify('Available skills:\n' + "\n".join(lines), "info")
                 return
             name, _, instruction = raw.partition(" ")
-            entry = skill_index.find(found, name)
-            if entry is None:
-                available = ", ".join(sorted(skill_index.slug(_runtime_name(e)) for e in found))
-                ctx.ui.notify(f"Unknown skill '{name}'. Available: {available}", "error")
-                return
-            await ctx.sendUserMessage(build_skill_message(
-                entry, user_instruction=instruction.strip(), session_id=session_id(ctx)))
+            async with self._read_lock:
+                entry, error = skill_index.resolve(roots, name, platform=self._platform)
+                if error:
+                    ctx.ui.notify(error, "error")
+                    return
+                message = await self._run_activation(self._single_message, entry, instruction.strip(), self._session_id(ctx), _ctx=ctx)
+                await ctx.sendUserMessage(message)
 
-        self.commands.append(CoreCommand(
+        self._commands.append(CoreCommand(
             "skill", "List skills, or invoke one with `/skill <name> [instruction]` in the current session.", skill_cmd))
 
+        async def reload_cmd(args, ctx):
+            before = dict(self._command_snapshot)
+            skill_index.invalidate()
+            self._refresh_roots()
+            self._update_command_snapshot()
+            diff = hermes_commands.diff_command_snapshots(before, self._command_snapshot)
+            diff["commands"] = len(self._command_snapshot)
+            ctx.ui.notify(json.dumps(diff, ensure_ascii=False), "info")
+
+        self._commands.append(CoreCommand("reload-skills", "Rescan Skills and report added/removed commands.", reload_cmd))
+
         async def learn_cmd(args, ctx):
+            if profile_dir is None:
+                ctx.ui.notify("Skill writing requires a role profile; select a role before using /learn.", "error")
+                return
             from misaka.core.skills import write as skill_write
             from misaka.core.skills.learn_prompt import build_learn_prompt
             target = os.path.join(profile_dir, "skills")
             os.makedirs(target, exist_ok=True)
-            prompt = build_learn_prompt(args or "", target_dir=target)
+            prompt = build_learn_prompt(args or "", target_dir=target,
+                                        available_tools=self.session.getActiveToolNames() if self.session else ())
             # Every write goes through the skill gate, validation, scan, and ledger.
             decision, note = skill_write.evaluate_gate()
             if decision == "off":
@@ -445,47 +460,521 @@ class SkillsPart:
             ctx.ui.notify(f"Skill write mode set to {value}; it takes effect immediately.", "info")
 
         if kind == "foreground":         # the write mode is the user's to set, at the keyboard
-            self.commands.append(CoreCommand(
+            self._commands.append(CoreCommand(
                 "skill-mode",
                 "Show or change the skill write mode: off, forbid / ask (writes wait for your review), or allow.",
                 skill_mode_cmd))
         if kind not in ("card", "child"):
-            self.commands.append(CoreCommand(
+            self._commands.append(CoreCommand(
                 "learn", "Create or improve a reusable skill from files, links, notes, or the workflow just completed.", learn_cmd))
 
+        if kind in ("foreground", "dm"):
+            async def refine(args, ctx):
+                import copy
+                from dataclasses import replace
+
+                from misaka.core.skills.operations import review_completed
+                if profile_dir is None:
+                    ctx.ui.notify("Skill review requires a role profile; select a role before using /refine.", "error")
+                    return
+                scope = replace(self.scope, origin="background_review", read_marks=None, stop=threading.Event())
+                messages = copy.deepcopy(getattr(getattr(self.session, "state", None), "messages", []))
+                task = await self._start_curator(scope, lambda: run_in_thread(review_completed, scope, messages, args))
+                if task is None:
+                    return
+                try:
+                    result = await asyncio.shield(task)
+                    await self._sync_owner.schedule()
+                    ctx.ui.notify(result.get("summary", "Skill review completed"), "warning" if result.get("error") else "info")
+                except asyncio.CancelledError:
+                    await self._stop_curator()
+                    raise
+                finally:
+                    if self._curator_task is task:
+                        self._curator_task = None
+                        self._review_scope = None
+            self._commands.append(CoreCommand("refine", "Review the completed task for reusable Skill improvements.", refine))
+
+
+    @property
+    def commands(self):
+        """The setting controls automatic commands; explicit /skill always remains."""
+        commands = list(self._commands)
+        settings = getattr(self.session, "settingsManager", None)
+        if settings and not settings.getEnableSkillCommands():
+            return commands
+        self._refresh_roots()
+        from misaka.core.slash_commands import (
+            _LOCAL_ALIAS_SLASH_COMMANDS,
+            BUILTIN_SLASH_COMMANDS,
+        )
+        reserved = {c.name for c in (*BUILTIN_SLASH_COMMANDS, *_LOCAL_ALIAS_SLASH_COMMANDS, *commands)}
+        if self.session:
+            for part in getattr(getattr(self.session, "moments", None), "parts", ()):
+                if part is not self:
+                    reserved.update(c.name for c in getattr(part, "commands", ()))
+            runner = getattr(self.session, "extensionRunner", None)
+            if runner:
+                reserved.update(c.name for c in runner.get_registered_commands())
+            loader = getattr(self.session, "resourceLoader", None)
+            if loader and hasattr(loader, "getPrompts"):
+                reserved.update(p.name for p in loader.getPrompts().get("prompts", []))
+        entries = _slash_entries(self._entries())
+        bundle_table = {k: v for k, v in self._bundles().items() if k[1:] not in reserved}
+        table = {"/" + skill_index.slug(_runtime_name(e)): e for e in entries
+                 if skill_index.slug(_runtime_name(e)) not in reserved
+                 and "/" + skill_index.slug(_runtime_name(e)) not in bundle_table}
+        for key, entry in table.items():
+            async def invoke(args, ctx, key=key):
+                async with self._read_lock:
+                    self._refresh_roots()
+                    extras, instruction = hermes_commands.split_stacked_skill_commands(
+                        args, lambda name: hermes_commands.resolve_slash_key(name, table))
+                    keys = list(dict.fromkeys([key, *extras]))
+                    message = await self._run_activation(self._stack_message, table, keys, instruction, self._session_id(ctx))
+                    if message:
+                        await ctx.sendUserMessage(message)
+                    else:
+                        ctx.ui.notify("Requested skills are no longer available.", "error")
+            commands.append(CoreCommand(key[1:], entry.get("list_description") or f"Invoke {_runtime_name(entry)}", invoke))
+        for key, info in bundle_table.items():
+            async def invoke_bundle(args, ctx, key=key):
+                async with self._read_lock:
+                    self._refresh_roots()
+                    result = await self._run_activation(self._bundle_message, key, args or "", self._session_id(ctx))
+                    if result:
+                        await ctx.sendUserMessage(result[0])
+                    else:
+                        ctx.ui.notify("Bundle has no available skills or no longer exists.", "error")
+            commands.append(CoreCommand(key[1:], info["description"], invoke_bundle))
+        return commands
+
+    def _update_command_snapshot(self):
+        self._command_snapshot = {c.name: c.description for c in self.commands if c.name not in {x.name for x in self._commands}}
+
+    def _single_message(self, entry, instruction, task_id, *, cancelled=None):
+        loaded = self._load_named_skill(_runtime_name(entry), task_id, source=entry["path"], cancelled=cancelled)
+        if not loaded:
+            raise ValueError("Skill is no longer available.")
+        note = f'{_SKILL_INVOCATION_PREFIX}"{loaded[2]}"{_SINGLE_SKILL_ACTIVATION_SUFFIX}'
+        return _render_loaded(loaded[0], loaded[0]["_entry"], activation_note=note,
+                              user_instruction=instruction, session_id=task_id)
+
+    def _preload(self, task_id, *, cancelled=None):
+        disabled = self._disabled_names()
+        return hermes_commands.build_preloaded_skills_prompt(
+            list(self._startup_skills), task_id,
+            load_blocks=lambda *args, **kwargs: self._load_blocks(*args, **kwargs, cancelled=cancelled),
+            load_payload=lambda identifier, task_id: self._load_named_skill(identifier, task_id, disabled=disabled, cancelled=cancelled),
+            disabled_names=disabled)
+
+    async def _prepare_provider(self, name, source=None):
+        if self._base_roots is not None:  # sealed card/child snapshots never activate live extensions
+            return
+        from misaka.core.skills.providers import prepare
+        if not source and isinstance(name, str) and ':' in name:
+            self._refresh_roots()
+            entry, error = skill_index.resolve(self._roots, name, platform=self._platform)
+            if error:
+                self._activated_providers.discard(parse_skill_name(name)[0])
+                return  # The normal resolver reports missing/disabled/ambiguous, without activation.
+            source = entry['path']
+        await prepare(getattr(self.session, "resourceLoader", None), name, self._activated_providers, source=source)
+
+    async def _run_activation(self, function, *args, _ctx=None, **kwargs):
+        kind = function.__name__
+        names = []
+        if kind in ("_single_message", "_load_payload") and args:
+            names = [(_runtime_name(args[0]), args[0]['path'])]
+        elif kind == "_stack_message":
+            names = [(_runtime_name(args[0][key]), args[0][key]['path']) for key in args[1] if key in args[0]]
+        elif kind == "_bundle_message":
+            names = [(name, None) for name in (self._bundles().get(args[0]) or {}).get("skills", [])]
+        elif kind == "_preload":
+            names = [(name, None) for name in self._startup_skills]
+        for name, source in names:
+            await self._prepare_provider(name, source=source)
+        """Cancel future bundle members, while draining the current owned effect."""
+        stop = threading.Event()
+        from misaka.core.skills.runtime import using_runtime
+        loop = asyncio.get_running_loop()
+        if _ctx is None and getattr(self.session, "extensionRunner", None) is not None:
+            _ctx = self.session.extensionRunner.create_context()
+        captures = set()
+        async def capture_owned(name, prompt):
+            from misaka.core.skills.secret_input import capture_secret
+            task = asyncio.current_task()
+            captures.add(task)
+            try:
+                return await capture_secret(_ctx, self.runtime, name, prompt, stop)
+            finally:
+                captures.discard(task)
+        def capture(name, prompt, metadata):
+            from concurrent.futures import TimeoutError as FutureTimeout
+            if _ctx is None or not getattr(_ctx, "hasUI", False):
+                return {"success": False, "skipped": True}
+            future = asyncio.run_coroutine_threadsafe(capture_owned(name, prompt), loop)
+            while True:
+                if stop.is_set():
+                    future.cancel()
+                    return {"success": False, "skipped": True}
+                try:
+                    return future.result(timeout=0.1)
+                except FutureTimeout:
+                    continue
+        def run():
+            prior = self.runtime.capture
+            self.runtime.capture = capture if _ctx is not None and getattr(_ctx, "hasUI", False) else prior
+            try:
+                from misaka.core.skills.scope import using_scope
+                with using_runtime(self.runtime), using_scope(self.scope):
+                    return function(*args, cancelled=stop, **kwargs)
+            finally:
+                self.runtime.capture = prior
+        work = asyncio.create_task(run_in_thread(run))
+        try:
+            return await asyncio.shield(work)
+        except asyncio.CancelledError as error:
+            stop.set()
+            try:
+                await settle(work)
+            finally:
+                for task in list(captures):
+                    task.cancel()
+                    try:
+                        await settle(task)
+                    except (asyncio.CancelledError, Exception):  # noqa: BLE001, S110 - drain every capture before propagating the original cancellation
+                        pass
+                raise error  # repeated cancellation or worker failure cannot orphan the work
+
+    @staticmethod
+    def _session_id(ctx):
+        try:
+            return str(ctx.sessionManager.getSessionId())
+        except Exception:  # noqa: BLE001 - missing session metadata should not block loading
+            return None
+
+    def _active_tools(self):
+        try:
+            return set(self.session.getActiveToolNames()) if self.session else None
+        except Exception:  # noqa: BLE001 - old host contexts can omit tool info
+            return None
+
+    def _entries(self, *, prompt=False):
+        self._refresh_roots()
+        active = self._active_tools()
+        tools, toolsets = visibility.capabilities(active)
+        detect = visibility.environment_detector(kind=self._kind, active=active)
+        if prompt:
+            return skill_index.build(self._roots, platform=self._platform, available_tools=tools,
+                                     available_toolsets=toolsets, detect=detect)
+        return skill_index.runtime_build(self._roots, platform=self._platform, detect=detect)
+
+    def _bundles(self):
+        if self._base_roots is None:
+            return bundles.scan(bundles.bundle_roots(self._profile_dir, self._workspace))
+        out = {}
+        for layer, root in self._base_roots:
+            if layer == "sandbox":
+                manifest = sandbox.read_manifest(root)
+                records = (manifest or {}).get("bundles", [])
+                for info in records:
+                    out.setdefault("/" + info["slug"], dict(info))
+            elif layer in ("role", "project", "shared"):
+                for key, info in bundles.scan([(layer, str(Path(root).parent / "skill-bundles"))]).items():
+                    out.setdefault(key, info)
+        return out
+
+    def _disabled_names(self):
+        from misaka.core.skills.layers import disabled_skill_names
+        disabled = set(disabled_skill_names(self._platform))
+        return disabled | {
+            _runtime_name(e) for e in skill_index.all_entries(self._roots, platform=self._platform, include_disabled=True)
+            if skill_index.is_disabled(e, self._platform, disabled=disabled)}
+
+    def _load_named_skill(self, identifier, task_id=None, *, source=None, disabled=None, cancelled=None):
+        if cancelled is not None and cancelled.is_set():
+            return None
+        entry, error = skill_index.resolve(self._roots, identifier, source=source,
+                                           platform=self._platform, include_disabled=True)
+        if error:
+            return None
+        if skill_index.is_disabled(entry, self._platform, disabled=disabled):
+            return {}, None, _runtime_name(entry)  # native block loader skips BEFORE any execution copy/preprocessing
+        try:
+            copied = self._execution_entry(entry)
+            loaded = reader.load(copied, task_id, profile_dir=self._profile_dir, preprocess=False, runtime=self.runtime)
+        except (OSError, ValueError):
+            return None
+        if not loaded.get("success"):
+            return None
+        from misaka.core.skills.operations import observe
+        observe(entry, self._profile_dir, self._workspace, view=False, task_id=task_id)
+        loaded["_entry"] = copied
+        return loaded, Path(copied["dir"]), _runtime_name(entry)
+
+    def _load_blocks(self, *args, cancelled=None, **kwargs):
+        def render(loaded, note, task_id):
+            if cancelled is not None and cancelled.is_set():
+                return ""
+            return _render_loaded(loaded[0], loaded[0]["_entry"], activation_note=note, session_id=task_id)
+        return hermes_commands._load_skill_blocks(*args, **kwargs, render=render)
+
+    def _stack_message(self, table, keys, instruction, task_id, *, cancelled=None):
+        disabled_names = self._disabled_names()
+        def load(key):
+            entry = table[key]
+            return self._load_named_skill(_runtime_name(entry), task_id, source=entry["path"], disabled=disabled_names, cancelled=cancelled)
+        if len(keys) == 1:
+            loaded = load(keys[0])
+            if not loaded or loaded[2] in disabled_names:
+                return None
+            note = f'{_SKILL_INVOCATION_PREFIX}"{loaded[2]}"{_SINGLE_SKILL_ACTIVATION_SUFFIX}'
+            return _render_loaded(loaded[0], loaded[0]["_entry"], activation_note=note,
+                                  user_instruction=instruction, session_id=task_id)
+        names, missing, disabled, blocks = self._load_blocks(keys, load,
+            lambda name: f'[Loaded as part of the stacked skill invocation "{name}".]', task_id,
+            missing_label=lambda k: k.lstrip("/"), disabled_names=disabled_names, cancelled=cancelled)
+        if not blocks:
+            return None
+        header = hermes_commands._scaffold_header(f'"{" ".join(keys)}" stacked skill bundle', names,
+            missing=missing, disabled=disabled, user_instruction=instruction)
+        return "\n\n".join([header, *blocks])
+
+    def _bundle_message(self, key, instruction, task_id, *, cancelled=None):
+        from misaka.core.skills.vendor.bundles import build_bundle_invocation_message
+        disabled_names = self._disabled_names()
+        return build_bundle_invocation_message(key, instruction, task_id, self._platform,
+            bundles=self._bundles(), load_blocks=lambda *args, **kwargs: self._load_blocks(*args, **kwargs, cancelled=cancelled),
+            load_payload=lambda identifier, task_id: self._load_named_skill(identifier, task_id, disabled=disabled_names, cancelled=cancelled),
+            disabled_names=disabled_names)
 
     def attach(self, session):
         self.session = session
+        self.scope.model = getattr(session, "model", None)
+        self.scope.model_registry = getattr(session, "modelRegistry", None)
+        manager = getattr(session, "sessionManager", None)
+        if manager is not None:
+            manager._skill_runtime = self.runtime
 
-    def _adopt_extension_skills(self):
-        # Skill roots an extension contributed through pi's resources_discover door
-        # (resource_loader.getExtensionSkillPaths); they join the layers as "extension".
+    def _refresh_roots(self):
+        # Hermes discovers current roots on access. Extension contributions are a
+        # replaceable set, not an append-only history; explicit sandbox roots stay pinned.
         loader = getattr(self.session, "resourceLoader", None)
-        paths = getattr(loader, "getExtensionSkillPaths", None)
-        if paths is None:
-            return
-        known = {os.path.abspath(root) for _layer, root in self._roots}
-        added = False
-        for path in paths():
-            if os.path.isdir(path) and os.path.abspath(path) not in known:
-                self._roots.append(("extension", path))
-                added = True
-        if added:
+        extension_paths = extension_resources(loader)
+        live = skill_roots(self._profile_dir, self._workspace, extension_paths=extension_paths)
+        current = live if self._base_roots is None else list(self._base_roots)
+        seen = set()
+        roots = []
+        for layer, root in current:
+            key = (layer if layer.startswith("extension:") else "", os.path.realpath(root))
+            if key not in seen:
+                seen.add(key)
+                roots.append((layer, root))
+        if roots != self._roots:
+            self._roots[:] = roots
             skill_index.invalidate()
+        from misaka.core.skills.layers import protected_skill_roots
+        self._live_roots.clear()
+        self._live_roots.update(protected_skill_roots(self._profile_dir, self._workspace, extension_paths=extension_paths))
+        self._live_roots.update(str(Path(root).resolve()) for _, root in bundles.bundle_roots(self._profile_dir, self._workspace))
+
+    def _execution_entry(self, entry):
+        with self._copy_lock:
+            if self._closed:
+                raise RuntimeError("Skill session is closed.")
+            return self._copy_entry(entry)
+
+    def _copy_entry(self, entry):
+        """Advertised absolute script paths point to an owned copy, never a guarded live tree."""
+        if self._base_roots is not None:
+            return entry
+        if self._execution_tmp is None:
+            self._execution_tmp = str(Path(tempfile.mkdtemp(prefix="misaka-skill-execution-")).resolve())
+        return sandbox.execution_entry(entry, self._execution_tmp)
+
+    def _load_payload(self, entry, session_id=None, *, file_path=None, cancelled=None):
+        try:
+            copied = self._execution_entry(entry)
+            payload = reader.load(copied, session_id, file_path=file_path, profile_dir=self._profile_dir, runtime=self.runtime)
+            if payload.get("success"):
+                from misaka.core.skills.operations import observe
+                observe({**entry, "origin_path": str(Path(entry.get("origin_dir", entry["dir"])) / file_path)} if file_path else entry,
+                        self._profile_dir, self._workspace, use=not file_path, task_id=session_id)
+            return payload
+        except (OSError, ValueError) as error:
+            return {"success": False, "error": str(error)}
+
+    def resolution_roots(self):
+        """The effective post-discovery collection, including explicit empty roots."""
+        self._refresh_roots()
+        return list(self._roots)
+
+    async def resources_ready(self, event, ctx):
+        if not self._sync_started and self._kind in ("foreground", "dm"):
+            self._sync_started = True
+            await self._sync_owner.schedule(startup=True)
+        async with self._read_lock:
+            if self._closed:
+                raise RuntimeError("Skill session is closed.")
+            if self._base_roots is not None and self._sealed_root is None:
+                loader = getattr(self.session, "resourceLoader", None)
+                extensions = list(extension_roots(extension_resources(loader)))
+                prepared = next((root for layer, root in self._base_roots if layer == "sandbox"), None)
+                manifest = await run_in_thread(sandbox.read_manifest, prepared, verify_files=True) if prepared else None
+                if self._kind == "child" and manifest and manifest["state"] != "sealed":
+                    raise ValueError("Nested child received an unsealed Skill snapshot.")
+                if prepared:
+                    if self._kind != "child":
+                        await run_in_thread(sandbox.seal, prepared, extensions)
+                    self._sealed_root = prepared
+                else:
+                    if self._execution_tmp is None:
+                        self._execution_tmp = str(Path(tempfile.mkdtemp(prefix="misaka-skill-collection-")).resolve())
+                    sealed_root = str(Path(self._execution_tmp) / "sealed")
+                    await run_in_thread(sandbox.readonly_copies, skill_index.all_entries(self._base_roots, platform=self._platform), sealed_root,
+                                        bundle_records=list(self._bundles().values()), category_descriptions=skill_index.categories(self._base_roots))
+                    await run_in_thread(sandbox.seal, sealed_root, extensions)
+                    self._sealed_root = sealed_root  # publish only the completed collection
+                self._base_roots = [("sandbox", self._sealed_root)]
+            self._refresh_roots()
+            if self._startup_prompt is None and self._startup_skills:
+                prompt, loaded, missing = await self._run_activation(self._preload, self._session_id(ctx))
+                if not loaded:
+                    raise ValueError("Unknown skill(s): " + ", ".join(missing))
+                self._startup_prompt = prompt
+                if missing:
+                    ctx.ui.notify("Unknown skill(s) requested, skipping: " + ", ".join(missing), "warning")
+            self._update_command_snapshot()
+
+    async def _drain_curator(self):
+        task = self._curator_task
+        if self._review_scope is not None:
+            self._review_scope.stop.set()
+        if task is not None:
+            task.cancel()
+            try:
+                await settle(task)
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception("Owned Skill review failed")
+        self._curator_task = None
+        self._review_scope = None
+
+    async def _stop_curator(self):
+        if self._review_scope is not None:
+            self._review_scope.stop.set()
+        async with self._curator_lock:
+            await self._drain_curator()
+
+    async def _start_curator(self, scope, run):
+        async with self._curator_lock:
+            await self._drain_curator()
+            if self._closed:
+                return None
+            self._review_scope = scope
+            self._curator_task = asyncio.create_task(run())
+            return self._curator_task
+
+    async def agent_start(self, event, ctx):
+        await self._stop_curator()
+        self._dedup.clear()
+        self.scope.read_marks = None
+
+    async def agent_end(self, event, ctx):
+        if self._kind not in ("foreground", "dm") or self._closed or self._profile_dir is None:
+            return
+        import copy
+        from dataclasses import replace
+
+        from misaka.core.skills.operations import review_completed
+        from misaka.core.skills.scope import load_config, using_scope
+        from misaka.core.skills.vendor import curator
+        with using_scope(self.scope):
+            cfg = load_config().get("background_review", {})
+            # HOST: enabling a newly ported feature must not silently bill existing sessions.
+            enabled = isinstance(cfg, dict) and cfg.get("enabled") is True
+            curate = curator.is_enabled()
+            delay = max(0.0, curator.get_min_idle_hours() * 3600.0) if curate else 0
+        if not enabled and not curate:
+            return
+        scope = replace(self.scope, origin="background_review", read_marks=None,
+                        stop=threading.Event(), model=getattr(self.session, "model", None))
+        messages = copy.deepcopy(getattr(getattr(self.session, "state", None), "messages", []))
+        async def run():
+            from filelock import FileLock, Timeout
+            lock = FileLock(str(scope.profile / ".curator-owner.lock"), timeout=0)
+            scope.profile.mkdir(parents=True, exist_ok=True)
+            def owned(function):
+                if scope.stop.is_set():
+                    return None
+                with using_scope(scope):
+                    try:
+                        with lock:
+                            return function()
+                    except Timeout:
+                        return None
+            if enabled:
+                await run_in_thread(owned, lambda: review_completed(scope, messages))
+                if not scope.stop.is_set():
+                    await self._sync_owner.schedule()
+            if curate and not scope.stop.is_set():
+                await asyncio.sleep(delay)
+                await run_in_thread(owned, lambda: curator.maybe_run_curator(idle_for_seconds=delay))
+        await self._start_curator(scope, run)
+
+    async def session_compact(self, event, ctx):
+        self._dedup.clear()
+
+    def _close_copies(self):
+        with self._copy_lock:
+            self._closed = True
+            try:
+                self.runtime.close()
+            finally:
+                if self._execution_tmp:
+                    sandbox.cleanup(self._execution_tmp)
+                    self._execution_tmp = None
+
+    async def session_shutdown(self, event, ctx):
+        self._closed = True  # Fence queued review/reload callbacks before awaiting.
+        await settle(asyncio.create_task(self._shutdown(event)))
+
+    async def _shutdown(self, event):
+        await self._stop_curator()
+        await self._sync_owner.close()
+        self._dedup.clear()
+        if event.get("reason") != "reload":
+            async with self._read_lock:
+                await run_in_thread(self._close_copies)
 
     async def before_agent_start(self, event, ctx):
-        self._adopt_extension_skills()
+        self._refresh_roots()
         return await self._advertise(event, ctx)
 
     async def session_start(self, event, ctx):
-        self._adopt_extension_skills()
+        self._activated_providers.clear()
+        if self._sync_owner.closed:
+            from misaka.core.skills.sync_owner import SyncOwner
+            self._sync_owner = SyncOwner(self.scope)
+            self._sync_started = False
+        if self.runtime.closed:
+            self.runtime = self.runtime.reopen()
+            self._startup_prompt = None
+            if self.session is not None:
+                self.attach(self.session)
+        self._closed = False
+        self._refresh_roots()
         await self._fresh(event, ctx)
 
     async def tool_call(self, event, ctx):
+        self._refresh_roots()
         return await self._guard(event, ctx)
 
 
-SESSION_KINDS = {"foreground", "dm", "card", "child"}
+SESSION_KINDS = {"foreground", "dm", "card", "child", "bare"}
 
 
 def _command_touches(command, workspace, live_roots):
@@ -527,6 +1016,8 @@ def _command_touches(command, workspace, live_roots):
 
 
 def part(spec):
-    roots = (list(spec.skill_roots) if spec.skill_roots is not None
-             else skill_roots(spec.profile_dir, spec.workspace))
-    return SkillsPart(roots, spec.profile_dir, cwd=spec.workspace, kind=spec.kind)
+    if spec.kind == "bare":
+        from misaka.config.profiles import is_last_order
+        if not is_last_order(spec.profile_dir):
+            return None
+    return SkillsPart(spec.skill_roots, spec.profile_dir, cwd=spec.workspace, kind=spec.kind, startup_skills=spec.startup_skills)

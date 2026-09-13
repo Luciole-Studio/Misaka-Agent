@@ -206,7 +206,7 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
         thinking_level = settings_manager.getDefaultThinkingLevel() or DEFAULT_THINKING_LEVEL
     thinking_level = "off" if model is None else clamp_thinking_level(model, thinking_level)
 
-    default_active_tool_names: list[ToolName] = ["read", "bash", "edit", "write", "grep", "find", "ls"]
+    default_active_tool_names: list[ToolName] = ["read", "bash", "edit", "write", "office", "grep", "find", "ls"]
     # defaultTools selects initial built-ins; it does not populate the registry allowlist (pi 541045ae0).
     configured_default_tools = settings_manager.getDefaultTools()
     allowed_tool_names = resolved_options.get("tools")
@@ -350,7 +350,8 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
     async def transform_context(messages: list[AgentMessage], _signal: Any | None = None) -> list[AgentMessage]:
         session = extension_runner_ref.get("session")
         if session is not None:
-            # MISAKA fork: the session's parts rewrite the context first; extensions see their output.
+            messages = await session.prepareContextMessages(messages, _signal)
+            # MISAKA fork: transient parts/extensions see the engine's durable view.
             messages = await session.moments.context(messages)
         runner = extension_runner_ref.get("current")
         if runner is None:
@@ -391,6 +392,10 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
             session_manager.appendModelChange(model.provider, model.id)
         session_manager.appendThinkingLevelChange(thinking_level)
 
+    from misaka.core.session_catalog import CatalogPart
+    parts = list(resolved_options.get("parts") or [])
+    if not any(isinstance(part, CatalogPart) for part in parts):
+        parts.insert(0, CatalogPart())  # raw SDK/helper sessions have no product assembly
     session = AgentSession(
         {
             "agent": agent,
@@ -400,7 +405,7 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
             "scopedModels": resolved_options.get("scopedModels") or [],
             "resourceLoader": resource_loader,
             "customTools": resolved_options.get("customTools") or [],
-            "parts": resolved_options.get("parts") or [],
+            "parts": parts,
             "modelRegistry": model_registry,
             "initialActiveToolNames": initial_active_tool_names,
             "allowedToolNames": allowed_tool_names,

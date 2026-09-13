@@ -110,9 +110,8 @@ def _opaque(column: str) -> str:
 
 
 _TAINTED_ROW = """
-    SELECT 1 FROM messages
-     WHERE store_id IN ({placeholders}) AND ({opaque})
-     LIMIT 1
+    SELECT COUNT(*), MAX(CASE WHEN {opaque} THEN 1 ELSE 0 END) FROM messages
+     WHERE store_id IN ({placeholders})
 """
 
 # Upstream's own lineage walk (`SummaryDAG.source_message_ids`), asked a yes/no question
@@ -133,10 +132,15 @@ _TAINTED_NODE = """
           JOIN walk ON walk.source_type = 'nodes' AND child.node_id = walk.source_id
           JOIN json_each(child.source_ids) j
     )
-    SELECT walk.root, MAX(CASE WHEN m.store_id IS NULL THEN 1 WHEN {opaque} THEN 1 ELSE 0 END)
+    SELECT walk.root, MAX(CASE
+        WHEN walk.source_type = 'messages' THEN
+            CASE WHEN m.store_id IS NULL OR ({opaque}) THEN 1 ELSE 0 END
+        WHEN walk.source_type = 'nodes' THEN
+            CASE WHEN child.node_id IS NULL OR json_array_length(child.source_ids) = 0 THEN 1 ELSE 0 END
+        ELSE 1 END), MAX(CASE WHEN walk.source_type = 'messages' THEN 1 ELSE 0 END)
       FROM walk
-      LEFT JOIN messages m ON m.store_id = walk.source_id
-     WHERE walk.source_type = 'messages'
+      LEFT JOIN messages m ON walk.source_type = 'messages' AND m.store_id = walk.source_id
+      LEFT JOIN summary_nodes child ON walk.source_type = 'nodes' AND child.node_id = walk.source_id
      GROUP BY walk.root
 """
 
@@ -244,7 +248,8 @@ def is_tainted(engine, *, store_ids=(), node_ids=(), rollup_ids=(), externalized
         with lock:
             for chunk in _chunks(stores):
                 sql = _TAINTED_ROW.format(placeholders=_marks(chunk), opaque=_opaque("content"))
-                if conn.execute(sql, [*chunk, *_OPAQUE_ARGS]).fetchone():
+                found, tainted = conn.execute(sql, [*_OPAQUE_ARGS, *chunk]).fetchone()
+                if found != len(chunk) or tainted:
                     return True
             for chunk in _chunks(rollups):
                 sql = _ROLLUP_SOURCES.format(placeholders=_marks(chunk))
@@ -255,8 +260,8 @@ def is_tainted(engine, *, store_ids=(), node_ids=(), rollup_ids=(), externalized
             for chunk in _chunks(nodes):
                 sql = _TAINTED_NODE.format(placeholders=_marks(chunk), opaque=_opaque("m.content"))
                 reached = set()
-                for root, tainted in conn.execute(sql, [*chunk, *_OPAQUE_ARGS]):
-                    if tainted:
+                for root, tainted, has_messages in conn.execute(sql, [*chunk, *_OPAQUE_ARGS]):
+                    if tainted or not has_messages:
                         return True
                     reached.add(root)
                 if len(reached) != len(chunk):

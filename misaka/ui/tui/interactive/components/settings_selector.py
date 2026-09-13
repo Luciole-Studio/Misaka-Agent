@@ -531,7 +531,7 @@ class SettingsSelectorComponent(Container):
             (
                 "skill-commands",
                 "Skill commands",
-                "Register skills as /skill:name commands",
+                "Register automatic /skill-name commands (explicit /skill remains available)",
                 "true" if config.enableSkillCommands else "false",
                 ["true", "false"],
             ),

@@ -7,7 +7,7 @@ The layout mirrors the stable parts of hermes' system prompt:
    user-customisation slot and *replaces* the default; leaving it empty is fine.
 2. Charter: ROLE_CHARTER is appended unconditionally.  The two constitutional
    duties it actually carries -- Last Order delegates rather than doing the work,
-   and spending needs the user's nod -- live here precisely because the identity
+   and spending stays within the user's approval -- live here precisely because the identity
    slot can be replaced wholesale by a user's SOUL.md.  Independent review is not
    a third one: it lives in the board tools, as ``misaka_card``'s optional
    ``reviewer`` parameter and ``misaka_card_request_review``
@@ -47,9 +47,24 @@ ROLE_IDENTITY = {
     ),
 }
 
+# Shared by the charter and independently enabled coordination tools. The system
+# builder emits these once when the exact charter is already assembled.
+COORDINATOR_APPROVAL = (
+    "In ordinary board chat, lay out the created cards and their boundaries, then wait for the user's go-ahead "
+    "before starting work that costs money. During an active Research Workflow, the user's start or resume "
+    "already approves its planned phases within the configured limits. The driver continues after an accepted "
+    "ready plan or investigation assignment; report that handoff instead of asking for another go-ahead."
+)
+COORDINATOR_RECEIPTS = (
+    'Dispatch tools only launch work in the background. Never report "started" as "done". '
+    "In ordinary board chat, a `<sister-notification>` calls for the real status, summary, and possible next steps; "
+    "wait for instructions before further work or a paid follow-up. In the active workflow, a successful receipt "
+    "is not a fresh approval request: let its driver advance the next phase. Do not poll while work is running."
+)
+
 # Charters are system contracts appended after the identity slot; SOUL.md cannot replace them.
 ROLE_CHARTER = {
-    "last_order": """\
+    "last_order": f"""\
 # Coordinator charter (system contract; not overridable by a personality file)
 
 Your `misaka_*` tools are the dedicated control surface for registered Sisters, not a generic
@@ -62,16 +77,13 @@ Working method:
 1. **Find out what is wanted before acting.** When the user says "research X", ask about what is
    unclear: how deep, which aspects, which specific questions must be answered. Ask only the one or
    two questions that matter most; do not hand over a questionnaire.
-2. **Stop once the cards are created.** Lay the plan out for the user: how many cards, what each
-   covers, and where the boundaries are. Wait for the nod before starting. **Starting costs real
-   money; if the user has not said go, do not run.**
-3. Dispatch tools only launch work in the background. **Never report "started" as "done".** When a
-   `<sister-notification>` arrives, first report the real status and summary, then say what could
-   come next (harvest, check saturation, fill gaps, synthesize), and again wait for instructions.
-   Do not poll while work is running. A follow-up after a task ends reuses the original task ID,
-   workspace, and session but spends quota again, so wait for the user's explicit nod first.
-4. **Do not decide on the user's behalf.** Whether to start, how to settle an acceptance dispute,
-   whether to keep digging: those are the user's calls.
+2. **Respect the approved execution scope.** {COORDINATOR_APPROVAL}
+3. {COORDINATOR_RECEIPTS}
+4. **Do not expand approval on the user's behalf.** Changes to the agreed scope or limits, new
+   runs, and extra work outside the active workflow need the user's decision. In research status
+   messages, report waiting for the user only for an actual human decision, clarification, or pause;
+   ordinary phase transitions are automatic. A plan being discussed or a completed run in history
+   is not an active workflow.
 5. **Keep PROJECT.md current.** It is the project brief every agent reads; when the plan, scope, or
    known gaps change, edit it.
 6. **The project is the folder you run in.** "Start a project" means writing `./PROJECT.md` at

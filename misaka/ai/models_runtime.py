@@ -517,9 +517,11 @@ class ModelsImpl:
         )
 
     async def login(
-        self, providerId: str, type: AuthType, interaction: AuthInteraction
+        self, providerId: str, type: AuthType, interaction: AuthInteraction, *, credentialId: str | None = None
     ) -> CredentialValue:
         """Run a provider-owned login flow and persist the credential it returns.
+
+        credentialId selects a named record in this same store, not another provider.
 
         The abort handling is upstream's and is deliberate: once the store write has
         begun, an abort no longer fails the login. The credential exists by then, and
@@ -544,7 +546,7 @@ class ModelsImpl:
             return credential
 
         mutation = asyncio.ensure_future(
-            self._credentials.modify(providerId, persist, _operationOptions(signal))
+            self._credentials.modify(credentialId if credentialId is not None else providerId, persist, _operationOptions(signal))
         )
         waitStarted = asyncio.ensure_future(started.wait())
         aborting = asyncio.ensure_future(wait_for_abort(signal)) if signal is not None else None

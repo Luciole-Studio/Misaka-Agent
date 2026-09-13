@@ -13,8 +13,18 @@ from wcwidth import wcswidth
 
 _THAI_LAO_AM_RE = re.compile(r"[\u0e33\u0eb3]")
 _PUNCTUATION_RE = re.compile(r"""[(){}\[\]<>.,;:'"!?+\-=*/\\|&%^$#@~`]""")
-_WIDTH_CACHE_SIZE = 512
+_WIDTH_CACHE_SIZE = 16384         # a long transcript re-measures thousands of distinct lines per render
 _width_cache: OrderedDict[str, int] = OrderedDict()
+# PORT-NOTE: pi measures width grapheme by grapheme (Intl.Segmenter); V8 makes that cheap, CPython
+# does not -- one full render of a 2000-row transcript spent most of its time here, and wrapping
+# a 2 MB transcript for a new width took 1.5 s. A character that starts no cluster (no combining
+# mark, format char, ZWJ, variation selector, modifier or regional indicator follows the rules
+# below) has the width wcwidth gives it, so a string made only of such characters is measured by
+# one C-level translate through this table (code point -> "1" or "2"); anything else takes pi's
+# path. The digits themselves are in the table from the start so that a "2" left untranslated
+# can never be mistaken for a width.
+_WIDTHS: dict[int, str] = {ord("1"): "1", ord("2"): "1"}
+_CLUSTERING: set[str] = set()     # characters that may join a cluster, or are zero-width: pi's path
 
 
 @dataclass(slots=True)
@@ -100,7 +110,7 @@ def _iter_graphemes(text: str) -> Iterator[str]:
         yield text[start:index]
 
 
-@lru_cache(maxsize=1024)
+@lru_cache(maxsize=65536)
 def _grapheme_width(segment: str) -> int:
     if not segment:
         return 0
@@ -122,10 +132,40 @@ def _grapheme_width(segment: str) -> int:
     return max(width, 0)
 
 
+def _simple_width(char: str) -> int:
+    """wcwidth of a character that can never join a cluster; -1 when pi's grapheme rules apply."""
+    codepoint = ord(char)
+    if (char == "\t" or codepoint == 0x200D or _is_regional_indicator(codepoint) or _is_extend_char(char)
+            or 0xD800 <= codepoint <= 0xDFFF):
+        return -1
+    width = wcswidth(char)
+    return width if width >= 0 else -1
+
+
+def _widths(text: str) -> str | None:
+    """``text`` with every character replaced by its column width, "1" or "2"; None when a
+    character may join a grapheme cluster (or is zero-width), where pi's grapheme rules
+    decide. A character seen for the first time is classified once."""
+    widths = text.translate(_WIDTHS)
+    if widths.count("1") + widths.count("2") == len(widths):
+        return widths
+    for char in set(text):
+        if ord(char) in _WIDTHS:
+            continue
+        if char in _CLUSTERING:
+            return None
+        width = _simple_width(char)
+        if width < 1:
+            _CLUSTERING.add(char)
+            return None
+        _WIDTHS[ord(char)] = "2" if width == 2 else "1"
+    return text.translate(_WIDTHS)
+
+
 def visible_width(text: str) -> int:
     if len(text) == 0:
         return 0
-    if _is_printable_ascii(text):
+    if text.isascii() and text.isprintable():
         return len(text)
 
     cached = _width_cache.get(text)
@@ -134,18 +174,13 @@ def visible_width(text: str) -> int:
 
     clean = text.replace("\t", "   ") if "\t" in text else text
     if "\x1b" in clean:
-        stripped_chars: list[str] = []
-        index = 0
-        while index < len(clean):
-            ansi = extract_ansi_code(clean, index)
-            if ansi is not None:
-                index += ansi.length
-                continue
-            stripped_chars.append(clean[index])
-            index += 1
-        clean = "".join(stripped_chars)
+        clean = _ESCAPE_RE.sub("", clean)       # what is left of an ESC is text, as in pi's scan
 
-    width = sum(_grapheme_width(segment) for segment in _iter_graphemes(clean))
+    widths = _widths(clean)
+    if widths is not None:
+        width = len(widths) + widths.count("2")
+    else:
+        width = sum(_grapheme_width(segment) for segment in _iter_graphemes(clean))
     if len(_width_cache) >= _WIDTH_CACHE_SIZE:
         _width_cache.popitem(last=False)
     _width_cache[text] = width
@@ -180,42 +215,25 @@ class AnsiMatch:
     length: int
 
 
+# ECMA-48 CSI: parameter bytes 0x30-0x3F, then intermediate bytes 0x20-0x2F, then one final
+# byte 0x40-0x7E. Pi (utils.ts:406-420) instead scans forward for `[mGKHJ]`, which makes any
+# other CSI — `\x1b[10A`, `\x1b[6n`, `\x1b[?25l` — swallow every character up to the next `m`.
+# `TUI.applyLineResets` appends `\x1b[0m` to every line, so that `m` always exists, and
+# `visible_width` then counts the swallowed text as zero: lines get wrapped and truncated
+# against a width that is far too small, the terminal soft-wraps them, and the over-wide-line
+# guard in `_doRenderInner` never fires. Match the real grammar instead, and report "not an
+# escape" for anything that does not terminate. OSC and APC strings run to BEL or ESC \ (a
+# lone ESC inside them is part of the string, as in pi's scan).
+_ESCAPE_RE = re.compile(
+    r"\x1b(?:\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]|[\]_](?:[^\x07\x1b]|\x1b(?!\\))*(?:\x07|\x1b\\))"
+)
+
+
 def extract_ansi_code(text: str, pos: int) -> AnsiMatch | None:
-    if pos >= len(text) or text[pos] != "\x1b":
+    match = _ESCAPE_RE.match(text, pos)
+    if match is None:
         return None
-    if pos + 1 >= len(text):
-        return None
-
-    next_char = text[pos + 1]
-    if next_char == "[":
-        # ECMA-48 CSI: parameter bytes 0x30-0x3F, then intermediate bytes 0x20-0x2F, then one
-        # final byte 0x40-0x7E. Pi (utils.ts:406-420) instead scans forward for `[mGKHJ]`, which
-        # makes any other CSI — `\x1b[10A`, `\x1b[6n`, `\x1b[?25l` — swallow every character up
-        # to the next `m`. `TUI.applyLineResets` appends `\x1b[0m` to every line, so that `m`
-        # always exists, and `visible_width` then counts the swallowed text as zero: lines get
-        # wrapped and truncated against a width that is far too small, the terminal soft-wraps
-        # them, and the over-wide-line guard in `_doRenderInner` never fires. Scan the real
-        # grammar instead, and report "not an escape" for anything that does not terminate.
-        end = pos + 2
-        while end < len(text) and "\x30" <= text[end] <= "\x3f":
-            end += 1
-        while end < len(text) and "\x20" <= text[end] <= "\x2f":
-            end += 1
-        if end < len(text) and "\x40" <= text[end] <= "\x7e":
-            return AnsiMatch(code=text[pos : end + 1], length=end + 1 - pos)
-        return None
-
-    if next_char in {"]", "_"}:
-        end = pos + 2
-        while end < len(text):
-            if text[end] == "\x07":
-                return AnsiMatch(code=text[pos : end + 1], length=end + 1 - pos)
-            if text[end] == "\x1b" and end + 1 < len(text) and text[end + 1] == "\\":
-                return AnsiMatch(code=text[pos : end + 2], length=end + 2 - pos)
-            end += 1
-        return None
-
-    return None
+    return AnsiMatch(code=match.group(), length=match.end() - pos)
 
 
 type Osc8Terminator = str
@@ -251,6 +269,61 @@ def _format_osc8_close(terminator: Osc8Terminator) -> str:
     return f"\x1b]8;;{terminator}"
 
 
+_SGR_RE = re.compile(r"\x1b\[([\d;]*)m")
+_SGR_FLAGS = {
+    1: ("bold", True), 2: ("dim", True), 3: ("italic", True), 4: ("underline", True),
+    5: ("blink", True), 7: ("inverse", True), 8: ("hidden", True), 9: ("strikethrough", True),
+    21: ("bold", False), 23: ("italic", False), 24: ("underline", False), 25: ("blink", False),
+    27: ("inverse", False), 28: ("hidden", False), 29: ("strikethrough", False),
+    39: ("fgColor", None), 49: ("bgColor", None),
+}
+_SGR_ACTIONS: dict[str, tuple[tuple[str, object], ...]] = {}   # sequence -> what it does to a tracker
+
+
+def _sgr_actions(ansi_code: str) -> tuple[tuple[str, object], ...]:
+    """What an SGR sequence does to the tracker's fields, in order: (field, value) pairs, with
+    ("reset", None) for SGR 0. A sequence recurs on every line of a transcript, so it is parsed
+    once (pi parses per call)."""
+    match = _SGR_RE.match(ansi_code)
+    if match is None:
+        return ()
+    params = match.group(1)
+    if params in {"", "0"}:
+        return (("reset", None),)
+    actions: list[tuple[str, object]] = []
+    parts = params.split(";")
+    index = 0
+    while index < len(parts):
+        try:
+            code = int(parts[index])
+        except ValueError:
+            index += 1
+            continue
+        if code in {38, 48}:
+            field = "fgColor" if code == 38 else "bgColor"
+            if index + 2 < len(parts) and parts[index + 1] == "5":
+                actions.append((field, ";".join(parts[index : index + 3])))
+                index += 3
+                continue
+            if index + 4 < len(parts) and parts[index + 1] == "2":
+                actions.append((field, ";".join(parts[index : index + 5])))
+                index += 5
+                continue
+        if code == 0:
+            actions.append(("reset", None))
+        elif code == 22:
+            actions.append(("bold", False))
+            actions.append(("dim", False))
+        elif code in _SGR_FLAGS:
+            actions.append(_SGR_FLAGS[code])
+        elif 30 <= code <= 37 or 90 <= code <= 97:
+            actions.append(("fgColor", str(code)))
+        elif 40 <= code <= 47 or 100 <= code <= 107:
+            actions.append(("bgColor", str(code)))
+        index += 1
+    return tuple(actions)
+
+
 class AnsiCodeTracker:
     def __init__(self) -> None:
         self.clear()
@@ -264,87 +337,16 @@ class AnsiCodeTracker:
         if not ansi_code.endswith("m"):
             return
 
-        match = re.match(r"\x1b\[([\d;]*)m", ansi_code)
-        if match is None:
-            return
-        params = match.group(1)
-        if params in {"", "0"}:
-            self._reset()
-            return
-
-        parts = params.split(";")
-        index = 0
-        while index < len(parts):
-            try:
-                code = int(parts[index])
-            except ValueError:
-                index += 1
-                continue
-
-            if code in {38, 48}:
-                if index + 2 < len(parts) and parts[index + 1] == "5":
-                    color_code = ";".join(parts[index : index + 3])
-                    if code == 38:
-                        self.fgColor = color_code
-                    else:
-                        self.bgColor = color_code
-                    index += 3
-                    continue
-                if index + 4 < len(parts) and parts[index + 1] == "2":
-                    color_code = ";".join(parts[index : index + 5])
-                    if code == 38:
-                        self.fgColor = color_code
-                    else:
-                        self.bgColor = color_code
-                    index += 5
-                    continue
-
-            match code:
-                case 0:
-                    self._reset()
-                case 1:
-                    self.bold = True
-                case 2:
-                    self.dim = True
-                case 3:
-                    self.italic = True
-                case 4:
-                    self.underline = True
-                case 5:
-                    self.blink = True
-                case 7:
-                    self.inverse = True
-                case 8:
-                    self.hidden = True
-                case 9:
-                    self.strikethrough = True
-                case 21:
-                    self.bold = False
-                case 22:
-                    self.bold = False
-                    self.dim = False
-                case 23:
-                    self.italic = False
-                case 24:
-                    self.underline = False
-                case 25:
-                    self.blink = False
-                case 27:
-                    self.inverse = False
-                case 28:
-                    self.hidden = False
-                case 29:
-                    self.strikethrough = False
-                case 39:
-                    self.fgColor = None
-                case 49:
-                    self.bgColor = None
-                case _:
-                    if 30 <= code <= 37 or 90 <= code <= 97:
-                        self.fgColor = str(code)
-                    elif 40 <= code <= 47 or 100 <= code <= 107:
-                        self.bgColor = str(code)
-            index += 1
+        actions = _SGR_ACTIONS.get(ansi_code)
+        if actions is None:
+            actions = _sgr_actions(ansi_code)
+            if len(_SGR_ACTIONS) < 4096:
+                _SGR_ACTIONS[ansi_code] = actions
+        for attribute, value in actions:
+            if attribute == "reset":
+                self._reset()
+            else:
+                setattr(self, attribute, value)
 
     def _reset(self) -> None:
         self.bold = False
@@ -414,76 +416,150 @@ class AnsiCodeTracker:
 
 
 def _update_tracker_from_text(text: str, tracker: AnsiCodeTracker) -> None:
-    index = 0
-    while index < len(text):
-        ansi = extract_ansi_code(text, index)
-        if ansi is not None:
-            tracker.process(ansi.code)
-            index += ansi.length
-            continue
-        index += 1
+    for match in _ESCAPE_RE.finditer(text):
+        tracker.process(match.group())
+
+
+def _text_run_end(text: str, index: int) -> int:
+    """Where the visible text starting at ``index`` ends: at the next escape sequence, or
+    at the end. An ESC that starts no sequence is text (pi: extractAnsiCode returns null)."""
+    match = _ESCAPE_RE.search(text, index + 1)
+    return match.start() if match is not None else len(text)
 
 
 # Characters that may break lines anywhere (approximates the TS Script_Extensions check for
 # Han/Hiragana/Katakana/Hangul/Bopomofo; Python re has no \p{Script}, so the main blocks are
 # listed explicitly, covering all common planes)
-_CJK_BREAK_RE = re.compile(
-    r"[\u2e80-\u2eff\u3005\u3007\u3041-\u30ff\u3100-\u312f"
+_CJK_CLASS = (
+    r"\u2e80-\u2eff\u3005\u3007\u3041-\u30ff\u3100-\u312f"
     r"\u31a0-\u31bf\u31f0-\u31ff\u3130-\u318f\u3400-\u4dbf"
     r"\u4e00-\u9fff\ua960-\ua97f\uac00-\ud7ff\uf900-\ufaff"
-    r"\uff66-\uff9d\U00020000-\U0002ffff]"
+    r"\uff66-\uff9d\U00020000-\U0002ffff"
 )
+_CJK_BREAK_RE = re.compile(f"[{_CJK_CLASS}]")
+# A run of visible text cut where pi's token loop cuts: CJK characters (one token each there,
+# one run here), runs of spaces, runs of everything else.
+_UNIT_RE = re.compile(f"([{_CJK_CLASS}]+)|( +)|([^ {_CJK_CLASS}]+)")
 
 
-def _split_into_tokens_with_ansi(text: str) -> list[str]:
-    tokens: list[str] = []
+def _units(text: str) -> list[tuple[str, int, tuple[str, str, str, str] | None]]:
+    """pi's splitIntoTokensWithAnsi: the line as tokens -- runs of spaces, runs of other text,
+    one CJK character each -- with escape codes attached to the token that follows them (or
+    to the last one). Each entry is (token, width, cjk): the width is -1 for a token pi must
+    measure grapheme by grapheme; cjk keeps a run of consecutive CJK tokens together as
+    (codes before, characters, their widths, codes after), and the wrap loop breaks such a run
+    between any two characters, as pi breaks between any two of its tokens."""
+    units: list[tuple[str, int, tuple[str, str, str, str] | None]] = []
     current = ""
-    pending_ansi = ""
+    current_width = 0
     current_kind: str | None = None
+    pending = ""
     index = 0
-
-    def flush_current() -> None:
-        nonlocal current, current_kind
-        if current:
-            tokens.append(current)
-            current = ""
-            current_kind = None
-
-    while index < len(text):
-        ansi = extract_ansi_code(text, index)
-        if ansi is not None:
-            pending_ansi += ansi.code
-            index += ansi.length
-            continue
-        text_end = index
-        while text_end < len(text) and extract_ansi_code(text, text_end) is None:
-            text_end += 1
-        for segment in _iter_graphemes(text[index:text_end]):
-            segment_is_space = segment == " "
-            if not segment_is_space and _CJK_BREAK_RE.search(segment):
-                flush_current()  # each CJK character is its own token: a line may break between any two
-                tokens.append(pending_ansi + segment)
-                pending_ansi = ""
+    length = len(text)
+    while index < length:
+        if text[index] == "\x1b":
+            match = _ESCAPE_RE.match(text, index)
+            if match is not None:
+                pending += match.group()
+                index = match.end()
                 continue
-            segment_kind = "space" if segment_is_space else "word"
-            if current and current_kind != segment_kind:
-                flush_current()
-            if pending_ansi:
-                current += pending_ansi
-                pending_ansi = ""
-            current_kind = segment_kind
-            current += segment
-        index = text_end
-
-    if pending_ansi:
-        if current:
-            current += pending_ansi
-        elif tokens:
-            tokens[-1] += pending_ansi
+        end = _text_run_end(text, index)
+        run = text[index:end]
+        index = end
+        if run.isascii() and run.isprintable():
+            widths = None                       # every character one column wide
         else:
-            current = pending_ansi
-    flush_current()
-    return tokens
+            widths = _widths(run)
+            if widths is None:                  # clusters: pi's grapheme loop, measured later
+                for segment in _iter_graphemes(run):
+                    if segment != " " and _CJK_BREAK_RE.search(segment):
+                        if current:
+                            units.append((current, current_width, None))
+                            current, current_width, current_kind = "", 0, None
+                        units.append((pending + segment, -1, None))
+                        pending = ""
+                        continue
+                    kind = "space" if segment == " " else "word"
+                    if current and current_kind != kind:
+                        units.append((current, current_width, None))
+                        current = ""
+                    if pending:
+                        current += pending
+                        pending = ""
+                    current_kind = kind
+                    current += segment
+                    current_width = -1
+                continue
+        offset = 0
+        for cjk, space, word in _UNIT_RE.findall(run):
+            if cjk:
+                if current:
+                    units.append((current, current_width, None))
+                    current, current_width, current_kind = "", 0, None
+                cjk_widths = "1" * len(cjk) if widths is None else widths[offset:offset + len(cjk)]
+                units.append((pending + cjk, len(cjk) + cjk_widths.count("2"), (pending, cjk, cjk_widths, "")))
+                pending = ""
+                offset += len(cjk)
+                continue
+            token = space or word
+            kind = "space" if space else "word"
+            width = len(token) if widths is None else len(token) + widths.count("2", offset, offset + len(token))
+            offset += len(token)
+            if current and current_kind != kind:
+                units.append((current, current_width, None))
+                current, current_width = "", 0
+            if pending:
+                current += pending
+                pending = ""
+            current_kind = kind
+            current += token
+            if current_width >= 0:
+                current_width += width
+
+    if pending:
+        if current:
+            current += pending
+        elif units:
+            token, width, cjk = units[-1]
+            units[-1] = (token + pending, width, cjk and (cjk[0], cjk[1], cjk[2], cjk[3] + pending))
+        else:
+            current = pending
+    if current:
+        units.append((current, current_width, None))
+    return units
+
+
+def _single_characters(unit: tuple[str, int, tuple[str, str, str, str] | None]):
+    """A CJK run as the tokens pi sees, one character each (for widths too narrow for the run loop)."""
+    token, width, cjk = unit
+    if cjk is None:
+        yield token, width, None
+        return
+    codes_before, characters, widths, codes_after = cjk
+    last = len(characters) - 1
+    for position, character in enumerate(characters):
+        piece = (codes_before if position == 0 else "") + character + (codes_after if position == last else "")
+        yield piece, int(widths[position]), None
+
+
+def _fitting(widths: str, position: int, count: int, room: int) -> int:
+    """How many of the characters from ``position`` on fit into ``room`` columns."""
+    if room <= 0:
+        return 0
+    span = count - position
+    wide = widths.count("2", position, count)
+    if wide == 0:
+        return min(span, room)
+    if wide == span:
+        return min(span, room // 2)
+    low, high = 0, min(span, room)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if middle + widths.count("2", position, position + middle) <= room:
+            low = middle
+        else:
+            high = middle - 1
+    return low
 
 
 def wrap_text_with_ansi(text: str, width: int) -> list[str]:
@@ -493,10 +569,12 @@ def wrap_text_with_ansi(text: str, width: int) -> list[str]:
     input_lines = re.split(r"\r\n|\r|\n", text)
     result: list[str] = []
     tracker = AnsiCodeTracker()
-    for input_line in input_lines:
+    last = len(input_lines) - 1
+    for index, input_line in enumerate(input_lines):
         prefix = tracker.getActiveCodes() if result else ""
         result.extend(_wrap_single_line(prefix + input_line, width))
-        _update_tracker_from_text(input_line, tracker)
+        if index < last:                  # the codes carry into the next line; none follows the last
+            _update_tracker_from_text(input_line, tracker)
     return result or [""]
 
 
@@ -508,45 +586,77 @@ def _wrap_single_line(line: str, width: int) -> list[str]:
 
     wrapped: list[str] = []
     tracker = AnsiCodeTracker()
-    tokens = _split_into_tokens_with_ansi(line)
+    active = ""                 # tracker.getActiveCodes() for the tokens placed so far ...
+    reset = ""                  # ... and getLineEndReset(): both change only with a token that carries codes
+    units = _units(line)
+    if width < 2:               # a CJK character may be wider than the line: pi's long-word path
+        units = [piece for unit in units for piece in _single_characters(unit)]
     current_line = ""
     current_visible_length = 0
 
-    for token in tokens:
-        token_visible_length = visible_width(token)
-        is_whitespace = token.strip() == ""
-        if token_visible_length > width and not is_whitespace:
-            if current_line:
+    for token, token_visible_length, cjk in units:
+        if token_visible_length < 0:
+            token_visible_length = visible_width(token)
+        if cjk is not None and current_visible_length + token_visible_length > width:
+            # pi sees one token per character and breaks wherever the next no longer fits;
+            # the run is placed by the same rule, as many characters as fill the line at once.
+            codes_before, characters, widths, codes_after = cjk
+            position = 0
+            count = len(characters)
+            while position < count:
+                fitting = _fitting(widths, position, count, width - current_visible_length)
+                if fitting == 0:                # the line holds something already: end it
+                    wrapped.append(current_line.rstrip() + reset)
+                    current_line = active
+                    current_visible_length = 0
+                    continue
+                piece = characters[position:position + fitting]
+                if position == 0:
+                    piece = codes_before + piece
+                position += fitting
+                if position == count:
+                    piece += codes_after
+                current_line += piece
+                current_visible_length += fitting + widths.count("2", position - fitting, position)
+                if position == fitting and codes_before:   # placed with its first character: its codes apply from here
+                    _update_tracker_from_text(codes_before, tracker)
+                    active = tracker.getActiveCodes()
+                    reset = tracker.getLineEndReset()
+            if codes_after:
+                _update_tracker_from_text(codes_after, tracker)
+                active = tracker.getActiveCodes()
                 reset = tracker.getLineEndReset()
-                if reset:
-                    current_line += reset
-                wrapped.append(current_line)
+            continue
+
+        if token_visible_length > width and not token.isspace():
+            if current_line:
+                wrapped.append(current_line + reset)
                 current_line = ""
                 current_visible_length = 0
-
             broken = _break_long_word(token, width, tracker)
             wrapped.extend(broken[:-1])
             current_line = broken[-1]
             current_visible_length = visible_width(current_line)
+            if "\x1b" in token:                 # _break_long_word fed the tracker
+                active = tracker.getActiveCodes()
+                reset = tracker.getLineEndReset()
             continue
 
-        total_needed = current_visible_length + token_visible_length
-        if total_needed > width and current_visible_length > 0:
-            line_to_wrap = current_line.rstrip()
-            reset = tracker.getLineEndReset()
-            if reset:
-                line_to_wrap += reset
-            wrapped.append(line_to_wrap)
-            if is_whitespace:
-                current_line = tracker.getActiveCodes()
+        if current_visible_length + token_visible_length > width and current_visible_length > 0:
+            wrapped.append(current_line.rstrip() + reset)
+            if token.isspace():
+                current_line = active
                 current_visible_length = 0
             else:
-                current_line = tracker.getActiveCodes() + token
+                current_line = active + token
                 current_visible_length = token_visible_length
         else:
             current_line += token
             current_visible_length += token_visible_length
-        _update_tracker_from_text(token, tracker)
+        if "\x1b" in token:
+            _update_tracker_from_text(token, tracker)
+            active = tracker.getActiveCodes()
+            reset = tracker.getLineEndReset()
 
     if current_line:
         wrapped.append(current_line)
@@ -565,38 +675,34 @@ def _break_long_word(word: str, width: int, tracker: AnsiCodeTracker) -> list[st
     lines: list[str] = []
     current_line = tracker.getActiveCodes()
     current_width = 0
-    segments: list[tuple[str, str]] = []
     index = 0
-    while index < len(word):
-        ansi = extract_ansi_code(word, index)
-        if ansi is not None:
-            segments.append(("ansi", ansi.code))
-            index += ansi.length
-            continue
-        end = index
-        while end < len(word) and extract_ansi_code(word, end) is None:
-            end += 1
-        for segment in _iter_graphemes(word[index:end]):
-            segments.append(("grapheme", segment))
+    length = len(word)
+    while index < length:
+        if word[index] == "\x1b":
+            match = _ESCAPE_RE.match(word, index)
+            if match is not None:
+                current_line += match.group()
+                tracker.process(match.group())
+                index = match.end()
+                continue
+        end = _text_run_end(word, index)
+        run = word[index:end]
         index = end
-
-    for segment_type, value in segments:
-        if segment_type == "ansi":
-            current_line += value
-            tracker.process(value)
-            continue
-        if not value:
-            continue
-        width_value = visible_width(value)
-        if current_width + width_value > width:
-            reset = tracker.getLineEndReset()
-            if reset:
-                current_line += reset
-            lines.append(current_line)
-            current_line = tracker.getActiveCodes()
-            current_width = 0
-        current_line += value
-        current_width += width_value
+        widths = _widths(run)
+        if widths is None:
+            pieces = [(segment, visible_width(segment)) for segment in _iter_graphemes(run)]
+        else:
+            pieces = zip(run, map(int, widths))
+        for segment, segment_width in pieces:
+            if current_width + segment_width > width:
+                reset = tracker.getLineEndReset()
+                if reset:
+                    current_line += reset
+                lines.append(current_line)
+                current_line = tracker.getActiveCodes()
+                current_width = 0
+            current_line += segment
+            current_width += segment_width
 
     if current_line:
         lines.append(current_line)

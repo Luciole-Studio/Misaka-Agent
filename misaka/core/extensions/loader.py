@@ -139,6 +139,31 @@ class _ExtensionAPI:
         )
         self.runtime.refreshTools()
 
+    def registerWebSearchProvider(self, provider: Any) -> None:
+        from misaka.core.web.registry import validate_provider
+
+        self.load.assert_active()
+        name = validate_provider(provider)
+        self.extension.webProviders[name] = provider
+        self.runtime.refreshTools()
+
+    def unregisterWebSearchProvider(self, name: str) -> None:
+        self.load.assert_active()
+        self.extension.webProviders.pop(name.strip(), None)
+        self.runtime.refreshTools()
+
+    def registerBrowserProvider(self, provider: Any) -> None:
+        from misaka.core.web.browser.providers import validate_provider
+
+        self.load.assert_active()
+        self.extension.browserProviders[validate_provider(provider)] = provider
+        self.runtime.refreshTools()
+
+    def unregisterBrowserProvider(self, name: str) -> None:
+        self.load.assert_active()
+        self.extension.browserProviders.pop(name.strip(), None)
+        self.runtime.refreshTools()
+
     def registerCommand(self, name: str, options: dict[str, Any]) -> None:
         self.load.assert_active()
         self.extension.commands[name] = RegisteredCommand(

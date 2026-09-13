@@ -4,5 +4,12 @@ __pycache__/
 .DS_Store
 .coverage
 # Benchmark runs are local artefacts; the frozen baseline is not.
-bench/results/*
-!bench/results/golden/
+
+# libghostty-vt build tree (scripts/build_libghostty_vt.sh)
+/build/
+
+# Claude Code session checkpoints
+/.claude/
+
+# build artefacts
+/dist/

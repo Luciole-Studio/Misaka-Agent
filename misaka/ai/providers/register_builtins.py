@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import importlib
 from collections.abc import AsyncIterable, Awaitable, Callable
 from dataclasses import dataclass
+from functools import cache
 from typing import Any
 
 from misaka.ai.api_lazy import lazy_api
@@ -31,7 +31,6 @@ class LazyProviderModule:
     streamSimple: ProviderSimpleStreamCallable
 
 
-_module_tasks: dict[str, asyncio.Task[LazyProviderModule]] = {}
 _bedrock_provider_module_override: LazyProviderModule | None = None
 
 
@@ -56,20 +55,18 @@ async def _load_provider_module(
     stream_name: str,
     stream_simple_name: str,
 ) -> LazyProviderModule:
-    existing = _module_tasks.get(cache_key)
-    if existing is not None:
-        return await existing
+    return _import_provider_module(cache_key, module_name, stream_name, stream_simple_name)
 
-    async def load() -> LazyProviderModule:
-        module = importlib.import_module(module_name)
-        return LazyProviderModule(
-            stream=getattr(module, stream_name),
-            streamSimple=getattr(module, stream_simple_name),
-        )
 
-    task = asyncio.create_task(load())
-    _module_tasks[cache_key] = task
-    return await task
+@cache
+def _import_provider_module(
+    cache_key: str, module_name: str, stream_name: str, stream_simple_name: str,
+) -> LazyProviderModule:
+    # importlib owns the import lock; cached values work across auxiliary worker loops.
+    module = importlib.import_module(module_name)
+    return LazyProviderModule(
+        stream=getattr(module, stream_name), streamSimple=getattr(module, stream_simple_name),
+    )
 
 
 async def _load_anthropic_provider_module() -> LazyProviderModule:

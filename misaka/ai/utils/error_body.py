@@ -100,6 +100,11 @@ def provider_error_status(error: Any) -> int | None:
                 value = metadata.get("HTTPStatusCode")
                 if isinstance(value, int) and not isinstance(value, bool):
                     return value
+    # google-genai APIError keeps the HTTP code here even when response is
+    # absent. Do not mistake provider-specific codes (e.g. 1210) for HTTP.
+    value = getattr(error, "code", None)
+    if isinstance(value, int) and not isinstance(value, bool) and 100 <= value <= 599:
+        return value
     return None
 
 

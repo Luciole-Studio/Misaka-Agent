@@ -890,6 +890,8 @@ class ExtensionRunner:
                     handler_result = _invoke_handler(handler, event, ctx)
                     if hasattr(handler_result, "__await__"):
                         handler_result = await handler_result
+                    if event_type in {"session_context_prepare", "session_context_carry"} and handler_result is not None:
+                        return handler_result
                     if event_type in {
                         "session_before_switch",
                         "session_before_fork",
@@ -899,8 +901,10 @@ class ExtensionRunner:
                         result = handler_result
                         if _result_flag(result, "cancel", False):
                             return result
-                except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception
+                except Exception as error:
                     self._emit_extension_exception(extension.path, event_type, error)
+                    if event_type in {"session_context_prepare", "session_context_carry"}:
+                        raise
         return result
 
     async def emit_message_end(self, event: Any) -> Any:

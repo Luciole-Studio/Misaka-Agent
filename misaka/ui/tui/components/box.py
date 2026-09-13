@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from misaka.ui.tui.tui import Component
-from misaka.ui.tui.utils import applyBackgroundToLine, visibleWidth
+from misaka.ui.tui.utils import visibleWidth
 
 
 @dataclass(slots=True)
@@ -90,10 +90,11 @@ class Box(Component):
         return result
 
     def applyBg(self, line: str, width: int) -> str:
-        visible_length = visibleWidth(line)
-        padded = line + (" " * max(0, width - visible_length))
+        padded = line + (" " * max(0, width - visibleWidth(line)))
         if callable(self.bgFn):
-            return applyBackgroundToLine(padded, width, self.bgFn)
+            # pi: applyBackgroundToLine(padded, width, bgFn), which measures the padded line
+            # once more only to find nothing left to pad; the measurement is the cost.
+            return self.bgFn(padded)
         return padded
 
 

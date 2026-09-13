@@ -48,6 +48,13 @@ class ReadToolInput(BaseModel):
     path: str = Field(description="Path to the file to read (relative or absolute)")
     offset: int | None = Field(default=None, description="Line number to start reading from (1-indexed)")
     limit: int | None = Field(default=None, description="Maximum number of lines to read")
+    cell_range: str | None = Field(
+        default=None,
+        description=(
+            "Spreadsheet only: an A1-style range such as \"Sheet1!A3:D15\" to read just that "
+            "region instead of the whole workbook. Use it to re-read part of a large sheet."
+        ),
+    )
 
 
 @dataclass(slots=True)
@@ -226,6 +233,33 @@ def _format_read_result(
     return text
 
 
+def _office_format(absolute_path: str) -> str | None:
+    """The Office renderer key for this path, or ``None``.
+
+    A local import: ``documents.office`` pulls in openpyxl, and ``read`` is constructed for
+    every session whether or not one ever opens a workbook.
+    """
+    from misaka.core.documents import office
+    return office.format_of(absolute_path)
+
+
+async def _render_office(absolute_path: str, cell_range: str | None, workspace: str) -> str:
+    """The document as markdown, off the event loop.
+
+    Parsing a workbook and walking its cells is seconds of CPU on a large file, and the
+    session is a single loop: doing it inline holds every other tool call still. Rendering
+    goes through the cache, so paging one document with ``offset`` parses it once.
+    ``cell_range`` deliberately bypasses the cache -- it is a different rendering of the
+    same file, and keying the store on it would let one range's answer serve another's.
+    """
+    from misaka.core.documents import office
+
+    if cell_range:
+        return await asyncio.to_thread(office.render, absolute_path, cell_range=cell_range)
+    return await asyncio.to_thread(
+        office.render_cached, absolute_path, lambda: office.render(absolute_path), workspace=workspace)
+
+
 def create_read_tool_definition(
     cwd: str,
     options: ReadToolOptions | Mapping[str, Any] | None = None,
@@ -283,8 +317,23 @@ def create_read_tool_definition(
                         ImageContent(data=processed.data, mimeType=processed.mimeType),
                     ]
             else:
-                buffer = await operations.readFile(absolute_path)
-                text_content = buffer.decode("utf-8", errors="replace")
+                # An Office file is rendered rather than decoded: its bytes are a zip, and
+                # ``errors="replace"`` on them produces pages of replacement characters that
+                # look like content and quote against nothing. The rendering is the corpus'
+                # own (``documents/office``), so what is shown here is what ``doc_read``
+                # would show -- a quotation copied out of this verifies against the indexed
+                # document. Everything below is unchanged: offset/limit page the rendering
+                # exactly as they page a text file.
+                if _office_format(absolute_path) is not None:
+                    text_content = await _render_office(absolute_path, parsed.cell_range, cwd)
+                elif parsed.cell_range:
+                    raise RuntimeError(
+                        "cell_range names a sheet and a range, and this is not a spreadsheet. "
+                        "Call read again without it."
+                    )
+                else:
+                    buffer = await operations.readFile(absolute_path)
+                    text_content = buffer.decode("utf-8", errors="replace")
                 all_lines = text_content.split("\n")
                 total_file_lines = len(all_lines)
                 start_line = max(0, parsed.offset - 1) if parsed.offset else 0
@@ -382,10 +431,16 @@ def create_read_tool_definition(
         name="read",
         label="read",
         description=(
-            "Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). "
+            "Read the contents of a file. Supports text files, Office documents "
+            "(xlsx, xlsm, csv, tsv, docx, docm, pptx, pptm), and images "
+            "(jpg, png, gif, webp, bmp). "
             f"Images are sent as attachments. For text files, output is truncated to {DEFAULT_MAX_LINES} "
             f"lines or {DEFAULT_MAX_BYTES // 1024}KB (whichever is hit first). Use offset/limit for large files. "
-            "When you need the full file, continue with offset until complete."
+            "When you need the full file, continue with offset until complete. A spreadsheet "
+            "is rendered with real cell coordinates, its formulas and its sheet-level "
+            "formatting; pass cell_range to re-read one region of a large sheet. A Word "
+            "document keeps its headings, lists, tables in body order and its footnotes; a "
+            "deck is rendered slide by slide with chart values and connector flow."
         ),
         promptSnippet="Read file contents",
         promptGuidelines=["Use read to examine files instead of cat or sed."],

@@ -32,6 +32,8 @@ def state_db_path_for_engine(engine: Any) -> Path:
     The path is read-only diagnostic input. When ``LCM_HERMES_BASE_DIR`` is
     configured, enforce the same containment guard for all diagnostic surfaces.
     """
+    if getattr(getattr(engine, "_lifecycle", None), "_host_sessions", None) is not None:  # misaka: catalogue, not state.db
+        return None
     hermes_home = getattr(engine, "_hermes_home", "") or ""
     if hermes_home:
         return _enforce_state_db_containment(

@@ -91,7 +91,7 @@ def register(harn):
         out = await asyncio.to_thread(_net().request, "pane.create", {
             "argv": params.argv, "cwd": params.cwd, "title": f"{name}·ally",
             "env": {"MISAKA_ALLY": name},
-            "place": {"tab": os.environ.get("MISAKA_NET_PANE")}})   # a tab of its own in this Last Order's space
+            "place": {"grid": os.environ.get("MISAKA_NET_PANE")}})   # a grid pane in this Last Order's tab (allies group with Sisters)
         return _text(f"Ally {name} is running in pane {out['pane_id']} (interactive session; the user can take over). "
                      f"To give it a job, create a card with misaka_ally_card.")
 
@@ -103,7 +103,6 @@ def register(harn):
         argv: list[str] = Field(
             description='The ally\'s non-interactive command, e.g. ["codex", "exec"], ["claude", "-p"], or ["gemini", "-p"]. '
                         'The contract is appended as the final argument. If unsure, run `<command> --help` first.')
-        timeout_seconds: int = Field(default=900, description="Timeout in seconds.")
         priority: int = Field(default=0, description="Priority; higher runs first.")
 
     @_register(
@@ -120,7 +119,7 @@ def register(harn):
         workspace = db.canonical_workspace(getattr(ctx, "cwd", None) or os.getcwd())
         tid = card_files.create(                      # the one front door: index row + cards/<id>.md
             _board(), workspace, params.title, params.body, params.assignee,
-            priority=params.priority, timeout_seconds=params.timeout_seconds, executor=params.argv,
+            priority=params.priority, executor=params.argv,
             origin_session=getattr(getattr(ctx, "sessionManager", None), "sessionId", None))
         return _text(f"Created {tid} for ally {params.assignee} (`{' '.join(params.argv)}`). "
                      f"It is on the board but not started; dispatch it once the user approves.")
@@ -136,7 +135,7 @@ def register(harn):
         harn,
         name="misaka_ally_dispatch", label="Dispatch ally card",
         description="Run a ready ally card in a pane (one non-interactive pass). Asynchronous: returns "
-                    "immediately; when the ally finishes, its report.json is the submission and the acceptance. "
+                    "immediately; when the ally exits successfully, the daemon records its output and deliverables. "
                     "Do not poll while waiting.",
         snippet="Dispatch an ally card",
         guidelines=[("misaka_ally_dispatch spends the external agent's own quota; do not call it unless the user "
@@ -147,9 +146,9 @@ def register(harn):
             raise ValueError("Dispatching spends the ally's own quota; get explicit user confirmation first.")
         out = await asyncio.to_thread(_net().request, "pane.run_card",
                                       {"task_id": params.task_id,
-                                       "place": {"tab": os.environ.get("MISAKA_NET_PANE")}})
-        return _text(f"Card {params.task_id} is running in pane {out['pane_id']}. It will submit on its own "
-                     f"(a valid report.json is its acceptance); go do something else meanwhile.")
+                                       "place": {"grid": os.environ.get("MISAKA_NET_PANE")}})
+        return _text(f"Card {params.task_id} is running in pane {out['pane_id']}. The daemon will settle it "
+                     "when the ally exits; go do something else meanwhile.")
 
     class PeerMsgParams(BaseModel):
         model_config = {"extra": "forbid"}

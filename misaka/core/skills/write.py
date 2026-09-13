@@ -6,8 +6,12 @@ its environment and the same files directly.
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
+import shutil
+import stat
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -28,11 +32,8 @@ def _root():
 
 
 def _config():
-    try:
-        with open(_root() / "skills.json", encoding="utf-8-sig") as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {}
+    from .layers import load_skills_config
+    return load_skills_config()
 
 
 def write_mode():
@@ -49,7 +50,7 @@ def current_origin():
 # Review ledger
 
 def _ledger_path():
-    return _root() / "skills" / ".ledger.jsonl"
+    return _root() / "skills" / ".ledger-v2.jsonl"
 
 
 def _blob_dir():
@@ -112,6 +113,24 @@ def _collect_blobs():
     referenced = {item["sha256"] for entry in entries()
                   for item in (entry.get("before") or []) + (entry.get("after") or [])
                   if isinstance(item, dict) and item.get("sha256")}
+    for entry in entries():
+        referenced.update(item["sha256"] for change in entry.get("changes") or []
+                          for side in ("before", "after")
+                          for item in change.get(side, {}).get("files", []) if item.get("sha256"))
+    for path in _journal_dir().glob("*.json"):
+        try:
+            journal = json.loads(path.read_text())
+            referenced.update(item["sha256"] for change in journal["changes"]
+                              for side in ("before", "after")
+                              for item in change.get(side, {}).get("files", []) if item.get("sha256"))
+        except (OSError, ValueError, KeyError, TypeError):
+            return  # Fail closed: an unreadable journal may be the only reference.
+    for pending in list_pending():
+        if pending.get("_integrity_error"):
+            return  # Corrupt review may be the only remaining reference.
+        payload = pending.get("payload") or {}
+        for side in ("before", "after"):
+            referenced.update(item["sha256"] for item in payload.get(side, {}).get("files", []) if item.get("sha256"))
     for name in blobs - referenced:
         try:
             (_blob_dir() / name).unlink()
@@ -119,50 +138,175 @@ def _collect_blobs():
             continue
 
 
-def restore(root, before):
-    """Put a skill tree back to a snapshot: its files from the blobs, everything else gone."""
-    root = Path(root)
-    root.mkdir(parents=True, exist_ok=True)
-    keep = set()
+def _safe_parents(path, *, create=False):
+    """Reject mutable symlink ancestors, including a redirected managed root."""
+    path = Path(os.path.abspath(path))
+    for component in reversed((path, *path.parents)):
+        # macOS's OS-owned /var and /tmp aliases are not managed tree links.
+        if str(component) in ("/var", "/tmp") and os.path.realpath(component) in ("/private/var", "/private/tmp"):
+            continue
+        try:
+            mode = component.lstat().st_mode
+        except FileNotFoundError:
+            if not create:
+                continue
+            component.mkdir()
+            mode = component.lstat().st_mode
+        if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+            raise ValueError(f"Skill directory ancestry is not a real directory: {component}")
+
+
+def _checked_snapshot(before):
+    """Validate ALL paths/blobs before touching live data; never follow snapshot links."""
+    from .manage import lookup_path_error
+    if not isinstance(before, list):
+        raise TypeError("Skill snapshot must be a list.")
+    paths = set()
     for item in before:
+        if not isinstance(item, dict) or lookup_path_error(item.get("path")):
+            raise ValueError("Invalid path in skill snapshot.")
+        rel = Path(item["path"])
+        if str(rel) in ("", ".") or "\\" in str(rel) or str(rel) in paths:
+            raise ValueError("Duplicate or invalid path in skill snapshot.")
+        if any(str(parent) in paths for parent in rel.parents):
+            raise ValueError("A snapshot file is another file's parent.")
+        paths.add(str(rel))
+        mode = item.get("mode", 0o644)
+        if type(mode) is not int or mode < 0 or mode > 0o777:
+            raise ValueError("Invalid mode in skill snapshot.")
+        if item.get("symlink") is not None:
+            if not isinstance(item["symlink"], str) or "\0" in item["symlink"]:
+                raise ValueError("Invalid symlink in skill snapshot.")
+            continue
+        sha = item.get("sha256")
+        if not isinstance(sha, str) or not re.fullmatch(r"[a-f0-9]{64}", sha):
+            raise ValueError("Invalid blob identity in skill snapshot.")
+        blob = _blob_dir() / sha
+        if blob.is_symlink():
+            raise ValueError(f"Rollback blob is a symlink: {sha}")
+        data = blob.read_bytes()
+        if hashlib.sha256(data).hexdigest() != sha:
+            raise ValueError(f"Corrupt rollback blob: {sha}")
+    for rel in paths:
+        if any(str(parent) in paths for parent in Path(rel).parents):
+            raise ValueError("A snapshot file is another file's parent.")
+
+
+def _remove_tree(path):
+    """Clean only an owned detached tree; never chmod through symlinks."""
+    path = Path(path)
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        for root, dirs, _files in os.walk(path):
+            if not Path(root).is_symlink():
+                os.chmod(root, stat.S_IMODE(os.stat(root).st_mode) | 0o700)
+        shutil.rmtree(path)
+
+
+def tree_image(root, *, store=True):
+    root = Path(root)
+    _safe_parents(root)
+    exists = root.is_dir()
+    return {"exists": exists, "files": snapshot(root, store=store),
+            "mode": stat.S_IMODE(root.stat().st_mode) if exists else 0o755,
+            "directories": {str(p.relative_to(root)): stat.S_IMODE(p.stat().st_mode)
+                            for p in sorted(root.rglob("*")) if p.is_dir() and not p.is_symlink()} if exists else {}}
+
+
+def _materialize(root, image):
+    """Build a fresh tree. The caller owns root; all blob/path checks precede writes."""
+    _checked_snapshot(image["files"])
+    mode = image.get("mode", 0o755)
+    if type(mode) is not int or not 0 <= mode <= 0o777:
+        raise ValueError("Invalid root mode in skill snapshot.")
+    from .manage import lookup_path_error
+    directories = image.get("directories", {})
+    if not isinstance(directories, dict):
+        raise TypeError("Invalid snapshot directories.")
+    for rel, mode in directories.items():
+        if lookup_path_error(rel) or str(Path(rel)) == "." or type(mode) is not int or not 0 <= mode <= 0o777:
+            raise ValueError("Invalid directory in skill snapshot.")
+        if any(str(Path(rel)) == item["path"] or Path(rel).is_relative_to(item["path"]) for item in image["files"]):
+            raise ValueError("Snapshot directory is beneath a file or symlink.")
+    if not image["exists"]:
+        if image["files"] or directories:
+            raise ValueError("Absent tree snapshot contains files.")
+        return
+    root.mkdir(parents=True, exist_ok=False)
+    for rel in directories:
+        (root / rel).mkdir(parents=True, exist_ok=True)
+    for item in image["files"]:
         dest = root / item["path"]
         dest.parent.mkdir(parents=True, exist_ok=True)
         if item.get("symlink") is not None:
-            if dest.is_symlink() or dest.exists():
-                dest.unlink()
             os.symlink(item["symlink"], dest)
         else:
-            dest.write_bytes((_blob_dir() / item["sha256"]).read_bytes())
-            if item.get("mode") is not None:              # absent in ledger entries from before this
-                os.chmod(dest, int(item["mode"]))
-        # Relative paths, not `resolve()`: resolving a restored symlink would name its target
-        # outside the tree, and the cleanup below would then delete the link it just made.
-        keep.add(str(Path(item["path"])))
-    for f in sorted(root.rglob("*"), reverse=True):       # deepest first, so emptied directories go too
-        if str(f.relative_to(root)) in keep:
-            continue
-        if f.is_symlink() or f.is_file():                 # is_symlink first: is_file/is_dir follow it,
-            f.unlink()                                    # and rmdir on a link to a dir raises
-        elif f.is_dir() and not any(f.iterdir()):
-            f.rmdir()
-    if not before and not any(root.iterdir()):
-        root.rmdir()
+            atomic.write_bytes(dest, (_blob_dir() / item["sha256"]).read_bytes(), mode=item.get("mode", 0o644))
+    for rel, mode in sorted(directories.items(), key=lambda i: len(Path(i[0]).parts), reverse=True):
+        os.chmod(root / rel, mode)
+    os.chmod(root, image.get("mode", 0o755))
+
+
+def restore(root, before, *, image=None):
+    """Restore by replacement, never in-place writes through current links.
+
+    With an enclosing transaction the durable journal owns crash recovery.
+    Standalone compatibility calls still validate all blobs before moving live data.
+    """
+    root = Path(os.path.abspath(root))
+    _safe_parents(root.parent, create=True)
+    if root.is_symlink():
+        raise ValueError(f"Skill root is a symlink: {root}")
+    image = image if image is not None else {"exists": bool(before), "files": before}
+    container = root.parent / ".misaka-skill-transactions"
+    _safe_parents(container, create=True)
+    stage = Path(tempfile.mkdtemp(prefix=_restore_prefix(root), dir=container))
+    new, old = stage / "new", stage / "old"
+    retain = False
+    try:
+        _materialize(new, image)
+        _safe_parents(root.parent)
+        if root.is_symlink():
+            raise ValueError(f"Skill root is a symlink: {root}")
+        if root.exists():
+            os.replace(root, old)
+        try:
+            if new.exists():
+                os.replace(new, root)
+        except BaseException:
+            if old.exists():
+                try:
+                    os.replace(old, root)
+                except OSError as error:
+                    retain = True
+                    raise OSError(f"Skill replacement and restoration failed; original retained at {old}: {error}") from error
+            raise
+    finally:
+        if not retain:
+            _remove_tree(stage)
+
+
+def _restore_prefix(root):
+    # Only a recovery for THIS root may clean its interrupted replace stages.
+    identity = hashlib.sha256(str(Path(root).absolute()).encode()).hexdigest()[:16]
+    return f"restore-{identity}-"
 
 
 def mutation_lock():
     """The one lock every live-skill mutation (apply, approve, rollback) runs under, so snapshot,
     write, scan and ledger happen as a unit. ponytail: one lock for all roles; per role if it contends."""
     from filelock import FileLock
-    path = _root() / "skills" / ".write.lock"
+    path = _root() / ".skills-write.lock"
     path.parent.mkdir(parents=True, exist_ok=True)
-    return FileLock(str(path))
+    return FileLock(str(path), is_singleton=True)  # Native reentrancy for nested metadata transactions.
 
 
-def record(action, skill, *, before=None, after_root=None, evidence=None):
+def record(action, skill, *, before=None, after_root=None, evidence=None, changes=None, entry_id=None):
     """Append a change to the ledger and return the entry id. Raises OSError when the ledger
     cannot be written: callers say so instead of pretending the change was recorded."""
     entry = {
-        "id": uuid.uuid4().hex[:12],
+        "id": entry_id or uuid.uuid4().hex[:12],
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "actor": current_origin(),
         "action": action,
@@ -170,13 +314,21 @@ def record(action, skill, *, before=None, after_root=None, evidence=None):
         "evidence": evidence or {},
         "before": before if before is not None else [],
         "after": snapshot(after_root) if after_root else [],
-        "rollbackable": action in MUTATING_ACTIONS,     # bookkeeping entries restore nothing
+        "version": 2,
+        "root": str(Path(after_root).absolute()) if after_root is not None else None,
+        "changes": changes,
+        "rollbackable": action in MUTATING_ACTIONS or bool(changes),     # bookkeeping entries restore nothing
     }
     path = _ledger_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    _collect_blobs()
+        f.flush()
+        os.fsync(f.fileno())
+    try:
+        _collect_blobs()
+    except Exception:
+        logging.getLogger(__name__).warning("Skill blob cleanup failed after commit", exc_info=True)
     return entry["id"]
 
 
@@ -190,43 +342,136 @@ def entries(limit=None):
                 if not line:
                     continue
                 try:
-                    out.append(json.loads(line))
+                    item = json.loads(line)
+                    if isinstance(item, dict):
+                        out.append(item)
                 except ValueError:
                     continue
     except OSError:
-        return []
+        pass
+    legacy = _root() / "skills" / ".ledger.jsonl"
+    if legacy != _ledger_path():
+        legacy_entries = []
+        try:
+            for line in legacy.read_text().splitlines():
+                try:
+                    item = json.loads(line)
+                    if isinstance(item, dict):
+                        legacy_entries.append(item)
+                except ValueError:
+                    continue
+        except OSError:
+            pass
+        out = legacy_entries + out
     return out[-limit:] if limit else out
 
 
-def rollback(entry_id, skill_root):
-    """Restore a skill directory to the ``before`` snapshot of a ledger entry."""
-    target = next((e for e in entries() if e["id"] == entry_id), None)
-    if target is None:
-        return False, f"Skill ledger entry not found: {entry_id}"
-    if not target.get("rollbackable", target["action"] in MUTATING_ACTIONS):
-        return False, f"Ledger entry {entry_id} records '{target['action']}', not a change that can be rolled back."
-    root = Path(skill_root)
+def _journal_dir():
+    return _root() / "skills" / ".transactions"
+
+
+def _save_journal(journal):
+    atomic.write_text(_journal_dir() / (journal["id"] + ".json"), json.dumps(journal, ensure_ascii=False))
+
+
+def _recover(journal):
+    # The fsynced ledger entry is the commit point; a crash before updating the
+    # journal must not undo an already committed write on restart.
+    committed = any(e.get("id") == journal["id"] for e in entries())
+    for change in journal["changes"]:
+        image = change["after"] if committed else change["before"]
+        restore(change["root"], image["files"], image=image)
+    journal["state"] = "committed" if committed else "aborted"
+    _save_journal(journal)
+    for change in journal["changes"]:
+        container = Path(change["root"]).parent / ".misaka-skill-transactions"
+        _safe_parents(container)
+        if container.is_dir():
+            for stage in container.glob(_restore_prefix(change["root"]) + "*"):
+                _remove_tree(stage)
+
+
+def recover_transactions():
+    """Replay unsettled durable journals under mutation_lock before new writes."""
+    for path in sorted(_journal_dir().glob("*.json")):
+        journal = json.loads(path.read_text())
+        if not isinstance(journal, dict) or journal.get("version") != 2 or path.stem != journal.get("id"):
+            raise ValueError(f"Invalid Skill transaction journal: {path}")
+        if journal.get("state") == "prepared":
+            _recover(journal)
+
+
+def prepare_transaction(roots, *, action, skill, evidence=None):
+    """Durable before-images precede staging, scanning, and every live mutation."""
+    if evidence and evidence.get("profile_dir"):
+        from .release import check_write
+        check_write(evidence["profile_dir"], activating=action == "generation-activate")
+    recover_transactions()
+    changes = [{"root": str(Path(root).absolute()), "before": tree_image(root)} for root in roots]
+    journal = {"version": 2, "id": uuid.uuid4().hex[:12], "state": "prepared",
+               "action": action, "skill": skill, "evidence": evidence or {}, "changes": changes}
+    _save_journal(journal)
+    return journal
+
+
+def commit_transaction(journal, after):
+    for change, image in zip(journal["changes"], after, strict=True):
+        change["after"] = image
+    _save_journal(journal)
     try:
-        root.resolve().relative_to(_root().resolve())    # whether or not it exists yet
-    except ValueError:
-        return False, "Rollback target must be inside ~/.misaka."
-    # Verify every required blob before changing the live skill.
-    for item in target["before"]:
-        if item.get("symlink") is not None:
-            continue            # a link is restored from its recorded target, not from a blob
-        if not (_blob_dir() / item["sha256"]).exists():
-            return False, f"Missing rollback blob for {item['path']} ({item['sha256'][:12]})."
+        for change in journal["changes"]:
+            restore(change["root"], change["after"]["files"], image=change["after"])
+        first = journal["changes"][0]
+        record(journal["action"], journal["skill"], before=first["before"]["files"],
+               after_root=first["root"], evidence=journal["evidence"],
+               changes=journal["changes"], entry_id=journal["id"])
+    except BaseException:
+        _recover(journal)
+        raise
+    journal["state"] = "committed"
+    try:
+        _save_journal(journal)
+    except OSError:
+        # The fsynced ledger already committed. Recovery recognizes the ID and
+        # republishes this journal; do not report an applied write as unapplied.
+        pass
+    return journal["id"]
+
+
+def abort_transaction(journal):
+    journal["state"] = "aborted"
+    _save_journal(journal)
+
+
+def rollback(entry_id, skill_root=None):
+    """Restore the recorded physical identities; caller-selected role is irrelevant.
+
+    Unbound v1 records remain readable, but need explicit provenance rebinding.
+    A current name or matching bytes do not establish the original owner.
+    """
     with mutation_lock():
+        recover_transactions()
+        target = next((e for e in entries() if e.get("id") == entry_id), None)
+        if target is None:
+            return False, f"Skill ledger entry not found: {entry_id}"
+        if target.get("action") == "generation-activate":
+            return False, "Writer generations require a new quiescent cutover, not ledger rollback."
+        if not target.get("rollbackable"):
+            return False, f"Ledger entry {entry_id} is not a change that can be rolled back."
+        changes = target.get("changes")
+        if not changes:
+            return False, "Legacy ledger entry has no bound root identity; review and rebind its original source before rollback."
         try:
-            record("pre-rollback", target["skill"], after_root=root, evidence={"rollback_of": entry_id})
-        except OSError as error:
-            return False, f"The skill ledger cannot be written ({error}); nothing was rolled back."
-        restore(root, target["before"])
-        try:
-            record("rollback", target["skill"], after_root=root, evidence={"rollback_of": entry_id})
-        except OSError as error:
-            return True, f"Rolled back {target['skill']} ({len(target['before'])} files), but the ledger could not record it: {error}"
-    return True, f"Rolled back {target['skill']} ({len(target['before'])} files)."
+            # Validate before-images before creating the rollback journal.
+            for change in changes:
+                _checked_snapshot(change["before"]["files"])
+                if tree_image(change["root"], store=False) != change.get("after"):
+                    return False, "Skill changed since this ledger entry; inspect the newer changes before rollback."
+            journal = prepare_transaction([c["root"] for c in changes], action="rollback", skill=target["skill"], evidence={"rollback_of": entry_id, "profile_dir": (target.get("evidence") or {}).get("profile_dir")})
+            commit_transaction(journal, [c["before"] for c in changes])
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            return False, f"Skill rollback did not complete: {error}"
+    return True, f"Rolled back {target['skill']}."
 
 
 # ── Write gate (after hermes write_approval.py) ─────────────────────────────
@@ -344,4 +589,34 @@ def pending_diff(item):
         item, file_id=item.get("_pending_file_id") if isinstance(item, dict) else None)
     if error:
         return f"(cannot preview: {error})"
-    return manage.pending_diff(item.get("payload") or {})
+    payload = item.get("payload") or {}
+    if payload.get("version") == 3 and payload.get("kind") == "distribution":
+        import difflib
+        old = json.dumps(payload["before"], indent=2, sort_keys=True).splitlines()
+        new = json.dumps(payload["after"], indent=2, sort_keys=True).splitlines()
+        parts = ["\n".join(difflib.unified_diff(old, new, fromfile="reviewed before", tofile="immutable after", lineterm=""))]
+        try:
+            for side in ('before', 'after'):
+                _checked_snapshot(payload[side]['files'])
+            before, after = ({entry['path']: entry for entry in payload[side]['files']} for side in ('before', 'after'))
+            for path in sorted(before.keys() | after.keys()):
+                if before.get(path) == after.get(path):
+                    continue
+                bodies = []
+                for entry in (before.get(path, {}), after.get(path, {})):
+                    data = (_blob_dir() / entry['sha256']).read_bytes() if entry.get('sha256') else b''
+                    # The full immutable hashes/modes/links are always listed above.
+                    # Bound terminal output for binary or very large content; never silently truncate.
+                    try:
+                        bodies.append(data.decode('utf-8') if b'\0' not in data and len(data) <= 512 * 1024 else None)
+                    except UnicodeDecodeError:
+                        bodies.append(None)
+                if None in bodies:
+                    parts.append(f"{path}: binary/large content; inspect immutable blobs in {_blob_dir()} using the hashes above.")
+                else:
+                    parts.append("\n".join(difflib.unified_diff(bodies[0].splitlines(), bodies[1].splitlines(),
+                        fromfile='reviewed before/' + path, tofile='immutable after/' + path, lineterm='')))
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            return f"(cannot preview immutable content: {error})"
+        return "\n\n".join(part for part in parts if part)
+    return manage.pending_diff(payload)

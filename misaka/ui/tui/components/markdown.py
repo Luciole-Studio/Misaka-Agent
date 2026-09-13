@@ -144,6 +144,7 @@ class Markdown(Component):
         self.cachedWidth: int | None = None
         self.cachedLines: list[str] | None = None
         self._sourceLines: list[str] = []
+        self._parsed: tuple[str, SyntaxTreeNode] | None = None
 
     def setText(self, text: str) -> None:
         self.text = text
@@ -171,7 +172,13 @@ class Markdown(Component):
         normalized_text = _C0_CONTROLS_RE.sub("", text.replace("\t", "   "))
         normalized_text = _trim_partial_closing_fence(normalized_text)
         self._sourceLines = normalized_text.split("\n")
-        root = SyntaxTreeNode(_MARKDOWN_PARSER.parse(normalized_text))
+        if self._parsed is None or self._parsed[0] != normalized_text:
+            # PORT-NOTE: pi lexes on every render (marked is fast). A width change re-renders
+            # every message of a transcript, and markdown-it in Python was most of that time,
+            # so the tree is kept per text. Rendering only reads it; the one place that wrote
+            # to it (_takeTaskMarker) remembers what it took.
+            self._parsed = (normalized_text, SyntaxTreeNode(_MARKDOWN_PARSER.parse(normalized_text)))
+        root = self._parsed[1]
 
         rendered_lines: list[str] = []
         # markdown-it swallows a leading blank line (upstream renders the space token as an empty line); put it back
@@ -579,14 +586,18 @@ class Markdown(Component):
                 first = inline.children[0]
                 if first.type != "text":
                     break
-                m = re.match(r"^\[([ xX])\] ", first.content)
-                if not m:
-                    break
                 token = getattr(first, "token", None)
                 if token is None:
                     break
+                taken = token.meta.get("taskMarker")
+                if taken is not None:             # this tree rendered before: the marker is already out
+                    return taken
+                m = re.match(r"^\[([ xX])\] ", first.content)
+                if not m:
+                    break
                 token.content = first.content[m.end():]
-                return f"[{'x' if m.group(1).lower() == 'x' else ' '}] "
+                token.meta["taskMarker"] = f"[{'x' if m.group(1).lower() == 'x' else ' '}] "
+                return token.meta["taskMarker"]
             break
         return ""
 

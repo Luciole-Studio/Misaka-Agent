@@ -19,21 +19,25 @@ the address is still pinned so the opt-out cannot become a rebinding hole.
 
 from __future__ import annotations
 
-import asyncio
 import ipaddress
 import socket
 import time
 from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 import httpx
 
+from misaka.core.tools._web.screening import screen_url
 from misaka.core.tools._web.url_safety import (
     CGNAT_NETWORK,
     allow_private_urls,
     always_blocked_address,
     always_blocked_host,
+    literal_address,
 )
+from misaka.core.web import debug
+from misaka.core.web.accounting import account_call
+from misaka.core.web.network import proxy_for_url, tls_verify, trusted_private_hosts
 from misaka.utils.values import signal_aborted
 
 #: Bytes of one response body a caller keeps by default. Callers that stream to
@@ -102,28 +106,29 @@ def _is_public_address(raw: str, *, allow_private: bool = False) -> bool:
 
 
 async def _resolve_host(host: str, port: int) -> list[str]:
-    records = await asyncio.to_thread(socket.getaddrinfo, host, port, type=socket.SOCK_STREAM)
+    from misaka.utils.async_lifecycle import run_in_thread
+
+    records = await run_in_thread(socket.getaddrinfo, host, port, type=socket.SOCK_STREAM)
     return sorted({record[4][0] for record in records})
 
 
 def _ipv4_first(addresses: list[str]) -> tuple[str, ...]:
     """Vetted addresses ordered IPv4 first.
 
-    :func:`open_checked_stream` dials only the first one, and a container with
-    no IPv6 route is the common case; plain string sort would put ``2606::``
-    ahead of ``93.184.…`` and strand those callers.
+    Try IPv4 before IPv6 to avoid waiting for an unavailable IPv6 route first.
+    The connection loop still tries every vetted candidate on connect failure.
     """
     return tuple(
         sorted(addresses, key=lambda raw: (ipaddress.ip_address(raw.split("%", 1)[0]).version, raw))
     )
 
 
-async def vet_public_url(url: str) -> tuple[str, ...]:
-    """The addresses *url* resolves to, once every one of them is public.
+async def vet_public_url(url: str, *, proxy: str | None = None) -> tuple[str, ...] | None:
+    """The addresses *url* resolves to, once every one satisfies the URL policy.
 
     Fail-closed: a name that cannot be parsed or resolved cannot be vetted, and
-    a single private answer rejects the URL, so a split-horizon resolver cannot
-    smuggle one private address through in a multi-address reply.
+    a single private answer rejects the URL unless explicitly allowed. Mixed
+    public/private answers do not bypass that policy; metadata stays blocked.
 
     Parsing is ``httpx.URL`` rather than ``urllib.parse`` because httpx is what
     eventually dials: the two disagree about hosts (``foo。bar`` IDNA-folds to
@@ -132,11 +137,13 @@ async def vet_public_url(url: str) -> tuple[str, ...]:
 
     Raises :class:`UnsafeUrlError` with the reason. The addresses come back
     ordered IPv4 first, for :func:`open_checked_stream` to pin the socket to.
+    With an explicitly selected proxy, None means local DNS failed and the proxy
+    owns resolution. Default/address-consuming callers never receive that sentinel.
     """
     try:
         parsed = httpx.URL(url)
         host = parsed.raw_host.decode("ascii").rstrip(".")
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
     except (httpx.InvalidURL, UnicodeDecodeError) as error:
         raise UnsafeUrlError(f"URL is not valid: {error}") from error
     if parsed.scheme not in {"http", "https"} or not host:
@@ -145,12 +152,17 @@ async def vet_public_url(url: str) -> tuple[str, ...]:
         raise UnsafeUrlError("URL credentials are not allowed")
     if always_blocked_host(host):
         raise UnsafeUrlError("URL targets a cloud metadata endpoint")
-    allow_private = allow_private_urls()
+    allow_private = allow_private_urls() or parsed.scheme == 'https' and host in trusted_private_hosts()
     if not allow_private and (host == "localhost" or host.endswith(".localhost")):
         raise UnsafeUrlError("URL resolves to a local address")
+    literal = literal_address(host)
+    if literal is not None and not _is_public_address(str(literal), allow_private=allow_private):
+        raise UnsafeUrlError("URL resolves to a local or private address")
     try:
         addresses = await _resolve_host(host, port)
     except (OSError, UnicodeError) as error:
+        if proxy is not None and literal is None and isinstance(error, socket.gaierror):
+            return None
         raise UnsafeUrlError(f"host resolution failed: {error}") from error
     if not addresses:
         raise UnsafeUrlError("host did not resolve")
@@ -209,58 +221,75 @@ async def open_checked_stream(
     timeout: float = 30.0,
     max_redirects: int = MAX_REDIRECT_HOPS,
     transport: httpx.AsyncBaseTransport | None = None,
+    service: str = "web_fetch",
 ) -> AsyncIterator[httpx.Response]:
     """Walk *url*'s redirect chain by hand and yield the final open response.
 
-    Every hop is vetted and then dialled at the address that vetting resolved,
-    so a resolver that answers publicly for the check and privately for the
-    connection (DNS rebinding) has nothing to rebind: the socket never consults
-    it a second time.
+    Direct hops dial the address that vetting resolved, so a resolver that answers
+    publicly for the check and privately for the connection (DNS rebinding) has
+    nothing to rebind. Explicitly proxied hops instead trust the proxy's final DNS.
 
     The body is not read here: the caller reads it inside this context (with
     :func:`read_bounded`) so an oversized response can be abandoned mid-transfer.
     ``response.url`` is the logical URL of the final hop, not the pinned one.
 
-    The client is built here rather than accepted from the caller because two of
-    its settings are load-bearing: ``follow_redirects=False`` is what makes
-    per-hop vetting possible at all, and ``trust_env=False`` keeps a proxy
-    environment variable from routing the request past the address that was
-    checked. ``transport`` exists so tests can answer without a network.
+    Clients are owned here: redirects are manual and trust_env stays False. Only
+    an explicitly enabled, URL-matching proxy may delegate target resolution;
+    otherwise sockets remain pinned. A failed proxy never falls back to direct.
+    ``transport`` is the explicit test transport, not a user-facing proxy setting.
 
     Raises :class:`UnsafeUrlError` for a hop that fails vetting -- never a quiet
     "no more redirects", which a caller would report as a successful fetch --
     and ``httpx.TooManyRedirects`` past ``max_redirects``.
 
-    # ponytail: only the first vetted address is dialled, with no failover to
-    # the rest, because failover inside the hop loop means driving
-    # ``client.stream``'s context by hand. IPv4-first ordering covers the case
-    # that actually bites (an IPv6 answer on a host with no IPv6 route);
-    # upgrade path is a retry loop over the returned addresses on ConnectError.
+    Connection errors try the next already-vetted address. Errors while the
+    caller reads the response are not retried: a streamed body may have effects.
     """
+    from misaka.core.web.timeouts import http_timeout
+
     request_headers = dict(headers or {})
     current = url
-    async with httpx.AsyncClient(
-        follow_redirects=False, trust_env=False, timeout=timeout, transport=transport
-    ) as client:
+    clients = {}
+    async with AsyncExitStack() as owned:
         for _hop in range(max_redirects + 1):
-            addresses = await vet_public_url(current)
-            dial_url, dial_headers, extensions = pin_to_address(
-                current, addresses[0], request_headers
-            )
-            async with client.stream(
-                method, dial_url, headers=dial_headers, extensions=extensions
-            ) as response:
-                location = response.headers.get("location", "").strip() if response.is_redirect else ""
-                if not location:
-                    # Undo the pin for the caller: it reports and resolves
-                    # against the URL it asked for, not the socket's address.
-                    response.request.url = httpx.URL(current)
-                    yield response
-                    return
-                # No InvalidURL guard: httpx parses the Location header itself
-                # while building response.next_request and reports a bad one as
-                # RemoteProtocolError before this line is ever reached.
-                target = str(httpx.URL(current).join(location))
+            screened = screen_url(current)
+            if not screened.allowed:
+                raise UnsafeUrlError(screened.refusal)
+            current = screened.url
+            proxy = proxy_for_url(current)
+            addresses = await vet_public_url(current, proxy=proxy)
+            if proxy not in clients:
+                verify = tls_verify()
+                route = (httpx.Proxy(proxy, ssl_context=verify if proxy.startswith('https://') and verify is not True else None)
+                         if proxy is not None else None)
+                clients[proxy] = await owned.enter_async_context(httpx.AsyncClient(
+                    follow_redirects=False, trust_env=False, timeout=http_timeout("direct", timeout),
+                    verify=verify, transport=transport, **({'proxy': route} if route is not None and transport is None else {}),
+                ))
+            client = clients[proxy]
+            debug.event('route', subject=current, transport='proxy' if proxy is not None else 'direct',
+                        dns_delegated=addresses is None)
+            candidates = (None,) if proxy is not None else addresses
+            for index, address in enumerate(candidates):
+                dial_url, dial_headers, extensions = ((current, request_headers, {}) if address is None else
+                                                       pin_to_address(current, address, request_headers))
+                async with AsyncExitStack() as stack:
+                    await stack.enter_async_context(account_call(service, "proxy" if proxy is not None else "direct", current))
+                    try:
+                        response = await stack.enter_async_context(
+                            client.stream(method, dial_url, headers=dial_headers, extensions=extensions)
+                        )
+                    except (httpx.ConnectError, httpx.ConnectTimeout):
+                        if index == len(candidates) - 1:
+                            raise
+                        continue
+                    location = response.headers.get("location", "").strip() if response.is_redirect else ""
+                    if not location:
+                        response.request.url = httpx.URL(current)
+                        yield response
+                        return
+                    target = str(httpx.URL(current).join(location))
+                break
             request_headers = _strip_cross_origin_credentials(request_headers, current, target)
             current = target
     raise httpx.TooManyRedirects(f"more than {max_redirects} redirects")

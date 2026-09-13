@@ -25,6 +25,7 @@ never collide with built-in tools.
 """
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -45,6 +46,8 @@ _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 INIT_TIMEOUT = float(os.environ.get("MISAKA_MCP_INIT_TIMEOUT", "30"))
 CALL_TIMEOUT = float(os.environ.get("MISAKA_MCP_CALL_TIMEOUT", "120"))
 PROTOCOL_VERSION = "2025-06-18"
+MAX_LIST_PAGES = 50  # Hermes _MCP_LIST_MAX_PAGES: bound forever-cursor discovery.
+logger = logging.getLogger(__name__)
 # One JSON-RPC message is one line, and MCP tools routinely return file or page contents:
 # asyncio's default 64 KiB StreamReader limit would turn a run-of-the-mill result into a
 # ValueError out of readline(). 32 MiB is far past any sane tool result.
@@ -103,7 +106,9 @@ def is_local(cfg):
 def _fingerprint(cfg):
     """Fingerprint of a server definition; a change in command/args/env/cwd forces a re-probe (Hermes' fingerprint field)."""
     import hashlib
-    key = json.dumps({k: cfg.get(k) for k in ("command", "args", "env", "cwd")},
+    # Version 2 caches the complete paginated list, not an old first-page snapshot.
+    key = json.dumps({"schema_cache_version": 4,
+                      **{k: cfg.get(k) for k in ("command", "args", "env", "cwd", "type", "url", "headers", "headersHelper", "authToken", "oauth", "scope")}},
                      sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
@@ -199,6 +204,7 @@ class McpClient:
         self._lock = asyncio.Lock()
         self._start_lock = asyncio.Lock()
         self._pump_task = None
+        self.capabilities = {}
         self._ready = False       # handshake and tools/list completed; a live process alone is not enough
 
     async def start(self):
@@ -239,15 +245,27 @@ class McpClient:
         # would leave every request waiting forever.
         self._pump_task = asyncio.ensure_future(self._pump(self.proc))
         await self._handshake()
-        self.tools = (await self._request("tools/list", {})).get("tools") or []
+        discovered = []
+        cursor = None
+        for _ in range(MAX_LIST_PAGES):
+            response = await self._request("tools/list", {"cursor": cursor} if cursor else {})
+            discovered.extend(response.get("tools") or [])
+            cursor = response.get("nextCursor")
+            if not isinstance(cursor, str) or not cursor:
+                break
+        else:
+            logger.warning("MCP server %r: tools/list exceeded %d pages; keeping %d tools",
+                           self.name, MAX_LIST_PAGES, len(discovered))
+        self.tools = discovered
         self._ready = True         # only now may ensure_started hand this client to a caller
         return self.tools
 
     async def _handshake(self):
-        await self._request("initialize", {
+        initialized = await self._request("initialize", {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {},
             "clientInfo": {"name": "misaka", "version": "1.0"}})
+        self.capabilities = initialized.get("capabilities") or {}
         await self._notify("notifications/initialized", {})
 
     async def _pump(self, proc):
@@ -372,10 +390,13 @@ class McpClient:
                 await self.stop()          # tear down the half-started one before replacing it
             await self.start()
 
-    async def call(self, tool, args, signal=None):
+    async def call_result(self, tool, args, signal=None):
         await self.ensure_started()
-        r = await self._request("tools/call", {"name": tool, "arguments": args or {}},
-                                timeout=CALL_TIMEOUT, signal=signal)
+        return await self._request("tools/call", {"name": tool, "arguments": args or {}},
+                                   timeout=CALL_TIMEOUT, signal=signal)
+
+    async def call(self, tool, args, signal=None):
+        r = await self.call_result(tool, args, signal=signal)
         parts = []
         for c in r.get("content") or []:
             if c.get("type") == "text":
@@ -467,10 +488,20 @@ def _tool_definition(client, t):
         # then a round trip, for an answer nobody is waiting for is pure latency.
         if signal_aborted(signal):
             raise RuntimeError("Operation aborted")
-        text = await _c.call(_t, args, signal=signal)
-        fenced = untrusted(f"mcp:{_c.name}/{_t}", text)
-        return {"content": [{"type": "text", "text": fenced}],
-                "details": {"server": _c.name, "tool": _t}}
+        from misaka.core.subagent.mcp_resources import result_content
+
+        result = await _c.call_result(_t, args, signal=signal)
+        content = await result_content(result.get("content") or [], _c.name, ctx)
+        details = {"server": _c.name, "tool": _t}
+        for key in ("_meta", "structuredContent"):
+            if key in result:
+                details[key] = result[key]
+        if not content:
+            text = json.dumps(result["structuredContent"], ensure_ascii=False) if "structuredContent" in result else "(no output)"
+            content = [{"type": "text", "text": untrusted(f"mcp:{_c.name}/{_t}", text)}]
+        if result.get("isError"):
+            raise RuntimeError("\n".join(block.get("text", "") for block in content if block.get("type") == "text"))
+        return {"content": content, "details": details}
 
     return ToolDefinition(
         name=tool_name(client.name, tname),
@@ -496,15 +527,23 @@ class McpPart:
         self.session = None
         self.tools = []
         self.clients, self.failed = {}, []
+        self._server_definitions = {}
+        self._operations = {}
         self.need_probe = {}
         cache = load_cache()
         for _n, _c in servers_for(context.profile_dir).items():
-            self.clients[_n] = McpClient(_n, _c, context)
+            if _c.get("type", "stdio") != "stdio" or (_c.get("url") and not _c.get("command")):
+                from misaka.core.subagent.mcp_transport import NetworkMcpClient
+
+                self.clients[_n] = NetworkMcpClient(_n, _c, context)
+            else:
+                self.clients[_n] = McpClient(_n, _c, context)
             _t = cached_tools(_n, _c, cache)
             if _t is None:
                 self.need_probe[_n] = _c
             else:
                 self.clients[_n].tools = _t
+                self.clients[_n].capabilities = (cache.get(_n) or {}).get("capabilities") or {}
         self.state = {"clients": self.clients, "failed": self.failed, "pending": len(self.need_probe)}
         self.ui_ref = {}     # ctx.ui captured at session_start, used to refresh the startup screen after probing.
         self.probe_task = None
@@ -516,41 +555,118 @@ class McpPart:
                 definition = _tool_definition(_c, _t)
                 if definition is not None:
                     self.tools.append(definition)
-        self.commands = [CoreCommand("mcp", "Show configured MCP servers and their tools.", self._status)]
+                    self._server_definitions.setdefault(_c.name, []).append(definition)
+        self._resource_tools_added = False
+        self._add_resource_tools()
+        self.commands = [CoreCommand("mcp", "MCP servers and tools; auth/logout <server>.", self._status)]
+
+    def _add_resource_tools(self):
+        if self._resource_tools_added or not any('resources' in client.capabilities for client in self.clients.values()):
+            return
+        from misaka.core.subagent.mcp_resources import resource_tools
+
+        definitions = resource_tools(self.clients)
+        self.tools.extend(definitions)
+        self._resource_tools_added = True
+        if self.session is not None:
+            self.session.registerCustomTools(definitions)
 
     def attach(self, session):
         self.session = session
 
+    def _install_server_tools(self, name):
+        client = self.clients[name]
+        previous = self._server_definitions.get(name, [])
+        identities = {id(item) for item in previous}
+        self.tools[:] = [item for item in self.tools if id(item) not in identities]
+        definitions = [d for d in (_tool_definition(client, t) for t in client.tools) if d is not None]
+        self.tools.extend(definitions)
+        self._server_definitions[name] = definitions
+        if self.session is not None:
+            if previous:
+                self.session.unregisterCustomTools(previous)
+            if definitions:
+                self.session.registerCustomTools(definitions)
+        self._add_resource_tools()
+
+    async def _probe(self, name, *, keep_alive=False):
+        client = self.clients[name]
+        try:
+            await client.ensure_started()
+            self._install_server_tools(name)
+            if not is_local(client.cfg):
+                cache = load_cache()
+                cache[name] = {"fingerprint": _fingerprint(client.cfg), "tools": client.tools,
+                               "capabilities": client.capabilities}
+                save_cache(cache)
+            self.failed[:] = [error for error in self.failed if not error.startswith(name + ": ")]
+        finally:
+            if not keep_alive:
+                await client.stop()
+
     async def probe_and_cache(self, pending):
-        """Runs only for uncached/stale servers: connect once, fetch the tool list, cache it, register the tools."""
-        cache = load_cache()
-        for name, cfg in pending.items():
-            client = self.clients[name]
+        """Probe through the same per-server operation gate as interactive login."""
+        for name in pending:
             try:
-                try:
-                    tools = await client.start()
-                except Exception as e:  # noqa: BLE001 - one server failing to start must not take the session down
-                    self.failed.append(f"{name}: {str(e)[:60]}")
-                    continue
-                if not is_local(cfg):      # Local servers are not cached; re-probing them costs milliseconds.
-                    cache[name] = {"fingerprint": _fingerprint(cfg), "tools": tools}
-                definitions = [d for d in (_tool_definition(client, t) for t in tools) if d is not None]
-                self.tools.extend(definitions)
-                if self.session is not None and definitions:
-                    self.session.registerCustomTools(definitions)
-                await client.stop()      # Stop after probing; ensure_started restarts it on first use.
+                async with self._operations.setdefault(name, asyncio.Lock()):
+                    await self._probe(name)
+            except Exception as error:  # noqa: BLE001 - one server must not take the session down
+                self.failed.append(f"{name}: {str(error)[:60]}")
             finally:
-                self.state["pending"] -= 1    # the startup screen counts down and stops saying "Probing…"
-        save_cache(cache)
+                self.state["pending"] -= 1
         ui = self.ui_ref.get("ui")
         refresh = getattr(ui, "refresh", None)
         if callable(refresh):
             try:
                 refresh()
-            except Exception:  # noqa: BLE001, S110 - a failed UI refresh must not break discovery
+            except Exception:  # noqa: BLE001, S110 - UI failure must not break discovery
                 pass
 
+    async def _auth_command(self, action, name, ctx):
+        client = self.clients.get(name)
+        if client is None or not callable(getattr(client, "authenticate", None)):
+            ctx.ui.notify("Choose a configured HTTP/SSE MCP server.", "error")
+            return
+        async def notify(url):
+            ctx.ui.notify("Open this MCP authorization URL in your browser:\n" + url, "info")
+            callback = client._login_callback
+            if callback is None or not getattr(ctx, "hasUI", False):
+                return
+            while not callback.future.done():
+                dialog = asyncio.create_task(ctx.ui.input("Paste the callback URL, or complete login in the browser"))
+                try:
+                    done, _ = await asyncio.wait({dialog, callback.future}, return_when=asyncio.FIRST_COMPLETED)
+                    if callback.future in done:
+                        return
+                    pasted = dialog.result()
+                    if pasted is None:
+                        from misaka.core.subagent.mcp_auth import McpAuthCancelled
+
+                        raise McpAuthCancelled("MCP authentication cancelled")
+                    if not callback.submit(pasted):
+                        ctx.ui.notify("Invalid callback URL or state; try again.", "warning")
+                finally:
+                    if not dialog.done():
+                        dialog.cancel()
+                    await asyncio.gather(dialog, return_exceptions=True)
+        try:
+            async with self._operations.setdefault(name, asyncio.Lock()):
+                if action == "auth":
+                    await client.authenticate(notify)
+                    await self._probe(name, keep_alive=True)
+                    ctx.ui.notify(f"MCP {name} authenticated and tools refreshed.", "info")
+                else:
+                    revoked = await client.logout()
+                    suffix = " Server-side revocation was not confirmed." if revoked is not True else " Server tokens revoked."
+                    ctx.ui.notify(f"MCP {name} local credentials removed." + suffix, "info")
+        except Exception as error:  # noqa: BLE001 - do not expose SDK token/error bodies
+            ctx.ui.notify(f"MCP {action} failed ({type(error).__name__}).", "error")
+
     async def _status(self, args, ctx):
+        action, _, name = str(args or "").strip().partition(" ")
+        if action in {"auth", "logout"}:
+            await self._auth_command(action, name.strip(), ctx)
+            return
         self.ui_ref.setdefault("ui", getattr(ctx, "ui", None))
         clients, failed = self.clients, self.failed
         if not clients and not failed:
@@ -580,6 +696,9 @@ class McpPart:
 
     async def session_shutdown(self, event, ctx):
         startup_sections.unregister("MCPs")
+        if self.probe_task is not None and not self.probe_task.done():
+            self.probe_task.cancel()
+            await asyncio.gather(self.probe_task, return_exceptions=True)
         await asyncio.gather(*[c.stop() for c in self.clients.values()], return_exceptions=True)
 
 

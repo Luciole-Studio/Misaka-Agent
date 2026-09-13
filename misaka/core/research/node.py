@@ -1,12 +1,13 @@
-"""Research processes: a node (``misaka research --node RUN NODE``), Last Order's fork on
-one issue (``misaka research --probe RUN ISSUE``), and one card of theirs
-(``python -m misaka.core.research.node --run-card TASK_ID``, this module's own child).
+"""Research node and Sister card processes.
 
-Inside the panel a node is a pane split beside the Last Order that started the run, a fork is
-a pane split beside its node (the fork rule: one line of context, one tab), and every Sister
-card either opens is a card pane in a tab of its own. Headless they are plain subprocesses and
-the cards run through dispatch. Exit codes: 0 done, 2 waiting for the user, 3 the run halted
-(stop or budget), 1 an error (the run stays resumable).
+Every fork LO is a formal child node (``misaka research --node RUN NODE``), with its
+own session, depth and Sisters. In the panel the node process is a pane of its own: a
+fork Last Order runs as an interactive window in a new tab beside her parent, the
+routine driven from inside that window (``wiring.node.NodePart``), her Sisters gridded
+into her tab. Without a panel (a command-line run) nodes run headless in the background
+and Sessions opens their conversations read-only or attached. Exit codes of a headless
+node: 0 done, 2 waiting for input, 3 stopped or budget exhausted, 1 error (the run
+stays resumable); an interactive node returns its window's exit code.
 """
 from __future__ import annotations
 
@@ -15,46 +16,29 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 
 from misaka.config import CFG, current_config
+from misaka.core.platform import processes
 from misaka.core.platform import tasks as task_store
 from misaka.core.research import runs
 
 
-class PaneSpawner:
-    """The panel: ``place`` is "split" (beside this pane) or "tab" (a tab in this pane's space)."""
-
-    def __init__(self, pane):
-        self.pane = pane
-
-    def spawn(self, argv, *, cwd, title, place="split"):
-        from misaka.ui.panel import client as net
-        return net.request("pane.create", {
-            "argv": argv, "cwd": cwd, "title": title, "place": {place: self.pane},
-            "env": {"MISAKA_THEME": os.environ.get("MISAKA_THEME", "dark")}})["pane_id"]
-
-    def alive(self, pane_id):
-        from misaka.ui.panel import client as net
-        row = next((p for p in net.request("panes.list")["panes"] if p["id"] == pane_id), None)
-        return bool(row and row["alive"])
-
-    def stop(self, pane_id):
-        from misaka.ui.panel import client as net
-        net.request("pane.close", {"id": pane_id})
-        for _ in range(25):                          # the daemon escalates SIGTERM -> SIGKILL itself; wait for it
-            if not self.alive(pane_id):
-                return
-            time.sleep(0.2)
-
-
 class ProcessSpawner:
-    """No panel: a child process whose output goes to the terminal."""
+    """Managed research children, independent of visible panes and their terminals."""
 
-    def spawn(self, argv, *, cwd, title, place="split", new_session=False):
-        # new_session makes the child the leader of a process group of its own, which is what
-        # lets its claim name that group (see HeadlessRunner). setsid is POSIX-only.
-        return subprocess.Popen(argv, cwd=cwd,
-                                start_new_session=new_session and os.name == "posix")
+    def spawn(self, argv, *, cwd, new_session=False):
+        env = os.environ.copy()
+        # A child of a pane is not the pane: neither it nor its model sessions may report as
+        # the foreground LO, and its output must not land on the pane's screen.
+        quiet = env.pop("MISAKA_NET_PANE", None) is not None
+        return subprocess.Popen(
+            argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL if quiet else None,
+            stderr=subprocess.DEVNULL if quiet else None,
+            # Nodes stay in the foreground owner's group so closing its panel also
+            # stops them. Headless cards need their own group for claim reconciliation.
+            start_new_session=new_session and os.name == "posix")
 
     def alive(self, proc):
         return proc.poll() is None
@@ -62,7 +46,6 @@ class ProcessSpawner:
     def stop(self, proc):
         if proc.poll() is not None:
             return
-        from misaka.core.platform import processes
         processes.terminate(proc.pid)      # the whole tree: a node's cards and LLM children must not outlive it
         try:
             proc.wait(5)
@@ -71,18 +54,73 @@ class ProcessSpawner:
             proc.wait(5)
 
 
-def spawner():
-    pane = os.environ.get("MISAKA_NET_PANE")
-    return PaneSpawner(pane) if pane else ProcessSpawner()
+def _node_title(argv):
+    """The tab's name: the node named after ``--node RUN NODE`` in a node's own argv."""
+    argv = list(argv)
+    if "--node" in argv and argv.index("--node") + 2 < len(argv):
+        return f"Node {argv[argv.index('--node') + 2]}"
+    return " ".join(argv[-2:])
+
+
+class PaneHandle:
+    """A research child the panel runs in a pane of its own: the pane to close, the process to
+    watch. Identity is captured at spawn so a recycled pid is never mistaken for the node."""
+    __slots__ = ("identity", "pane_id", "pid")
+
+    def __init__(self, pane_id, pid, identity):
+        self.pane_id, self.pid, self.identity = pane_id, pid, identity
+
+
+class PaneSpawner:
+    """Research children as panes of the panel. The node process runs in a new tab beside its
+    parent's pane, with a terminal of its own, so a fork Last Order is the window the user
+    sees -- not a background process behind a viewer. The daemon hands the child its own pane
+    id (``MISAKA_NET_PANE``), which is how the node knows to run interactively and where to
+    grid its Sisters; the parent's ``MISAKA_*`` settings travel along, its pane id does not."""
+
+    def __init__(self, parent_pane=None):
+        self.parent = parent_pane or os.environ.get("MISAKA_NET_PANE")
+
+    def spawn(self, argv, *, cwd, new_session=False):
+        from misaka.ui.panel import client as net
+        env = {key: value for key, value in os.environ.items()
+               if key.startswith("MISAKA_") and key != "MISAKA_NET_PANE"}
+        out = net.request("pane.create", {
+            "argv": list(argv), "cwd": cwd, "title": _node_title(argv),
+            "env": env, "place": {"tab": self.parent}})
+        pid = int(out["pid"])
+        return PaneHandle(out["pane_id"], pid, processes.identity(pid))
+
+    def alive(self, handle):
+        return processes.identity_is_alive(handle.pid, handle.identity)
+
+    def stop(self, handle):
+        """Close the node's pane, which ends its process tree; if the panel cannot be reached,
+        end the process directly. Either way wait for it to be gone."""
+        from misaka.ui.panel import client as net
+        if not self.alive(handle):
+            return
+        try:
+            net.request("pane.close", {"id": handle.pane_id})
+        except (RuntimeError, OSError):
+            processes.terminate(handle.pid)
+        deadline = time.monotonic() + 10
+        while self.alive(handle) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if self.alive(handle):
+            processes.terminate(handle.pid)
 
 
 class PaneRunner:
-    """Inside a node or fork pane: ready cards become card panes (a tab each, named after the
-    owner); a stop closes the card's pane."""
+    """Ready cards become Sister panes gridded into their Last Order's own tab: a tab holds one
+    Last Order and the Sisters she summoned. The Last Order's pane is the home -- the root's
+    foreground window, or a fork node's own window (``run_interactive``); nothing is opened
+    on the node's behalf and nothing is gridded into a parent's tab."""
 
     def __init__(self, con, cfg, label, pane):
-        self.con, self.cfg, self.label, self.pane = con, cfg, label, pane
-        self._said = {}       # card id -> the last refusal printed; a 2-second poll must not repeat it
+        self.con, self.cfg, self.label = con, cfg, label
+        self.home = pane
+        self._said = {}       # card id / "status" -> the last refusal printed; a 2-second poll must not repeat it
 
     async def launch_ready(self, *, task_ids, **_kwargs):
         from misaka.ui.panel import client as net
@@ -94,9 +132,9 @@ class PaneRunner:
                 try:
                     await asyncio.to_thread(net.request, "pane.run_card", {
                         "task_id": tid,
-                        "place": {"tab": self.pane, "name": f"{self.label}·{row['assignee']}·{tid}"}})
+                        "place": {"grid": self.home}})
                     self._said.pop(tid, None)
-                except (RuntimeError, ConnectionError) as error:
+                except (RuntimeError, OSError) as error:
                     if self._said.get(tid) != str(error):
                         self._said[tid] = str(error)
                         print(f"card {tid}: {error}", flush=True)
@@ -105,17 +143,27 @@ class PaneRunner:
         from misaka.ui.panel import client as net
         try:
             await asyncio.to_thread(net.request, "card.stop", {"task_id": task_id})
-        except (RuntimeError, ConnectionError):
+        except (RuntimeError, OSError):
             pass
+
+    async def pending(self, task_ids):
+        """A card's TUI stays open after completion; wait for its settled idle report."""
+        from misaka.ui.panel import client as net
+        try:
+            panes = (await asyncio.to_thread(net.request, "panes.status"))["panes"]
+            self._said.pop("status", None)
+        except OSError as error:
+            if self._said.get("status") != str(error):
+                self._said["status"] = str(error)
+                print(f"Panel status unavailable; waiting to retry: {error}", flush=True)
+            # Unknown is not settled/dead. The drive loop still checks stop and budget.
+            return set(task_ids)
+        return {pane["card"] for pane in panes
+                if pane.get("card") in task_ids and pane.get("alive")
+                and (pane.get("reported") or {}).get("state") != "idle"}
 
 
 CARD_ARGV = [sys.executable, "-m", "misaka.cli.research_node", "--run-card"]   # + the card's id
-
-# A settled card's child is not finished: acceptance commits first, and only then does the child
-# commit the card's line and index its artifacts, which budgets up to 300s for a single PDF.
-# Nothing re-runs that tail, so close() waits this long for it before it starts signalling.
-SETTLED_TAIL_SECONDS = 300
-
 
 class HeadlessRunner:
     """No panel: every ready card becomes a child process of its own, so a node's batch runs at
@@ -174,7 +222,7 @@ class HeadlessRunner:
             # what a card whose project folder is gone means. The parallelism ceiling is the
             # drive loop's free-slot count, already applied to task_ids -- not ours to re-decide.
             self.flying[task_id] = self._processes.spawn(
-                [*CARD_ARGV, task_id], cwd=None, title=f"card {task_id}", new_session=True)
+                [*CARD_ARGV, task_id], cwd=None, new_session=True)
             taken[row["assignee"]] = taken.get(row["assignee"], 0) + 1
 
     async def stop(self, task_id, **_kwargs):
@@ -184,6 +232,11 @@ class HeadlessRunner:
         proc = self.flying.pop(task_id, None)
         if proc is not None:
             await asyncio.to_thread(self._processes.stop, proc)
+
+    async def pending(self, task_ids):
+        """Database acceptance precedes Git/PageIndex; retain and reap the whole worker."""
+        self._reap()
+        return set(task_ids).intersection(self.flying)
 
     def close(self):
         """The node's routine is over: no card of this node may outlive the node. Called from
@@ -200,28 +253,26 @@ class HeadlessRunner:
         for task_id, proc in list(self.flying.items()):
             row = task_store.get(self.con, task_id)
             if row is not None and row["status"] not in ("ready", "todo", "running"):
-                try:
-                    proc.wait(SETTLED_TAIL_SECONDS)
-                except subprocess.TimeoutExpired:
-                    pass                     # the tail is not finishing: stop the tree below
+                proc.wait()                  # active work has no elapsed-time kill switch
             self.flying.pop(task_id, None)
             self._processes.stop(proc)
 
     def _slots_taken(self, rows):
         """The admission slots a new child would have to fit into: every claimed card on the
-        board (what ``db.claim`` counts) plus the children of ours that have not claimed theirs
-        yet. The claim stays the authority -- counting here only keeps this node from starting a
+        board (what ``db.claim`` counts) plus our unclaimed children and accepted-card tails.
+        The claim stays the authority -- counting here only keeps this node from starting a
         process per poll for a card the host has no room for. Inline, a refused claim cost
         nothing; a refused claim now costs a process, and the drive loop offers the same card
         again two seconds later."""
-        taken = {}
-        for row in self.con.execute(
-                "SELECT assignee FROM tasks WHERE status='running' AND claim_lock IS NOT NULL"):
-            taken[row["assignee"]] = taken.get(row["assignee"], 0) + 1
+        from misaka.core.platform import admission
+        occupied = admission.occupied(self.con)
         for task_id in self.flying:
             row = rows[task_id] if task_id in rows else task_store.get(self.con, task_id)
-            if row is not None and row["status"] == "ready":     # started, about to claim
-                taken[row["assignee"]] = taken.get(row["assignee"], 0) + 1
+            if row is not None:
+                occupied[task_id] = row["assignee"]
+        taken = {}
+        for assignee in occupied.values():
+            taken[assignee] = taken.get(assignee, 0) + 1
         return taken
 
     def _reap(self):
@@ -230,59 +281,60 @@ class HeadlessRunner:
                 self.flying.pop(task_id)
 
 
-class Reporter:
-    """The process's own word on its pane's dot (pane.report_state): working / blocked / idle."""
-
-    def __init__(self):
-        self.pane, self.seq = os.environ.get("MISAKA_NET_PANE"), 0
-
-    def __call__(self, state, message=""):
-        if not self.pane:
-            return
-        from misaka.ui.panel import client as net
-        self.seq += 1
-        try:
-            net.request("pane.report_state", {"id": self.pane, "state": state, "message": message[:240],
-                                              "seq": self.seq})
-        except (RuntimeError, ConnectionError):
-            pass
-
-
-def _run(label, routine):
-    """Common shell of both processes: connect, report, run the coroutine, map its result to an exit code."""
+def _run(label, routine, *, row_id, runner_key):
+    """Node process shell: connect, report, run the coroutine, map its result to an exit code."""
     from misaka.core.network import worker
     con = task_store.connect(os.path.expanduser(CFG["db"]))
-    runs.init(con)
-    cfg = current_config()
-    report = Reporter()
-    runner = PaneRunner(con, cfg, label, report.pane) if report.pane else HeadlessRunner(con, cfg)
+    runner, failure = None, None
 
     def progress(event):
+        from misaka.core.platform import notifications
+        branch = runs.node(con, row_id)
+        payload = {**event, "node_id": branch["id"], "depth": branch["depth"],
+                   "issue_id": None}
+        notifications.publish(con, "research", branch["run_id"], "progress", payload)
         print(event["message"], flush=True)
         for item in event.get("tasks") or []:
             print(f"  - {item['title']} → Sister {item['assignee']}", flush=True)
-        report("working", event["message"])
 
-    report("working", f"{label} starting")
+    def failed(error):
+        traceback.print_exc()
+        text = f"{type(error).__name__}: {error}"
+        print(f"{label} failed: {text}", flush=True)
+        try:
+            con.execute('UPDATE research_branches SET last_error=COALESCE(last_error,?) WHERE id=? AND runner_key=?',
+                        (text, row_id, runner_key))
+        except Exception:  # noqa: BLE001 - keep the original traceback even when recording it also fails
+            traceback.print_exc()
+
     try:
+        runs.init(con)
+        if not runs.claim_runner(con, "research_branches", row_id, runner_key):
+            print(f"{label}: superseded execution", flush=True)
+            return 1
+        cfg = current_config()
+        runner = HeadlessRunner(con, cfg)
         result = asyncio.run(routine(con, cfg, runner, worker, progress))
-    except Exception as error:  # noqa: BLE001 - the pane shows why; the run stays resumable
-        print(f"{label} failed: {type(error).__name__}: {error}", flush=True)
-        report("blocked", f"{type(error).__name__}: {error}")
-        return 1
+    except Exception as error:  # noqa: BLE001 - the persisted attempt names the actual cause
+        failed(error)
+        failure = error
     finally:
-        # However this process ends, the card processes it started end with it. A pane
-        # runner has nothing of its own to close: the daemon owns those panes.
         close = getattr(runner, "close", None)
-        if close is not None:
-            close()
+        try:
+            if close is not None:
+                close()
+        except Exception as error:  # noqa: BLE001 - cleanup must not overwrite the original failure
+            failed(error)
+            failure = failure or error
+        finally:
+            con.close()
+    if failure is not None:
+        return 1
     if isinstance(result, dict):
         questions = "; ".join(result.get("questions") or [])
         print(f"{label} needs input: {questions}", flush=True)
-        report("blocked", questions)
         return 2
     print(f"{label}: {result}", flush=True)
-    report("idle", f"{label}: {result}")
     return 3 if result in ("stopped", "budget") else 0
 
 
@@ -304,16 +356,89 @@ def main_card(task_id):
         con.close()
 
 
-def main(run_id, node_id):
+def main(run_id, node_id, *, runner_key):
+    """``misaka research --node RUN NODE``. In a pane of the panel (the daemon hands the process
+    its pane id and a terminal of its own) the node is an interactive window; anywhere else --
+    a command-line run, a test, a redirected stdin -- it runs headless in the background."""
+    if os.environ.get("MISAKA_NET_PANE") and sys.stdin.isatty():
+        return run_interactive(run_id, node_id, runner_key=runner_key)
+    return run_headless(run_id, node_id, runner_key=runner_key)
+
+
+def run_interactive(run_id, node_id, *, runner_key):
+    """The node's process is a pane of the panel: open its Last Order's conversation as the same
+    interactive chat the root has (``misaka chat``'s Last Order assembly, this node's own session
+    folder, its saved session when the run is resumed) and let ``wiring.node.NodePart`` run the
+    routine inside it. What the user types there is a turn of that very Last Order -- the plan
+    that waits for a go-ahead, a word mid-run, a question about her conclusion once the routine
+    is over and the window stays open. The node row is claimed here and released to the parent
+    driver by the part when the routine ends; a window closed before that ends the node."""
+    from misaka.config import identity, profiles
+    from misaka.core.research import planner
+    con = task_store.connect(os.path.expanduser(CFG["db"]))
+    try:
+        runs.init(con)
+        if not runs.claim_runner(con, "research_branches", node_id, runner_key):
+            print(f"node {node_id}: superseded execution", flush=True)
+            return 1
+        run, node = runs.get(con, run_id), runs.node(con, node_id)
+    finally:
+        con.close()
+    cfg = current_config()
+    profile = os.path.join(cfg["roles_root"], "last_order")
+    role = profiles.role_of(profile)
+    flags = ["--provider", cfg["provider"], "--model", cfg["lo_model"], "--thinking", "high",
+             "--append-system-prompt", profiles.shared_soul()]
+    for section in identity.prompt_sections(profile, role):
+        flags += ["--append-system-prompt", section]
+    flags += ["--session-dir", planner._lo_session(run, node)]
+    if node["session_file"] and os.path.exists(node["session_file"]):
+        flags += ["--session", node["session_file"]]    # a resumed node goes on in its own conversation
+    os.chdir(run["workspace"])
+    os.environ.update({
+        "MISAKA_RESEARCH_NODE": f"{run_id} {node_id} {runner_key}",
+        "MISAKA_APP_TITLE": f"MISAKA · Last Order · node {node_id}",
+        "MISAKA_TAGLINE": (f"Last Order of research node {node_id} (depth {node['depth']}, run {run_id}). "
+                           "Her plan for this node waits for your go-ahead here: talk it over with her and she "
+                           "starts it once you agree. Her Sisters open beside this window."),
+        "MISAKA_WHO": "last-order",
+        "MISAKA_MCP_ROLE": "last-order",
+        "MISAKA_PROFILE_DIR": profile,
+        "MISAKA_WORKSPACE": run["workspace"],
+        "MISAKA_INPUT_HISTORY": os.path.expanduser("~/.misaka/input-history/last-order.json"),
+        "MISAKA_CODING_AGENT": "true",
+        # Her tools' spending counts against the run, as a card's counts against its card.
+        "MISAKA_USAGE_DB": str(cfg["db"]), "MISAKA_USAGE_TASK_ID": run_id,
+        "MISAKA_USAGE_GENERATION": "1", "MISAKA_USAGE_TOKEN_CAP": str(cfg.get("token_cap") or 0)})
+    from misaka.core.wiring import SessionSpec, assemble
+    # The root window's assembly, less the Last Order mailbox: what is addressed to Last Order
+    # is the root's to read, and this node's cards report through the run itself.
+    assembly = assemble(SessionSpec(
+        profile_dir=profile, role=role, workspace=run["workspace"], kind="foreground",
+        sender="last-order", mcp_role="last-order", receive_messages=False, research_context=True))
+    from misaka.cli.engine import main as engine_main
+    try:
+        return asyncio.run(engine_main(flags, assembly.engine_options()))
+    except Exception as error:  # noqa: BLE001 - a window that never opened is the node's failure to report
+        traceback.print_exc()
+        con = task_store.connect(os.path.expanduser(CFG["db"]))
+        try:
+            con.execute('UPDATE research_branches SET last_error=COALESCE(last_error,?) WHERE id=? AND runner_key=?',
+                        (f"{type(error).__name__}: {error}", node_id, runner_key))
+        finally:
+            con.close()
+        return 1
+
+
+def run_headless(run_id, node_id, *, runner_key):
     # Imported here, not at the top: a card child runs this module too, and the research
     # workflow is a second of imports it has no use for.
     from misaka.core.research import workflow
-    return _run(f"node {node_id}", lambda con, cfg, runner, worker, progress: workflow.expand_node(
-        con, cfg, runner, worker, run_id=run_id, node_id=node_id, spawner=spawner(), progress=progress))
+    from misaka.core.research.window import node_session
 
+    async def routine(con, cfg, runner, _worker, progress):
+        async with node_session(con, cfg, runs.get(con, run_id), runs.node(con, node_id)) as owner:
+            return await workflow.expand_node(
+                con, cfg, runner, owner, run_id=run_id, node_id=node_id, progress=progress, session=owner.session)
 
-def main_probe(run_id, issue_id):
-    from misaka.core.research import workflow
-    return _run(f"fork {issue_id}", lambda con, cfg, runner, worker, progress: workflow.probe(
-        con, cfg, runner, worker, run_id=run_id, issue_id=issue_id, progress=progress))
-
+    return _run(f"node {node_id}", routine, row_id=node_id, runner_key=runner_key)

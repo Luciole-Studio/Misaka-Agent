@@ -60,6 +60,7 @@ class Readable(HTMLParser):
             self._base: httpx.URL | None = httpx.URL(base_url) if base_url else None
         except httpx.InvalidURL:
             self._base = None
+        self._seen_base = False
         self._hidden = 0
         self._in_title = False
         self._title: list[str] = []
@@ -72,7 +73,18 @@ class Readable(HTMLParser):
             return
         if self._hidden:
             return
-        if tag == "title":
+        if tag == "base" and not self._seen_base:
+            href = next((value for name, value in attrs if name == "href"), None)
+            if href is not None:
+                self._seen_base = True  # Only the first base with an href takes effect.
+                if self._base is not None:
+                    try:
+                        target = self._base.join(href.strip())
+                        if target.scheme in {"http", "https"}:
+                            self._base = target
+                    except (httpx.InvalidURL, ValueError, UnicodeError):
+                        pass
+        elif tag == "title":
             self._in_title = True
         elif tag == "a":
             # Only the outermost anchor is tracked. Nested <a> is invalid HTML and a

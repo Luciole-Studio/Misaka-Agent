@@ -35,7 +35,8 @@ def board_text(con, workspace=None):
     for project in workspaces:
         if project:
             cards.rebuild(con, project)
-    sql = "SELECT id,status,assignee,priority,title,workspace FROM tasks"
+    sql = ("SELECT id,status,assignee,priority,title,workspace,consecutive_failures,blocked_at "
+           "FROM tasks")
     args = []
     if workspace:
         sql += " WHERE workspace=?"
@@ -51,7 +52,9 @@ def board_text(con, workspace=None):
             out.append(f"\n▌{os.path.basename(cur.rstrip(os.sep)) or cur}")
         # Pad the plain text first: format widths count ANSI escape bytes as visible columns.
         status = f"{r['status']:<18}"
-        out.append(f"{r['id']}  {_c(r['status'], status)}  {r['assignee']:<16} p{r['priority']}  {r['title']}")
+        signal = cards.card_signal(r)
+        out.append(f"{r['id']}  {_c(r['status'], status)}  {r['assignee']:<16} p{r['priority']}  {r['title']}"
+                   + (f"  [{signal}]" if signal else ""))
     return "\n".join(out)
 
 

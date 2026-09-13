@@ -185,11 +185,11 @@ def stream_mistral(
         except Exception as error:  # noqa: BLE001
             output.stopReason = "aborted" if signal_aborted(_option(options, "signal")) else "error"
             output.errorMessage = format_mistral_error(error)
-            stream.push(ErrorEvent(reason=output.stopReason, error=output))
+            stream.push(ErrorEvent(reason=output.stopReason, error=output), cause=error)
         finally:
             stream.end()
 
-    spawn_stream_task(run())
+    spawn_stream_task(run(), stream=stream)
     return stream
 
 

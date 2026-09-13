@@ -33,10 +33,12 @@ from __future__ import annotations
 import importlib
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from misaka.config import profiles
-from misaka.core.extensions.types import ToolDefinition
+
+if TYPE_CHECKING:
+    from misaka.core.extensions.types import ToolDefinition
 
 type SessionKind = Literal["foreground", "dm", "card", "child", "beast", "bare"]
 
@@ -60,6 +62,10 @@ class SessionSpec:
     # Where this session's skills come from, as ``(layer, root)`` pairs. None = the role's
     # three layers (project, role, shared); a card passes its read-only sandbox instead.
     skill_roots: tuple[tuple[str, str], ...] | None = None
+    startup_skills: tuple[str, ...] = ()
+    # Optional one-call catalog snapshot shared with Research's assignment validator.
+    sister_catalog: tuple[dict[str, Any], ...] | None = None
+    research_context: bool = False
 
 
 # Shared entries by name, then Last Order's, then the Sisters': the folder scan's order.
@@ -72,7 +78,7 @@ class SessionSpec:
 TOOL_MODULES: tuple[str, ...] = (
     "misaka.core.ask_user",
     "misaka.core.documents.wiring.documents",
-    "misaka.core.web",
+    "misaka.core.research.tools",
     "misaka.core.network.ally",
 )
 
@@ -99,16 +105,20 @@ class ToolCollector:
 # ``part(spec) -> object | None`` with a ``tools`` list and the moment methods it needs.
 # Their tools take the same ``customTools`` door as ``TOOL_MODULES``. Order is call order.
 PART_MODULES: tuple[str, ...] = (
+    "misaka.core.session_catalog",
     "misaka.core.moa",
     "misaka.core.mcp",
+    "misaka.core.web",
     "misaka.core.network.wiring.messages",
     "misaka.core.network.wiring.roster",
     "misaka.core.network.wiring.todo",
     "misaka.core.network.wiring.network",
     "misaka.core.network.wiring.panel",
     "misaka.core.network.wiring.roster_admin",
+    "misaka.core.network.wiring.capabilities",
     "misaka.core.skills.wiring.skills",
     "misaka.core.research.wiring.research",
+    "misaka.core.research.wiring.node",
     "misaka.core.subagent",
 )
 
@@ -188,10 +198,12 @@ class Assembly:
         parts: list[Any] | None = None,
         *,
         spec: SessionSpec | None = None,
+        extra_tools: tuple[ToolDefinition, ...] = (),
     ) -> None:
         self.spec = spec
         self._extension_factories = extension_factories
         self._custom_tools = custom_tools
+        self._extra_tools = extra_tools
         self._parts = parts
 
     @property
@@ -210,7 +222,7 @@ class Assembly:
     def custom_tools(self) -> list[ToolDefinition]:
         if self._custom_tools is None:
             own = tools_for(self.spec) if self.spec else []
-            self._custom_tools = [*own, *(tool for part in self.parts for tool in part.tools)]
+            self._custom_tools = [*own, *(tool for part in self.parts for tool in part.tools), *self._extra_tools]
         return self._custom_tools
 
     def engine_options(self) -> dict[str, Any]:
@@ -233,8 +245,15 @@ def inline(
 
 
 def delegates(spec: SessionSpec) -> bool:
-    """Whether the session may spawn sub-agents: every role except Last Order."""
-    return not profiles.is_last_order(spec.profile_dir)
+    """Sister roots delegate; generic children follow the upstream tool filter."""
+    from misaka.core.subagent import disallowed_management_tools
+
+    return not profiles.is_last_order(spec.profile_dir) and "Agent" not in disallowed_management_tools(spec.kind)
+
+
+def sender_address(spec: SessionSpec) -> str:
+    """The mailbox name this session sends as and, with ``receive_messages``, reads."""
+    return spec.sender or spec.role.rsplit("/", 1)[-1]
 
 
 def role_key(spec: SessionSpec) -> str:

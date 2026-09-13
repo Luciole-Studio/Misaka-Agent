@@ -1,0 +1,2133 @@
+{
+  "commit": "610576454a40e9b0ff5e53ebaa89f37aacce7d36",
+  "files": {
+    "context_compressor.py": {
+      "source": "agent/context_compressor.py",
+      "cut_before": "# ---- BEGIN PLUGIN-COMPAT",
+      "replacements": [
+        [
+          "from agent.context_engine import",
+          "from .context_engine import",
+          1
+        ],
+        [
+          "from agent.context_compressor_summary import",
+          "from .context_compressor_summary import",
+          1
+        ],
+        [
+          "from agent.micro_compaction import",
+          "from .micro_compaction import",
+          1
+        ],
+        [
+          "from agent.error_classifier import",
+          "from .error_classifier import",
+          1
+        ],
+        [
+          "from agent.model_metadata import",
+          "from .model_metadata import",
+          1
+        ],
+        [
+          "from agent.redact import",
+          "from .redact import",
+          1
+        ],
+        [
+          "from agent.auxiliary_client import",
+          "from ..host.native import",
+          1
+        ],
+        [
+          "from agent.turn_context import",
+          "from .support import",
+          1
+        ],
+        [
+          "from tools.todo_tool import",
+          "from .support import",
+          1
+        ],
+        [
+          "from agent.secret_scope import",
+          "from .support import",
+          1
+        ],
+        [
+          "from agent.conversation_compression import",
+          "from .support import",
+          3
+        ],
+        [
+          "from agent.image_token_cost import",
+          "from .image_token_cost import",
+          1
+        ],
+        [
+          "from agent.agent_runtime_helpers import",
+          "from .support import",
+          3
+        ],
+        [
+          "from agent.message_sanitization import",
+          "from .support import",
+          2
+        ],
+        [
+          "from agent.conversation_loop import",
+          "from .support import",
+          1
+        ],
+        [
+          "from hermes_time import",
+          "from ..host.native import",
+          1
+        ],
+        [
+          "from hermes_cli.mem_trim import",
+          "from ..host.native import",
+          1
+        ],
+        [
+          "        replay.pop(_COMPACTION_TAIL_MARKER, None)\n",
+          "        replay.pop(_COMPACTION_TAIL_MARKER, None)\n        replay.pop(\"_misaka_replay_source\", None)  # misaka: restatement is a new derived row\n",
+          1
+        ]
+      ]
+    },
+    "context_compressor_summary.py": {
+      "source": "agent/context_compressor_summary.py",
+      "replacements": [
+        [
+          "from agent.context_compressor import",
+          "from .context_compressor import",
+          1
+        ],
+        [
+          "from agent.auxiliary_client import",
+          "from ..host.native import",
+          1
+        ]
+      ]
+    },
+    "context_engine.py": {
+      "source": "agent/context_engine.py",
+      "replacements": [
+        [
+          "from agent.context_compressor import",
+          "from .context_compressor import",
+          1
+        ],
+        [
+          "from agent.redact import",
+          "from .redact import",
+          1
+        ]
+      ]
+    },
+    "micro_compaction.py": {
+      "source": "agent/micro_compaction.py",
+      "replacements": [
+        [
+          "from agent import context_compressor",
+          "from . import context_compressor",
+          1
+        ],
+        [
+          "from agent.model_metadata import",
+          "from .model_metadata import",
+          1
+        ],
+        [
+          "from agent.auxiliary_client import",
+          "from ..host.native import",
+          1
+        ],
+        [
+          "from agent.turn_context import",
+          "from .support import",
+          1
+        ],
+        [
+          "from agent.agent_runtime_helpers import",
+          "from .support import",
+          1
+        ],
+        [
+          "logging.getLogger(\"agent.context_compressor\")",
+          "logging.getLogger(__package__ + \".context_compressor\")  # misaka: same scoped logger as the compressor",
+          1
+        ]
+      ]
+    },
+    "error_classifier.py": {
+      "source": "agent/error_classifier.py",
+      "replacements": [
+        [
+          "from agent.errors import",
+          "from .support import",
+          1
+        ],
+        [
+          "from agent.reasoning_timeouts import",
+          "from .support import",
+          1
+        ],
+        [
+          "from hermes_cli.plugins import",
+          "from ..host.native import",
+          1
+        ],
+        [
+          "from hermes_cli.model_normalize import",
+          "from ..host.native import",
+          1
+        ]
+      ]
+    },
+    "redact.py": {
+      "source": "agent/redact.py",
+      "replacements": [
+        [
+          "from agent.file_safety import",
+          "from .support import",
+          1
+        ]
+      ]
+    },
+    "support.py": {
+      "header": "\"\"\"Pinned pure dependency closure; source selections are recorded in HERMES_NATIVE.json.\"\"\"\nfrom __future__ import annotations\n\nimport contextlib\nimport logging\nimport re\nimport threading\nfrom contextvars import ContextVar\nfrom typing import Any, Dict, List, Optional, Tuple\nfrom urllib.parse import urlparse\n\nlogger = logging.getLogger(__name__)",
+      "segments": [
+        {
+          "source": "agent/file_safety.py",
+          "symbols": [
+            "_BLOCKED_PROJECT_ENV_BASENAMES"
+          ]
+        },
+        {
+          "source": "agent/errors.py",
+          "symbols": [
+            "MoAPresetNotFoundError"
+          ]
+        },
+        {
+          "source": "agent/secret_scope.py",
+          "symbols": [
+            "UnscopedSecretError"
+          ]
+        },
+        {
+          "source": "agent/turn_context.py",
+          "symbols": [
+            "drop_stale_api_content"
+          ]
+        },
+        {
+          "source": "tools/todo_tool.py",
+          "symbols": [
+            "TODO_INJECTION_HEADER"
+          ]
+        },
+        {
+          "source": "agent/agent_runtime_helpers.py",
+          "symbols": [
+            "_REASONING_TAG_NAMES",
+            "_TOOL_CALL_TAG_NAMES",
+            "_REASONING_BLOCK_PATTERNS",
+            "_TOOL_CALL_BLOCK_PATTERNS",
+            "_NAMED_FUNCTION_BLOCK_PATTERN",
+            "_UNTERMINATED_REASONING_BLOCK_PATTERN",
+            "_ORPHAN_REASONING_TAG_PATTERN",
+            "_STRAY_TOOL_CALL_CLOSER_PATTERN",
+            "_UNTERMINATED_TOOL_CALL_PATTERN",
+            "_flatten_content_text",
+            "_THINK_STRIP_PATTERNS",
+            "strip_think_blocks",
+            "_classify_tool_call_orphans"
+          ]
+        },
+        {
+          "source": "agent/message_sanitization.py",
+          "symbols": [
+            "_tc_field",
+            "_expand_tool_id_variants",
+            "tool_call_id_variants",
+            "tool_result_id_variants",
+            "_REASONING_ECHO_RULES",
+            "_REASONING_ECHO_RULE_BY_FAMILY",
+            "matches_reasoning_echo_family",
+            "reasoning_echo_family",
+            "needs_reasoning_echo",
+            "stale_thinking_reaches_wire"
+          ]
+        },
+        {
+          "source": "agent/conversation_compression.py",
+          "symbols": [
+            "_SYNTHETIC_USER_PREFIXES",
+            "_message_text",
+            "_SYNTHETIC_USER_FLAGS",
+            "_is_real_user_message",
+            "_PRUNED_SKILL_RELOAD_NOTICE_HEADER"
+          ]
+        },
+        {
+          "source": "agent/conversation_loop.py",
+          "symbols": [
+            "_LENGTH_CONTINUATION_NETWORK_STUB",
+            "_LENGTH_CONTINUATION_OUTPUT_LIMIT",
+            "_LENGTH_CONTINUATION_DROPPED_TOOLS_PREFIX",
+            "_CODEX_INCOMPLETE_NUDGE",
+            "_CODEX_ACK_CONTINUATION_NUDGE",
+            "_DROPPED_TOOLCALL_NUDGE_CONTENT",
+            "_EMPTY_TOOL_RESPONSE_NUDGE"
+          ]
+        },
+        {
+          "source": "agent/reasoning_timeouts.py",
+          "symbols": [
+            "_REASONING_STALE_TIMEOUT_FLOORS",
+            "_SORTED_REASONING_FLOORS",
+            "get_reasoning_stale_timeout_floor"
+          ]
+        },
+        {
+          "source": "agent/message_metadata.py",
+          "symbols": [
+            "PERSISTENCE_ONLY_MESSAGE_FIELDS"
+          ]
+        },
+        {
+          "source": "utils.py",
+          "symbols": [
+            "_parse_base_url",
+            "_hostname_of",
+            "base_url_hostname",
+            "base_url_host_matches"
+          ]
+        },
+        {
+          "source": "agent/auxiliary_client.py",
+          "symbols": [
+            "logger",
+            "_aux_interrupt_protection",
+            "AuxiliaryExplicitCancellation",
+            "aux_interrupt_protection",
+            "_contains_any",
+            "_is_connection_error",
+            "_coerce_llm_message",
+            "_message_field",
+            "extract_content_or_reasoning"
+          ]
+        }
+      ],
+      "replacements": [
+        [
+          "from agent.context_compressor import",
+          "from .context_compressor import",
+          1
+        ],
+        [
+          "    from utils import base_url_host_matches\n",
+          "",
+          1
+        ],
+        [
+          "PERSISTENCE_ONLY_MESSAGE_FIELDS = frozenset({\"timestamp\"})",
+          "PERSISTENCE_ONLY_MESSAGE_FIELDS = frozenset({\"timestamp\", \"_misaka_replay_source\"})  # misaka: private ordinal is not wire content",
+          1
+        ]
+      ]
+    },
+    "model_metadata.py": {
+      "header": "\"\"\"Pinned estimators; model discovery belongs to MISAKA's registry, not Hermes' home.\"\"\"\nimport json\nimport re\nfrom typing import Any, Dict, List, Optional, Tuple\n\nfrom .support import PERSISTENCE_ONLY_MESSAGE_FIELDS\nfrom ..host.native import get_model_context_length",
+      "segments": [
+        {
+          "source": "agent/model_metadata.py",
+          "symbols": [
+            "CONTEXT_PROBE_TIERS",
+            "DEFAULT_FALLBACK_CONTEXT",
+            "MINIMUM_CONTEXT_LENGTH",
+            "_CJK_DENSE_RE",
+            "_is_cjk_token_dense_char",
+            "estimate_tokens_rough",
+            "estimate_messages_tokens_rough",
+            "_STALE_THINKING_ESTIMATE_KEYS",
+            "_strip_stale_thinking_for_estimate",
+            "_MSG_TOKENS_CACHE",
+            "_MSG_TOKENS_CACHE_MAX",
+            "_msg_fingerprint",
+            "_estimate_message_tokens_cached",
+            "_count_parts",
+            "_count_image_tokens",
+            "strip_opaque_replay_items",
+            "_wire_message_shadow",
+            "_estimate_message_tokens_without_images",
+            "estimate_request_tokens_rough",
+            "_TOOLS_TOKENS_CACHE",
+            "_TOOLS_TOKENS_CACHE_MAX",
+            "_tool_name_for_cache",
+            "_estimate_tools_tokens_rough"
+          ]
+        }
+      ],
+      "replacements": [
+        [
+          "from agent.image_token_cost import",
+          "from .image_token_cost import",
+          1
+        ]
+      ]
+    },
+    "auxiliary_policy.py": {
+      "header": "\"\"\"Pinned auxiliary task route and timeout policy; native registry/config seams only.\"\"\"\nfrom __future__ import annotations\nimport contextlib\nfrom typing import Any, Dict, Optional, Tuple\nfrom ..host.config_bridge import _scoped_key_env\nfrom ..host.llm import _expand_direct_api_alias, _unwrap_moa_provider\n",
+      "segments": [
+        {
+          "source": "agent/auxiliary_client.py",
+          "symbols": [
+            "_get_auxiliary_task_config",
+            "_preserve_provider_with_base_url",
+            "_resolve_task_provider_model",
+            "_DEFAULT_AUX_TIMEOUT",
+            "_COMPRESSION_TIMEOUT_FLOOR_SECONDS",
+            "_get_task_timeout",
+            "_effective_aux_timeout",
+            "_API_KEY_PROVIDER_AUX_MODELS_FALLBACK"
+          ]
+        }
+      ],
+      "replacements": [
+        [
+          "from hermes_cli.config import load_config_readonly",
+          "from ..host.config_bridge import load_auxiliary_config as load_config_readonly",
+          1
+        ],
+        [
+          "from hermes_cli.plugins import get_plugin_auxiliary_tasks",
+          "from ..host.config_bridge import get_plugin_auxiliary_tasks",
+          1
+        ],
+        [
+          "from hermes_cli.providers import get_provider",
+          "from ..host.llm import get_provider",
+          1
+        ]
+      ]
+    },
+    "responses_cache.py": {
+      "header": "\"\"\"Pinned Responses cache identity/retention policy; not a cache or session owner.\"\"\"\nfrom __future__ import annotations\nimport hashlib\nimport json\nimport re\nfrom typing import Any, Optional\n",
+      "segments": [
+        {
+          "source": "agent/transports/codex.py",
+          "symbols": [
+            "_CRON_SESSION_ID_RE",
+            "_cache_scope_from_session_id",
+            "_EXTENDED_PROMPT_CACHE_MODELS",
+            "_EXTENDED_PROMPT_CACHE_MODEL_RE",
+            "_default_prompt_cache_retention_for_request",
+            "_content_cache_key"
+          ]
+        }
+      ],
+      "replacements": [
+        [
+          "from utils import base_url_hostname",
+          "from .support import base_url_hostname",
+          1
+        ]
+      ]
+    },
+    "auxiliary_recovery.py": {
+      "header": "\"\"\"Pinned auxiliary recovery predicates and parameter ladder; native I/O is host-owned.\"\"\"\nfrom __future__ import annotations\nimport contextlib\nimport logging\nimport re\nfrom typing import Any, Callable, Dict, NamedTuple, Optional, Tuple\nfrom .support import _contains_any, _is_connection_error\nlogger = logging.getLogger(__name__)\n",
+      "segments": [
+        {
+          "source": "agent/auxiliary_client.py",
+          "symbols": [
+            "_PAYMENT_KEYWORDS",
+            "_is_payment_error",
+            "_RATE_LIMIT_KEYWORDS",
+            "_RATE_LIMIT_BILLING_KEYWORDS",
+            "_is_rate_limit_error",
+            "_is_timeout_error",
+            "_is_transient_transport_error",
+            "_DEFAULT_TRANSIENT_RETRIES",
+            "_TRANSIENT_RETRY_BACKOFF_BASE",
+            "_transient_retry_count",
+            "_is_auth_error",
+            "_is_unsupported_parameter_error",
+            "_is_structured_output_rejection",
+            "_without_structured_output_format",
+            "_TIMEOUT_NO_RETRY_TASKS",
+            "_should_skip_same_provider_retry",
+            "_should_retry_same_provider",
+            "_AFFORDABLE_TOKENS_RE",
+            "_AFFORDABLE_RETRY_FLOOR_TOKENS",
+            "_AFFORDABLE_RETRY_MARGIN_TOKENS",
+            "_affordable_max_tokens_from_error",
+            "_LadderStep",
+            "_rung",
+            "_param_rung_accepts",
+            "_LadderRoute",
+            "_ladder_parameter_rungs",
+            "_drive_ladder_async"
+          ]
+        }
+      ],
+      "replacements": [
+        [
+          "from hermes_cli.config import cfg_get, load_config",
+          "from ..host.config_bridge import load_auxiliary_config",
+          1
+        ],
+        [
+          "val = cfg_get(load_config(), \"auxiliary\", \"transient_retries\")",
+          "val = load_auxiliary_config().get(\"auxiliary\", {}).get(\"transient_retries\")",
+          1
+        ]
+      ]
+    },
+    "auxiliary_options.py": {
+      "header": "\"\"\"Pinned auxiliary option, concurrency and stream-budget policy.\"\"\"\nfrom __future__ import annotations\nimport logging\nimport re\nimport threading\nfrom typing import Any, Callable, Dict, NamedTuple, Optional\nfrom .auxiliary_policy import _get_auxiliary_task_config\nfrom .reasoning import parse_reasoning_effort\nlogger = logging.getLogger(__name__)\n_aux_sem_lock = threading.Lock()\n_aux_sync_semaphores = {}\nfrom ..host.profiles import nous_portal_tags\n",
+      "segments": [
+        {
+          "source": "agent/auxiliary_client.py",
+          "symbols": [
+            "_get_task_extra_body",
+            "_get_task_max_concurrency",
+            "_cached_semaphore",
+            "_acquire_sync_aux_semaphore",
+            "_AUX_STREAM_CEILING_FLOOR_SECONDS",
+            "_AUX_STREAM_CEILING_MULTIPLIER",
+            "_aux_stream_total_ceiling",
+            "_coerce_positive_timeout",
+            "_fallback_chain_entry",
+            "_fallback_entry_timeout",
+            "_fallback_provider_from_label",
+            "_dedupe_tool_names",
+            "_ProfileProjection",
+            "_project_provider_profile",
+            "_merge_aux_extra_body",
+            "_NOUS_PROVIDER_NAMES",
+            "_contains_profile_reasoning_fields",
+            "_PROFILE_REASONING_KEYS",
+            "OMIT_TEMPERATURE",
+            "_bare_model",
+            "_is_kimi_model",
+            "_is_arcee_trinity_thinking",
+            "_fixed_temperature_for_model"
+          ]
+        },
+        {
+          "source": "agent/anthropic_adapter.py",
+          "symbols": [
+            "_NO_XHIGH_CLAUDE_SUBSTRINGS",
+            "_LEGACY_MANUAL_THINKING_CLAUDE_SUBSTRINGS",
+            "_is_claude_model",
+            "_model_matches",
+            "_forbids_sampling_params"
+          ]
+        }
+      ],
+      "replacements": [
+        [
+          "    from hermes_constants import parse_reasoning_effort\n",
+          "",
+          1
+        ],
+        [
+          "from providers import get_provider_profile",
+          "from ..host.profiles import get_provider_profile",
+          1
+        ],
+        [
+          "from providers.base import ProviderProfile",
+          "from .provider_profile import ProviderProfile",
+          1
+        ],
+        [
+          "from agent.portal_tags import get_conversation_context",
+          "from ..host.profiles import get_conversation_context",
+          1
+        ],
+        [
+          "_nous_portal_tags()",
+          "nous_portal_tags()",
+          1
+        ]
+      ]
+    },
+    "reasoning.py": {
+      "header": "\"\"\"Original auxiliary reasoning-level parser.\"\"\"",
+      "segments": [
+        {
+          "source": "hermes_constants.py",
+          "symbols": [
+            "VALID_REASONING_EFFORTS",
+            "parse_reasoning_effort"
+          ]
+        }
+      ],
+      "replacements": []
+    },
+    "backend_identity.py": {
+      "source": "agent/backend_identity.py",
+      "replacements": [
+        [
+          "from hermes_cli.route_identity import normalize_route_base_url",
+          "from .route_identity import normalize_route_base_url",
+          1
+        ],
+        [
+          "from hermes_cli.auth import PROVIDER_REGISTRY",
+          "from ..host.routing import provider_names\n        PROVIDER_REGISTRY = provider_names()",
+          1
+        ]
+      ]
+    },
+    "route_identity.py": {
+      "header": "from __future__ import annotations\nfrom typing import Any\nfrom urllib.parse import urlsplit, urlunsplit",
+      "segments": [
+        {
+          "source": "hermes_cli/route_identity.py",
+          "symbols": [
+            "normalize_route_base_url"
+          ]
+        }
+      ],
+      "replacements": []
+    },
+    "auxiliary_fallback.py": {
+      "header": "\"\"\"Pinned fallback selection and failure scopes on native registry boundaries.\"\"\"\nfrom __future__ import annotations\nimport logging\nfrom typing import Any, Callable, Dict, List, Optional, Tuple\nfrom .auxiliary_recovery import (_drive_ladder_async, _LadderStep, _is_auth_error, _is_payment_error, _is_rate_limit_error)\nfrom .support import _contains_any, _is_connection_error\nfrom .auxiliary_policy import _get_auxiliary_task_config\nfrom .auxiliary_options import _fallback_provider_from_label\nfrom .model_metadata import MINIMUM_CONTEXT_LENGTH\nfrom ..host.native import get_model_context_length\nfrom ..host.routing import (_resolve_fallback_entry, _custom_health_base_url,\n    _is_provider_unhealthy, _mark_provider_unhealthy, _log_skip_unhealthy,\n    _read_main_provider, _read_main_model, _get_provider_chain, _normalize_chain_label,\n    _recoverable_pool_provider, _record_route_info, resolve_provider_client)\nlogger = logging.getLogger(__name__)\nfrom ..host.routing import _fallback_entry_api_key\nfrom .auxiliary_recovery import _LadderRoute\n",
+      "segments": [
+        {
+          "source": "agent/auxiliary_client.py",
+          "symbols": [
+            "_is_model_not_found_error",
+            "_is_model_incompatible_error",
+            "_is_invalid_aux_response_error",
+            "_RERAISE_ORIGINAL",
+            "_FALLBACK_REASONS",
+            "_credential_rung_accepts",
+            "_failed_backend_skip",
+            "_task_minimum_context_length",
+            "_candidate_context_window",
+            "_context_too_small",
+            "_try_configured_fallback_chain",
+            "_try_main_fallback_chain",
+            "_try_payment_fallback",
+            "_try_main_agent_model_fallback",
+            "_ladder_provider_fallback"
+          ]
+        }
+      ],
+      "replacements": [
+        [
+          "from agent.backend_identity import",
+          "from .backend_identity import",
+          2
+        ],
+        [
+          "from hermes_cli.config import load_config_readonly",
+          "from ..host.config_bridge import load_auxiliary_config as load_config_readonly",
+          1
+        ],
+        [
+          "from hermes_cli.fallback_config import get_fallback_chain",
+          "from ..host.routing import get_fallback_chain",
+          1
+        ],
+        [
+          "_resolve_moa_aggregator(main_model)",
+          "(\"\", \"\")",
+          1
+        ],
+        [
+          "provider=failed_provider, model=skip_model, base_url=failed_base_url)",
+          "provider=(_read_main_provider() if failed_provider in {\"auto\", \"\", None} else failed_provider), model=skip_model, base_url=failed_base_url)",
+          1
+        ]
+      ]
+    },
+    "image_token_cost.py": {
+      "source": "agent/image_token_cost.py",
+      "replacements": [
+        [
+          "from agent.model_metadata import _cache_file",
+          "from ..host.native import _cache_file",
+          1
+        ],
+        [
+          "from agent.model_metadata import _load_json_dict",
+          "from ..host.native import _load_json_dict",
+          1
+        ],
+        [
+          "from agent.model_metadata import _count_image_tokens",
+          "from .model_metadata import _count_image_tokens",
+          1
+        ],
+        [
+          "from agent.usage_anchor import anchored_context_tokens",
+          "from .usage_anchor import anchored_context_tokens",
+          1
+        ],
+        [
+          "from utils import base_url_hostname",
+          "from .support import base_url_hostname",
+          1
+        ],
+        [
+          "from utils import atomic_json_write",
+          "from ..host.native import atomic_json_write",
+          1
+        ]
+      ]
+    },
+    "usage_anchor.py": {
+      "source": "agent/usage_anchor.py",
+      "replacements": [
+        [
+          "from agent.model_metadata import estimate_messages_tokens_rough",
+          "from .model_metadata import estimate_messages_tokens_rough",
+          1
+        ]
+      ]
+    },
+    "provider_profile.py": {
+      "source": "providers/base.py",
+      "replacements": [
+        [
+          "from hermes_cli import __version__ as _ver",
+          "from ..host.profiles import HOST_VERSION as _ver",
+          1
+        ],
+        [
+          "from hermes_cli.urllib_security import open_credentialed_url",
+          "from .urllib_security import open_credentialed_url",
+          1
+        ]
+      ]
+    },
+    "reasoning_effort.py": {
+      "source": "agent/reasoning_effort.py",
+      "replacements": []
+    },
+    "profile_meta_ai.py": {
+      "source": "plugins/model-providers/meta-ai/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ],
+        [
+          "from agent.reasoning_effort import",
+          "from .reasoning_effort import",
+          1
+        ]
+      ]
+    },
+    "profile_openai_codex.py": {
+      "source": "plugins/model-providers/openai-codex/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ]
+      ]
+    },
+    "profile_arcee.py": {
+      "source": "plugins/model-providers/arcee/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ]
+      ]
+    },
+    "profile_alibaba_coding_plan.py": {
+      "source": "plugins/model-providers/alibaba-coding-plan/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ]
+      ]
+    },
+    "profile_gemini.py": {
+      "source": "plugins/model-providers/gemini/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ],
+        [
+          "from agent.transports.chat_completions import",
+          "from .profile_thinking import",
+          1
+        ]
+      ]
+    },
+    "profile_copilot_acp.py": {
+      "source": "plugins/model-providers/copilot-acp/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ],
+        [
+          "from agent.copilot_acp_client import CopilotACPClient",
+          "from ..host.acp import OwnedACPClient as CopilotACPClient",
+          1
+        ]
+      ]
+    },
+    "profile_openrouter.py": {
+      "source": "plugins/model-providers/openrouter/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ],
+        [
+          "from agent.portal_tags import",
+          "from ..host.profiles import",
+          1
+        ],
+        [
+          "from agent.transports.codex import _cache_scope_from_session_id",
+          "from .responses_cache import _cache_scope_from_session_id",
+          1
+        ],
+        [
+          "from hermes_cli.models import clamp_reasoning_effort_to_supported",
+          "from .profile_utils import clamp_reasoning_effort_to_supported",
+          1
+        ],
+        [
+          "from hermes_cli.models_reasoning_caps import openrouter_model_reasoning_capabilities",
+          "from ..host.profiles import openrouter_model_reasoning_capabilities",
+          1
+        ]
+      ]
+    },
+    "profile_kilocode.py": {
+      "source": "plugins/model-providers/kilocode/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ]
+      ]
+    },
+    "profile_copilot.py": {
+      "source": "plugins/model-providers/copilot/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ],
+        [
+          "from hermes_cli.models import clamp_reasoning_effort_to_supported, github_model_reasoning_efforts",
+          "from .profile_utils import clamp_reasoning_effort_to_supported\n            from ..host.profiles import github_model_reasoning_efforts",
+          1
+        ]
+      ]
+    },
+    "profile_ai_gateway.py": {
+      "source": "plugins/model-providers/ai-gateway/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ]
+      ]
+    },
+    "profile_actual.py": {
+      "source": "plugins/model-providers/actual/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ],
+        [
+          "from hermes_cli.auth import normalize_actual_base_url",
+          "from .profile_utils import normalize_actual_base_url",
+          1
+        ]
+      ]
+    },
+    "profile_deepinfra.py": {
+      "source": "plugins/model-providers/deepinfra/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ],
+        [
+          "from agent.secret_scope import get_secret",
+          "from ..host.config_bridge import _scoped_key_env as get_secret",
+          1
+        ],
+        [
+          "from hermes_cli.models import _fetch_deepinfra_models_by_tag",
+          "from ..host.profiles import _fetch_deepinfra_models_by_tag",
+          1
+        ]
+      ]
+    },
+    "profile_fireworks.py": {
+      "source": "plugins/model-providers/fireworks/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ],
+        [
+          "from hermes_cli import __version__ as _HERMES_VERSION",
+          "from ..host.profiles import HOST_VERSION as _HERMES_VERSION",
+          1
+        ]
+      ]
+    },
+    "profile_novita.py": {
+      "source": "plugins/model-providers/novita/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ]
+      ]
+    },
+    "profile_minimax.py": {
+      "source": "plugins/model-providers/minimax/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ]
+      ]
+    },
+    "profile_qwen_oauth.py": {
+      "source": "plugins/model-providers/qwen-oauth/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ]
+      ]
+    },
+    "profile_opencode_free.py": {
+      "source": "plugins/model-providers/opencode-free/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ],
+        [
+          "from hermes_cli import __version__ as _HERMES_VERSION",
+          "from ..host.profiles import HOST_VERSION as _HERMES_VERSION",
+          1
+        ],
+        [
+          "from providers import get_provider_profile",
+          "from ..host.profiles import get_provider_profile",
+          1
+        ]
+      ]
+    },
+    "profile_alibaba.py": {
+      "source": "plugins/model-providers/alibaba/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ]
+      ]
+    },
+    "profile_deepseek.py": {
+      "source": "plugins/model-providers/deepseek/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ],
+        [
+          "from agent.reasoning_effort import",
+          "from .reasoning_effort import",
+          1
+        ]
+      ]
+    },
+    "profile_xai.py": {
+      "source": "plugins/model-providers/xai/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ],
+        [
+          "from hermes_cli import __version__ as _HERMES_VERSION",
+          "from ..host.profiles import HOST_VERSION as _HERMES_VERSION",
+          1
+        ]
+      ]
+    },
+    "profile_nous.py": {
+      "source": "plugins/model-providers/nous/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ],
+        [
+          "from agent.portal_tags import",
+          "from ..host.profiles import",
+          1
+        ],
+        [
+          "from agent.transports.codex import _cache_scope_from_session_id",
+          "from .responses_cache import _cache_scope_from_session_id",
+          1
+        ],
+        [
+          "from hermes_cli.models import get_nous_recommended_aux_model",
+          "from ..host.profiles import get_nous_recommended_aux_model",
+          1
+        ],
+        [
+          "from hermes_cli.models_reasoning_caps import nous_model_reasoning_capabilities, warm_nous_reasoning_caps_async",
+          "from ..host.profiles import nous_model_reasoning_capabilities, warm_nous_reasoning_caps_async",
+          1
+        ]
+      ]
+    },
+    "profile_commandcode.py": {
+      "source": "plugins/model-providers/commandcode/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ]
+      ]
+    },
+    "profile_bedrock.py": {
+      "source": "plugins/model-providers/bedrock/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ]
+      ]
+    },
+    "profile_ollama_cloud.py": {
+      "source": "plugins/model-providers/ollama-cloud/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ],
+        [
+          "from agent.reasoning_effort import",
+          "from .reasoning_effort import",
+          1
+        ]
+      ]
+    },
+    "profile_stepfun.py": {
+      "source": "plugins/model-providers/stepfun/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ]
+      ]
+    },
+    "profile_xiaomi.py": {
+      "source": "plugins/model-providers/xiaomi/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ]
+      ]
+    },
+    "profile_nvidia.py": {
+      "source": "plugins/model-providers/nvidia/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ]
+      ]
+    },
+    "profile_gmi.py": {
+      "source": "plugins/model-providers/gmi/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ],
+        [
+          "from hermes_cli import __version__ as _HERMES_VERSION",
+          "from ..host.profiles import HOST_VERSION as _HERMES_VERSION",
+          1
+        ]
+      ]
+    },
+    "profile_kimi_coding.py": {
+      "source": "plugins/model-providers/kimi-coding/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ],
+        [
+          "from agent.reasoning_effort import",
+          "from .reasoning_effort import",
+          1
+        ],
+        [
+          "from hermes_cli import __version__ as _HERMES_VERSION",
+          "from ..host.profiles import HOST_VERSION as _HERMES_VERSION",
+          1
+        ]
+      ]
+    },
+    "profile_anthropic.py": {
+      "source": "plugins/model-providers/anthropic/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ],
+        [
+          "from hermes_cli.urllib_security import open_credentialed_url",
+          "from ..host.profiles import open_credentialed_url",
+          1
+        ]
+      ]
+    },
+    "profile_huggingface.py": {
+      "source": "plugins/model-providers/huggingface/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ]
+      ]
+    },
+    "profile_opencode_zen.py": {
+      "source": "plugins/model-providers/opencode-zen/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ],
+        [
+          "from agent import reasoning_effort as re_",
+          "from . import reasoning_effort as re_",
+          1
+        ],
+        [
+          "from hermes_cli import __version__ as _HERMES_VERSION",
+          "from ..host.profiles import HOST_VERSION as _HERMES_VERSION",
+          1
+        ]
+      ]
+    },
+    "profile_vertex.py": {
+      "source": "plugins/model-providers/vertex/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ],
+        [
+          "from agent.transports.chat_completions import",
+          "from .profile_thinking import",
+          1
+        ]
+      ]
+    },
+    "profile_upstage.py": {
+      "source": "plugins/model-providers/upstage/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ],
+        [
+          "from agent.reasoning_effort import",
+          "from .reasoning_effort import",
+          1
+        ]
+      ]
+    },
+    "profile_custom.py": {
+      "source": "plugins/model-providers/custom/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ],
+        [
+          "from agent.reasoning_effort import",
+          "from .reasoning_effort import",
+          1
+        ]
+      ]
+    },
+    "profile_nebius_token_factory.py": {
+      "source": "plugins/model-providers/nebius-token-factory/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ],
+        [
+          "from agent.reasoning_effort import",
+          "from .reasoning_effort import",
+          1
+        ]
+      ]
+    },
+    "profile_azure_foundry.py": {
+      "source": "plugins/model-providers/azure-foundry/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ]
+      ]
+    },
+    "profile_zai.py": {
+      "source": "plugins/model-providers/zai/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ],
+        [
+          "from agent import reasoning_effort as re_",
+          "from . import reasoning_effort as re_",
+          1
+        ]
+      ]
+    },
+    "profile_router.py": {
+      "source": "plugins/model-providers/router/__init__.py",
+      "replacements": [
+        [
+          "from providers import register_provider",
+          "from ..host.profiles import register_provider",
+          1
+        ],
+        [
+          "from providers.base import",
+          "from .provider_profile import",
+          1
+        ],
+        [
+          "from agent.reasoning_effort import",
+          "from .reasoning_effort import",
+          1
+        ],
+        [
+          "from hermes_cli import __version__ as _HERMES_VERSION",
+          "from ..host.profiles import HOST_VERSION as _HERMES_VERSION",
+          1
+        ],
+        [
+          "from hermes_cli.urllib_security import open_credentialed_url",
+          "from ..host.profiles import open_credentialed_url",
+          1
+        ],
+        [
+          "from hermes_cli.config import get_env_value_prefer_dotenv as prefer_dotenv",
+          "from ..host.config_bridge import _scoped_key_env as prefer_dotenv",
+          1
+        ],
+        [
+          "from hermes_constants import get_hermes_home",
+          "from misaka.config import get_agent_dir",
+          1
+        ],
+        [
+          "return get_hermes_home() / \"cache\" / \"router_catalog.json\"",
+          "return Path(get_agent_dir()) / \"cache\" / \"router_catalog.json\"",
+          1
+        ]
+      ]
+    },
+    "urllib_security.py": {
+      "source": "hermes_cli/urllib_security.py",
+      "replacements": []
+    },
+    "profile_thinking.py": {
+      "header": "from typing import Any\n",
+      "segments": [
+        {
+          "source": "agent/transports/chat_completions.py",
+          "symbols": [
+            "_HIGH_EFFORTS",
+            "_build_gemini_thinking_config",
+            "_snake_case_gemini_thinking_config",
+            "_is_gemini_openai_compat_base_url"
+          ]
+        }
+      ],
+      "replacements": []
+    },
+    "portal_tags.py": {
+      "header": "from typing import List\nfrom ..host.profiles import get_conversation_context",
+      "segments": [
+        {
+          "source": "agent/portal_tags.py",
+          "symbols": [
+            "hermes_client_tag",
+            "conversation_tag",
+            "nous_portal_tags"
+          ]
+        }
+      ],
+      "replacements": [
+        [
+          "from hermes_cli import __version__",
+          "from ..host.profiles import HOST_VERSION as __version__",
+          1
+        ],
+        [
+          "product=hermes-agent",
+          "product=misaka",
+          1
+        ],
+        [
+          "client=hermes-client-v",
+          "client=misaka-v",
+          2
+        ]
+      ]
+    },
+    "profile_utils.py": {
+      "header": "from typing import Optional\nfrom urllib.parse import urlparse\nfrom .reasoning_effort import clamp_effort as _clamp_effort\nDEFAULT_ACTUAL_BASE_URL = \"https://api.actual.inc/v1\"\n\nfrom .support import base_url_host_matches\nfrom ..host.profiles import normalize_provider\n",
+      "segments": [
+        {
+          "source": "hermes_cli/models.py",
+          "symbols": [
+            "clamp_reasoning_effort_to_supported",
+            "opencode_provider_family",
+            "_OPENCODE_FAMILIES"
+          ]
+        },
+        {
+          "source": "hermes_cli/auth.py",
+          "symbols": [
+            "is_actual_local_base_url",
+            "normalize_actual_base_url"
+          ]
+        },
+        {
+          "source": "agent/anthropic_endpoints.py",
+          "symbols": [
+            "_is_opencode_endpoint"
+          ]
+        }
+      ],
+      "replacements": []
+    },
+    "opencode_affinity.py": {
+      "source": "agent/opencode_affinity.py",
+      "replacements": [
+        [
+          "from hermes_cli.models import opencode_provider_family",
+          "from .profile_utils import opencode_provider_family",
+          1
+        ],
+        [
+          "from agent.anthropic_endpoints import _is_opencode_endpoint",
+          "from .profile_utils import _is_opencode_endpoint",
+          1
+        ],
+        [
+          "from agent.portal_tags import get_affinity_scope, get_conversation_context",
+          "from ..host.profiles import get_affinity_scope, get_conversation_context",
+          1
+        ],
+        [
+          "from agent.transports.codex import _cache_scope_from_session_id",
+          "from .responses_cache import _cache_scope_from_session_id",
+          1
+        ]
+      ]
+    },
+    "request_pressure.py": {
+      "header": "from __future__ import annotations\nimport logging\nfrom typing import Any, Dict, List\nfrom .usage_anchor import anchored_context_tokens\nfrom .model_metadata import estimate_request_tokens_rough\nlogger = logging.getLogger(__name__)\n",
+      "segments": [
+        {
+          "source": "agent/turn_context.py",
+          "symbols": [
+            "_str_attr",
+            "_preflight_request_tokens",
+            "_agent_stale_thinking_on_wire"
+          ]
+        }
+      ],
+      "replacements": [
+        [
+          "from agent.codex_responses_adapter import estimate_native_responses_preflight_tokens",
+          "from ..host.native import estimate_native_responses_preflight_tokens",
+          1
+        ],
+        [
+          "from agent.message_sanitization import stale_thinking_reaches_wire",
+          "from .support import stale_thinking_reaches_wire",
+          1
+        ]
+      ]
+    },
+    "auxiliary_health.py": {
+      "header": "\"\"\"Pinned cooldown and throttled diagnostics; state belongs to the native auth owner.\"\"\"\nfrom __future__ import annotations\nimport logging\nimport time\nfrom typing import Any, Optional\nfrom .route_identity import normalize_route_base_url\nfrom ..host.routing import _health_cache, _custom_health_base_url\nlogger = logging.getLogger(__name__)\n",
+      "segments": [
+        {
+          "source": "agent/auxiliary_client.py",
+          "symbols": [
+            "_AUX_UNHEALTHY_TTL_SECONDS",
+            "_AUX_UNHEALTHY_LABEL_ALIASES",
+            "_normalize_chain_label",
+            "_mark_provider_unhealthy",
+            "_is_provider_unhealthy",
+            "_log_skip_unhealthy",
+            "_reset_aux_unhealthy_cache"
+          ]
+        },
+        {
+          "source": "agent/auxiliary_health.py",
+          "symbols": [
+            "_unhealthy_cache_key"
+          ]
+        }
+      ],
+      "replacements": [
+        [
+          "_aux_unhealthy_until",
+          "_health_cache('until')",
+          5
+        ],
+        [
+          "_aux_unhealthy_logged_at",
+          "_health_cache('logged_at')",
+          4
+        ],
+        [
+          "    from agent.auxiliary_client import _normalize_chain_label\n",
+          "",
+          1
+        ]
+      ]
+    },
+    "credential_policy.py": {
+      "header": "\"\"\"Pinned pool selection, cooldown and failed-key attribution; host owns credential I/O.\"\"\"\nfrom __future__ import annotations\nimport logging\nimport random\nimport re\nimport time\nimport uuid\nfrom dataclasses import dataclass, fields, replace\nfrom datetime import datetime\nfrom typing import Any, Callable, Dict, List, Optional, Tuple\nfrom .credential_persistence import sanitize_borrowed_credential_payload\nfrom ..host import pool as auth_mod\nlogger = logging.getLogger(__name__)\n_TOKENS_SINGLETON_PROVIDERS = {}",
+      "segments": [
+        {
+          "source": "agent/credential_pool.py",
+          "symbols": [
+            "STATUS_OK",
+            "STATUS_EXHAUSTED",
+            "STATUS_DEAD",
+            "_TERMINAL_AUTH_REASONS",
+            "CREDENTIAL_PERSIST_FAILED_REASON",
+            "DEAD_MANUAL_PRUNE_TTL_SECONDS",
+            "AUTH_TYPE_OAUTH",
+            "AUTH_TYPE_API_KEY",
+            "SOURCE_MANUAL",
+            "STRATEGY_FILL_FIRST",
+            "STRATEGY_ROUND_ROBIN",
+            "STRATEGY_RANDOM",
+            "STRATEGY_LEAST_USED",
+            "SUPPORTED_POOL_STRATEGIES",
+            "EXHAUSTED_TTL_401_SECONDS",
+            "EXHAUSTED_TTL_429_SECONDS",
+            "EXHAUSTED_TTL_DEFAULT_SECONDS",
+            "EXHAUSTED_TTL_SOLE_CREDENTIAL_SECONDS",
+            "FAILURE_REASON_BILLING",
+            "FAILURE_REASON_BILLING_UNVERIFIED",
+            "NO_AVAILABLE_ENTRIES_LOG_THROTTLE_SECONDS",
+            "_EXTRA_KEYS",
+            "_CLEAR_STATUS",
+            "_MARK_OK",
+            "_normalize_pool_auth_type",
+            "PooledCredential",
+            "_is_manual_source",
+            "_exhausted_ttl",
+            "_parse_absolute_timestamp",
+            "_RETRY_DELAY_PATTERNS",
+            "_extract_retry_delay_seconds",
+            "_normalize_error_context",
+            "_exhausted_until",
+            "CredentialPool._is_sole_credential",
+            "CredentialPool._find",
+            "CredentialPool._current_unlocked",
+            "CredentialPool.current",
+            "CredentialPool.entry_id_for_api_key",
+            "CredentialPool._replace_entry",
+            "CredentialPool._adopt",
+            "CredentialPool._is_terminal_auth_failure",
+            "CredentialPool._mark_exhausted",
+            "CredentialPool._available_entries",
+            "CredentialPool._log_no_available_entries",
+            "CredentialPool._select_unlocked",
+            "CredentialPool._identify_failed_entry",
+            "CredentialPool._rotate_unmatched",
+            "CredentialPool.mark_exhausted_and_rotate"
+          ]
+        }
+      ],
+      "replacements": []
+    },
+    "credential_persistence.py": {
+      "source": "agent/credential_persistence.py",
+      "replacements": []
+    },
+    "nous_auth.py": {
+      "header": "\"\"\"Pinned Nous JWT/endpoint/token policy. AuthStorage owns grants and refresh I/O.\"\"\"\nfrom __future__ import annotations\nimport base64, json, logging, os, time\nfrom contextlib import suppress\nfrom datetime import datetime, timedelta, timezone\nfrom typing import Any, Dict, Optional, FrozenSet, Callable\nlogger = logging.getLogger(__name__)\nfrom urllib.parse import urlparse\nimport ssl, sys",
+      "segments": [
+        {
+          "source": "hermes_cli/auth_constants.py",
+          "symbols": [
+            "DEFAULT_NOUS_PORTAL_URL",
+            "DEFAULT_NOUS_INFERENCE_URL",
+            "DEFAULT_NOUS_CLIENT_ID",
+            "NOUS_INFERENCE_INVOKE_SCOPE",
+            "DEFAULT_NOUS_SCOPE",
+            "ACCESS_TOKEN_REFRESH_SKEW_SECONDS",
+            "NOUS_INVOKE_JWT_MIN_TTL_SECONDS",
+            "_decode_jwt_claims"
+          ]
+        },
+        {
+          "source": "hermes_cli/auth.py",
+          "symbols": [
+            "_parse_iso_timestamp",
+            "_is_expiring",
+            "_coerce_ttl_seconds",
+            "_nonempty_str"
+          ]
+        },
+        {
+          "source": "hermes_cli/auth_nous.py",
+          "symbols": [
+            "_scope_values",
+            "_nous_invoke_jwt_status",
+            "_nous_invoke_jwt_is_usable",
+            "_nous_jwt_expires_at",
+            "_ALLOWED_NOUS_INFERENCE_HOSTS",
+            "_validate_nous_inference_url_from_network",
+            "_apply_nous_refreshed_tokens",
+            "_healed_nous_inference_url",
+            "_iso_after"
+          ]
+        },
+        {
+          "source": "utils.py",
+          "symbols": [
+            "TRUTHY_STRINGS",
+            "is_truthy_value"
+          ]
+        },
+        {
+          "source": "hermes_cli/auth_device_flow.py",
+          "symbols": [
+            "_default_verify",
+            "_resolve_verify"
+          ]
+        },
+        {
+          "source": "hermes_cli/auth_constants.py",
+          "symbols": [
+            "AuthError"
+          ]
+        },
+        {
+          "source": "hermes_cli/auth.py",
+          "symbols": [
+            "_last_auth_error_marker",
+            "_OAUTH_GRANT_DEAD_CODES"
+          ]
+        }
+      ],
+      "replacements": [
+        [
+          "    from hermes_cli.auth import _is_expiring\n",
+          "",
+          1
+        ],
+        [
+          "    from hermes_cli.auth import _nous_invoke_jwt_status\n",
+          "",
+          1
+        ],
+        [
+          "    from hermes_cli.auth import _coerce_ttl_seconds\n",
+          "",
+          1
+        ],
+        [
+          "    from hermes_cli.auth import _default_verify\n",
+          "",
+          1
+        ]
+      ]
+    },
+    "codex_quota.py": {
+      "header": "\"\"\"Pinned Codex quota shape and endpoint policy; host handles cancellable HTTP.\"\"\"\nfrom typing import Any, Dict, Optional\nfrom .nous_auth import _decode_jwt_claims\nfrom ..host.pool import _codex_base_url",
+      "segments": [
+        {
+          "source": "hermes_cli/auth_codex.py",
+          "symbols": [
+            "_stripped",
+            "_is_codex_rate_limit_shaped",
+            "_entry_is_rate_limit_exhausted",
+            "CODEX_QUOTA_PROBE_MIN_INTERVAL_SECONDS",
+            "_codex_usage_probe_url"
+          ]
+        }
+      ],
+      "replacements": []
+    },
+    "reasoning_caps.py": {
+      "source": "hermes_cli/models_reasoning_caps.py",
+      "replacements": [
+        [
+          "    from hermes_cli import models\n    return models",
+          "    from ..host.catalog import origin\n    return origin()",
+          1
+        ],
+        [
+          "    from hermes_constants import get_hermes_home\n    return get_hermes_home() / \"cache\" / \"reasoning_caps.json\"",
+          "    from ..host.catalog import cache_path\n    return cache_path(\"reasoning_caps.json\")",
+          1
+        ],
+        [
+          "from hermes_cli.models import _read_json_cache",
+          "from ..host.catalog import _read_json_cache",
+          1
+        ],
+        [
+          "from hermes_cli.models import _write_json_cache",
+          "from ..host.catalog import _write_json_cache",
+          1
+        ],
+        [
+          "    threading.Thread(target=refresh, name=\"reasoning-caps-warm\", daemon=True).start()",
+          "    from ..host.catalog import warm\n    warm(refresh)",
+          1
+        ],
+        [
+          "    from hermes_cli.models_pricing import _resolve_nous_pricing_credentials\n    return f\"{_resolve_nous_pricing_credentials()[1]}/v1/models\"",
+          "    from ..host.catalog import catalog_url\n    return catalog_url(\"nous\")",
+          1
+        ],
+        [
+          "    lambda: _OPENROUTER_CATALOG_URL,",
+          "    lambda: __import__(\"misaka.extensions.hermes_lcm.host.catalog\", fromlist=[\"catalog_url\"]).catalog_url(\"openrouter\"),",
+          1
+        ],
+        [
+          "return _seed_reasoning_caps(url, payload.get(\"data\"))",
+          "return _seed_reasoning_caps(url, payload.get(\"data\")) if isinstance(payload, dict) else None",
+          1
+        ]
+      ]
+    },
+    "recommended_models.py": {
+      "header": "\"\"\"Pinned tier-aware Nous auxiliary model selection.\"\"\"\nfrom typing import Any, Optional\nfrom ..host.catalog import fetch_nous_recommended_models, _resolve_nous_portal_url, check_nous_free_tier",
+      "segments": [
+        {
+          "source": "hermes_cli/models.py",
+          "symbols": [
+            "_extract_model_name",
+            "get_nous_recommended_aux_model"
+          ]
+        }
+      ],
+      "replacements": []
+    },
+    "nous_account.py": {
+      "header": "\"\"\"Pinned Nous entitlement normalization, with no credential-store I/O.\"\"\"\nfrom __future__ import annotations\nimport time\nfrom dataclasses import dataclass, field, fields\nfrom datetime import datetime, timezone\nfrom typing import Any, Literal, Optional",
+      "segments": [
+        {
+          "source": "hermes_cli/nous_account.py",
+          "symbols": [
+            "NousAccountInfoSource",
+            "TOOL_COVERAGE_CATEGORIES",
+            "_ACCOUNT_INFO_CACHE_TTL",
+            "NousPortalSubscriptionInfo",
+            "NousPaidServiceAccessInfo",
+            "NousToolAccessInfo",
+            "NousPortalAccountInfo",
+            "_info_from_valid_jwt",
+            "_info_from_account_payload",
+            "_tool_access_from_value",
+            "_coerced_dataclass",
+            "_subscription_from_payload",
+            "_dict_or_empty",
+            "_coerce_str",
+            "_coerce_bool",
+            "_coerce_num",
+            "_COERCERS"
+          ]
+        }
+      ],
+      "replacements": [
+        [
+          "from hermes_cli.auth import _decode_jwt_claims",
+          "from .nous_auth import _decode_jwt_claims",
+          1
+        ]
+      ]
+    },
+    "copilot_catalog.py": {
+      "header": "\"\"\"Pinned Copilot model aliases and capability interpretation.\"\"\"\nfrom typing import Any, Optional\nfrom ..host.catalog import fetch_github_model_catalog",
+      "segments": [
+        {
+          "source": "hermes_cli/models_catalog_static.py",
+          "symbols": [
+            "_COPILOT_MODEL_ALIASES"
+          ]
+        },
+        {
+          "source": "hermes_cli/models.py",
+          "symbols": [
+            "COPILOT_REASONING_EFFORTS_GPT5",
+            "COPILOT_REASONING_EFFORTS_O_SERIES",
+            "_COPILOT_CHAT_ENDPOINTS",
+            "_payload_items",
+            "_copilot_catalog_item_is_text_model",
+            "_copilot_text_models",
+            "_copilot_catalog_ids",
+            "normalize_copilot_model_id",
+            "_github_reasoning_efforts_for_model_id",
+            "github_model_reasoning_efforts"
+          ]
+        }
+      ],
+      "replacements": []
+    },
+    "auxiliary_nous.py": {
+      "header": "\"\"\"Pinned Nous stale-model recovery policy.\"\"\"\nimport logging\nfrom typing import Optional\nfrom .auxiliary_recovery import _is_payment_error\nfrom .support import _contains_any\nlogger = logging.getLogger(__name__)",
+      "segments": [
+        {
+          "source": "agent/auxiliary_client.py",
+          "symbols": [
+            "_NOUS_MODEL",
+            "_is_model_not_found_error",
+            "_refresh_nous_recommended_model"
+          ]
+        },
+        {
+          "source": "hermes_cli/providers.py",
+          "symbols": [
+            "nous_api_mode",
+            "_nous_anthropic_wire"
+          ]
+        }
+      ],
+      "replacements": [
+        [
+          "from hermes_cli.models import get_nous_recommended_aux_model",
+          "from .recommended_models import get_nous_recommended_aux_model",
+          1
+        ],
+        [
+          "from hermes_cli.config import load_config_readonly",
+          "from ..host.config_bridge import load_auxiliary_config as load_config_readonly",
+          1
+        ]
+      ]
+    },
+    "acp_openai_bridge.py": {
+      "source": "agent/acp_openai_bridge.py",
+      "replacements": []
+    },
+    "acp_env.py": {
+      "header": "\"\"\"Pinned ACP child-process secret classification.\"\"\"",
+      "segments": [
+        {
+          "source": "tools/environments/local_env_policy.py",
+          "symbols": [
+            "_HERMES_PROVIDER_ENV_FORCE_PREFIX",
+            "_is_hermes_internal_secret",
+            "_ALWAYS_STRIP_KEYS"
+          ]
+        }
+      ],
+      "replacements": []
+    },
+    "copilot_acp_client.py": {
+      "source": "agent/copilot_acp_client.py",
+      "replacements": [
+        [
+          "from agent.acp_openai_bridge import",
+          "from .acp_openai_bridge import",
+          1
+        ],
+        [
+          "from agent.redact import",
+          "from .redact import",
+          1
+        ],
+        [
+          "from agent.file_safety import",
+          "from ..host.acp_environment import",
+          1
+        ],
+        [
+          "from tools.environments.local import hermes_subprocess_env",
+          "from ..host.acp_environment import hermes_subprocess_env",
+          1
+        ],
+        [
+          "    from hermes_constants import apply_subprocess_home_env",
+          "    from ..host.acp_environment import apply_subprocess_home_env",
+          1
+        ],
+        [
+          "from hermes_cli._subprocess_compat import windows_hide_flags",
+          "from ..host.acp_environment import windows_hide_flags",
+          1
+        ],
+        [
+          "\"readTextFile\": True, \"writeTextFile\": True",
+          "\"readTextFile\": False, \"writeTextFile\": False",
+          1
+        ],
+        [
+          "\"hermes-agent\", \"title\": \"Hermes Agent\"",
+          "\"misaka-lcm\", \"title\": \"MISAKA LCM\"",
+          1
+        ],
+        [
+          "        threading.Thread(target=_pump, args=(proc.stdout, lambda line: inbox.put(_decode(line))), daemon=True).start()\n        threading.Thread(target=_pump, args=(proc.stderr, lambda line: stderr_tail.append(line.rstrip(\"\\n\"))), daemon=True).start()",
+          "        pumps = [threading.Thread(target=_pump, args=(proc.stdout, lambda line: inbox.put(_decode(line))), daemon=True),\n                 threading.Thread(target=_pump, args=(proc.stderr, lambda line: stderr_tail.append(line.rstrip(\"\\n\"))), daemon=True)]\n        for pump in pumps:\n            pump.start()",
+          1
+        ],
+        [
+          "while time.monotonic() < deadline and proc.poll() is None:",
+          "while time.monotonic() < deadline:",
+          1
+        ],
+        [
+          "                except queue.Empty:\n                    continue",
+          "                except queue.Empty:\n                    if proc.poll() is not None and not pumps[0].is_alive():\n                        break\n                    continue",
+          1
+        ],
+        [
+          "        finally:\n            self.close()",
+          "        finally:\n            self.close()\n            for pump in pumps:\n                pump.join()\n            for pipe in (proc.stdin, proc.stdout, proc.stderr):\n                if pipe is not None:\n                    pipe.close()",
+          1
+        ],
+        [
+          "            stdin=subprocess.DEVNULL,",
+          "            stdin=subprocess.DEVNULL, env=_build_subprocess_env(),",
+          1
+        ],
+        [
+          "active ACP agent backend for Hermes.",
+          "active ACP agent backend for MISAKA.",
+          1
+        ],
+        [
+          "Hermes ACP mode requires",
+          "MISAKA ACP mode requires",
+          1
+        ],
+        [
+          "point Hermes at it explicitly",
+          "point MISAKA at it explicitly",
+          1
+        ],
+        [
+          "via `hermes setup`",
+          "in MISAKA settings",
+          1
+        ],
+        [
+          "is not supported by Hermes yet.",
+          "is not supported by MISAKA yet.",
+          1
+        ],
+        [
+          "    from ..host.acp_environment import apply_subprocess_home_env\n",
+          "",
+          1
+        ],
+        [
+          "    apply_subprocess_home_env(env)\n",
+          "",
+          1
+        ]
+      ]
+    },
+    "anthropic_endpoints.py": {
+      "source": "agent/anthropic_endpoints.py",
+      "replacements": [
+        [
+          "from utils import",
+          "from .support import",
+          1
+        ]
+      ]
+    }
+  },
+  "notes": {
+    "context_compressor.py": "Full compressor and public turn helpers; exclude only the explicitly revert-scheduled PLUGIN-COMPAT block.",
+    "support.py": "Exact transitive pure helper selections; no Hermes agent/gateway/tools/runtime import or independent memory provider.",
+    "model_metadata.py": "Exact rough estimators; native registry supplies context length. Learned image calibration is still F01 work.",
+    "imports": "Only listed import spelling adaptations; MISAKA-owned call, clock, model discovery, diagnostics and allocator hooks live in host/native.py."
+  },
+  "tests": {
+    "test_context_compressor_summary_continuity.py": "tests/agent/test_context_compressor_summary_continuity.py",
+    "test_context_compressor_structural_backoff.py": "tests/agent/test_context_compressor_structural_backoff.py",
+    "test_context_compressor_reasoning_fallback.py": "tests/agent/test_context_compressor_reasoning_fallback.py",
+    "test_compressor_truncated_summary_guard.py": "tests/agent/test_compressor_truncated_summary_guard.py",
+    "test_compressor_stale_tool_images.py": "tests/agent/test_compressor_stale_tool_images.py",
+    "test_compressor_tail_cut_tool_pair_floor.py": "tests/agent/test_compressor_tail_cut_tool_pair_floor.py",
+    "test_context_compressor_session_end_clears_state.py": "tests/agent/test_context_compressor_session_end_clears_state.py",
+    "test_context_compressor_cross_session_guard.py": "tests/agent/test_context_compressor_cross_session_guard.py",
+    "test_compression_small_ctx_threshold_floor.py": "tests/agent/test_compression_small_ctx_threshold_floor.py",
+    "test_compressor_actionable_tail_anchor.py": "tests/agent/test_compressor_actionable_tail_anchor.py",
+    "test_micro_compaction.py": "tests/agent/test_micro_compaction.py",
+    "test_usage_anchor.py": "tests/agent/test_usage_anchor.py",
+    "test_image_token_cost.py": "tests/agent/test_image_token_cost.py"
+  }
+}

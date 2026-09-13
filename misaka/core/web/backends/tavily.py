@@ -32,6 +32,7 @@ from typing import Any
 
 import httpx
 
+from misaka.core.web.accounting import account_call
 from misaka.core.web.config import (
     keyless_tier_enabled,
     provider_env,
@@ -39,7 +40,13 @@ from misaka.core.web.config import (
     use_keyless,
 )
 from misaka.core.web.keyless import CLIENT_NAME
-from misaka.core.web.provider import WebSearchProvider
+from misaka.core.web.network import api_network_options
+from misaka.core.web.provider import (
+    WebSearchProvider,
+    align_documents,
+    extraction_error,
+)
+from misaka.core.web.timeouts import http_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +100,10 @@ async def tavily_request(
     url = f"{base_url}/{endpoint.lstrip('/')}"
     logger.info("Tavily %s request to %s", endpoint, url)
 
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with (
+        httpx.AsyncClient(timeout=http_timeout("tavily", 60), **api_network_options(url)) as client,
+        account_call(f"web_{endpoint.lstrip('/')}", "tavily", payload.get("query") or "\n".join(payload.get("urls") or [])),
+    ):
         response = await client.post(url, json=payload, headers=_tavily_headers(api_key))
     if response.status_code >= 400:
         body = (response.text or "").strip()
@@ -101,22 +111,6 @@ async def tavily_request(
         raise ValueError(detail)
     return response.json()
 
-
-def _failed(url: str, error: str) -> dict[str, Any]:
-    """The contract entry for a page Tavily did not return.
-
-    An entry, never a hole in the list: the caller reassembles its argument list by
-    position, so a dropped failure hands it the next page's text under this page's
-    address.
-    """
-    return {
-        "url": url,
-        "title": "",
-        "content": "",
-        "raw_content": "",
-        "error": error,
-        "metadata": {"sourceURL": url},
-    }
 
 
 def normalize_extract_documents(
@@ -131,20 +125,11 @@ def normalize_extract_documents(
     *why*; and ``failed_urls`` is a bare list of strings with no reason attached at all,
     hence the literal "extraction failed" Hermes uses for them.
 
-    Divergence from Hermes, deliberate. Its ``_normalize_tavily_documents`` appends the
-    three lists end to end, so a three-URL batch whose middle page failed answers with the
-    third page's text in the second position and every caller pairing by argument order
-    reads the wrong page under the wrong address. The reply is re-keyed onto *urls* here,
-    and a URL nobody asked for is dropped with a debug line rather than lengthening the
-    list past its request.
-
-    Hermes' ``fallback_url`` -- the address to file a result that names none under -- is
-    kept only for a single-URL request. In a batch there is no defensible position for an
-    unlabelled result, and giving it the first URL's is exactly the mispairing this
-    function exists to prevent.
+    Preserve canonical response URLs and unassociated material; the shared association
+    helper gives requested slots their exact URL/ID match or an explicit error.
     """
     fallback = urls[0] if len(urls) == 1 else ""
-    by_url: dict[str, dict[str, Any]] = {}
+    documents: list[dict[str, Any]] = []
 
     for result in response.get("results") or []:
         if not isinstance(result, dict):
@@ -152,8 +137,7 @@ def normalize_extract_documents(
         url = str(result.get("url") or fallback)
         title = str(result.get("title") or "")
         content = str(result.get("raw_content") or result.get("content") or "")
-        by_url.setdefault(
-            url,
+        documents.append(
             {
                 "url": url,
                 "title": title,
@@ -166,17 +150,12 @@ def normalize_extract_documents(
         if not isinstance(failure, dict):
             continue
         url = str(failure.get("url") or fallback)
-        by_url.setdefault(
-            url, _failed(url, str(failure.get("error") or "extraction failed"))
-        )
+        documents.append(extraction_error(url, str(failure.get("error") or "extraction failed")))
     for failed_url in response.get("failed_urls") or []:
         url = failed_url if isinstance(failed_url, str) else str(failed_url)
-        by_url.setdefault(url, _failed(url, "extraction failed"))
+        documents.append(extraction_error(url, "extraction failed"))
 
-    unrequested = sorted(set(by_url) - set(urls))
-    if unrequested:
-        logger.debug("tavily extract: reply named unrequested url(s) %s", unrequested)
-    return [by_url.get(url) or _failed(url, "no content returned") for url in urls]
+    return align_documents(urls, documents)
 
 
 def normalize_search_results(response: dict[str, Any]) -> dict[str, Any]:
@@ -279,7 +258,7 @@ class TavilyWebSearchProvider(WebSearchProvider):
         force_keyless = use_keyless("tavily", api_key)
         if not force_keyless and not api_key:
             error = _missing_key_error("extract")
-            return [_failed(url, error) for url in urls]
+            return [extraction_error(url, error) for url in urls]
 
         logger.info(
             "Tavily %sextract: %d URL(s)",
@@ -293,7 +272,7 @@ class TavilyWebSearchProvider(WebSearchProvider):
         )
         return normalize_extract_documents(raw, list(urls))
 
-    def setup_hint(self) -> dict[str, Any]:
+    def get_setup_schema(self) -> dict[str, Any]:
         return {
             "name": "Tavily",
             "badge": "free - key optional",

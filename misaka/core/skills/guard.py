@@ -6,6 +6,13 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .vendor.guard_patterns import (
+    _AGENT_CONFIG_FILES,
+    _content_contract_re,
+    _prose_modify_re,
+    _shell_write_re,
+)
+
 # ---------------------------------------------------------------------------
 # Caller-supplied source labels
 # ---------------------------------------------------------------------------
@@ -55,6 +62,7 @@ class ScanResult:
     findings: list[Finding] = field(default_factory=list)
     scanned_at: str = ""
     summary: str = ""
+    scan_provenance: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -429,9 +437,14 @@ THREAT_PATTERNS = [
      "sets SUID/SGID bit on a file"),
 
     # ── Agent config persistence ──
+    (_prose_modify_re(_AGENT_CONFIG_FILES),
+     "agent_config_mod", "critical", "persistence", "instructs modification of agent config files (could persist instructions across sessions)"),
+    (_shell_write_re(_AGENT_CONFIG_FILES),
+     "agent_config_mod_shell", "critical", "persistence", "shell write (redirect/sed -i/tee/cp/mv) targeting agent config files (persistence mechanism)"),
+    (_content_contract_re(_AGENT_CONFIG_FILES),
+     "agent_config_contract", "high", "persistence", "dictates agent config file contents (verify intent — authoring guides use this shape too)"),
     (r'AGENTS\.md|CLAUDE\.md|\.cursorrules|\.clinerules',
-     "agent_config_mod", "critical", "persistence",
-     "references agent config files (could persist malicious instructions across sessions)"),
+     "agent_config_ref", "low", "persistence", "references agent config files (informational; only modification intent is scored)"),
     (r'\.hermes/config\.yaml|\.hermes/SOUL\.md',
      "hermes_config_mod", "critical", "persistence",
      "references Hermes configuration files directly"),
@@ -502,7 +515,7 @@ _COMPILED_THREAT_PATTERNS = [
 # Structural limits for skill directories
 MAX_FILE_COUNT = 50       # skills shouldn't have 50+ files
 MAX_TOTAL_SIZE_KB = 1024  # 1MB total is suspicious for a skill
-MAX_SINGLE_FILE_KB = 256  # individual file > 256KB is suspicious
+MAX_SINGLE_FILE_KB = 1024  # individual file > 256KB is suspicious
 
 # File extensions to scan (text files only — skip binary)
 # Known binary extensions that should NOT be in a skill
@@ -1198,3 +1211,14 @@ def _build_summary(name: str, source: str, trust: str, verdict: str, findings: l
 
     categories = {f.category for f in findings}
     return f"{name}: {verdict} — {len(findings)} finding(s) in {', '.join(sorted(categories))}"
+
+
+from .vendor.guard_cache import (
+    content_hash as content_hash,  # noqa: PLC0414 - public compatibility export
+)
+from .vendor.guard_cache import (
+    full_content_hash as full_content_hash,  # noqa: PLC0414 - public compatibility export
+)
+from .vendor.guard_cache import (
+    scan_skill_cached as scan_skill_cached,  # noqa: PLC0414 - public compatibility export
+)

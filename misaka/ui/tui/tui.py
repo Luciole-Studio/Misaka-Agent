@@ -298,6 +298,9 @@ class TUI(Container):
         self.maxLinesRendered = 0
         self.previousViewportTop = 0
         self.fullRedrawCount = 0
+        # After a resize, the fast viewport frame (renders only the bottom of the transcript)
+        # leaves the scrollback and the diff model to be rebuilt by the next settled full render.
+        self._needs_full_rebuild = False
         self.stopped = False
         self.focusOrderCounter = 0
         self.overlayStack: list[dict[str, Any]] = []
@@ -885,6 +888,68 @@ class TUI(Container):
             return {"row": row, "col": col}
         return None
 
+    def _leaf_chunks_reverse(self, comp: Any, width: int):
+        """Yield each visible component's rendered lines, bottom-up. Descends only into plain
+        containers -- those whose ``render`` is the base ``Container.render``, which passes
+        ``width`` straight through -- and renders every other component (Box, Markdown, message
+        components, the editor, the footer) whole at ``width``, exactly as the full render does.
+        So concatenating these chunks top-to-bottom reproduces the full render, and taking the
+        last rows of them reproduces its tail without rendering the whole transcript."""
+        if type(comp).render is Container.render and getattr(comp, "children", None) is not None:
+            for child in reversed(comp.children):
+                yield from self._leaf_chunks_reverse(child, width)
+        else:
+            yield comp.render(width)
+
+    def _render_tail(self, width: int, height: int) -> list[str]:
+        """The bottom ``height`` lines of a full render, produced by rendering only the
+        components that reach the viewport (validated to equal ``render(width)[-height:]``).
+        The generator is lazy and the break is per chunk, so components above the viewport are
+        never rendered -- that is the whole point (a few ms instead of the whole transcript)."""
+        chunks: list[list[str]] = []
+        total = 0
+        for chunk in self._leaf_chunks_reverse(self, width):
+            chunks.append(chunk)
+            total += len(chunk)
+            if total >= height:
+                break
+        lines: list[str] = []
+        for chunk in reversed(chunks):
+            lines.extend(chunk)
+        return lines[-height:] if len(lines) > height else lines
+
+    def _try_viewport_render(self, width: int, height: int) -> bool:
+        """A fast frame after a resize: repaint only the visible screen from the transcript's
+        tail, leaving the scrollback to the terminal's own reflow until the next settled render
+        rebuilds it. Returns False (fall back to the full render) when the tail holds a kitty
+        image, which needs the whole-buffer path. pi lays a full frame out in well under a
+        frame, so it never needs this; the Python port re-wraps a long transcript in hundreds
+        of ms, which made a drag lurch, so the tail (a handful of ms) is drawn per step and the
+        full buffer is rebuilt once the size settles (``_needs_full_rebuild``)."""
+        tail = self._render_tail(width, height)
+        if (self.terminal.columns, self.terminal.rows) != (width, height):
+            self.requestRender()      # the size moved while we laid out: try again for the new one
+            return True
+        if any(isImageLine(line) for line in tail):
+            return False
+        cursor_pos = self.extractCursorPosition(tail, height)
+        tail = self.applyLineResets(tail)
+        buffer = "\x1b[?2026h\x1b[2J\x1b[H"     # clear the visible screen only (2J, not 3J): keep scrollback
+        for index, line in enumerate(tail):
+            if index > 0:
+                buffer += "\r\n"
+            buffer += line
+        buffer += "\x1b[?2026l"
+        self.terminal.write(buffer)
+        self.cursorRow = max(0, len(tail) - 1)
+        self.hardwareCursorRow = self.cursorRow
+        self.positionHardwareCursor(cursor_pos, len(tail))
+        self.previousWidth = width
+        self.previousHeight = height
+        self._needs_full_rebuild = True
+        self.requestRender()          # a full, clean frame (and scrollback) once the size holds
+        return True
+
     def doRender(self) -> None:
         if self.stopped:
             return
@@ -917,6 +982,13 @@ class TUI(Container):
         height = self.terminal.rows
         width_changed = self.previousWidth != 0 and self.previousWidth != width
         height_changed = self.previousHeight != 0 and self.previousHeight != height
+        # A resize: paint the viewport from the transcript's tail (a few ms) instead of
+        # re-wrapping the whole transcript (hundreds of ms). The full buffer is rebuilt on the
+        # next render once the size settles. _try_viewport_render runs only if the guards pass
+        # (short-circuit) and returns False to fall through to the full render (kitty images).
+        if ((width_changed or height_changed) and self.previousLines
+                and not self.overlayStack and self._try_viewport_render(width, height)):
+            return
         previous_buffer_length = self.previousViewportTop + self.previousHeight if self.previousHeight > 0 else height
         prev_viewport_top = max(0, previous_buffer_length - height) if height_changed else self.previousViewportTop
         viewport_top = prev_viewport_top
@@ -930,6 +1002,15 @@ class TUI(Container):
         new_lines = self.render(width)
         if self.overlayStack:
             new_lines = self.compositeOverlays(new_lines, width, height)
+        if (self.terminal.columns, self.terminal.rows) != (width, height):
+            # PORT-NOTE: pi lays a frame out in well under a frame, so a resize during
+            # render() is invisible there. Here a long transcript takes a second or more,
+            # and a frame laid out for the old width written into the new one wraps every
+            # row. Nothing was written, so the terminal still holds the previous frame
+            # (reflowed to its new width by the panel's terminal, as ghostty would): render
+            # again for the size we have now. pi's own bookkeeping stays untouched.
+            self.requestRender()
+            return
 
         cursor_pos = self.extractCursorPosition(new_lines, height)
         new_lines = self.applyLineResets(new_lines)
@@ -973,6 +1054,12 @@ class TUI(Container):
             self.previousWidth = width
             self.previousHeight = height
 
+        if self._needs_full_rebuild:
+            # The size has settled after one or more fast viewport frames: rebuild the whole
+            # buffer once, cleanly, so the scrollback and the diff model are correct again.
+            self._needs_full_rebuild = False
+            full_render(True)
+            return
         if not self.previousLines and not width_changed and not height_changed:
             full_render(False)
             return

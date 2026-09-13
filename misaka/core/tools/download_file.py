@@ -40,12 +40,13 @@ from misaka.agent.types import AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.documents import index as corpus
 from misaka.core.extensions.types import ToolDefinition
-from misaka.core.platform import budget
 from misaka.core.platform.prompt_guard import untrusted
+from misaka.core.tools._common import run_with_abort
 from misaka.core.tools._web.bounded import UnsafeUrlError, open_checked_stream
 from misaka.core.tools._web.evidence import citable_url
 from misaka.core.tools._web.screening import screen_url
 from misaka.core.tools.path_utils import DOWNLOAD_DIR_NAME, resolve_to_cwd
+from misaka.utils.async_lifecycle import run_in_thread
 from misaka.utils.values import signal_aborted
 
 #: Ceiling on one downloaded file. Sized for what research actually pulls -- a paper
@@ -57,9 +58,7 @@ MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
 
 #: Downloads land here, under the workspace, and nowhere else.
 
-# Wall-clock ceiling for the whole transfer. The per-operation timeout below only
-# bounds a *stall*; a server that dribbles bytes forever passes it indefinitely.
-_TOTAL_TIMEOUT = 300.0
+# HTTP phase default; whole transfer/tool defaults live in core.web.timeouts.
 _STREAM_TIMEOUT = 60.0
 
 # Bytes kept for the signature check. 512 covers the deepest signature we look at
@@ -208,6 +207,15 @@ def _magic_mismatch(suffix: str, head: bytes) -> bool:
     """Whether the leading bytes contradict what *suffix* claims the file is."""
     entry = _SIGNATURES.get(suffix)
     if entry is None:
+        import codecs
+        encoding = ("utf-32" if head.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)) else
+                    "utf-16" if head.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)) else None)
+        if encoding:
+            try:
+                # This is a prefix, so its final codepoint may span the sample boundary.
+                return "\x00" in codecs.getincrementaldecoder(encoding)().decode(head, final=False)
+            except UnicodeError:
+                return True
         return b"\x00" in head
     offset, prefixes = entry
     return not any(head[offset : offset + len(prefix)] == prefix for prefix in prefixes)
@@ -224,27 +232,16 @@ def _declared_length(headers: httpx.Headers) -> int | None:
 
 
 def _publish(part: str, directory: str, name: str) -> str:
-    """Move the finished, verified file from *part* to a free name, and return it.
-
-    Nothing is visible under a real download name until this runs: a name in
-    ``downloads/`` is a contract that the file is complete and is the type it claims,
-    and a reader has no way to tell a still-streaming or still-unchecked file from a
-    finished one. ``O_EXCL`` makes "is this name free?" and the claim on the answer one
-    syscall, so two downloads racing on one name get two files rather than one
-    clobbered by the other, and ``os.replace`` onto the name this call just created is
-    atomic -- no lock involved.
-    """
+    """Publish a complete file atomically without replacing an existing download."""
+    os.chmod(part, 0o644)
     stem, suffix = os.path.splitext(name)
     for index in range(_MAX_COLLISIONS):
         path = os.path.join(directory, name if index == 0 else f"{stem}-{index}{suffix}")
         try:
-            os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
+            os.link(part, path)
         except FileExistsError:
             continue
-        os.replace(part, path)
-        # mkstemp creates 0600; a download is an ordinary workspace file, and the
-        # mode came from the staging file rather than from any decision about it.
-        os.chmod(path, 0o644)
+        _discard(part)
         return path
     raise _Refused(f"Could not find a free filename for {name} after {_MAX_COLLISIONS} tries.")
 
@@ -257,48 +254,44 @@ def _discard(path: str) -> None:
 
 
 async def _stream_to_disk(
-    response: httpx.Response, path: str, handle: Any, deadline: float, signal: Any
+    response: httpx.Response, handle: Any, deadline: float, signal: Any
 ) -> tuple[int, str, bytes]:
     """Write the body to *handle*, returning ``(bytes, sha256, head)``.
 
     The counted total is the authority on size: a Content-Length is a claim, and a
-    chunked response makes no claim at all. Any exit other than a completed body
-    removes the file, cancellation included -- the caller must never find a partial.
+    chunked response makes no claim at all. The caller owns staging-file cleanup
+    until publication, including cancellation during connection teardown.
     """
     digest = hashlib.sha256()
     total = 0
     head = b""
-    try:
-        with handle:
-            async for chunk in response.aiter_bytes():
-                total += len(chunk)
-                if total > MAX_DOWNLOAD_BYTES:
-                    raise _Refused(
-                        f"Download aborted: the file is larger than the {MAX_DOWNLOAD_BYTES} byte limit "
-                        "(the server understated or did not declare its size). The partial file was "
-                        "deleted. Find a smaller source, or fetch only the part you need."
-                    )
-                if signal_aborted(signal):
-                    # Checked per chunk, not just before the request: this is the one tool
-                    # that can legitimately run for minutes, and an abort the caller has
-                    # already issued must not keep a transfer alive behind their back.
-                    raise RuntimeError("Operation aborted")
-                if time.monotonic() > deadline:
-                    raise _Refused(
-                        f"Download aborted after {_TOTAL_TIMEOUT:g}s with {total} bytes received. "
-                        "The partial file was deleted. Try a faster mirror."
-                    )
-                handle.write(chunk)
-                digest.update(chunk)
-                if len(head) < _MAGIC_BYTES:
-                    head += chunk[: _MAGIC_BYTES - len(head)]
-    except BaseException:  # every exit that is not a completed body, cancellation included
-        _discard(path)
-        raise
+    with handle:
+        async for chunk in response.aiter_bytes():
+            total += len(chunk)
+            if total > MAX_DOWNLOAD_BYTES:
+                raise _Refused(
+                    f"Download aborted: the file is larger than the {MAX_DOWNLOAD_BYTES} byte limit "
+                    "(the server understated or did not declare its size). The partial file was "
+                    "deleted. Find a smaller source, or fetch only the part you need."
+                )
+            if signal_aborted(signal):
+                # Checked per chunk, not just before the request: this is the one tool
+                # that can legitimately run for minutes, and an abort the caller has
+                # already issued must not keep a transfer alive behind their back.
+                raise RuntimeError("Operation aborted")
+            if time.monotonic() > deadline:
+                raise _Refused(
+                    f"Download exceeded its transfer deadline with {total} bytes received. "
+                    "The partial file was deleted. Try a faster mirror."
+                )
+            handle.write(chunk)
+            digest.update(chunk)
+            if len(head) < _MAGIC_BYTES:
+                head += chunk[: _MAGIC_BYTES - len(head)]
     return total, digest.hexdigest(), head
 
 
-async def _index_in_corpus(path: str) -> tuple[str, str | None]:
+async def _index_in_corpus(path: str, workspace: str) -> tuple[str, str | None]:
     """Index a downloaded document into the corpus; return ``(line for the model, doc_id)``.
 
     Without this the download has no usable next step: the read tool understands text and
@@ -306,15 +299,12 @@ async def _index_in_corpus(path: str) -> tuple[str, str | None]:
     step that actually works -- is something the model has to already know to look for.
     Indexing here makes the download and the corpus entry one motion.
 
-    The ingest is content-addressed under the corpus root, outside the workspace, and a
-    second download of the same bytes links the existing document rather than writing a
-    second one -- so this adds no file to the workspace whose name is not already a
-    function of what is in it.
+    The project-local store deduplicates identical documents without moving the download.
     """
     try:
         # pdftotext runs under a 300s timeout inside ingest, and page files are written one
         # by one: on the event loop that is the whole session held still for minutes.
-        doc_id, pages = await asyncio.to_thread(corpus.ingest, path)
+        doc_id, pages = await run_in_thread(corpus.ingest, path, workspace=workspace)
     except Exception as error:  # noqa: BLE001 - the file is downloaded, verified and kept; indexing is the step after, and its failures may damage nothing but themselves
         # ValueError is ingest's documented refusal (a scanned PDF with no text layer), and
         # its text is exactly the instruction the model needs -- OCR it, then doc_add. Any
@@ -323,71 +313,78 @@ async def _index_in_corpus(path: str) -> tuple[str, str | None]:
         reason = str(error) or type(error).__name__  # some OSErrors carry no message at all
         return f"  not indexed: {reason}", None
     note = (f"  indexed as doc {doc_id} ({pages} pages) — navigate it with doc_outline / doc_read, "
-            "and doc_verify every quotation before you cite it")
+            "and use doc_verify when you need help locating a passage")
     return note, doc_id
 
 
-async def _download(url: str, requested: str, directory: str, signal: Any) -> AgentToolResult:
-    deadline = time.monotonic() + _TOTAL_TIMEOUT
-    async with open_checked_stream(url, headers=_REQUEST_HEADERS, timeout=_STREAM_TIMEOUT) as response:
-        if response.status_code >= 400:
-            return _result(
-                f"Download failed: the server answered HTTP {response.status_code} for {url}. "
-                "Check the URL, or find the file at another source."
-            )
-        content_type = _TYPE_JUNK.sub("", response.headers.get("content-type", "").split(";", 1)[0].lower())[:80]
+async def _download(url: str, requested: str, directory: str, signal: Any, workspace: str) -> AgentToolResult:
+    from misaka.core.web.timeouts import operation_seconds
 
-        declared = _declared_length(response.headers)
-        if declared is not None and declared > MAX_DOWNLOAD_BYTES:
-            # Refused before a single body byte is read: the stream is still open, and
-            # leaving this context closes the connection.
-            return _result(
-                f"Refused to download {url}: the server declares {declared} bytes, over the "
-                f"{MAX_DOWNLOAD_BYTES} byte limit. Nothing was transferred. Find a smaller source."
-            )
-
-        name = _target_name(requested, str(response.url), response.headers, content_type)
-        suffix = os.path.splitext(name)[1].lower()
-        if suffix not in _ACCEPTED_SUFFIXES:
-            return _result(
-                f"Refused to download {url}: {suffix[:20] or '(no extension)'} is not a downloadable type "
-                f"(declared type {content_type or 'unknown'}). Documents, text and data files, images, "
-                "and archives are allowed. Use web_fetch to read a web page instead."
-            )
-
-        os.makedirs(directory, exist_ok=True)
-        # Streamed into a dotted staging name, never straight to the destination: until
-        # the byte count and the signature have both passed there is nothing here worth
-        # a real filename, and a process killed mid-transfer must not leave a truncated
-        # file sitting under one.
-        descriptor, part = tempfile.mkstemp(dir=directory, prefix=".partial-")
-        total, sha256, head = await _stream_to_disk(
-            response, part, os.fdopen(descriptor, "wb"), deadline, signal
-        )
-
-    # Accounted on the transfer, not on the keep: the bytes below may yet be thrown away
-    # for wearing the wrong signature, and they cost the same either way.
-    budget.record_external_call("download_file", subject=url, bytes=total)
-
-    if _magic_mismatch(suffix, head):
-        # The overwhelmingly common case is a paywall or login page served with a 200
-        # in place of the PDF. Keeping the file would put an HTML page into the ledger
-        # under a paper's name, so it is deleted and the failure is reported as one.
-        _discard(part)
-        # The name is deliberately not echoed here: it is the server's text, and this
-        # message is one of the few that reach the model outside the untrusted fence.
-        return _result(
-            f"Refused to keep the download from {url}: its first bytes are not {suffix} content "
-            f"(the server sent {content_type or 'an unknown type'} — usually a paywall, login, or "
-            "error page). The file was deleted. Open the URL's landing page with web_fetch to find "
-            "the real file link."
-        )
-
+    if not corpus.under(directory, workspace):
+        raise _Refused("Download directory resolves outside the workspace; nothing was written.")
+    part = None
     try:
+        seconds = operation_seconds("download_transfer")
+        if seconds == 0:
+            raise _Refused("Download transfer deadline is 0s; no request started.")
+        deadline = time.monotonic() + seconds
+        async with (
+            asyncio.timeout(seconds),
+            open_checked_stream(url, headers=_REQUEST_HEADERS, timeout=_STREAM_TIMEOUT, service="download_file") as response,
+        ):
+            if response.status_code >= 400:
+                return _result(
+                    f"Download failed: the server answered HTTP {response.status_code} for {url}. "
+                    "Check the URL, or find the file at another source."
+                )
+            content_type = _TYPE_JUNK.sub("", response.headers.get("content-type", "").split(";", 1)[0].lower())[:80]
+
+            declared = _declared_length(response.headers)
+            if declared is not None and declared > MAX_DOWNLOAD_BYTES:
+                # Refused before a single body byte is read: the stream is still open, and
+                # leaving this context closes the connection.
+                return _result(
+                    f"Refused to download {url}: the server declares {declared} bytes, over the "
+                    f"{MAX_DOWNLOAD_BYTES} byte limit. Nothing was transferred. Find a smaller source."
+                )
+
+            name = _target_name(requested, str(response.url), response.headers, content_type)
+            suffix = os.path.splitext(name)[1].lower()
+            if suffix not in _ACCEPTED_SUFFIXES:
+                return _result(
+                    f"Refused to download {url}: {suffix[:20] or '(no extension)'} is not a downloadable type "
+                    f"(declared type {content_type or 'unknown'}). Documents, text and data files, images, "
+                    "and archives are allowed. Use web_fetch to read a web page instead."
+                )
+
+            os.makedirs(directory, exist_ok=True)
+            # Streamed into a dotted staging name, never straight to the destination: until
+            # the byte count and the signature have both passed there is nothing here worth
+            # a real filename, and a process killed mid-transfer must not leave a truncated
+            # file sitting under one.
+            descriptor, part = tempfile.mkstemp(dir=directory, prefix=".partial-")
+            total, sha256, head = await _stream_to_disk(
+                response, os.fdopen(descriptor, "wb"), deadline, signal
+            )
+
+        if _magic_mismatch(suffix, head):
+            # The overwhelmingly common case is a paywall or login page served with a 200
+            # in place of the PDF. Keeping the file would put an HTML page into the ledger
+            # under a paper's name, so it is deleted and the failure is reported as one.
+            # The name is deliberately not echoed here: it is the server's text, and this
+            # message is one of the few that reach the model outside the untrusted fence.
+            return _result(
+                f"Refused to keep the download from {url}: its first bytes are not {suffix} content "
+                f"(the server sent {content_type or 'an unknown type'} — usually a paywall, login, or "
+                "error page). The file was deleted. Open the URL's landing page with web_fetch to find "
+                "the real file link."
+            )
+
         path = _publish(part, directory, name)
-    except BaseException:  # a name that cannot be claimed leaves no staging file behind
-        _discard(part)
-        raise
+        part = None
+    finally:
+        if part is not None:
+            _discard(part)
 
     final_url = citable_url(str(response.url))
     details = {
@@ -414,7 +411,7 @@ async def _download(url: str, requested: str, directory: str, signal: Any) -> Ag
     ingestable = suffix in corpus.SCAN_SUFFIXES
     doc_id = None
     if ingestable:
-        note, doc_id = await _index_in_corpus(path)
+        note, doc_id = await _index_in_corpus(path, workspace)
         lines.append(note)
         if doc_id:
             details["doc_id"] = doc_id
@@ -464,7 +461,12 @@ def create_download_file_tool_definition(
 
         directory = resolve_to_cwd(DOWNLOAD_DIR_NAME, cwd)
         try:
-            return await _download(url, parsed.path.strip(), directory, signal)
+            result, aborted = await run_with_abort(
+                _download(url, parsed.path.strip(), directory, signal, cwd), signal
+            )
+            if aborted:
+                raise RuntimeError("Operation aborted")
+            return result
         except _Refused as refusal:
             return _result(str(refusal))
         except UnsafeUrlError as error:
@@ -477,7 +479,7 @@ def create_download_file_tool_definition(
                 f"Refused to download {url}: it redirects too many times. The link is probably "
                 "broken or a redirect loop; find the file at another source."
             )
-        except httpx.TimeoutException:
+        except (TimeoutError, httpx.TimeoutException):
             return _result(
                 f"Download of {url} timed out. Retry once, or find a faster mirror."
             )
@@ -506,9 +508,12 @@ def create_download_file_tool_definition(
         promptGuidelines=[
             ("Use download_file for files worth keeping (papers, datasets); it saves them without "
              "putting the content in your context. A downloaded PDF, Markdown, or text file is "
-             "indexed on arrival: work with it through doc_outline / doc_read / doc_verify, which "
-             "is also what makes it citable. The read tool understands only text and images, so it "
+             "indexed on arrival: read it through doc_outline / doc_read; doc_verify is an optional "
+             "passage locator, not a citation requirement. The read tool understands text and images, so it "
              "cannot open a PDF; use it for the other downloaded types."),
+            ("Before downloading, check doc_list / doc_find and the downloads/ folder: a file another Sister "
+             "already downloaded is indexed and readable now, and the same bytes index to the same document ID, "
+             "so re-downloading it buys nothing."),
         ],
         parameters=DownloadFileToolInput,
         execute=execute,

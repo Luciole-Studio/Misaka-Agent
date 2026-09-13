@@ -6,6 +6,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, runtime_checkable
 
+from pydantic import Field
+
 from misaka.ai.types import (
     AssistantMessage,
     AssistantMessageEventValue,
@@ -52,6 +54,8 @@ class BeforeToolCallResult:
     # blocked.  Early termination only happens when every finalized tool result in the
     # batch sets this to true.  (pi 1eb988c #7715)
     terminate: bool | None = None
+    # MISAKA adapter for CCB PreToolUse.updatedInput; validated again before use.
+    updatedInput: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -177,6 +181,8 @@ class AgentLoopConfig:
 
 class AgentTool(Tool):
     label: str
+    # Runtime-only legacy names. Never advertise duplicate provider tool schemas.
+    aliases: tuple[str, ...] = Field(default=(), exclude=True)
     prepareArguments: Callable[[Any], Any] | None = None
     execute: Callable[[str, Any, Any | None, AgentToolUpdateCallback | None], Awaitable[AgentToolResult]]
     executionMode: ToolExecutionMode | None = None

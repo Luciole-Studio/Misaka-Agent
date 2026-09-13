@@ -26,10 +26,17 @@ def _get(path, **params):
         return json.load(response)
 
 
+def _works_filter(query):
+    """Match titles and abstracts, not full text: a full-text ``search`` matches every paper that
+    happens to contain the query's ordinary words, and the subfield counts then say nothing about
+    who discusses the question. Commas and colons are OpenAlex filter syntax, so they become spaces."""
+    return "title_and_abstract.search:" + " ".join(str(query).replace(",", " ").replace(":", " ").split())
+
+
 def scan(query, limit=LIMIT):
     """Counts of matching works per subfield and per topic, plus topics whose own description matches."""
-    by_subfield = _get("/works", search=query, group_by="primary_topic.subfield.id", per_page=limit)
-    by_topic = _get("/works", search=query, group_by="primary_topic.id", per_page=limit)
+    by_subfield = _get("/works", filter=_works_filter(query), group_by="primary_topic.subfield.id", per_page=limit)
+    by_topic = _get("/works", filter=_works_filter(query), group_by="primary_topic.id", per_page=limit)
     named = _get("/topics", search=query, per_page=6)
     lines = [f"OpenAlex: {by_subfield['meta']['count']:,} works match \"{query}\".", "", "Subfields (works):"]
     lines += [f"  {g['key_display_name']} ({g['count']})" for g in by_subfield["group_by"][:limit]] or ["  none"]
@@ -55,6 +62,13 @@ def register(harn):
 
     async def execute(tool_call_id, raw, signal, on_update, ctx):
         params = raw if isinstance(raw, ScanParams) else ScanParams(**(raw or {}))
+        if not any("a" <= ch.lower() <= "z" for ch in params.query):
+            # A CJK or other non-Latin phrase matches a handful of unrelated works at random,
+            # and "0 works" then reads as a confirmed gap in the literature; the index is of
+            # English titles and abstracts.
+            return {"content": [{"type": "text", "text": (
+                "OpenAlex indexes English titles and abstracts: a query without Latin letters "
+                "cannot be matched. Rephrase the question in English and scan again.")}], "details": {}}
         try:
             # Three sequential urllib calls at up to 25s each: never on the event loop
             # (the same rule documents.py states for its corpus calls).

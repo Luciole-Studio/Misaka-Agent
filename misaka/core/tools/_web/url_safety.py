@@ -8,19 +8,13 @@ cloud-metadata floor that stays shut whatever the operator configured, and the o
 opt-out itself. Everything here answers a question about the *text* of a URL; the
 question of what address it reaches belongs to :mod:`misaka.core.tools._web.bounded`.
 
-Four pieces of the Hermes original were deliberately left behind:
+Both Hermes and MISAKA pin vetted direct connections. ``bounded.py`` owns MISAKA's
+transport gate; ``core.web.network`` supplies explicit proxy-DNS delegation and
+exact HTTPS private-host grants. No QQ-specific default or legacy transport facade
+is copied. A delegated proxy owns final DNS/egress; it is not local IP pinning.
 
-* ``is_safe_url`` / ``async_is_safe_url`` and the SSRF-guarded httpx transports --
-  ``bounded.py`` is MISAKA's SSRF gate and is strictly stronger: it pins the socket to
-  the address it vetted and re-vets every redirect hop, so this module's only job is to
-  hand it the always-blocked floor and the opt-out.
-* the proxy DNS delegation at ``url_safety.py:447-475``, which lets a request through
-  unchecked whenever DNS fails and a proxy variable is set -- that is exactly the reach
-  ``bounded.open_checked_stream``'s address pinning plus ``trust_env=False``
-  (``bounded.py:214``) exists to deny, and the two cannot both hold. MISAKA keeps pinning.
-* ``_TRUSTED_PRIVATE_IP_HOSTS``, a Hermes-specific allowance for one QQ media domain.
-* ``get_hermes_home_override`` and its ``secret_scope`` multiplexed-profile handling --
-  MISAKA serves one profile per process, so the opt-out has exactly one scope to resolve.
+The private-URL opt-out reads the current Web profile and logical call's environment
+snapshot; it is not a process-global policy when several sessions share a process.
 
 One thing is deliberately *stricter* than the original, and it is the credential table's
 body length -- see :data:`_URL_BODY_MINIMUM`.
@@ -29,24 +23,23 @@ body length -- see :data:`_URL_BODY_MINIMUM`.
 from __future__ import annotations
 
 import ipaddress
-import logging
 import os
 import re
-from urllib.parse import parse_qsl, quote, unquote, urlsplit, urlunsplit
+import socket
+from urllib.parse import parse_qsl, unquote, urlsplit
+
+import httpx
 
 from misaka.core.web.config import web_config
-
-logger = logging.getLogger(__name__)
+from misaka.core.web.scope import current_scope
 
 
 def normalize_url_for_request(url: str) -> str:
     """Return an ASCII-safe HTTP URL for MISAKA-owned URL tools.
 
-    Hermes' ``normalize_url_for_request``. Browsers and HTTP clients expect URIs, but
-    users and models hand over IRIs such as ``https://wttr.in/Köln``. Preserve URL syntax
-    and existing percent escapes -- ``%`` is in every safe set below, which is what makes
-    this idempotent and keeps ``%C3%B6`` from becoming ``%25C3%25B6`` on a second pass --
-    while encoding non-ASCII host/path/query/fragment text.
+    Use the dialler's URL parser, including its IDNA encoding. Python's older IDNA
+    codec maps ``faß`` to ``fass``, silently changing the destination before HTTPX sees
+    it. Native encoding also preserves existing percent escapes on repeated calls.
 
     Intentionally for URL *tool inputs* only. Rewriting an arbitrary string the model
     wrote would corrupt shell commands and file paths that merely look URL-shaped, which
@@ -67,28 +60,10 @@ def normalize_url_for_request(url: str) -> str:
     raw = re.sub(r"^([A-Za-z][A-Za-z0-9+.-]*://)\s+", r"\1", raw)
 
     try:
-        parsed = urlsplit(raw)
-    except ValueError:
+        parsed = httpx.URL(raw)
+    except httpx.InvalidURL:
         return raw
-
-    if parsed.scheme.lower() not in {"http", "https"}:
-        return raw
-
-    netloc = parsed.netloc
-    hostname = parsed.hostname
-    if hostname:
-        try:
-            ascii_host = hostname.encode("idna").decode("ascii")
-        except UnicodeError:
-            ascii_host = hostname
-        if ascii_host != hostname:
-            netloc = netloc.replace(hostname, ascii_host, 1)
-
-    path = quote(parsed.path, safe="/%:@!$&'()*+,;=")
-    query = quote(parsed.query, safe="/%:@!$&'()*+,;=?")
-    fragment = quote(parsed.fragment, safe="/%:@!$&'()*+,;=?")
-
-    return urlunsplit((parsed.scheme, netloc, path, query, fragment))
+    return str(parsed) if parsed.scheme in {"http", "https"} else raw
 
 
 # Known API key prefixes -- match the prefix + contiguous token chars.
@@ -389,13 +364,24 @@ def always_blocked_address(
     if isinstance(value, (ipaddress.IPv4Address, ipaddress.IPv6Address)):
         address = value
     else:
-        try:
-            address = ipaddress.ip_address(str(value).strip().split("%", 1)[0])
-        except ValueError:
+        address = literal_address(str(value))
+        if address is None:
             return False
     return address in _ALWAYS_BLOCKED_IPS or any(
         address in network for network in _ALWAYS_BLOCKED_NETWORKS
     )
+
+
+def literal_address(host: str):
+    """Parse without DNS, including libc's abbreviated/decimal/octal/hex IPv4 forms."""
+    raw = host.strip().split('%', 1)[0]
+    try:
+        return ipaddress.ip_address(raw)
+    except ValueError:
+        try:
+            return ipaddress.IPv4Address(socket.inet_aton(raw))
+        except (OSError, ValueError):
+            return None
 
 
 # Strings a config value may spell "yes" with. Hermes' ``TRUTHY_STRINGS``; the point of
@@ -428,7 +414,8 @@ def allow_private_urls() -> bool:
 
     Never raises: an unreadable or malformed config means False, the safe answer.
     """
-    raw = os.getenv("MISAKA_ALLOW_PRIVATE_URLS", "").strip().lower()
+    environment = current_scope().environment
+    raw = (os.environ if environment is None else environment).get("MISAKA_ALLOW_PRIVATE_URLS", "").strip().lower()
     if raw in _TRUTHY_STRINGS:
         return True
     if raw in {"0", "false", "no", "off"}:
@@ -436,8 +423,7 @@ def allow_private_urls() -> bool:
 
     try:
         value = web_config().get("allow_private_urls")
-    except Exception as error:  # noqa: BLE001 - a missing or broken config must not break a fetch
-        logger.debug("allow_private_urls: config unreadable (%s); staying closed", error)
+    except Exception:  # noqa: BLE001 - a missing or broken config must not break a fetch
         return False
     if isinstance(value, str):
         return value.strip().lower() in _TRUTHY_STRINGS

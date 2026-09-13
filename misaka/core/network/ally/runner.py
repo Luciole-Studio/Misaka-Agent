@@ -43,7 +43,7 @@ def notify(task_id, text, *, sender, to_addr="last-order"):
     con = messages.connect()
     try:
         messages.send(con, to_addr, text, summary=f"ally {sender}·card {task_id}",
-                      sender=sender, task_id=task_id)
+                      sender=sender)
     finally:
         con.close()
 
@@ -82,13 +82,13 @@ def card_prompt(row):
 
 def _artifacts(root, workspace, since):
     """Files under ``root`` written during the run (mtime >= ``since``), nested ones included;
-    hidden entries, the board's own folders and report.json are not deliverables."""
+    hidden entries and the board's own folders are not deliverables."""
     out = []
     for base, dirs, files in os.walk(root):
         dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d not in ("cards", "research", "node_modules"))
         for name in sorted(files):
             path = os.path.join(base, name)
-            if name.startswith(".") or name == "report.json":
+            if name.startswith("."):
                 continue
             try:
                 if since is not None and os.path.getmtime(path) < since:
@@ -99,46 +99,36 @@ def _artifacts(root, workspace, since):
     return out
 
 
-def write_report(workspace, exit_code, output, *, assignee, task_id=None, output_dir=None, generation=None,
-                 since=None):
-    """Write report.json on the ally's behalf so the board's submit -> done
-    flow works unchanged (only the verification gate marks done; allies and Sisters are treated alike).
-    Returns (submitted, summary).
-    """
-    import json as _json
+def submission(workspace, exit_code, output, *, assignee, output_dir=None, since=None):
+    """Build an external ally's board submission from its exit and output."""
     if exit_code != 0:
-        return False, f"Ally {assignee} exited with code {exit_code}: {summarize(output, 500)}"
+        return None, f"Ally {assignee} exited with code {exit_code}: {summarize(output, 500)}"
     tail = summarize(output, 2000).strip()
     if not tail:
-        return False, f"Ally {assignee} produced no output."
+        return None, f"Ally {assignee} produced no output."
     artifacts = _artifacts(output_dir or workspace, workspace, since)
-    report = {"schema_version": 1, "status": "done",
-              **({"generation": int(generation)} if generation is not None else {}),
-              "summary": tail[-1500:],
-              "artifacts": artifacts,
-              "uncertain": [f"Output was produced by ally {assignee} and has not been independently reviewed."]}
-    report_dir = workspace
-    if task_id:
-        from misaka.core.platform import tasks
-        report_dir = tasks.task_state_dir(task_id)
-    os.makedirs(report_dir, exist_ok=True)
-    with open(os.path.join(report_dir, "report.json"), "w", encoding="utf-8") as f:
-        _json.dump(report, f, ensure_ascii=False)
-    return True, report["summary"]
+    result = {
+        "summary": tail[-1500:],
+        "artifacts": artifacts,
+        "notes": "",
+        "uncertain": [
+            f"Output was produced by ally {assignee} and has not been independently reviewed."
+        ],
+        "findings": [],
+    }
+    return result, result["summary"]
 
 
 def finish(workspace, exit_code, output, *, assignee, task_id, output_dir=None, generation=None, since=None):
-    """Wrap up after the ally process exits: write report.json, then mail Last Order. Returns (submitted, summary)."""
-    ok, summary = write_report(
-        workspace, exit_code, output, assignee=assignee,
-        task_id=task_id, output_dir=output_dir, generation=generation, since=since)
-    head = "finished and submitted" if ok else "could not submit"
-    try:
-        notify(task_id, f"Ally {assignee} {head} (card {task_id}):\n\n{summary}",
-               sender=assignee)
-    except Exception:  # noqa: BLE001, S110 - a failed notification must not change the submission result
-        pass
-    return ok, summary
+    """Build the submission after the ally process exits; the daemon owns settlement."""
+    return submission(
+        workspace,
+        exit_code,
+        output,
+        assignee=assignee,
+        output_dir=output_dir,
+        since=since,
+    )
 
 
 def describe(argv, prompt):

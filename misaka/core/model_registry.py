@@ -455,6 +455,8 @@ def _build_oauth_provider(provider_name: str, oauth: OAuthProviderInterface | Ma
             login=login,
             refreshToken=refresh_token,
             getApiKey=get_api_key,
+            getBaseUrl=oauth.get("getBaseUrl") if isinstance(oauth, Mapping) else getattr(oauth, "getBaseUrl", None),
+            getAuthHeaders=oauth.get("getAuthHeaders") if isinstance(oauth, Mapping) else getattr(oauth, "getAuthHeaders", None),
         ),
     )
 
@@ -1850,7 +1852,7 @@ class ModelRegistry:
         ]
 
     async def login(
-        self, provider: str, type: AuthType, interaction: AuthInteraction
+        self, provider: str, type: AuthType, interaction: AuthInteraction, *, account: str | None = None
     ) -> CredentialValue:
         if (
             provider not in self._nativeProviderIds
@@ -1858,11 +1860,17 @@ class ModelRegistry:
             and provider not in self._radiusProviders
         ):
             raise ValueError(f"Provider {provider} does not use native authentication")
-        return await self._authModels.login(provider, type, interaction)
+        if account is None:
+            return await self._authModels.login(provider, type, interaction)
+        from .auth_storage import oauth_account_key
+        return await self._authModels.login(provider, type, interaction,
+            credentialId=oauth_account_key(provider, account))
 
-    async def getApiKeyAndHeaders(self, model: Model) -> ResolvedRequestAuth:
+    async def getApiKeyAndHeaders(
+        self, model: Model, overrides: AuthResolutionOverrides | None = None,
+    ) -> ResolvedRequestAuth:
         try:
-            resolution = await self.getAuth(model)
+            resolution = await self.getAuth(model, overrides)
             if resolution is None:
                 return {
                     "ok": True,

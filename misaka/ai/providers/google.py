@@ -157,7 +157,8 @@ def create_client(
     options_headers: Mapping[str, str] | None = None,
     timeout_ms: int | None = None,
 ) -> GoogleGenAI:
-    http_options: dict[str, Any] = {}
+    # The outer retry_google_request owns retries; disable the SDK's five-attempt default.
+    http_options: dict[str, Any] = {"retryOptions": {"attempts": 1}}
     if model.baseUrl:
         http_options["baseUrl"] = model.baseUrl
         http_options["apiVersion"] = ""
@@ -415,7 +416,7 @@ def stream_google(
         except Exception as error:  # noqa: BLE001
             output.stopReason = "aborted" if signal_aborted(signal) else "error"
             output.errorMessage = _format_google_error(error)
-            stream.push(ErrorEvent(reason=output.stopReason, error=output))
+            stream.push(ErrorEvent(reason=output.stopReason, error=output), cause=error)
         finally:
             aio_client = getattr(client, "aio", None)
             close = getattr(aio_client, "aclose", None) if aio_client is not None else None
@@ -426,7 +427,7 @@ def stream_google(
                     pass
             stream.end()
 
-    spawn_stream_task(run())
+    spawn_stream_task(run(), stream=stream)
     return stream
 
 

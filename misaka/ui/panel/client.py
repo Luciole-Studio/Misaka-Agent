@@ -4,6 +4,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 
 from misaka.config import CFG
@@ -16,9 +17,9 @@ def _sock_path():
 def request(method, params=None, *, timeout=10):
     """Send one request and return its result. Raises ConnectionError if the daemon is not running."""
     con = socket.socket(socket.AF_UNIX)
-    con.settimeout(timeout)
-    con.connect(_sock_path())
     try:
+        con.settimeout(timeout)
+        con.connect(_sock_path())
         con.sendall((json.dumps(
             {"id": "1", "method": method, "params": params or {}},
             ensure_ascii=False) + "\n").encode())
@@ -30,6 +31,9 @@ def request(method, params=None, *, timeout=10):
                 # running", never a reply to parse.
                 raise ConnectionError("the daemon closed the connection")
             buf += chunk
+    except TimeoutError as error:
+        # No blind retry: a mutating request may have executed before its reply was lost.
+        raise TimeoutError(f"Panel request {method!r} timed out after {timeout}s; result unknown") from error
     finally:
         con.close()
     out = json.loads(buf)
@@ -60,19 +64,37 @@ def _wait_for_dying_daemon(timeout):
 
 
 def _spawn_and_wait(timeout):
-    with open(os.devnull, "rb") as devnull_in, open(os.devnull, "ab") as devnull_out:
-        subprocess.Popen(
-            [sys.executable, "-m", "misaka", "net-daemon"],
-            stdin=devnull_in, stdout=devnull_out, stderr=devnull_out,
+    log_path = _sock_path() + ".log"
+    os.makedirs(os.path.dirname(log_path), mode=0o700, exist_ok=True)
+    with os.fdopen(os.open(log_path, os.O_CREAT | os.O_RDWR | os.O_APPEND, 0o600), "a+b") as log:
+        os.fchmod(log.fileno(), 0o600)
+        log_start = log.seek(0, os.SEEK_END)
+        process = subprocess.Popen(
+            # The daemon hosts PTYs, not model sessions. The CLI entry eagerly imports
+            # every provider SDK before binding the socket; use its existing direct entry.
+            [sys.executable, "-u", "-m", "misaka.ui.panel.daemon"],
+            stdin=subprocess.DEVNULL, stdout=log, stderr=log,
             start_new_session=True,
         )
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            return request("ping", timeout=2)
-        except (ConnectionError, FileNotFoundError, OSError):
-            time.sleep(0.05)
-    raise RuntimeError("The daemon did not become ready in time (run `misaka net-daemon` by hand to see the error).")
+        # Reap our child without tying its lifetime to this client or holding up a reply.
+        threading.Thread(target=process.wait, daemon=True).start()
+        deadline = time.monotonic() + timeout
+        while (remaining := deadline - time.monotonic()) > 0:
+            try:
+                return request("ping", timeout=min(2, remaining))
+            except (ConnectionError, FileNotFoundError, OSError):
+                if process.poll() is not None:
+                    break
+                time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+        code = process.poll()
+        state = f"exited with code {code}" if code is not None else f"is still running after {timeout:g}s"
+        # Only this attempt's tail belongs in the error; keep the full log on disk.
+        log.seek(max(log_start, log.seek(0, os.SEEK_END) - 8192))
+        detail = log.read().decode("utf-8", errors="replace").strip()
+    raise RuntimeError(
+        f"Daemon process {process.pid} {state}, but its socket did not answer. "
+        f"Log: {log_path}" + (f"\n{detail}" if detail else "")
+    ) from None
 
 
 def ensure(timeout=8.0):

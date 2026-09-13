@@ -63,13 +63,13 @@ async def _forward_stream(target: AssistantMessageEventStream, source: AsyncIter
     leaves that future unresolved.
     """
     async for event in source:
-        target.push(event)
+        target.push(event, cause=getattr(source, "error_cause", None))
     target.end()
 
 
 def _fail(outer: AssistantMessageEventStream, model: Model, error: Any) -> None:
     message = _create_setup_error_message(model, error)
-    outer.push(ErrorEvent(reason="error", error=message))
+    outer.push(ErrorEvent(reason="error", error=message), cause=error)
     outer.end(message)
 
 
@@ -92,8 +92,12 @@ def lazy_stream(
             # The caller is watching the stream, not awaiting a raise, so a break here
             # ends the same way a setup failure does.
             _fail(outer, model, error)
+        finally:
+            settled = getattr(inner, 'settled', None)
+            if settled is not None:
+                await settled()
 
-    spawn_stream_task(run())
+    spawn_stream_task(run(), stream=outer)
     return outer
 
 

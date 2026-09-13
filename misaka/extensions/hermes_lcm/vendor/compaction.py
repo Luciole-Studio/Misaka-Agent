@@ -996,7 +996,7 @@ class CompactionMixin:
             "es" if leaf_passes != 1 else "",
             count_messages_tokens(messages),
             count_messages_tokens(compressed),
-            len(self._dag.get_session_nodes(self._session_id)),
+            self._dag.get_session_node_count(self._session_id),  # misaka: exact count, not a node sample.
             ", forced overflow recovery" if force_overflow else "",
         )
 
@@ -1037,5 +1037,12 @@ class CompactionMixin:
         self._write_generated_ignored_placeholder_hash_ordinals(
             self._generated_placeholder_digest_ordinals_for_active_replay(compressed)
         )
+        record_successful_compaction = getattr(
+            self,
+            "_record_successful_compaction_telemetry",
+            None,
+        )
+        if callable(record_successful_compaction):
+            record_successful_compaction()
 
         return compressed

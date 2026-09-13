@@ -34,6 +34,10 @@ from misaka.utils import atomic
 from misaka.utils.paths import resolve_path
 
 
+class ContextCarryUnsupportedError(RuntimeError):
+    """An explicit carry request was not accepted; the current owner is intact."""
+
+
 class ExtensionRunnerLike(Protocol):
     def hasHandlers(self, event: str) -> bool: ...
 
@@ -207,14 +211,22 @@ class AgentSessionRuntime:
         result = await runner.emit(event)
         return {"cancelled": _result_flag(result, "cancel", False) is True}
 
-    async def teardownCurrent(self, reason: str, targetSessionFile: str | None = None) -> None:
+    async def teardownCurrent(self, reason: str, targetSessionFile: str | None = None,
+                              *, carryTo: SessionManager | None = None) -> None:
         # Settle any active response first so the aborted turn (including tool
         # results) is persisted to the outgoing session before it is replaced.
         await self.session.abort()
+        if carryTo is not None:
+            result = await self.session.extensionRunner.emit({
+                "type": "session_context_carry", "sessionManager": carryTo,
+            })
+            if not result or not result.get("handled"):
+                raise ContextCarryUnsupportedError("The active context engine does not support explicit carry-over")
         shutdown_event = {
             "type": "session_shutdown",
             "reason": reason,
             "targetSessionFile": targetSessionFile,
+            **({"contextCarried": True} if carryTo is not None else {}),
         }
         await self.session.moments.session_shutdown(shutdown_event)  # MISAKA fork
         await emit_session_shutdown_event(self.session.extensionRunner, shutdown_event)
@@ -281,6 +293,17 @@ class AgentSessionRuntime:
         return {"cancelled": False}
 
     async def newSession(self, options: dict[str, Any] | None = None) -> dict[str, bool]:
+        if not options or not options.get('carryOverContext'):
+            return await self._newSession(options)
+        # Once DAG ownership moves, cancellation must not leave the old native
+        # runtime installed. Finish the replacement before returning cancellation.
+        from misaka.utils.async_lifecycle import settle
+        result, cancelled = await settle(asyncio.create_task(self._newSession(options)))
+        if cancelled is not None:
+            raise cancelled
+        return result
+
+    async def _newSession(self, options: dict[str, Any] | None = None) -> dict[str, bool]:
         before_result = await self.emitBeforeSwitch("new")
         if before_result["cancelled"]:
             return before_result
@@ -295,7 +318,8 @@ class AgentSessionRuntime:
         if options and options.get("parentSession"):
             session_manager.newSession(NewSessionOptions(parentSession=options["parentSession"]))
 
-        await self.teardownCurrent("new", session_manager.getSessionFile())
+        await self.teardownCurrent("new", session_manager.getSessionFile(),
+                                   carryTo=session_manager if options and options.get("carryOverContext") else None)
         self.apply(
             await self.createRuntime(
                 {

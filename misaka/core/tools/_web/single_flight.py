@@ -6,24 +6,26 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from misaka.core.web import debug
+
 # How long a follower waits on the leader before making its own call. Bounds the
 # "leader stalled -> every caller blocks" failure mode; the wait is pure latency,
 # so it is generous compared with any single request timeout.
-FOLLOWER_WAIT_TIMEOUT = 90.0
+FOLLOWER_WAIT_TIMEOUT = 90.0  # Standalone callers without a logical Web operation.
 
 # ponytail: a plain dict, no lock. The event loop never switches tasks between the
 # lookup and the insert below, so the leader election is already atomic. The running
 # loop is part of the slot because a future can only be woken by the loop that made
 # it: sharing one across loops does not raise, it silently never wakes the follower,
 # which would then sit out the whole ``wait_timeout`` before falling back.
-_inflight: dict[tuple[asyncio.AbstractEventLoop, str], asyncio.Future[Any]] = {}
+_inflight: dict[tuple[asyncio.AbstractEventLoop, str], tuple[asyncio.Future[Any], str | None]] = {}
 
 
 async def single_flight[T](
     key: str,
     fn: Callable[[], Awaitable[T]],
     *,
-    wait_timeout: float = FOLLOWER_WAIT_TIMEOUT,
+    wait_timeout: float | None = None,
 ) -> T:
     """Run ``fn`` once per ``key`` while that call is in flight.
 
@@ -42,17 +44,27 @@ async def single_flight[T](
     loop = asyncio.get_running_loop()
     slot = (loop, key)
 
-    leader_future = _inflight.get(slot)
-    if leader_future is not None:
+    leader = _inflight.get(slot)
+    if leader is not None:
+        leader_future, leader_trace = leader
+        from misaka.core.web.timeouts import remaining_operation
+
+        if wait_timeout is None:
+            remaining = remaining_operation()
+            wait_timeout = FOLLOWER_WAIT_TIMEOUT if remaining is None else remaining
         # asyncio.wait never cancels what it waits on, so a follower giving up cannot
         # disturb the leader or the other followers.
+        debug.event("flight_wait", leader_trace_id=leader_trace)
         await asyncio.wait([leader_future], timeout=wait_timeout)
         if leader_future.done() and not leader_future.cancelled() and leader_future.exception() is None:
+            debug.event("flight_reused", leader_trace_id=leader_trace)
             return leader_future.result()
+        remaining_operation()  # An expired follower must not start another request.
+        debug.event("flight_fallback", leader_trace_id=leader_trace)
         return await fn()
 
     future: asyncio.Future[T] = loop.create_future()
-    _inflight[slot] = future
+    _inflight[slot] = (future, debug.trace_id())
     try:
         result = await fn()
     except BaseException:

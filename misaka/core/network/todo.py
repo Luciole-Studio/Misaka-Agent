@@ -1,6 +1,9 @@
 """Per-card tools: nested, durable to-do items, and a line in the card's log."""
+import asyncio
+import os
 import secrets
 import time
+from pathlib import Path
 
 STATUSES = ("open", "doing", "done", "blocked")
 MAX_TEXT = 200
@@ -69,7 +72,7 @@ def tree(con, task_id):
     """Return nested task items with ``children`` lists."""
     nodes, roots = {}, []
     for r in items(con, task_id):
-        node = {**{k: r[k] for k in r}, "children": []}
+        node = {**dict(r), "children": []}
         nodes[r["id"]] = node
         parent = nodes.get(r["parent_id"])
         (parent["children"] if parent else roots).append(node)
@@ -117,6 +120,26 @@ def _field(event, key, default=None):
         return getattr(event, key, default)
 
 
+def _assistant_end(event):
+    for message in reversed(list(_field(event, "messages", []) or [])):
+        if _field(message, "role") != "assistant":
+            continue
+        content = _field(message, "content", [])
+        if isinstance(content, str):
+            text = content
+        else:
+            text = "\n".join(
+                str(_field(block, "text", ""))
+                for block in (content or [])
+                if _field(block, "type") == "text" and _field(block, "text")
+            )
+        return str(_field(message, "stopReason", "") or ""), text.strip()
+    return "", ""
+
+
+PROGRESS_SECONDS = 60     # how often a busy Sister stamps progress on its card
+
+
 class TodoPart:
     """The ``misaka_todo`` tools and reminder nudges for one task card."""
 
@@ -140,6 +163,14 @@ class TodoPart:
         self._since_write = 0
         self._empty_nagged = False
         self._stale_nags = 0
+        self._summary = None
+        self._summary_token = None
+        self._nudged_generation = None    # the generation already given its one extra turn
+        self._touched = 0.0
+        self._in_flight = 0               # tool calls started and not yet answered
+        self._stamper = None              # the task that stamps progress while one is
+        self.usage = None                 # card-shell opts in; managed/headless workers already meter their calls
+        self._close_usage = None
 
         def con():
             return self.con()
@@ -194,7 +225,7 @@ class TodoPart:
             lines = [f"{row['id']}  {row['status']}  assignee {row['assignee']}"
                      + (f"  reviewer {row['reviewer']}" if row["reviewer"] else ""),
                      f"dependencies: {state}" + (f" ({', '.join(str(p) for p in parents)})" if parents else " (none)"),
-                     f"generation {row['generation']}  timeout {row['timeout_seconds']}s"]
+                     f"generation {row['generation']}"]
             if row["block_reason"]:
                 lines.append(f"blocked: {row['block_reason']}")
             log = cards.read_log(row["workspace"], task_id)
@@ -202,13 +233,52 @@ class TodoPart:
                 lines += ["log:", *(f"  {line}" for line in log[-20:])]
             return _text("\n".join(lines))
 
+        from misaka.core.research import runs
+        from misaka.core.research.commands import Issue
+        from misaka.core.research.ledger import Finding
+
         class NoteParams(BaseModel):
             text: str = Field(description="One line for the card's log: a decision, a change of course, a dead end.")
+            findings: list[Finding] = Field(default_factory=list, description="Append declarations; corrections do not erase earlier notes.")
+            uncertain: list[str] = Field(default_factory=list)
+            issues: list[Issue] | None = Field(
+                None, description="Red-team cards: complete issue list for your node Last Order; [] means no issues."
+            )
 
         async def note_exec(tool_call_id, raw, signal, on_update, ctx):
             from misaka.core.platform import cards
             p = raw if isinstance(raw, NoteParams) else NoteParams(**(raw or {}))
-            row = bdb.get(con(), task_id)
+            c = con()
+            row = bdb.get(c, task_id)
+            evidence = {
+                "findings": [item.model_dump(exclude_none=True) for item in p.findings],
+                "uncertain": [item.strip() for item in p.uncertain if item.strip()],
+            }
+            link = None
+            if (p.findings or p.issues is not None) and c.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_run_tasks'"
+            ).fetchone():
+                link = c.execute("SELECT run_id,kind FROM research_run_tasks WHERE task_id=?", (task_id,)).fetchone()
+            if p.issues is not None:
+                if not link or link["kind"] not in runs.REVIEW_KINDS:
+                    raise ValueError("Only this node's red-team card may record critique issues.")
+                generation, claim_lock = self._ownership()
+                if generation is None or not bdb.add_event(
+                    c, task_id, "research_critique", {"issues": [item.model_dump() for item in p.issues]},
+                    generation=generation, claim_lock=claim_lock,
+                ):
+                    raise ValueError("Card ownership changed before its review was recorded.")
+            if {"findings", "uncertain"} & p.model_fields_set:
+                generation, claim_lock = self._ownership()
+                if generation is None or not bdb.add_event(
+                    c,
+                    task_id,
+                    "research_evidence",
+                    evidence,
+                    generation=generation,
+                    claim_lock=claim_lock,
+                ):
+                    raise ValueError("Card ownership changed before its research evidence was recorded.")
             cards.append_log(row["workspace"], task_id, sender, p.text)
             return _text("Logged on the card.")
 
@@ -241,19 +311,150 @@ class TodoPart:
             ToolDefinition(
                 name="misaka_card_note", label="Log a note on the card",
                 description="Append one line to this card's log (its `## log` section in the card file): a decision, a change "
-                            "of course, a dead end. Last Order reads the log when she looks at the card.",
-                parameters=NoteParams.model_json_schema(), execute=note_exec,
+                            "of course, or a dead end. Research cards attach findings and uncertainty; red-team cards attach issues.",
+                parameters=NoteParams, execute=note_exec,
                 promptSnippet="Log a decision or change of course on this card",
-                promptGuidelines=["Log why you changed course or dropped a line of inquiry as it happens; report.json is for the end."]),
+                promptGuidelines=["Append findings and uncertainty as work progresses; explain corrections in new notes. Earlier declarations remain visible for review."]),
         ]
 
     def attach(self, session):
         self.session = session
 
+    async def session_start(self, event=None, ctx=None):
+        if self.usage is not None and self._close_usage is None:
+            from misaka.core.network import worker
+            self._close_usage = worker.install_card_usage(self.session, **self.usage)
+
     def con(self):
         if self._con is None:
-            self._con = self._bdb.connect(self._db_path)
+            path = (os.environ.get("MISAKA_SISTER_OWNER_DB")
+                    or os.environ.get("MISAKA_USAGE_DB") or self._db_path)
+            self._con = self._bdb.connect(path)
         return self._con
+
+    def _ownership(self):
+        task_id = (os.environ.get("MISAKA_SISTER_OWNER_TASK_ID")
+                   or os.environ.get("MISAKA_USAGE_TASK_ID"))
+        generation = (os.environ.get("MISAKA_SISTER_OWNER_GENERATION")
+                      or os.environ.get("MISAKA_USAGE_GENERATION"))
+        claim_lock = (os.environ.get("MISAKA_SISTER_OWNER_CLAIM_LOCK")
+                      or os.environ.get("MISAKA_USAGE_CLAIM_LOCK"))
+        if task_id != self.task_id or not generation or not claim_lock:
+            return None, None
+        try:
+            return int(generation), claim_lock
+        except ValueError:
+            return None, None
+
+    def _owned_row(self):
+        generation, claim_lock = self._ownership()
+        row = self._bdb.get(self.con(), self.task_id)
+        if (generation is None or row is None or row["status"] != "running"
+                or int(row["generation"]) != generation or row["claim_lock"] != claim_lock):
+            return None
+        if not self._bdb.heartbeat(
+            self.con(), self.task_id, claim_lock, generation=generation, ttl_seconds=1800,
+        ):
+            return None
+        return row
+
+    async def agent_start(self, event=None, ctx=None):
+        self._summary = None
+        self._summary_token = None
+        row = self._owned_row()
+        if row is not None:
+            from misaka.core.network import worker
+
+            worker.record_output_baseline(self.con(), row)
+
+    async def agent_end(self, event, ctx=None):
+        reason, summary = _assistant_end(event)
+        self._summary = summary if reason == "stop" and self._owned_row() is not None else None
+        self._summary_token = object() if self._summary is not None else None
+
+    async def agent_settled(self, event=None, ctx=None):
+        self._calls_settled()
+        summary, token = self._summary, self._summary_token
+        if summary is None or token is None:
+            return
+        from misaka.core.subagent import extension as subagent
+
+        while subagent.has_background_tasks() or subagent.has_async_hooks():
+            await subagent.wait_for_background_tasks()
+            await subagent.wait_for_async_hooks()
+            await self.session.agent.waitForIdle()
+            if self._summary_token is not token:
+                return
+        if self._summary_token is not token:
+            return
+        row = self._owned_row()
+        if row is None:
+            if self._summary_token is token:
+                self._summary = self._summary_token = None
+            return
+        from misaka.core.network import dispatch, worker
+
+        try:
+            submission = worker.build_submission(self.con(), row, summary)
+            accepted = dispatch.accept_state(
+                self.con(),
+                row,
+                submission,
+                generation=row["generation"],
+                claim_lock=row["claim_lock"],
+            )
+            if accepted:
+                await asyncio.to_thread(
+                    dispatch.accept_side_effects,
+                    self.con(),
+                    row,
+                    submission,
+                    generation=row["generation"],
+                    workspace=row["workspace"],
+                )
+        except Exception as error:  # noqa: BLE001 - a finalizer error is a real system failure
+            accepted = False
+            if self._summary_token is not token:
+                return
+            if (isinstance(error, worker.IncompleteSubmission)
+                    and self._nudged_generation != int(row["generation"])
+                    and self._owned_row() is not None):
+                # What is missing is the model's to supply: one more turn, in this session,
+                # before the miss costs an attempt. The second miss fails like any other.
+                self._nudged_generation = int(row["generation"])
+                self._prompt(f"Submission incomplete: {error} Then end the turn again with "
+                             "the plain-text summary.")
+                self._summary = self._summary_token = None
+                return
+            if self._owned_row() is not None:
+                self._bdb.add_event(
+                    self.con(), self.task_id, "failed", {"reason": f"finalizer: {error}"},
+                    generation=row["generation"], claim_lock=row["claim_lock"],
+                )
+                self._bdb.mark_failed(
+                    self.con(), self.task_id, generation=row["generation"],
+                    claim_lock=row["claim_lock"], reason=f"finalizer: {error}",
+                )
+        if self._summary_token is token and (accepted or self._owned_row() is None):
+            self._summary = self._summary_token = None
+
+    def _record_artifact(self, value):
+        row = self._owned_row()
+        if row is None or not value:
+            return
+        root = Path(row["workspace"]).resolve()
+        path = Path(str(value))
+        try:
+            path = (path if path.is_absolute() else root / path).resolve(strict=True)
+            relative = os.path.relpath(path, root)
+            path.relative_to(root)
+        except (OSError, RuntimeError, ValueError):
+            return
+        if path.is_file():
+            self._bdb.add_event(
+                self.con(), self.task_id, "artifact_written", {"path": relative},
+                generation=row["generation"], claim_lock=row["claim_lock"],
+            )
 
     def _nag(self, text):
         try:
@@ -264,8 +465,69 @@ class TodoPart:
         except Exception:  # noqa: BLE001, S110 - reminders must never interrupt work
             pass
 
+    def _prompt(self, text):
+        """A follow-up that starts a turn: the session is idle, and the card needs one more."""
+        try:
+            self.session.moments.send_message(
+                {"customType": "submission-incomplete", "display": True,
+                 "content": text, "details": {}},
+                {"deliverAs": "followUp", "triggerTurn": True})
+        except Exception:  # noqa: BLE001, S110 - without the turn the next settle fails the card
+            pass
+
+    def _touch(self):
+        """Stamp progress at most once a minute: a tool result is the model getting somewhere,
+        and the stamp is what tells a wedged worker from a busy one."""
+        now = time.monotonic()
+        if now - self._touched < PROGRESS_SECONDS:
+            return
+        self._touched = now
+        self._owned_row()
+
+    async def _stamp_in_flight(self):
+        while self._in_flight > 0:
+            await asyncio.sleep(PROGRESS_SECONDS)
+            if self._in_flight > 0:
+                try:
+                    self._touch()
+                except Exception:  # noqa: BLE001, S110 - a busy board skips one stamp, not the rest
+                    pass
+
+    def _calls_settled(self):
+        """The turn is over: nothing is in flight, whatever the call/result bookkeeping says."""
+        self._in_flight = 0
+        if self._stamper is not None:
+            self._stamper.cancel()
+            self._stamper = None
+
+    async def tool_call(self, event=None, ctx=None):
+        """A tool call in flight is progress too: a build that runs an hour, or a foreground
+        sub-agent, would otherwise read as a wedged worker while it works. The stamping runs
+        until the result lands or the turn ends."""
+        try:
+            self._in_flight += 1
+            self._touch()
+            if self._stamper is None or self._stamper.done():
+                self._stamper = asyncio.ensure_future(self._stamp_in_flight())
+        except Exception:  # noqa: BLE001, S110 - a crash here would fail the call; a stamp is best-effort
+            pass
+
     async def tool_result(self, event, ctx=None):
+        self._in_flight = max(0, self._in_flight - 1)
+        self._touch()
         name = str(_field(event, "toolName", "") or "")
+        if not _field(event, "isError", False):
+            raw = _field(event, "input", {}) or {}
+            details = _field(event, "details", {}) or {}
+            if name in {"write", "edit", "office"}:
+                self._record_artifact(_field(raw, "path"))
+            elif name == "download_file":
+                self._record_artifact(_field(details, "path"))
+            elif name in {"web_fetch", "x_search"}:
+                self._record_artifact(_field(details, "saved_path"))
+            elif name == "web_extract" or name.startswith("browser_"):
+                for path in _field(details, "saved_paths", []) or []:
+                    self._record_artifact(path)
         if name in ("misaka_todo", "misaka_todo_list"):
             self._since_write = 0
             return
@@ -288,5 +550,10 @@ class TodoPart:
             )
 
     async def session_shutdown(self, event=None, ctx=None):
+        self._calls_settled()
+        if self._close_usage is not None:
+            self._close_usage()
+            self._close_usage = None
         if self._con is not None:
             self._con.close()
+            self._con = None

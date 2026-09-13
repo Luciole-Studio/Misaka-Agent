@@ -21,21 +21,17 @@ holds page text. What web_search does have in Hermes is the registry's
 from __future__ import annotations
 
 import json
-import logging
 from typing import Any
 
 from misaka.core.extensions.types import ToolDefinition
-from misaka.core.platform import budget
 from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.tools._common import run_with_abort
 from misaka.core.tools._web.single_flight import single_flight
-from misaka.core.web import cache
-from misaka.core.web.config import redact_secrets
+from misaka.core.web import cache, debug
+from misaka.core.web.config import redact_secrets, redact_values
 from misaka.core.web.dispatch import memo_identity, resolve_provider
 from misaka.core.web.dispatch import web_search as dispatch_search
 from misaka.utils.values import signal_aborted
-
-logger = logging.getLogger(__name__)
 
 # Verbatim from Hermes tools/web_tools.py:1655-1676. Do not reword: the operator sentence
 # is what makes a model try `site:` instead of giving up on a domain-scoped question.
@@ -77,7 +73,6 @@ def tool_error(message: object, **extra: Any) -> str:
     """Return a JSON error string, the way Hermes' ``tools.registry.tool_error`` does."""
     text = str(message)
     if len(text) > _MAX_TOOL_ERROR_CHARS:
-        logger.debug("tool error body truncated for context (%d chars)", len(text))
         text = text[:_MAX_TOOL_ERROR_CHARS] + _TOOL_ERROR_TRUNCATION_MARKER
     result: dict[str, Any] = {"error": text}
     if extra:
@@ -97,29 +92,9 @@ def _bound_error_field(response: dict[str, Any]) -> dict[str, Any]:
     """
     error = response.get("error")
     if isinstance(error, str) and len(error) > _MAX_TOOL_ERROR_CHARS:
-        logger.debug("provider error body truncated for context (%d chars)", len(error))
         response = dict(response)
         response["error"] = error[:_MAX_TOOL_ERROR_CHARS] + _TOOL_ERROR_TRUNCATION_MARKER
     return response
-
-
-def _redacted(value: Any) -> Any:
-    """Strip configured credentials out of every string in a response, in place of nothing.
-
-    Walks the structure rather than the rendered JSON for two reasons: a secret containing
-    a character JSON escapes (a backslash in a SearXNG password) never appears verbatim in
-    the rendered text and would survive a string-level pass, and :func:`_bound_result_size`
-    re-renders from this dict, so a pass over its output would be re-bypassed on the trim
-    path. Runs before rendering so no truncation can ever cut a key in half and leave a
-    usable fragment.
-    """
-    if isinstance(value, str):
-        return redact_secrets(value)
-    if isinstance(value, dict):
-        return {key: _redacted(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_redacted(item) for item in value]
-    return value
 
 
 def _oversized_error(size: int) -> str:
@@ -213,18 +188,9 @@ async def web_search_tool(query: str, limit: int = 5, *, signal: Any = None) -> 
                 # single_flight's timeout would otherwise pay again.
                 hit = cache.search_memo.lookup(name, query, limit)
                 if hit is not None:
+                    debug.event("cache_hit", cache="search", backend=provider.name, subject=query)
                     return hit
                 response = await dispatch_search(query, fetch_limit)
-                # The one place a search is actually paid for: memo hits and the
-                # followers single_flight coalesces cost nothing and are not on the
-                # ledger. ``name`` rather than the raw backend, so the five keyless
-                # vendors are accounted as the one free tier they are.
-                budget.record_external_call(
-                    "web_search",
-                    subject=query,
-                    backend=name,
-                    results=len((response.get("data") or {}).get("web") or []),
-                )
                 # Never cache a rescue-served response: it came from a ring vendor, not
                 # the chosen backend, and caching it would make the one-shot rescue
                 # sticky for this query for a whole TTL -- the next call must attempt the
@@ -241,16 +207,17 @@ async def web_search_tool(query: str, limit: int = 5, *, signal: Any = None) -> 
                 )
                 if aborted:
                     return tool_error("Interrupted", success=False)
+            else:
+                debug.event("cache_hit", cache="search", backend=provider.name, subject=query)
         response_data = _bound_error_field(
-            _redacted(cache.slice_search_response(response_data, limit))
+            redact_values(cache.slice_search_response(response_data, limit))
         )
-        return _bound_result_size(
-            response_data, json.dumps(response_data, indent=2, ensure_ascii=False)
-        )
+        rendered = json.dumps(response_data, indent=2, ensure_ascii=False)
+        debug.metrics(original_response_chars=len(rendered))
+        return _bound_result_size(response_data, rendered)
 
     except Exception as exc:  # noqa: BLE001 - a search failure is a result, not a crash
         error_msg = f"Error searching web: {exc!s}"
-        logger.debug("%s", error_msg)
         return tool_error(redact_secrets(error_msg))
 
 
@@ -263,13 +230,15 @@ def register(harn) -> None:
         result_json = await web_search_tool(
             args.get("query", ""), limit=args.get("limit", 5), signal=signal
         )
+        debug.result_json(result_json)
+        envelope = json.loads(result_json)
         # Titles, URLs and descriptions are written by whoever got ranked, and a backend's
         # own error body is echoed through verbatim -- all of it third-party text landing
         # in the model's context. Fencing the whole rendered document rather than each
         # field keeps the provider contract untouched (nothing below this line may
         # reshape what a provider returned) and leaves no unfenced seam between fields.
         return {"content": [{"type": "text", "text": untrusted("web-search", result_json)}],
-                "details": {}}
+                "details": {}, "isError": envelope.get("success") is False or bool(envelope.get("error"))}
 
     harn.registerTool(ToolDefinition(
         name=WEB_SEARCH_SCHEMA["name"],
@@ -278,4 +247,9 @@ def register(harn) -> None:
         parameters=WEB_SEARCH_SCHEMA["parameters"],
         execute=execute,
         promptSnippet="Search the web for current information",
+        promptGuidelines=[
+            ("Results are snippets and links, not pages: read a page with web_fetch or web_extract before citing "
+             "it. Identical queries are served from a short-lived memo inside this process, so re-asking the same "
+             "thing costs nothing; a different Sister's identical search is paid again."),
+        ],
     ))

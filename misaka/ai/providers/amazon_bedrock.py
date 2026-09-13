@@ -220,6 +220,10 @@ def build_client_settings(model: Model, options: StreamOptions | dict[str, Any] 
     )
 
     config_kwargs: dict[str, Any] = {}
+    retries = _option(options, "maxRetries")
+    if retries is not None:
+        # botocore counts the initial attempt; StreamOptions counts retries.
+        config_kwargs["retries"] = {"total_max_attempts": max(0, int(retries)) + 1}
     timeout_ms = _option(options, "timeoutMs")
     if timeout_ms is not None:
         config_kwargs["read_timeout"] = timeout_ms / 1000
@@ -501,12 +505,12 @@ def stream_bedrock(
             output.errorMessage = format_bedrock_error(error)
             if output.stopReason == "error":
                 append_bedrock_failure_diagnostic(output, error, response_request_id)
-            stream.push(ErrorEvent(reason=output.stopReason, error=output))
+            stream.push(ErrorEvent(reason=output.stopReason, error=output), cause=error)
         finally:
             await _close_stream(response_stream)
             stream.end()
 
-    spawn_stream_task(run())
+    spawn_stream_task(run(), stream=stream)
     return stream
 
 

@@ -589,13 +589,13 @@ def stream_pi_messages(
                 if transport is None:
                     await client.aclose()
         except Exception as error:  # noqa: BLE001 - every failure leaves as an error event
-            event_stream.push(_create_error_event(model, error, signal_aborted(signal)))
+            event_stream.push(_create_error_event(model, error, signal_aborted(signal)), cause=error)
         finally:
             # The terminal event already resolved the stream's result; this only releases a
             # consumer that is still waiting on the queue.
             event_stream.end()
 
-    spawn_stream_task(run())
+    spawn_stream_task(run(), stream=event_stream)
     return event_stream
 
 

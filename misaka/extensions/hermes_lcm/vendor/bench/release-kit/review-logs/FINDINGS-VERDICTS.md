@@ -1,0 +1,22 @@
+# Round-1 product findings verdicts
+
+| Item | Verdict | Source validation and disposition | Focused proof |
+|---|---|---|---|
+| 1 | CONFIRMED-FIXED | `state_semantic_quota > 0 and rows` excluded the empty-FTS underfill case. The state-semantic arm now runs for any positive quota and remains additive; quota zero is unchanged. | `test_expansion_can_fill_a_pure_lexical_miss`; existing default-byte and additive-tail tests. |
+| 2 | CONFIRMED-FIXED | A profile was activated before any state vector write. Profiles now remain inactive throughout resumable writes, pass a complete-row-count check, and activate only at completion. An interrupted run leaves staged rows but no incomplete active profile; resume reuses them. | `test_profile_activates_only_after_resumed_backfill_completes`; existing idempotent/resume test. |
+| 3 | CONFIRMED-FIXED | `_scan_ranked` checked only its relative budget. The absolute recall deadline now reaches summary and chunk KNN and is checked before and after each batch, producing bounded coverage on an early stop. | `test_full_scan_absolute_deadline_stops_between_batches`; existing budget/full-scan tests. |
+| 4 | CONFIRMED-FIXED | `_semantic_state_ranks` provider exceptions escaped the query path. The state arm now fences them, increments the existing fallback counter, and leaves lexical results intact. | `test_state_query_provider_failure_degrades_to_lexical`. |
+| 5 | CONFIRMED-FIXED | State query embeddings bypassed `_semantic_usage`. Query calls and successful usage tokens are now counted consistently with source-semantic queries. | `test_state_query_embedding_is_counted_in_semantic_usage`. |
+| 6 | CONFIRMED-FIXED | The dimension probe sent the first full state document. It now probes only the first provider-bounded token chunk. | `test_dimension_probe_is_bounded_by_document_token_budget`. |
+| 7 | CONFIRMED-FIXED | The fallback `token_budget * 4` window could exceed the shared estimator, especially for non-ASCII text; chunks now use that estimator directly. The reported `chunked_states == 1` test expectation was wrong independently: both fixture documents exceed five cl100k tokens, so the corrected contract is `2`. | `test_fallback_chunks_obey_the_shared_token_estimator`; corrected `test_chunked_path_pools_oversize_documents`. |
+| 8 | CONFIRMED-FIXED | The hint consumer selects `lcm_expand(node_id=...)` only when `from_current_session` is present. Summary leads now preserve that context. | `test_summary_leads_preserve_current_context_and_obey_response_limit`. |
+| 9 | CONFIRMED-FIXED | Summary leads followed the 50–100 row retrieval window while the response limit is at most 25 and may be lower. The actual clamped response limit now bounds leads. | `test_summary_leads_preserve_current_context_and_obey_response_limit`. |
+| 10 | CONFIRMED-FIXED | `mark_failed` could raise inside the publish exception handler and replace the original failure contract. Cleanup is now best-effort and exception-safe. | `test_persist_compiled_view_cleanup_failure_does_not_escape`. |
+| 11 | CONFIRMED-FIXED | Fixed the real/cheap items: state-cache freshness marker plus regression, removed the unused recall constant, corrected the summary-arm annotation, centralized the message column count, corrected the chunk-KNN docstring, narrowed the clock patch, added direct nested/source DAG tests, and extended query/trajectory remediation apply coverage. REFUTED: the MMR `assert` is not load-bearing because every nonempty `remaining` iteration assigns `best_item`; state-semantic IDs are unique by the embeddings PK, ranking indices, and merge dedupe. DECLINED: no SQLite row-value failure exists on the supported Python 3.11+ CI matrix, so no compatibility branch was added without a reproduced supported-path failure. | `test_state_matrix_cache_refreshes_after_same_profile_rewrite`; `tests/test_dag_source_message_ids.py`; extended schema/vector tests; touched-file suite. |
+
+V1 delivery flag: none. Items 1–7 remain default-off or change only an already-expired operation; item 8–11 changes do not alter default delivered-hit selection.
+
+Round-1 follow-through: the stress-CLI FTS marker normalization in
+`benchmarking/stress.py` landed with the round, and the final stress smoke passed.
+
+Explicit exclusions were not changed: `store.py:1123` query semantics, arbitrary summary source-row selection, and `tests/test_lcm_engine.py`; no benchmarking change beyond the documented stress-CLI fix belonged to round 1.

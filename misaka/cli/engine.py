@@ -548,6 +548,11 @@ def create_runtime_factory(
     app_mode: AppMode = "print",
     startup_settings_manager: SettingsManager | None = None,
 ) -> Callable[[dict[str, Any]], Awaitable[CreateAgentSessionRuntimeResult]]:
+    if parsed.agents is not None:
+        for part in parts or ():
+            configure = getattr(part, "configure_agents", None)
+            if configure is not None:
+                configure(parsed.agents)
     project_trust_by_cwd: dict[str, bool] = {}
 
     async def _factory(runtime_options: dict[str, Any]) -> CreateAgentSessionRuntimeResult:

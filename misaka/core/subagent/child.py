@@ -9,6 +9,7 @@ and gives the parent an explicit ready/accepted handshake.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 import re
@@ -19,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from misaka.core.platform.vocabulary import MANAGEMENT_TOOL_NAMES, MANAGEMENT_TOOLS
-from misaka.utils.values import read_field
+from misaka.utils.values import call_with_optional_second_arg, maybe_await, read_field
 
 PROTOCOL_VERSION = 2
 PROCESS_GROUP_IDENTITY = "process-group|"
@@ -107,10 +108,16 @@ def _hook_tools(kind: str, tools: list[Any]) -> list[Any]:
 
     if kind == "prompt":
         return []
+    from misaka.core.subagent.tool_policy import (
+        ALL_AGENT_DISALLOWED_TOOLS,
+        canonical_tool_name,
+    )
+
     return [
-        tool
-        for tool in tools
+        tool for tool in tools
         if str(read_field(tool, "name", "")).casefold() not in MANAGEMENT_TOOL_NAMES
+        and canonical_tool_name(str(read_field(tool, "name", ""))) not in ALL_AGENT_DISALLOWED_TOOLS
+        and read_field(tool, "name") != "StructuredOutput"
     ]
 
 
@@ -238,8 +245,10 @@ def _turn_sidecar(session: Any, turn_id: str) -> Path:
         directory = transcript.parent / ".turn-results"
         stem = transcript.stem
     else:  # Defensive fallback; normal sub-agents always receive --session.
-        directory = Path(os.environ.get("MISAKA_SUBAGENT_DIR", "~/.misaka/subagents")).expanduser()
-        stem = os.environ.get("MISAKA_SUBAGENT_ID", "agent")
+        from misaka.config.sessions import subagent_session_dir
+
+        stem = session.sessionManager.getSessionId()
+        directory = Path(subagent_session_dir(stem)) / ".turn-results"
     return directory / f"{stem}.{turn_id}.json"
 
 
@@ -331,11 +340,22 @@ async def amain() -> int:
 
     from misaka.agent.request_budget import install_turn_budget
     from misaka.core.platform import session as engine_session
-    from misaka.core.subagent import extension as subagent
     from misaka.core.subagent import hooks as subagent_hooks
     from misaka.core.subagent import policy as subagent_policy
 
     permission_waiters: dict[str, asyncio.Future[bool]] = {}
+    settings_waiters: dict[str, asyncio.Future] = {}
+
+    async def request_parent_settings():
+        request_id = secrets.token_hex(8)
+        future = asyncio.get_running_loop().create_future()
+        settings_waiters[request_id] = future
+        _emit({"type": "permission_settings_request", "requestId": request_id})
+        try:
+            return await asyncio.wait_for(future, 30)
+        finally:
+            settings_waiters.pop(request_id, None)
+
 
     async def request_parent_permission(payload: dict[str, Any]) -> bool:
         request_id = secrets.token_hex(8)
@@ -432,20 +452,62 @@ async def amain() -> int:
         await engine_session.dispose(runtime)
         subagent_policy.set_async_hook_broker(None)
         subagent_policy.set_permission_broker(None)
+        subagent_policy.set_permission_settings_provider(None)
         parent_watch.cancel()
         await asyncio.gather(parent_watch, return_exceptions=True)
         return 2
 
-    disallowed_tools = _disallowed_tool_names(
-        os.environ.get("MISAKA_SUBAGENT_DISALLOWED_TOOLS")
-    )
+    if not card:
+        from misaka.core.subagent.resume import install_resume_filter
+        install_resume_filter(session)
+
+    from misaka.core.subagent import disallowed_management_tools
+    from misaka.core.subagent.tool_policy import tool_allowed_for_agent
+
+    fork_snapshot = None
+    if os.environ.get("MISAKA_FORK_CHILD") == "1":
+        try:
+            path = Path(os.environ["MISAKA_SUBAGENT_TRANSCRIPT"]).with_suffix(".meta.fork.json")
+            fork_snapshot = json.loads(path.read_text(encoding="utf-8"))
+            if (fork_snapshot.get("schemaVersion") != 1
+                or fork_snapshot.get("agentId") != os.environ.get("MISAKA_SUBAGENT_ID")
+                or fork_snapshot.get("parentSessionId") != os.environ.get("MISAKA_SUBAGENT_PARENT_SESSION_ID")
+                or not isinstance(fork_snapshot.get("systemPrompt"), str)
+                or not isinstance(fork_snapshot.get("tools"), list)):
+                raise ValueError("Fork snapshot identity or shape mismatch")
+        except (OSError, ValueError, KeyError) as error:
+            _emit({"type": "child_error", "error": f"Fork startup failed: {error}"})
+            await engine_session.dispose(runtime)
+            parent_watch.cancel()
+            await asyncio.gather(parent_watch, return_exceptions=True)
+            return 2
+
+    disallowed_tools = list(dict.fromkeys([
+        *_disallowed_tool_names(os.environ.get("MISAKA_SUBAGENT_DISALLOWED_TOOLS")),
+        *disallowed_management_tools("card" if card else "child"),
+    ]))
+    denied = {t.casefold() for t in disallowed_tools}
+    is_async = os.environ.get("MISAKA_SUBAGENT_BACKGROUND", "0") != "0"
     if disallowed_tools:
-        denied = {t.casefold() for t in disallowed_tools}
         session.setDisallowedToolsByName(
             disallowed_tools,
-            # Explicit deny wins: a management tool disabled in frontmatter is not revived by always-allow.
-            alwaysAllowed=[t for t in MANAGEMENT_TOOLS if t.casefold() not in denied],
+            # Structural and frontmatter denies both win over management always-allow.
+            alwaysAllowed=([t for t in MANAGEMENT_TOOLS if t.casefold() not in denied] if card else []),
+            admission=(None if card else
+                       (lambda name: any(tool["name"] == name for tool in fork_snapshot["tools"]))
+                       if fork_snapshot is not None else
+                       lambda name: tool_allowed_for_agent(
+                           name, is_async=is_async,
+                           permission_mode=os.environ.get("MISAKA_SUBAGENT_PERMISSION_MODE"),
+                       )),
         )
+
+    from misaka.core.subagent.model import (
+        install_effort_adapter,
+        normalize_model_for_api,
+    )
+
+    install_effort_adapter(session.agent, os.environ)
 
     if os.environ.get("MISAKA_SUBAGENT_INHERIT_ALL_TOOLS") == "1":
         # No frontmatter allow/deny list means Claude's complete independently
@@ -461,7 +523,8 @@ async def amain() -> int:
         """Run prompt/agent hooks on this child's configured provider stack."""
 
         from misaka.agent.agent import Agent, AgentOptions
-        from misaka.agent.types import BeforeToolCallResult
+        from misaka.agent.types import AgentTool, AgentToolResult, BeforeToolCallResult
+        from misaka.ai.types import TextContent, UserMessage
         from misaka.core.subagent.runtime import (
             RoleContext,
             resolve_model_spec,
@@ -474,7 +537,7 @@ async def amain() -> int:
             provider, model_id = resolve_model_spec(
                 {}, None, requested_model, parent_model, available
             )
-            model = session.modelRegistry.find(provider, model_id)
+            model = session.modelRegistry.find(provider, normalize_model_for_api(model_id))
             if model is None:
                 raise RuntimeError(f"Hook model is not available: {provider}/{model_id}")
         else:
@@ -491,23 +554,63 @@ async def amain() -> int:
             transcript_path = str(Path(transcript_path).expanduser().resolve())
         tools = _hook_tools(kind, session.agent.state.tools)
         turns = 0
+        structured_result: dict[str, Any] | None = None
+        response_schema = {
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}, "reason": {"type": "string"}},
+            "required": ["ok"],
+            "additionalProperties": False,
+        }
+
+        async def structured_output(
+            _id: str, args: Any, _signal: Any = None, _update: Any = None
+        ) -> AgentToolResult:
+            nonlocal structured_result
+            structured_result = dict(args)
+            return AgentToolResult(
+                content=[TextContent(text=json.dumps(structured_result))],
+                details=structured_result,
+                terminate=True,
+            )
+
+        if kind == "agent":
+            tools.append(AgentTool(
+                name="StructuredOutput", label="Structured output",
+                description="Return the hook verification result.",
+                parameters=response_schema, execute=structured_output,
+            ))
+
+        async def output_format(payload: dict[str, Any], model: Any) -> dict[str, Any]:
+            # Keep the native multi-provider wire adapter explicit; the CCB
+            # implementation writes Anthropic outputFormat only.
+            if kind != "prompt":
+                return payload
+            api = str(read_field(model, "api", ""))
+            if api == "anthropic-messages":
+                payload.setdefault("output_config", {})["format"] = {
+                    "type": "json_schema", "schema": response_schema,
+                }
+            elif api in {"openai-responses", "openai-codex-responses"}:
+                payload.setdefault("text", {})["format"] = {
+                    "type": "json_schema", "name": "hook_response", "schema": response_schema,
+                }
+            elif api == "openai-completions":
+                payload["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {"name": "hook_response", "schema": response_schema},
+                }
+            return payload
 
         async def before_tool(call: Any, _signal: Any = None) -> BeforeToolCallResult | None:
             call_name = str(read_field(read_field(call, "toolCall"), "name", ""))
             call_input = read_field(call, "args", {}) or {}
-            if _agent_hook_can_read_transcript(
-                kind,
-                transcript_path,
-                call_name,
-                call_input,
-            ):
+            if call_name == "StructuredOutput":
                 return None
-            action, reason = subagent_policy._permission_action(
-                "dontAsk",
-                role_context.tool_rule_layers,
-                call_name,
-                call_input,
-                workspace,
+            action, reason = await subagent_policy.hook_tool_permission(
+                session, role_context, call_name, call_input, workspace,
+                transcript_read=_agent_hook_can_read_transcript(
+                    kind, transcript_path, call_name, call_input,
+                ),
             )
             if action != "allow":
                 return BeforeToolCallResult(
@@ -519,7 +622,20 @@ async def amain() -> int:
         async def should_stop(_turn: Any, _signal: Any = None) -> bool:
             nonlocal turns
             turns += 1
-            return turns >= (1 if kind == "prompt" else 50)
+            if structured_result is not None or turns >= (1 if kind == "prompt" else 50):
+                return True
+            # Source registerStructuredOutputEnforcement: an ordinary assistant
+            # answer is not the final verdict. Request the synthetic output tool.
+            message = read_field(_turn, "message", None)
+            if kind == "agent" and not any(
+                read_field(block, "type") == "toolCall"
+                for block in (read_field(message, "content", []) or [])
+            ):
+                verifier.followUp(UserMessage(
+                    content="Return your verification using the StructuredOutput tool.",
+                    timestamp=0,
+                ))
+            return False
 
         verifier = Agent(
             AgentOptions(
@@ -528,7 +644,7 @@ async def amain() -> int:
                         "Evaluate the hook condition. Return only JSON in the form "
                         '{"ok":true} or {"ok":false,"reason":"..."}. '
                         + (
-                            "You may use the provided tools to verify facts. "
+                            "Use the provided tools to verify facts. Return the result using StructuredOutput. "
                             + (
                                 f"The conversation transcript is available at: {transcript_path}."
                                 if transcript_path
@@ -541,15 +657,25 @@ async def amain() -> int:
                     "model": model,
                     "thinkingLevel": "off",
                     "tools": tools,
-                    "messages": [],
+                    "messages": copy.deepcopy(session.agent.state.messages) if kind == "prompt" else [],
                 },
-                streamFn=session.agent.streamFn,
+                convertToLlm=session.agent.convertToLlm,
+                onPayload=output_format,
+                streamFn=getattr(session.agent, "_subagent_base_stream_fn", session.agent.streamFn),
                 getApiKey=session.agent.getApiKey,
                 beforeToolCall=before_tool if tools else None,
                 shouldStopAfterTurn=should_stop,
             )
         )
-        await verifier.prompt(prompt)
+        try:
+            await verifier.prompt(prompt)
+        finally:
+            # Timeout cancellation must not leave a model stream/tool task alive.
+            verifier.abort()
+        if kind == "agent":
+            if structured_result is None:
+                raise RuntimeError("Agent hook ended without StructuredOutput")
+            return json.dumps(structured_result)
         for message in reversed(verifier.state.messages):
             if str(read_field(message, "role", "")) != "assistant":
                 continue
@@ -592,8 +718,16 @@ async def amain() -> int:
     subagent_policy.set_permission_classifier(classify_auto_permission)
 
     model_turn_count = 0
-    max_turn_abort_requested = False
     turn_budget = install_turn_budget(session)
+    previous_stop = getattr(session.agent, "shouldStopAfterTurn", None)
+
+    async def stop_at_turn_boundary(context: Any, abort_signal: Any = None) -> bool:
+        if max_turns is not None and model_turn_count >= max_turns:
+            return True
+        return bool(await maybe_await(call_with_optional_second_arg(previous_stop, context, abort_signal))) if previous_stop else False
+
+    if max_turns is not None:
+        session.agent.shouldStopAfterTurn = stop_at_turn_boundary
     sequence = 0
     active_turn_id: str | None = None
     active_messages: list[dict[str, Any]] | None = None
@@ -604,10 +738,21 @@ async def amain() -> int:
     def jsonable(value: Any) -> Any:
         return json.loads(engine_session.event_line(value))
 
+    progress_jobs: set[asyncio.Task] = set()
+
+    async def publish_assistant(turn_id: str, index: int, message: Any) -> None:
+        sidecar = _turn_sidecar(session, f"{turn_id}-progress-{index}")
+        await asyncio.to_thread(_atomic_write_json, sidecar, {
+            "schemaVersion": 1, "turnId": turn_id,
+            "agentId": os.environ.get("MISAKA_SUBAGENT_ID"), "messages": [message],
+        })
+        _emit({"type": "child_progress", "turnId": turn_id, "event": "assistant_message",
+               "sequence": index, "messagesFile": str(sidecar)})
+
     def on_event(event: Any) -> None:
         """Collect assistant completions and expose only bounded progress data."""
 
-        nonlocal model_turn_count, max_turn_abort_requested
+        nonlocal model_turn_count
         event_type = str(read_field(event, "type", ""))
 
         # A SendMessage acknowledgement means the running agent actually
@@ -637,20 +782,16 @@ async def amain() -> int:
             message = read_field(event, "message")
             if str(read_field(message, "role", "")) == "assistant":
                 try:
-                    active_messages.append(jsonable(message))
+                    normalized = jsonable(message)
+                    active_messages.append(normalized)
+                    if active_turn_id:
+                        job = asyncio.create_task(publish_assistant(active_turn_id, len(active_messages), normalized))
+                        progress_jobs.add(job)
                 except (TypeError, ValueError):
                     pass
 
         if event_type == "turn_end":
             model_turn_count += 1
-            if (
-                max_turns is not None
-                and model_turn_count >= max_turns
-                and not max_turn_abort_requested
-                and session.isStreaming
-            ):
-                max_turn_abort_requested = True
-                asyncio.create_task(session.abort())
         if event_type in {"agent_start", "turn_start", "turn_end", "agent_end"}:
             _emit(
                 {
@@ -688,7 +829,8 @@ async def amain() -> int:
     session.subscribe(on_event)
 
     async def run_turn(message: str, turn_id: str) -> None:
-        nonlocal active_turn_id, active_messages, accepts_steer
+        nonlocal active_turn_id, active_messages, accepts_steer, model_turn_count
+        model_turn_count = 0
         messages: list[dict[str, Any]] = []
         active_turn_id = turn_id
         active_messages = messages
@@ -696,27 +838,11 @@ async def amain() -> int:
         try:
             await session.prompt(message)
             accepts_steer = False
-            # A nested child process is the supervisor for agents it launched.
-            # Keep it alive, deliver their completion notifications, and let
-            # the model consume the resulting follow-up turn before emitting
-            # this turn's sidecar to its parent.
-            if subagent.has_background_task_records() or subagent.has_async_hooks():
-                quiet_passes = 0
-                while quiet_passes < 2:
-                    await subagent.wait_for_background_tasks()
-                    await subagent.wait_for_async_hooks()
-                    await asyncio.sleep(0.05)
-                    await session.agent.waitForIdle()
-                    await asyncio.sleep(0.05)
-                    quiet_passes = (
-                        0
-                        if (
-                            subagent.has_background_tasks()
-                            or subagent.has_async_hooks()
-                            or session.isStreaming
-                        )
-                        else quiet_passes + 1
-                    )
+            # A nested child process is the supervisor for agents it launched, and a card
+            # session may start one more turn at settle time. Keep the process alive until
+            # all of that has ended before emitting this turn's sidecar to its parent.
+            from misaka.core.platform.session import settle_after_prompt
+            await settle_after_prompt(session)
         except Exception as exc:  # noqa: BLE001
             turn_error = f"{type(exc).__name__}: {exc}"
         finally:
@@ -742,6 +868,11 @@ async def amain() -> int:
         if terminal_error:
             turn_error = f"{turn_error}; {terminal_error}" if turn_error else terminal_error
 
+        # Sidecars remain ordered ahead of the authoritative turn-done record.
+        # A failed progress write must not discard the final transcript/result.
+        if progress_jobs:
+            await asyncio.gather(*progress_jobs, return_exceptions=True)
+            progress_jobs.clear()
         messages_file: str | None = None
         try:
             sidecar = _turn_sidecar(session, turn_id)
@@ -789,12 +920,12 @@ async def amain() -> int:
 
     def mcp_server_names() -> list[str]:
         try:
-            registered = session.extensionRunner.get_all_registered_tools()
+            registered = session.getAllTools()
             return list(
                 dict.fromkeys(
                     name.split("__", 2)[1]
                     for tool in registered
-                    if (name := str(read_field(read_field(tool, "definition"), "name", "")))
+                    if (name := str(read_field(tool, "name", "")))
                     if name.startswith("mcp__") and name.count("__") >= 2
                 )
             )
@@ -807,6 +938,11 @@ async def amain() -> int:
         required_mcp = [str(item) for item in decoded] if isinstance(decoded, list) else []
     except (TypeError, ValueError):
         required_mcp = []
+    if fork_snapshot is not None:
+        required_mcp.extend(
+            item["name"].split("__", 2)[1] for item in fork_snapshot["tools"]
+            if str(item.get("name", "")).startswith("mcp__") and item["name"].count("__") >= 2
+        )
     deadline = asyncio.get_running_loop().time() + float(
         os.environ.get("MISAKA_MCP_REQUIRED_WAIT", "30")
     )
@@ -845,16 +981,37 @@ async def amain() -> int:
         missing = [
             name
             for name in requested_tools
-            if name not in assembled and not name.startswith("mcp__")
+            if name not in assembled and name.casefold() not in denied and not name.startswith("mcp__")
         ]
         if missing:
             _emit({"type": "child_tools_missing", "tools": missing})
+
+    if fork_snapshot is not None:
+        from misaka.core.subagent.fork import install as install_fork
+        try:
+            install_fork(session, fork_snapshot)
+        except (ValueError, TypeError) as error:
+            _emit({"type": "child_error", "error": f"Exact fork startup failed: {error}"})
+            await engine_session.dispose(runtime)
+            parent_watch.cancel()
+            await asyncio.gather(parent_watch, return_exceptions=True)
+            return 2
+
+    # Discovery/sealing is complete before this handshake. The parent retains
+    # ownership of blocking preload work, but resolves against THIS child's roots.
+    from misaka.core.skills.wiring.skills import SkillsPart
+    skills_part = next((p for p in session.moments.parts if isinstance(p, SkillsPart)), None)
+    skill_roots = skills_part.resolution_roots() if skills_part is not None else []
+
+    if os.environ.get("MISAKA_SUBAGENT_LIVE_PERMISSIONS") == "1":
+        subagent_policy.set_permission_settings_provider(request_parent_settings)
 
     _emit(
         {
             "type": "child_ready",
             "protocolVersion": PROTOCOL_VERSION,
             "mcpServers": active_mcp_servers,
+            "skillRoots": skill_roots,
         }
     )
 
@@ -926,9 +1083,32 @@ async def amain() -> int:
                             "error": "Agent turn is no longer active",
                         }
                     )
+            elif kind == "background":
+                if not card:
+                    from dataclasses import replace
+
+                    is_async = True
+                    os.environ["MISAKA_SUBAGENT_BACKGROUND"] = "1"
+                    bubble = os.environ.get("MISAKA_SUBAGENT_BUBBLE") == "1"
+                    if not bubble:
+                        os.environ.pop("MISAKA_SUBAGENT_CAN_PROMPT", None)
+                    for part in session.moments.parts:
+                        agent_policy = getattr(part, "policy", None)
+                        if agent_policy is not None:
+                            agent_policy.context = replace(agent_policy.context, permission_can_prompt=bubble)
+                    if not bubble:
+                        for waiter in permission_waiters.values():
+                            if not waiter.done():
+                                waiter.set_result(False)
+                    session.refreshTools()
+                _emit({"type": "background_ready"})
             elif kind == "abort":
                 await session.abort()
                 _emit({"type": "abort_accepted", "turnId": active_turn_id, "requestId": request_id})
+            elif kind == "permission_settings_response":
+                waiter = settings_waiters.get(str(request_id or ""))
+                if waiter is not None and not waiter.done():
+                    waiter.set_result({"settings": command.get("settings"), "mode": command.get("mode")})
             elif kind == "permission_response":
                 waiter = permission_waiters.get(str(request_id or ""))
                 if waiter is not None and not waiter.done():
@@ -945,6 +1125,11 @@ async def amain() -> int:
         subagent_policy.set_async_hook_broker(None)
         subagent_policy.set_permission_broker(None)
         subagent_policy.set_permission_classifier(None)
+        subagent_policy.set_permission_settings_provider(None)
+        for waiter in settings_waiters.values():
+            if not waiter.done():
+                waiter.set_exception(RuntimeError("Parent permission settings channel closed"))
+        settings_waiters.clear()
         for waiter in permission_waiters.values():
             if not waiter.done():
                 waiter.set_exception(RuntimeError("Parent permission channel closed"))
@@ -952,4 +1137,3 @@ async def amain() -> int:
         parent_watch.cancel()
         await asyncio.gather(parent_watch, return_exceptions=True)
         await engine_session.dispose(runtime)
-

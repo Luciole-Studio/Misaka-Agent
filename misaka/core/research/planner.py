@@ -8,126 +8,152 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from pathlib import Path
 
-from misaka.config import CFG
-from misaka.core.platform import prompt_guard
-from misaka.core.research import ledger, runs
+from misaka.core.platform import budget, prompt_guard
+from misaka.core.platform import tasks as task_store
+from misaka.core.research import commands, ledger, runs
 from misaka.core.session_manager import find_most_recent_session
-from misaka.core.skills import layers as skill_layers
 from misaka.utils import atomic
 
-PROJECT_INTAKE_CONTRACT = """You are Last Order in Research mode. Draft the project brief (PROJECT.md) for the user's research question.
-Do not answer the original question, and do not break it into research tasks yet.
-Return exactly one JSON object:
-{"project_markdown": "the complete PROJECT.md"}
-
-Requirements:
-- project_markdown must cover the original question, the research goal, the assumptions to test, and the boundaries.
-- Phrase assumptions as things to investigate, never as conclusions.
-- Output JSON only.
-"""
-
-
-ROOT_CONTRACT = """You are Last Order, the planner for Research mode.
+ROOT_CONTRACT = """# Research plan — design only
 Do not answer the user's question at this stage. Your only deliverable is a research design.
 Do not assume that textbooks, mass media, the mainstream view, or the contrarian view is correct.
 
 Start by working out what the user is actually asking, what else the question could mean, and which of its
 premises are untested. Then map the relevant objects, processes, interactions, prior knowledge, time horizons,
 consequences, feedback effects, and disciplines. Pick the methods, theories, analytical frameworks, and source
-strategies that fit the problem, and state each method's blind spots and the competing approaches. The method
-catalog is a menu, not a requirement: combine, reject, or add methods as the problem demands. Before dividing the
-work, check the design for dimensions it forgot: read the `coverage-maps` skill from the method catalog (its references
-are maps of fields, facets, kinds of question, and traditions) and call `coverage_scan` with two or three phrasings of
-the question to see where the literature actually discusses it. Only after that divide the work into tasks and choose
-Sisters by their profiles and skills. `plan_markdown` must end with a section "Coverage maps used": which maps and scans
+strategies that fit the problem, and state each method's blind spots and the competing approaches. Available method
+Skills are a menu, not a requirement: combine, reject, or add methods as the problem demands. Before dividing the
+work, check the design for dimensions it forgot: load `coverage-maps` with `skill_view` (its references are maps of
+fields, facets, kinds of question, and traditions) and perform the `coverage_scan` check. Then divide the work into
+tasks. Read relevant Sister profiles from the system catalog, choose by fit rather than roster order, and explain
+each choice. `plan_markdown` must end with a section "Coverage maps used": which maps and scans
 you consulted, which you did not and why, and which dimensions they surfaced.
 
-Return exactly one JSON object of this shape. `plan_markdown` and `extensions` are free-form:
-{
-  "status": "ready|clarify",
-  "clarifying_questions": ["A question that needs a human decision before research can continue"],
-  "plan_markdown": "The complete, open-ended research plan in Markdown; never the answer",
-  "methods": [{"name":"Method", "why":"Why it fits", "blind_spots":"What it may miss", "skill":"optional skill name"}],
-  "tasks": [{
-    "local_id":"short-safe-id", "title":"Task title", "question":"The exact research question",
-    "rationale":"Why it matters", "method":"How to investigate it", "source_strategy":"Where to look and what to look for",
-    "falsifiers":"Evidence that would overturn the working premise", "deliverable":"Path of the Markdown artifact",
-    "dependencies":["other-local-id"], "capabilities":["required capability"],
-    "assignee":"a Sister id from the roster", "assignee_reason":"Why this Sister fits", "priority":0
-  }],
-  "red_team": {"assignee":"a Sister id from the roster", "reason":"Why this Sister's profile fits adversarial review"},
-  "extensions": {}
-}
+Call `misaka_research_assign` with your plan and assignments.
+This tool records your dispatch command; research cards are created only from an accepted call, never from
+JSON in your final answer or a submission file.
+After the tool accepts your command, end with a short plain-text summary.
 
 Rules:
 - Never force a question into PICO, a causal-variable model, or any other single-discipline template.
-- Use status=clarify only when research genuinely cannot continue without a human choice. Uncertainty that can be researched belongs in a probe or a task.
+- A required human choice is asked in conversation when a user is talking to you; status=clarify with
+  clarifying_questions is only for a run nobody is talking to. Uncertainty that can be researched belongs in a research task.
 - Tasks must be substantive research assignments written for this question, not mechanical templates.
-- Choose Sisters by their capability profiles; do not default to the first roster entry.
 - The red team is the Sister whose profile makes her the best critic of this plan's conclusion; only you decide who that is.
-- Output JSON only.
 """
 
 
-PREFLIGHT_CONTRACT = """You are a Sister preparing to execute a research assignment.
-Plan the investigation before starting it; do no research and draw no conclusions yet. Decide where and how to find
-material, how you will tell good sources from bad, which tools and methods fit, which premises might be wrong, and what
-would make you change course or stop.
+OPTIONAL_MATERIAL_TOOLS = ("x_search", "browser_navigate", "browser_snapshot", "browser_get_images", "browser_vision")
+MATERIAL_TOOLS = ("read", "misaka_research_view", "web_search", "web_fetch", "web_extract", "download_file",
+                  "doc_list", "doc_outline", "doc_read", "doc_find", "doc_page_image", "doc_add", *OPTIONAL_MATERIAL_TOOLS)
+RESEARCH_TOOLS = (*MATERIAL_TOOLS, "coverage_scan", "skills_list", "skill_view")
 
-Return JSON only:
-{"preflight_markdown":"A free-form plan in Markdown",
- "sources":["A source type, collection, archive, or dataset to try first"],
- "queries":["An initial search or inspection step"],
- "tools":["A system tool or skill you may use"],
- "failure_modes":["A likely failure or source of bias"],
- "falsifiers":["Material that could overturn the task's working premise"],
- "stop_condition":"When the task is done, or when it can no longer proceed honestly"}
+# A research Sister's working rules, appended once to her system prompt (worker.card_session_setup)
+# rather than repeated in every card. The card body keeps only what is specific to that task.
+RESEARCH_SISTER_DISCIPLINE = """[Research card]
+You are one researcher on a research tree that Last Order coordinates. How to work:
+- Back every empirical claim with a traceable source and an exact quotation or precise location; read the saved
+  material before citing it.
+- Keep facts, inferences, interpretations and normative judgements apart, and say which is which.
+- Record counterevidence, competing explanations and unresolved questions as you meet them. Before you search, write
+  one line naming the evidence that would overturn the working premise, and look for that evidence on purpose.
+- Note whether your sources are independent of one another: three retellings of one source are one source.
+- Authority, mainstream or contrarian opinion, and the task's own premise are not evidence.
+- When material cannot be obtained you may still conclude, with reservations: name what is missing and what it
+  would settle.
+- Declare findings and concrete uncertainties with `misaka_card_note` as you work: `text`, `claim_type`
+  (fact | inference | interpretation | normative), `source_file` or `doc_id` + `page`, optional `quote`.
+  Notes accumulate; a correction says which earlier declaration it revises. The ledger records without judging;
+  the red team and Last Order weigh it later.
+- `SendMessage` reaches Last Order and any Sister named on your card; `request_input=true` to last-order parks this
+  card until she answers.
+- This run's conversations -- Last Order's with the user, every Sister's -- are listed under Conversations in
+  `misaka_research_view(view="workspace", run_id=...)`; `lcm_grep(session_scope="session", session_id=...)`
+  searches one and `lcm_load_session` opens it. Sessions not listed there belong to other work; leave them alone.
 """
 
 
-SYNTHESIS_CONTRACT = """You are Last Order writing this node's conclusion: one synthesis of the accepted research output, in one pass.
-Read the source artifacts (summaries are navigation aids, not evidence) and check every claim against its quotation.
+def session_tools(worker, tools=RESEARCH_TOOLS):
+    """Keep already-enabled execution/extension capabilities, not Board/library mutation tools.
 
-Write free-form Markdown that separates: shared findings, competing findings, key evidence, counterevidence,
-methodological limits, value premises, and unresolved questions. Every empirical judgement cites `[task_id/path]`.
-Do not vote, do not hide competing interpretations or insufficient evidence, and introduce no facts beyond the supplied artifacts.
-State what new evidence could change the judgement. Output Markdown only; no JSON.
+    New registrations are considered on the NEXT phase, not allowed to widen a running one.
+    The registry still enforces the owning session's role/user permission ceiling.
+    """
+    session = getattr(worker, "session", None)
+    # A new bare coordinator has no prior selection to inherit. Bootstrap the
+    # same execution capabilities for one-shot calls and resident nodes.
+    extra = ["bash", "office"] if session is None else []
+    if session is not None:
+        active = set(session.getActiveToolNames())
+        for tool in session.getAllTools():
+            if tool.name in active and (
+                tool.name in {"bash", "powershell", "office", "browser_exec"}
+                or tool.name.startswith("mcp__")
+                or tool.sourceInfo.source not in {"builtin", "sdk"}
+            ):
+                extra.append(tool.name)
+    return tuple(dict.fromkeys((*tools, *extra)))
+
+SOURCES_FOOTER = """
+End with a `## Sources` section listing every source this text rests on, one per line: the file's path inside the
+project (`downloads/...`, `nodes/...`) or its `doc:<id>#p<n>` locator, plus the URL it was fetched from when it came
+from the web. A program reads that section: whatever it does not list is not bundled beside this text.
+"""
+
+MARKDOWN_OUTPUT = """\nReturn the complete answer as free-form assistant Markdown, not JSON, in this turn.
+The workflow saves your final assistant message automatically. Do not call a tool to submit or save this answer.
 """
 
 
-PROBE_CONTRACT = """You are Last Order's fork on ONE issue the red team raised against this node's conclusion. You keep the
-node's whole planning context; this issue is the only thing you investigate. Do not replan the project.
-
-Each round, do one of two things:
-- open research cards that test the issue (one or several; choose Sisters by their profiles), or
-- when what the cards returned settles it, give the verdict.
-
-Return exactly one JSON object:
-{"tasks": [{
-   "local_id":"short-safe-id", "title":"Card title", "question":"The exact question the card answers",
-   "rationale":"How the answer bears on the issue", "method":"How to investigate it", "source_strategy":"Where to look",
-   "falsifiers":"What would show the conclusion is wrong", "deliverable":"Path of the Markdown artifact",
-   "dependencies":[], "capabilities":[], "assignee":"a Sister id from the roster", "assignee_reason":"Why this Sister fits",
-   "priority":0}],
- "verdict": null | {"verdict":"supports|inconclusive|undermines", "reason":"What in the card artifacts decides it"}}
-- supports: the conclusion stands; the material is additional support.
-- inconclusive: the issue cannot be settled (material unavailable, sources conflict, question not answerable).
-- undermines: the conclusion is shaken; the issue deserves a research node of its own.
-A round without tasks must carry a verdict. Do not vote and do not soften. Output JSON only.
+def navigation(run_id):
+    return f"""\n# Research context
+Current workspace lookup: misaka_research_view(view="workspace", run_id="{run_id}").
 """
+
+
+SYNTHESIS_FOLLOWUP = """
+# Round {round}: conclude, or ask for more material ({left} more round(s) may still be asked for)
+Do not write a conclusion the material cannot carry. If what the cards brought back leaves the question
+unanswerable, call `misaka_research_assign` with a follow-up round of cards: say in `plan_markdown` what this
+round left open and why each new card closes it, and end this turn with a short note; the conclusion is written
+after those cards return, from all rounds together. A follow-up round is for the same question with missing
+material; a doubt about the conclusion itself belongs to the red team, which reviews what you write next, and
+issues it raises open child nodes -- do not use follow-up rounds to review yourself.
+"""
+
+SYNTHESIS_LAST_ROUND = """
+# Round {round}: the last round
+No further cards can be assigned on this node. Write the conclusion from what there is, and name what remains
+unsupported and what evidence would settle it.
+"""
+
+SYNTHESIS_CONTRACT = """# Node conclusion — synthesize the submitted research output
+Read full sources in context; summaries and the ledger are researchers' declarations, not certified evidence.
+
+Separate shared findings, competing findings, key evidence, counterevidence,
+methodological limits, value premises, and unresolved questions. Give traceable source paths, document locations or URLs.
+Do not vote or hide competing interpretations or insufficient evidence. You may read documents and fetch supplementary
+material: preserve it in the workspace and cite its location so the red team can examine it with the rest of the sources.
+State what new evidence could change the judgement.
+This run's conversations -- yours with the user, every Sister's -- are listed under Conversations in
+`misaka_research_view(view="workspace", run_id=...)`; `lcm_grep(session_scope="session", session_id=...)` searches
+one and `lcm_load_session` opens it. Sessions not listed there belong to other work; leave them alone.
+""" + SOURCES_FOOTER + MARKDOWN_OUTPUT
 
 
 RED_TEAM_CONTRACT = """## goal
 Red-team the conclusion at `{synthesis_path}` for "{question}". Hunt for reasoning failures; do not extend the report and do not
-polish prose. Deliver `critique.md` (your review) and `critique.json` (the issues, machine-readable).
+polish prose. Deliver `critique.md` for the node Last Order to read. Record your issues with `misaka_card_note(issues=...)`.
+This returns the review to that Last Order; it does not start investigations on your behalf.
 
 ## material
 - Conclusion under review: `{synthesis_path}`
-- Plan: `{plan_path}`
+- Plan (every round of this node, oldest first): {plan_path}
 - Source-task artifacts: read whichever the conclusion cites.
-{evidence}
+{own_cards}{deliberation}{evidence}
 ## what to inspect
 Facts and quotations, inference and causation, concepts and scope, methods and sampling, standpoint and bias, omitted actors or
 processes, interactions, time horizons, consequences, and normative claims disguised as facts. For omissions, use the
@@ -137,57 +163,17 @@ without either side being automatically wrong. A false objection does as much da
 
 ## acceptance criteria
 - `critique.md` exists and every criticism names a concrete next research step.
-- `critique.json` exists and is exactly: `{{"issues": [{{"kind": "fact|logic|causation|concept|scope|method|bias|normative|unresolved",
-  "question": "A specific question that can be researched on its own", "rationale": "Why it could change the conclusion",
-  "priority": 0, "material": true}}]}}`. Only `material: true` issues are probed; keep the list honest, not long.
-- Register both files in `report.json`.
+- Call `misaka_card_note` with the complete `issues` list: kind, question, rationale, priority, material.
+  Use issues=[] explicitly if there are no issues. Only material=true issues require investigation.
+- Write the review under the card's deliverable directory. Do not create a machine-readable submission file.
+
 """
 
 
-def _frontmatter_description(path):
-    try:
-        text = Path(path).read_text(encoding="utf-8")
-    except OSError:
-        return ""
-    if not text.startswith("---"):
-        return ""
-    for line in text.split("---", 2)[1].splitlines():
-        if line.strip().startswith("description:"):
-            return line.split(":", 1)[1].strip().strip("'\"")
-    return ""
-
-
-def sister_catalog(root=None):
-    root = os.path.expanduser(root or CFG["profiles_root"])
-    if not os.path.isdir(root):
-        return []
-    out = []
-    for sid in sorted(os.listdir(root)):
-        profile = os.path.join(root, sid)
-        if not os.path.isdir(profile):
-            continue
-        desc_path = os.path.join(profile, "DESCRIBE.md")
-        description = _frontmatter_description(desc_path)
-        try:
-            body = Path(desc_path).read_text(encoding="utf-8")[:3000]
-        except OSError:
-            body = ""
-        skills = []
-        skills_dir = os.path.join(profile, "skills")
-        if os.path.isdir(skills_dir):
-            for name in sorted(x for x in os.listdir(skills_dir) if not x.startswith(".")):
-                skill_path = os.path.join(skills_dir, name, "SKILL.md")
-                skills.append({"name": name, "description": _frontmatter_description(skill_path),
-                               "path": skill_path})
-        out.append({"id": sid, "description": description, "profile": body, "skills": skills})
-    return out
-
-
-def method_catalog(profile_dir, cwd):
-    """The research methods Last Order can plan with: her skill index in this folder."""
-    from misaka.core.skills import index as skill_index
-    return [{"name": e["name"], "description": e["description"], "path": e["path"]}
-            for e in skill_index.build(skill_layers.skill_roots(profile_dir, cwd))]
+def sister_catalog(root=None, *, workspace=None):
+    # Compatibility entry for CLI callers; parsing and filtering have one owner.
+    from misaka.core.network.roster import capability_catalog
+    return capability_catalog(root, workspace=workspace)
 
 
 def _catalog_text(items):
@@ -195,58 +181,53 @@ def _catalog_text(items):
 
 
 def _call(worker, cfg, prompt, *, cwd, session_dir, continue_session=False,
-          profile="last_order", tools=("read", "web_search"), raw=False, task_id=None,
-          timeout=None, thinking="high", model=None):
+          profile="last_order", tools=RESEARCH_TOOLS, raw=False, task_id=None,
+          thinking="high", model=None, extra_tools=(), con=None, session_file=None, sister_catalog=None):
     kwargs = {
-        "cwd": cwd, "tools": list(tools),
-        "timeout": runs.call_timeout(
-            cfg, timeout or max(600, int(cfg.get("judge_timeout", 600)))), "soul": False,
+        "cwd": cwd, "tools": list(session_tools(worker, tools)),
+        "timeout": None, "soul": False, "research_context": True,
         "raw": raw, "usage_db": cfg.get("db"), "usage_task_id": task_id,
         "usage_generation": 1, "usage_token_cap": cfg.get("token_cap"),
         "session_dir": session_dir, "continue_session": continue_session,
         "thinking": thinking,
     }
+    if session_file:
+        kwargs["session_file"] = session_file
+    if extra_tools:
+        kwargs["extra_tools"] = extra_tools
+    if sister_catalog is not None:
+        kwargs["sister_catalog"] = sister_catalog
     if model:
         kwargs["model"] = model
-    return worker.run_llm_json(
-        os.path.join(cfg["roles_root"], profile), prompt,
-        cfg["provider"], cfg["default_model"], **kwargs,
-    )
+    while True:
+        result = worker.run_llm_json(
+            os.path.join(cfg["roles_root"], profile), prompt,
+            cfg["provider"], cfg["default_model"], **kwargs,
+        )
+        if (result[2] != "shared token budget exhausted" or con is None
+                or budget.exhausted(con, cfg.get("token_cap"))):
+            return result
+        if runs.stop_requested(con, task_id):
+            return None, "", "Research stopped while waiting for token capacity"
+        # Other node LOs share this ledger. A reservation is
+        # backpressure, not a failed model call; no tokens were spent on this refusal.
+        time.sleep(2)
 
 
-def intake_session_dir(cfg, workspace):
-    """Where the PROJECT.md intake conversation is kept: under Last Order's bucket for the
-    folder (``config.sessions``), never inside the project folder (a fresh project is
-    committed wholesale by ``misaka init``). ``cfg`` is unused since the move out of the
-    runs root; kept for the callers."""
-    from misaka.config import sessions
-
-    return sessions.intake_session_dir(str(Path(workspace).expanduser().resolve()))
-
-
-def ensure_project_brief(cfg, worker, question, workspace):
-    """Return ``<workspace>/PROJECT.md``, letting Last Order draft it when the folder has none."""
-    workspace = str(Path(workspace).expanduser().resolve())
-    path = os.path.join(workspace, "PROJECT.md")
-    if os.path.isfile(path):
-        return path
-    obj, _raw, err = _call(
-        worker, cfg, PROJECT_INTAKE_CONTRACT + f"""
-# The user's research question
-{question}
-""",
-        cwd=workspace, session_dir=intake_session_dir(cfg, workspace), tools=(),
-        timeout=120, thinking="low",
-    )
-    if err:
-        raise RuntimeError(f"Last Order could not draft PROJECT.md: {err}")
-    text = str((obj or {}).get("project_markdown") or "").strip()
-    if len(text) < 40:
-        raise ValueError("Last Order did not generate a complete PROJECT.md.")
-    # atomic: `ensure_project_brief` only checks `isfile` next time, so a half-written
-    # PROJECT.md left by a kill would be returned forever as the project brief.
-    atomic.write_text(path, text.rstrip() + "\n")
-    return path
+def publish_project_brief(workspace, plan, *, round=1):
+    """The accepted root plan is also the brief; no separate model or conversation. A later
+    round of the root is appended as its own section, never written over the brief."""
+    path = Path(workspace) / "PROJECT.md"
+    if plan["status"] != "ready":
+        return str(path)
+    if not path.is_file():
+        atomic.write_text(str(path), plan["plan_markdown"].rstrip() + "\n")
+    elif round > 1:
+        marker = f"\n\n## Round {round}\n\n"
+        current = path.read_text(encoding="utf-8")
+        if marker.strip() not in current:
+            atomic.write_text(str(path), current.rstrip() + marker + plan["plan_markdown"].rstrip() + "\n")
+    return str(path)
 
 
 def _validate_task(raw, roster, index):
@@ -310,7 +291,7 @@ def validate_plan(obj, roster):
     if status not in {"ready", "clarify"}:
         raise ValueError("Last Order returned an invalid planning status.")
     plan_markdown = obj.get("plan_markdown")
-    if not isinstance(plan_markdown, str) or len(plan_markdown.strip()) < 40:
+    if not isinstance(plan_markdown, str) or not plan_markdown.strip():
         raise ValueError("Last Order returned an incomplete plan_markdown value.")
     roster_ids = {r["id"] if isinstance(r, dict) else str(r) for r in roster}
     tasks = _validate_tasks(obj.get("tasks"), roster_ids)
@@ -328,40 +309,79 @@ def validate_plan(obj, roster):
         **obj, "status": status, "plan_markdown": plan_markdown.strip(), "tasks": tasks,
         "red_team": {"assignee": red_team.get("assignee"), "reason": str(red_team.get("reason") or "")},
         "clarifying_questions": [q.strip() for q in questions],
+        "reframed_question": " ".join(str(obj.get("reframed_question") or "").split()),
         "methods": obj.get("methods") if isinstance(obj.get("methods"), list) else [],
         "extensions": obj.get("extensions") if isinstance(obj.get("extensions"), dict) else {},
     }
 
 
 def _roster(cfg):
-    roster = sister_catalog(cfg.get("profiles_root"))
+    roster = sister_catalog(cfg.get("profiles_root"), workspace=cfg.get("workspace"))
     if not roster:
         raise RuntimeError("The Sister roster is empty; research tasks cannot be assigned.")
     return roster
 
 
 def _lo_session(run, node, *parts):
+    if node["parent_id"] is None and run["root_session"]:
+        return os.path.join(os.path.dirname(run["root_session"]), *parts)
     return runs.session_dir(run, "root-lo" if node["parent_id"] is None else f"node-{node['id']}", *parts)
 
 
-def plan(run, cfg, worker, node, *, context_path=None):
+def plan_waits_for_user(cfg, worker):
+    """Whether an accepted plan waits for the user's go-ahead before its cards are created: on by
+    configuration, and only where the Last Order has a live conversation the user can join (a
+    window, or a node's resident session); a one-shot headless call has nowhere to talk."""
+    return bool(cfg.get("research_plan_approval", True)) and getattr(worker, "session", None) is not None
+
+
+PLAN_WAITS = """
+# The plan waits for the user
+An accepted plan is not executed until the user agrees to it -- this plan, here, whether it is the root's, a
+fork's, or a follow-up round's. An ancestor's approval does not carry over, and the driver never starts a node on
+its own: it waits for your `misaka_research_start`. After the tool accepts your command, present the
+plan to the user in plain language and talk it over with them. Revise it with `misaka_research_assign` (each call
+replaces the recorded plan). Once the user has said the plan should go ahead, call `misaka_research_start`; it
+is available from the next turn on, so this turn ends with your summary. While a follow-up round waits,
+`misaka_research_withdraw` drops it if the user would rather have the conclusion from what there is. If the user
+would rather not research a fork node at all, `misaka_research_skip` (a fork's first plan only) closes it
+unresearched: no cards, no conclusion, its issue parked for final adjudication with the reason you record. Never
+fake a completion or write one into project files instead. Anything
+you would otherwise put in
+`clarifying_questions`, ask the user in that conversation instead; `status=clarify` is for runs nobody is
+talking to. If the question itself seems wrong, propose the reframing in `plan_markdown` and put the new
+wording in `reframed_question`: it takes effect only once the user agrees.
+"""
+
+
+def plan(run, cfg, worker, node, *, con, context_path=None):
     """Open or continue the node's Last Order session and return its research plan."""
-    root = runs.run_dir(run)
     session_dir = _lo_session(run, node)
-    roster = _roster(cfg)
-    methods = method_catalog(os.path.join(cfg["roles_root"], "last_order"), run["workspace"])   # the project folder's skills/, not the run dir's
-    prompt = ROOT_CONTRACT
+    roster = _roster({**cfg, "workspace": run["workspace"]})
+    prompt = ROOT_CONTRACT + "\n# Artifact layout\nWithin the current workspace, every node's files live under " \
+        "nodes/<node>/ and each of its cards under nodes/<node>/cards/<card>/; run-level products go to final/. " \
+        "The runtime assigns these paths. Use simple deliverable filenames, not directories.\n" \
+        + f"\n# Current node depth\n{node['depth']} (root = 0; max_depth = {runs.limits(run)['max_depth']})\n"
     if node["parent_id"] is None:
+        brief = Path(run["workspace"]) / "PROJECT.md"
+        brief_instruction = (f"PROJECT.md already exists. Read `{brief}` and respect its scope."
+                             if brief.is_file() else
+                             "PROJECT.md does not exist yet. Do not try to read it. Begin plan_markdown "
+                             "with the original question, research goal, assumptions to test, and boundaries. "
+                             "After your plan is accepted, the driver writes it to PROJECT.md before any "
+                             "Sister task starts; no separate write call or intake session is needed.")
         prompt += f"""
 # Original question
 {run['question']}
 
-# Project / PageIndex workspace index (read before planning)
-{root}/workspace-index.md
+# Project brief and root plan are ONE deliverable
+{brief_instruction}
+Do not make a separate intake call or delegate this design to another Last Order.
+Assumptions are questions, not conclusions.
 """
     else:
         prompt += f"""
-This is a targeted research node. Address the issue that undermined the parent conclusion without replanning the whole project.
+This is a targeted research node. Investigate the red-team issue against the parent conclusion, without assuming it is correct, without replanning the whole project.
 
 # Issue that opened this node
 {node['trigger_text']}
@@ -369,36 +389,50 @@ This is a targeted research node. Address the issue that undermined the parent c
 # Context packet (ancestor sessions and artifact map; read it first)
 {context_path}
 """
-    prompt += f"""
-# Sister capability profiles
-{_catalog_text(roster)}
-
-# Method and tool skills available
-{_catalog_text(methods)}
+    prompt += navigation(run["id"]) + """
+Read the live workspace view before planning.
 """
-    obj, raw, err = _call(
-        worker, cfg, prompt, cwd=root, session_dir=session_dir,
-        tools=("read", "coverage_scan", "web_search"),
-        continue_session=bool(find_most_recent_session(session_dir)), task_id=run["id"],
+    if plan_waits_for_user(cfg, worker):
+        prompt += PLAN_WAITS
+    action, raw = _command(
+        con, run, cfg, worker, node, prompt, key="plan", name="misaka_research_assign",
+        description="Last Order: assign the research plan and choose its red-team Sister",
+        model=commands.Plan, validate=lambda value: validate_plan(value, roster),
+        session_dir=session_dir, tools=RESEARCH_TOOLS, sister_catalog=roster,
     )
-    if err:
-        raise RuntimeError(f"Last Order planning failed for node {node['id']}: {err}")
-    return validate_plan(obj, roster), raw, find_most_recent_session(session_dir)
+    return action["payload"], raw, action["session_file"]
+
+
+def _command(con, run, cfg, worker, node, prompt, *, key, name, description, model, validate,
+             session_dir, tools=RESEARCH_TOOLS, sister_catalog=None):
+    previous = runs.action(con, run["id"], node["id"], key)
+    if previous:
+        return previous, ""
+    session_file = run["root_session"] if node["parent_id"] is None else node["session_file"]
+    command = commands.tool(con, run, node, key=key, name=name, description=description,
+                            model=model, validate=validate, session_dir=session_dir,
+                            session_file=session_file)
+    _obj, text, err = _call(
+        worker, cfg, prompt, cwd=run["workspace"], session_dir=session_dir,
+        tools=tools, extra_tools=(command,), raw=True, sister_catalog=sister_catalog,
+        continue_session=bool(find_most_recent_session(session_dir)), task_id=run["id"], con=con,
+        session_file=session_file,
+    )
+    accepted = runs.action(con, run["id"], node["id"], key)
+    if not accepted:
+        raise RuntimeError(f"Last Order did not call {name} for {key}: {err or 'no command accepted'}")
+    return accepted, text
 
 
 def task_sources(con, run, rows):
     """What each done card delivered, from frozen records only: its submitted event (this
-    generation), its registered artifacts, and the evidence ledger -- never the mutable
-    report.json a finished worker could still rewrite."""
+    generation), its registered artifacts, and the evidence ledger."""
+    from misaka.core.platform import cards
+
     parts = []
     for row in rows:
-        event = con.execute(
-            "SELECT payload FROM events WHERE task_id=? AND kind='submitted' AND generation=? "
-            "ORDER BY id DESC LIMIT 1", (row["id"], row["generation"])).fetchone()
-        try:
-            payload = json.loads(event["payload"] or "{}") if event else {}
-        except (TypeError, ValueError):
-            payload = {}
+        payload = json.loads(task_store.latest_payload(
+            con, row["id"], "submitted", generation=row["generation"]) or "{}")
         artifacts = []
         for item in runs.artifacts(con, run["id"], task_id=row["id"]):
             path = runs.artifact_path(item)
@@ -406,22 +440,23 @@ def task_sources(con, run, rows):
                 artifacts.append(path)
         finds = []
         for finding in ledger.findings(con, run["id"], task_id=row["id"]):
-            claims = con.execute(
-                "SELECT source_file, quote FROM research_claims WHERE finding_id=?",
-                (finding["id"],)).fetchall()
-            entry = {"text": finding["text"], "claim_type": finding["claim_type"]}
-            if claims:
-                entry.update(source_file=claims[0]["source_file"], quote=claims[0]["quote"])
-            finds.append(entry)
+            finds.append({"text": finding["text"], "claim_type": finding["claim_type"],
+                          "claims": [dict(claim) for claim in ledger.claims(con, finding["id"])]})
+        # The ledger already holds what it accepted; only a submitted finding it does not hold
+        # (rejected, or never ingested) is worth a second listing.
+        recorded = {item["text"] for item in finds}
+        submitted = [item for item in payload.get("findings", [])
+                     if not (isinstance(item, dict) and item.get("text") in recorded)]
         parts.append({"task_id": row["id"], "title": row["title"],
+                      "card_path": cards.card_path(row["workspace"], row["id"]),
                       "summary": str(payload.get("summary") or ""), "artifacts": artifacts,
-                      "findings": finds,
+                      "findings": finds, "submitted_findings": submitted,
                       "uncertain": payload.get("uncertain") or []})
     return parts
 
 
 def evidence_block(con, run, node):
-    """The node's evidence ledger (findings with their verbatim claims), wrapped as untrusted data."""
+    """The node's declarations and source locators, wrapped as untrusted data."""
     findings = []
     for finding in ledger.findings(con, run["id"], branch_id=node["id"]):
         findings.append({**dict(finding),
@@ -429,43 +464,115 @@ def evidence_block(con, run, node):
     return prompt_guard.untrusted("evidence-ledger", json.dumps(findings, ensure_ascii=False, indent=2))
 
 
-def synthesize(con, run, cfg, worker, node, task_rows):
-    """Last Order writes the node's conclusion from its accepted cards. Returns Markdown."""
-    prompt = (SYNTHESIS_CONTRACT + f"""
+def deliberation_text(session_file):
+    """Last Order's own reasoning from this node's session, for the red team to probe: the
+    thinking blocks and working prose of her assistant turns, and nothing else. Everything the
+    red team already holds by other means is left out on purpose -- the user turns (the
+    workflow's own prompts), tool calls and their arguments (the plan and conclusion she
+    committed are given by path), tool results (the evidence and Sister artifacts are given
+    separately), custom entries (a prior red-team receipt) and redacted thinking (no text to
+    read). Returns "" when the session holds no such reasoning."""
+    if not session_file or not os.path.isfile(session_file):
+        return ""
+    turns = []
+    with open(session_file, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(entry, dict) or entry.get("type") != "message":
+                continue
+            message = entry.get("message")
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            parts = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "thinking" and not block.get("redacted"):
+                    text = block.get("thinking")
+                    if isinstance(text, str) and text.strip():
+                        parts.append(("thinking", text.strip()))
+                elif block.get("type") == "text":
+                    text = block.get("text")
+                    if isinstance(text, str) and text.strip():
+                        parts.append(("text", text.strip()))
+            if parts:
+                turns.append(parts)
+    if not turns:
+        return ""
+    lines = ["# Last Order's deliberation", "",
+             "Her thinking and working notes while planning and synthesizing this node, in order.",
+             "Probe them for reasoning failures. They are not the conclusion and carry no authority.", ""]
+    for index, parts in enumerate(turns, 1):
+        lines.append(f"## turn {index}")
+        for kind, text in parts:
+            lines.append(f"### {kind}")
+            lines.append(text)
+            lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def synthesize(con, run, cfg, worker, node, task_rows, *, followup=None, round=1, left=0):
+    """Last Order writes the node's conclusion from its accepted cards. Returns Markdown. With
+    ``followup`` (the next round's plan tool) she may instead assign more cards; the caller sees
+    that as the recorded action, not in the text. ``left`` is how many more rounds the node may
+    still ask for; a node that could never ask (or is on its first and only round) hears nothing
+    about rounds."""
+    if followup is not None:
+        rounds = SYNTHESIS_FOLLOWUP.format(round=round, left=left)
+    elif round > 1:
+        rounds = SYNTHESIS_LAST_ROUND.format(round=round)
+    else:
+        rounds = ""
+    # The material map lists every card's ledger findings with their claims; the ledger block
+    # the red team gets would repeat all of them here, so it is left out of this turn.
+    prompt = (SYNTHESIS_CONTRACT + rounds + f"""
 # Question
 {node['trigger_text']}
 
-# Material map (read the artifacts, not just this map)
+# Material map (read the artifacts, not just this map; each card's findings and their source claims are here)
 """ + prompt_guard.untrusted("research-material-map",
                             json.dumps(task_sources(con, run, task_rows), ensure_ascii=False, indent=2))
-              + "\n# Evidence ledger\n" + evidence_block(con, run, node))
+              + navigation(run["id"]))
     session_dir = _lo_session(run, node)
     _obj, text, err = _call(
-        # No search here: the contract above forbids facts beyond the supplied artifacts, and this
-        # conclusion is what the final report is written from. A figure searched up at this desk
-        # enters the run with no ledger entry behind it, so the citation gate on final.md reports
-        # it as ungrounded and spends the run's single rewrite deleting it. Reading the cards'
-        # artifacts -- which is what `read` is for -- is the whole of the job.
-        worker, cfg, prompt, cwd=runs.run_dir(run), session_dir=session_dir, raw=True, tools=("read",),
-        continue_session=bool(find_most_recent_session(session_dir)), task_id=run["id"],
-        timeout=max(900, int(cfg.get("judge_timeout", 600))),
+        worker, cfg, prompt, cwd=run["workspace"], session_dir=session_dir, raw=True, tools=RESEARCH_TOOLS,
+        continue_session=bool(find_most_recent_session(session_dir)), task_id=run["id"], con=con,
+        session_file=run["root_session"] if node["parent_id"] is None else node["session_file"],
+        extra_tools=(followup,) if followup is not None else (),
     )
-    if err or not text or len(text.strip()) < 80:
-        raise RuntimeError(f"Synthesis for node {node['id']} is too short or failed: {err or ''}")
+    if followup is not None and runs.plan_round(con, run["id"], node["id"]) > round:
+        return ""                                     # she asked for another round instead of concluding
+    if err or not text or not text.strip():
+        raise RuntimeError(f"Synthesis for node {node['id']} is empty or failed: {err or ''}")
     return text.strip() + "\n"
 
 
-def red_team_body(node, *, synthesis_path, plan_path, evidence=""):
+def red_team_body(node, *, synthesis_path, plan_path, evidence="", deliberation_path=None, own_cards=()):
+    own = ("- Cards on this node you researched yourself, in an earlier session of yours (this review is not "
+           "third-party to them; hold them to the same standard): "
+           + ", ".join(f"[{row['id']}] {row['title']}" for row in own_cards) + "\n") if own_cards else ""
+    deliberation = (
+        "- Last Order's deliberation -- her thinking and working notes while planning and synthesizing, "
+        "to probe for reasoning failures; not the conclusion, and no authority over it: "
+        f"`{deliberation_path}`\n" if deliberation_path else "")
     return RED_TEAM_CONTRACT.format(
         question=node["trigger_text"], synthesis_path=synthesis_path, plan_path=plan_path,
+        deliberation=deliberation, own_cards=own,
         evidence=f"- Evidence ledger:\n{evidence}\n" if evidence else "")
 
 
-def fork_session(source_dir, target_dir):
-    """A pi fork of the newest session in ``source_dir`` into ``target_dir``: the whole line so far,
-    with ``parentSession`` recorded. None when there is nothing to fork (the fork then starts fresh)."""
+def fork_session(source, target_dir):
+    """Fork the owning session, never the newest unrelated chat in its directory."""
     from misaka.core.session_manager import SessionManager
-    source = find_most_recent_session(source_dir)
     if not source:
         return None
     os.makedirs(target_dir, exist_ok=True)
@@ -479,115 +586,106 @@ def fork_session(source_dir, target_dir):
     return branched
 
 
-def probe_step(con, run, cfg, worker, node, issue, cards, *, synthesis_path, round_no, rounds, final=False):
-    """One round of the fork on ``issue``: more cards, or the verdict. Returns (tasks, verdict).
-    With ``final`` no more cards may be opened: the answer must be a verdict."""
-    roster = _roster(cfg)
-    closing = ("\n# Final judgement: every round has been used, no more cards can be opened. "
-               "Give the verdict now, from the artifacts returned so far.\n") if final else ""
-    prompt = (PROBE_CONTRACT + closing + f"""
-# Issue
-{_catalog_text({"id": issue["id"], "kind": issue["kind"], "question": issue["question"], "rationale": issue["rationale"]})}
+INVESTIGATE_CONTRACT = """# Assign follow-up investigations from this node's completed review
+Read the full review text and recorded issues supplied below. Below max_depth, formulate an assignment for EVERY material
+issue and call `misaka_research_investigate` with its issue_id and assignment. Each assignment directly
+creates a formal child node at depth + 1, forked from YOUR session. That fork plans, assigns its own
+Sisters, synthesizes and runs its chosen red team, exactly like this node. There is no preliminary
+probe, verdict handback, promotion or second fork. Do not investigate the issue yourself or pre-judge it.
+Do not dismiss, merge or silently omit an issue. This dispatch turn runs only when material issues
+need child research and the depth limit permits it. End in plain text after the tool accepts.
+"""
 
-# Conclusion under test
-{synthesis_path}
 
-# Round {round_no} of {rounds}. Cards returned so far (read their artifacts; none yet on round 1)
-""" + prompt_guard.untrusted("probe-results", json.dumps(task_sources(con, run, cards), ensure_ascii=False, indent=2))
-              + f"""
+def review_context(con, run, red, issues):
+    """The full frozen review, shared by active dispatch and model-free receipt."""
+    review = task_sources(con, run, [red])
+    review[0]["review_text"] = [
+        {"path": runs.artifact_path(item), "content": runs.artifact_text(item)}
+        for item in runs.artifacts(con, run["id"], kind="critique", task_id=red["id"])
+        if Path(item["path"]).suffix.lower() == ".md"
+    ]
+    return ("\n# Red-team review\n" + prompt_guard.untrusted("red-team-results", _catalog_text(review))
+            + "\n# Recorded material issues\n" + prompt_guard.untrusted("issues", _catalog_text([dict(i) for i in issues])))
 
-# Sister capability profiles
-{_catalog_text(roster)}
-""")
-    session_dir = runs.probe_session_dir(run, issue["id"])
-    obj, _raw, err = _call(
-        worker, cfg, prompt, cwd=runs.run_dir(run), session_dir=session_dir,
-        continue_session=bool(find_most_recent_session(session_dir)), task_id=run["id"],
+
+def investigate(con, run, cfg, worker, node, red):
+    accepted = runs.action(con, run["id"], node["id"], "investigate")
+    if accepted:
+        return accepted["payload"]["assignments"]  # resume dispatch, not the already completed review
+    issues = list(runs.issues(con, run["id"], node_id=node["id"]))
+    if node["depth"] >= runs.limits(run)["max_depth"]:
+        raise ValueError("Depth limit reached; no Last Order dispatch turn is needed.")
+    expected = {item["id"] for item in issues}
+    if not expected:
+        raise ValueError("No material issues; no Last Order dispatch turn is needed.")
+
+    def validate(value):
+        ids = [item["issue_id"] for item in value["assignments"]]
+        if len(ids) != len(set(ids)) or set(ids) != expected:
+            raise ValueError("Assign every recorded material issue exactly once; use only this node's issue IDs.")
+        return value
+
+    prompt = (INVESTIGATE_CONTRACT + f"\n# Depth\n{node['depth']} / {runs.limits(run)['max_depth']}\n"
+              + review_context(con, run, red, issues) + navigation(run["id"]))
+    action, _raw = _command(
+        con, run, cfg, worker, node, prompt, key="investigate", name="misaka_research_investigate",
+        description="Last Order: assign next-depth fork LO nodes for material red-team issues",
+        model=commands.Investigations, validate=validate, session_dir=_lo_session(run, node),
     )
-    if err:
-        raise RuntimeError(f"The fork on issue {issue['id']} failed: {err}")
-    obj = obj if isinstance(obj, dict) else {}
-    tasks = _validate_tasks(obj.get("tasks"), {r["id"] for r in roster})
-    verdict = obj.get("verdict")
-    if verdict is not None:
-        if not isinstance(verdict, dict) or verdict.get("verdict") not in {"supports", "inconclusive", "undermines"}:
-            raise ValueError(f"The fork on issue {issue['id']} returned an invalid verdict.")
-        verdict = {"verdict": verdict["verdict"], "reason": str(verdict.get("reason") or "")}
-    if final and verdict is None:
-        raise ValueError(f"The fork on issue {issue['id']} did not give a verdict in its final round.")
-    if not tasks and verdict is None:
-        raise ValueError(f"The fork on issue {issue['id']} neither opened cards nor gave a verdict.")
-    return tasks, verdict
+    return action["payload"]["assignments"]
 
 
-def preflight(run, cfg, worker, task, *, node):
-    root = runs.run_dir(run)
-    sid = task["assignee"]
-    profile = os.path.join(cfg["profiles_root"], sid)
-    if not os.path.isdir(profile):
-        raise ValueError(f"Sister profile not found: {sid}")
-    session_dir = runs.session_dir(run, "preflight", node["id"], task["local_id"])
-    prompt = (PREFLIGHT_CONTRACT + '\n# Original question\n' + run["question"]
-              + '\n# Your research assignment\n' + _catalog_text(task)
-              + f"""
-# Run workspace
-{root}
-""")
-    obj, raw, err = worker.run_llm_json(
-        profile, prompt, cfg["provider"], cfg["default_model"], cwd=root,
-        tools=[], timeout=runs.call_timeout(
-            cfg, max(300, int(cfg.get("judge_timeout", 600)))),
-        usage_db=cfg.get("db"), usage_task_id=run["id"], usage_generation=1,
-        usage_token_cap=cfg.get("token_cap"), session_dir=session_dir,
-        thinking="medium",
-    )
-    if err:
-        raise RuntimeError(f"Sister {sid} preflight failed: {err}")
-    if not isinstance(obj, dict) or len(str(obj.get("preflight_markdown") or "").strip()) < 20:
-        raise ValueError(f"Sister {sid} returned an invalid preflight plan.")
-    return obj, raw, find_most_recent_session(session_dir)
-
-
-def task_body(task, preflight_path, evidence=""):
-    ledger = f"\n## evidence so far\nWhat earlier cards established (read the sources; do not repeat them):\n{evidence}\n" if evidence else ""
+def task_body(task, *, run_id=None, node=None, siblings=(), previous=()):
+    """The card's own contract: only what this task needs to say. The researcher's working rules
+    are RESEARCH_SISTER_DISCIPLINE (her system prompt, once per session) and the tools' own
+    guidelines, so they are not repeated here. ``node`` is the branch the card belongs to (its
+    question is the larger one this card serves); ``siblings`` are the plan's other task specs on
+    that node, so she knows whom she can ask; ``previous`` are the node's cards from earlier rounds
+    (rows with title and output_dir), whose outputs this round builds on."""
+    approach = """## Execution approach
+Before substantial work, write one line naming the evidence that would overturn the working premise, then briefly
+outline your approach in ordinary prose: sources and methods, risks and counterevidence to check, and when to stop.
+Then use your tools and carry out the task in this same session; do not stop after the outline. Revise the approach
+when evidence warrants it and explain why. No separate planning submission, file, or approval is required.
+"""
+    if run_id is not None:
+        approach += navigation(run_id)
+    if "instructions" in task:
+        return task["instructions"].rstrip() + "\n\n" + approach
+    larger = ""
+    trigger = node["trigger_text"] if node is not None else None
+    if trigger:
+        larger = (f"\n## the larger question\n{trigger}\n"
+                  "This card is one piece of it; the rationale above says which piece.\n")
+    others = [spec for spec in siblings if spec.get("local_id") != task.get("local_id")]
+    company = ""
+    if previous:
+        company += ("\n## earlier cards on this node\nAn earlier round already brought these back; read them "
+                    "before doing anything they already did:\n"
+                    + "\n".join(f"- [{row['id']}] {row['title']} → `{row['output_dir']}`" for row in previous) + "\n")
+    if others:
+        company = ("\n## sibling cards\nOther cards on the same node, in parallel with yours "
+                   "(reach their Sisters with `SendMessage`):\n"
+                   + "\n".join(f"- {spec.get('local_id')} · {spec.get('title')} → Sister {spec.get('assignee')}"
+                               for spec in others) + "\n")
     return f"""## research question
 {task['question']}
 
 ## rationale
 {task['rationale']}
-
-## method and source strategy
-Method: {task.get('method') or 'See the preflight plan.'}
-Source strategy: {task.get('source_strategy') or 'See the preflight plan.'}
-Potential falsifiers: {task.get('falsifiers') or 'Identify evidence that could overturn the working premise.'}
-Read web pages with `web_fetch` or `web_extract`, never `curl`: both save each page's complete text into the workspace, and a
-registered file is the only thing a quote can be checked against. `web_extract` reads up to five pages in one call and gets
-through pages that need JavaScript, so reach for it first when a page comes back empty or you have a list of sources;
-`web_fetch` dials the page itself, which is what a paywalled or vendor-blocked page needs. Two exceptions: a binary document
-(PDF, dataset, archive) goes through `download_file`, and a raw data endpoint that answers JSON or CSV may be called with `curl`.
-
-## preflight plan
-Read `{preflight_path}` first and work from that plan. Change course when a key premise fails, and record why.
-{ledger}
+{larger}{company}
+{approach}
 ## deliverable
 {task['deliverable']}
+Write it under the deliverable location the card names; successful writes and fetched source files are recorded
+automatically.
 
 ## boundaries
-Do not treat authority, mainstream opinion, contrarian opinion, or the task's own premise as evidence.
-If material is unavailable, state the limit that creates instead of claiming proof.
+Where material cannot be obtained you may still conclude -- with the gap named, and what it would settle.
 
 ## acceptance criteria
-- Register at least one Markdown artifact in `report.json`.
-- Back every empirical claim with a traceable source and an exact quotation or precise location.
-- Separate facts, inferences, interpretations, and normative judgements.
-- Record counterevidence, competing explanations, and unresolved questions.
-- Include a `findings` array in `report.json`. Each item uses:
-  `{{"text":"self-contained claim","claim_type":"fact|inference|interpretation|normative",`
-  `"source_file":"registered artifact path","quote":"exact text present in that artifact"}}`
-- A document already in the corpus (a book, a downloaded PDF) is cited where it stands rather than copied into
-  an artifact first: run `doc_verify` to confirm the passage and read back its page, then use the other shape:
-  `{{"text":"self-contained claim","claim_type":"fact|inference|interpretation|normative",`
-  `"doc_id":"the document id","page":<the page number doc_verify returned>,"quote":"the passage, verbatim"}}`
-  The quotation is checked against that page the same way. One shape or the other per finding, never both.
-- You write the findings yourself. The system only checks that the path is a registered artifact and the quote appears in it verbatim; it does not judge credibility.
+- At least one Markdown deliverable exists.
+- Findings and concrete uncertainties are declared with `misaka_card_note` (`text`, `claim_type`
+  fact|inference|interpretation|normative, `source_file` or `doc_id` + `page`, optional `quote`).
 """

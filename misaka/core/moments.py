@@ -101,6 +101,42 @@ class Moments:
     def command(self, name: str) -> CoreCommand | None:
         return next((command for command in self.commands() if command.name == name), None)
 
+    def project_tools(self, tools: list[Any]) -> list[Any]:
+        """Request-visible views only; canonical registry definitions keep their owner."""
+        for part in self.parts:
+            project = getattr(part, "project_tools", None)
+            if project is not None:
+                tools = project(tools)
+        return tools
+
+    def configure_tool_options(self, options: dict[str, Any]) -> None:
+        """Parts configure native builtins before creation; SDK/extension overrides keep ownership."""
+        for part in self.parts:
+            configure = getattr(part, "configure_tool_options", None)
+            if configure is not None:
+                configure(options)
+
+    def configure_tools(self, definitions: list[Any], extensions: list[Any]) -> list[Any]:
+        """Refresh extension-dependent parts in the same tool-registry transaction.
+
+        This synchronous hook runs at construction, live registration and headless reload,
+        before the existing permission ceiling. Identity matching preserves unrelated SDK
+        and MCP tools, including same-named definitions supplied by another owner.
+        """
+        for part in self.parts:
+            configure = getattr(part, "configure_tools", None)
+            if configure is None:
+                continue
+            previous = tuple(part.tools)
+            configure(extensions)
+            if tuple(map(id, previous)) == tuple(map(id, part.tools)):
+                continue
+            old_ids = {id(tool) for tool in previous}
+            position = next((i for i, tool in enumerate(definitions) if id(tool) in old_ids), len(definitions))
+            definitions = [tool for tool in definitions if id(tool) not in old_ids]
+            definitions[position:position] = part.tools
+        return definitions
+
     async def _call(self, part: Any, name: str, event: dict[str, Any], ctx: Any) -> Any:
         method = getattr(part, name, None)
         if method is None or not callable(method):
@@ -124,6 +160,13 @@ class Moments:
     async def session_start(self, event: dict[str, Any]) -> None:
         await self._notify("session_start", event)
 
+    async def resources_ready(self, event: dict[str, Any]) -> None:
+        """Required resource barrier: failure stops startup, unlike notifications."""
+        for part in self.parts:
+            method = getattr(part, "resources_ready", None)
+            if method is not None:
+                await method(event, self._ctx())
+
     async def session_shutdown(self, event: dict[str, Any]) -> None:
         await self._notify("session_shutdown", event)
 
@@ -135,6 +178,9 @@ class Moments:
 
     async def agent_start(self, event: dict[str, Any]) -> None:
         await self._notify("agent_start", event)
+
+    async def agent_settled(self, event: dict[str, Any]) -> None:
+        await self._notify("agent_settled", event)
 
     async def ui_prompt_start(self, event: dict[str, Any]) -> None:
         await self._notify("ui_prompt_start", event)
@@ -178,6 +224,11 @@ class Moments:
             message = _field(result, "message")
             if message is not None:
                 folded.messages.append(message)
+            # A native part can contribute independent catalog/hook messages.
+            # Keep the existing singular contract and message order unchanged.
+            messages = _field(result, "messages")
+            if isinstance(messages, (list, tuple)):
+                folded.messages.extend(messages)
             replaced = _field(result, "systemPrompt")
             if replaced is not None:
                 folded.system_prompt = str(replaced)
@@ -193,6 +244,18 @@ class Moments:
             result = await self._call(part, "agent_end", event, ctx)
             if _field(result, "block", False):
                 return result
+        return None
+
+    async def session_context_prepare(self, event: dict[str, Any]) -> Any:
+        """First context owner wins; a failed owner is not a request for Pi fallback."""
+        for part in self.parts:
+            method = getattr(part, "session_context_prepare", None)
+            if method is not None:
+                result = method(event, self._ctx())
+                if hasattr(result, "__await__"):
+                    result = await result
+                if result is not None:
+                    return result
         return None
 
     async def session_before_compact(self, event: dict[str, Any]) -> Any:
@@ -212,6 +275,7 @@ class Moments:
             return None
         ctx = self._ctx()
         result: Any = None
+        updated_input = None
         for part in self.parts:
             method = getattr(part, "tool_call", None)
             if method is None:
@@ -221,8 +285,17 @@ class Moments:
                 answer = await answer
             if answer:
                 result = answer
+                changed = _field(answer, "updatedInput", None)
+                if changed is not None:
+                    updated_input = changed
+                    event["input"] = changed
                 if _field(result, "block", False):
                     return result
+        if updated_input is not None:
+            return {"block": _field(result, "block", False),
+                    "reason": _field(result, "reason", None),
+                    "terminate": _field(result, "terminate", None),
+                    "updatedInput": updated_input}
         return result
 
     async def tool_result(self, event: dict[str, Any]) -> Any:
@@ -236,14 +309,17 @@ class Moments:
             result = await self._call(part, "tool_result", current, ctx)
             if result is None:
                 continue
-            for name in ("content", "details", "isError", "usage"):
+            for name in ("content", "details", "isError", "usage", "terminate"):
                 value = _field(result, name, _MISSING)
                 if value is not _MISSING:
                     current[name] = value
                     modified = True
         if not modified:
             return None
-        return {name: current.get(name) for name in ("content", "details", "isError", "usage")}
+        folded = {name: current.get(name) for name in ("content", "details", "isError", "usage")}
+        if "terminate" in current:
+            folded["terminate"] = current["terminate"]
+        return folded
 
     async def input(self, text: str, images: Any, source: Any, streaming_behavior: Any) -> dict[str, Any]:
         """Runner ``emit_input``: the first part to handle the input wins; transforms chain."""

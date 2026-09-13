@@ -8,16 +8,15 @@ MISAKA session: the extension in
 :mod:`misaka.core.skills.wiring.skills` is the one consumer of this index, so a session's
 skills are decided in exactly one place.
 
-Caching, as hermes: an in-process cache per roots and disabled list (dropped by
-``invalidate()``), and for the personal layers a disk snapshot validated by an
-mtime/size manifest of every SKILL.md and DESCRIPTION.md, so a cold start never
-re-reads an unchanged tree. Project entries pass the quarantine scanner after a
+Caching: raw documents per root manifest (dropped by ``invalidate()``); current
+disable and relevance rules are evaluated after lookup. Personal layers also
+use a versioned disk snapshot keyed by the markdown mtime/size manifest, so a
+cold start does not re-parse an unchanged tree. Project entries pass the quarantine scanner after a
 whole-bundle fingerprint changes; external layers are scanned directly.
 """
 import hashlib
 import json
 import os
-import re
 import sys
 from pathlib import Path
 
@@ -26,70 +25,49 @@ from misaka.core.skills.layers import (
     disabled_skill_names,
     home,
     iter_project_skill_files,
+    iter_skill_documents,
     iter_skill_files,
+    parse_skill_name,
     project_skill_tree_fingerprint,
     walk_skill_tree,
 )
 
-_INVALID = re.compile(r"[^a-z0-9-]")
-_MULTI_HYPHEN = re.compile(r"-{2,}")
-_CACHE = {}                 # (roots, disabled) -> (prompt entries, categories, all, runtime entries)
+_CACHE = {}                 # root manifests -> raw documents and category metadata
 _CACHE_MAX = 32
-SNAPSHOT_VERSION = 2
+SNAPSHOT_VERSION = 6
 
 # Cap on description length in the system-prompt skill index (hermes SKILL_PROMPT_DESC_LIMIT).
 # The index lives in every session, so longer descriptions are truncated; learn_prompt's hard
 # "<= 60 characters" rule comes from this limit.
-SKILL_PROMPT_DESC_LIMIT = 60
+from .vendor.metadata import SKILL_PROMPT_DESC_LIMIT
+
 SKILL_LIST_DESC_LIMIT = 1024
-_PLATFORM_MAP = {"macos": "darwin", "linux": "linux", "windows": "win32"}
 
 
 def truncate_skill_description(description):
     """Description for the index: truncate with an ellipsis past the limit (hermes extract_skill_description)."""
-    desc = str(description or "").strip().strip("'\"")
-    if len(desc) > SKILL_PROMPT_DESC_LIMIT:
-        return desc[: SKILL_PROMPT_DESC_LIMIT - 3] + "..."
-    return desc
+    from .vendor.metadata import extract_skill_description
+    return extract_skill_description({"description": description})
 
 
 def is_skill_description_truncated(description):
     """Whether this description would be truncated in the index (used by the linter and /learn)."""
-    return len(str(description or "").strip().strip("'\"")) > SKILL_PROMPT_DESC_LIMIT
+    from .vendor.metadata import is_skill_description_truncated_for_prompt
+    return is_skill_description_truncated_for_prompt({"description": description})
 
 
 def parse_skill_markdown(content):
-    """Hermes' runtime SKILL.md parser: BOM-safe YAML with a key:value fallback.
-
-    Mutation and lint paths deliberately keep using the strict global parser; this
-    lenient parser is only for advertising and loading already-present skills.
-
-    Where the frontmatter *ends* is not part of that difference, and must not be:
-    this parser used to find the closing fence with its own regex, which rejected
-    spellings the strict parser accepts (`----`, a fence at end of file with no
-    trailing newline, text after the fence on the same line). A SKILL.md written
-    through `skill_manage` then validated fine and arrived here as one big body:
-    no name, no description, and `platforms:` silently not enforced. So the two
-    share one boundary implementation, `_extract_frontmatter`, and differ only in
-    how they load the YAML between the fences: strict raises, this one falls back
-    to reading `key: value` lines out of whatever it got.
-    """
-    from misaka.utils.frontmatter import _extract_frontmatter
-
-    yaml_content, body = _extract_frontmatter(content)
-    if yaml_content is None:
-        return {}, body
-    try:
-        import yaml
-        parsed = yaml.load(yaml_content, Loader=getattr(yaml, "CSafeLoader", None) or yaml.SafeLoader)
-        return (parsed if isinstance(parsed, dict) else {}), body
-    except Exception:  # noqa: BLE001 - Hermes recovers useful metadata from malformed YAML
-        frontmatter = {}
-        for line in yaml_content.strip().split("\n"):
-            if ":" in line:
-                key, value = line.split(":", 1)
-                frontmatter[key.strip()] = value.strip()
+    from .vendor.metadata import parse_frontmatter
+    frontmatter, body = parse_frontmatter(content)
+    if body != content.removeprefix("\ufeff"):
         return frontmatter, body
+    # Keep the already-supported Pi fence spellings readable. Hermes handles
+    # all normal input; only the host's older fence grammar is normalized here.
+    from misaka.utils.frontmatter import _extract_frontmatter
+    yaml_text, legacy_body = _extract_frontmatter(content)
+    if yaml_text is not None:
+        return parse_frontmatter("---\n" + yaml_text + "\n---\n" + legacy_body)
+    return frontmatter, body
 
 
 def list_skill_description(frontmatter, body):
@@ -105,21 +83,8 @@ def list_skill_description(frontmatter, body):
 
 
 def skill_matches_platform(frontmatter):
-    """Hermes' top-level ``platforms`` offer/load filter."""
-    platforms = frontmatter.get("platforms")
-    if not platforms:
-        return True
-    if not isinstance(platforms, list):
-        platforms = [platforms]
-    termux = bool(os.environ.get("TERMUX_VERSION")
-                  or "com.termux/files/usr" in os.environ.get("PREFIX", ""))
-    for platform in platforms:
-        mapped = _PLATFORM_MAP.get(str(platform).lower().strip(), str(platform).lower().strip())
-        if sys.platform.startswith(mapped):
-            return True
-        if termux and mapped in ("linux", "termux", "android"):
-            return True
-    return False
+    from .vendor.metadata import skill_matches_platform as matches
+    return matches(frontmatter)
 
 
 def _snapshot_dir():
@@ -128,8 +93,8 @@ def _snapshot_dir():
 
 def slug(name):
     """``Git_Helper`` -> ``git-helper``: how /skill and skill_view accept a name."""
-    value = name.lower().replace(" ", "-").replace("_", "-")
-    return _MULTI_HYPHEN.sub("-", _INVALID.sub("", value)).strip("-")
+    from .vendor.commands import slugify_skill_name
+    return slugify_skill_name(name)
 
 
 def invalidate():
@@ -171,16 +136,19 @@ def _scan_root(root, skill_files=None):
     """Every skill under one layer root, plus the layer's category descriptions, as stored
     in a snapshot: ``{"skills": [...], "categories": {...}}``."""
     skills, categories = [], {}
-    for skill_md in iter_skill_files(root) if skill_files is None else skill_files:
+    for skill_md in iter_skill_documents(root) if skill_files is None else skill_files:
         (prompt_fm, _), (runtime_fm, runtime_body) = _documents(skill_md)
         rel = skill_md.relative_to(root).parts
-        skills.append({"name": str(prompt_fm.get("name") or skill_md.parent.name).strip(),
-                       "runtime_name": str(runtime_fm.get("name") or skill_md.parent.name).strip(),
+        legacy = skill_md.name != "SKILL.md"
+        fallback = skill_md.stem if legacy else skill_md.parent.name
+        skills.append({"name": str(prompt_fm.get("name") or fallback).strip(),
+                       "runtime_name": str(runtime_fm.get("name") or fallback).strip(),
                        "description": truncate_skill_description(str(prompt_fm.get("description") or "")),
                        "list_description": list_skill_description(runtime_fm, runtime_body),
-                       "prompt_compatible": skill_matches_platform(prompt_fm),
-                       "runtime_compatible": skill_matches_platform(runtime_fm),
-                       "category": _category(rel), "rel": "/".join(rel[:-1]),
+                       "prompt_frontmatter": prompt_fm, "frontmatter": runtime_fm,
+                       "legacy": legacy,
+                       "category": ("/".join(rel[:-1]) or "general") if legacy else _category(rel),
+                       "rel": str(Path(*rel).with_suffix("")) if legacy else "/".join(rel[:-1]),
                        "dir": str(skill_md.parent), "path": str(skill_md)})
     for desc_md in iter_skill_files(root, "DESCRIPTION.md"):      # a category's own one-liner
         text = str(_frontmatter(desc_md).get("description") or "").strip().strip("'\"")
@@ -196,8 +164,8 @@ def _manifest(root):
     _build_skills_manifest): the snapshot is valid exactly while this is unchanged."""
     manifest = {}
     for here, files in walk_skill_tree(root):
-        for name in ("SKILL.md", "DESCRIPTION.md"):
-            if name in files:
+        for name in files:
+            if name.endswith(".md") or name in (".misaka-skill-snapshot.json", ".org-provenance.json", ".active_org"):
                 path = os.path.join(here, name)
                 try:
                     st = os.stat(path)
@@ -208,7 +176,7 @@ def _manifest(root):
 
 
 def _snapshot_path(root):
-    digest = hashlib.sha256(str(Path(root).resolve()).encode()).hexdigest()[:16]
+    digest = hashlib.sha256(os.path.abspath(root).encode()).hexdigest()[:16]
     return os.path.join(_snapshot_dir(), f"{digest}.json")
 
 
@@ -219,7 +187,8 @@ def _load_snapshot(root, manifest):
     except (OSError, ValueError):
         return None
     if (not isinstance(snapshot, dict) or snapshot.get("version") != SNAPSHOT_VERSION
-            or snapshot.get("manifest") != manifest):
+            or snapshot.get("manifest") != manifest
+            or snapshot.get("real_root") != os.path.realpath(root)):
         return None
     return snapshot
 
@@ -227,17 +196,23 @@ def _load_snapshot(root, manifest):
 def _write_snapshot(root, manifest, scanned):
     path = _snapshot_path(root)
     try:
-        os.makedirs(_snapshot_dir(), exist_ok=True)
-        with open(path + ".tmp", "w", encoding="utf-8") as f:
-            json.dump({"version": SNAPSHOT_VERSION, "root": str(root), "manifest": manifest, **scanned}, f)
-        os.replace(path + ".tmp", path)
-    except OSError:
+        from misaka.utils.atomic import write_text
+        write_text(path, json.dumps({"version": SNAPSHOT_VERSION, "root": str(root),
+                                    "real_root": os.path.realpath(root), "manifest": manifest, **scanned}))
+    except (OSError, TypeError, ValueError):
         pass                                       # best effort: the next start scans again
 
 
 def _layer(layer, root):
     """A layer's skills: from its snapshot when the tree is unchanged (personal layers), else
     a scan -- written back as the new snapshot."""
+    if layer == "sandbox":
+        from .sandbox import read_manifest
+        if manifest := read_manifest(root):
+            for entry in manifest["entries"]:
+                (prompt, _), (runtime, _) = _documents(entry["path"])
+                entry["prompt_frontmatter"], entry["frontmatter"] = prompt, runtime
+            return {"skills": manifest["entries"], "categories": manifest.get("categories", {})}
     if layer == "project":
         return _scan_root(root, iter_project_skill_files(root))
     if layer not in PERSONAL_LAYERS:
@@ -252,53 +227,93 @@ def _layer(layer, root):
 
 # ── the index ─────────────────────────────────────────────────────────────
 
-def _assemble(roots, disabled):
-    entries, runtime_entries, categories, all_entries = [], [], {}, []
-    prompt_names, runtime_names = set(), set()
+def _assemble(roots):
+    categories, all_entries = {}, []
+    # A provider label never changes ownership. Reuse the project's admitted
+    # collection for aliases (including symlink targets and nested/parent roots),
+    # rather than letting a second discovery path bypass its quarantine.
+    project_scans = {root: _layer(layer, root) for layer, root in roots if layer == "project"}
+    project_roots = [Path(root).resolve() for root in project_scans]
+    project_documents = {str(path.resolve()) for root in project_scans for path in iter_skill_documents(root)}
+    project_admitted = {str(Path(e["path"]).resolve()): e for scan in project_scans.values() for e in scan["skills"]}
     for layer, root in roots:
-        scanned = _layer(layer, root)
+        scanned = project_scans[root] if layer == "project" else _layer(layer, root)
         for skill in scanned["skills"]:
-            entry = {**skill, "layer": layer}
-            if ({entry["name"], entry.get("runtime_name", entry["name"]), Path(entry["dir"]).name}
-                    & disabled):
+            owned_path = Path(skill["path"]).resolve()
+            project = (str(owned_path) in project_documents or any(owned_path.is_relative_to(p) for p in project_roots))
+            owner = project_admitted.get(str(owned_path)) if project else None
+            if project and owner is None:
                 continue
+            namespace = layer.removeprefix("extension:") if layer.startswith("extension:") else None
+            entry = {**skill, "identity_path": skill.get("identity_path", os.path.realpath(skill["path"])), "layer": skill.get("origin_layer", "extension" if namespace else layer), "root": str(root),
+                     "prompt_compatible": skill_matches_platform(skill.get("prompt_frontmatter", {})),
+                     "runtime_compatible": skill_matches_platform(skill.get("frontmatter", {}))}
+            if namespace:
+                if namespace.startswith("<inline:"):
+                    # Use underscore-style public names for inline skills without
+                    # rewriting their source documents or directory names.
+                    for key in ("name", "runtime_name"):
+                        entry[key] = entry[key].replace("-", "_")
+                entry.update(namespace=namespace, bare_name=entry["runtime_name"],
+                             extension_root=str(root))
+                entry["name"] = f"{namespace}:{entry['name']}"
+                entry["runtime_name"] = f"{namespace}:{entry['runtime_name']}"
+            if owner is not None:
+                entry.update(layer="project", origin_layer="project", project_name=owner["runtime_name"], project_rel=owner["rel"])
+            if layer != "sandbox":
+                from .vendor.org_header import _org_provenance_header
+                entry["org_provenance"], entry["org_header"] = _org_provenance_header(Path(entry["dir"]), Path(root))
             all_entries.append(entry)
-            if entry.get("prompt_compatible", True) and entry["name"] not in prompt_names:
-                prompt_names.add(entry["name"])
-                entries.append(entry)
-            runtime_name = entry.get("runtime_name", entry["name"])
-            if entry.get("runtime_compatible", True) and runtime_name not in runtime_names:
-                runtime_names.add(runtime_name)
-                runtime_entries.append(entry)
         for category, text in scanned["categories"].items():
             categories.setdefault(category, text)
-    return entries, categories, all_entries, runtime_entries
-
-
-def _key(roots):
-    return tuple((str(layer), str(root)) for layer, root in roots), tuple(sorted(disabled_skill_names()))
+    sources, project_sources = {}, {}
+    for entry in all_entries:
+        if entry.get("runtime_compatible", True):
+            for name in {entry["name"], entry.get("runtime_name", entry["name"])}:
+                source = os.path.realpath(entry["path"])
+                sources.setdefault(name, set()).add(source)
+                if entry["layer"] == "project":
+                    project_sources.setdefault(name, set()).add(source)
+    for entry in all_entries:
+        if entry.get("namespace"):
+            entry["siblings"] = sorted({e["bare_name"] for e in all_entries
+                if e.get("namespace") == entry["namespace"] and e["bare_name"] != entry["bare_name"]})
+    for entry in all_entries:
+        if any(len(project_sources.get(name) or sources.get(name, ())) > 1 for name in
+               (entry["name"], entry.get("runtime_name", entry["name"]))):
+            entry["source"] = entry["path"]
+    return {"entries": all_entries, "categories": categories}
 
 
 def _cached(roots):
-    """Assemble once per (roots, disabled, on-disk state).
-
-    Personal/external roots use the metadata-file manifest; project roots fingerprint the
-    whole bundle so a support-file edit re-runs quarantine. An unchanged tree pays only
-    filesystem metadata reads instead of YAML parsing and security scans.
-    """
-    normalized_roots, disabled = _key(roots)
-    key = (normalized_roots, disabled,
-           tuple(sorted((layer, _root_fingerprint(layer, root))
-                        for layer, root in normalized_roots)))
+    """Cache metadata only. Live policy and offer context are evaluated outside it."""
+    normalized_roots = tuple((str(layer), str(root)) for layer, root in roots)
+    key = (normalized_roots, tuple(os.path.realpath(r) for _, r in normalized_roots), sys.platform,
+           os.environ.get("TERMUX_VERSION"), os.environ.get("PREFIX"),
+           tuple((layer, _root_fingerprint(layer, root)) for layer, root in normalized_roots))
     entry = _CACHE.get(key)
     if entry is None:
-        entry = _CACHE[key] = _assemble(normalized_roots, set(disabled))
+        entry = _CACHE[key] = _assemble(normalized_roots)
         while len(_CACHE) > _CACHE_MAX:
             _CACHE.pop(next(iter(_CACHE)))
     else:
         _CACHE.pop(key)
         _CACHE[key] = entry
     return entry
+
+
+def is_disabled(entry, platform="cli", *, disabled=None):
+    names = {entry["name"], entry.get("runtime_name", entry["name"])}
+    if entry.get("project_name"):
+        names.update((entry["project_name"], entry["project_rel"]))
+    if entry.get("namespace"):
+        names.add(f"{entry['namespace']}:{entry['rel']}")
+    elif entry.get("legacy"):
+        names.update((entry["rel"], Path(entry.get("origin_path", entry["path"])).stem))
+    else:
+        names.update((entry["rel"], Path(entry["dir"]).name, Path(entry.get("origin_dir", entry["dir"])).name))
+    return bool(names & (set(disabled_skill_names(platform)) if disabled is None else disabled))
+
 
 
 def _manifest_digest(root):
@@ -314,42 +329,70 @@ def _root_fingerprint(layer, root):
             else _manifest_digest(root))
 
 
-def build(roots):
-    """Index entries ``{"name", "description", "category", "layer", "dir", "path"}`` for the
-    layer roots (``(layer, root)`` in precedence order): names first-wins, so a project skill
-    shadows a role, shared, or external one of the same name; the ``disabled`` list honoured;
-    the description cut to the prompt limit; the category read from the path inside the
-    layer (``finance/fmp-data`` -> ``finance``, a skill right under the root -> ``general``)."""
-    return _cached(roots)[0]
+def _offered_entries(roots, *, prompt, platform="cli", tools=None, toolsets=None, detect=None):
+    from .visibility import offered
+    seen, out = set(), []
+    disabled = set(disabled_skill_names(platform))
+    for entry in _cached(roots)["entries"]:
+        compatible = "prompt_compatible" if prompt else "runtime_compatible"
+        fm = "prompt_frontmatter" if prompt else "frontmatter"
+        name = entry["name"] if prompt else entry.get("runtime_name", entry["name"])
+        if (entry.get("legacy") or not entry.get(compatible, True) or is_disabled(entry, platform, disabled=disabled)
+                or not offered(entry.get(fm, {}), tools=tools, toolsets=toolsets, platform=platform,
+                               detect=detect, conditions=prompt) or name in seen):
+            continue
+        seen.add(name)
+        out.append(dict(entry))
+    return out
 
 
-def runtime_build(roots):
-    """Entries for list/view/invocation, decoded like Hermes' runtime tools."""
-    return _cached(roots)[3]
+def build(roots, *, platform="cli", available_tools=None, available_toolsets=None, detect=None):
+    """First visible source wins. Relevance affects advertising, never explicit reads."""
+    return _offered_entries(roots, prompt=True, platform=platform, tools=available_tools,
+                            toolsets=available_toolsets, detect=detect)
+
+
+def runtime_build(roots, *, platform="cli", detect=None):
+    return _offered_entries(roots, prompt=False, platform=platform, detect=detect)
 
 
 def categories(roots):
-    """``{category: description}`` from the layers' DESCRIPTION.md files (hermes)."""
-    return _cached(roots)[1]
+    return dict(_cached(roots)["categories"])
 
 
-def candidates(roots, name):
-    """Every skill a name could mean, across the layers -- shadowed ones included.
-    ``skill_view`` refuses to guess between them (hermes collision rule); the index itself
-    keeps the first."""
-    wanted = (name or "").strip()
+def all_entries(roots, *, platform="cli", include_disabled=False):
+    """All admitted read candidates, including unoffered and shadowed objects."""
+    disabled = set() if include_disabled else set(disabled_skill_names(platform))
+    return [dict(e) for e in _cached(roots)["entries"] if e.get("runtime_compatible", True) and not is_disabled(e, platform, disabled=disabled)]
+
+
+def candidates(roots, name, *, platform="cli", include_disabled=False):
+    from .vendor.metadata import is_valid_namespace
+    raw = (name or "").strip()
+    disabled = set() if include_disabled else set(disabled_skill_names(platform))
+    entries = [e for e in _cached(roots)["entries"] if not is_disabled(e, platform, disabled=disabled)]
+    namespace, bare = parse_skill_name(raw)
+    if namespace is not None:
+        # A known provider owns its prefix even if this particular skill is absent.
+        providers = [e for e in _cached(roots)["entries"] if e.get("namespace") == namespace]
+        if providers:
+            return [e for e in entries if e.get("namespace") == namespace and bare in
+                    (e.get("bare_name"), e["rel"], Path(e["dir"]).name)]
+        if not is_valid_namespace(namespace):
+            return []
+    wanted = raw.replace(":", "/")
     key = slug(wanted)
-    all_entries = _cached(roots)[2]
-    exact = [entry for entry in all_entries
-             if wanted in (entry["name"], entry.get("runtime_name", entry["name"]), entry["rel"])]
-    return exact or [entry for entry in all_entries
-                     if key and any(slug(candidate) == key for candidate in
-                                    (entry["name"], entry.get("runtime_name", entry["name"])))]
+    exact = [e for e in entries if wanted in (e["name"], e.get("runtime_name", e["name"]), e["rel"], e.get("bare_name"))]
+    found = exact or [e for e in entries if key and any(slug(n) == key for n in
+        (e["name"], e.get("runtime_name", e["name"]), e.get("bare_name", "")))]
+    # Preserve old unqualified extension references only when no local skill
+    # owns that spelling. Normal advertised extension names are qualified.
+    return [e for e in found if not e.get("namespace")] or found
 
 
 def find(entries, name):
     """The index entry a name refers to."""
-    wanted = (name or "").strip()
+    wanted = (name or "").strip().replace(":", "/")
     key = slug(wanted)
     exact = next((entry for entry in entries
                   if wanted in (entry["name"], entry.get("runtime_name", entry["name"]), entry["rel"])), None)
@@ -369,16 +412,20 @@ def index_lines(entries, category_descriptions=None, compact=(), *,
     by_category = {}
     for entry in entries:
         by_category.setdefault(entry["category"], []).append(entry)
+    def label(entry):
+        name = entry.get(name_key, entry["name"])
+        return f"{name} [source={entry['source']}]" if entry.get("source") else name
+
     lines = []
     for category in sorted(by_category):
         if category.split("/", 1)[0] in compact:
-            names = sorted({entry.get(name_key, entry["name"]) for entry in by_category[category]})
+            names = sorted({label(entry) for entry in by_category[category]})
             lines.append(f"  {category} [names only]: {', '.join(names)}")
             continue
         text = (category_descriptions or {}).get(category, "")
         lines.append(f"  {category}: {text}" if text else f"  {category}:")
         for entry in sorted(by_category[category], key=lambda e: e.get(name_key, e["name"])):
-            name = entry.get(name_key, entry["name"])
+            name = label(entry)
             desc = entry.get(description_key, entry["description"])
             if entry["layer"] == "project":
                 desc = f"[project] {desc}".strip()
@@ -386,41 +433,89 @@ def index_lines(entries, category_descriptions=None, compact=(), *,
     return lines
 
 
-PROMPT_HEAD = (
-    "## Skills (mandatory)\n"
-    "Before replying, scan the skills below. If a skill matches or is even partially relevant "
-    "to your task, you MUST load it with skill_view(name) and follow its instructions. "
-    "Err on the side of loading — it is always better to have context you don't need "
-    "than to miss critical steps, pitfalls, or established workflows. "
-    "Skills contain specialized knowledge — API endpoints, tool-specific commands, "
-    "and proven workflows that outperform general-purpose approaches. Load the skill "
-    "even if you think you could handle the task with basic tools. "
-    "Skills also encode the user's preferred approach, conventions, and quality standards "
-    "for tasks like code review, planning, and testing — load them even for tasks you "
-    "already know how to do, because the skill defines how it should be done here.\n"
-    "If a skill has issues, fix it with skill_manage(action='patch').\n"
-    "After difficult/iterative tasks, offer to save as a skill. "
-    "If a skill you loaded was missing steps, had wrong commands, or needed "
-    "pitfalls you discovered, update it before finishing.\n"
-)
-PROMPT_FOOT = "Only proceed without loading a skill if genuinely none are relevant to the task."
-COMPACT_NOTE = (
-    "\n(Categories marked [names only] are outside the current coding "
-    "context, so their descriptions are omitted — the skills work "
-    "normally and load with skill_view(name) as usual.)"
-)
+def render_prompt(entries, category_descriptions=None, compact=(), *, can_manage=True, available_tools=None):
+    from .vendor.visibility import _render_skills_index
+    grouped = {}
+    for entry in entries:
+        name = entry["name"]
+        if entry.get("source"):
+            name += f" [source={entry['source']}]"
+        desc = entry["description"]
+        if entry["layer"] == "project":
+            desc = f"[project] {desc}".strip()
+        grouped.setdefault(entry["category"], []).append((name, desc))
+    result = _render_skills_index(grouped, category_descriptions or {}, compact, available_tools)
+    if not can_manage:
+        # Only remove the native write guidance, never text supplied by a skill.
+        head, marker, tail = result.partition("<available_skills>")
+        start = head.find("If a skill has issues, fix it with skill_manage")
+        if start >= 0:
+            head = head[:start] + "\n"
+        result = head + marker + tail
+    if result and any(e.get("source") for e in entries):
+        result = result.replace("## Skills\n", "## Skills\nFor entries marked source=..., pass that path as source to skill_view to resolve the name.\n", 1)
+    # The native prose names terminal; only its static pre-index prose is mapped.
+    head, marker, tail = result.partition("<available_skills>")
+    if available_tools is not None:
+        shell = "bash" if "bash" in available_tools else "powershell" if "powershell" in available_tools else None
+        basic = " or ".join(t for t in ("web_search" if "web_search" in available_tools else None, shell) if t)
+        head = head.replace("basic tools like web_search or terminal", "basic tools" + (" like " + basic if basic else ""))
+        head = head.replace("basic tools like terminal", "basic tools" + (" like " + basic if basic else ""))
+    return head + marker + tail
 
 
-def render_prompt(entries, category_descriptions=None, compact=()):
-    """The system-prompt section advertising the index (hermes wording), or "" when there
-    is nothing to advertise."""
-    if not entries:
-        return ""
-    lines = index_lines(entries, category_descriptions, compact)
-    demoted = any(line.lstrip().split(" [names only]:")[0] != line.lstrip() for line in lines)
-    return (PROMPT_HEAD + "\n<available_skills>\n" + "\n".join(lines)
-            + "\n</available_skills>\n\n" + PROMPT_FOOT + (COMPACT_NOTE if demoted else ""))
-
-
-__all__ = ["build", "candidates", "categories", "find", "index_lines", "invalidate",
+__all__ = ["SKILL_PROMPT_DESC_LIMIT", "build", "candidates", "categories", "find", "index_lines", "invalidate",
            "parse_skill_markdown", "render_prompt", "runtime_build", "skill_matches_platform", "slug"]
+
+
+def resolve(roots, name, *, source=None, platform="cli", include_disabled=False, require_compatible=True):
+    """Select one admitted identity. Absolute references match indexed origins only."""
+    wanted = str(name or "").strip()
+    if source or Path(wanted).expanduser().is_absolute():
+        selected = os.path.abspath(os.path.expanduser(source or wanted))
+        found = [e for e in _cached(roots)["entries"] if selected in {
+            e["path"], e["dir"], e.get("origin_path"), e.get("origin_dir"),
+            os.path.realpath(e["path"]), os.path.realpath(e["dir"])}]
+        if source:
+            ids = {e["path"] for e in candidates(roots, wanted, platform=platform, include_disabled=include_disabled)}
+            found = [e for e in found if e["path"] in ids]
+    else:
+        found = candidates(roots, wanted, platform=platform, include_disabled=include_disabled)
+        if require_compatible:
+            found = [e for e in found if e.get("runtime_compatible", True)] or found
+        exact = [e for e in found if e["rel"] == wanted.replace(":", "/")]
+        found = exact or found
+        found = [e for e in found if e["layer"] == "project"] or found
+    unique = {e.get("identity_path", os.path.realpath(e["path"])): e for e in found}
+    if len(unique) > 1:
+        return None, f"Ambiguous skill name '{name}': pass source with one exact SKILL.md path: " + "; ".join(e["path"] for e in unique.values())
+    entry = next(iter(unique.values()), None)
+    if entry is None:
+        return None, f"Unknown skill '{name}'."
+    if not include_disabled and is_disabled(entry, platform):
+        return None, f"Skill '{name}' is disabled."
+    if require_compatible and not entry.get("runtime_compatible", True):
+        return None, f"Skill '{name}' is not supported on this platform."
+    return dict(entry), None
+
+
+def resolve_definition(roots, name, base_dir=None, *, platform="cli"):
+    """Trusted definition-local compatibility, never a disabled-layer escape hatch."""
+    entry, error = resolve(roots, name, platform=platform)
+    if entry is not None or not base_dir or any(layer == "sandbox" for layer, _ in roots):
+        return entry, error
+    direct = Path(name).expanduser()
+    if not direct.is_absolute():
+        direct = Path(base_dir) / direct
+    path = direct / "SKILL.md" if direct.is_dir() else direct
+    if not path.is_file() or path.suffix.lower() != ".md":
+        return None, error
+    if any(path.resolve().is_relative_to(Path(root).resolve()) for _, root in roots):
+        return None, error
+    fm, body = parse_skill_markdown(path.read_text(encoding="utf-8-sig", errors="replace"))
+    canonical = str(fm.get("name") or path.parent.name)
+    if {canonical, path.parent.name, name} & set(disabled_skill_names(platform)) or not skill_matches_platform(fm):
+        return None, error
+    return {"name": canonical, "runtime_name": canonical, "path": str(path), "dir": str(path.parent),
+            "layer": "definition", "rel": path.parent.name, "frontmatter": fm,
+            "list_description": list_skill_description(fm, body)}, None

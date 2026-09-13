@@ -23,24 +23,19 @@ import subprocess
 import sys
 from typing import Any
 
+from misaka.core.web.accounting import account_call
 from misaka.core.web.config import without_credentials
 from misaka.core.web.provider import WebSearchProvider
+from misaka.core.web.timeouts import ddgs_request_timeout, operation_seconds
+from misaka.utils.async_lifecycle import settle
 
 logger = logging.getLogger(__name__)
-
-# Overall wall-clock cap for a single ddgs search. The DDGS constructor's ``timeout`` only
-# bounds individual HTTP requests; ddgs's multi-engine retry loop has no overall cap, so a
-# slow or rate-limited DuckDuckGo response can hang the caller indefinitely. The hard cap
-# is enforced here by killing the worker process.
-_SEARCH_TIMEOUT_SECS = 30
 
 # After terminate(), wait this long before escalating to kill().
 _TERMINATE_GRACE_SECS = 1.0
 
-_WORKER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_ddgs_worker.py")
 
-
-def _run_ddgs_search(query: str, safe_limit: int) -> list[dict[str, Any]]:
+def _run_ddgs_search(query: str, safe_limit: int, request_timeout: float) -> list[dict[str, Any]]:
     """Run the blocking ddgs query and return normalized hits.
 
     Module-level (not a closure) so the child worker can import it and so tests can patch
@@ -50,7 +45,7 @@ def _run_ddgs_search(query: str, safe_limit: int) -> list[dict[str, Any]]:
     from ddgs import DDGS
 
     results: list[dict[str, Any]] = []
-    with DDGS(timeout=10) as client:
+    with DDGS(timeout=request_timeout, verify=os.environ.get("SSL_CERT_FILE") or True) as client:
         for i, hit in enumerate(client.text(query, max_results=safe_limit)):
             if i >= safe_limit:
                 break
@@ -68,16 +63,17 @@ def _run_ddgs_search(query: str, safe_limit: int) -> list[dict[str, Any]]:
 
 def _worker_argv() -> list[str]:
     """Command that runs the search worker. The seam tests replace with a stub script."""
-    return [sys.executable, _WORKER_PATH]
+    # A script in backends/ shadows the external ddgs package with our ddgs.py.
+    # -P also excludes an unrelated module in the caller's working directory.
+    return [sys.executable, "-P", "-m", "misaka.core.web.backends._ddgs_worker"]
 
 
 def _worker_env() -> dict[str, str]:
     """Child environment with MISAKA importable and no credentials in it.
 
-    Running the worker as a script puts its own directory on ``sys.path[0]``, which is not
-    enough to ``import misaka``; the repo (or site-packages) root is prepended instead,
-    resolved from the live package rather than by counting ``dirname`` calls -- that stays
-    correct for both a source checkout and an installed wheel.
+    The worker uses safe module execution (-P -m). Supply the repo/site-packages root
+    explicitly, resolved from the live package rather than the working directory;
+    this works for both a source checkout and an installed wheel.
 
     Every credential-shaped variable is stripped first. Hermes runs this same worker under
     ``_sanitize_subprocess_env`` for the same reason: the child exists to hand one query to
@@ -85,8 +81,25 @@ def _worker_env() -> dict[str, str]:
     those keys could leave the machine on this path.
     """
     import misaka
+    from misaka.core.web.config import provider_env
+    from misaka.core.web.network import TLS_VARIABLES, _proxy_url, proxy_environment
+    from misaka.core.web.scope import current_scope
 
-    env = without_credentials(dict(os.environ))
+    snapshot = current_scope().environment
+    env = without_credentials(dict(os.environ if snapshot is None else snapshot))
+    # Native transports read their own proxy environment. Normalize precedence
+    # before spawning; never mutate the parent process or inherit application keys.
+    for name, value in proxy_environment().items():
+        env.pop(name.lower(), None)
+        if value and name != "NO_PROXY":
+            value = _proxy_url(value, name)
+        env[name] = value
+    for name in TLS_VARIABLES:
+        env[name] = provider_env(name)
+    if provider_env("SSL_CERT_DIR") and not provider_env("SSL_CERT_FILE"):
+        raise ValueError("DDGS needs SSL_CERT_FILE (a PEM bundle); its native client has no CA-directory option")
+    native_proxy = provider_env("DDGS_PROXY")
+    env["DDGS_PROXY"] = _proxy_url(native_proxy, "DDGS_PROXY") if native_proxy else ""
     root = os.path.dirname(os.path.dirname(os.path.abspath(misaka.__file__)))
     existing = env.get("PYTHONPATH", "")
     if root and root not in existing.split(os.pathsep):
@@ -106,14 +119,11 @@ async def _terminate_and_reap(proc: asyncio.subprocess.Process) -> None:
         except TimeoutError:
             pass
         proc.kill()
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=_TERMINATE_GRACE_SECS)
-        except TimeoutError:
-            logger.warning("DDGS worker pid=%s did not exit after kill", proc.pid)
     except ProcessLookupError:
         pass  # already gone between the poll and the signal
-    except Exception as exc:  # noqa: BLE001 - best-effort cleanup
-        logger.debug("DDGS worker reap error: %s", exc)
+    # The deadline starts cancellation; it is not permission to leave the worker
+    # unowned after SIGKILL. Reaping may take longer than the grace interval.
+    await proc.wait()
 
 
 async def _run_ddgs_search_bounded(query: str, safe_limit: int) -> list[dict[str, Any]]:
@@ -123,11 +133,15 @@ async def _run_ddgs_search_bounded(query: str, safe_limit: int) -> list[dict[str
     answers with nothing usable. A cancellation (the session aborting the tool) kills the
     child on the way out rather than leaving it to finish a search nobody wants.
     """
-    request = json.dumps({"query": query, "safe_limit": safe_limit}).encode()
+    seconds = operation_seconds("ddgs")
+    if seconds == 0:
+        raise TimeoutError("DuckDuckGo search deadline is 0s; no worker started")
+    request = json.dumps({"query": query, "safe_limit": safe_limit,
+                          "request_timeout": ddgs_request_timeout()}).encode()
     spawn: dict[str, Any] = (
         {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
         if sys.platform == "win32"
-        # Own session so a hung native grandchild is reaped with the worker.
+        # Keep terminal signals separate from the parent's awaited cleanup.
         else {"start_new_session": True}
     )
     proc = await asyncio.create_subprocess_exec(
@@ -141,19 +155,20 @@ async def _run_ddgs_search_bounded(query: str, safe_limit: int) -> list[dict[str
         **spawn,
     )
     try:
-        raw, _err = await asyncio.wait_for(
-            proc.communicate(request), timeout=_SEARCH_TIMEOUT_SECS
-        )
+        # DDGS owns its engine HTTP internally. Record the observable operation,
+        # not a fabricated count of the hidden requests it might make.
+        async with account_call("web_search", "ddgs", query, unit="provider_operation"):
+            raw, _err = await asyncio.wait_for(
+                proc.communicate(request), timeout=seconds
+            )
     except TimeoutError:
-        await _terminate_and_reap(proc)
         raise TimeoutError(
-            f"DuckDuckGo search timed out after {_SEARCH_TIMEOUT_SECS}s"
+            f"DuckDuckGo search timed out after {seconds:g}s"
         ) from None
-    except asyncio.CancelledError:
-        await _terminate_and_reap(proc)
-        raise
     finally:
-        await _terminate_and_reap(proc)
+        _, cancelled = await settle(asyncio.create_task(_terminate_and_reap(proc)))
+        if cancelled is not None:
+            raise cancelled
 
     text = (raw or b"").decode("utf-8", "replace").strip()
     if not text:
@@ -221,14 +236,14 @@ class DDGSWebSearchProvider(WebSearchProvider):
 
         try:
             web_results = await _run_ddgs_search_bounded(query, safe_limit)
-        except TimeoutError:
+        except TimeoutError as error:
             logger.warning(
-                "DDGS search timed out after %ds for query: %r", _SEARCH_TIMEOUT_SECS, query
+                "DDGS search reached its operation timeout for query: %r", query
             )
             return {
                 "success": False,
                 "error": (
-                    f"DuckDuckGo search timed out after {_SEARCH_TIMEOUT_SECS}s - "
+                    f"{error} - "
                     "DuckDuckGo may be rate-limiting or slow. Try again later "
                     "or switch to a different search provider."
                 ),
@@ -240,10 +255,11 @@ class DDGSWebSearchProvider(WebSearchProvider):
         logger.info("DDGS search '%s': %d results (limit %d)", query, len(web_results), limit)
         return {"success": True, "data": {"web": web_results}}
 
-    def setup_hint(self) -> dict[str, Any]:
+    def get_setup_schema(self) -> dict[str, Any]:
         return {
             "name": "DuckDuckGo (ddgs)",
             "badge": "free - no key - search only",
             "tag": "Search via the ddgs Python package - no API key",
             "env_vars": [],
+            "post_setup": "ddgs",
         }

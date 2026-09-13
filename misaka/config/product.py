@@ -70,22 +70,29 @@ CFG = {
     # Addressed here rather than expanded from ``~`` at the call site so a test run
     # cannot reach the developer's own cache -- the same reason web_config is here.
     "web_cache": os.environ.get("MISAKA_WEB_CACHE", "~/.misaka/cache/web"),
+    # Rendered Office markdown, keyed by (path, size, mtime): a continuation read of a
+    # 50-sheet workbook must not re-parse it. Addressed here for the same reason
+    # ``web_cache`` is -- a test run must not reach the developer's own cache.
+    "office_cache": os.environ.get("MISAKA_OFFICE_CACHE", "~/.misaka/cache/office"),
+    # What the model actually asked the office tool to write, one JSON per call. A
+    # deliverable that came out wrong is otherwise unexplainable: the ops that produced it
+    # are gone the moment the call returns, leaving only the file and a receipt saying it
+    # worked.
+    "office_intent": os.environ.get("MISAKA_OFFICE_INTENT", "~/.misaka/office_intent"),
     "net_sock": os.environ.get("MISAKA_NET_SOCK", "~/.misaka/net.sock"),
     "net_snapshot": os.environ.get("MISAKA_NET_SNAPSHOT", "~/.misaka/net.json"),
-    "tasks_root": os.path.expanduser(os.environ.get("MISAKA_TASKS", "~/.misaka/tasks")),
+    "tasks_root": os.path.realpath(os.path.expanduser(os.environ.get("MISAKA_TASKS", "~/.misaka/tasks"))),
     # As in pi: personalities are user data and live next to skills/MCP under
     # ~/.misaka/profiles/<role>/, never in the source tree.
     "profiles_root": os.path.join(ROLES_ROOT, "sisters"),
     "roles_root": ROLES_ROOT,
     "judge_timeout": _number("MISAKA_JUDGE_TIMEOUT", "600", int),
     "token_cap": _number("MISAKA_TOKEN_CAP", "0", int),
+    # A node's plan waits for the user's go-ahead (recorded by its Last Order once they agree in
+    # conversation) before any card is created. Off for unattended runs and tests.
+    "research_plan_approval": os.environ.get("MISAKA_RESEARCH_PLAN_APPROVAL", "1").strip().lower()
+    not in {"0", "false", "no", "off", ""},
     "lcm_db": os.environ.get("MISAKA_LCM_DB", "~/.misaka/lcm.db"),
-    "lcm_summary_provider": os.environ.get("MISAKA_LCM_SUMMARY_PROVIDER", ""),
-    "lcm_summary_model": os.environ.get("MISAKA_LCM_SUMMARY_MODEL", ""),
-    "lcm_summary_fallback_models": os.environ.get("MISAKA_LCM_SUMMARY_FALLBACK_MODELS", ""),
-    "lcm_summary_timeout": _number("MISAKA_LCM_SUMMARY_TIMEOUT", "60", float),
-    "lcm_retrieval_mode": os.environ.get("MISAKA_LCM_RETRIEVAL_MODE", "fts"),
-    "lcm_embedding_model": os.environ.get("MISAKA_LCM_EMBEDDING_MODEL", ""),
 }
 
 

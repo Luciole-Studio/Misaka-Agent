@@ -1,11 +1,8 @@
-"""Git for projects (git unification): one repository per project.
-
-Cards commit on whatever line their workspace is checked out on: the project folder
-(default branch) or a research node's worktree. Research nodes are the only branches:
-``research/<node>`` forks from its parent node's branch and merges back when the node
-closes. A folder that is not a repository with a commit degrades every function to a
-no-op, so nothing below requires git.
+"""Optional project Git history. Research and cards write directly into the project;
+commits record selected artifacts, never deliver them through branches or merges.
 """
+import fcntl
+import functools
 import os
 import subprocess
 import time
@@ -32,10 +29,33 @@ def enabled(workspace):
         return False
 
 
+def _serialized(operation):
+    @functools.wraps(operation)
+    def locked(workspace, *args, **kwargs):
+        if not enabled(workspace):
+            return operation(workspace, *args, **kwargs)
+        common = _git(workspace, "rev-parse", "--git-common-dir")
+        if common.returncode:
+            raise OSError(common.stderr.strip())
+        directory = os.path.realpath(os.path.join(workspace, common.stdout.strip()))
+        # ponytail: one repository lock; split by worktree only if Git throughput warrants it.
+        # Git's index.lock protects one command, not add/commit sequences.
+        with open(os.path.join(directory, "misaka-git.lock"), "a", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            return operation(workspace, *args, **kwargs)
+    return locked
+
+
+@_serialized
 def commit(workspace, paths, message):
     """Commit ``paths`` (relative to ``workspace``) on the line checked out there. A path that is
     gone from disk but tracked is committed as a deletion; a path git has never seen is skipped.
     True when the paths are committed (a commit was made, or there was nothing left to commit)."""
+    return _commit(workspace, paths, message)
+
+
+def _commit(workspace, paths, message):
+    """Commit with the repository mutation lock already held."""
     if not enabled(workspace):
         return False
     paths = [p for p in paths
@@ -53,55 +73,8 @@ def commit(workspace, paths, message):
     return _git(workspace, "commit", "-q", "-m", message, "--", *paths).returncode == 0
 
 
-def branch_merged(workspace, name, into=None):
-    """True when branch ``name`` is already contained in the line checked out at ``into``."""
-    return enabled(workspace) and _git(into or workspace, "merge-base", "--is-ancestor", name, "HEAD").returncode == 0
-
-
-def commit_card(workspace, task_id, report, message):
-    """A card's submission: the artifacts its report lists plus its contract and inputs."""
-    return commit(workspace, [*(report.get("artifacts") or []),
+def commit_card(workspace, task_id, submission, message):
+    """Commit a card's submitted artifacts together with its contract and inputs."""
+    return commit(workspace, [*(submission.get("artifacts") or []),
                               os.path.join("cards", f"{task_id}.md"),
                               os.path.join("cards", str(task_id))], message)
-
-
-def branch_start(workspace, name, worktree, base=None):
-    """Check branch ``name`` out into ``worktree``, creating it from ``base`` (default: the
-    workspace's HEAD) when new. Reuses a live worktree. Returns the path, or None when degraded."""
-    if not enabled(workspace):
-        return None
-    if os.path.exists(os.path.join(worktree, ".git")):
-        return worktree
-    os.makedirs(os.path.dirname(worktree), exist_ok=True)
-    _git(workspace, "worktree", "prune")                # a deleted directory may still be registered
-    if _git(workspace, "rev-parse", "--verify", "-q", name).returncode == 0:
-        made = _git(workspace, "worktree", "add", "-q", worktree, name)
-    else:
-        made = _git(workspace, "worktree", "add", "-q", "-b", name, worktree, *([base] if base else []))
-    return worktree if made.returncode == 0 else None
-
-
-def branch_finish(workspace, name, worktree, *, into=None, merge=True, message="", remove=True):
-    """Close a branch: leftover work is committed, then -- when ``merge`` -- the branch is merged
-    --no-ff into the line checked out at ``into`` (default: the workspace), and only then is a
-    completely clean worktree removed without force. A conflict, leftover ignored/untracked work,
-    or a failed removal leaves the worktree in place for a human; nothing unknown is discarded.
-    The branch itself always stays as the record. Returns "merged" / "conflict" / "closed" / None."""
-    if not enabled(workspace):
-        return None
-    live = os.path.exists(os.path.join(worktree, ".git"))
-    if live and not commit(worktree, ["."], f"{name}: leftover changes"):
-        return "conflict"                              # uncommitted work stays where it is
-    if live:
-        status = _git(worktree, "status", "--porcelain=v1", "--untracked-files=all", "--ignored")
-        if status.returncode != 0 or status.stdout.strip():
-            return "conflict"                          # ignored/untracked work is not part of the commit
-    if merge:
-        merged = _git(into or workspace, "merge", "--no-ff", "-q", "-m", message or f"{name}: merged", name)
-        if merged.returncode != 0:
-            _git(into or workspace, "merge", "--abort")
-            return "conflict"                          # the branch and its worktree stay for a human
-    if live and remove and _git(workspace, "worktree", "remove", worktree).returncode != 0:
-        return "conflict"                              # merged or closed, but the worktree was not safely removed
-    _git(workspace, "worktree", "prune")
-    return "merged" if merge else "closed"

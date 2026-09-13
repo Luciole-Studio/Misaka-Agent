@@ -7,8 +7,7 @@ char-budget pipeline (``_get_extract_char_limit`` 649-660,
 block (1678-1723). The provider layer below answers "which backend, and what did it say";
 this file answers "what does the model see".
 
-The schema dict is a verbatim copy of Hermes', with two clauses changed because they name
-tools MISAKA does not have: ``read_file`` is ``read`` here, and the closing advice points
+The schema dict is a verbatim copy of Hermes', with host-specific tool names and a material-kind note: ``read_file`` is ``read`` here, and the closing advice points
 at ``web_fetch`` where Hermes points at its browser tool. Kept as a literal rather than
 generated from a pydantic model for the same reason ``web_search``'s is: a model would
 reword the description, and that wording -- "no LLM summarization", the PDF sentence, the
@@ -20,8 +19,7 @@ head+tail explanation -- is the part a model actually reads.
 ``_store_full_text`` inside the truncation branch, because the file exists to let the
 model page through a middle it was not shown. MISAKA writes every page through the same
 evidence writer ``web_fetch`` uses, because here the file has a second job:
-``misaka/core/research/ledger.py`` verifies a quote against a *registered artifact*, so a page
-that fit under the budget still has to be on disk or it cannot be quoted. The path comes
+readers and red teams need the original material even when the preview fits the budget. The path comes
 back on each entry as ``saved_path``, which is the addition to Hermes' result shape.
 
 *The per-page budget is squeezed to fit the whole call.* Hermes clamps ``char_limit`` to
@@ -32,14 +30,13 @@ and shrunk until the rendered document fits. The outcome is the one Hermes engin
 the model sees a bounded document and a pointer to the rest -- reached with the mechanism
 MISAKA has, and no page is dropped to get there.
 
-**Not ported:** ``_ensure_web_plugins_loaded`` (MISAKA registers backends explicitly),
-the ``WEB_TOOLS_DEBUG`` call log, and the ``requires_env`` / ``emoji`` / ``toolset``
-registration metadata, none of which have a counterpart in ``ToolDefinition``.
+``WEB_TOOLS_DEBUG`` records are owned by WebRuntime rather than a module-global log.
+MISAKA's loader supplies provider registration; ``requires_env`` / ``emoji`` /
+``toolset`` metadata is not copied into unrelated ``ToolDefinition`` fields.
 """
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
@@ -47,31 +44,32 @@ import re
 from typing import Any
 
 from misaka.core.extensions.types import ToolDefinition
-from misaka.core.platform import budget
 from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.tools._common import run_with_abort
 from misaka.core.tools._web.bounded import UnsafeUrlError, vet_public_url
 from misaka.core.tools._web.evidence import (
     citable_url,
     frontmatter_line_count,
-    page_stem,
     save_page,
 )
 from misaka.core.tools._web.screening import screen_url
-from misaka.core.web import cache
-from misaka.core.web.config import redact_secrets, web_config
+from misaka.core.tools._web.website_policy import check_website_access
+from misaka.core.web import cache, debug
+from misaka.core.web.config import redact_secrets, redact_values, web_config
 from misaka.core.web.dispatch import resolve_extractor
 from misaka.core.web.dispatch import web_extract as dispatch_extract
+from misaka.core.web.network import proxy_for_url
 from misaka.core.web.tool import tool_error
+from misaka.utils.async_lifecycle import run_in_thread
 from misaka.utils.values import signal_aborted
 
 logger = logging.getLogger(__name__)
 
-# Verbatim from Hermes tools/web_tools.py:1678-1697, except that ``read_file`` is this
-# project's ``read`` and the closing advice names web_fetch instead of a browser tool.
+# Hermes tools/web_tools.py:1678-1697: host tool names and returned-material scope
+# are adapted; input parameters and truncation behavior keep the upstream contract.
 WEB_EXTRACT_SCHEMA = {
     "name": "web_extract",
-    "description": "Extract content from web page URLs. Returns clean page content in markdown/text (no LLM summarization — fast). Also works with PDF URLs (arxiv papers, documents) — pass the PDF link directly. Pages within the char budget (default 15000) return whole; larger pages return a head+tail window with a footer telling you the full text's saved file path and the read call to page through the omitted middle. Inline images appear as [IMAGE: alt] placeholders; real image URLs are kept as links. If a URL fails or times out, use web_fetch instead.",
+    "description": "Extract content from web page URLs. Returns clean page content in markdown/text (no LLM summarization — fast). Also works with PDF URLs (arxiv papers, documents) — pass the PDF link directly. Pages within the char budget (default 15000) return whole; larger pages return a head+tail window with a footer telling you the full text's saved file path and the read call to page through the omitted middle. Inline images appear as [IMAGE: alt] placeholders; real image URLs are kept as links. Check content_kind: some providers return excerpts rather than full-page text. Saved files contain the returned material, not a guarantee of the site's complete text. If a URL fails or times out, use web_fetch instead.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -198,7 +196,7 @@ def truncate_with_footer(
     head_budget = int(char_limit * 0.75)
     tail_budget = char_limit - head_budget
     head = content[:head_budget]
-    tail = content[-tail_budget:]
+    tail = content[-tail_budget:] if tail_budget else ""
     # Snap both cuts to a line boundary, but only when the boundary is near enough that
     # snapping costs a line rather than half the window.
     newline = head.rfind("\n")
@@ -222,7 +220,7 @@ def truncate_with_footer(
         footer.append(f"Full text saved to: {saved_path}")
         footer.append(
             f'To read the omitted middle: read path="{saved_path}" '
-            f"offset={middle_start} limit=200  (the file is the complete page; "
+            f"offset={middle_start} limit=200  (the file contains the returned material; "
             "raise or lower offset to page through it)."
         )
     else:
@@ -249,30 +247,35 @@ def _invalid_entry(index: int) -> dict[str, Any]:
     }
 
 
+def _final_url(entry: dict[str, Any]) -> str:
+    metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+    try:
+        return citable_url(str(metadata.get("sourceURL") or entry.get("url") or ""))
+    except ValueError:
+        # A malformed reported address must not erase an otherwise returned document.
+        return ""
+
+
 def _store_page(
     cwd: str | None, entry: dict[str, Any], clean: str, backend: str
 ) -> tuple[str | None, int]:
     """Write one extracted page into the workspace; return ``(path, frontmatter_lines)``.
 
-    The same writer ``web_fetch`` uses, so a page reached either way is one kind of
-    artifact with one kind of provenance -- which is what lets
-    ``misaka/core/research/ledger.py`` verify a quote against it. ``text_sha256`` is the digest
-    that check reads. Best-effort: a session with no workspace, or a full disk, costs the
-    evidence file and not the extraction.
+    Full text and source metadata remain available for readers and red teams.
+    Storage is best-effort and file digests express identity, not citation validity.
     """
     try:
         body = clean.encode()
-    except UnicodeError as error:
+    except UnicodeError:
         # Same failure the writer guards against, one step earlier: the digest and the
         # filename both encode. Best-effort means best-effort on every line of the path.
-        logger.debug("No evidence file for %s: %s", entry.get("url", ""), error)
         return None, 0
-    url = entry.get("url", "")
+    url = entry.get("requested_url", entry.get("url", ""))
     metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
     # Query-stripped, for the reason web_fetch and download_file strip it: the address a
     # vendor says it ended on is the server's choice and is commonly presigned, and this
     # header is written to the workspace and registered as an artifact.
-    final = citable_url(metadata.get("sourceURL") or url)
+    final = _final_url(entry)
     # The vendor that actually answered, not the one that was chosen. A rescued batch was
     # served by a ring member, and the ring says which in ``served_by``; recording the
     # chosen backend there would put a name on this page that never fetched it.
@@ -283,10 +286,11 @@ def _store_page(
         "provider": served_by,
         "text_sha256": hashlib.sha256(body).hexdigest(),
         "title": entry.get("title", ""),
+        "content_kind": metadata.get("content_kind") or "page_text",
     }
-    saved = save_page(
-        cwd, page_stem(url, str(provenance["final_url"]), body), provenance, clean
-    )
+    if url is None:
+        provenance["association"] = "unresolved"
+    saved = save_page(cwd, provenance, clean)
     return saved, frontmatter_line_count(provenance)
 
 
@@ -313,140 +317,147 @@ async def web_extract_tool(
     cache, which therefore sits after every control and before the only paid call.
     """
     try:
-        items = list(urls)[:MAX_URLS] if isinstance(urls, list) else []
-        if signal_aborted(signal):
-            return tool_error("Interrupted", success=False)
+        result, aborted = await run_with_abort(
+            _extract_pages(urls, format, char_limit, signal=signal, cwd=cwd), signal
+        )
+        return tool_error("Interrupted", success=False) if aborted else result
+    except Exception as exc:  # noqa: BLE001 - a tool failure is a result
+        return tool_error(redact_secrets(f"Error extracting content: {exc!s}"))
 
-        entries: dict[int, dict[str, Any]] = {}
-        screened_urls: list[tuple[int, str]] = []
-        for index, item in enumerate(items):
-            raw = extract_url(item)
-            if raw is None:
-                entries[index] = _invalid_entry(index)
-                continue
-            screening = screen_url(raw, third_party=True)
-            if screening.policy is not None:
-                # A policy refusal is one page's answer, not the call's: the operator
-                # blocked a host, not the request. Flagged so the keyless rescue below
-                # knows never to re-fetch it through a vendor they did not configure.
-                entries[index] = {
-                    "url": screening.url,
-                    "title": "",
-                    "content": "",
-                    "error": screening.refusal,
-                    "blocked_by_policy": True,
-                }
-                continue
-            if screening.refusal:
-                # A credential in the URL fails the whole call, as in Hermes: the model
-                # is about to hand a secret to a third party, and answering four of five
-                # pages would bury that.
-                return json.dumps(
-                    {"success": False, "error": screening.refusal}, ensure_ascii=False
-                )
-            screened_urls.append((index, screening.url))
 
-        vetted: list[tuple[int, str]] = []
-        for index, url in screened_urls:
-            try:
-                await vet_public_url(url)
-            except UnsafeUrlError as error:
-                entries[index] = {
-                    "url": url,
-                    "title": "",
-                    "content": "",
-                    "error": f"Blocked: {error}.",
-                }
+async def _extract_pages(urls, format, char_limit, *, signal, cwd) -> str:
+    items = list(urls)[:MAX_URLS] if isinstance(urls, list) else []
+    if signal_aborted(signal):
+        return tool_error("Interrupted", success=False)
+
+    entries: dict[int, dict[str, Any]] = {}
+    unassociated: list[dict[str, Any]] = []
+    screened_urls: list[tuple[int, str]] = []
+    for index, item in enumerate(items):
+        raw = extract_url(item)
+        if raw is None:
+            entries[index] = _invalid_entry(index)
+            continue
+        screening = screen_url(raw, third_party=True)
+        if screening.policy is not None:
+            # A policy refusal is one page's answer, not the call's: the operator
+            # blocked a host, not the request. Flagged so the keyless rescue below
+            # knows never to re-fetch it through a vendor they did not configure.
+            entries[index] = {
+                "url": screening.url,
+                "title": "",
+                "content": "",
+                "error": screening.refusal,
+                "blocked_by_policy": True,
+            }
+            continue
+        if screening.refusal:
+            # A credential in the URL fails the whole call, as in Hermes: the model
+            # is about to hand a secret to a third party, and answering four of five
+            # pages would bury that.
+            return json.dumps(
+                {"success": False, "error": screening.refusal}, ensure_ascii=False
+            )
+        screened_urls.append((index, screening.url))
+
+    vetted: list[tuple[int, str]] = []
+    for index, url in screened_urls:
+        try:
+            await vet_public_url(url, proxy=proxy_for_url(url))
+        except UnsafeUrlError as error:
+            entries[index] = {
+                "url": url,
+                "title": "",
+                "content": "",
+                "error": f"Blocked: {error}.",
+            }
+        else:
+            vetted.append((index, url))
+
+    backend_name = ""
+    if vetted:
+        provider, backend_name, config_error = resolve_extractor()
+        if provider is None:
+            return json.dumps({"success": False, "error": config_error}, ensure_ascii=False)
+
+        to_fetch: list[tuple[int, str]] = []
+        for index, url in vetted:
+            hit = await run_in_thread(
+                cache.extract_cache_get, url, format=format, provider=provider.name
+            )
+            if hit is not None:
+                debug.event("cache_hit", cache="extract", backend=provider.name, subject=url, input_index=index)
+                # A cached redirect still belongs to its final source. Apply today's
+                # website rule without fetching or saving that blocked page again.
+                source_url = hit["metadata"].get("sourceURL") or url
+                blocked = check_website_access(source_url)
+                if blocked:
+                    hit.update(content="", error=blocked["message"], blocked_by_policy=blocked)
+                elif source_url != url:
+                    try:
+                        await vet_public_url(source_url, proxy=proxy_for_url(source_url))
+                    except UnsafeUrlError as error:
+                        hit.update(content="", error=f"Blocked cached source: {error}.")
+                entries[index] = hit
             else:
-                vetted.append((index, url))
+                to_fetch.append((index, url))
 
-        backend_name = ""
-        if vetted:
-            provider, backend_name, config_error = resolve_extractor()
-            if provider is None:
-                return json.dumps({"success": False, "error": config_error}, ensure_ascii=False)
-
-            to_fetch: list[tuple[int, str]] = []
-            for index, url in vetted:
-                hit = await asyncio.to_thread(
-                    cache.extract_cache_get, url, format=format, provider=provider.name
+        if to_fetch:
+            logger.info(
+                "Web extract via %s: %d URL(s)", provider.name, len(to_fetch)
+            )
+            fetch_urls = [url for _, url in to_fetch]
+            results, rescued = await dispatch_extract(provider, fetch_urls, format=format)
+            for entry in results:
+                blocked = check_website_access(_final_url(entry))
+                if blocked:
+                    entry.update(content="", raw_content="", error=blocked["message"], blocked_by_policy=blocked)
+            # A batch provider can preserve material whose canonical URL no longer
+            # identifies an input. Keep it, without an invented input or cache key.
+            extra = results[len(to_fetch):]
+            if len(extra) > MAX_URLS:
+                # Bound the number of previews/files even for an over-producing API.
+                # Preserve the extra records together, rather than dropping them.
+                extra = [{"url": "", "title": "Unassociated provider records (JSON)",
+                          "content": json.dumps(extra, ensure_ascii=False),
+                          "metadata": {"content_kind": "provider_records"}}]
+            unassociated.extend({**entry, "requested_url": None, "input_index": None} for entry in extra)
+            for position, (index, url) in enumerate(to_fetch):
+                entries[index] = (
+                    results[position]
+                    if position < len(results)
+                    else {
+                        "url": url,
+                        "title": "",
+                        "content": "",
+                        "error": "Extract backend returned no result for this URL",
+                    }
                 )
-                if hit is not None:
-                    entries[index] = hit
-                else:
-                    to_fetch.append((index, url))
+            if not rescued:
+                # Never cache a rescued batch: it came from a ring vendor rather than
+                # the chosen backend, and caching it would make one bad minute stick
+                # to these pages for a whole TTL.
+                for index, url in to_fetch:
+                    entry = entries[index]
+                    if entry.get("error"):
+                        continue
+                    content = entry.get("raw_content") or entry.get("content") or ""
+                    if content:
+                        await run_in_thread(
+                            cache.extract_cache_put,
+                            url,
+                            content,
+                            title=entry.get("title", ""),
+                            format=format,
+                            provider=provider.name,
+                            metadata=entry.get("metadata"),
+                        )
 
-            if to_fetch:
-                logger.info(
-                    "Web extract via %s: %d URL(s)", provider.name, len(to_fetch)
-                )
-                fetch_urls = [url for _, url in to_fetch]
-                results, rescued = await _run_extract(provider, fetch_urls, format, signal)
-                if results is None:
-                    return tool_error("Interrupted", success=False)
-                for position, (index, url) in enumerate(to_fetch):
-                    entries[index] = (
-                        results[position]
-                        if position < len(results)
-                        else {
-                            "url": url,
-                            "title": "",
-                            "content": "",
-                            "error": "Extract backend returned no result for this URL",
-                        }
-                    )
-                    # One row per page that actually cost a vendor call. A cache hit is
-                    # not on the ledger; a rescued batch is, because it really did go out
-                    # -- to a different vendor, which the row records.
-                    budget.record_external_call(
-                        "web_extract",
-                        subject=url,
-                        backend=provider.name,
-                        rescued=rescued,
-                    )
-                if not rescued:
-                    # Never cache a rescued batch: it came from a ring vendor rather than
-                    # the chosen backend, and caching it would make one bad minute stick
-                    # to these pages for a whole TTL.
-                    for index, url in to_fetch:
-                        entry = entries[index]
-                        if entry.get("error"):
-                            continue
-                        content = entry.get("raw_content") or entry.get("content") or ""
-                        if content:
-                            await asyncio.to_thread(
-                                cache.extract_cache_put,
-                                url,
-                                content,
-                                title=entry.get("title", ""),
-                                format=format,
-                                provider=provider.name,
-                            )
-
-        results_in_order = [entries.get(index, _invalid_entry(index)) for index in range(len(items))]
-        return await _render(results_in_order, char_limit, cwd, backend_name)
-
-    except Exception as exc:  # noqa: BLE001 - an extraction failure is a result, not a crash
-        error_msg = f"Error extracting content: {exc!s}"
-        logger.debug("%s", error_msg)
-        return tool_error(redact_secrets(error_msg))
-
-
-async def _run_extract(
-    provider: Any, urls: list[str], format: str | None, signal: Any
-) -> tuple[list[dict[str, Any]] | None, bool]:
-    """Dispatch one batch, racing it against the caller's abort. ``(None, False)`` = aborted.
-
-    The agent loop awaits a tool call directly instead of running it as a task it can
-    cancel, so a tool that only checks its signal between steps cannot be interrupted
-    during one. Five pages through a backend that allows sixty seconds each is five
-    minutes of a session that will not answer Ctrl-C, which is why this one is raced
-    rather than polled.
-    """
-    outcome, aborted = await run_with_abort(
-        dispatch_extract(provider, urls, format=format), signal
-    )
-    return (None, False) if aborted else outcome
+    results_in_order = []
+    for index in range(len(items)):
+        entry = entries.get(index, _invalid_entry(index))
+        results_in_order.append({**entry, "requested_url": entry.get("url"), "input_index": index})
+    return await _render([*results_in_order, *unassociated], char_limit, cwd, backend_name)
 
 
 def _capped(clean: str) -> str:
@@ -472,7 +483,12 @@ def _capped(clean: str) -> str:
 def _bounded(value: object, limit: int) -> str:
     """A vendor-written string cut to *limit*, marked when it was."""
     text = str(value or "")
-    return text if len(text) <= limit else text[:limit] + _ELLIPSIS
+    if len(json.dumps(text, ensure_ascii=False)) - 2 <= limit:
+        return text
+    text = text[:limit]
+    while len(json.dumps(text, ensure_ascii=False)) - 2 > limit:
+        text = text[:len(text) // 2]
+    return text + _ELLIPSIS
 
 
 def _prepare(
@@ -480,7 +496,7 @@ def _prepare(
 ) -> dict[int, tuple[str, str | None, int]]:
     """Clean and store each page once, before any budget decision.
 
-    Storing is what makes a page quotable, so it happens for every page and at full
+    Storing keeps the original available, so it happens for every page and at full
     length -- independently of how much of it the model is shown, which the budget below
     may revise more than once.
     """
@@ -506,23 +522,38 @@ def _trim(
     trimmed: list[dict[str, Any]] = []
     for index, entry in enumerate(results):
         error = entry.get("error")
+        requested = entry.get("requested_url", entry.get("url"))
+        metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
         out: dict[str, Any] = {
-            "url": entry.get("url", ""),
+            "url": _bounded(entry.get("url"), 2048),
+            "requested_url": _bounded(requested, 2048) if requested is not None else None,
+            "final_url": _bounded(_final_url(entry), 2048),
+            "input_index": entry.get("input_index"),
+            "provider": _bounded(metadata.get("served_by"), 100),
+            "content_kind": _bounded(metadata.get("content_kind") or "page_text", 100),
             "title": _bounded(entry.get("title"), _MAX_ENTRY_TITLE_CHARS),
-            "content": entry.get("content", ""),
+            "content": "",
             "error": _bounded(error, _MAX_ENTRY_ERROR_CHARS) if error else error,
         }
+        if requested is None:
+            out["association"] = "unresolved"
         if "blocked_by_policy" in entry:
-            out["blocked_by_policy"] = entry["blocked_by_policy"]
+            block = entry["blocked_by_policy"]
+            out["blocked_by_policy"] = (
+                {key: _bounded(block.get(key), 500) for key in ("host", "rule", "source")}
+                if isinstance(block, dict) else bool(block)
+            )
         page = prepared.get(index)
         if page is not None:
             clean, saved, frontmatter_lines = page
             out["content"], _ = truncate_with_footer(clean, per_page, saved, frontmatter_lines)
             if saved:
-                # MISAKA's addition to Hermes' shape: the path is what a card registers in
-                # report.json to make the page quotable, and a page that fit under the
-                # budget has no footer to name it.
+                # MISAKA's addition to Hermes' shape: the card records this path to make
+                # the page quotable, and a page that fit under the budget has no footer
+                # to name it.
                 out["saved_path"] = saved
+        else:
+            out["content"] = _bounded(entry.get("content"), per_page)
         trimmed.append(out)
     return trimmed
 
@@ -534,12 +565,19 @@ async def _render(
 
     Halving rather than dividing by the page count: the pages in one call are rarely the
     same size, and a flat share starves a long page to leave room a short one never uses.
-    Two or three passes over at most five pages costs nothing measurable, and every pass
-    is deterministic.
+    Requested pages and unassociated material share the same bounded preview budget.
     """
     # Off the loop: storing five pages is five file writes plus their digests, and the
     # cache's own index lock (cache.py) exists precisely because this runs on a thread.
-    prepared = await asyncio.to_thread(_prepare, results, cwd, backend)
+    stamped = []
+    for entry in results:
+        metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+        stamped.append({**entry, "metadata": {**metadata, "served_by": metadata.get("served_by") or backend}})
+    results = stamped
+    debug.original_json({"results": results})
+    prepared = await run_in_thread(_prepare, results, cwd, backend)
+    results = redact_values(results)
+    prepared = {i: (redact_secrets(text), path, lines) for i, (text, path, lines) in prepared.items()}
     limit = char_limit if char_limit is not None else extract_char_limit()
     try:
         limit = max(_MIN_CHAR_LIMIT, min(int(limit), _MAX_CHAR_LIMIT))
@@ -548,17 +586,20 @@ async def _render(
 
     trimmed = _trim(results, prepared, limit)
     rendered = json.dumps({"results": trimmed}, indent=2, ensure_ascii=False)
-    while len(rendered) > MAX_RESULT_SIZE_CHARS and limit > _MIN_CHAR_LIMIT:
-        limit = max(_MIN_CHAR_LIMIT, limit // 2)
+    while len(rendered) > MAX_RESULT_SIZE_CHARS and limit > 0:
+        limit //= 2
         trimmed = _trim(results, prepared, limit)
         rendered = json.dumps({"results": trimmed}, indent=2, ensure_ascii=False)
 
     if not trimmed:
         return tool_error("Content was inaccessible or not found")
-    # A belt-and-braces sweep over the serialised document: a provider that tucked a blob
-    # into metadata rather than into the page text would otherwise slip past the per-page
-    # pass. Hermes runs the same second sweep for the same reason.
-    return redact_secrets(convert_base64_images_to_links(rendered))
+    if debug.active():
+        debug.metrics(pages_truncated=sum(len(text) > limit for text, _path, _lines in prepared.values()))
+        for index, (text, path, _lines) in prepared.items():
+            debug.event("page_processed", input_index=results[index].get("input_index"),
+                        original_chars=len(text), final_chars=len(trimmed[index]["content"]),
+                        truncated=len(text) > limit, stored=path is not None)
+    return rendered
 
 
 def register(harn, workspace: str | None = None) -> None:
@@ -577,13 +618,26 @@ def register(harn, workspace: str | None = None) -> None:
             signal=signal,
             cwd=workspace,
         )
+        debug.result_json(result_json)
         # Whole pages of somebody else's prose, which is the most injection-prone thing
         # any tool in this project hands the model. Fencing the rendered document rather
         # than each field leaves no unfenced seam between entries and keeps the provider
         # contract untouched.
+        try:
+            rendered = json.loads(result_json)
+            is_error = rendered.get("success") is False or bool(rendered.get("error"))
+            saved_paths = list(dict.fromkeys(
+                entry["saved_path"]
+                for entry in rendered.get("results", [])
+                if isinstance(entry, dict) and entry.get("saved_path")
+            ))
+        except (AttributeError, TypeError, ValueError):
+            saved_paths = []
+            is_error = True
         return {
             "content": [{"type": "text", "text": untrusted("web-extract", result_json)}],
-            "details": {},
+            "details": {"saved_paths": saved_paths},
+            "isError": is_error,
         }
 
     harn.registerTool(
@@ -594,5 +648,11 @@ def register(harn, workspace: str | None = None) -> None:
             parameters=WEB_EXTRACT_SCHEMA["parameters"],
             execute=execute,
             promptSnippet="Extract the clean text of up to five web pages at once",
+            promptGuidelines=[
+                ("Up to five URLs per call. JavaScript rendering and whole-page extraction depend on the selected "
+                 "provider; Perplexity returns snippets, not full pages. Each page's text is saved under "
+                 "downloads/pages/ (saved_paths in the result): read the saved file before citing it, and check "
+                 "content_kind and final_url. No provider gets past a paywall."),
+            ],
         )
     )

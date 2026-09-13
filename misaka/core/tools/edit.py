@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import errno as errno_module
 import json
+import os
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -352,6 +353,30 @@ def _set_edit_preview(
     return changed
 
 
+def _refuse_office_package(absolute_path: str, tool: str) -> None:
+    """Send a .docx/.xlsx/.pptx to the office tool instead of corrupting it.
+
+    These are zip packages. Decoding one as text and writing the result back produces a
+    file no program will open, and both tools would report success -- the model finds out
+    only when someone tries to open the deliverable. A local import: ``documents.office``
+    pulls in openpyxl, and these tools are constructed for every session.
+    """
+    from misaka.core.documents import office
+
+    suffix = os.path.splitext(absolute_path)[1].lower()
+    if suffix in office.SUFFIXES and suffix not in _TEXT_OFFICE_SUFFIXES:
+        raise RuntimeError(
+            f"{tool} cannot write {suffix}: it is a zip package, not text, and writing it "
+            f"as text corrupts it. Use the office tool, which edits it through structured "
+            f"operations. To read it, use read."
+        )
+
+
+# .csv and .tsv are text and both tools have always handled them; only the packages are
+# refused here.
+_TEXT_OFFICE_SUFFIXES = frozenset({".csv", ".tsv"})
+
+
 def create_edit_tool_definition(
     cwd: str,
     options: EditToolOptions | Mapping[str, Any] | None = None,
@@ -369,6 +394,7 @@ def create_edit_tool_definition(
         parsed = EditToolInput.model_validate(input_value)
         path, edits = _validate_edit_input(parsed)
         absolute_path = resolve_to_cwd(path, cwd)
+        _refuse_office_package(absolute_path, "edit")
 
         async def mutate() -> AgentToolResult:
             if signal_aborted(signal):

@@ -17,7 +17,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass, is_dataclass, replace
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
@@ -36,8 +36,10 @@ from misaka.config import (
     get_auth_path,
     get_debug_log_path,
 )
-from misaka.core.agent_session import parse_skill_block
-from misaka.core.agent_session_runtime import SessionImportFileNotFoundError
+from misaka.core.agent_session_runtime import (
+    ContextCarryUnsupportedError,
+    SessionImportFileNotFoundError,
+)
 from misaka.core.bash_executor import BashResult
 from misaka.core.defaults import DEFAULT_THINKING_LEVEL
 from misaka.core.extensions import startup_sections
@@ -95,15 +97,8 @@ from misaka.ui.tui.interactive.components.assistant_message import (
     AssistantMessageComponent,
 )
 from misaka.ui.tui.interactive.components.bash_execution import BashExecutionComponent
-from misaka.ui.tui.interactive.components.branch_summary_message import (
-    BranchSummaryMessageComponent,
-)
-from misaka.ui.tui.interactive.components.compaction_summary_message import (
-    CompactionSummaryMessageComponent,
-)
 from misaka.ui.tui.interactive.components.countdown_timer import CountdownTimer
 from misaka.ui.tui.interactive.components.custom_editor import CustomEditor
-from misaka.ui.tui.interactive.components.custom_entry import CustomEntryComponent
 from misaka.ui.tui.interactive.components.custom_message import CustomMessageComponent
 from misaka.ui.tui.interactive.components.dynamic_border import DynamicBorder
 from misaka.ui.tui.interactive.components.extension_editor import (
@@ -144,14 +139,15 @@ from misaka.ui.tui.interactive.components.settings_selector import (
     SettingsConfig,
     SettingsSelectorComponent,
 )
-from misaka.ui.tui.interactive.components.skill_invocation_message import (
-    SkillInvocationMessageComponent,
-)
 from misaka.ui.tui.interactive.components.thinking_selector import (
     ADAPTIVE_LEVEL_DESCRIPTIONS,
     ThinkingSelectorComponent,
 )
 from misaka.ui.tui.interactive.components.tool_execution import ToolExecutionComponent
+from misaka.ui.tui.interactive.components.transcript import (
+    TranscriptRenderer,
+    user_text,
+)
 from misaka.ui.tui.interactive.components.tree_selector import TreeSelectorComponent
 from misaka.ui.tui.interactive.components.trust_selector import (
     TrustSelectorComponent,
@@ -161,6 +157,12 @@ from misaka.ui.tui.interactive.components.user_message import UserMessageCompone
 from misaka.ui.tui.interactive.components.user_message_selector import (
     UserMessageItem,
     UserMessageSelectorComponent,
+)
+from misaka.ui.tui.interactive.conversation import (
+    Conversation,
+    _safe_call_bool,
+    _safe_call_int,
+    _safe_call_str,
 )
 from misaka.ui.tui.utils import visibleWidth
 from misaka.utils.clipboard import copy_to_clipboard
@@ -538,7 +540,7 @@ class _ExtensionUIContext:
         self._mode.setToolsExpanded(expanded)
 
 
-class InteractiveMode:
+class InteractiveMode(Conversation):
     MAX_WIDGET_LINES = 10
 
     def __init__(
@@ -682,13 +684,7 @@ class InteractiveMode:
                         setTitle=lambda *_args, **_kwargs: None,
                     ),
                 )
-        self.chatContainer = getattr(self, "chatContainer", Container())
-        self.pendingMessagesContainer = getattr(self, "pendingMessagesContainer", Container())
-        self.statusContainer = getattr(self, "statusContainer", Container())
-        self.headerContainer = getattr(self, "headerContainer", Container())
-        self.widgetContainerAbove = getattr(self, "widgetContainerAbove", Container())
-        self.widgetContainerBelow = getattr(self, "widgetContainerBelow", Container())
-        self.editorContainer = getattr(self, "editorContainer", Container())
+        super().__init__(self.ui, self.settingsManager, self.sessionManager.getCwd())
         self.defaultEditor = getattr(self, "defaultEditor", None)
         self.editor = getattr(self, "editor", None)
         self.keybindings = getattr(self, "keybindings", None)
@@ -745,9 +741,6 @@ class InteractiveMode:
         self.lastStatusText = getattr(self, "lastStatusText", None)
         self.autocompleteProviderWrappers = list(getattr(self, "autocompleteProviderWrappers", []))
         self.autocompleteProvider = getattr(self, "autocompleteProvider", None)
-        self.toolOutputExpanded = bool(getattr(self, "toolOutputExpanded", False))
-        self.customHeader = getattr(self, "customHeader", None)
-        self.builtInHeader = getattr(self, "builtInHeader", None)
         self.customFooter = getattr(self, "customFooter", None)
         self.editorComponentFactory = getattr(self, "editorComponentFactory", None)
         self.extensionSelector = getattr(self, "extensionSelector", None)
@@ -775,12 +768,6 @@ class InteractiveMode:
         self.anthropicSubscriptionWarningShown = bool(
             getattr(self, "anthropicSubscriptionWarningShown", False)
         )
-        self.hideThinkingBlock = bool(
-            getattr(self, "hideThinkingBlock", _safe_call_bool(self.settingsManager, "getHideThinkingBlock"))
-        )
-        self.outputPad = int(
-            getattr(self, "outputPad", _safe_call_int(self.settingsManager, "getOutputPad", 1))
-        )
         self.version = getattr(self, "version", VERSION)
         self.isInitialized = bool(getattr(self, "isInitialized", False))
         self.lastSigintTime = float(getattr(self, "lastSigintTime", 0))
@@ -789,8 +776,6 @@ class InteractiveMode:
         self.workingMessage = getattr(self, "workingMessage", None)
         self.workingVisible = bool(getattr(self, "workingVisible", True))
         self.workingIndicatorOptions = getattr(self, "workingIndicatorOptions", None)
-        self.defaultHiddenThinkingLabel = getattr(self, "defaultHiddenThinkingLabel", "Thinking...")
-        self.hiddenThinkingLabel = getattr(self, "hiddenThinkingLabel", self.defaultHiddenThinkingLabel)
         self.compactionQueuedMessages = list(getattr(self, "compactionQueuedMessages", []))
         self.deferredInputMessages = list(getattr(self, "deferredInputMessages", []))
         self.pendingBashComponents = list(getattr(self, "pendingBashComponents", []))
@@ -810,7 +795,6 @@ class InteractiveMode:
         self._pendingUserInputFuture: asyncio.Future[str] | None = None
         self._backgroundTasks: set[asyncio.Task[Any]] = set()
         self._sessionUnsubscribe: Callable[[], None] | None = None
-        self._toolComponentsById: dict[str, ToolExecutionComponent] = {}
         self._handleClearCount = 0
         self.lastEscapeTime = float(getattr(self, "lastEscapeTime", 0))
 
@@ -835,15 +819,6 @@ class InteractiveMode:
                     refresh()
                 except Exception:  # noqa: BLE001, S110 - one broken block must not block the redraw
                     pass
-
-    def _request_render(self, force: bool | None = None) -> None:
-        request_render = _callable_attr(self.ui, "requestRender")
-        if request_render is None:
-            return
-        if force is None:
-            request_render()
-        else:
-            request_render(force)
 
     def prefixAutocompleteDescription(self, description: str | None, source_info: Any = None) -> str | None:
         source_path = read_field(source_info, "path")
@@ -1727,18 +1702,6 @@ class InteractiveMode:
             done(None)
             self._releaseExtensionPrompt(owner)
 
-    def setToolsExpanded(self, expanded: bool) -> None:
-        self.toolOutputExpanded = expanded
-        active_header = self.customHeader or self.builtInHeader
-        set_header_expanded = _callable_attr(active_header, "setExpanded")
-        if set_header_expanded is not None:
-            set_header_expanded(expanded)
-        for child in getattr(self.chatContainer, "children", []):
-            set_expanded = _callable_attr(child, "setExpanded")
-            if set_expanded is not None:
-                set_expanded(expanded)
-        self._request_render()
-
     async def maybeWarnAboutAnthropicSubscriptionAuth(self, model: Any | None = None) -> None:
         warnings = {}
         get_warnings = _callable_attr(self.settingsManager, "getWarnings")
@@ -2442,59 +2405,13 @@ class InteractiveMode:
                 invalidate_footer()
             self.updateEditorBorderColor()
 
+        renderer = self._transcriptRenderer()
         for message in items:
             if read_field(message, "type") == "custom" and _message_role(message) is None:
                 self.addCustomEntryToChat(message)
                 continue
-            role = _message_role(message)
-            if role == "assistant":
-                self.addMessageToChat(message, options=options)
-                for content in list(read_field(message, "content", []) or []):
-                    if read_field(content, "type") != "toolCall":
-                        continue
-                    tool_name = str(read_field(content, "name", ""))
-                    tool_call_id = str(read_field(content, "id", ""))
-                    component = ToolExecutionComponent(
-                        tool_name,
-                        tool_call_id,
-                        read_field(content, "arguments", {}),
-                        {
-                            "showImages": _safe_call_bool(self.settingsManager, "getShowImages", True),
-                            "imageWidthCells": _safe_call_int(self.settingsManager, "getImageWidthCells", 40),
-                        },
-                        _tool_definition(self.session, tool_name),
-                        self.ui,
-                        self.sessionManager.getCwd(),
-                    )
-                    component.setExpanded(self.toolOutputExpanded)
-                    self.chatContainer.addChild(component)
-
-                    if read_field(message, "stopReason") in {"aborted", "error"}:
-                        if read_field(message, "stopReason") == "aborted":
-                            retry_attempt = int(read_field(self.session, "retryAttempt", 0) or 0)
-                            error_message = (
-                                f"Aborted after {retry_attempt} retry attempt{'s' if retry_attempt > 1 else ''}"
-                                if retry_attempt > 0
-                                else "Operation aborted"
-                            )
-                        else:
-                            error_message = str(read_field(message, "errorMessage", "") or "Error")
-                        component.updateResult(
-                            {"content": [{"type": "text", "text": error_message}], "isError": True}
-                        )
-                    else:
-                        rendered_pending_tools[tool_call_id] = component
-                continue
-
-            if role == "toolResult":
-                tool_call_id = str(read_field(message, "toolCallId", ""))
-                component = rendered_pending_tools.get(tool_call_id)
-                if component is not None:
-                    component.updateResult(message)
-                    rendered_pending_tools.pop(tool_call_id, None)
-                continue
-
-            self.addMessageToChat(message, options=options)
+            renderer.appendItem(self.chatContainer, message, rendered_pending_tools)
+            self._rememberUserMessage(message, options)
 
         self._toolComponentsById = rendered_pending_tools
         self._request_render()
@@ -2666,14 +2583,8 @@ class InteractiveMode:
         return self.session.extensionRunner.get_markdown_transformers()
 
     def addCustomEntryToChat(self, entry: dict[str, Any]) -> None:
-        renderer = self.session.extensionRunner.get_entry_renderer(
-            str(read_field(entry, "customType", ""))
-        )
-        if renderer is None:
-            return
-        component = CustomEntryComponent(entry, renderer)
-        component.setExpanded(self.toolOutputExpanded)
-        if not component.hasContent():
+        component = self._transcriptRenderer().customEntry(entry)
+        if component is None:
             return
         if self.streamingComponent is not None:
             try:
@@ -2685,115 +2596,25 @@ class InteractiveMode:
                 return
         self.chatContainer.addChild(component)
 
-    def addMessageToChat(
-        self,
-        message: Any,
-        options: dict[str, Any] | None = None,
-    ) -> None:
-        role = _message_role(message)
-        markdown_theme = self.getMarkdownThemeWithSettings()
+    def _transcriptRenderer(self) -> TranscriptRenderer:
+        renderer = super()._transcriptRenderer()
+        renderer.cwd = self.sessionManager.getCwd()
+        renderer.markdownTransformers = self.getMarkdownTransformers()
+        renderer.extensionRunner = getattr(self.session, "extensionRunner", None)
+        renderer.toolDefinition = lambda name: _tool_definition(self.session, name)
+        renderer.retryAttempt = int(read_field(self.session, "retryAttempt", 0) or 0)
+        return renderer
 
-        if role == "user":
-            text = _extract_user_text(message)
-            if text:
-                if getattr(self.chatContainer, "children", []):
-                    self.chatContainer.addChild(Spacer(1))
-                skill_block = parse_skill_block(text)
-                if skill_block is not None:
-                    component = SkillInvocationMessageComponent(skill_block, markdown_theme)
-                    component.setExpanded(self.toolOutputExpanded)
-                    self.chatContainer.addChild(component)
-                    user_message = read_field(skill_block, "userMessage")
-                    if user_message:
-                        self.chatContainer.addChild(
-                            UserMessageComponent(
-                                str(user_message),
-                                markdown_theme,
-                                self.outputPad,
-                                self.getMarkdownTransformers(),
-                            )
-                        )
-                else:
-                    self.chatContainer.addChild(
-                        UserMessageComponent(
-                            text,
-                            markdown_theme,
-                            self.outputPad,
-                            self.getMarkdownTransformers(),
-                        )
-                    )
-                if bool(read_field(options, "populateHistory", False)):
-                    add_history = _callable_attr(self.editor, "addToHistory")
-                    if add_history is not None:
-                        add_history(text)
-            return
+    def _rememberUserMessage(self, message: Any, options: dict[str, Any] | None) -> None:
+        if _message_role(message) == "user" and read_field(options, "populateHistory", False):
+            add_history = _callable_attr(self.editor, "addToHistory")
+            text = user_text(message)
+            if add_history is not None and text:
+                add_history(text)
 
-        if role == "assistant":
-            assistant = AssistantMessageComponent(
-                message,
-                self.hideThinkingBlock,
-                markdown_theme,
-                self.hiddenThinkingLabel,
-                self.outputPad,
-                self.getMarkdownTransformers(),
-            )
-            self.chatContainer.addChild(assistant)
-            return
-
-        if role == "bashExecution":
-            component = BashExecutionComponent(
-                str(read_field(message, "command", "")),
-                self.ui,
-                bool(read_field(message, "excludeFromContext", False)),
-            )
-            output = str(read_field(message, "output", ""))
-            if output:
-                component.appendOutput(output)
-            component.setComplete(
-                read_field(message, "exitCode"),
-                bool(read_field(message, "cancelled", False)),
-                None,
-                read_field(message, "fullOutputPath"),
-            )
-            component.setExpanded(self.toolOutputExpanded)
-            self.chatContainer.addChild(component)
-            return
-
-        if role == "custom":
-            if not bool(read_field(message, "display", False)):
-                return
-            custom_type = str(read_field(message, "customType", ""))
-            runner = getattr(self.session, "extensionRunner", None)
-            get_renderer = _callable_attr(runner, "get_message_renderer") or _callable_attr(
-                runner, "getMessageRenderer"
-            )
-            renderer = get_renderer(custom_type) if get_renderer is not None else None
-            component = CustomMessageComponent(
-                message,
-                renderer,
-                markdown_theme,
-                self.outputPad,
-            )
-            component.setExpanded(self.toolOutputExpanded)
-            self.chatContainer.addChild(component)
-            return
-
-        if role == "branchSummary":
-            self.chatContainer.addChild(Spacer(1))
-            component = BranchSummaryMessageComponent(message, markdown_theme)
-            component.setExpanded(self.toolOutputExpanded)
-            self.chatContainer.addChild(component)
-            return
-
-        if role == "compactionSummary":
-            self.chatContainer.addChild(Spacer(1))
-            component = CompactionSummaryMessageComponent(message, markdown_theme)
-            component.setExpanded(self.toolOutputExpanded)
-            self.chatContainer.addChild(component)
-            return
-
-        if role == "toolResult":
-            return
+    def addMessageToChat(self, message: Any, options: dict[str, Any] | None = None) -> None:
+        self._transcriptRenderer().addMessage(self.chatContainer, message)
+        self._rememberUserMessage(message, options)
 
     async def handleImportCommand(self, text: str) -> None:
         input_path = self.getPathCommandArgument(text, "/import")
@@ -3263,7 +3084,7 @@ class InteractiveMode:
         text = await asyncio.to_thread(board.board_for, cwd)  # sqlite stays off the loop
         self.showExtensionNotify(text or "(No task cards on the board.)", "info")
 
-    async def handleClearCommand(self, notice: str = "✓ New session started") -> bool:
+    async def handleClearCommand(self, notice: str = "✓ New session started", *, carry: bool = False) -> bool:
         if self.loadingAnimation is not None:
             stop = _callable_attr(self.loadingAnimation, "stop")
             if stop is not None:
@@ -3273,7 +3094,7 @@ class InteractiveMode:
         if clear is not None:
             clear()
         try:
-            result = await self.runtimeHost.newSession()
+            result = await self.runtimeHost.newSession({"carryOverContext": True}) if carry else await self.runtimeHost.newSession()
             if read_field(result, "cancelled", False):
                 return False
             self.renderCurrentSessionState()
@@ -3283,6 +3104,9 @@ class InteractiveMode:
             )
             self._request_render()
             return True
+        except ContextCarryUnsupportedError as error:
+            self.showError(str(error))
+            return False
         except Exception as error:  # noqa: BLE001
             await self.handleFatalRuntimeError("Failed to create session", error)
             return False
@@ -3477,9 +3301,9 @@ class InteractiveMode:
             self._set_editor_text("")
             await self.showOAuthSelector("logout")
             return
-        if text == "/new":
+        if text == "/new" or text == "/new --carry":
             self._set_editor_text("")
-            await self.handleClearCommand()
+            await self.handleClearCommand(carry=text == "/new --carry")
             return
         if text == "/clear":
             self._set_editor_text("")
@@ -3713,6 +3537,20 @@ class InteractiveMode:
             await self.showOAuthSelector("login")
             return
         await self.session.modelRegistry.authStorage.readLatestData()
+        account = None
+        if "--account" in providerRef:
+            import shlex
+
+            from misaka.core.auth_storage import oauth_account_key
+            try:
+                args = shlex.split(providerRef)
+                if len(args) < 3 or args[-2] != "--account" or "--account" in args[:-2]:
+                    raise ValueError("Usage: /login PROVIDER --account NAME")
+                providerRef, account = " ".join(args[:-2]), args[-1]
+                oauth_account_key(providerRef, account)
+            except ValueError as error:
+                self.showError(str(error))
+                return
         normalized = providerRef.casefold()
         matches = [
             provider
@@ -3721,7 +3559,7 @@ class InteractiveMode:
         ]
         if len(matches) == 1:
             await self._handle_login_provider_select(
-                matches, matches[0].id, lambda: None
+                matches, matches[0].id, lambda: None, account=account
             )
             return
         if len(matches) > 1 and len({provider.id for provider in matches}) == 1:
@@ -3742,7 +3580,7 @@ class InteractiveMode:
                             self._handle_login_provider_select(
                                 [matches[labels.index(label)]],
                                 matches[labels.index(label)].id,
-                                lambda: None,
+                                lambda: None, account=account,
                             )
                         ),
                     ),
@@ -3870,18 +3708,22 @@ class InteractiveMode:
         provider_options: list[AuthSelectorProvider],
         provider_id: str,
         done: Callable[[], None],
+        *, account: str | None = None,
     ) -> None:
         done()
         provider = next((item for item in provider_options if item.id == provider_id), None)
         if provider is None:
             return
         if provider.authType == "oauth":
-            await self.showLoginDialog(provider.id, provider.name)
+            await self.showLoginDialog(provider.id, provider.name, account=account)
             return
         if provider.id == _BEDROCK_PROVIDER_ID:
+            if account is not None:
+                self.showError("Bedrock uses AWS profiles rather than named API-key records")
+                return
             self.showBedrockSetupDialog(provider.id, provider.name)
             return
-        await self.showApiKeyLoginDialog(provider.id, provider.name)
+        await self.showApiKeyLoginDialog(provider.id, provider.name, account=account)
 
     async def showOAuthSelector(self, mode: str) -> None:
         await self.session.modelRegistry.authStorage.readLatestData()
@@ -3943,9 +3785,14 @@ class InteractiveMode:
         provider_name: str,
         auth_type: str,
         previous_model: Any = None,
+        *, account: str | None = None,
     ) -> None:
         await self.session.modelRegistry.refresh()
         action_label = f"Logged in to {provider_name}" if auth_type == "oauth" else f"Saved API key for {provider_name}"
+
+        if account is not None:
+            self.showStatus(f"{action_label} (account: {account}). Saved to {get_auth_path()}; main-model credentials unchanged.")
+            return
 
         selected_model = None
         selection_error: str | None = None
@@ -4052,7 +3899,7 @@ class InteractiveMode:
             set_focus(dialog)
         self._request_render()
 
-    async def showApiKeyLoginDialog(self, providerId: str, providerName: str) -> None:
+    async def showApiKeyLoginDialog(self, providerId: str, providerName: str, *, account: str | None = None) -> None:
         previous_model = getattr(self.session, "model", None)
         dialog = LoginDialogComponent(self.ui, providerId, lambda _success, _message: None, providerName)
         self.editorContainer.clear()
@@ -4121,16 +3968,18 @@ class InteractiveMode:
                         prompt=prompt_auth,
                         notify=notify_auth,
                     ),
+                    account=account,
                 )
             else:
                 api_key = str((await dialog.showPrompt("Enter API key:")).strip())
                 if not api_key:
                     raise RuntimeError("API key cannot be empty.")
+                from misaka.core.auth_storage import oauth_account_key
                 self.session.modelRegistry.authStorage.set(
-                    providerId, {"type": "api_key", "key": api_key}
+                    oauth_account_key(providerId, account), {"type": "api_key", "key": api_key}
                 )
             restore_editor()
-            await self.completeProviderAuthentication(providerId, providerName, "api_key", previous_model)
+            await self.completeProviderAuthentication(providerId, providerName, "api_key", previous_model, account=account)
         except Exception as error:  # noqa: BLE001
             restore_editor()
             if str(error) != "Login cancelled":
@@ -4175,7 +4024,7 @@ class InteractiveMode:
         self._request_render()
         return future
 
-    async def showLoginDialog(self, providerId: str, providerName: str) -> None:
+    async def showLoginDialog(self, providerId: str, providerName: str, *, account: str | None = None) -> None:
         provider_info = next(
             (
                 provider
@@ -4280,6 +4129,7 @@ class InteractiveMode:
                         prompt=prompt_auth,
                         notify=notify_auth,
                     ),
+                    account=account,
                 )
             else:
                 await self.session.modelRegistry.authStorage.login(
@@ -4296,9 +4146,10 @@ class InteractiveMode:
                         onManualCodeInput=lambda: manual_code_future,
                         signal=dialog.signal,
                     ),
+                    account=account,
                 )
             restore_editor()
-            await self.completeProviderAuthentication(providerId, providerName, "oauth", previous_model)
+            await self.completeProviderAuthentication(providerId, providerName, "oauth", previous_model, account=account)
         except Exception as error:  # noqa: BLE001
             restore_editor()
             if str(error) != "Login cancelled":
@@ -4761,14 +4612,17 @@ class InteractiveMode:
                 clear_chat = _callable_attr(self.chatContainer, "clear")
                 if clear_chat is not None:
                     clear_chat()
-                self.renderSessionEntries(entries[1:])
-                self.addMessageToChat(
-                    createCompactionSummaryMessage(
-                        str(read_field(result, "summary", "")),
-                        int(read_field(result, "tokensBefore", 0)),
-                        datetime.now(UTC).isoformat(),
+                if read_field(entries[0], "contextMessages") is not None:
+                    self.renderSessionEntries(entries)
+                else:
+                    self.renderSessionEntries(entries[1:])
+                    self.addMessageToChat(
+                        createCompactionSummaryMessage(
+                            str(read_field(result, "summary", "")),
+                            int(read_field(result, "tokensBefore", 0)),
+                            datetime.now(UTC).isoformat(),
+                        )
                     )
-                )
                 invalidate_footer = _callable_attr(self.footer, "invalidate")
                 if invalidate_footer is not None:
                     invalidate_footer()
@@ -5048,15 +4902,6 @@ class InteractiveMode:
             thinking_level = read_field(getattr(self.session, "state", None), "thinkingLevel", "off")
         return str(thinking_level or "off")
 
-    def getMarkdownThemeWithSettings(self) -> Any:
-        markdown_theme = interactive_theme.get_markdown_theme()
-        indent = _safe_call_str(self.settingsManager, "getCodeBlockIndent", "  ")
-        try:
-            return replace(markdown_theme, codeBlockIndent=indent)
-        except TypeError:
-            markdown_theme.codeBlockIndent = indent
-            return markdown_theme
-
     def updateEditorBorderColor(self) -> None:
         border = (
             interactive_theme.theme.getBashModeBorderColor()
@@ -5066,9 +4911,6 @@ class InteractiveMode:
         if hasattr(self.editor, "borderColor"):
             self.editor.borderColor = border
         self._request_render()
-
-    def toggleToolOutputExpansion(self) -> None:
-        self.setToolsExpanded(not self.toolOutputExpanded)
 
     def toggleThinkingBlockVisibility(self) -> None:
         self.hideThinkingBlock = not self.hideThinkingBlock
@@ -5414,9 +5256,6 @@ class InteractiveMode:
             )
             print(interactive_theme.theme.fg("dim", f"Model scope: {model_list}{cycle_hint}"))
         self.headerContainer.clear()
-        add_child = _callable_attr(self.ui, "addChild")
-        if add_child is not None:
-            add_child(self.headerContainer)
         if self.options.verbose or not quiet_startup:
             _title_text = os.environ.get("MISAKA_APP_TITLE") or APP_NAME
 
@@ -5498,22 +5337,8 @@ class InteractiveMode:
             self.builtInHeader = Text("", 0, 0)
             self.headerContainer.addChild(self.builtInHeader)
 
-        if add_child is not None:
-            for child in (
-                self.chatContainer,
-                self.pendingMessagesContainer,
-                self.statusContainer,
-            ):
-                add_child(child)
         self.renderWidgets()
-        if add_child is not None:
-            for child in (
-                self.widgetContainerAbove,
-                self.editorContainer,
-                self.widgetContainerBelow,
-                self.footer,
-            ):
-                add_child(child)
+        self.mount()
         set_focus = _callable_attr(self.ui, "setFocus")
         if set_focus is not None:
             set_focus(self.editor)
@@ -6563,6 +6388,9 @@ class InteractiveMode:
                 self.renderCurrentSessionState()
                 self._request_render()
             return result
+        except ContextCarryUnsupportedError as error:
+            self.showError(str(error))
+            return False
         except Exception as error:  # noqa: BLE001
             await self.handleFatalRuntimeError("Failed to create session", error)
             return {"cancelled": True}
@@ -6630,50 +6458,6 @@ class InteractiveMode:
         if flush_queue is not None:
             self._schedule_task(maybe_await(flush_queue({"willRetry": False})))
         return {"cancelled": False}
-
-
-def _safe_call_bool(obj: Any, name: str, default: bool = False) -> bool:
-    getter = _callable_attr(obj, name)
-    if getter is None:
-        return default
-    try:
-        return bool(getter())
-    except Exception:  # noqa: BLE001 - an accessor that fails yields the default
-        return default
-
-
-def _safe_call_int(obj: Any, name: str, default: int = 0) -> int:
-    getter = _callable_attr(obj, name)
-    if getter is None:
-        return default
-    try:
-        return int(getter())
-    except Exception:  # noqa: BLE001 - an accessor that fails yields the default
-        return default
-
-
-def _safe_call_str(obj: Any, name: str, default: str | None = None) -> str | None:
-    getter = _callable_attr(obj, name)
-    if getter is None:
-        return default
-    try:
-        value = getter()
-    except Exception:  # noqa: BLE001 - an accessor that fails yields the default
-        return default
-    return str(value) if value is not None else default
-
-
-def _extract_user_text(message: Any) -> str:
-    content = read_field(message, "content")
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return ""
-    parts: list[str] = []
-    for block in content:
-        if read_field(block, "type") == "text":
-            parts.append(str(read_field(block, "text", "")))
-    return "".join(parts)
 
 
 def _model_argument_completions(session: Any, prefix: str) -> list[dict[str, str]] | None:

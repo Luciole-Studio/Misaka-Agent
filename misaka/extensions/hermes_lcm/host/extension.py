@@ -1,97 +1,69 @@
 """The harness registration that puts the vendored engine on misaka's compaction seam.
 
-Deliberately thin, and deliberately not a copy of the pre-port ``extension.py`` next to
-it: that file registers four ``lcm_*`` tools which read the mini implementation's schema
-and would go blind against an upstream database. Upstream's own fifteen replace them
-here, and only here -- ``activate`` picks one register function, so the two sets of
-``lcm_*`` names can never both be on the model's tool list.
-
 Every handler here is a thin ``async def`` around a synchronous call into the vendored
 engine, and none of that work may run on the event loop -- see ``_off_loop``.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
-import shlex
+from functools import partial
 
-from . import context_engine, externalize, preanswer, slash, tools
+from misaka.utils.values import read_field
+
+from . import context_engine, execution, preanswer, slash, tools
 
 logger = logging.getLogger(__name__)
 
 
-async def _off_loop(work, *args):
-    """One synchronous engine call, in a worker thread and under the engine lock.
+async def _off_loop(work, *args, signal=None, must_finish=False):
+    """Run storage/model work off the UI loop with the caller's provider registry."""
 
-    Both halves are load-bearing, and both are ``tools.py``'s answer to the same problem
-    (its module docstring states it, ``_answer`` implements it) applied to the event
-    handlers, which had gone on calling the engine inline.
-
-    *The thread*, because the work is not merely sqlite. A compaction escalates to the
-    auxiliary summariser, and that seam (``host/llm.py`` -> ``platform.session.run_coro``)
-    runs a whole nested model turn, up to three of them, blocking whichever thread called
-    it. On the loop that is every session in this process frozen -- no keystroke, no
-    render, no abort -- for the length of a model round trip. The pre-answer brief has the
-    same shape on the ``context`` event, i.e. before *every* request rather than only
-    before a compaction.
-
-    *The lock*, because moving the work off the loop is what removes the serialisation
-    the loop was providing. Upstream's connections take one caller at a time (see
-    ``context_engine.ENGINE_LOCK``), and ``context_engine._host_driven_boundary`` pins
-    four config fields for the length of one compaction -- fields ``externalize`` and
-    ``preanswer`` read. Holding the same lock across all of it is what keeps that window
-    invisible without anyone having to reason about which handlers can overlap.
-
-    What this depends on, stated because an earlier version of this note got it wrong:
-    these handlers *do* run inside ``platform.session.run_session``'s environment window.
-    Bundled extensions reach a session as ``extension_factories``, and two live callers
-    pass exactly that to ``run_session`` -- ``misaka/cli/dm.py`` and
-    ``misaka/core/network/worker.py``, both under ``run_coro``. So the nesting is real:
-    ``to_thread`` copies ``_ENV_WINDOW_OWNER`` into this worker, the summariser's
-    ``run_coro`` finds no loop here, and ``_env_window`` must recognise the nested session
-    as re-entrant or it will wait on the ``_ENV_LOCK`` its own caller holds. The no-loop
-    branch of ``run_coro`` stamps the re-entry token for that reason; do not remove it.
-    The engine lock is not re-entered along the same path: the summariser runs through
-    ``run_text``, which passes no ``extension_factories``, so the nested session has no
-    LCM handlers of its own.
-    """
-
-    def _locked():
-        with context_engine.ENGINE_LOCK:
-            return work(*args)
-
-    return await asyncio.to_thread(_locked)
+    return await execution.off_loop(
+        work, *args, ctx=args[-1] if args else None, signal=signal, must_finish=must_finish)
 
 
 def register(harn, *, kind: str):
-    """Register the engine's tools for a session of ``kind`` and subscribe it to the events it needs.
+    """Register the original tool surface and adapt MISAKA lifecycle events."""
 
-    ``kind`` is the session kind ``misaka.core.wiring`` activated this extension
-    for; ``tools.withheld`` turns it into the subset of the fifteen this session is offered.
-    """
+    from .nous import flow
+    harn.registerProvider('nous', {'oauth': flow})
 
     async def session_start(event, ctx):
         try:
-            await _off_loop(context_engine.start, ctx)
-        # Fail open, three times over: a session must start, a missed ingest is repaired
-        # at the next bind, and a failed compaction leaves pi's native summariser to it.
+            await _off_loop(context_engine.bound_engine, ctx)
+        # Binding failure does not prevent opening saved history. The next operation
+        # retries the bind; owned compaction errors never invoke a different engine.
         except Exception:
-            logger.warning("LCM session bind failed; this session runs without LCM.", exc_info=True)
+            logger.warning("LCM session bind failed; the next operation retries it.", exc_info=True)
 
     async def sync_event(event, ctx):
         try:
-            await _off_loop(context_engine.sync, ctx)
+            await _off_loop(partial(context_engine.sync, transcript=context_engine.snapshot(ctx)), ctx)
         except Exception:
             logger.warning("LCM ingest failed; the transcript is unaffected.", exc_info=True)
 
-    async def before_compact(event, ctx):
+    async def session_tree(event, ctx):
+        # Rebind and ingest before another prompt is appended to the selected branch.
+        def rebind(transcript, ctx):
+            context_engine.start(ctx)
+            context_engine.sync(ctx, transcript=transcript)
         try:
-            return await _off_loop(context_engine.compact, event, ctx)
+            await _off_loop(rebind, context_engine.snapshot(ctx), ctx)
         except Exception:
-            logger.warning("LCM compaction failed; keeping the native summariser.", exc_info=True)
-            return None
+            logger.warning("LCM tree rebind failed; the next sync retries it.", exc_info=True)
+
+    async def context_prepare(event, ctx):
+        transcript = context_engine.snapshot(ctx)
+        frozen = context_engine.freeze_context(ctx, transcript)
+        prepared = await execution.off_loop(
+            partial(context_engine.prepare, transcript=transcript), event, frozen,
+            ctx=frozen, signal=read_field(event, "signal"))
+        async def execute():
+            return await execution.off_loop(context_engine.compact, prepared, ctx=frozen,
+                                            signal=read_field(event, "signal"))
+        return {"execute": execute if prepared is not None else None}
 
     async def compact_failed(event, ctx):
         # The engine committed its side of a compaction pi then threw away (an abort
@@ -100,34 +72,34 @@ def register(harn, *, kind: str):
         # upstream repairs a cursor from the store; without it the next ingest writes
         # that whole region a second time.
         try:
-            await _off_loop(context_engine.start, ctx)
+            await _off_loop(context_engine.start, ctx, must_finish=True)
         except Exception:
             logger.warning("LCM could not reset its ingest cursor after a discarded "
                            "compaction; the store may take duplicate rows.", exc_info=True)
 
-    async def transform_context(event, ctx):
-        # The last seam before the provider, and the only one that can rewrite a message
-        # `pi` is keeping -- which is what active-replay stubbing is. Off unless
-        # LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED says otherwise.
-        try:
-            return await _off_loop(externalize.stub_replay, event, ctx)
-        except Exception:
-            logger.warning("LCM could not stub the live context; it goes out in full.", exc_info=True)
-            return None
-
     async def session_end(event, ctx):
-        await sync_event(event, ctx)
+        if read_field(event, 'contextCarried', False):
+            return  # The explicit rollover already ran end/reset/start/carry.
         try:
-            await _off_loop(context_engine.end, ctx)
+            # Upstream on_session_end already performs one bounded final flush.
+            await _off_loop(partial(context_engine.end, transcript=context_engine.snapshot(ctx),
+                                    reset=read_field(event, "reason") == "new"),
+                            ctx, must_finish=True)
         except Exception:
             logger.warning("LCM session end failed; the store keeps what was ingested.", exc_info=True)
+
+    async def session_carry(event, ctx):
+        from . import carry
+        count = await _off_loop(carry.rollover, event['sessionManager'], context_engine.snapshot(ctx), ctx,
+                                must_finish=True)
+        return {'handled': True, 'carriedNodes': count}
 
     async def response_usage(event, ctx):
         message = event.get("message") if isinstance(event, dict) else getattr(event, "message", None)
         if getattr(message, "role", None) != "assistant" and not (isinstance(message, dict) and message.get("role") == "assistant"):
             return
         try:
-            await _off_loop(context_engine.usage, message)
+            await _off_loop(context_engine.usage, message, ctx)
         except Exception:
             logger.warning("LCM usage update failed; the next one repairs it.", exc_info=True)
 
@@ -138,38 +110,44 @@ def register(harn, *, kind: str):
 
     async def lcm_command(args, ctx):
         try:
-            text = await asyncio.to_thread(slash.run, shlex.split(args or ""))
+            text = await _off_loop(slash.run, args or "", ctx)
         except (SystemExit, ValueError):
             text = slash.USAGE
         ctx.ui.notify(text, "info")
 
     async def preanswer_context(event, ctx):
-        # The same seam again, and second on purpose: the runner threads each handler's
-        # messages into the next, and the stubber's protected fresh tail is counted from
-        # the end of the list. Appending the brief first would move that boundary.
+        # Keep the native user turn and protected-tail positions intact.
         try:
-            return await _off_loop(preanswer.inject, event, ctx)
+            return await _off_loop(partial(preanswer.inject, active_tools=harn.getActiveTools()),
+                                   event, ctx, signal=read_field(ctx, "signal"))
         except Exception:
             logger.warning("LCM pre-answer evidence failed; the turn goes out unchanged.", exc_info=True)
             return None
 
     try:
-        tools.register(harn, withhold=tools.withheld(kind, context_engine.engine()))
+        tools.register(harn)
     except Exception:
         logger.warning("LCM tools were not registered; this session runs without them.", exc_info=True)
 
+    async def model_select(event, ctx):
+        await _off_loop(context_engine.update_model, ctx)
+
     harn.on("session_start", session_start)
+    harn.on("session_tree", session_tree)
+    harn.on("model_select", model_select)
     harn.on("before_agent_start", sync_event)
     harn.on("agent_end", sync_event)
     harn.on("session_shutdown", session_end)
+    harn.on("session_context_carry", session_carry)
     harn.on("message_end", response_usage)
     harn.on("resources_discover", discover_resources)
-    harn.registerCommand("lcm", {
-        "description": "Inspect, back up, and maintain the LCM context database.",
-        "handler": lcm_command,
-    })
-    harn.on("session_before_compact", before_compact)
+    from ..vendor import _env_flag_enabled
+    if _env_flag_enabled("LCM_ENABLE_SLASH_COMMAND", default=False):
+        harn.registerCommand("lcm", {
+            "description": "Inspect, back up, and maintain the LCM context database.",
+            "handler": lcm_command,
+        })
+    harn.on("session_context_prepare", context_prepare)
     harn.on("session_compact", sync_event)
     harn.on("session_compact_failed", compact_failed)
-    harn.on("context", transform_context)
     harn.on("context", preanswer_context)

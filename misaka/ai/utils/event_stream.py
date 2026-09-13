@@ -96,10 +96,31 @@ class EventStream[TEvent, TResult]:
 
 class AssistantMessageEventStream(EventStream[AssistantMessageEvent, AssistantMessage]):
     def __init__(self) -> None:
+        # Live control data only: never serialized into the message or session.
+        self.error_cause: BaseException | None = None
+        self._producer: asyncio.Task | None = None
         super().__init__(
             lambda event: event.type in {"done", "error"},
             lambda event: event.message if event.type == "done" else event.error,
         )
+
+
+    async def settled(self) -> None:
+        """Join this stream's producer, including its transport finalizers.
+
+        A done/error event resolves result() before the provider's finally block.
+        Short-lived auxiliary event loops must drain that owner before closing.
+        """
+        if self._producer is not None and self._producer is not asyncio.current_task():
+            from misaka.utils.async_lifecycle import settle
+            _, cancelled = await settle(self._producer)
+            if cancelled is not None:
+                raise cancelled
+
+    def push(self, event: AssistantMessageEvent, *, cause: BaseException | None = None) -> None:
+        if not self._done and event.type == "error":
+            self.error_cause = cause
+        super().push(event)
 
 
 __all__ = [
@@ -111,7 +132,7 @@ __all__ = [
 _live_stream_tasks: set[asyncio.Task[Any]] = set()
 
 
-def spawn_stream_task(coro: Any) -> asyncio.Task[Any]:
+def spawn_stream_task(coro: Any, *, stream: AssistantMessageEventStream | None = None) -> asyncio.Task[Any]:
     """Run a provider's streaming body, holding the task until it finishes.
 
     The event loop keeps only a weak reference to a task, so a bare
@@ -119,6 +140,8 @@ def spawn_stream_task(coro: Any) -> asyncio.Task[Any]:
     can be collected mid-response. The reference lives here until the task completes.
     """
     task = asyncio.create_task(coro)
+    if stream is not None:
+        stream._producer = task
     _live_stream_tasks.add(task)
     task.add_done_callback(_live_stream_tasks.discard)
     return task

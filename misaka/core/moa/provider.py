@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import logging
 import os
 import time
 from collections.abc import Callable
@@ -35,8 +34,6 @@ from misaka.core.moa.privacy import (
     redact_advisor_text,
     redact_outputs,
 )
-
-logger = logging.getLogger(__name__)
 
 MOA_CONFIG_PATH = "~/.misaka/moa.json"
 DEFAULT_MOA_PRESET_NAME = "default"
@@ -571,8 +568,8 @@ def _save_trace(cfg, session_id, preset_name, advisor_traces, agg_slot,
         }
         with open(os.path.join(base, f"{sid}.jsonl"), "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("MoA trace write failed: %s", exc)
+    except Exception:  # noqa: BLE001, S110 - a trace is a sidecar; losing one never breaks the call
+        pass
 
 
 def _redact_trace_messages(messages) -> Any:

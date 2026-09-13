@@ -27,8 +27,11 @@ from typing import Any
 
 import httpx
 
+from misaka.core.web.accounting import account_call
 from misaka.core.web.config import provider_env
+from misaka.core.web.network import api_network_options
 from misaka.core.web.provider import WebSearchProvider
+from misaka.core.web.timeouts import http_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +60,10 @@ class SearXNGWebSearchProvider(WebSearchProvider):
         params: dict[str, Any] = {"q": query, "format": "json", "pageno": 1}
 
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
+            async with (
+                httpx.AsyncClient(timeout=http_timeout("searxng", 15), **api_network_options(base_url)) as client,
+                account_call("web_search", "searxng", query),
+            ):
                 resp = await client.get(
                     f"{base_url}/search",
                     params=params,
@@ -110,7 +116,7 @@ class SearXNGWebSearchProvider(WebSearchProvider):
 
         return {"success": True, "data": {"web": web_results}}
 
-    def setup_hint(self) -> dict[str, Any]:
+    def get_setup_schema(self) -> dict[str, Any]:
         return {
             "name": "SearXNG",
             "badge": "free - self-hosted",

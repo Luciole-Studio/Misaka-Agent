@@ -77,6 +77,7 @@ if TYPE_CHECKING:
     from misaka.core.tools.powershell import PowerShellToolDetails, PowerShellToolInput
     from misaka.core.tools.read import ReadToolDetails, ReadToolInput
     from misaka.core.tools.write import WriteToolInput
+    from misaka.core.web.provider import WebSearchProvider
 
 TArgs = TypeVar("TArgs")
 TDetails = TypeVar("TDetails")
@@ -253,6 +254,7 @@ class _SendUserMessageOptions(TypedDict, total=False):
 
 class _NewSessionOptions(TypedDict, total=False):
     parentSession: str
+    carryOverContext: bool
     setup: Callable[[SessionManager], Awaitable[None]]
     withSession: Callable[[ReplacedSessionContext], Awaitable[None]]
 
@@ -283,6 +285,7 @@ class ToolDefinition[TArgs, TDetails]:
         [str, TArgs, AbortSignal | None, AgentToolUpdateCallback | None, ExtensionContext],
         Awaitable[AgentToolResult],
     ]
+    aliases: tuple[str, ...] = ()
     constrainedSampling: Literal[False] | ConstrainedSamplingConfig | None = None
     prepareArguments: Callable[[Any], Static] | None = None
     executionMode: ToolExecutionMode | None = None
@@ -376,6 +379,8 @@ class OAuthProviderConfig(TypedDict):
     # JavaScript drops the extra argument.
     refreshToken: Callable[..., Awaitable[OAuthCredentials]]
     getApiKey: Callable[[OAuthCredentials], str]
+    getBaseUrl: NotRequired[Callable[[OAuthCredentials], str | None]]
+    getAuthHeaders: NotRequired[Callable[[OAuthCredentials], dict[str, str] | None]]
     modifyModels: NotRequired[Callable[[list[Model[Any]], OAuthCredentials], list[Model[Any]]]]
 
 
@@ -567,6 +572,8 @@ class ResourcesDiscoverResult(TypedDict, total=False):
     promptPaths: list[str]
     themePaths: list[str]
 
+    skillPaths: list[str]
+
 
 class SessionStartEvent(TypedDict):
     type: Literal["session_start"]
@@ -589,6 +596,26 @@ class SessionBeforeForkEvent(TypedDict):
     type: Literal["session_before_fork"]
     entryId: str
     position: Literal["before", "at"]
+
+
+class SessionContextPrepareEvent(TypedDict):
+    """Early whole-context ownership, before native compaction gates."""
+    type: Literal["session_context_prepare"]
+    reason: Literal["manual", "threshold", "overflow"]
+    preflight: bool
+    allowCompression: bool
+    currentTokens: int | None
+    systemPrompt: str
+    tools: list[dict[str, Any]]
+    messages: list[AgentMessage]
+    customInstructions: str | None
+    signal: AbortSignal
+
+
+class SessionContextPrepareResult(TypedDict):
+    # None is an engine-owned no-op, not native fallback. The operation executes
+    # only after core starts the ordinary compaction lifecycle/owner fencing.
+    execute: Callable[[], Awaitable[SessionCompactionResult | None]] | None
 
 
 class SessionBeforeCompactEvent(TypedDict):
@@ -623,6 +650,12 @@ class SessionShutdownEvent(TypedDict):
     type: Literal["session_shutdown"]
     reason: Literal["quit", "reload", "new", "resume", "fork"]
     targetSessionFile: NotRequired[str]
+    contextCarried: NotRequired[bool]
+
+
+class SessionContextCarryEvent(TypedDict):
+    type: Literal["session_context_carry"]
+    sessionManager: SessionManager
 
 
 class TreePreparation(TypedDict):
@@ -656,6 +689,8 @@ type SessionEvent = (
     | SessionBeforeSwitchEvent
     | SessionBeforeForkEvent
     | SessionBeforeCompactEvent
+    | SessionContextPrepareEvent
+    | SessionContextCarryEvent
     | SessionCompactEvent
     | SessionCompactFailedEvent
     | SessionShutdownEvent
@@ -1097,6 +1132,8 @@ class Extension:
     sourceInfo: SourceInfo
     handlers: dict[str, list[Callable[..., Any]]] = field(default_factory=dict)
     tools: dict[str, RegisteredTool] = field(default_factory=dict)
+    webProviders: dict[str, WebSearchProvider] = field(default_factory=dict)
+    browserProviders: dict[str, Any] = field(default_factory=dict)
     messageRenderers: dict[str, MessageRenderer[Any]] = field(default_factory=dict)
     markdownTransformer: MarkdownTransformer | None = None
     entryRenderers: dict[str, EntryRenderer[Any]] = field(default_factory=dict)
@@ -1252,6 +1289,11 @@ class ExtensionAPI(Protocol):
     def on(self, event: Literal["session_before_fork"], handler: ExtensionHandler[SessionBeforeForkEvent, SessionBeforeForkResult]) -> None: ...
 
     @overload
+    def on(self, event: Literal["session_context_prepare"], handler: ExtensionHandler[SessionContextPrepareEvent, SessionContextPrepareResult]) -> None: ...
+
+    @overload
+    def on(self, event: Literal["session_context_carry"], handler: ExtensionHandler[SessionContextCarryEvent, dict[str, Any]]) -> None: ...
+    @overload
     def on(self, event: Literal["session_before_compact"], handler: ExtensionHandler[SessionBeforeCompactEvent, SessionBeforeCompactResult]) -> None: ...
 
     @overload
@@ -1344,6 +1386,18 @@ class ExtensionAPI(Protocol):
     def on(self, event: str, handler: Callable[..., Any]) -> None: ...
 
     def registerTool(self, tool: ToolDefinition[Any, Any]) -> None: ...
+
+    def registerWebSearchProvider(self, provider: WebSearchProvider) -> None:
+        """Register a WebSearchProvider owned by this extension, not a model provider."""
+        ...
+
+    def unregisterWebSearchProvider(self, name: str) -> None:
+        """Remove this extension's registration; reveal the previous owner, if any."""
+        ...
+
+    def registerBrowserProvider(self, provider: Any) -> None: ...
+
+    def unregisterBrowserProvider(self, name: str) -> None: ...
 
     def registerCommand(
         self,
@@ -1623,6 +1677,9 @@ __all__ = [
     "SessionBeforeTreeEvent",
     "SessionBeforeTreeResult",
     "SessionCompactEvent",
+    "SessionContextCarryEvent",
+    "SessionContextPrepareEvent",
+    "SessionContextPrepareResult",
     "SessionEvent",
     "SessionInfoChangedEvent",
     "SessionShutdownEvent",

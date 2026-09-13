@@ -16,11 +16,9 @@ the policy is read from a top-level ``website_blocklist`` key there::
                            "domains": ["ads.example", "*.cdn.example"],
                            "shared_files": ["blocked.txt"]}}
 
-That document is read here directly rather than through
-:func:`misaka.core.web.config.web_config`, for two reasons. That helper folds every
-read and parse failure into ``{}``, which is precisely the condition this module exists to
-be able to report; and ``core/`` must not import from ``extensions/`` -- the enforcement
-points are core tools that run whether or not the web extension ever loaded.
+Default reads use core.web.config's strict shared/profile view. Explicit paths still
+load only that document and report malformed policy to the caller. Relative shared
+files are resolved against the layer declaring them, never the process directory.
 
 ``enabled`` is opt-in with no implicit default: a ``domains`` list without
 ``"enabled": true`` blocks nothing. Hermes behaves the same way (its defaults carry
@@ -42,17 +40,11 @@ Exa extract is never checked at all; MISAKA screens at the tool layer instead
 fetches -- ``web_fetch``, ``download_file``), so a newly added backend cannot quietly opt
 out of the user's blocklist.
 
-One pre-flight screen is nonetheless *weaker* than Hermes at one boundary, which is a debt
-recorded here rather than a simplification claimed. Two Hermes sites re-check the
-post-redirect final URL -- ``vision_tools.py:545`` (``final_url = str(response.url)``) and
-``firecrawl/provider.py:737`` -- and ``image_source.py:180-182`` says outright that the
-double check is "intentional, not redundant: this one guarantees no bytes move for a
-blocked URL; the inner one covers redirects and non-resolver callers". An allowed host
-that redirects to a blocked one is refused by Hermes and would be fetched on a single
-pre-flight check. The re-check belongs per hop in
-:func:`misaka.core.tools._web.bounded.open_checked_stream`, which already walks
-``Location`` headers by hand with ``follow_redirects=False`` and is the only place that
-can see a final URL; it is not wired yet.
+Initial screening is followed by per-hop checks in
+:func:`misaka.core.tools._web.bounded.open_checked_stream`. Firecrawl checks its reported
+final source on both paid and free paths; ``web_extract`` checks that source again on a
+cache hit. A vendor-side post-check rejects returned content, not an already-made remote
+request. Policy refusals remain terminal through both rescue and free-tier failover.
 
 The 30-second cache is not a micro-optimisation for one URL: it is what keeps a 50-URL
 extract from re-reading and re-parsing the same document 51 times. Its lock is real
@@ -71,7 +63,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+import httpx
+
 from misaka.config.product import CFG
+from misaka.core.web.config import _config_path, web_config
+from misaka.core.web.scope import current_scope
 
 logger = logging.getLogger(__name__)
 
@@ -96,13 +92,32 @@ class WebsitePolicyError(Exception):
     """Raised when the website policy configuration is malformed."""
 
 
+def policy_blocked(result: dict[str, Any]) -> bool:
+    """A website-policy refusal is terminal for both rescue and free-tier failover."""
+    if result.get("blocked_by_policy"):
+        return True
+    return "blocked by website policy" in str(result.get("error") or "").lower()
+
+
 def _default_config_path() -> Path:
-    """``~/.misaka/web.json``, read from ``CFG`` on every call so tests can redirect it."""
-    return Path(os.path.expanduser(CFG["web_config"]))
+    return Path(_config_path())
+
+
+def _policy_cache_key() -> str:
+    # Standalone checks retain Hermes' TTL; tool calls use their consistent config view.
+    if current_scope().config is not None:
+        return f"{_default_config_path()}|{json.dumps(web_config().get('website_blocklist'), sort_keys=True)}"
+    return f"{os.path.expanduser(CFG['web_config'])}|{_default_config_path()}"
 
 
 def _normalize_host(host: str) -> str:
-    return (host or "").strip().lower().rstrip(".")
+    host = (host or "").strip().lower().rstrip(".")
+    if not host.isascii():
+        try:
+            return httpx.URL(host=host).raw_host.decode("ascii").rstrip(".")
+        except httpx.InvalidURL:
+            pass  # An invalid host is left for the outbound URL gate to reject.
+    return host
 
 
 def _normalize_rule(rule: Any) -> str | None:
@@ -122,13 +137,15 @@ def _normalize_rule(rule: Any) -> str | None:
     if "://" in value:
         try:
             parsed = urlparse(value)
+            value = parsed.hostname or ""
         except ValueError:
             # An authority urlparse refuses outright ("http://[::1") names no host, so the
             # rule means nothing. Raising here would put a ValueError through
             # load_website_blocklist, which only ever contracts to raise WebsitePolicyError.
             return None
-        value = parsed.netloc or parsed.path
     value = value.split("/", 1)[0].strip().rstrip(".")
+    # Encode literal IDN labels but preserve the pattern's existing ASCII glob syntax.
+    value = ".".join(label if label.isascii() else _normalize_host(label) for label in value.split("."))
     # Hermes slices `value[4:]` behind a `startswith` here; `removeprefix` is the same
     # operation and is what this repo's ruff insists on (FURB188).
     value = value.removeprefix("www.")
@@ -162,22 +179,25 @@ def _iter_blocklist_file_rules(path: Path) -> list[str]:
     return rules
 
 
-def _load_policy_config(config_path: Path) -> dict[str, Any]:
+def _load_policy_config(config_path: Path | None) -> dict[str, Any]:
     """The raw ``website_blocklist`` mapping, merged over the defaults.
 
     Every failure that is *not* "there is no config" raises: a typo in the one file that
     says what to block is the user's problem to see, and :func:`check_website_access`
     decides separately whether this call may fail open on it.
     """
-    if not config_path.exists():
+    if config_path is not None and not config_path.exists():
         return dict(_DEFAULT_WEBSITE_BLOCKLIST)
 
     try:
-        config = json.loads(config_path.read_text(encoding="utf-8")) or {}
+        config = (json.loads(config_path.read_text(encoding="utf-8")) or {}
+                  if config_path is not None else web_config(strict=True))
     except json.JSONDecodeError as exc:
         raise WebsitePolicyError(f"Invalid config JSON at {config_path}: {exc}") from exc
     except (OSError, UnicodeDecodeError) as exc:
         raise WebsitePolicyError(f"Failed to read config file {config_path}: {exc}") from exc
+    except ValueError as exc:
+        raise WebsitePolicyError(str(exc)) from exc
     if not isinstance(config, dict):
         raise WebsitePolicyError("web.json root must be a mapping")
 
@@ -205,7 +225,8 @@ def load_website_blocklist(config_path: Path | None = None) -> dict[str, Any]:
     global _cached_policy, _cached_policy_path, _cached_policy_time
 
     default_path = _default_config_path()
-    resolved_path = str(config_path) if config_path else str(default_path)
+    use_default = config_path is None
+    resolved_path = _policy_cache_key() if use_default else str(config_path)
     now = time.monotonic()
 
     # Cached policy, if it is still fresh and was read from this same path. The path is
@@ -219,8 +240,8 @@ def load_website_blocklist(config_path: Path | None = None) -> dict[str, Any]:
             ):
                 return _cached_policy
 
-    config_path = config_path or default_path
     policy = _load_policy_config(config_path)
+    config_path = config_path or default_path
 
     raw_domains = policy.get("domains", []) or []
     if not isinstance(raw_domains, list):
@@ -264,7 +285,7 @@ def load_website_blocklist(config_path: Path | None = None) -> dict[str, Any]:
 
     result: dict[str, Any] = {"enabled": enabled, "rules": rules}
 
-    if config_path == default_path:
+    if use_default:
         with _cache_lock:
             _cached_policy = result
             _cached_policy_path = resolved_path
@@ -353,7 +374,7 @@ def check_website_access(url: str, config_path: Path | None = None) -> dict[str,
                 _cached_policy is not None
                 and not _cached_policy.get("enabled")
                 and (time.monotonic() - _cached_policy_time) < _CACHE_TTL_SECONDS
-                and _cached_policy_path == str(_default_config_path())
+                and _cached_policy_path == _policy_cache_key()
             ):
                 return None
 
@@ -398,4 +419,5 @@ __all__ = [
     "check_website_access",
     "invalidate_cache",
     "load_website_blocklist",
+    "policy_blocked",
 ]

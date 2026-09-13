@@ -2,7 +2,7 @@
 
 Layers, in precedence order: the project folder's ``skills/``, the role's
 ``skills/``, the shared ``profiles/skills/``, then the read-only external
-directories listed in ``~/.misaka/core/skills.json`` (hermes ``skills.external_dirs``).
+directories listed in ``~/.misaka/skills.json`` (hermes ``skills.external_dirs``).
 Turning them into an index (one entry per name, the system-prompt section,
 lookups) is :mod:`misaka.core.skills.index`; this module only says where skills live
 and which directories count, plus the project-tier quarantine chokepoint.
@@ -75,12 +75,19 @@ def load_skills_config():
     return cfg
 
 
-def disabled_skill_names():
-    """Return the set of skill names the user has disabled in skills.json."""
-    raw = load_skills_config().get("disabled")
-    if isinstance(raw, str):
-        raw = [raw]
-    return {str(x).strip() for x in raw or [] if str(x).strip()}
+def disabled_skill_names(platform=None):
+    """Hermes scalar/list/serialized-list normalization, scoped to this surface.
+
+    MISAKA has no unconditionally advertised ``hermes-agent`` manual: no name is
+    exempt from the user's disable list here.
+    """
+    from .vendor.metadata import _normalize_string_set
+    cfg = load_skills_config()
+    disabled = _normalize_string_set(cfg.get("disabled"))
+    platforms = cfg.get("platform_disabled")
+    if platform and isinstance(platforms, dict):
+        disabled |= _normalize_string_set(platforms.get(platform))
+    return disabled
 
 
 def write_skills_config(cfg):
@@ -100,7 +107,7 @@ def write_skills_config(cfg):
 
 
 EXCLUDED_SKILL_DIRS = frozenset((
-    ".git", ".github", ".hub", ".archive", ".venv", "venv", "node_modules",
+    ".git", ".github", ".hub", ".archive", ".curator_backups", ".misaka-skill-transactions", ".venv", "venv", "node_modules",
     "site-packages", "__pycache__", ".tox", ".nox", ".pytest_cache",
     ".mypy_cache", ".ruff_cache",
 ))
@@ -110,8 +117,14 @@ SKILL_SUPPORT_DIRS = frozenset(("references", "templates", "assets", "scripts"))
 
 def _walk_skill_tree(root, *, prune_support, prune_excluded=True):
     """Walk a skill tree once, following links without revisiting a real directory."""
+    from .vendor.org_visibility import read_active_org_id
+    active_org = read_active_org_id(Path(root))
     seen = set()
     for here, dirs, files in os.walk(root, followlinks=True):
+        if Path(here) == Path(root) and active_org is None:
+            dirs[:] = [d for d in dirs if d != "_org"]
+        elif Path(here) == Path(root) / "_org":
+            dirs[:] = [d for d in dirs if d == active_org]
         real = os.path.realpath(here)
         if real in seen:
             dirs[:] = []
@@ -139,6 +152,12 @@ def iter_skill_files(root, filename="SKILL.md"):
     between: ``<root>/finance/fmp-data/SKILL.md`` is ``finance/fmp-data``."""
     return iter(sorted(Path(here) / filename for here, files in walk_skill_tree(root)
                        if filename in files))
+
+
+def iter_skill_documents(root):
+    """Directory skills plus legacy flat documents (explicit reads only)."""
+    return iter(sorted(Path(here) / name for here, files in walk_skill_tree(root)
+        for name in files if name.endswith(".md") and name != "DESCRIPTION.md"))
 
 
 _PROJECT_SCAN_SOURCE = "project-local"
@@ -179,7 +198,7 @@ def is_quarantined_project_skill(skill_md):
 
 def iter_project_skill_files(root):
     """Yield project SKILL.md files through the single quarantine chokepoint."""
-    return (path for path in iter_skill_files(root) if not is_quarantined_project_skill(path))
+    return (path for path in iter_skill_documents(root) if not is_quarantined_project_skill(path))
 
 
 def project_skill_tree_fingerprint(root):
@@ -252,7 +271,7 @@ def shared_skills_dir():
 PERSONAL_LAYERS = frozenset(("role", "shared"))   # the layers the user edits: snapshotted (hermes "local")
 
 
-def skill_roots(profile_dir, cwd=None):
+def skill_roots(profile_dir, cwd=None, *, extension_paths=()):
     """The layer roots a role sees, as ``(layer, root)`` in precedence order: the project
     folder's ``skills/`` (the folder MISAKA runs in is the project; never a directory under
     the profiles tree), the role's ``skills/``, the shared ``profiles/skills``, the external
@@ -260,7 +279,7 @@ def skill_roots(profile_dir, cwd=None):
     out, seen = [], set()
 
     def add(layer, root):
-        key = Path(root).resolve()
+        key = (layer if layer.startswith("extension:") else "", Path(root).resolve())
         if key not in seen and os.path.isdir(root):
             seen.add(key)
             out.append((layer, str(root)))
@@ -277,12 +296,68 @@ def skill_roots(profile_dir, cwd=None):
     add("shared", shared_skills_dir())
     for root in external_skills_dirs():
         add("external", root)
+    for layer, root in extension_roots(extension_paths):
+        add(layer, root)
     return out
 
 
-def skills_stack(profile_dir, cwd=None):
-    """The skill directories a role sees, project first, one per name (the index decides
-    who wins). Used where directories, not entries, are needed: the read-only copies a
-    card runs against, and a sub-agent resolving the skills its definition names."""
-    from misaka.core.skills import index
-    return [entry["dir"] for entry in index.build(skill_roots(profile_dir, cwd))]
+def protected_skill_roots(profile_dir, cwd=None, *, extension_paths=()):
+    """Workflow protection includes absent and other-role Skill and bundle roots."""
+    roles = Path(os.path.expanduser(CFG["roles_root"]))
+    roots = [Path(shared_skills_dir())]
+    if profile_dir:
+        roots.append(Path(profile_dir) / "skills")
+    # Profiles may be nested (Sisters); the nearest existing role ancestors are
+    # covered by their expected skills root, regardless of whether it exists yet.
+    if roles.is_dir():
+        for here, dirs, files in os.walk(roles):
+            dirs[:] = [d for d in dirs if d not in {"skills", "skill-bundles", ".git", "sessions", "cache"}]
+            roots.extend((Path(here) / "skills", Path(here) / "skill-bundles"))
+    workspace = Path(cwd or os.getcwd()).expanduser().absolute()
+    if not (workspace / "skills").resolve().is_relative_to(roles.resolve()):
+        roots.append(workspace / "skills")
+    roots.extend(Path(root) for _, root in skill_roots(profile_dir, cwd, extension_paths=extension_paths))
+    return {str(p) for root in roots for p in (root.absolute(), root.resolve())}
+
+
+def extension_resources(loader):
+    """Keep provider metadata when available; old resource loaders remain usable."""
+    getter = getattr(loader, "getExtensionSkillResources", None)
+    if getter is not None:
+        return getter()
+    getter = getattr(loader, "getExtensionSkillPaths", None)
+    return getter() if getter is not None else ()
+
+
+def extension_roots(resources):
+    """Namespaced layer labels keep the serializable (layer, path) root protocol.
+
+    Provider namespaces use the loader's source label, never SKILL frontmatter.
+    Duplicate provider names stay ambiguous; callers can choose an exact source.
+    """
+    from .vendor.commands import slugify_skill_name
+    for resource in resources:
+        if isinstance(resource, str):
+            yield "extension", resource
+            continue
+        metadata = resource.get("metadata", {})
+        if metadata.get("enabled") is False or metadata.get("available") is False or metadata.get("state") in ("disabled", "unavailable", "withdrawn"):
+            continue
+        label = metadata.get("source", "").removeprefix("extension:")
+        if label.startswith("inline:"):
+            namespace = f"<{label}>"
+        else:
+            if label.endswith((".py", ".js", ".ts")):
+                label = label.rsplit(".", 1)[0]
+            namespace = slugify_skill_name(label)
+        yield (f"extension:{namespace}" if namespace else "extension"), resource["path"]
+
+
+def parse_skill_name(name):
+    """Keep the loader's inline source label intact when splitting a qualified name."""
+    from .vendor.metadata import parse_qualified_name
+    if name.startswith("<inline:"):
+        namespace, separator, bare = name.partition(">:")
+        if separator:
+            return namespace + ">", bare
+    return parse_qualified_name(name)

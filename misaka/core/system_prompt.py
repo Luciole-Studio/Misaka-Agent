@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import NotRequired, TypedDict
 
+CURRENT_TOOLS_GUIDELINE = "Use only the tools offered in the current request; tool names in conversation history do not grant capabilities."
+
 
 class BuildSystemPromptOptions(TypedDict):
     cwd: str
@@ -40,13 +42,21 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
     tools = (
         selected_tools
         if selected_tools is not None
-        else ["read", "bash", "edit", "write"]
+        else ["read", "bash", "edit", "write", "office"]
     )
     visible_tools = [name for name in tools if tool_snippets and tool_snippets.get(name)]
     tools_list = "\n".join(f"- {name}: {tool_snippets[name]}" for name in visible_tools) if visible_tools else "(none)"
 
     guidelines: list[str] = []
-    seen_guidelines: set[str] = set()
+    from misaka.config.identity import (
+        COORDINATOR_APPROVAL,
+        COORDINATOR_RECEIPTS,
+        ROLE_CHARTER,
+    )
+    # Only our exact, assembled charter covers these shared rules. An arbitrary
+    # custom identity never suppresses independently enabled tools' instructions.
+    seen_guidelines = ({COORDINATOR_APPROVAL, COORDINATOR_RECEIPTS}
+                       if ROLE_CHARTER["last_order"] in (append_system_prompt or "") else set())
 
     def add_guideline(guideline: str) -> None:
         if guideline in seen_guidelines:
@@ -104,7 +114,7 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
 Available tools:
 {tools_list}
 
-In addition to the tools above, you may have access to other custom tools depending on the project.
+{CURRENT_TOOLS_GUIDELINE}
 
 Guidelines:
 {guidelines_text}"""

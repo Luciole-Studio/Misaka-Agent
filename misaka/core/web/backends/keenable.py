@@ -21,8 +21,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import httpx
-
+from misaka.core.web.accounting import account_call
 from misaka.core.web.config import (
     keyless_tier_enabled,
     provider_env,
@@ -36,6 +35,7 @@ from misaka.core.web.keyless import (
     search_with_failover,
 )
 from misaka.core.web.provider import WebSearchProvider
+from misaka.core.web.runtime import api_client
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +75,9 @@ class KeenableWebSearchProvider(WebSearchProvider):
         """
         return keyless_tier_enabled() and provider_tier("keenable") != "paid"
 
+    def uses_keyless_ring(self) -> bool:
+        return use_keyless("keenable", provider_env("KEENABLE_API_KEY"))
+
     def supports_extract(self) -> bool:
         """Keenable reads whole pages through ``/v1/fetch``; see :meth:`extract`."""
         return True
@@ -83,12 +86,15 @@ class KeenableWebSearchProvider(WebSearchProvider):
         """Execute a Keenable search (keyed path or keyless ring)."""
         try:
             api_key = provider_env("KEENABLE_API_KEY")
-            if use_keyless("keenable", api_key):
+            if self.uses_keyless_ring():
                 logger.info("Keenable keyless search: '%s' (limit=%d)", query, limit)
                 return await search_with_failover("keenable", query, limit)
 
             logger.info("Keenable search: '%s' (limit=%d)", query, limit)
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with (
+                api_client("keenable", KEENABLE_API_URL, api_key, timeout=30, follow_redirects=True) as client,
+                account_call("web_search", "keenable", query),
+            ):
                 response = await client.post(
                     f"{KEENABLE_API_URL}/v1/search",
                     json={"query": query, "max_results": min(max(1, int(limit)), 20)},
@@ -131,14 +137,11 @@ class KeenableWebSearchProvider(WebSearchProvider):
         every request stands alone; the dispatcher's all-entries-failed check is what
         turns "every page failed" back into the one-shot rescue.
 
-        Divergence from Hermes, small and matching what
-        :func:`misaka.core.web.keyless.keenable_extract_keyless` already does: the
-        entry is filed under the URL that was *asked for*, not the one Keenable echoes
-        back. A redirect makes the two differ, and an entry whose ``url`` is not the
-        caller's is exactly the mispairing the positional contract exists to prevent.
+        Each request identifies its input; the reported URL is retained separately in
+        metadata.sourceURL, so canonicalisation loses neither material nor provenance.
         """
         api_key = provider_env("KEENABLE_API_KEY")
-        if use_keyless("keenable", api_key):
+        if self.uses_keyless_ring():
             # The same decision :meth:`search` makes, through the same chokepoint.
             logger.info("Keenable keyless extract: %d URL(s)", len(urls))
             return await extract_with_failover("keenable", list(urls))
@@ -147,7 +150,10 @@ class KeenableWebSearchProvider(WebSearchProvider):
         results: list[dict[str, Any]] = []
         for url in urls:
             try:
-                async with httpx.AsyncClient(timeout=30) as client:
+                async with (
+                    api_client("keenable", KEENABLE_API_URL, api_key, timeout=30, follow_redirects=True) as client,
+                    account_call("web_extract", "keenable", url),
+                ):
                     response = await client.get(
                         f"{KEENABLE_API_URL}/v1/fetch",
                         params={"url": url},
@@ -168,11 +174,10 @@ class KeenableWebSearchProvider(WebSearchProvider):
                         "title": title,
                         "content": content,
                         "raw_content": content,
-                        "metadata": {"sourceURL": url, "title": title},
+                        "metadata": {"sourceURL": str(data.get("url") or url), "title": title},
                     }
                 )
             except Exception as exc:  # noqa: BLE001 - per-URL error entry, as in Hermes
-                logger.debug("Keenable fetch failed for %s: %s", url, exc)
                 results.append(
                     {
                         "url": url,
@@ -185,19 +190,8 @@ class KeenableWebSearchProvider(WebSearchProvider):
                 )
         return results
 
-    def setup_hint(self) -> dict[str, Any]:
-        return {
-            "name": "Keenable - Free (keyless)",
-            "badge": "free - no key",
-            "tag": (
-                "Independent web index for AI apps - fast search and page fetch on "
-                "Keenable's anonymous free tier."
-            ),
-            "env_vars": [
-                {
-                    "key": "KEENABLE_API_KEY",
-                    "prompt": "Keenable API key",
-                    "url": "https://keenable.ai",
-                },
-            ],
-        }
+    def get_setup_schema(self) -> dict[str, Any]:
+        from misaka.core.web.provider import keyless_setup_schema
+
+        return keyless_setup_schema('Keenable', 'KEENABLE_API_KEY', 'https://keenable.ai',
+                                    'Web search and page extraction.')

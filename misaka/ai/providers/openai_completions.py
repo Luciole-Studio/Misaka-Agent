@@ -526,11 +526,11 @@ def stream_openai_completions(
             )
             if isinstance(raw_metadata, Mapping) and raw_metadata.get("raw"):
                 output.errorMessage = f"{output.errorMessage}\n{raw_metadata['raw']}"
-            stream.push(ErrorEvent(reason=output.stopReason, error=output))
+            stream.push(ErrorEvent(reason=output.stopReason, error=output), cause=error)
         finally:
             stream.end()
 
-    spawn_stream_task(run())
+    spawn_stream_task(run(), stream=stream)
     return stream
 
 

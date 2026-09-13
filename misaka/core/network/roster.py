@@ -173,6 +173,31 @@ def describe_line(sid, root=None):
     return truncate_skill_description(desc) if desc else None
 
 
+def capability_catalog(root=None, *, workspace=None, platform="cli"):
+    """The coordinator's catalog, using the same layered Skill index as a Sister.
+
+    These are configured capabilities, not a claim that every credential or
+    script dependency is ready. No Sister runtime or extension is started to
+    discover the catalog. Detailed profiles stay readable at profile_path.
+    """
+    from misaka.core.skills import index, layers, visibility
+
+    root = os.path.expanduser(root or CFG["profiles_root"])
+    out = []
+    for sid in roster_names(root):
+        if not _valid(sid):
+            continue
+        profile = os.path.join(root, sid)
+        description, body = describe(sid, root)
+        entries = index.runtime_build(layers.skill_roots(profile, cwd=workspace), platform=platform,
+                                      detect=visibility.environment_detector(kind="card"))
+        out.append({"id": sid, "description": description or "", "profile": body or "",
+                    "profile_path": os.path.join(profile, "DESCRIBE.md"),
+                    "skills": [{"name": e.get("runtime_name", e["name"]), "description": e["description"],
+                                "path": e["path"], "layer": e["layer"]} for e in entries]})
+    return out
+
+
 def remove_sister(sid, root=None, db_path=None):
     """Remove a Sister profile unless it has active cards; return ``(success, message)``."""
     root = root or ROOT

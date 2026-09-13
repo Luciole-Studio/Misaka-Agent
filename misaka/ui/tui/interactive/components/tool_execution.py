@@ -101,12 +101,8 @@ class ToolExecutionComponent(Container):
 
         self.addChild(Spacer(1))
         self.contentBox = Box(1, 1, lambda text: theme.bg("toolPendingBg", text))
-        self.contentText = Text("", 1, 1, lambda text: theme.bg("toolPendingBg", text))
         self.selfRenderContainer = Container()
-        if self.hasRendererDefinition():
-            self.addChild(self.selfRenderContainer if self.getRenderShell() == "self" else self.contentBox)
-        else:
-            self.addChild(self.contentText)
+        self.addChild(self.selfRenderContainer if self.getRenderShell() == "self" else self.contentBox)
         self.updateDisplay()
 
     def _request_render(self) -> None:
@@ -165,7 +161,14 @@ class ToolExecutionComponent(Container):
         return json.dumps(self.args, indent=2, ensure_ascii=False)
 
     def createCallFallback(self) -> Text:
-        return Text(theme.fg("toolTitle", theme.bold(self.toolName)), 0, 0)
+        title = theme.fg("toolTitle", theme.bold(self.toolName))
+        if self.isPartial:
+            state = "running" if self.executionStarted else (
+                "queued" if self.argsComplete else "generating arguments")
+            title += theme.fg("muted", f" — {state}")
+        if not self.hasRendererDefinition():
+            title += f"\n\n{self._format_args()}"
+        return Text(title, 0, 0)
 
     def createResultFallback(self) -> Text | None:
         output = self.getTextOutput()
@@ -301,63 +304,58 @@ class ToolExecutionComponent(Container):
         has_content = False
         self.hideComponent = False
 
-        if self.hasRendererDefinition():
-            render_container = self.selfRenderContainer if self.getRenderShell() == "self" else self.contentBox
-            if isinstance(render_container, Box):
-                render_container.setBgFn(bg_fn)
-            render_container.clear()
+        render_container = self.selfRenderContainer if self.getRenderShell() == "self" else self.contentBox
+        if isinstance(render_container, Box):
+            render_container.setBgFn(bg_fn)
+        render_container.clear()
 
-            call_renderer = self.getCallRenderer()
-            if not callable(call_renderer):
+        call_renderer = self.getCallRenderer()
+        if not callable(call_renderer):
+            render_container.addChild(self.createCallFallback())
+            has_content = True
+        else:
+            try:
+                component = call_renderer(self.args, theme, self.getRenderContext(self.callRendererComponent))
+            except Exception:  # noqa: BLE001 - a failing tool renderer falls back to the default
+                self.callRendererComponent = None
+                component = None
+            if component is None:
                 render_container.addChild(self.createCallFallback())
-                has_content = True
+            else:
+                self.callRendererComponent = component
+                render_container.addChild(component)
+            has_content = True
+
+        if self.result is not None:
+            result_renderer = self.getResultRenderer()
+            if not callable(result_renderer):
+                component = self.createResultFallback()
+                if component is not None:
+                    render_container.addChild(component)
+                    has_content = True
             else:
                 try:
-                    component = call_renderer(self.args, theme, self.getRenderContext(self.callRendererComponent))
+                    component = result_renderer(
+                        {
+                            "content": self.result.content,
+                            "details": self.result.details,
+                        },
+                        {"expanded": self.expanded, "isPartial": self.isPartial},
+                        theme,
+                        self.getRenderContext(self.resultRendererComponent),
+                    )
                 except Exception:  # noqa: BLE001 - a failing tool renderer falls back to the default
-                    self.callRendererComponent = None
+                    self.resultRendererComponent = None
                     component = None
                 if component is None:
-                    render_container.addChild(self.createCallFallback())
+                    fallback = self.createResultFallback()
+                    if fallback is not None:
+                        render_container.addChild(fallback)
+                        has_content = True
                 else:
-                    self.callRendererComponent = component
+                    self.resultRendererComponent = component
                     render_container.addChild(component)
-                has_content = True
-
-            if self.result is not None:
-                result_renderer = self.getResultRenderer()
-                if not callable(result_renderer):
-                    component = self.createResultFallback()
-                    if component is not None:
-                        render_container.addChild(component)
-                        has_content = True
-                else:
-                    try:
-                        component = result_renderer(
-                            {
-                                "content": self.result.content,
-                                "details": self.result.details,
-                            },
-                            {"expanded": self.expanded, "isPartial": self.isPartial},
-                            theme,
-                            self.getRenderContext(self.resultRendererComponent),
-                        )
-                    except Exception:  # noqa: BLE001 - a failing tool renderer falls back to the default
-                        self.resultRendererComponent = None
-                        component = None
-                    if component is None:
-                        fallback = self.createResultFallback()
-                        if fallback is not None:
-                            render_container.addChild(fallback)
-                            has_content = True
-                    else:
-                        self.resultRendererComponent = component
-                        render_container.addChild(component)
-                        has_content = True
-        else:
-            self.contentText.setCustomBgFn(bg_fn)
-            self.contentText.setText(self.formatToolExecution())
-            has_content = True
+                    has_content = True
 
         self._clear_dynamic_media()
         if self.result is not None:
@@ -398,15 +396,6 @@ class ToolExecutionComponent(Container):
             return ""
         return get_text_output(self.result, self.showImages)
 
-    def formatToolExecution(self) -> str:
-        text = theme.fg("toolTitle", theme.bold(self.toolName))
-        args_text = self._format_args()
-        if args_text:
-            text += f"\n\n{args_text}"
-        output = self.getTextOutput()
-        if output:
-            text += f"\n{output}"
-        return text
 
 
 __all__ = [

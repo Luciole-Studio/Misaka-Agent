@@ -97,10 +97,13 @@ _cached_websocket_connector: Callable[..., Any] | None = None
 
 
 class CodexApiError(RuntimeError):
-    def __init__(self, message: str, *, code: str | None = None, payload: dict[str, Any] | None = None) -> None:
+    def __init__(self, message: str, *, code: str | None = None, payload: dict[str, Any] | None = None,
+                 status_code: int | None = None, headers: Mapping[str, str] | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.payload = payload
+        self.status_code = status_code
+        self.headers = headers
 
 
 class CodexProtocolError(RuntimeError):
@@ -1236,8 +1239,9 @@ def stream_openai_codex_responses(
             signal = _option(options, "signal")
 
             async with httpx.AsyncClient(follow_redirects=True, timeout=_resolve_codex_timeout(options)) as client:
-                last_error: RuntimeError | None = None
-                for attempt in range(MAX_RETRIES + 1):
+                retries = _option(options, "maxRetries")
+                retries = MAX_RETRIES if retries is None else max(0, int(retries))
+                for attempt in range(retries + 1):
                     if signal_aborted(signal):
                         raise RuntimeError("Request was aborted")
                     try:
@@ -1266,23 +1270,24 @@ def stream_openai_codex_responses(
 
                         error_info = await parse_error_response(response)
                         error_text = error_info.get("message", "")
-                        if attempt < MAX_RETRIES and _is_retryable_error(response.status_code, error_text):
+                        if attempt < retries and _is_retryable_error(response.status_code, error_text):
                             delay_ms = _parse_retry_after_delay_ms(response, BASE_DELAY_MS * (2**attempt))
                             await response.aclose()
                             await _sleep(delay_ms, signal)
                             continue
                         await response.aclose()
-                        raise CodexApiError(error_info.get("friendlyMessage") or error_info["message"])
+                        raise CodexApiError(error_info.get("friendlyMessage") or error_info["message"],
+                                            status_code=response.status_code,
+                                            headers=headers_to_record(response.headers))
                     except (httpx.HTTPError, CodexApiError, CodexProtocolError, RuntimeError) as error:
                         if isinstance(error, RuntimeError) and str(error) == "Request was aborted":
                             raise
                         if is_codex_non_transport_error(error):
                             raise
-                        last_error = error if isinstance(error, RuntimeError) else RuntimeError(str(error))
-                        if attempt < MAX_RETRIES:
+                        if attempt < retries:
                             await _sleep(BASE_DELAY_MS * (2**attempt), signal)
                             continue
-                        raise last_error from error
+                        raise
 
                 if response is None or not response.is_success:
                     raise RuntimeError("Failed after retries")
@@ -1305,13 +1310,13 @@ def stream_openai_codex_responses(
                     continue
             output.stopReason = "aborted" if signal_aborted(_option(options, "signal")) else "error"
             output.errorMessage = str(error)
-            stream.push(ErrorEvent(reason=output.stopReason, error=output))
+            stream.push(ErrorEvent(reason=output.stopReason, error=output), cause=error)
             stream.end()
         finally:
             if response is not None:
                 await response.aclose()
 
-    spawn_stream_task(run())
+    spawn_stream_task(run(), stream=stream)
     return stream
 
 

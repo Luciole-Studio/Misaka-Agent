@@ -1,0 +1,164 @@
+[
+  {
+    "name": "browser_navigate",
+    "description": "Navigate to a URL in the browser. Initializes the session and loads the page. Must be called before other browser tools. For simple information retrieval, prefer web_search or web_extract (faster, cheaper). For plain-text endpoints \u2014 URLs ending in .md, .txt, .json, .yaml, .yml, .csv, .xml, raw.githubusercontent.com, or any documented API endpoint \u2014 prefer curl via the bash tool or web_extract; the browser stack is overkill and much slower for these. Use browser tools when you need to interact with a page (click, fill forms, dynamic content). Returns a compact page snapshot with interactive elements and ref IDs \u2014 no need to call browser_snapshot separately after navigating.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "The URL to navigate to (e.g., 'https://example.com')"
+        }
+      },
+      "required": [
+        "url"
+      ]
+    }
+  },
+  {
+    "name": "browser_snapshot",
+    "description": "Read the current accessibility snapshot and ref IDs. full=false returns a compact view; full=true includes noninteractive content. Large snapshots are saved in full; use read with the returned path. Navigation already returns a snapshot. Also reports pending dialogs and frame IDs.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "full": {
+          "type": "boolean",
+          "description": "If true, returns complete page content. If false (default), returns compact view with interactive elements only.",
+          "default": false
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "browser_click",
+    "description": "Click on an element identified by its ref ID from the snapshot (e.g., '@e5'). The ref IDs are shown in square brackets in the snapshot output. Requires browser_navigate and browser_snapshot to be called first.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "ref": {
+          "type": "string",
+          "description": "The element reference from the snapshot (e.g., '@e5', '@e12')"
+        }
+      },
+      "required": [
+        "ref"
+      ]
+    }
+  },
+  {
+    "name": "browser_type",
+    "description": "Type text into an input field identified by its ref ID. Clears the field first, then types the new text. Requires browser_navigate and browser_snapshot to be called first.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "ref": {
+          "type": "string",
+          "description": "The element reference from the snapshot (e.g., '@e3')"
+        },
+        "text": {
+          "type": "string",
+          "description": "The text to type into the field"
+        }
+      },
+      "required": [
+        "ref",
+        "text"
+      ]
+    }
+  },
+  {
+    "name": "browser_scroll",
+    "description": "Scroll the page in a direction. Use this to reveal more content that may be below or above the current viewport. Requires browser_navigate to be called first.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "direction": {
+          "type": "string",
+          "enum": [
+            "up",
+            "down"
+          ],
+          "description": "Direction to scroll"
+        }
+      },
+      "required": [
+        "direction"
+      ]
+    }
+  },
+  {
+    "name": "browser_back",
+    "description": "Navigate back to the previous page in browser history. Requires browser_navigate to be called first.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  },
+  {
+    "name": "browser_press",
+    "description": "Press a keyboard key. Useful for submitting forms (Enter), navigating (Tab), or keyboard shortcuts. Requires browser_navigate to be called first.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "Key to press (e.g., 'Enter', 'Tab', 'Escape', 'ArrowDown')"
+        }
+      },
+      "required": [
+        "key"
+      ]
+    }
+  },
+  {
+    "name": "browser_get_images",
+    "description": "Get a list of all images on the current page with their URLs and alt text. Useful for finding images to analyze with the vision tool. Requires browser_navigate to be called first.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  },
+  {
+    "name": "browser_vision",
+    "description": "Capture the current page. annotate=true labels interactive elements with refs. Native vision receives one ImageContent; text-only models can use browser.vision_model. Saved screenshots remain workspace artifacts.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "question": {
+          "type": "string",
+          "description": "What you want to know about the page visually. Be specific about what you're looking for."
+        },
+        "annotate": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, overlay numbered [N] labels on interactive elements. Each [N] maps to ref @eN for subsequent browser commands. Useful for QA and spatial reasoning about page layout."
+        }
+      },
+      "required": [
+        "question"
+      ]
+    }
+  },
+  {
+    "name": "browser_console",
+    "description": "Get browser console output and JavaScript errors from the current page. Returns console.log/warn/error/info messages and uncaught JS exceptions. Use this to detect silent JavaScript errors, failed API calls, and application warnings. Requires browser_navigate to be called first. When 'expression' is provided, evaluates JavaScript in the page context and returns the result \u2014 use this for DOM inspection, reading page state, or extracting data programmatically.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "clear": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, clear the message buffers after reading"
+        },
+        "expression": {
+          "type": "string",
+          "description": "JavaScript expression to evaluate in the page context. Runs in the browser like DevTools console \u2014 full access to DOM, window, document. Return values are serialized to JSON. Example: 'document.title' or 'document.querySelectorAll(\"a\").length'"
+        }
+      },
+      "required": []
+    }
+  }
+]

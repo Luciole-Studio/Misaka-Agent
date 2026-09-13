@@ -1,23 +1,8 @@
-"""Where MISAKA keeps conversations: one root, then the role, then the folder.
+"""Session paths: one product root, with roles, cards, research and nested agents.
 
-pi keeps one agent's sessions under its engine home, bucketed by working directory
-(``~/.pi/agent/sessions/<encoded cwd>/``). MISAKA runs several roles out of one install,
-so the product tree adds the role above the bucket::
-
-    ~/.misaka/sessions/<role>/<folder bucket>/*.jsonl        the role's chats in that folder
-    ~/.misaka/sessions/<role>/dm/*.jsonl                     her DM inbox conversation
-    ~/.misaka/sessions/<sister>/<bucket>/cards/<card>/       a card she ran there (one dir per card)
-    ~/.misaka/sessions/last-order/<bucket>/intake/           Last Order drafting that folder's brief
-
-Everything a session can be lives under this root, and it is the only root the three ways
-of finding one (``/resume``, the panel sidebar, ``--session <id>``) look at. Card and intake
-conversations sit one level *below* a bucket on purpose: ``/resume`` lists a bucket's own
-files, so they never show up as chats to continue, while a card keeps the one-directory
-invariant its resume logic relies on (the newest file in its dir is its transcript).
-
-Until this module, the engine's own default (``<agent dir>/sessions/<bucket>``, pi's
-layout) stayed reachable: a session created without an explicit directory landed there,
-where nothing in the product ever looked. The engine default now resolves here too.
+Explicit session directories and SDK engine homes remain supported. Child sessions
+stay beside a persisted parent; children of in-memory parents use this root too.
+SessionManager owns transcript storage; the catalog adds identity and live state.
 """
 
 import os
@@ -47,17 +32,23 @@ def dm_dir(role: str) -> str:
 
 
 def card_session_dir(task) -> str:
-    """One directory per card, under its Sister's bucket for the card's workspace.
+    """One immutable storage address per card; resetting its runtime does not reset this.
 
-    ``task`` is a board row or a dict with ``id``, ``assignee`` and ``workspace``.
+    Newly allocated cards use their id, independent of assignee and execution workspace.
+    A persisted address is authoritative (including existing directories retained in place).
     """
-    return os.path.join(chat_dir(task["assignee"], task["workspace"]), "cards", str(task["id"]))
+    directory = task["session_dir"] if "session_dir" in task.keys() else None  # noqa: SIM118 - sqlite3.Row membership checks values
+    return directory or os.path.join(sessions_root(), "cards", str(task["id"]))
 
 
-def intake_session_dir(workspace: str) -> str:
-    """Where Last Order drafts a folder's PROJECT.md: under her bucket for that folder."""
-    return os.path.join(chat_dir(COORDINATOR, workspace), "intake")
+def subagent_session_dir(parent_id: str, parent_file: str | None = None) -> str:
+    """One child namespace per parent, including parents with no transcript yet."""
+    if not parent_id or parent_id in {".", ".."} or "/" in parent_id or "\\" in parent_id:
+        raise ValueError("A parent session ID must be a single path component.")
+    if parent_file:
+        return os.path.join(os.path.dirname(os.path.realpath(os.path.expanduser(parent_file))), parent_id, "subagents")
+    return os.path.join(sessions_root(), "subagents", parent_id)
 
 
-__all__ = ["COORDINATOR", "ENV", "card_session_dir", "chat_dir", "dm_dir", "intake_session_dir",
-           "role_dir", "sessions_root"]
+__all__ = ["COORDINATOR", "ENV", "card_session_dir", "chat_dir", "dm_dir", "role_dir",
+           "sessions_root", "subagent_session_dir"]

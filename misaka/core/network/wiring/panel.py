@@ -3,7 +3,7 @@
 Two things the panel needs from inside a session, both formerly bundled extensions:
 
 * state reports (herdr's ``herdr-agent-state.ts``, MISAKA edition): ``agent_start`` -> working,
-  ``agent_end`` -> idle, an extension UI prompt in flight -> blocked (the panel's red dot: she is
+  ``agent_settled`` -> idle, an extension UI prompt in flight -> blocked (the panel's red dot: she is
   waiting for a person). Reports go to ``pane.report_state`` with a seq that stays monotonic across
   reloads; a duplicate state is not resent. Each report carries the session file this pane writes,
   so the panel can mark the open sessions in its list and jump to the tab.
@@ -11,7 +11,7 @@ Two things the panel needs from inside a session, both formerly bundled extensio
   hides the divergence. Inside a pane the part cancels the swap, creates the same branched file the
   runtime would, and asks the daemon to seat a fresh ``misaka chat --session <branch>`` as a split
   of this pane. Both branches stay live, side by side. Foreground only: a card pane belongs to
-  card_shell's Supervisor, and a headless chat has no pane to split.
+  the card lifecycle hook, and a headless chat has no pane to split.
 
 Only sessions that live in a pane take part; a child process inherits its parent's pane id but
 must not speak for that pane.
@@ -101,8 +101,10 @@ class PanelPart:
         self.reporter.note_session(ctx)
         await self.reporter.publish()
 
-    async def agent_end(self, _event, ctx):
-        self.reporter.active = False
+    async def agent_settled(self, _event, ctx):
+        # TodoPart precedes this part: acceptance, Git and PageIndex finish
+        # before the research driver may advance to the next phase.
+        self.reporter.active = not ctx.isIdle()
         self.reporter.note_session(ctx)
         await self.reporter.publish()
 
@@ -164,7 +166,7 @@ class PanelPart:
             created = request("pane.create",
                               {"argv": [*chat, "--session", branched], "cwd": manager.getCwd(),
                                "title": "Last Order" if role == "last_order" else who,
-                               "place": {"split": pane_id}})
+                               "place": {"tab": pane_id}})
             # Only a seated pane (daemon.py answers with its id) earns the cancel:
             # cancelling first and failing second loses the fork at both ends.
             return bool(created and created.get("pane_id"))

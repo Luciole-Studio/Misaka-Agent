@@ -68,3 +68,8 @@ def signal_aborted(signal: Any) -> bool:
     ``_signal_aborted``, ``_aborted``. It is the same question, so it has one answer.
     """
     return bool(read_field(signal, "aborted", False))
+
+
+def semantic_boolean(value: Any) -> Any:
+    """CCB semanticBoolean: coerce only exact boolean strings before strict validation."""
+    return {"true": True, "false": False}.get(value, value) if isinstance(value, str) else value

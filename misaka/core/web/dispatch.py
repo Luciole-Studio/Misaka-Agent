@@ -13,15 +13,8 @@ contract. The one thing the tool must honour from here: a response carrying
 must never be cached, or a single failure would pin the query to the free tier for a
 whole TTL.
 
-Two pieces of Hermes' rescue machinery have no counterpart here, each because the thing
-they guard does not exist:
-
-* ``_disabled_web_plugin_for`` -- diagnoses "you configured this backend but disabled its
-  plugin". MISAKA has no plugin-disable table, so the only way to name a backend that is
-  not there is a typo, which is what :func:`resolve_provider` says instead.
-* the ``WEB_TOOLS_DEBUG`` / ``DebugSession`` call log. A developer facility that writes
-  ``logs/web_tools_debug_*.json``; it changes nothing a model sees. The two log lines that
-  do carry information are kept verbatim, here and in the memo.
+Disabled providers are diagnosed before resolution and excluded from ring rescue.
+Hermes' structured Web debug trace is still tracked separately in the transplant plan.
 """
 
 from __future__ import annotations
@@ -29,13 +22,13 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from misaka.core.tools._web.website_policy import policy_blocked
+from misaka.core.web import debug
 from misaka.core.web.config import (
     keyless_rescue_enabled,
-    provider_env,
-    use_keyless,
+    provider_disabled,
 )
 from misaka.core.web.keyless import (
-    KEYLESS_RING,
     extract_with_failover,
     search_with_failover,
 )
@@ -52,15 +45,6 @@ from misaka.core.web.registry import (
 
 logger = logging.getLogger(__name__)
 
-# Which credential decides whether a ring vendor ran keyed or keyless on this call.
-_RING_KEY_VARS = {
-    "exa": "EXA_API_KEY",
-    "parallel": "PARALLEL_API_KEY",
-    "firecrawl": "FIRECRAWL_API_KEY",
-    "keenable": "KEENABLE_API_KEY",
-}
-
-
 def serves_keyless(provider: WebSearchProvider | None) -> bool:
     """Whether a call on *provider* will be dispatched through the keyless ring.
 
@@ -69,10 +53,7 @@ def serves_keyless(provider: WebSearchProvider | None) -> bool:
     single vendor request that can fail and be rescued -- not a walk that already tried
     every free tier there is.
     """
-    name = getattr(provider, "name", "")
-    if name not in KEYLESS_RING:
-        return False
-    return use_keyless(name, provider_env(_RING_KEY_VARS.get(name, "")))
+    return provider is not None and provider.uses_keyless_ring()
 
 
 # The cache identity shared by every vendor serving through the ring.
@@ -113,12 +94,13 @@ def rescue_eligible(provider: WebSearchProvider | None) -> bool:
     """
     if not keyless_rescue_enabled():
         return False
+    if getattr(provider, "name", "") == "nous":
+        return False  # Explicit managed billing errors are not silently rerouted.
     if provider is None:
         return False
     try:
         return not serves_keyless(provider)
-    except Exception as exc:  # noqa: BLE001 - rescue is best-effort, as in Hermes
-        logger.debug("rescue eligibility check failed: %s", exc)
+    except Exception:  # noqa: BLE001 - rescue is best-effort, as in Hermes
         return False
 
 
@@ -137,6 +119,7 @@ async def rescue_search(
         provider_name,
         (original_error or "")[:200],
     )
+    debug.event("rescue", capability="search", from_backend=provider_name)
     rescued = await search_with_failover(provider_name, query, limit)
     if rescued.get("success"):
         data = rescued.setdefault("data", {})
@@ -167,24 +150,16 @@ def resolve_provider() -> tuple[WebSearchProvider | None, str, str]:
     """
     ensure_backends_registered()
     backend = search_backend_name()
+    if provider_disabled(backend):
+        return None, backend, f"Web provider '{backend}' is disabled; use `misaka web enable {backend}`."
     provider = get_provider(backend) if backend else None
     if provider is not None and not provider.supports_search():
-        # The mirror of the search-only refusal in :func:`resolve_extractor`, and for the
-        # same reason: a registered name that cannot serve this capability is named as
-        # such rather than quietly swapped for one that can.
-        #
-        # Divergence from Hermes, deliberate. Hermes gates on the same flag
-        # (``tools/web_tools.py:907``) but then falls through to the capability-filtered
-        # walk and serves from whatever it finds, so the user's search works and their
-        # broken ``search_backend`` never surfaces. Its extract side, where incapable
-        # backends actually exist, names the problem instead -- and that is the better of
-        # its two answers, so both sides say it here. Reachable only through a
-        # third-party provider registered with ``supports_search() -> False``; every
-        # bundled backend searches.
-        return None, backend, (
-            f"{provider.display_name} is an extract-only backend and cannot search. "
-            "Set `search_backend` in `~/.misaka/web.json` to a backend that can."
-        )
+        # Hermes searches with another capable provider rather than calling an
+        # extract-only implementation. Keep this separate from unknown-name errors.
+        provider = active_search_provider()
+        if provider is None:
+            return None, backend, "No available web provider supports search."
+        return provider, provider.name, ""
     if provider is not None:
         return provider, backend, ""
     if backend and selection_stored():
@@ -229,19 +204,6 @@ async def web_search(query: str, limit: int = 5) -> dict[str, Any]:
         )
     return response
 
-def policy_blocked(result: dict[str, Any]) -> bool:
-    """Whether an extract entry failed because the operator's blocklist said so.
-
-    A policy refusal is a decision, not an outage. Hermes' ``_policy_blocked_result``
-    (``tools/web_tools.py:523-530``) exists for exactly one caller -- the rescue below --
-    because routing a refused URL through the keyless ring would fetch the page the
-    operator just forbade, using a vendor they never configured. The string test is the
-    fallback for a provider that reports the block in prose rather than the flag.
-    """
-    if result.get("blocked_by_policy"):
-        return True
-    return "blocked by website policy" in str(result.get("error") or "").lower()
-
 
 async def rescue_extract(
     provider_name: str, urls: list[str], results: list[dict[str, Any]]
@@ -276,6 +238,7 @@ async def rescue_extract(
         len(rescue_urls),
         (original_error or "")[:200],
     )
+    debug.event("rescue", capability="extract", from_backend=provider_name)
     rescued = await extract_with_failover(provider_name, list(rescue_urls))
     if rescued and all(entry.get("error") for entry in rescued):
         return results  # the ring failed everywhere too: keep the backend's own errors
@@ -309,6 +272,8 @@ def resolve_extractor() -> tuple[WebSearchProvider | None, str, str]:
     """
     ensure_backends_registered()
     backend = extract_backend_name()
+    if provider_disabled(backend):
+        return None, backend, f"Web provider '{backend}' is disabled; use `misaka web enable {backend}`."
     provider = get_provider(backend) if backend else None
     if provider is not None and not provider.supports_extract():
         return None, backend, (

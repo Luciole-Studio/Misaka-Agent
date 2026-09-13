@@ -27,8 +27,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import httpx
-
+from misaka.core.web.accounting import account_call
 from misaka.core.web.config import (
     keyless_tier_enabled,
     provider_env,
@@ -40,29 +39,18 @@ from misaka.core.web.keyless import (
     extract_with_failover,
     search_with_failover,
 )
-from misaka.core.web.provider import WebSearchProvider
+from misaka.core.web.provider import (
+    WebSearchProvider,
+    align_documents,
+    extraction_error,
+)
+from misaka.core.web.runtime import api_client
 
 logger = logging.getLogger(__name__)
 
 _EXA_SEARCH_URL = "https://api.exa.ai/search"
 _EXA_CONTENTS_URL = "https://api.exa.ai/contents"
 
-
-def _failed(url: str, error: str) -> dict[str, Any]:
-    """The contract entry for a page Exa did not read.
-
-    An entry, never a hole in the list: the caller reassembles its argument list by
-    position, so a dropped failure hands it the next page's text under this page's
-    address.
-    """
-    return {
-        "url": url,
-        "title": "",
-        "content": "",
-        "raw_content": "",
-        "error": error,
-        "metadata": {"sourceURL": url},
-    }
 
 
 class ExaWebSearchProvider(WebSearchProvider):
@@ -94,6 +82,9 @@ class ExaWebSearchProvider(WebSearchProvider):
         """
         return keyless_tier_enabled() and provider_tier("exa") != "paid"
 
+    def uses_keyless_ring(self) -> bool:
+        return use_keyless("exa", provider_env("EXA_API_KEY"))
+
     def supports_extract(self) -> bool:
         """Exa reads whole pages through ``/contents``; see :meth:`extract`."""
         return True
@@ -102,7 +93,7 @@ class ExaWebSearchProvider(WebSearchProvider):
         """Execute an Exa search."""
         try:
             api_key = provider_env("EXA_API_KEY")
-            if use_keyless("exa", api_key):
+            if self.uses_keyless_ring():
                 # Keyless free tier -- public MCP endpoint.
                 logger.info("Exa keyless search: '%s' (limit=%d)", query, limit)
                 return await search_with_failover("exa", query, limit)
@@ -114,7 +105,10 @@ class ExaWebSearchProvider(WebSearchProvider):
                 )
 
             logger.info("Exa search: '%s' (limit=%d)", query, limit)
-            async with httpx.AsyncClient(timeout=60) as client:
+            async with (
+                api_client("exa", _EXA_SEARCH_URL, api_key, follow_redirects=True) as client,
+                account_call("web_search", "exa", query),
+            ):
                 response = await client.post(
                     _EXA_SEARCH_URL,
                     json={
@@ -162,17 +156,11 @@ class ExaWebSearchProvider(WebSearchProvider):
         HTML mode to select between, so ``content`` and ``raw_content`` are the same
         string -- which is what Hermes does with ``result.text`` too.
 
-        Divergence from Hermes, deliberate. It appends one entry per result the vendor
-        *returned*, so a batch Exa answers short comes back short and every caller pairing
-        by argument position then reads one page's text under another page's address. The
-        reply is re-keyed onto the requested list here, a URL Exa named nothing for
-        becomes that URL's error entry, and a URL nobody asked for is dropped with a debug
-        line rather than lengthening the list past its request. This is the same back-fill
-        :func:`misaka.core.web.keyless.parallel_extract_keyless` already performs,
-        for the same reason.
+        Vendor ID/URL association preserves requested order without dropping canonical
+        URLs. Unassociated batch material remains explicit instead of being guessed.
         """
         api_key = provider_env("EXA_API_KEY")
-        if use_keyless("exa", api_key):
+        if self.uses_keyless_ring():
             # The same decision :meth:`search` makes, asked of the same chokepoint: a
             # vendor whose two capabilities disagree about which tier they are on is a
             # bug nobody finds for months.
@@ -184,7 +172,7 @@ class ExaWebSearchProvider(WebSearchProvider):
             # reason and each says so, and the dispatcher's all-entries-failed check
             # gives the batch the same one-shot rescue a raise would have.
             return [
-                _failed(
+                extraction_error(
                     url,
                     "EXA_API_KEY environment variable not set. "
                     "Get your API key at https://exa.ai",
@@ -193,7 +181,10 @@ class ExaWebSearchProvider(WebSearchProvider):
             ]
 
         logger.info("Exa extract: %d URL(s)", len(urls))
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with (
+            api_client("exa", _EXA_CONTENTS_URL, api_key, follow_redirects=True) as client,
+            account_call("web_extract", "exa", "\n".join(urls)),
+        ):
             response = await client.post(
                 _EXA_CONTENTS_URL,
                 json={"urls": list(urls), "text": True},
@@ -211,17 +202,17 @@ class ExaWebSearchProvider(WebSearchProvider):
             detail = (response.text or "").strip() or f"HTTP {response.status_code}"
             raise ValueError(f"Exa extract failed: {detail}")
 
-        by_url: dict[str, dict[str, Any]] = {}
+        documents: list[dict[str, Any]] = []
         for result in response.json().get("results") or []:
             if not isinstance(result, dict):
                 continue
             url = str(result.get("url") or "")
             title = str(result.get("title") or "")
             content = str(result.get("text") or "")
-            by_url.setdefault(
-                url,
+            documents.append(
                 {
                     "url": url,
+                    "id": result.get("id"),
                     "title": title,
                     "content": content,
                     "raw_content": content,
@@ -229,21 +220,10 @@ class ExaWebSearchProvider(WebSearchProvider):
                 },
             )
 
-        unrequested = sorted(set(by_url) - set(urls))
-        if unrequested:
-            logger.debug("exa extract: reply named unrequested url(s) %s", unrequested)
-        return [by_url.get(url) or _failed(url, "no content returned") for url in urls]
+        return align_documents(urls, documents)
 
-    def setup_hint(self) -> dict[str, Any]:
-        return {
-            "name": "Exa - Free (keyless)",
-            "badge": "free - no key",
-            "tag": (
-                "Semantic + neural web search and page reads on Exa's anonymous "
-                "free tier. "
-                "Rate-limited under burst load."
-            ),
-            "env_vars": [
-                {"key": "EXA_API_KEY", "prompt": "Exa API key", "url": "https://exa.ai"},
-            ],
-        }
+    def get_setup_schema(self) -> dict[str, Any]:
+        from misaka.core.web.provider import keyless_setup_schema
+
+        return keyless_setup_schema('Exa', 'EXA_API_KEY', 'https://exa.ai',
+                                    'Semantic web search and page extraction.')

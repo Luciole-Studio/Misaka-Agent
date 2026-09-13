@@ -1,36 +1,23 @@
-"""Parallel.ai web search and extraction (keyed via the optional SDK, or keyless).
+"""Parallel search and extraction via REST or the anonymous MCP ring.
 
-Ported from Hermes' ``plugins/web/parallel/provider.py``.
-
-Config keys this provider responds to (``~/.misaka/web.json``)::
-
-    "search_backend": "parallel"      # explicit per-capability
-    "extract_backend": "parallel"     # explicit per-capability
-    "backend": "parallel"             # shared fallback
-    "provider_tier": {"parallel": "free"|"paid"}
-
-Env vars::
-
-    PARALLEL_API_KEY=...             # https://parallel.ai (required for the keyed path)
-    PARALLEL_SEARCH_MODE=agentic     # optional: agentic|fast|one-shot
-
-**The keyed paths need the ``parallel`` package and degrade without it.** Hermes
-lazy-installs the SDK on first use; MISAKA does not install packages behind the user's
-back, and Parallel's keyed search and extract are beta endpoints whose request shapes live
-in that SDK -- hand-rolling them against a guessed URL would be a worse lie than an honest
-"not installed". The keyless paths need nothing: they speak MCP over plain HTTP, so a
-credential-free install still gets Parallel through the ring.
-
-Search runs on the blocking client in a thread and extract on the async one, because that
-is what each SDK offers: ``beta.search`` has no async entry point, ``beta.extract`` does.
+The existing beta request contract is documented in Parallel's migration guides:
+https://docs.parallel.ai/search/search-migration-guide
+https://docs.parallel.ai/extract/extract-migration-guide
+No optional SDK, implicit install, blocking client or unclosed connection pool.
 """
 
 from __future__ import annotations
 
 import asyncio
+import email.utils
 import logging
+import random
+import time
 from typing import Any
 
+import httpx
+
+from misaka.core.web.accounting import account_call
 from misaka.core.web.config import (
     keyless_tier_enabled,
     provider_env,
@@ -38,7 +25,12 @@ from misaka.core.web.config import (
     use_keyless,
 )
 from misaka.core.web.keyless import extract_with_failover, search_with_failover
-from misaka.core.web.provider import WebSearchProvider
+from misaka.core.web.provider import (
+    WebSearchProvider,
+    align_documents,
+    extraction_error,
+)
+from misaka.core.web.runtime import api_client
 
 logger = logging.getLogger(__name__)
 
@@ -51,74 +43,74 @@ def _resolve_search_mode() -> str:
     return mode
 
 
-def _keyed_search(api_key: str, query: str, limit: int) -> list[dict[str, Any]]:
-    """Run the blocking SDK search and return normalized hits.
-
-    Module-level rather than a closure so a test can patch it, and so the blocking work
-    is one clearly-marked function to hand to a thread.
-    """
-    # Optional dependency, imported on use: a missing package must be an error the
-    # caller can turn into a message, not an import failure at registration time.
-    from parallel import Parallel
-
-    response = Parallel(api_key=api_key).beta.search(
-        search_queries=[query],
-        objective=query,
-        mode=_resolve_search_mode(),
-        max_results=min(limit, 20),
-    )
-    web_results = []
-    for i, result in enumerate(response.results or []):
-        excerpts = result.excerpts or []
-        web_results.append(
-            {
-                "url": result.url or "",
-                "title": result.title or "",
-                "description": " ".join(excerpts) if excerpts else "",
-                "position": i + 1,
-            }
-        )
-    return web_results
+def _retry_delay(attempt: int, headers: httpx.Headers | None) -> float:
+    """Parallel 0.4.2: retry-after-ms/seconds/date, then capped jittered backoff."""
+    delay = None
+    if headers is not None:
+        try:
+            delay = float(headers["retry-after-ms"]) / 1000
+        except (KeyError, ValueError):
+            try:
+                delay = float(headers["retry-after"])
+            except (KeyError, ValueError):
+                parsed = email.utils.parsedate_tz(headers.get("retry-after", ""))
+                if parsed is not None:
+                    delay = email.utils.mktime_tz(parsed) - time.time()
+    if delay is not None and 0 < delay <= 60:
+        return delay
+    return min(0.5 * 2 ** attempt, 8.0) * (1 - 0.25 * random.random())
 
 
-def _failed(url: str, error: str) -> dict[str, Any]:
-    """The contract entry for a page Parallel did not return.
+def _should_retry(response: httpx.Response) -> bool:
+    directive = response.headers.get("x-should-retry")
+    if directive in {"true", "false"}:
+        return directive == "true"
+    return response.status_code in {408, 409, 429} or response.status_code >= 500
 
-    An entry, never a hole in the list: the caller reassembles its argument list by
-    position, so a dropped failure hands it the next page's text under this page's
-    address.
-    """
-    return {
-        "url": url,
-        "title": "",
-        "content": "",
-        "raw_content": "",
-        "error": error,
-        "metadata": {"sourceURL": url},
-    }
+
+async def _post(api_key: str, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+    endpoint = (provider_env("PARALLEL_BASE_URL") or "https://api.parallel.ai").rstrip("/")
+    # The existing bounded timeout is a host policy, not the SDK's 5/600 default.
+    async with api_client("parallel", endpoint, api_key, follow_redirects=True) as client:
+        for attempt in range(3):  # SDK max_retries=2, in addition to the initial attempt.
+            retry_headers = None
+            try:
+                async with account_call(f"web_{operation}", "parallel", payload.get("objective") or "\n".join(payload.get("urls") or [])):
+                    response = await client.post(
+                        f"{endpoint}/v1beta/{operation}",
+                        headers={"x-api-key": api_key, "parallel-beta": "search-extract-2025-10-10",
+                                 "x-stainless-retry-count": str(attempt)},
+                        json=payload,
+                    )
+            except httpx.TransportError:
+                if attempt == 2:
+                    raise
+            else:
+                if not response.is_error or attempt == 2 or not _should_retry(response):
+                    response.raise_for_status()
+                    return response.json()
+                retry_headers = response.headers
+                await response.aclose()
+            await asyncio.sleep(_retry_delay(attempt, retry_headers))
+        raise AssertionError("Parallel retry loop exhausted without a result")
+
+
+async def _keyed_search(api_key: str, query: str, limit: int) -> list[dict[str, Any]]:
+    response = await _post(api_key, "search", {
+        "search_queries": [query], "objective": query,
+        "mode": _resolve_search_mode(), "max_results": min(limit, 20),
+    })
+    return [
+        {"url": result.get("url") or "", "title": result.get("title") or "",
+         "description": " ".join(result.get("excerpts") or []), "position": i + 1}
+        for i, result in enumerate(response.get("results") or [])
+    ]
+
 
 
 async def _keyed_extract(api_key: str, urls: list[str]) -> Any:
-    """Run the async SDK extract and return its raw response object.
-
-    Module-level for the reason :func:`_keyed_search` is: it is the one function that
-    touches the optional package, so a test can drive the mapping in
-    :meth:`ParallelWebSearchProvider.extract` without installing an SDK this repo does not
-    ship. Unlike search, nothing here goes to a thread -- ``AsyncParallel`` awaits, and
-    handing an already-async call to :func:`asyncio.to_thread` would burn a worker to sit
-    on a second event loop.
-
-    The client is built per call and not closed, matching what :func:`_keyed_search` does
-    with ``Parallel(...)``: one pool per batch, released when it is collected. Hermes
-    caches one instead, which is what its ``reset_clients()`` test hook exists to undo.
-    """
-    # Optional dependency, imported on use: a missing package must be an error the
-    # caller can turn into a message, not an import failure at registration time.
-    from parallel import AsyncParallel
-
-    return await AsyncParallel(api_key=api_key).beta.extract(
-        urls=list(urls), full_content=True
-    )
+    """Request full page content in one batch."""
+    return await _post(api_key, "extract", {"urls": list(urls), "full_content": True})
 
 
 class ParallelWebSearchProvider(WebSearchProvider):
@@ -148,6 +140,9 @@ class ParallelWebSearchProvider(WebSearchProvider):
         """
         return keyless_tier_enabled() and provider_tier("parallel") != "paid"
 
+    def uses_keyless_ring(self) -> bool:
+        return use_keyless("parallel", provider_env("PARALLEL_API_KEY"))
+
     def supports_extract(self) -> bool:
         """Parallel reads whole pages through ``beta.extract``; see :meth:`extract`."""
         return True
@@ -156,7 +151,7 @@ class ParallelWebSearchProvider(WebSearchProvider):
         """Execute a Parallel search."""
         try:
             api_key = provider_env("PARALLEL_API_KEY")
-            if use_keyless("parallel", api_key):
+            if self.uses_keyless_ring():
                 # Keyless free tier -- public MCP endpoint, no SDK needed.
                 logger.info("Parallel keyless search: '%s' (limit=%d)", query, limit)
                 return await search_with_failover("parallel", query, limit)
@@ -173,12 +168,10 @@ class ParallelWebSearchProvider(WebSearchProvider):
                 _resolve_search_mode(),
                 limit,
             )
-            web_results = await asyncio.to_thread(_keyed_search, api_key, query, limit)
+            web_results = await _keyed_search(api_key, query, limit)
             return {"success": True, "data": {"web": web_results}}
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
-        except ImportError as exc:
-            return {"success": False, "error": f"Parallel SDK not installed: {exc}"}
         except Exception as exc:  # noqa: BLE001 - surface as failure, as in Hermes
             logger.warning("Parallel search error: %s", exc)
             return {"success": False, "error": f"Parallel search failed: {exc}"}
@@ -192,16 +185,11 @@ class ParallelWebSearchProvider(WebSearchProvider):
         falls back to its excerpts joined by blank lines, which is the only other text the
         endpoint offers. *format* is ignored -- there is no second rendition to choose.
 
-        Divergence from Hermes, deliberate. It appends the read pages and then the
-        ``errors`` list, so a three-URL batch whose middle page failed answers with the
-        third page's text in the second position and every caller pairing by argument
-        order reads the wrong page under the wrong address. Both lists are re-keyed onto
-        the requested URLs here, a URL named in neither becomes that URL's error entry,
-        and one nobody asked for is dropped with a debug line. Same fix, same reason, as
-        :func:`misaka.core.web.keyless.parallel_extract_keyless`.
+        Associate exact URLs, or one unambiguous single-URL response. Unmapped batch
+        material is preserved separately, never labelled as a different requested page.
         """
         api_key = provider_env("PARALLEL_API_KEY")
-        if use_keyless("parallel", api_key):
+        if self.uses_keyless_ring():
             # The same decision :meth:`search` makes, through the same chokepoint.
             logger.info("Parallel keyless extract: %d URL(s)", len(urls))
             return await extract_with_failover("parallel", list(urls))
@@ -211,7 +199,7 @@ class ParallelWebSearchProvider(WebSearchProvider):
         # gives the batch the one-shot rescue a raise would have earned it.
         if not api_key:
             return [
-                _failed(
+                extraction_error(
                     url,
                     "PARALLEL_API_KEY environment variable not set. "
                     "Get your API key at https://parallel.ai",
@@ -220,56 +208,38 @@ class ParallelWebSearchProvider(WebSearchProvider):
             ]
 
         logger.info("Parallel extract: %d URL(s)", len(urls))
-        try:
-            response = await _keyed_extract(api_key, list(urls))
-        except ImportError as exc:
-            return [_failed(url, f"Parallel SDK not installed: {exc}") for url in urls]
+        response = await _keyed_extract(api_key, list(urls))
 
-        by_url: dict[str, dict[str, Any]] = {}
-        for result in getattr(response, "results", None) or []:
-            url = str(getattr(result, "url", "") or "")
-            title = str(getattr(result, "title", "") or "")
-            content = str(getattr(result, "full_content", "") or "") or "\n\n".join(
-                getattr(result, "excerpts", None) or []
+        documents: list[dict[str, Any]] = []
+        for result in response.get("results", None) or []:
+            url = str(result.get("url", "") or "")
+            title = str(result.get("title", "") or "")
+            content = str(result.get("full_content", "") or "") or "\n\n".join(
+                result.get("excerpts", None) or []
             )
-            by_url.setdefault(
-                url,
+            documents.append(
                 {
                     "url": url,
                     "title": title,
                     "content": content,
                     "raw_content": content,
-                    "metadata": {"sourceURL": url, "title": title},
+                    "metadata": {"sourceURL": url, "title": title,
+                                 "content_kind": "page_text" if result.get("full_content") else "excerpts"},
                 },
             )
-        for failure in getattr(response, "errors", None) or []:
-            url = str(getattr(failure, "url", "") or "")
+        for failure in response.get("errors", None) or []:
+            url = str(failure.get("url", "") or "")
             detail = (
-                getattr(failure, "content", "")
-                or getattr(failure, "error_type", "")
+                failure.get("content", "")
+                or failure.get("error_type", "")
                 or "extraction failed"
             )
-            by_url.setdefault(url, _failed(url, str(detail)))
+            documents.append(extraction_error(url, str(detail)))
 
-        unrequested = sorted(set(by_url) - set(urls))
-        if unrequested:
-            logger.debug("parallel extract: reply named unrequested url(s) %s", unrequested)
-        return [by_url.get(url) or _failed(url, "no content returned") for url in urls]
+        return align_documents(urls, documents)
 
-    def setup_hint(self) -> dict[str, Any]:
-        return {
-            "name": "Parallel - Free (keyless)",
-            "badge": "free - no key",
-            "tag": (
-                "Objective-tuned search and page extraction on Parallel's anonymous "
-                "free tier. "
-                "Rate-limited under burst load."
-            ),
-            "env_vars": [
-                {
-                    "key": "PARALLEL_API_KEY",
-                    "prompt": "Parallel API key",
-                    "url": "https://parallel.ai",
-                },
-            ],
-        }
+    def get_setup_schema(self) -> dict[str, Any]:
+        from misaka.core.web.provider import keyless_setup_schema
+
+        return keyless_setup_schema('Parallel', 'PARALLEL_API_KEY', 'https://parallel.ai',
+                                    'Objective-tuned search and page extraction.')

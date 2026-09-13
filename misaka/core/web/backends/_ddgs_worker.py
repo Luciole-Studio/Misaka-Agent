@@ -1,12 +1,12 @@
 """DDGS search child-process entrypoint.
 
-Invoked as ``python misaka/core/web/backends/_ddgs_worker.py`` (script path from the
-parent provider). Reads one JSON request from stdin, writes one JSON envelope to stdout,
+Invoked as ``python -P -m misaka.core.web.backends._ddgs_worker`` by the
+parent provider. Reads one JSON request from stdin, writes one JSON envelope to stdout,
 then exits.
 
 Request::
 
-    {"query": str, "safe_limit": int}
+    {"query": str, "safe_limit": int, "request_timeout": float}
 
 Envelope::
 
@@ -42,8 +42,10 @@ def main() -> int:
         # Imported inside main so startup stays light and the parent's module (which the
         # test seam patches) is the one that defines the search.
         from misaka.core.web.backends.ddgs import _run_ddgs_search
+        from misaka.core.web.timeouts import validate_setting
 
-        results = _run_ddgs_search(query, safe_limit)
+        timeout = validate_setting("http_timeout", "ddgs", request["request_timeout"])
+        results = _run_ddgs_search(query, safe_limit, timeout)
         _write_envelope({"ok": True, "results": results})
         return 0
     except Exception as exc:  # noqa: BLE001 - ddgs raises its own exception types

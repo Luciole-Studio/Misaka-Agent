@@ -47,6 +47,10 @@ def _parser():
     dmp.add_argument("--summary", help="Short audit-log summary")
     dmp.add_argument("--task-id", dest="dm_task", help=argparse.SUPPRESS)
     dmp.add_argument("--generation", dest="dm_gen", type=int, help=argparse.SUPPRESS)
+    dmp.add_argument("--wait-message", type=int, help=argparse.SUPPRESS)
+
+    st = sub.add_parser("setup", help="First-run wizard: environment, model & provider, Sisters, documents, web search, project")
+    st.add_argument("section", nargs="?", help="Run one section only: environment | model | sisters | documents | web | project")
 
     ini = sub.add_parser("init", help="Make this folder a MISAKA project (git repo + PROJECT.md + cards/) and initialize the database")
     ini.add_argument("--migrate", action="store_true",
@@ -82,32 +86,63 @@ def _parser():
     sub.add_parser("panel", help="Open the Misaka Network panel (default in a terminal)")
     ch = sub.add_parser("chat", help="Chat with Last Order, or with a Sister via --as")
     ch.add_argument("--model", help="Override the model")
+    ch.add_argument("-s", "--skills", action="append", help="Preload Skill names; repeat or separate with commas")
     ch.add_argument("--as", dest="as_agent", metavar="SISTER",
                     help="Chat with this Sister instead of Last Order")
     ch.add_argument("-c", "--continue", dest="cont", action="store_true",
                     help="Continue the most recent session instead of starting a new one")
     ch.add_argument("--pick", action="store_true", help="Pick a past session to resume")
-    ch.add_argument("--session", help="Resume a session by path or UUID prefix")
+    source = ch.add_mutually_exclusive_group()
+    source.add_argument("--session", help="Open a session by path or UUID prefix")
+    source.add_argument("--catalog", help="With --attach/--read-only: locate an unsaved session")
+    access = ch.add_mutually_exclusive_group()
+    access.add_argument("--attach", action="store_true", help="Send input to the original live session, without starting another agent")
+    access.add_argument("--read-only", action="store_true",
+                    help="Show existing session records without starting an agent")
 
     rs = sub.add_parser("research", help="Run the Research Workflow on a question")
     rs.add_argument("goal", nargs="?", help="Research question for a new run")
     rs.add_argument("--resume", metavar="RUN_ID", help="Resume an existing research run")
     rs.add_argument("--depth", type=int, default=3, help="Maximum branch depth")
+    rs.add_argument("--parallel", type=int, help="Maximum concurrent LO nodes (default: 4); saved with the run")
+    rs.add_argument("--followups", type=int,
+                    help="After its first cards are back, how many more times a node may send Sisters out before concluding (default: 2, 0-6)")
+    rs.add_argument("--runner-key", help=argparse.SUPPRESS)
     rs.add_argument("--node", nargs=2, metavar=("RUN_ID", "NODE_ID"),
                     help="(internal) run one research node in this process")
-    rs.add_argument("--probe", nargs=2, metavar=("RUN_ID", "ISSUE_ID"),
-                    help="(internal) run Last Order's fork on one issue in this process")
 
 
+
+    from misaka.core.skills.distribution import OPERATIONS as distribution_operations
     sk = sub.add_parser("skills", help="Discover, review, approve, and manage skills")
     sk.add_argument("op", nargs="?", default="list",
                     choices=["list", "scan", "pending", "approve", "reject",
-                             "ledger", "rollback", "mode"])
+                             "ledger", "rollback", "mode", 'usage', 'adopt', 'pin', 'unpin', 'archive', 'restore', 'sync-on', 'sync-off', 'curator-status', 'curator-run', 'curator-pause', 'curator-resume', 'backup', 'backups', 'restore-backup', 'audit', 'setup', *sorted(distribution_operations)])
     sk.add_argument("name", nargs="?",
                     help="Skill name or pending ID; ledger ID for rollback; mode name for mode")
     sk.add_argument("--dir", help="Project folder to scan (default: the current directory)")
+    sk.add_argument("--dry-run", action="store_true", help="Preview a curator pass")
+    sk.add_argument("--consolidate", action="store_true", default=None, help="Opt into model-assisted curator consolidation")
+    sk.add_argument("--expected-digest", help="Unchanged physical Skill digest from generation-status")
+    sk.add_argument("--source", default="all", help="Hub source filter")
+    sk.add_argument("--category", default="", help="Hub install category or tap path")
+    sk.add_argument("--force", action="store_true", help="Explicitly allow replacing local edits; does not bypass write policy")
+    sk.add_argument("--restore", action="store_true", help="Restore original bundled or optional bytes")
+    sk.add_argument("--repo", default="", help="GitHub publication owner/repo")
+    sk.add_argument("--bundled-dir", help="Bundled catalog source directory")
+    sk.add_argument("--optional-dir", help="Optional catalog source directory")
     sk.add_argument("--as", dest="role", default="sisters/10032",
                     help="Role whose skill stack to show")
+
+    bu = sub.add_parser("bundles", help="List, inspect, save, or delete role-scoped Skill bundles")
+    bu.add_argument("op", nargs="?", default="list", choices=["list", "show", "save", "delete"])
+    bu.add_argument("name", nargs="?")
+    bu.add_argument("skills", nargs="*", help="Ordered member Skill names (save)")
+    bu.add_argument("--as", dest="role", default="sisters/10032", help="Role whose bundles to use")
+    bu.add_argument("--dir", help="Project workspace (default: current directory)")
+    bu.add_argument("--description", default="")
+    bu.add_argument("--instruction", default="")
+    bu.add_argument("--overwrite", action="store_true", help="Replace an existing role bundle")
 
     mo = sub.add_parser("moa", help="Configure, list, or delete Mixture-of-Agents presets")
     mo.add_argument("op", nargs="?", default="list", choices=["list", "configure", "delete"])
@@ -116,17 +151,26 @@ def _parser():
     # Registered so `misaka --help` lists it, and so `misaka auth --help` is not an
     # "invalid choice" -- but it is never dispatched: `main` short-circuits `argv[0] ==
     # "auth"` before argparse runs, because auth has its own Pi-compatible grammar.
+    lc = sub.add_parser("lcm", help="Inspect LCM and run explicit history/backfill operators")
+    lc.add_argument("lcm_args", nargs=argparse.REMAINDER)
     ac = sub.add_parser("auth", help="Check or print provider credentials")
     ac.add_argument("auth_args", nargs=argparse.REMAINDER)
 
     wb = sub.add_parser("web", help="Show or change web-search configuration (~/.misaka/web.json)")
-    wb.add_argument("op", nargs="?", default="status", choices=["status", "set", "unset"])
+    wb.add_argument("op", nargs="?", default="status", choices=["status", "set", "unset", "providers", "setup", "enable", "disable", "accounts", "login", "logout", "browser-status", "browser-providers", "browser-setup", "browser-install", "browser-connect", "browser-disconnect", "gateway-login", "gateway-logout", "gateway-status"])
     wb.add_argument("key", nargs="?", help="backend | search_backend | extract_backend | "
                                            "keyless_fallback | keyless_rescue | allow_private_urls | "
                                            "cache_enabled | cache_ttl_minutes | cache_exempt_hosts | "
                                            "extract_char_limit | env.<VAR> | provider_tier.<vendor> | "
                                            "website_blocklist.<enabled|domains|shared_files> | xai.<key>")
     wb.add_argument("value", nargs="?", help="The value to set (omit for unset)")
+    wb.add_argument("--profile", metavar="DIR", help="Use DIR/web.json over shared Web defaults")
+    wb.add_argument("--extension", action="append", default=[], metavar="PATH", help="Load an explicit session extension (repeatable)")
+    wb.add_argument("--capability", choices=["search", "extract", "both"], help="Setup only these capabilities")
+    wb.add_argument("--tier", choices=["auto", "free", "paid"], help="Setup tier from the provider's rows")
+    wb.add_argument("--yes", action="store_true", help="Setup without prompts; keep existing credentials")
+    wb.add_argument("--install", action="store_true", help="Explicitly install the selected provider's optional dependency")
+    wb.add_argument("--login", action="store_true", help="Explicitly run the selected provider's OAuth login")
 
 
     dc = sub.add_parser("doc", help="Index documents, search them, show their structure, and verify quotes")
@@ -165,8 +209,9 @@ def _doc_tree_lines(tree, depth=1):
 
 def _cmd_chat(args):
     from misaka.cli import chat
-    chat.launch(args.as_agent, model=args.model, cont=args.cont, pick=args.pick,
-                session=args.session)
+    return chat.launch(args.as_agent, model=args.model, cont=args.cont, pick=args.pick,
+                       session=args.session, read_only=args.read_only, catalog=args.catalog, attach=args.attach,
+                       **({"skills": args.skills} if args.skills else {}))
 
 
 def _cmd_panel(args):
@@ -232,8 +277,6 @@ def _cmd_init(args):
         result = migrations.run_migrations(os.getcwd())
         if result["migratedAuthProviders"]:
             print("migrated credentials to auth.json: " + ", ".join(result["migratedAuthProviders"]))
-        if result["movedSessions"]:
-            print(f"moved {result['movedSessions']} session file(s) to per-folder buckets")
         for warning in result["deprecationWarnings"]:
             print(f"warning: {warning}")
     else:
@@ -269,7 +312,7 @@ def _cmd_dm(args):
     sys.exit(dm_cli.deliver(args.to, args.message, sender=args.sender,
                             model=args.model, timeout=args.timeout,
                             task_id=args.dm_task, generation=args.dm_gen,
-                            summary=args.summary))
+                            summary=args.summary, wait_message=args.wait_message))
 
 
 def _cmd_task(args):
@@ -293,10 +336,16 @@ def _cmd_research(args):
     from misaka.core.research import node as research_node
     from misaka.core.research import planner, runs, workflow
     if args.node:
-        sys.exit(research_node.main(*args.node))
-    if args.probe:
-        sys.exit(research_node.main_probe(*args.probe))
+        sys.exit(research_node.main(*args.node, runner_key=args.runner_key))
     cfg = current_config()
+    # A command-line run has no conversation for its root Last Order: her turns are one-shot
+    # calls, so nobody could agree to her plan. The fork nodes it spawns do have live sessions
+    # and would otherwise stop and wait for a go-ahead the root never asked for; the whole run
+    # therefore runs unattended, and the node processes inherit that through the environment.
+    if cfg.get("research_plan_approval", True):
+        print("Unattended run: plans are not held for approval (use the panel's /research for that).")
+    cfg["research_plan_approval"] = False
+    os.environ["MISAKA_RESEARCH_PLAN_APPROVAL"] = "0"
     # Preflight before anything is written: a run with no Sister to assign to dies deep
     # inside the workflow (planner._roster), after the workspace has been git-initialised
     # and committed into, and the message that surfaces there names neither the roster nor
@@ -321,32 +370,29 @@ def _cmd_research(args):
                      f"Recreate them first, for example: misaka create {missing[0]}")
         if not assigned and not roster:
             sys.exit(empty_roster)
-        try:
-            runs.resume(con, run["id"])
-        except ValueError as err:      # a finished run refuses in its own words
-            sys.exit(str(err))
+        if run["status"] == "done":
+            sys.exit(f"Research run {run['id']} is done; start a new run.")
     else:
         if not roster:
             sys.exit(empty_roster)
         if not args.goal:
             sys.exit("A new research run requires a question; use --resume RUN_ID to continue one.")
         try:
-            brief = planner.ensure_project_brief(cfg, worker_mod, args.goal, os.getcwd())
-        except RuntimeError as err:
-            # The intake step needs a model; its own text says which credential is missing
-            # and where it is kept, so print that rather than a traceback around it.
-            sys.exit(f"{err}\n\n(/login is typed inside `misaka chat`; "
-                     f"`misaka auth check --provider {cfg['provider']}` verifies the result.)")
+            limits = runs.normalize_limits({"max_depth": args.depth,
+                                            **({"parallel": args.parallel} if args.parallel is not None else {}),
+                                            **({"max_followups": args.followups} if args.followups is not None else {})})
+        except ValueError as error:
+            sys.exit(str(error))
         from misaka.core.platform import cards as card_files
-        card_files.init_project(os.getcwd())
+        card_files.init_project(os.getcwd(), draft_brief=False)
         run = runs.create(con, workspace=os.getcwd(), question=args.goal,
-                          limits={"max_depth": args.depth},
+                          limits=limits,
                           token_start=budget.spent(con))
-        print(f"Project brief: {brief}\nResearch run {run['id']}: {runs.run_dir(run)}")
+        print(f"Research run {run['id']}: {run['workspace']}")
     try:
         out = _asyncio.run(workflow.run(
-            con, cfg, research_node.spawner(), worker_mod,
-            run_id=run["id"], poll_seconds=1.0))
+            con, cfg, research_node.ProcessSpawner(), worker_mod,
+            run_id=run["id"], poll_seconds=1.0, resume=bool(args.resume)))
     except RuntimeError as err:
         # Node failures already print their own reason above; the workflow's own summary is
         # the useful part, and a traceback of the event loop is not.
@@ -358,69 +404,9 @@ def _cmd_research(args):
 
 
 def _cmd_web(args):
-    from misaka.core.web import config as web_config
-    from misaka.core.web import dispatch, registry
+    from misaka.cli.web import run
 
-    if args.op == "set":
-        if not args.key or args.value is None:
-            print("Usage: misaka web set <key> <value>")
-            sys.exit(2)
-        before = dict(web_config.web_config().get("provider_tier") or {})
-        try:
-            path = web_config.set_config(args.key, args.value)
-        except ValueError as err:
-            print(err)
-            sys.exit(2)
-        print(f"Set {args.key} in {path}")
-        # Choosing a backend clears that backend's own tier pin, the way Hermes' picker
-        # does for a row that names no tier. Saying so out loud is the difference between
-        # a rule and a surprise: a user who pinned the tier first would otherwise watch it
-        # vanish for no visible reason.
-        after = web_config.web_config().get("provider_tier") or {}
-        cleared = sorted(set(before) - set(after))
-        if cleared:
-            print(f"Cleared tier pin on {', '.join(cleared)} "
-                  f"(re-pin with `misaka web set provider_tier.{cleared[0]} free`)")
-        return
-    if args.op == "unset":
-        if not args.key:
-            print("Usage: misaka web unset <key>")
-            sys.exit(2)
-        path = web_config.unset_config(args.key)
-        print(f"Unset {args.key} in {path}")
-        return
-
-    # status (default): what will actually serve a search and an extract, and why.
-    registry.ensure_backends_registered()
-    provider, backend, err = dispatch.resolve_provider()
-    if provider is not None:
-        print(f"Search backend: {backend}  ({'ready' if registry.provider_is_ready(provider) else 'not ready'})")
-    else:
-        print(f"Search backend: {backend or 'none'}  — {err or 'no provider can serve'}")
-    extractor, extract_backend, extract_err = dispatch.resolve_extractor()
-    if extractor is not None:
-        ready = "ready" if registry.provider_is_ready(extractor) else "not ready"
-        print(f"Extract backend: {extract_backend}  ({ready})")
-    else:
-        print(f"Extract backend: {extract_backend or 'none'}  — {extract_err}")
-    print(f"Keyless ring: {'on' if web_config.keyless_tier_enabled() else 'off'}"
-          f"   rescue: {'on' if web_config.keyless_rescue_enabled() else 'off'}")
-    print(f"Searchable now: {'yes' if registry.web_search_available() else 'no'}")
-    # A tier pinned on a vendor nothing routes to is invisible until it surprises someone:
-    # `provider_tier.exa: free` still decides where the keyless ring starts its walk.
-    stale = [
-        vendor
-        for vendor in (web_config.web_config().get("provider_tier") or {})
-        if vendor not in {backend, extract_backend}
-    ]
-    if stale:
-        print(f"Tier pins on other vendors: {', '.join(sorted(stale))}"
-              "   (`misaka web unset provider_tier.<vendor>` to clear)")
-    print("Credentials:")
-    for name, is_set, source in web_config.credential_status():
-        mark = "✓" if is_set else "·"
-        print(f"  {mark} {name}" + (f"  ({source})" if is_set else ""))
-    print(f"\nConfig file: {os.path.expanduser(CFG['web_config'])}")
+    return run(args)
 
 
 def _cmd_moa(args):
@@ -477,6 +463,29 @@ def _cmd_skills(args):
     import os as _os
 
     from misaka.core.skills import layers as skill_layers
+    from misaka.core.skills.distribution import OPERATIONS as distribution_operations
+    if args.op in distribution_operations or args.op in ('usage', 'adopt', 'pin', 'unpin', 'archive', 'restore', 'sync-on', 'sync-off', 'curator-status', 'curator-run', 'curator-pause', 'curator-resume', 'backup', 'backups', 'restore-backup', 'audit', 'setup'):
+        import json
+        from pathlib import Path
+
+        from misaka.core.skills.operations import execute
+        role = Path(args.role)
+        if role.is_absolute() or ".." in role.parts:
+            sys.exit("Role must be relative to roles_root.")
+        root = Path(_os.path.expanduser(CFG["roles_root"]))
+        profile = root / role
+        if not profile.resolve().is_relative_to(root.resolve()):
+            sys.exit("Role resolves outside roles_root.")
+        options = ({"dry_run": args.dry_run, "consolidate": args.consolidate} if args.op == "curator-run" else {})
+        if args.op in distribution_operations:
+            options = {"source": args.source, "category": args.category, "force": args.force,
+                       "restore": args.restore, "repo": args.repo, "dry_run": args.dry_run,
+                       "bundled_root": args.bundled_dir, "optional_root": args.optional_dir, "expected_digest": args.expected_digest}
+        result = execute(args.op, args.name, profile_dir=profile, workspace=args.dir or _os.getcwd(), **options)
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        if not result.get("success"):
+            sys.exit(1)
+        return
     if args.op == "mode":
         from misaka.core.skills import write as skill_write
         if not args.name:
@@ -502,7 +511,6 @@ def _cmd_skills(args):
             print(f"Skill write mode set to {args.name} (effective immediately).")
     elif args.op in ("pending", "approve", "reject", "ledger", "rollback"):
         from misaka.core.skills import write as skill_write
-        live = _os.path.join(CFG["roles_root"], args.role, "skills")
         if args.op in ("approve", "reject", "rollback") and skill_write.agent_session():
             sys.exit("Marked agent sessions do not make skill review decisions; this is a workflow guard, not an OS sandbox.")
 
@@ -573,8 +581,7 @@ def _cmd_skills(args):
             target = next((e for e in skill_write.entries() if e["id"] == args.name), None)
             if target is None:
                 sys.exit(f"Skill ledger entry not found: {args.name}")
-            ok, why = skill_write.rollback(
-                args.name, _os.path.join(live, target["skill"]))
+            ok, why = skill_write.rollback(args.name)
             print(why)
             sys.exit(0 if ok else 1)
     elif args.op == "scan":
@@ -595,18 +602,50 @@ def _cmd_skills(args):
             print(f"{e['layer']:<9}{e['category']}/{e['name']}  {e['description']}  ({e['dir']})")
 
 
+def _cmd_bundles(args):
+    import json
+    from pathlib import Path
+
+    from misaka.core.skills import bundles
+    from misaka.core.skills.vendor.commands import slugify_skill_name
+    roles = Path(CFG["roles_root"]).expanduser().resolve()
+    profile = roles / args.role
+    if profile.resolve() == roles or not profile.resolve().is_relative_to(roles):
+        sys.exit("Role must be a profile under roles_root.")
+    try:
+        if args.op in ("save", "delete"):
+            if not args.name:
+                sys.exit(f"Usage: misaka bundles {args.op} <name>")
+            path = (bundles.delete(args.name, profile_dir=profile) if args.op == "delete" else
+                    bundles.save(args.name, args.skills, profile_dir=profile, description=args.description,
+                                 instruction=args.instruction, overwrite=args.overwrite))
+            print(path)
+            return
+        found = bundles.scan(bundles.bundle_roots(profile, args.dir or os.getcwd()))
+        if args.op == "show":
+            info = found.get("/" + slugify_skill_name(args.name or ""))
+            if info is None:
+                sys.exit(f"Bundle not found: {args.name or ''}")
+            print(json.dumps(info, ensure_ascii=False, indent=2))
+        else:
+            for key, info in sorted(found.items()):
+                print(f"{key}  [{info['layer']}]  {', '.join(info['skills'])}  ({info['path']})")
+    except (OSError, ValueError) as error:
+        sys.exit(str(error))
+
+
 def _cmd_doc(args):
     if args.action == "add":
         if not args.arg:
             sys.exit("Usage: misaka doc add <file> [--no-tree]")
-        did, n = corpus.ingest(args.arg, with_tree=not args.no_tree)
-        doc = corpus.resolve_doc(did)
+        did, n = corpus.ingest(args.arg, with_tree=not args.no_tree, workspace=db.canonical_workspace())
+        doc = corpus.resolve_doc(did, workspace=db.canonical_workspace())
         has = doc and os.path.exists(os.path.join(doc, "tree.json"))
         structure = "with PageIndex structure" if has else "page navigation only"
         print(f"Added {os.path.basename(args.arg)} as {did}: {n} pages, {structure}.")
     elif args.action == "scan":
         target = args.arg or os.getcwd()
-        ingested, skipped = corpus.scan(target, with_tree=not args.no_tree)
+        ingested, skipped = corpus.scan(target, with_tree=not args.no_tree, workspace=db.canonical_workspace())
         for did, path in ingested:
             print(f"  {did}  {path}")
         for path, reason in skipped:
@@ -646,7 +685,13 @@ def _cmd_doc(args):
         for pg in (st.get("pages") or [])[:40]:
             print(f"  p{pg['page']:<4} {pg['head']}")
 
+def _cmd_setup(args):
+    from misaka.cli import setup
+    sys.exit(setup.run(args.section))
+
+
 COMMANDS = {
+    "setup": _cmd_setup,
     "chat": _cmd_chat,
     "panel": _cmd_panel,
     "net-daemon": _cmd_net_daemon,
@@ -663,6 +708,7 @@ COMMANDS = {
     "web": _cmd_web,
     "moa": _cmd_moa,
     "skills": _cmd_skills,
+    "bundles": _cmd_bundles,
     "doc": _cmd_doc,
 }
 
@@ -672,12 +718,34 @@ def main(argv=None):
     if it uses it; ``argv`` defaults to the process arguments so tests can drive it directly."""
     bootstrap.install()
     argv = list(sys.argv[1:] if argv is None else argv)
-    # The profiles tree is the half a person edits, and nothing else creates it:
-    # see config.layout. Idempotent, never raises.
-    layout.ensure()
+    if argv[:1] == ["lcm"]:
+        # Read-only/dry-run operators must not bootstrap user directories or open
+        # a board/engine before their original parser decides what to do.
+        from misaka.extensions.hermes_lcm.host.operators import main as lcm_main
+        return lcm_main(argv[1:])
+    # Attaching/reading uses the existing owner's configuration. Other commands,
+    # including first-run help/version, retain the normal CLI bootstrap contract.
+    if not (argv[:1] == ["chat"] and ({"--read-only", "--attach"} & set(argv))):
+        layout.ensure()
     if not argv:
         # No arguments: open the panel in a terminal, plain chat when piped.
-        argv = ["panel"] if sys.stdin.isatty() and sys.stdout.isatty() else ["chat"]
+        interactive = sys.stdin.isatty() and sys.stdout.isatty()
+        if interactive:
+            from misaka.cli import setup
+            if not setup.configured_anywhere():
+                # A first run: no credential for the default provider anywhere. The wizard
+                # is the door, and the panel opens once it is done.
+                print("No provider credential is configured yet; starting `misaka setup`.")
+                if setup.run() != 0:
+                    return 1
+            from misaka.ui.panel import ghostty
+            if not os.path.isfile(ghostty.library_path()):
+                # The panel's terminal emulator is a prebuilt library; a platform without it
+                # (Linux, until libghostty-vt.so is built) still gets the plain chat.
+                print("The panel's terminal library (libghostty-vt) is not available on this install; "
+                      "opening plain chat. See `misaka setup environment`.", file=sys.stderr)
+                interactive = False
+        argv = ["panel"] if interactive else ["chat"]
     if argv[0] == "auth":
         # Auth has its own Pi-compatible grammar; preserve the raw option order instead
         # of sending it through the product CLI's unrelated parser.

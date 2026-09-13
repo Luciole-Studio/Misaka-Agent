@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, TypedDict
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
@@ -43,7 +43,7 @@ from misaka.utils.shell import (
     track_detached_child_pid,
     untrack_detached_child_pid,
 )
-from misaka.utils.values import read_field, signal_aborted
+from misaka.utils.values import read_field, semantic_boolean, signal_aborted
 
 _BASH_PREVIEW_LINES = 5
 _BASH_UPDATE_THROTTLE_SECONDS = 0.1
@@ -76,6 +76,15 @@ class BashToolInput(BaseModel):
 
     command: str = Field(description="Shell command to execute")
     timeout: float | None = Field(default=None, description="Timeout in seconds (optional, no default timeout)")
+
+
+class BackgroundBashToolInput(BashToolInput):
+    # CCB semanticBoolean accepts exactly the two boolean strings, not 0/1/yes.
+    timeout: float | None = Field(default=None, description="Foreground wait in seconds; managed commands default to BASH_DEFAULT_TIMEOUT_MS / 1000 (120 seconds if unset). Eligible commands continue in the background at timeout.")
+    run_in_background: bool = Field(default=False, strict=True, description="Run in the background; use TaskOutput or TaskStop with the returned task ID")
+    description: str | None = Field(default=None, description="Short description of this command")
+
+    _semantic_boolean = field_validator("run_in_background", mode="before")(semantic_boolean)
 
 
 @dataclass(slots=True)
@@ -112,6 +121,8 @@ class BashToolOptions:
     shellPath: str | None = None
     exposeSessionEnvironment: bool | None = True
     spawnHook: BashSpawnHook | None = None
+    startBackground: Callable[..., AgentToolResult] | None = None
+    registerForeground: Callable[..., Any] | None = None
 
 
 @dataclass(slots=True)
@@ -322,6 +333,8 @@ def _coerce_options(options: BashToolOptions | Mapping[str, Any] | None) -> Bash
             True if expose_session_environment is None else expose_session_environment
         ),
         spawnHook=options.get("spawnHook"),
+        startBackground=options.get("startBackground"),
+        registerForeground=options.get("registerForeground"),
     )
 
 
@@ -348,6 +361,9 @@ def _resolve_spawn_context(
         thinking_level = read_field(ctx, "thinkingLevel")
         if thinking_level:
             env["PI_REASONING_LEVEL"] = thinking_level
+    runtime = getattr(read_field(ctx, "sessionManager"), "_skill_runtime", None) if ctx is not None else None
+    if runtime is not None:
+        env = runtime.execution_env(env)
     base_context = BashSpawnContext(command=command, cwd=cwd, env=env)
     return spawn_hook(base_context) if spawn_hook is not None else base_context
 
@@ -522,6 +538,8 @@ def create_shell_tool_definition(
             {"shellPath": resolved_options.shellPath}
         )
 
+    input_model = BackgroundBashToolInput if resolved_options.startBackground is not None else BashToolInput
+
     async def execute(
         _tool_call_id: str,
         params: dict[str, Any],
@@ -529,7 +547,7 @@ def create_shell_tool_definition(
         on_update: Callable[[AgentToolResult], None] | None = None,
         _ctx: Any = None,
     ) -> AgentToolResult:
-        parsed = BashToolInput.model_validate(params)
+        parsed = input_model.model_validate(params)
         resolved_command = (
             f"{resolved_options.commandPrefix}\n{parsed.command}" if resolved_options.commandPrefix else parsed.command
         )
@@ -540,6 +558,18 @@ def create_shell_tool_definition(
             expose_session_environment,
             _ctx,
         )
+        runtime = getattr(read_field(_ctx, "sessionManager"), "_skill_runtime", None) if _ctx is not None else None
+        if runtime is not None and runtime.remote is not None:
+            from misaka.utils.async_lifecycle import run_in_thread
+            await run_in_thread(runtime.prepare_remote)
+        if isinstance(parsed, BackgroundBashToolInput) and parsed.run_in_background:
+            if signal_aborted(signal):
+                raise RuntimeError("Command aborted")
+            timeout = _resolve_timeout_seconds(parsed.timeout)
+            return resolved_options.startBackground(
+                command=parsed.command, description=parsed.description, context=_ctx,
+                spawn_context=spawn_context, operations=operations, timeout=timeout,
+            )
         output = OutputAccumulator(
             OutputAccumulatorOptions(tempFilePrefix=config.tempFilePrefix)
         )
@@ -631,18 +661,35 @@ def create_shell_tool_definition(
                     )
             return text, details
 
+        foreground = None
+        timeout = parsed.timeout
+        if resolved_options.registerForeground is not None:
+            if signal_aborted(signal):
+                raise RuntimeError("Command aborted")
+            foreground = resolved_options.registerForeground(
+                command=parsed.command, description=read_field(parsed, "description"), context=_ctx,
+                spawn_context=spawn_context, operations=operations, output=output, on_data=handle_data,
+                timeout=timeout,
+            )
         try:
             try:
-                result = await operations.exec(
-                    spawn_context.command,
-                    spawn_context.cwd,
-                    {
-                        "onData": handle_data,
-                        "signal": signal,
-                        "timeout": parsed.timeout,
-                        "env": spawn_context.env,
-                    },
-                )
+                if foreground is not None:
+                    result = await foreground.wait_foreground(signal, timeout, auto_background=True)
+                    if result is None:
+                        from misaka.core.subagent.shell import background_result
+                        clear_update_handle()
+                        return background_result(foreground, by_user=foreground.backgrounded_by_user)
+                else:
+                    result = await operations.exec(
+                        spawn_context.command,
+                        spawn_context.cwd,
+                        {
+                            "onData": handle_data,
+                            "signal": signal,
+                            "timeout": parsed.timeout,
+                            "env": spawn_context.env,
+                        },
+                    )
                 exit_code = result.get("exitCode")
             except Exception as error:
                 snapshot = await finish_output()
@@ -672,12 +719,15 @@ def create_shell_tool_definition(
             f"Output is truncated to last {DEFAULT_MAX_LINES} lines or {DEFAULT_MAX_BYTES // 1024}KB "
             "(whichever is hit first). If truncated, full output is saved to a temp file. "
             "Optionally provide a timeout in seconds."
+            + (" run_in_background=true returns a task ID immediately; completion arrives automatically. "
+               "TaskOutput reads output and TaskStop stops the command. Eligible foreground commands also continue "
+               "in the background when the foreground wait times out (default 120 seconds; BASH_DEFAULT_TIMEOUT_MS overrides)." if resolved_options.startBackground is not None else "")
         ),
         promptSnippet=config.promptSnippet,
         promptGuidelines=(
             list(config.promptGuidelines) if expose_session_environment else []
         ),
-        parameters=BashToolInput,
+        parameters=input_model,
         constrainedSampling=get_experimental_tool_sampling(),
         execute=execute,
         renderCall=lambda args, _theme, context: _render_call(

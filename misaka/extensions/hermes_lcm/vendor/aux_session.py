@@ -693,7 +693,7 @@ class AuxiliarySessionMixin:
             return False
 
         path = self._state_db_path(kwargs)
-        if not path.exists():
+        if path is None or not path.exists():  # misaka: native sessions have no Hermes state.db
             return False
         try:
             uri = path.resolve().as_uri() + "?mode=ro"
@@ -754,7 +754,7 @@ class AuxiliarySessionMixin:
         auxiliary_lineage_ids: set[str],
         state_db_path: Path,
     ) -> bool:
-        if not session_id or not auxiliary_lineage_ids or not state_db_path.exists():
+        if not session_id or not auxiliary_lineage_ids or state_db_path is None or not state_db_path.exists():  # misaka: optional host DB
             return False
         visited: set[str] = set()
         current = session_id

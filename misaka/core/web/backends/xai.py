@@ -30,47 +30,41 @@ Env vars::
                         # origin whenever the bearer is an OAuth token -- see
                         # :func:`_inference_base_url`
 
-**Credentials, and where this diverges from Hermes.** Hermes resolves through its own
-credential pool, which supports an unconditional ``force_refresh=True``. MISAKA's
-:class:`~misaka.core.auth_storage.AuthStorage` has no such flag: every refresh it owns --
-``getApiKey``, ``refreshOAuthTokenWithLock`` -- is gated on
-``oauthCredentialsExpireSoon``, so asking it to refresh a token the store still believes
-in is a no-op. That gate is exactly the case a 401 exists to report, so
-:func:`_force_refresh_oauth_token` drives the registered xAI OAuth provider directly and
-persists the rotated pair through ``AuthStorage.set`` -- the same ``{"type": "oauth", ...}``
-envelope ``refreshOAuthTokenWithLock`` writes, under the same file lock. What it does not
-inherit is that method's read-under-lock: a second session rotating the refresh token in
-the same instant wins, and this call degrades to the 401 it already had.
+OAuth expiry and rejected-token refresh both use AuthStorage's authoritative
+read/refresh/write lock. A newer login is adopted; a deleted grant stays deleted.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
+import time
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 
-from misaka.ai.utils.oauth import OAuthCredentials, getOAuthProvider
+from misaka.ai.utils.oauth.xai import with_http_options
 from misaka.config import get_auth_path
 from misaka.core.auth_storage import AuthStorage
+from misaka.core.web.accounting import account_call
 from misaka.core.web.config import provider_env, web_config
 from misaka.core.web.keyless import CLIENT_NAME
+from misaka.core.web.network import api_network_options
 from misaka.core.web.provider import WebSearchProvider
+from misaka.core.web.runtime import api_client
+from misaka.core.web.scope import current_scope
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "grok-build-0.1"
 DEFAULT_TIMEOUT = 90
 DEFAULT_BASE_URL = "https://api.x.ai/v1"
-
-# The provider id the OAuth device-code flow in `misaka.ai.utils.oauth.xai` stores under,
-# which is also the id `/login xai` writes. One name, so a chat login and a web search
-# read the same credential.
-_AUTH_PROVIDER_ID = "xai"
 
 # xAI's hard cap on allowed_domains / excluded_domains. Trimmed silently rather than
 # passed through, because the API answers an over-long list with a 400 and the user's
@@ -107,17 +101,8 @@ def _auth_path() -> str:
     probe that says "configured" about a different file than the search then opens is
     worse than either answer alone. It is also the seam the tests move.
     """
-    return get_auth_path()
-
-
-def _client(timeout: float) -> httpx.AsyncClient:
-    """Build the HTTP client for one search.
-
-    A fresh client per call, no shared pool -- the house rule for every backend here. It
-    is a function so the tests can mount an ``httpx.MockTransport`` without reaching into
-    ``httpx`` itself and disturbing whatever else the session has in flight.
-    """
-    return httpx.AsyncClient(timeout=timeout)
+    profile = current_scope().profile_dir
+    return str(Path(profile) / "auth.json") if profile is not None else get_auth_path()
 
 
 def _xai_config() -> dict[str, Any]:
@@ -142,35 +127,67 @@ def _coerce_domain_list(value: Any) -> list[str]:
     return cleaned
 
 
-async def _resolve_credentials() -> tuple[str, AuthStorage | None]:
-    """Resolve the bearer token, and the store to refresh it through if it came from OAuth.
+@dataclass
+class OAuthAccount:
+    storage: AuthStorage
+    name: str | None
 
-    Hermes' ``resolve_xai_http_credentials`` order: an xAI OAuth login first, the API key
-    second. ``AuthStorage.getApiKey`` covers both stored shapes (an OAuth grant from
-    ``/login xai``, an API key saved through the same flow) and refreshes an OAuth token
-    that is already inside the five-minute expiry window, which is why the 401 path below
-    is about revocation rather than ordinary expiry.
 
-    The second element is the OAuth marker: a store handle when the token came from a
-    stored OAuth grant, ``None`` when it is an API key. An API key cannot be refreshed,
-    so it must never trigger the retry -- an immediate second request with the same
-    rejected key only burns quota.
+def _identity(token):
+    return hashlib.sha256(repr((_auth_path(), token)).encode()).hexdigest()
 
-    Every failure inside the store degrades to ``XAI_API_KEY`` rather than raising: a
-    corrupted or half-written ``auth.json`` must not cost a user their working key.
-    """
+
+def _quarantine(token):
+    scope = current_scope()
+    now = time.monotonic()
+    with scope.lock:
+        for key, expiry in tuple(scope.rejected_credentials.items()):
+            if expiry <= now:
+                del scope.rejected_credentials[key]
+        if len(scope.rejected_credentials) >= 128:
+            scope.rejected_credentials.pop(next(iter(scope.rejected_credentials)))
+        scope.rejected_credentials[_identity(token)] = now + 300
+
+
+async def _resolve_credentials(*, prefer_api_key=False, excluded=()) -> tuple[str, OAuthAccount | None]:
+    """Key-first for X, OAuth-first for Web; only the rejected account is refreshed."""
+    explicit = provider_env("XAI_API_KEY")
+    if prefer_api_key and explicit:
+        return explicit, None
     try:
-        storage = await asyncio.to_thread(AuthStorage.create, _auth_path())
-        credential = storage.get(_AUTH_PROVIDER_ID)
-        is_oauth = isinstance(credential, dict) and credential.get("type") == "oauth"
-        token = str(await storage.getApiKey(_AUTH_PROVIDER_ID) or "").strip()
-        if token:
-            return token, storage if is_oauth else None
-    except Exception as exc:  # noqa: BLE001 - a broken store must not cost the API-key path
-        logger.debug("xAI auth store unusable, falling back to XAI_API_KEY: %s", exc)
-    # `provider_env` is wider than the store's own env fallback: it also reads the `env`
-    # section of web.json, which is where a user who never exported anything puts a key.
-    return provider_env("XAI_API_KEY"), None
+        from misaka.utils.async_lifecycle import run_in_thread
+
+        storage = await run_in_thread(AuthStorage.create, _auth_path())
+        for key, credential in storage.getAll().items():
+            if key != "xai" and not key.startswith("xai:"):
+                continue
+            if key in excluded or not isinstance(credential, dict):
+                continue
+            if credential.get("type") != "oauth":
+                if key == "xai":
+                    token = await storage.getApiKey("xai")
+                    if token:
+                        return token, None
+                continue
+            from misaka.core.web.config import remember_secret
+            remember_secret(credential.get("access"))
+            remember_secret(credential.get("refresh"))
+            rejected = current_scope().rejected_credentials.get(_identity(str(credential.get("access", ""))), 0)
+            if rejected > time.monotonic():
+                continue
+            account = OAuthAccount(storage, key.partition(":")[2] or None)
+            try:
+                with with_http_options(api_network_options):
+                    refreshed = await storage.refreshOAuthTokenWithLock("xai", account=account.name)
+                token = str(refreshed["apiKey"] or "").strip() if refreshed else ""
+            except Exception:  # noqa: BLE001 - tool or transport boundary reports the failure
+                _quarantine(str(credential.get("access", "")))
+                continue
+            if token:
+                return token, account
+    except Exception:  # noqa: BLE001, S110 - tool or transport boundary reports the failure
+        pass
+    return explicit, None
 
 
 def _inference_base_url(*, pin_origin: bool) -> str:
@@ -221,41 +238,68 @@ def _inference_base_url(*, pin_origin: bool) -> str:
     return candidate
 
 
-async def _force_refresh_oauth_token(storage: AuthStorage, rejected: str) -> str:
-    """Rotate the stored xAI OAuth token unconditionally; ``""`` when that changes nothing.
-
-    Hermes forces a refresh here because a 401 closes two gaps its proactive expiry check
-    cannot: an opaque (non-JWT) access token whose expiry cannot be read at all, and
-    mid-window revocation -- an admin revoke, a refresh-token rotation elsewhere, or clock
-    skew -- on a token whose recorded expiry is still comfortably in the future. MISAKA
-    records an explicit ``expires``, so the first gap is closed already; the second is the
-    whole reason this exists, and it is precisely the case ``AuthStorage``'s own
-    expiry-gated refresh declines to serve (see the module docstring).
-
-    Returns ``""`` on every failure and on a refresh that handed back the same token,
-    so the caller reports the original 401 instead of replaying the request.
-    """
+async def _force_refresh_oauth_token(account: OAuthAccount, rejected: str) -> str:
     try:
-        credential = storage.get(_AUTH_PROVIDER_ID)
-        if not isinstance(credential, dict) or credential.get("type") != "oauth":
-            return ""
-        provider = getOAuthProvider(_AUTH_PROVIDER_ID)
-        if provider is None:
-            return ""
-        stored = OAuthCredentials.model_validate(
-            {key: value for key, value in credential.items() if key != "type"}
-        )
-        refreshed = await provider.refreshToken(stored)
-        await asyncio.to_thread(
-            storage.set,
-            _AUTH_PROVIDER_ID,
-            {"type": "oauth", **refreshed.model_dump(exclude_none=False)},
-        )
-        token = str(provider.getApiKey(refreshed) or "").strip()
-    except Exception as exc:  # noqa: BLE001 - a failed refresh reports the 401, not itself
-        logger.warning("xAI web search OAuth refresh after 401 failed: %s", exc)
+        with with_http_options(api_network_options):
+            refreshed = await account.storage.refreshOAuthTokenWithLock(
+                "xai", rejected_api_key=rejected, account=account.name
+            )
+        token = str(refreshed["apiKey"] or "").strip() if refreshed else ""
+    except Exception as error:  # noqa: BLE001 - tool or transport boundary reports the failure
+        logger.warning("xAI OAuth rejected-token refresh failed (%s)", type(error).__name__)
         return ""
     return token if token and token != rejected else ""
+
+
+async def post_responses(payload, query, *, operation="web_search", timeout=90, retries=0,
+                         prefer_api_key=False):
+    """One HTTP attempt per accounting event; account rotation is separate from 5xx retry."""
+    token, account = await _resolve_credentials(prefer_api_key=prefer_api_key)
+    if not token:
+        raise ValueError(_NO_CREDENTIALS_ERROR)
+    excluded, tried, refreshed_accounts = set(), set(), set()
+    network_attempt = 0
+    while True:
+        from misaka.core.web.config import remember_secret
+        remember_secret(token)
+        base = _inference_base_url(pin_origin=account is not None or prefer_api_key)
+        url = f"{base}/responses"
+        identity = (account.name if account is not None else "api_key", _identity(token))
+        tried.add(identity)
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json", "User-Agent": CLIENT_NAME}
+        try:
+            # Pool identity includes account and bearer. Refresh never inherits cookies
+            # from another account, and the old pool drains its current borrowers.
+            async with api_client("xai", url, identity, timeout=timeout) as client, account_call(operation, "xai", query):
+                response = await client.post(url, headers=headers, json=payload)
+        except (httpx.ReadTimeout, httpx.ConnectError) as error:
+            if network_attempt >= retries:
+                raise ValueError(f"Could not reach xAI: {type(error).__name__}") from error
+        else:
+            if response.status_code == 401 and account is not None:
+                key = "xai" + (":" + account.name if account.name else "")
+                refreshed = ""
+                if key not in refreshed_accounts:
+                    refreshed_accounts.add(key)
+                    refreshed = await _force_refresh_oauth_token(account, token)
+                if refreshed and (account.name, _identity(refreshed)) not in tried:
+                    token = refreshed
+                    continue
+                _quarantine(token)
+                excluded.add(key)
+                new_token, new_account = await _resolve_credentials(excluded=excluded)
+                new_identity = (new_account.name if new_account is not None else "api_key", _identity(new_token))
+                if new_token and new_identity not in tried and len(tried) < 64:
+                    token, account = new_token, new_account
+                    continue
+            if response.status_code < 400:
+                return response, "oauth" if account is not None else "api_key"
+            if response.status_code < 500 or network_attempt >= retries:
+                # Never reflect a rejected bearer from a vendor/proxy error response.
+                body = response.text[:300 if operation == "web_search" else 500].replace(token, "<redacted>")
+                raise ValueError(f"xAI {operation.replace('_', ' ')} returned HTTP {response.status_code}: {body}")
+        network_attempt += 1
+        await asyncio.sleep(min(5.0, 1.5 * network_attempt))
 
 
 class XAIWebSearchProvider(WebSearchProvider):
@@ -313,10 +357,11 @@ class XAIWebSearchProvider(WebSearchProvider):
         try:
             with open(_auth_path(), encoding="utf-8-sig") as handle:
                 store = json.load(handle)
-        except Exception as exc:  # noqa: BLE001 - a missing or broken store means "no"
-            logger.debug("xAI availability probe could not read the auth store: %s", exc)
+        except Exception:  # noqa: BLE001 - a missing or broken store means "no"
             return False
-        return bool(isinstance(store, dict) and store.get(_AUTH_PROVIDER_ID))
+        return bool(isinstance(store, dict) and any(
+            (key == "xai" or key.startswith("xai:")) and isinstance(value, dict)
+            and (value.get("access") or value.get("key")) for key, value in store.items()))
 
     def is_keyless_available(self) -> bool:
         """Never. xAI has no free tier and is not a member of the keyless ring."""
@@ -324,10 +369,6 @@ class XAIWebSearchProvider(WebSearchProvider):
 
     async def search(self, query: str, limit: int = 5) -> dict[str, Any]:
         """Execute a Grok-backed web search."""
-        token, oauth_storage = await _resolve_credentials()
-        if not token:
-            return {"success": False, "error": _NO_CREDENTIALS_ERROR}
-
         # Clamp to the range the tool above accepts rather than to something smaller, so
         # an explicit limit is never silently downgraded. Grok happily produces longer
         # lists; cost scales with the requested count through reasoning tokens, but that
@@ -367,55 +408,10 @@ class XAIWebSearchProvider(WebSearchProvider):
             # are read from annotations / citations separately anyway.
             "include": ["no_inline_citations"],
         }
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "User-Agent": CLIENT_NAME,
-        }
-
-        # `oauth_storage is not None` is exactly Hermes' `provider == "xai-oauth"`: the
-        # bearer about to go on the wire is a subscription OAuth token, so its destination
-        # is pinned to the xAI origin.
-        base_url = _inference_base_url(pin_origin=oauth_storage is not None)
-        url = f"{base_url}/responses"
-        logger.info(
-            "xAI web search via %s: '%s' (limit=%d, model=%s)", base_url, query, limit, model
-        )
-
-        response: httpx.Response | None = None
-        async with _client(timeout) as client:
-            for attempt in range(2):
-                try:
-                    response = await client.post(url, headers=headers, json=payload)
-                except httpx.RequestError as exc:
-                    logger.warning("xAI web search request error: %s", exc)
-                    return {"success": False, "error": f"Could not reach xAI: {exc}"}
-                if response.status_code < 400:
-                    break
-                if response.status_code == 401 and attempt == 0 and oauth_storage is not None:
-                    logger.info(
-                        "xAI web search got 401 on first attempt; forcing OAuth "
-                        "refresh and retrying once.",
-                    )
-                    refreshed = await _force_refresh_oauth_token(oauth_storage, token)
-                    if refreshed:
-                        token = refreshed
-                        headers["Authorization"] = f"Bearer {token}"
-                        continue
-                    # The refresh failed or handed back the same token; there is nothing
-                    # a second request would do differently. Fall through to the error.
-                body = (response.text or "")[:300]
-                logger.warning("xAI web search HTTP %d: %s", response.status_code, body)
-                return {
-                    "success": False,
-                    "error": (
-                        f"xAI web search returned HTTP {response.status_code}: {body}"
-                    ).rstrip(),
-                }
-
-        if response is None:
-            # Defensive: both attempts would have to leave the loop without a response.
-            return {"success": False, "error": "xAI web search produced no response"}
+        try:
+            response, _source = await post_responses(payload, query, timeout=timeout)
+        except (ValueError, httpx.RequestError) as error:
+            return {"success": False, "error": str(error)}
 
         try:
             data = response.json()
@@ -440,16 +436,12 @@ class XAIWebSearchProvider(WebSearchProvider):
         # way every other backend reports zero hits: the model decides whether to retry.
         return {"success": True, "data": {"web": _extract_results(data, limit=limit)}}
 
-    def setup_hint(self) -> dict[str, Any]:
-        """Hermes' ``get_setup_schema``, minus its ``post_setup`` hook.
-
-        Hermes delegates auth to a shared ``xai_grok`` post-setup prompt that every xAI
-        service (image, TTS, search) reuses. MISAKA has no picker and no post-setup hooks,
-        so the OAuth half is named in the tag and the key half is an ordinary env var.
-        """
+    def get_setup_schema(self) -> dict[str, Any]:
+        """CLI setup uses the existing AuthStorage/device-code login, just like /login."""
         return {
             "name": "xAI Web Search (Grok)",
             "badge": "paid",
+            "post_setup": "xai_grok",
             "tag": (
                 "Agentic web search through Grok's web_search tool. Signs in with "
                 "`/login xai` (SuperGrok / X Premium) or uses XAI_API_KEY."

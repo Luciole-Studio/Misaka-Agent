@@ -76,16 +76,26 @@ def _txn(con):
 
 NOTIFICATION_SCHEMA_VERSION = 1
 EVENT_RETENTION_SECONDS = 30 * 86400      # an event every subscriber has passed is history
+SUBSCRIPTION_IDLE_SECONDS = 30 * 86400    # a subscriber silent this long has left for good
+SUBSCRIBE_LOOKBACK_SECONDS = 7 * 86400    # what a new subscriber is told about from before it arrived
 
 
 def prune(con, *, now=None):
-    """Drop delivered events older than the retention window.
+    """Drop subscriptions nobody drives any more, then the events every remaining one has passed.
 
-    The trigger appends one row per terminal transition and nothing ever removed them, so the
-    table grew for the life of the board. A row is only dropped once every subscription's
-    cursor is past it, so a subscriber that has been away still gets what it missed.
+    The trigger appends one row per terminal transition, so the table grows for the life of
+    the board. A row is dropped only once every subscription's cursor is past it, so a
+    subscriber that has been away still gets what it missed. That rule needs the other half:
+    a research run's chat subscription outlives the run, and one abandoned cursor would
+    otherwise pin the whole table forever. A subscription that has neither leased nor
+    acknowledged anything in ``SUBSCRIPTION_IDLE_SECONDS`` is gone; a session that comes back
+    later resubscribes and reads from ``SUBSCRIBE_LOOKBACK_SECONDS`` ago.
     """
     now = int(time.time()) if now is None else int(now)
+    con.execute(
+        "DELETE FROM notification_subscriptions WHERE updated_at < ?",
+        (now - SUBSCRIPTION_IDLE_SECONDS,),
+    )
     floor = con.execute("SELECT MIN(cursor) FROM notification_subscriptions").fetchone()[0]
     con.execute(
         "DELETE FROM notification_events WHERE created_at < ? AND id <= ?",
@@ -150,16 +160,29 @@ def publish(con, resource_type, resource_id, kind, payload=None, *, dedupe_key=N
 
 def subscribe(con, owner, channel, resource_type="*", resource_id="*", kind="*", *,
               from_now=False):
+    """Return the subscription for this signature, creating it on first use.
+
+    A new subscriber hears about the last ``SUBSCRIBE_LOOKBACK_SECONDS`` (the cards that
+    finished while nobody was listening) and nothing older: an old board's first session used
+    to replay every terminal event in its history, one turn each. ``from_now`` starts at the
+    present instead.
+    """
     signature = f"{owner}\x00{channel}\x00{resource_type}\x00{resource_id}\x00{kind}"
     subscription_id = "ns_" + hashlib.sha256(signature.encode()).hexdigest()[:16]
     now = int(time.time())
-    cursor = con.execute("SELECT COALESCE(MAX(id),0) FROM notification_events").fetchone()[0]
+    if from_now:
+        cursor = con.execute("SELECT COALESCE(MAX(id),0) FROM notification_events").fetchone()[0]
+    else:
+        cursor = con.execute(
+            "SELECT COALESCE(MAX(id),0) FROM notification_events WHERE created_at < ?",
+            (now - SUBSCRIBE_LOOKBACK_SECONDS,),
+        ).fetchone()[0]
     con.execute(
         "INSERT OR IGNORE INTO notification_subscriptions"
         "(id,owner,channel,resource_type,resource_id,kind,cursor,created_at,updated_at) "
         "VALUES(?,?,?,?,?,?,?,?,?)",
         (subscription_id, owner, channel, resource_type, resource_id, kind,
-         int(cursor) if from_now else 0, now, now),
+         int(cursor), now, now),
     )
     return subscription_id
 

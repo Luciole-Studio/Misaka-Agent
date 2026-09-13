@@ -8,9 +8,12 @@ to match -- the device code itself is the correlation handle.
 
 from __future__ import annotations
 
+import asyncio
 import math
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode, urlsplit, urlunsplit
@@ -24,6 +27,7 @@ from misaka.ai.utils.oauth.types import (
     OAuthDeviceCodeInfo,
     OAuthLoginCallbacks,
 )
+from misaka.utils.async_lifecycle import settle
 from misaka.utils.values import signal_aborted
 
 CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
@@ -37,11 +41,20 @@ CANCEL_MESSAGE = "Login cancelled"
 # Upstream passes no timeout and leaves it to the runtime's `fetch`. httpx does have a
 # default (`httpx.AsyncClient().timeout` is `Timeout(timeout=5.0)` on the pinned 0.28.1),
 # so this is not about adding a bound that was missing -- it is about widening a 5s one
-# that a token endpoint on a slow link would trip. The bound itself still matters: the
-# abort path below abandons the request without cancelling it (see `_http_post_form`), so
-# something has to close the socket. 30s matches the anthropic OAuth flow next door
+# that a token endpoint on a slow link would trip. 30s matches the anthropic OAuth flow next door
 # (`anthropic.py` builds its client with `timeout=30.0`).
 REQUEST_TIMEOUT_MS = 30 * 1000
+_http_options: ContextVar[Callable[[str], dict[str, Any]] | None] = ContextVar("xai_oauth_http_options", default=None)
+
+
+@contextmanager
+def with_http_options(options):
+    """Let the host supply its network route without importing host code into ai."""
+    token = _http_options.set(options)
+    try:
+        yield
+    finally:
+        _http_options.reset(token)
 
 # WHATWG's URL parser removes leading *and* trailing C0 controls and spaces from its input
 # before it parses, which is why `new URL(raw).href` never carries them. CPython's
@@ -137,7 +150,8 @@ async def _http_post_form(url: str, fields: dict[str, str], signal: Any = None) 
         raise RuntimeError(CANCEL_MESSAGE)
 
     async def send() -> Any:
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_MS / 1000) as client:
+        options = _http_options.get()
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_MS / 1000, **(options(url) if options is not None else {})) as client:
             return await client.post(
                 url,
                 headers={
@@ -149,22 +163,20 @@ async def _http_post_form(url: str, fields: dict[str, str], signal: Any = None) 
                 content=urlencode(fields).encode(),
             )
 
+    task = asyncio.create_task(send())
     try:
-        # Upstream hands the `AbortSignal` to `fetch` (auth/oauth/xai.ts:74) and the
-        # in-flight request dies with it. misaka's signals are duck-typed `aborted` flags
-        # that httpx knows nothing about, so racing the request against the signal is the
-        # equivalent -- and it is what makes the `signal_aborted` branch below reachable
-        # at all: with the signal unwired, an abort mid-request left this waiting for the
-        # server, and nothing here ever raised on its own.
-        #
-        # The race stops *waiting* for the loser, it does not cancel it, which is why the
-        # client above carries a finite timeout: the abandoned request then closes itself
-        # within a bounded time instead of holding a socket for as long as the server likes.
-        response = await race_with_abort_signal(send(), signal)
+        response = await race_with_abort_signal(task, signal)
     except Exception as error:
         if signal_aborted(signal):
             raise RuntimeError(CANCEL_MESSAGE) from error
         raise
+    finally:
+        # This HTTP request is owned, unlike a shared Promise passed to the race helper.
+        if not task.done():
+            task.cancel()
+        _, cancelled = await settle(asyncio.gather(task, return_exceptions=True))
+        if cancelled is not None:
+            raise cancelled
 
     try:
         parsed: Any = response.json()

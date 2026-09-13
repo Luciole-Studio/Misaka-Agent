@@ -64,6 +64,13 @@ from misaka.core.tools.ls import (
     createLsTool,
     createLsToolDefinition,
 )
+from misaka.core.tools.office import (
+    OfficeToolInput,
+    create_office_tool,
+    create_office_tool_definition,
+    createOfficeTool,
+    createOfficeToolDefinition,
+)
 from misaka.core.tools.powershell import (
     PowerShellOperations,
     PowerShellSpawnContext,
@@ -110,10 +117,10 @@ from misaka.core.tools.write import (
 type Tool = AgentTool
 type ToolDef = ToolDefinition[Any, Any]
 type ToolName = Literal[
-    "read", "bash", "powershell", "edit", "write", "grep", "find", "ls"
+    "read", "bash", "powershell", "edit", "write", "office", "grep", "find", "ls"
 ]
 all_tool_names: set[ToolName] = {
-    "read", "bash", "powershell", "edit", "write", "grep", "find", "ls"
+    "read", "bash", "powershell", "edit", "write", "office", "grep", "find", "ls"
 }
 allToolNames = all_tool_names
 
@@ -123,6 +130,7 @@ class ToolsOptions(TypedDict, total=False):
     powershell: PowerShellToolOptions | Mapping[str, Any]
     write: WriteToolOptions | Mapping[str, Any]
     edit: EditToolOptions | Mapping[str, Any]
+    office: Mapping[str, Any]
     grep: GrepToolOptions | Mapping[str, Any]
     find: FindToolOptions | Mapping[str, Any]
     ls: LsToolOptions | Mapping[str, Any]
@@ -154,6 +162,10 @@ def create_tool_definition(
             return create_write_tool_definition(
                 cwd, _get_tool_options(options, "write")
             )
+        case "office":
+            return create_office_tool_definition(
+                cwd, _get_tool_options(options, "office")
+            )
         case "grep":
             return create_grep_tool_definition(cwd, _get_tool_options(options, "grep"))
         case "find":
@@ -180,6 +192,8 @@ def create_tool(
             return create_edit_tool(cwd, _get_tool_options(options, "edit"))
         case "write":
             return create_write_tool(cwd, _get_tool_options(options, "write"))
+        case "office":
+            return create_office_tool(cwd, _get_tool_options(options, "office"))
         case "grep":
             return create_grep_tool(cwd, _get_tool_options(options, "grep"))
         case "find":
@@ -226,6 +240,7 @@ def create_all_tool_definitions(
         ),
         "edit": create_edit_tool_definition(cwd, _get_tool_options(options, "edit")),
         "write": create_write_tool_definition(cwd, _get_tool_options(options, "write")),
+        "office": create_office_tool_definition(cwd, _get_tool_options(options, "office")),
         "grep": create_grep_tool_definition(cwd, _get_tool_options(options, "grep")),
         "find": create_find_tool_definition(cwd, _get_tool_options(options, "find")),
         "ls": create_ls_tool_definition(cwd, _get_tool_options(options, "ls")),
@@ -268,6 +283,7 @@ def create_all_tools(
         ),
         "edit": create_edit_tool(cwd, _get_tool_options(options, "edit")),
         "write": create_write_tool(cwd, _get_tool_options(options, "write")),
+        "office": create_office_tool(cwd, _get_tool_options(options, "office")),
         "grep": create_grep_tool(cwd, _get_tool_options(options, "grep")),
         "find": create_find_tool(cwd, _get_tool_options(options, "find")),
         "ls": create_ls_tool(cwd, _get_tool_options(options, "ls")),
@@ -309,6 +325,7 @@ __all__ = [
     "LsToolDetails",
     "LsToolInput",
     "LsToolOptions",
+    "OfficeToolInput",
     "PowerShellOperations",
     "PowerShellSpawnContext",
     "PowerShellSpawnHook",
@@ -346,6 +363,8 @@ __all__ = [
     "createLocalPowerShellOperations",
     "createLsTool",
     "createLsToolDefinition",
+    "createOfficeTool",
+    "createOfficeToolDefinition",
     "createPowerShellTool",
     "createPowerShellToolDefinition",
     "createReadOnlyToolDefinitions",
@@ -361,6 +380,8 @@ __all__ = [
     "create_find_tool",
     "create_grep_tool",
     "create_ls_tool",
+    "create_office_tool",
+    "create_office_tool_definition",
     "create_powershell_tool",
     "create_read_tool",
     "create_write_tool",
@@ -370,4 +391,4 @@ __all__ = [
     "truncateTail",
     "withFileMutationQueue",
     "with_file_mutation_queue",
-    ]
+]

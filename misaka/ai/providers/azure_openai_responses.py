@@ -356,11 +356,11 @@ def stream_azure_openai_responses(
             signal = _option(options, "signal")
             output.stopReason = "aborted" if signal_aborted(signal) else "error"
             output.errorMessage = format_azure_openai_error(error)
-            stream.push(ErrorEvent(reason=output.stopReason, error=output))
+            stream.push(ErrorEvent(reason=output.stopReason, error=output), cause=error)
         finally:
             stream.end()
 
-    spawn_stream_task(run())
+    spawn_stream_task(run(), stream=stream)
     return stream
 
 

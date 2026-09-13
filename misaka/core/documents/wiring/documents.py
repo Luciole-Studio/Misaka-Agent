@@ -31,97 +31,18 @@ def _workspace(ctx):
     return os.path.realpath(getattr(ctx, "cwd", None) or os.getcwd())
 
 
-# -- which folders may own a document this session can cite ---------------------------------------
-#
-# Mirror of ``runs.evidence_roots`` (misaka/core/research/runs.py): the ledger accepts a doc citation
-# under either the run's project folder or the run home that holds every node worktree, so the
-# doc_* tools must see the same set -- a doc_verify that answers "do not cite it" about a citation
-# ``ledger.ingest_report`` would accept kills the verify-then-cite loop for every below-root card.
-# The tool layer has no run row and no database, so the candidates are derived from the path shape
-# alone; keep the two rules in step when either side changes.
-
-def _linked_worktree_main(root):
-    """The main repository root when ``root`` is a linked git worktree, else None.
-
-    A linked worktree's ``.git`` is a *file* whose first line reads
-    ``gitdir: <main>/.git/worktrees/<name>``; the main repository keeps a ``.git`` directory.
-    """
-    gitfile = os.path.join(root, ".git")
-    try:
-        if not os.path.isfile(gitfile):
-            return None
-        with open(gitfile, encoding="utf-8", errors="replace") as f:
-            first = f.readline().strip()
-    except OSError:
-        return None
-    if not first.startswith("gitdir:"):
-        return None
-    # join() handles both spellings git writes: an absolute gitdir, or one relative to the worktree.
-    gitdir = os.path.normpath(os.path.join(root, first.removeprefix("gitdir:").strip()))
-    worktrees, dotgit = os.path.dirname(gitdir), os.path.dirname(os.path.dirname(gitdir))
-    if os.path.basename(worktrees) != "worktrees" or os.path.basename(dotgit) != ".git":
-        return None
-    return os.path.realpath(os.path.dirname(dotgit))
-
-
-def _run_home(root):
-    """The research run home containing ``root``, or None.
-
-    ``runs.node_worktree`` puts every node's line at ``<runs home>/<run_id>/branches/<node>/
-    worktree``, and ``runs.evidence_roots`` accepts the whole ``<runs home>/<run_id>`` -- that is
-    how one node's card reaches a document a sibling or ancestor node indexed. Recognized purely
-    by that shape: an ancestor named ``worktree`` two levels under one named ``branches``.
-    """
-    current = root
-    while True:
-        parent = os.path.dirname(current)
-        if (os.path.basename(current) == "worktree"
-                and os.path.basename(os.path.dirname(parent)) == "branches"):
-            return os.path.dirname(os.path.dirname(parent))
-        if parent == current:
-            return None
-        current = parent
-
-
-def _roots(ctx):
-    """The candidate roots a document may be owned under, in the ledger's own search order."""
-    out = [_workspace(ctx)]
-    for candidate in (_linked_worktree_main(out[0]), _run_home(out[0])):
-        if candidate and candidate not in out:
-            out.append(candidate)
-    return out
-
-
 def _owning_root(doc_id, ctx):
-    """The first candidate root that owns ``doc_id``, or None (``ledger._doc_evidence``'s search)."""
-    return next((root for root in _roots(ctx) if corpus.resolve_doc(doc_id, workspace=root)), None)
+    """Document tools and the research ledger use the same project-local store."""
+    root = _workspace(ctx)
+    return root if corpus.resolve_doc(doc_id, workspace=root) else None
 
 
 def _docs(ctx):
-    """Indexed documents owned by any candidate root, oldest first -- one row per document (a book
-    linked from both the project and a worktree is one document, not two)."""
-    rows, seen = [], set()
-    for root in _roots(ctx):
-        for row in corpus.docs(workspace=root):
-            if row["doc_id"] not in seen:
-                seen.add(row["doc_id"])
-                rows.append(row)
-    rows.sort(key=lambda row: row.get("added_at", 0))
-    return rows
+    return corpus.docs(workspace=_workspace(ctx))
 
 
 def _find(query, doc_id, ctx, limit=10):
-    """Literal search across every candidate root, deduped by (doc, page) where roots overlap."""
-    hits, seen = [], set()
-    for root in _roots(ctx):
-        for hit in corpus.search_literal(query, doc_id=doc_id, workspace=root, limit=limit):
-            key = (hit["doc_id"], hit["page"])
-            if key not in seen:
-                seen.add(key)
-                hits.append(hit)
-        if len(hits) >= limit:
-            break
-    return hits[:limit]
+    return corpus.search_literal(query, doc_id=doc_id, workspace=_workspace(ctx), limit=limit)
 
 
 # -- what a page is made of -----------------------------------------------------------------------
@@ -259,10 +180,12 @@ def register(harn):
         rows = await _off_loop(_docs, ctx)
         if signal_aborted(signal):
             return _text("Cancelled.")
+        if not rows:
+            return _text("No documents are indexed in this workspace.")
         if params.query:
             rows = [r for r in rows if params.query.lower() in (r["title"] or "").lower()]
         if not rows:
-            return _text("No documents are indexed in this workspace.")
+            return _text("No indexed document titles match this filter. Omit query to list all documents.")
         # A title is the document's own words -- an EPUB's dc:title, an HTML <title>, the name a
         # card gave its artifact -- and it used to be the file name, which the workspace chose.
         # doc_outline and doc_find fence theirs; rows read out in the tool's own voice would let
@@ -434,10 +357,10 @@ def register(harn):
         if path != ws and not path.startswith(ws + os.sep):
             return _text(f"Refused: {params.path} resolves outside the workspace {ws}.")
         if os.path.isdir(path):
-            added, skipped = await _off_loop(corpus.scan, path)
+            added, skipped = await _off_loop(corpus.scan, path, workspace=ws)
         elif os.path.isfile(path):
             try:
-                added, skipped = [((await _off_loop(corpus.ingest, path))[0], path)], []
+                added, skipped = [((await _off_loop(corpus.ingest, path, workspace=ws))[0], path)], []
             except ValueError as e:
                 added, skipped = [], [(path, str(e))]
         else:
@@ -457,11 +380,11 @@ def register(harn):
         quote: str = Field(description="Exact quotation to verify.")
 
     @_register(
-        harn, name="doc_verify", label="Verify quotation",
-        description="Confirm that an exact quotation occurs in a document and return its page, character offset, and claim hash.",
-        snippet="Verify an exact quotation and return its citation anchor",
+        harn, name="doc_verify", label="Locate quotation",
+        description="Locate literal text in an indexed document and return its page, character offset, and locator hash. This does not assess support for a claim.",
+        snippet="Locate a quotation in indexed text",
         guidelines=[
-            "Run `doc_verify` before citing a quotation. If verification fails, paraphrase it or mark it unconfirmed.",
+            "Use doc_verify as an optional locator, not a citation gate. A missing literal match may reflect extraction or typography; read the source in context to assess the quotation and argument.",
         ],
         parameters=VerifyParams)
     async def doc_verify(tool_call_id, params, signal, on_update, ctx):
@@ -473,20 +396,18 @@ def register(harn):
         if root is None:
             return _text("Document not found. Use doc_list to find its document ID.")
         if not v:
-            return _text("❌ The quotation was not found. Do not cite it as a verified quotation.")
+            return _text("No literal match in the indexed text. Inspect the document or page image for context and extraction differences.")
         lines = [f"✅ Page {v['page']}, character {v['offset']}",
                  f"claim_hash {v['claim_hash']}",
                  f"Cite as: [{params.doc_id} p{v['page']}]"]
-        # This answer is what the research ledger records the quotation against, so it is the one
-        # place the difference has to be said out loud: a quotation checked against OCR output
-        # carries OCR's error rate, and the claim hash makes it look settled.
+        # OCR is a transcription; locating text in it does not establish what the page says.
         if _page_from_ocr(await _off_loop(_row, params.doc_id, root), v["page"]):
             lines.append(f"Page {v['page']} was read by OCR, not lifted from a text layer: the "
                          f"quotation matches what OCR read there. Check it against "
                          f"doc_page_image(doc_id, {v['page']}) before citing it word for word.")
         return _text("\n".join(lines))
 
-SESSION_KINDS = {"foreground", "dm", "card", "child"}
+SESSION_KINDS = {"foreground", "dm", "card", "child", "bare"}
 
 
 def activate(spec):

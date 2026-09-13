@@ -57,6 +57,8 @@ class CompactionResult:
     # Keep details as the fourth positional field for existing Python extensions.
     estimatedTokensAfter: int | None = None
     usage: Usage | dict[str, Any] | None = None
+    # None keeps Pi's prefix/tail form; even [] is a complete engine-owned view.
+    contextMessages: list[AgentMessage] | None = None
 
 
 @dataclass(slots=True)
@@ -686,6 +688,7 @@ def prepare_compaction(
             break
 
     previous_summary: str | None = None
+    checkpoint_messages: list[AgentMessage] = []
     boundary_start = 0
     if previous_compaction_index >= 0:
         previous_compaction = path_entries[previous_compaction_index]
@@ -696,6 +699,13 @@ def prepare_compaction(
             -1,
         )
         boundary_start = first_kept_entry_index if first_kept_entry_index >= 0 else previous_compaction_index + 1
+        if previous_compaction.get("contextMessages") is not None:
+            # A complete checkpoint may still contain raw backlog and a changed tail.
+            # On a native compaction, summarize that view, never its display label or
+            # the pre-checkpoint archive that it already replaced.
+            checkpoint_messages = session_entry_to_context_messages(previous_compaction)
+            previous_summary = None
+            boundary_start = previous_compaction_index + 1
 
     tokens_before = estimate_context_tokens(build_session_context(path_entries).messages).tokens
     cut_point = find_cut_point(path_entries, boundary_start, len(path_entries), settings.keepRecentTokens)
@@ -705,7 +715,7 @@ def prepare_compaction(
         return None
 
     history_end = cut_point.turnStartIndex if cut_point.isSplitTurn else cut_point.firstKeptEntryIndex
-    messages_to_summarize: list[AgentMessage] = []
+    messages_to_summarize: list[AgentMessage] = list(checkpoint_messages)
     for entry in path_entries[boundary_start:history_end]:
         message = _get_message_from_entry_for_compaction(entry)
         if message is not None:

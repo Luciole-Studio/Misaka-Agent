@@ -1,9 +1,10 @@
 """Persistent research-run state and file artifacts.
 
 A run is a tree of nodes (``research_branches``): the root is the first conclusion, every
-other node re-researches an issue that undermined its parent's conclusion. Research prose
-lives under ``<workspace>/research/<run_id>``; node worktrees and session transcripts live
-under ``~/.misaka/runs/<run_id>``. SQLite stores only workflow state and relationships, so a
+other node investigates a material issue raised against its parent's conclusion. Research prose
+lives directly in the project from its first write: ``<workspace>/nodes/<node>/`` per node (its cards
+under ``cards/``) and ``<workspace>/final/`` for run-level products.
+Session transcripts share the existing ``~/.misaka/sessions`` store. SQLite stores only workflow state and relationships, so a
 Last Order process that died can resume the same run.
 """
 from __future__ import annotations
@@ -21,10 +22,23 @@ from pathlib import Path
 from misaka.core.platform import tasks as task_store
 from misaka.utils import atomic
 
+REVIEW_KINDS = {"red_team", "final_review"}
+
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS research_actions (
+  run_id TEXT NOT NULL,
+  branch_id TEXT NOT NULL,
+  action_key TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  session_file TEXT NOT NULL,
+  tool_call_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(run_id,branch_id,action_key)
+);
 CREATE TABLE IF NOT EXISTS research_runs (
   id              TEXT PRIMARY KEY,
   workspace       TEXT NOT NULL,
+  artifact_layout TEXT,
   question        TEXT NOT NULL,
   phase           TEXT NOT NULL,
   status          TEXT NOT NULL,
@@ -32,6 +46,7 @@ CREATE TABLE IF NOT EXISTS research_runs (
   limits_json     TEXT NOT NULL,
   token_start     INTEGER NOT NULL DEFAULT 0,
   root_session    TEXT,
+  origin_session  TEXT,
   stop_requested  INTEGER NOT NULL DEFAULT 0,
   final_artifact  TEXT,
   last_error      TEXT,
@@ -47,11 +62,12 @@ CREATE TABLE IF NOT EXISTS research_branches (
   trigger_text    TEXT NOT NULL,
   depth           INTEGER NOT NULL,
   status          TEXT NOT NULL DEFAULT 'queued',
-  worktree        TEXT,
   session_file    TEXT,
   context_artifact TEXT,
   runner_pid      INTEGER,
   runner_identity TEXT,
+  runner_key      TEXT,
+  last_error      TEXT,
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
 );
@@ -61,7 +77,6 @@ CREATE TABLE IF NOT EXISTS research_run_tasks (
   branch_id       TEXT NOT NULL,
   kind            TEXT NOT NULL,
   wave            INTEGER NOT NULL DEFAULT 0,
-  preflight_artifact TEXT,
   local_id        TEXT,
   issue_id        TEXT,
   depends_json    TEXT NOT NULL DEFAULT '[]',
@@ -79,8 +94,6 @@ CREATE TABLE IF NOT EXISTS research_issues (
   status          TEXT NOT NULL DEFAULT 'open',
   reason          TEXT,
   child_branch_id TEXT,
-  runner_pid      INTEGER,
-  runner_identity TEXT,
   created_at      INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS research_artifacts (
@@ -93,8 +106,7 @@ CREATE TABLE IF NOT EXISTS research_artifacts (
   path            TEXT NOT NULL,
   sha256          TEXT NOT NULL,
   metadata_json   TEXT NOT NULL DEFAULT '{}',
-  created_at      INTEGER NOT NULL,
-  UNIQUE(run_id,path)
+  created_at      INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS research_findings (
   id              TEXT PRIMARY KEY,
@@ -122,6 +134,8 @@ CREATE INDEX IF NOT EXISTS research_branches_run ON research_branches(run_id,dep
 CREATE INDEX IF NOT EXISTS research_tasks_run ON research_run_tasks(run_id,branch_id,kind);
 CREATE INDEX IF NOT EXISTS research_issues_run ON research_issues(run_id,branch_id,status);
 CREATE INDEX IF NOT EXISTS research_artifacts_run ON research_artifacts(run_id,branch_id,kind);
+CREATE UNIQUE INDEX IF NOT EXISTS research_artifacts_generated ON research_artifacts(run_id,path) WHERE task_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS research_artifacts_task ON research_artifacts(run_id,task_id,path) WHERE task_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS research_findings_run ON research_findings(run_id,branch_id,task_id);
 CREATE INDEX IF NOT EXISTS research_claims_finding ON research_claims(finding_id);
 CREATE UNIQUE INDEX IF NOT EXISTS research_tasks_local ON research_run_tasks(run_id,branch_id,local_id) WHERE local_id IS NOT NULL;
@@ -129,11 +143,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS research_tasks_local ON research_run_tasks(run
 
 ACTIVE = ("active", "waiting_input", "stopping")
 NODE_TERMINAL = ("closed", "failed", "parked")
-# closing = triaged, waiting for its children; conflict = its branch did not merge, a human resolves it
-DEFAULT_LIMITS = {"max_depth": 3}
-RESEARCH_SCHEMA_VERSION = 10   # 10: node/probe runner identity on the row, visible to a successor driver
+# closing = own research complete, waiting for child nodes; no filesystem merge
+DEFAULT_LIMITS = {"max_depth": 3, "parallel": 4, "max_followups": 2}
+RESEARCH_SCHEMA_VERSION = 16   # task planning stays in the card session; no separate plan-artifact link
 DRIVER_TTL_SECONDS = 300
 RESEARCH_TABLES = (
+    "research_actions",
     "research_claims", "research_findings", "research_artifacts",
     "research_issues", "research_run_tasks", "research_branches", "research_runs",
 )
@@ -233,10 +248,23 @@ def _reject_interrupted_migration(con):
         )
 
 
+def _validate_current_schema(con):
+    """A version marker is not proof of table shape. Recheck after any SQLite DDL change."""
+    cookie = (RESEARCH_SCHEMA_VERSION, con.execute("PRAGMA schema_version").fetchone()[0])
+    if getattr(con, "_research_schema_checked", None) == cookie:
+        return
+    if not _matches_current_schema(con):
+        raise RuntimeError(f"Research schema v{RESEARCH_SCHEMA_VERSION} marker does not match its tables. "
+                           "Reload the current MISAKA build before starting research; no run was created.")
+    if hasattr(con, "__dict__"):
+        con._research_schema_checked = cookie
+
+
 def init(con):
     has_runs, current, newest = _schema_state(con)
     _reject_newer(newest)
     if has_runs and current:
+        _validate_current_schema(con)
         return                               # the normal read path takes no SQLite write lock
     if current:
         raise RuntimeError("The research schema marker exists but the research_runs table is missing.")
@@ -250,6 +278,7 @@ def init(con):
         has_runs, current, newest = _schema_state(con)
         _reject_newer(newest)
         if has_runs and current:
+            _validate_current_schema(con)
             return                           # current schema: nothing to migrate, nothing to replay
         if current:
             raise RuntimeError("The research schema marker exists but the research_runs table is missing.")
@@ -350,48 +379,8 @@ def release_driver(con, run_id, lock):
                 (run_id, lock))
 
 
-def relocate_node_tasks(con, node, old_root, new_root):
-    """A closed node's line merged into its parent's: its cards now live there, so their
-    ``workspace`` / ``output_dir`` follow (the worktree they pointed at is gone)."""
-    old_root, new_root = os.path.realpath(old_root), os.path.realpath(new_root)
-    moved = 0
-    for row in tasks(con, node["run_id"], node_id=node["id"]):
-        workspace, output_dir = row["workspace"], row["output_dir"]
-        new_ws = new_root if workspace and os.path.realpath(workspace) == old_root else workspace
-        new_out = output_dir
-        if output_dir and (os.path.realpath(output_dir) == old_root
-                           or os.path.realpath(output_dir).startswith(old_root + os.sep)):
-            new_out = new_root + os.path.realpath(output_dir)[len(old_root):]
-        if (new_ws, new_out) != (workspace, output_dir):
-            con.execute("UPDATE tasks SET workspace=?, output_dir=? WHERE id=?", (new_ws, new_out, row["id"]))
-            moved += 1
-    # Generated and Sister artifacts record the file on the node's current line in
-    # metadata while ``path`` remains their eventual project path.  When a worktree
-    # is merged and removed, move that source pointer with it or descendants cannot
-    # read the evidence until every ancestor has reached the main line.
-    for artifact in con.execute(
-        "SELECT id,metadata_json FROM research_artifacts WHERE run_id=?", (node["run_id"],)
-    ):
-        try:
-            metadata = json.loads(artifact["metadata_json"] or "{}")
-        except ValueError:
-            continue
-        source = metadata.get("source_workspace")
-        if not source:
-            continue
-        source = os.path.realpath(source)
-        if source != old_root and not source.startswith(old_root + os.sep):
-            continue
-        metadata["source_workspace"] = new_root + source[len(old_root):]
-        con.execute(
-            "UPDATE research_artifacts SET metadata_json=? WHERE id=?",
-            (json.dumps(metadata, ensure_ascii=False), artifact["id"]),
-        )
-    return moved
-
-
 # Cards past these statuses keep their dependency history as it is: the DAG must not be rewritten
-# under a moving card, and a finished one (whose node line may already be merged and gone) has
+# under a moving card, and a finished one (whose execution already finished) has
 # nothing left to wait for. Read by ``_backfill_dependencies`` and by ``workflow._submit_tasks``,
 # the two places that replay a plan's edges onto cards that may already have run.
 SETTLED_TASK_STATUSES = frozenset({"running", "review", "done", "failed", "stopped", "archived"})
@@ -401,7 +390,7 @@ def _backfill_dependencies(con):
     """Replay the stored local-id dependencies into the generic task DAG.
 
     Idempotent where nothing is wrong: edges that already exist are skipped, settled cards are
-    left alone, and a card whose line no longer exists (a closed node's worktree) cannot make the
+    left alone, and a card whose project folder no longer exists cannot make the
     replay fail. An edge that a *live* card refuses is the one thing it will not swallow -- see
     the raise below."""
     rows = con.execute(
@@ -421,55 +410,123 @@ def _backfill_dependencies(con):
             continue
         from misaka.core.platform import cards as card_files
         if not os.path.isfile(card_files.card_path(task["workspace"], row["task_id"])):
-            continue        # the card's line is gone (closed node): its `needs` cannot be read, so nothing moves
-        existing = set(task_store.parent_ids(con, row["task_id"]))
-        for parent_id in parents:
-            if parent_id in existing:
-                continue
-            try:
-                task_store.link_tasks(con, parent_id, row["task_id"])
-            except (ValueError, OSError) as error:
-                # Everything that is merely history was skipped above -- a settled card, a card
-                # whose line is gone, an edge the file already carries. What is left here is a
-                # fault: an unreadable ancestor (so the acyclicity walk could not run), a cycle, a
-                # plan that names itself, or a file that would not take the write. The child's
-                # ``needs`` does not name this parent either way, and there is no status that can
-                # hold it back -- nothing in the board writes or honours a ``held`` card, and
-                # ``cards.reconcile`` writes the card file's own ``status`` back over any row we
-                # set here on the very next tick. So the replay refuses to finish quietly: it says
-                # which edge it could not write and why, and ``depends_json`` keeps the plan for
-                # the next attempt once the card that blocked the walk is fixed.
-                raise RuntimeError(
-                    f"Research dependency could not be replayed: {parent_id} -> {row['task_id']} "
-                    f"({error}) Fix that card, then run init again; until the edge exists the "
-                    "run's cards would execute out of order."
-                ) from error
+            continue        # the card's file is gone: its `needs` cannot be read, so nothing moves
+        try:
+            task_store.link_dependencies(con, parents, row["task_id"])
+        except (ValueError, OSError) as error:
+            raise RuntimeError(
+                f"Research dependency could not be replayed onto {row['task_id']}: {error}"
+            ) from error
         if dependencies:
             task_store.promote_task(con, row["task_id"])
 
 
+# Where a run's files go inside the project. "project-flat" (2026-09-05 .. 09-11) wrote every
+# root artifact as ``root/<run>-<name>`` and every fork artifact as ``forks/<node>-<name>``, with
+# each card's output folder beside them. "by-node" gives every node one folder -- its files, its
+# cards, and (bundle) the sources they cite -- and puts run-level products under ``final/``.
+# Old runs keep their layout; only new runs get the current one.
+ARTIFACT_LAYOUT = "by-node"
+LAYOUTS = frozenset({"project-flat", ARTIFACT_LAYOUT})
+
+
+def _by_node(run):
+    return run["artifact_layout"] == ARTIFACT_LAYOUT
+
+
+def require_layout(run):
+    if run["artifact_layout"] not in LAYOUTS:
+        raise ValueError("This run used the removed worktree layout; start a new run. "
+                         "Its artifacts and sessions are preserved.")
+
+
+def node_dir(run, branch_id=None):
+    """The folder a node owns under the by-node layout: ``nodes/<branch id>``, the root's named
+    by the run id (it has no branch id of its own in artifact scopes)."""
+    return os.path.join("nodes", branch_id or run["id"])
+
+
 def normalize_limits(raw=None):
+    raw = raw or {}
     try:
-        depth = int((raw or {}).get("max_depth", DEFAULT_LIMITS["max_depth"]))
+        depth = int(raw.get("max_depth", DEFAULT_LIMITS["max_depth"]))
     except (TypeError, ValueError) as error:
         raise ValueError("max_depth must be an integer") from error
     if not 0 <= depth <= 12:
         raise ValueError("max_depth must be between 0 and 12")
-    return {"max_depth": depth}
+    parallel = raw.get("parallel", DEFAULT_LIMITS["parallel"])
+    if isinstance(parallel, bool) or not isinstance(parallel, (int, str)):
+        raise ValueError("parallel must be a positive integer")  # noqa: TRY004 - startup callers surface ValueError
+    try:
+        parallel = int(parallel)
+    except ValueError as error:
+        raise ValueError("parallel must be a positive integer") from error
+    if parallel < 1:
+        raise ValueError("parallel must be a positive integer")
+    # How many more times a node may send its Sisters out after its first cards are back,
+    # before it must conclude. Conversation with the user is never counted.
+    followups = raw.get("max_followups", DEFAULT_LIMITS["max_followups"])
+    if isinstance(followups, bool) or not isinstance(followups, (int, str)):
+        raise ValueError("max_followups must be an integer between 0 and 6")  # noqa: TRY004 - startup callers surface ValueError
+    try:
+        followups = int(followups)
+    except ValueError as error:
+        raise ValueError("max_followups must be an integer between 0 and 6") from error
+    if not 0 <= followups <= 6:
+        raise ValueError("max_followups must be an integer between 0 and 6")
+    return {"max_depth": depth, "parallel": parallel, "max_followups": followups}
 
 
-def run_dir(run):
-    return os.path.join(run["workspace"], "research", run["id"])
+def prepare_runner(con, table, row_id):
+    key = secrets.token_hex(16)
+    changed = con.execute(f'UPDATE "{table}" SET runner_key=?, last_error=NULL WHERE id=? '
+                          'AND runner_pid IS NULL AND runner_identity IS NULL', (key, row_id)).rowcount
+    if changed != 1:
+        raise RuntimeError(f"Research execution {row_id} still has a runner")
+    return key
 
 
-def _home(run):
-    return os.path.join(os.environ.get("MISAKA_RUNS_HOME") or os.path.expanduser("~/.misaka/runs"),
-                        run["id"])
+def claim_runner(con, table, row_id, key):
+    """Fence delayed/duplicate spawns, including a lost pane.create reply."""
+    from misaka.core.platform import processes
+    if not key:
+        return False
+    pid = os.getpid()
+    identity = processes.identity(pid)
+    if identity is None:
+        raise RuntimeError("Research runner process identity is unreadable")
+    return con.execute(f'UPDATE "{table}" SET runner_pid=?, runner_identity=? WHERE id=? AND runner_key=? '
+                       'AND (runner_pid IS NULL OR (runner_pid=? AND runner_identity=?))',
+                       (pid, identity, row_id, key, pid, identity)).rowcount == 1
 
 
-def session_dir(run, *parts):
-    """Transcript directory for one of the run's one-shot model calls (kept out of the project folder)."""
-    return os.path.join(_home(run), "sessions", *parts)
+def release_runner(con, table, row_id, key):
+    """The runner's routine is over but its process stays alive (an interactive node keeps its
+    window open for the user): clear the pid and identity so the parent settles the row, and
+    keep the key so the parent's own bookkeeping still matches when it clears the rest."""
+    con.execute(f'UPDATE "{table}" SET runner_pid=NULL, runner_identity=NULL WHERE id=? AND runner_key=?',
+                (row_id, key))
+
+
+def session_dir(run, scope, *parts):
+    """One conversation directory under the existing session store, not a separate run home."""
+    from misaka.config import sessions
+    values = (run["id"], scope, *parts)
+    if any(not p or Path(p).name != p or p in {".", ".."} or "\\" in p for p in values):
+        raise ValueError("Research session scope must contain names, not paths.")
+    return os.path.join(sessions.sessions_root(), "research", "--".join(values))
+
+
+def task_contexts(con):
+    """Owning project and research lineage, with every card in the same project."""
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_runs'").fetchone():
+        return {}
+    init(con)
+    return {row["task_id"]: dict(row) for row in con.execute(
+        "SELECT t.task_id,t.run_id,t.branch_id AS node_id,b.depth,t.issue_id,t.kind,"
+        "r.workspace,r.origin_session,b.trigger_text AS node_question,i.question AS issue_question "
+        "FROM research_run_tasks t JOIN research_runs r ON r.id=t.run_id "
+        "JOIN research_branches b ON b.id=t.branch_id LEFT JOIN research_issues i ON i.id=t.issue_id")}
 
 
 def project_name(run):
@@ -478,8 +535,9 @@ def project_name(run):
 
 
 def ensure_layout(run):
-    root = Path(run_dir(run))
-    for rel in ("branches", "tasks"):
+    root = Path(run["workspace"])
+    for rel in (("nodes", "final") if _by_node(run) else ("root", "forks")):
+        (root / rel).resolve().relative_to(root.resolve())
         (root / rel).mkdir(parents=True, exist_ok=True)
     return str(root)
 
@@ -488,17 +546,44 @@ def _atomic_write(path, content):
     atomic.write_text(path, content)
 
 
-def _commit(run, node, message):
-    """Record the run's state on git: the project line always, the node's line when it has one."""
+def _commit(con, run, message):
+    """Commit project-local artifacts; Git is history, not a delivery mechanism.
+
+    Research cards are not committed one by one at acceptance, so the node and run commits carry
+    each card's contract (``cards/<id>.md``) and attachment folder along with the artifacts."""
     from misaka.core.platform import repo
-    # ponytail: only this run's prose and the project brief; cards commit themselves per transition.
-    paths = [os.path.join("research", run["id"]), "PROJECT.md"]
-    repo.commit(run["workspace"], paths, message)
-    if node is not None and node["worktree"]:
-        repo.commit(node["worktree"], paths, message)
+    paths = [os.path.relpath(a["path"], run["workspace"]) for a in artifacts(con, run["id"])]
+    for row in tasks(con, run["id"]):
+        paths += [os.path.join("cards", f"{row['id']}.md"), os.path.join("cards", str(row["id"]))]
+    repo.commit(run["workspace"], [*paths, "PROJECT.md"], message)
 
 
-def create(con, *, workspace, question, limits=None, token_start=0):
+def _artifact_name(name):
+    if not name or Path(name).name != name or name in {".", ".."} or "\\" in name:
+        raise ValueError("Generated research artifacts need a filename, not a directory path.")
+    return name
+
+
+def generated_path(run, name, *, branch_id=None):
+    """A node's artifact, relative to the project: ``nodes/<node>/<name>`` under the by-node
+    layout; ``root/<run>-<name>`` or ``forks/<node>-<name>`` under project-flat."""
+    name = _artifact_name(name)
+    if _by_node(run):
+        return os.path.join(node_dir(run, branch_id), name)
+    return os.path.join("forks" if branch_id else "root", f"{branch_id or run['id']}-{name}")
+
+
+def run_path(run, name):
+    """A run-level product (question, clarifications, survey, draft, final, partial, workspace
+    index): ``final/<run>-<name>`` under the by-node layout, so the run's deliverables and the
+    sources they cite sit in one folder; project-flat keeps them beside the root artifacts."""
+    name = _artifact_name(name)
+    if _by_node(run):
+        return os.path.join("final", f"{run['id']}-{name}")
+    return generated_path(run, name)
+
+
+def create(con, *, workspace, question, limits=None, token_start=0, origin_session=None):
     workspace = os.path.realpath(os.path.expanduser(str(workspace or "")))
     if not os.path.isdir(workspace):
         raise ValueError(f"A research run needs an existing project folder: {workspace}")
@@ -515,14 +600,14 @@ def create(con, *, workspace, question, limits=None, token_start=0):
     with task_store.write_txn(con):
         con.execute(
             "INSERT INTO research_runs "
-            "(id,workspace,question,phase,status,limits_json,token_start,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
-            (run_id, workspace, question, "created", "active",
-             json.dumps(spec, ensure_ascii=False), int(token_start), now, now),
+            "(id,workspace,artifact_layout,question,phase,status,limits_json,token_start,origin_session,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (run_id, workspace, ARTIFACT_LAYOUT, question, "created", "active",
+             json.dumps(spec, ensure_ascii=False), int(token_start), origin_session, now, now),
         )
         row = get(con, run_id)
         ensure_layout(row)
-        write_text(con, run_id, "question", 'Original research question', "question.md",
+        write_text(con, run_id, "question", 'Original research question', run_path(row, "question.md"),
                    f"""# Original research question
 
 {question}
@@ -583,10 +668,11 @@ def set_state(con, run_id, *, phase=None, status=None, error=None,
         where += " AND driver_lock=?"
         values.append(driver_lock)
     cur = con.execute(f"UPDATE research_runs SET {','.join(fields)} WHERE {where}", values)
-    run = get(con, run_id)
-    if phase is not None and cur.rowcount == 1:
-        _commit(run, None, f"research {run_id}: {phase}")
-    return run
+    if driver_lock is not None and cur.rowcount != 1:
+        raise RuntimeError(f"Research run {run_id}: driver lease lost.")
+    # No commit per phase: Git records a node when it reaches a terminal state (set_node) and
+    # the run when it ends (workflow), not every step in between.
+    return get(con, run_id)
 
 
 def request_stop(con, run_id):
@@ -597,18 +683,39 @@ def request_stop(con, run_id):
     )
 
 
-def resume(con, run_id):
+def resume(con, run_id, *, driver_lock=None, clarification=""):
+    with task_store.write_txn(con):
+        return _resume(con, run_id, driver_lock=driver_lock, clarification=clarification)
+
+
+def _resume(con, run_id, *, driver_lock, clarification):
     """Reopen a stopped, failed, or waiting run: same card generations, nodes pick up where they were.
     A finished run is not resumable: its report is final; start a new run."""
     current = get(con, run_id)
     if current is None:
         raise ValueError(f"Research run not found: {run_id}")
+    require_layout(current)
     if current["status"] == "done":
         raise ValueError(f"Research run {run_id} is done; start a new run instead of resuming it.")
+    if (current["driver_lock"] and current["driver_lock"] != driver_lock
+            and (current["driver_expires"] is None or current["driver_expires"] >= time.time())):
+        raise ValueError(f"Research run {run_id} is already being driven by another process.")
+    if clarification:
+        n = len(artifacts(con, run_id, kind="clarification")) + 1
+        write_text(con, run_id, "clarification", f"User clarification {n}",
+                   run_path(current, f"clarification-{n}.md"), clarification + "\n")
+        con.execute("UPDATE research_runs SET question=question||? WHERE id=?",
+                    (f"\n\nUser clarification: {clarification}", run_id))
+    for branch in nodes(con, run_id):
+        round, previous = current_plan(con, run_id, branch["id"])
+        if previous and previous["payload"].get("status") == "clarify":
+            delete_action(con, run_id, branch["id"], plan_key(round))
     # A failed card is retried like a stopped one: without this the node it killed replays the
     # identical failure on every resume, and the only way out is editing this database by hand.
     for row in tasks(con, run_id):
-        if row["status"] not in ("stopped", "failed"):
+        unusable = row["status"] == "done" and task_store.latest_payload(
+            con, row["id"], "research_review_missing", generation=row["generation"])
+        if row["status"] not in ("stopped", "failed") and not unusable:
             continue
         target = "todo" if task_store.parent_ids(con, row["id"]) else "ready"
         if task_store.reopen_task(
@@ -620,12 +727,10 @@ def resume(con, run_id):
                 {"from_generation": row["generation"]}, generation=int(row["generation"]) + 1,
             )
     # A failed node replans: every phase of ``_expand`` is idempotent over what it already
-    # produced (a saved plan is reused, cards are deduped by their link, and the node's worktree
-    # was deliberately kept), so it picks up its own work. ``conflict`` is not cleared here: it
-    # waits for a human to resolve the branch.
+    # produced (saved plans, cards and project-local artifacts), so it picks up its own work.
     con.execute(
         "UPDATE research_branches SET status='planning',updated_at=? "
-        "WHERE run_id=? AND status IN ('waiting_input','failed')", (int(time.time()), run_id),
+        "WHERE run_id=? AND status IN ('waiting_input','awaiting_approval','failed')", (int(time.time()), run_id),
     )
     con.execute(
         "UPDATE research_runs SET stop_requested=0,status='active',phase='active',last_error='',"
@@ -639,49 +744,43 @@ def stop_requested(con, run_id):
     return not row or bool(row["stop_requested"])
 
 
-def call_timeout(cfg, default):
-    """Per-call failure timeout in seconds; this is not a research stopping criterion.
-
-    ``cfg["call_timeout"]`` overrides ``default`` when it is there -- but no shipped
-    configuration puts it there: ``config/product.py``'s ``CFG`` has no such key and no
-    ``MISAKA_*`` variable writes one, so every caller today gets the ``default`` it
-    passed. The read stays because it is the seam a future key connects through
-    (``_fanout`` keeps ``research_parallel`` for the same reason); it is not a knob a
-    user can turn yet, and it must not be documented as one.
-    """
-    try:
-        value = int((cfg or {}).get("call_timeout") or default)
-    except (TypeError, ValueError, AttributeError):
-        value = int(default)
-    return max(1, value)
-
-
 def task_count(con, run_id):
     return con.execute(
         "SELECT COUNT(*) FROM research_run_tasks WHERE run_id=?", (run_id,)
     ).fetchone()[0]
 
 
-def link_task(con, run_id, task_id, *, kind, node, preflight_artifact=None,
-              local_id=None, issue_id=None, dependencies=()):
-    """Attach a card to a node. The card's workspace is the node's line (set by the card's creation);
-    its output_dir lives under that line's copy of the run directory."""
+def link_task(con, run_id, task_id, *, kind, node,
+              local_id=None, issue_id=None, dependencies=(), round=1):
+    """Attach a card to a node; one project-local output directory protects concurrent cards.
+    ``round`` is the planning round the card belongs to (a node may plan more than once)."""
     run = get(con, run_id)
     if not run:
         raise ValueError(f"Research run not found: {run_id}")
+    task = task_store.get(con, task_id)
+    if task is None or os.path.realpath(task["workspace"]) != run["workspace"]:
+        raise ValueError("Research cards must execute in the run's project folder.")
+    if _by_node(run):
+        # The card lives inside its node's folder: nodes/<node>/cards/<card>.
+        output_dir = Path(run["workspace"], node_dir(run, node["id"] if node["parent_id"] else None), "cards", task_id)
+    else:
+        output_dir = Path(run["workspace"], "forks" if node["parent_id"] else "root", task_id)
+    output_dir.resolve().relative_to(Path(run["workspace"]).resolve())
+    if issue_id is None:
+        origin = con.execute("SELECT id FROM research_issues WHERE child_branch_id=?", (node["id"],)).fetchone()
+        issue_id = origin["id"] if origin else None
     dependencies = list(dependencies)
     con.execute(
         "INSERT INTO research_run_tasks "
-        "(task_id,run_id,branch_id,kind,wave,preflight_artifact,local_id,issue_id,depends_json,created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (task_id, run_id, node["id"], kind, int(node["depth"]), preflight_artifact, local_id, issue_id,
+        "(task_id,run_id,branch_id,kind,wave,local_id,issue_id,depends_json,created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (task_id, run_id, node["id"], kind, int(round), local_id, issue_id,
          json.dumps(dependencies, ensure_ascii=False), int(time.time())),
     )
-    output_dir = Path(os.path.realpath(node_root(run, node)), "research", run_id, "tasks", task_id, "work")
     output_dir.mkdir(parents=True, exist_ok=True)
     con.execute("UPDATE tasks SET output_dir=? WHERE id=?", (str(output_dir), task_id))
     # ``cards.create(after_row=...)`` calls this before the child card file exists;
-    # the submitter projects the dependencies after creation.  Direct callers link
+    # create publishes the complete needs list in its first file. Direct callers link
     # already-created cards here as before.
     task = task_store.get(con, task_id)
     if task is not None:
@@ -690,43 +789,25 @@ def link_task(con, run_id, task_id, *, kind, node, preflight_artifact=None,
     else:
         card_exists = False
     if card_exists:
-        refused = []
+        parents = []
         for dependency in dependencies:
             parent = con.execute(
                 "SELECT task_id FROM research_run_tasks WHERE run_id=? AND branch_id=? AND local_id=?",
                 (run_id, node["id"], dependency),
             ).fetchone()
-            if not parent:
-                continue
-            try:
-                task_store.link_tasks(con, parent["task_id"], task_id)
-            except (ValueError, OSError) as error:
-                refused.append((parent["task_id"], str(error)))
-        if refused:
-            # An edge we cannot write has to be loud. The obvious softer landing -- park this one
-            # card in a `held` status and let ``_backfill_dependencies`` promote it later -- was
-            # tried and does not work: nothing else in the board writes or reads `held`, and
-            # ``cards.reconcile`` copies the card file's own `status` back over the row on the very
-            # next tick, so the card is `ready` again and dispatched before anyone notices. There
-            # is no state that holds a card whose file does not name its parent, so the caller is
-            # told instead, and ``depends_json`` (inserted above) keeps the plan for a later replay.
-            #
-            # Residual, deliberately not fixed here: with several parents, the edges that *did* get
-            # written already ran ``link_tasks``'s own tail -- ready -> todo plus ``promote_task``
-            # -- so a child whose written-out parents are all done is `ready` before this raise is
-            # reached, and stays dispatchable. Closing that needs every edge of one node written in
-            # a single transaction, which is a design change for a later wave.
+            if parent:
+                parents.append(parent["task_id"])
+        try:
+            task_store.link_dependencies(con, parents, task_id)
+        except (ValueError, OSError) as error:
             task_store.add_event(con, task_id, "dependency_unlinked",
-                                 {"parents": [pid for pid, _ in refused], "reason": refused[0][1]})
-            raise RuntimeError(
-                f"Research dependency could not be linked onto {task_id}: {refused[0][1]} "
-                "The card's `needs` does not name that parent, so it would run out of order."
-            )
+                                 {"parents": parents, "reason": str(error)})
+            raise RuntimeError(f"Research dependency could not be linked onto {task_id}: {error}") from error
 
 
-def tasks(con, run_id, *, kind=None, node_id=None, issue_id=None):
+def tasks(con, run_id, *, kind=None, node_id=None, issue_id=None, round=None):
     q, args = (
-        ("SELECT t.*,rt.branch_id,rt.kind AS research_kind,rt.wave,rt.preflight_artifact,"
+        ("SELECT t.*,rt.branch_id,rt.kind AS research_kind,rt.wave,"
         "rt.local_id,rt.issue_id,rt.depends_json "
         "FROM research_run_tasks rt JOIN tasks t ON t.id=rt.task_id WHERE rt.run_id=?"),
         [run_id],
@@ -740,6 +821,9 @@ def tasks(con, run_id, *, kind=None, node_id=None, issue_id=None):
     if issue_id is not None:
         q += " AND rt.issue_id=?"
         args.append(issue_id)
+    if round is not None:
+        q += " AND rt.wave=?"
+        args.append(int(round))
     return con.execute(q + " ORDER BY rt.created_at", args).fetchall()
 
 
@@ -762,6 +846,19 @@ def create_node(con, run_id, *, trigger, parent_id, depth):
     return node(con, bid)
 
 
+def assign_child(con, run_id, parent, issue_id):
+    """One accepted issue assignment creates exactly one depth+1 node, including on replay."""
+    with task_store.write_txn(con):
+        item = issue(con, issue_id)
+        if item is None or item["run_id"] != run_id or item["branch_id"] != parent["id"]:
+            raise ValueError("Child assignment must reference this node's material issue.")
+        if item["child_branch_id"]:
+            return node(con, item["child_branch_id"])
+        child = create_node(con, run_id, trigger=item["question"], parent_id=parent["id"], depth=parent["depth"] + 1)
+        set_issue(con, issue_id, "assigned", child_branch_id=child["id"])
+        return child
+
+
 def node(con, node_id):
     return con.execute("SELECT * FROM research_branches WHERE id=?", (node_id,)).fetchone()
 
@@ -776,71 +873,40 @@ def nodes(con, run_id, *, parent_id=None):
 
 def next_level(con, run_id):
     """The BFS frontier: every node still expanding at the shallowest such depth, oldest first.
-    A node in ``conflict`` waits for a human, not for a process."""
-    rows = [n for n in nodes(con, run_id) if n["status"] not in ("closing", "conflict", *NODE_TERMINAL)]
+    Closing nodes wait for their children, not another model process."""
+    rows = [n for n in nodes(con, run_id) if n["status"] not in ("closing", *NODE_TERMINAL)]
     return [n for n in rows if n["depth"] == rows[0]["depth"]] if rows else []
 
 
-def set_node(con, node_id, *, status=None, session_file=None, context_artifact=None,
-             worktree=None):
+def set_node(con, node_id, *, status=None, session_file=None, context_artifact=None):
     fields, values = [], []
     for name, value in (("status", status), ("session_file", session_file),
-                        ("context_artifact", context_artifact), ("worktree", worktree)):
+                        ("context_artifact", context_artifact)):
         if value is not None:
             fields.append(f"{name}=?")
             values.append(value)
     fields.append("updated_at=?")
     values.extend([int(time.time()), node_id])
-    if status is not None:                     # a status change commits the phase just completed
-        row = node(con, node_id)
-        _commit(get(con, row["run_id"]), row, f"research {row['run_id']}/{node_id}: {row['status']}")
-    con.execute(f"UPDATE research_branches SET {','.join(fields)} WHERE id=?", values)
-    return node(con, node_id)
+    with task_store.write_txn(con):
+        con.execute(f"UPDATE research_branches SET {','.join(fields)} WHERE id=?", values)
+        if status is not None:
+            # Lifecycle only, never a scientific verdict.
+            issue_status = "researched" if status == "closed" else "parked" if status in NODE_TERMINAL else "assigned"
+            con.execute("UPDATE research_issues SET status=? WHERE child_branch_id=?", (issue_status, node_id))
+    row = node(con, node_id)
+    if status in NODE_TERMINAL:
+        # One commit per node, once its work is over and the row already says so: the history
+        # records what the node delivered, not each phase it passed through.
+        _commit(con, get(con, row["run_id"]), f"research {row['run_id']}/{node_id}: {status}")
+    return row
 
-
-def node_root(run, node):
-    """Where the node's cards work: its worktree, or the project folder for the root."""
-    return node["worktree"] or run["workspace"]
-
-
-def node_worktree(run, node_id):
-    return os.path.join(_home(run), "branches", node_id, "worktree")
-
-
-def evidence_roots(run):
-    """The folders that hold material this run itself worked on.
-
-    The project folder is only half of it: every node below the root works in a worktree under the
-    run's own home (``node_worktree``), so a document a card downloaded and indexed does not sit
-    inside the project folder until -- and unless -- its node merges. A check that accepted only
-    ``run['workspace']`` would therefore reject every citation raised below the root node, which is
-    where most of a run's cards live.
-    """
-    return (run["workspace"], _home(run))
-
-
-def node_branch(node_id):
-    return f"research/{node_id}"
-
-
-def probe_session_dir(run, issue_id):
-    """Where a Last Order fork on one issue keeps its session (forked from the node's)."""
-    return session_dir(run, f"probe-{issue_id}")
-
-
-def node_prefix(node):
-    """Artifact path prefix inside the run directory: the root writes at the top."""
-    return "" if node["parent_id"] is None else f"branches/{node['id']}/"
-
-
-# --- issues: the edges the red team proposes -------------------------------------------
 
 def add_issue(con, run_id, *, node, kind, question, rationale, priority=0):
     question = str(question or "").strip()
     if not question:
         return None
     # Only exact matches after case/whitespace normalization, and only inside the same node, count
-    # as duplicates: another node raising the same question keeps its own issue so its triage sees
+    # as duplicates: another node raising the same question keeps its own issue so its Last Order sees
     # it. Semantic merging is Last Order's job.
     normalized = " ".join(question.casefold().split())
     for row in con.execute("SELECT id,question FROM research_issues WHERE run_id=? AND branch_id=?",
@@ -873,6 +939,115 @@ def issue(con, issue_id):
     return con.execute("SELECT * FROM research_issues WHERE id=?", (issue_id,)).fetchone()
 
 
+def action(con, run_id, node_id, key):
+    row = con.execute(
+        "SELECT * FROM research_actions WHERE run_id=? AND branch_id=? AND action_key=?",
+        (run_id, node_id, key),
+    ).fetchone()
+    return {**dict(row), "payload": json.loads(row["payload_json"])} if row else None
+
+
+def _owned(con, run, branch):
+    current, owner = get(con, run["id"]), node(con, branch["id"])
+    if (not current or current["stop_requested"] or current["status"] != "active"
+            or not owner or owner["run_id"] != run["id"]
+            or owner["runner_key"] != branch["runner_key"]
+            or owner["status"] in (*NODE_TERMINAL, "closing")):
+        raise ValueError("Research command belongs to a stopped or superseded node.")
+
+
+def record_action(con, run, branch, key, payload, *, session_file, tool_call_id):
+    """Accept one LO command, not prose inferred by the driver. Replays are idempotent."""
+    with task_store.write_txn(con):
+        _owned(con, run, branch)
+        prior = action(con, run["id"], branch["id"], key)
+        if prior:
+            if prior["payload"] != payload:
+                raise ValueError("This research command was already accepted with different arguments.")
+            return prior
+        con.execute(
+            "INSERT INTO research_actions VALUES (?,?,?,?,?,?,?)",
+            (run["id"], branch["id"], key, json.dumps(payload, ensure_ascii=False),
+             session_file, tool_call_id, int(time.time())),
+        )
+    return action(con, run["id"], branch["id"], key)
+
+
+def replace_action(con, run, branch, key, payload, *, session_file, tool_call_id):
+    """Accept a command that supersedes the earlier one of its key: a plan revised while it waits
+    for the user, or a fresh start after such a revision. Same ownership rule as record_action."""
+    with task_store.write_txn(con):
+        _owned(con, run, branch)
+        con.execute("DELETE FROM research_actions WHERE run_id=? AND branch_id=? AND action_key=?",
+                    (run["id"], branch["id"], key))
+        con.execute(
+            "INSERT INTO research_actions VALUES (?,?,?,?,?,?,?)",
+            (run["id"], branch["id"], key, json.dumps(payload, ensure_ascii=False),
+             session_file, tool_call_id, int(time.time())),
+        )
+    return action(con, run["id"], branch["id"], key)
+
+
+SKIP_KEY = "skip"
+
+
+def skipped(con, run_id, node_id):
+    """The user's decision, recorded by the node's Last Order, to close this node unresearched."""
+    return action(con, run_id, node_id, SKIP_KEY)
+
+
+def delete_action(con, run_id, node_id, key):
+    con.execute("DELETE FROM research_actions WHERE run_id=? AND branch_id=? AND action_key=?",
+                (run_id, node_id, key))
+
+
+def plan_key(round):
+    """The action key of a round's plan: the first round keeps the bare ``plan`` (older runs)."""
+    return "plan" if int(round) <= 1 else f"plan:{int(round)}"
+
+
+def start_key(round):
+    return "start" if int(round) <= 1 else f"start:{int(round)}"
+
+
+def plan_round(con, run_id, node_id):
+    """The highest planning round this node has recorded a plan for; 0 before the first."""
+    keys = [row[0] for row in con.execute(
+        "SELECT action_key FROM research_actions WHERE run_id=? AND branch_id=? "
+        "AND (action_key='plan' OR action_key LIKE 'plan:%')", (run_id, node_id))]
+    rounds = [1 if key == "plan" else int(key.split(":", 1)[1]) for key in keys]
+    return max(rounds) if rounds else 0
+
+
+def current_plan(con, run_id, node_id):
+    """``(round, plan action)`` for the node's latest round; ``(0, None)`` before the first."""
+    round = plan_round(con, run_id, node_id)
+    return (round, action(con, run_id, node_id, plan_key(round))) if round else (0, None)
+
+
+def plan_started(con, run_id, node_id):
+    """True once Last Order has recorded the user's go-ahead for the plan as it stands now: a
+    start names the plan it was given for, so a revision after it needs a new start, and each
+    round has its own start."""
+    round, plan = current_plan(con, run_id, node_id)
+    start = action(con, run_id, node_id, start_key(round)) if round else None
+    return bool(plan and start and start["payload"].get("plan_tool_call_id") == plan["tool_call_id"])
+
+
+def reframe(con, run_id, node, question):
+    """The user agreed to Last Order's reframed question: the root's is the run's question (its
+    root node's trigger too); a fork's is the issue that node investigates."""
+    question = " ".join(str(question or "").split())
+    if not question:
+        return
+    with task_store.write_txn(con):
+        con.execute("UPDATE research_branches SET trigger_text=?,updated_at=? WHERE id=?",
+                    (question, int(time.time()), node["id"]))
+        if node["parent_id"] is None:
+            con.execute("UPDATE research_runs SET question=?,updated_at=? WHERE id=?",
+                        (question, int(time.time()), run_id))
+
+
 def set_issue(con, issue_id, status, *, child_branch_id=None, reason=None):
     con.execute(
         "UPDATE research_issues SET status=?,child_branch_id=COALESCE(?,child_branch_id),"
@@ -884,29 +1059,22 @@ def set_issue(con, issue_id, status, *, child_branch_id=None, reason=None):
 # --- artifacts -------------------------------------------------------------------------
 
 def write_text(con, run_id, kind, title, relative_path, content, *,
-               branch_id=None, task_id=None, metadata=None, source_workspace=None):
+               branch_id=None, task_id=None, metadata=None):
     run = get(con, run_id)
     if not run:
         raise ValueError(f"Research run not found: {run_id}")
-    root = Path(run_dir(run)).resolve()
+    root = Path(run["workspace"]).resolve()
     path = (root / relative_path).resolve()
     try:
         path.relative_to(root)
     except ValueError as error:
-        raise ValueError("Research artifact path is outside the run directory.") from error
-    source_root = Path(source_workspace or run["workspace"], "research", run_id).resolve()
-    source_path = (source_root / relative_path).resolve()
-    try:
-        source_path.relative_to(source_root)
-    except ValueError as error:
-        raise ValueError("Research artifact source path is outside the run directory.") from error
-    _atomic_write(source_path, str(content))
-    sha = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        raise ValueError("Research artifact path is outside the project workspace.") from error
+    _atomic_write(path, str(content))
+    sha = hashlib.sha256(path.read_bytes()).hexdigest()
     metadata = dict(metadata or {})
-    if source_path != path:
-        metadata["source_workspace"] = str(source_path)
     old = con.execute(
-        "SELECT id FROM research_artifacts WHERE run_id=? AND path=?", (run_id, str(path))
+        "SELECT id FROM research_artifacts WHERE run_id=? AND path=? AND task_id IS ?",
+        (run_id, str(path), task_id),
     ).fetchone()
     if old:
         con.execute(
@@ -915,7 +1083,7 @@ def write_text(con, run_id, kind, title, relative_path, content, *,
             (sha, str(title), str(kind), json.dumps(metadata, ensure_ascii=False),
              int(time.time()), old["id"]),
         )
-        return old["id"], str(source_path)
+        return old["id"], str(path)
     aid = "a_" + secrets.token_hex(5)
     con.execute(
         "INSERT INTO research_artifacts "
@@ -924,21 +1092,23 @@ def write_text(con, run_id, kind, title, relative_path, content, *,
         (aid, run_id, branch_id, task_id, str(kind), str(title), str(path), sha,
          json.dumps(metadata, ensure_ascii=False), int(time.time())),
     )
-    return aid, str(source_path)
+    return aid, str(path)
 
 
 def register_file(con, run_id, kind, title, path, *, sha256, branch_id=None, task_id=None, metadata=None):
-    """Register a file that already exists (a Sister's artifact on its card's line) without copying it.
-    ``path`` is where it rests once merged; ``metadata["source_workspace"]`` is where it is now."""
-    path = os.path.normpath(path)
+    """Register a project file at its actual, permanent location without copying it."""
+    run = get(con, run_id)
+    path = str(Path(path).resolve())
+    Path(path).relative_to(Path(run["workspace"]).resolve())
     old = con.execute(
-        "SELECT id FROM research_artifacts WHERE run_id=? AND path=?", (run_id, path)
+        "SELECT id FROM research_artifacts WHERE run_id=? AND path=? AND task_id IS ?",
+        (run_id, path, task_id),
     ).fetchone()
     if old:
         con.execute(
-            "UPDATE research_artifacts SET sha256=?,title=?,kind=?,task_id=?,metadata_json=?,created_at=? "
+            "UPDATE research_artifacts SET sha256=?,title=?,kind=?,branch_id=?,metadata_json=?,created_at=? "
             "WHERE id=?",
-            (sha256, str(title), str(kind), task_id, json.dumps(metadata or {}, ensure_ascii=False),
+            (sha256, str(title), str(kind), branch_id, json.dumps(metadata or {}, ensure_ascii=False),
              int(time.time()), old["id"]),
         )
         return old["id"], path
@@ -954,27 +1124,15 @@ def register_file(con, run_id, kind, title, path, *, sha256, branch_id=None, tas
 
 
 def artifact_text(row):
-    """An artifact's text from where it lives now (a card's line before its node merges), else its resting path."""
-    try:
-        source = json.loads(row["metadata_json"] or "{}").get("source_workspace")
-    except ValueError:
-        source = None
-    for path in (source, row["path"]):
-        if path and os.path.isfile(path):
-            data = Path(path).read_bytes()
-            if hashlib.sha256(data).hexdigest() != row["sha256"]:
-                raise ValueError(f"artifact {row['id']} changed since it was registered: {path}")
-            return data.decode("utf-8")
-    raise FileNotFoundError(row["path"])
+    """Read the registered project file, verifying its frozen digest."""
+    data = Path(row["path"]).read_bytes()
+    if hashlib.sha256(data).hexdigest() != row["sha256"]:
+        raise ValueError(f"artifact {row['id']} changed since it was registered: {row['path']}")
+    return data.decode("utf-8")
 
 
 def artifact_path(row):
-    """The existing location of an artifact, or its eventual project path."""
-    try:
-        source = json.loads(row["metadata_json"] or "{}").get("source_workspace")
-    except ValueError:
-        source = None
-    return next((path for path in (source, row["path"]) if path and os.path.isfile(path)), row["path"])
+    return row["path"]
 
 
 def artifacts(con, run_id, *, branch_id=None, kind=None, task_id=None, root_only=False):

@@ -40,6 +40,7 @@ class Args:
     sessionDir: str | None = None
     models: list[str] | None = None
     tools: list[str] | None = None
+    agents: str | None = None
     excludeTools: list[str] | None = None
     noTools: bool = False
     noBuiltinTools: bool = False
@@ -77,7 +78,7 @@ def is_valid_thinking_level(level: str) -> bool:
 _FLAGS_REQUIRING_A_VALUE = frozenset({
     "api-key", "append-system-prompt", "exclude-tools", "export", "extension", "fork",
     "model", "models", "prompt-template", "provider", "session", "session-dir",
-    "session-id", "system-prompt", "theme", "thinking", "tools",
+    "session-id", "system-prompt", "theme", "thinking", "tools", "agents",
 })
 
 
@@ -213,6 +214,9 @@ def parse_args(args: list[str]) -> Args:
             result.extensions = result.extensions or []
             result.extensions.append(args[index + 1])
             index += 1
+        elif arg == "--agents" and has_next:
+            result.agents = args[index + 1]
+            index += 1
         elif arg in {"--no-extensions", "-ne"}:
             result.noExtensions = True
         elif arg == "--prompt-template" and has_next:
@@ -312,6 +316,7 @@ Options:
   --session-dir <dir>            Directory for session storage and lookup
   --no-session                   Don't save session (ephemeral)
   --name, -n <name>              Set session display name
+  --agents <json>                Additional agent definitions as a JSON object
   --models <patterns>            Comma-separated model patterns for Ctrl+P cycling
                                  Supports globs (anthropic/*, *sonnet*) and fuzzy matching
   --no-tools, -nt                Disable all tools by default (built-in and extension)

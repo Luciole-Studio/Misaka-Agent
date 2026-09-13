@@ -1,105 +1,131 @@
-"""The web tool extension: a pluggable search and extract backend layer, ported from Hermes.
+"""Web search/extract and direct fetch/download, assembled once as a session Part.
 
-Layout, and why it is split this way -- each module is the misaka equivalent of one
-Hermes file, so a future re-sync can be done file by file:
+Provider protocols and schemas come from Hermes; MISAKA owns cancellation, HTTP
+pools and workspace evidence. WebPart uses the existing Moments lifecycle rather
+than registering shutdown handlers on the tool-only collector.
 
-    provider.py   agent/web_search_provider.py   the ABC, both capabilities, the contract
-    registry.py   agent/web_search_registry.py + tools/web_tools.py:171-450
-                  registration, per-capability backend selection, availability
-    keyless.py    plugins/web/keyless_mcp.py     the no-key vendor ring, search and extract
-    dispatch.py   tools/web_tools.py:362-460 + 1163-1345
-                  resolve -> call -> one-shot rescue, per capability
-    config.py     hermes_cli.config              backend selection and credentials
-    backends/     plugins/web/<vendor>/          one module per vendor, nine of them
-    cache.py      tools/web_result_cache.py      the search memo and the extract disk cache
-    tool.py       tools/web_tools.py:838-1048    web_search: schema, memo, untrusted fence
-    extract.py    tools/web_tools.py:1048-1490 + 635-800
-                  web_extract: schema, gates, budget, evidence, untrusted fence
-
-Three helpers this package leans on live under ``misaka/core/tools/_web/`` rather than
-here, because ``web_fetch`` and ``download_file`` need them too: ``url_safety.py`` and
-``website_policy.py`` are Hermes' ``tools/url_safety.py`` and ``tools/website_policy.py``,
-``screening.py`` is the fixed order they are asked in, and ``evidence.py`` is the writer
-that makes a fetched or extracted page quotable.
-
-The tool bodies (schema, rendering, caching) call into
-:mod:`misaka.core.web.dispatch`; nothing above the dispatch layer is allowed to
-reshape what a provider returned, because that shape is the contract.
-
-**Deliberately not ported from Hermes**, each because the thing it depends on does not
-exist here rather than because it was skipped:
-
-* the plugin-scoped registry (``snapshot_registration`` / ``restore_registration``) and
-  ``_disabled_web_plugin_for`` -- misaka's registry is one flat process-global table with
-  no plugin identity and no enable/disable state, so there is nothing to scope or to
-  diagnose. A name that is not registered is a typo, which is what the error says.
-* the Nous managed tool-gateway (``NOUS_MANAGED_PROVIDER``, ``_is_tool_gateway_ready``,
-  ``web.use_gateway``, ``TOOL_GATEWAY_*``) -- Hermes' subscription product.
-* ``WEB_TOOLS_DEBUG`` and its ``DebugSession`` call log -- misaka replaced its debug
-  environment switches with ``/debug`` and module loggers.
-* the ``requires_env`` / ``emoji`` / ``toolset`` registration metadata --
-  :class:`misaka.core.extensions.types.ToolDefinition` has no such fields.
-* Hermes' proxy DNS delegation in ``url_safety`` -- it would let a request reach an
-  address that was never vetted, which is what ``bounded.py``'s address pinning exists to
-  prevent.
+X search, native/remote browsers and managed gateway share this same owner and
+permission ceiling. Optional browser executables are never installed by discovery.
 """
 
 from __future__ import annotations
 
-# Which sessions actually receive the tool. ``beast`` is left out because a beast session
-# is started with ``-t <subagent tools>`` or ``-nt`` (misaka/core/network/worker.py), so
-# declaring it would only produce a tool the ceiling then hides -- the reasoning todo.py
-# already states. ``bare`` is IN, unlike documents.py and skills.py, because a bare
-# session is not tool-less: ``run_llm_json`` builds ``-t <explicit list>`` out of its
-# ``tools=`` argument, which is exactly how coverage.py's ``coverage_scan`` reaches Last
-# Order's planning calls. Leaving ``bare`` out would silently undo the research-flow
-# whitelist entries in research/planner.py and research/report.py.
+# Bare Last Order planning calls still receive explicitly permitted material tools.
+# Beast sessions supply their own tool set; the final session ceiling remains authoritative.
 SESSION_KINDS = {"foreground", "dm", "card", "child", "bare"}
 
 
-def activate(spec):
-    """Register the four web tools: search, extract, fetch, and controlled download.
+class WebPart:
+    """Web tools and their awaited, session-scoped resource owner."""
 
-    ``web_search`` and ``web_extract`` are conditional on the same gate -- Hermes' single
-    ``check_fn=check_web_api_key`` on both registry entries, moved to the point MISAKA
-    makes the same decision. Config and environment only, never a network call: it runs
-    while a session is being assembled. On a machine with no credentials anywhere it still
-    returns True, because the keyless vendor ring can serve, which is the whole reason the
-    ring was ported. One gate for two capabilities is Hermes' choice and it is kept: a
-    backend that searches but cannot extract is reported by name at call time
-    ("X is a search-only backend"), which tells the user what to change, where hiding the
-    tool would leave them wondering why the model never reads a page.
+    def __init__(self, spec):
+        from misaka.core.tools.download_file import create_download_file_tool_definition
+        from misaka.core.tools.web_fetch import create_web_fetch_tool_definition
+        from misaka.core.web.extract import register as register_extract
+        from misaka.core.web.runtime import WebRuntime
+        from misaka.core.web.scope import WebScope
+        from misaka.core.web.tool import register as register_search
+        from misaka.core.web.x_search import register as register_x_search
 
-    Three tools that fetch, not one, because they answer different questions.
-    ``web_extract`` asks a vendor that renders JavaScript and reads PDFs for up to five
-    pages at once; ``web_fetch`` dials one page itself, which is what a page the vendor
-    cannot see or should not be shown needs; ``download_file`` puts bytes on disk and into
-    the corpus. All three leave their evidence in the same place, under ``spec.workspace``.
+        self.scope = WebScope(spec.profile_dir)
+        self.runtime = WebRuntime(self.scope)
+        self._restart_on_configure = False
+        self.tools = []
+        register_search(self)
+        register_extract(self, spec.workspace)
+        register_x_search(self, spec.workspace)
+        from misaka.core.web.browser.tools import register as register_browser
+        register_browser(self, spec.workspace)
+        self.registerTool(create_web_fetch_tool_definition(spec.workspace))
+        self.registerTool(create_download_file_tool_definition(spec.workspace))
+        self._definitions = tuple(self.tools)
+        self.configure_tools([])
 
-    ``web_fetch`` and ``download_file`` need no credentials at all, so a session gets
-    them either way: reading a page the model already has a URL for does not depend on
-    anyone's search subscription. Both are rooted at ``spec.workspace``, which is where
-    each leaves what it pulled off the internet -- a downloaded file, or a fetched page's
-    complete text -- so a card can register the path and the ledger can quote it.
-    ``download_file`` goes one step further for the formats the corpus can read: it indexes
-    the file on arrival and hands back a document ID, because the alternative next step the
-    model is left with is the read tool, which cannot open a PDF at all. That makes the
-    ``doc_*`` tools (registered by ``core/documents/wiring/documents.py`` for every session kind here
-    except ``bare``) the way a downloaded document is navigated and quoted.
-    """
-    from misaka.core.tools.download_file import create_download_file_tool_definition
-    from misaka.core.tools.web_fetch import create_web_fetch_tool_definition
-    from misaka.core.web.extract import register as register_extract
-    from misaka.core.web.registry import web_search_available
-    from misaka.core.web.tool import register as register_search
+    def configure_tools(self, extensions):
+        from misaka.core.web.registry import (
+            ensure_backends_registered,
+            replace_extension_providers,
+            web_search_available,
+        )
 
-    searchable = web_search_available()
+        with self.scope.activate():
+            ensure_backends_registered()
+            replace_extension_providers(extensions)
+            self.scope.browser_providers = {name: provider for extension in extensions
+                                            for name, provider in getattr(extension, "browserProviders", {}).items()}
+        # One config read for the entire registration gate, not a file read per probe.
+        with self.scope.activate(snapshot=True):
+            ready = web_search_available()
+            from misaka.core.web.backends.xai import XAIWebSearchProvider
 
-    def register(harn):
-        if searchable:
-            register_search(harn)
-            register_extract(harn, spec.workspace)
-        harn.registerTool(create_web_fetch_tool_definition(spec.workspace))
-        harn.registerTool(create_download_file_tool_definition(spec.workspace))
+            x_ready = XAIWebSearchProvider().is_available()
+            from misaka.core.web.browser.settings import available_tools
+            try:
+                # Keep fallback definitions in the registry; the final active-tool
+                # ceiling selects exec or base tools, never exposing both to the model.
+                browser_tools = available_tools(include_fallback=True)
+                from misaka.core.web.browser.settings import config as browser_config
+                local_exec = bool(browser_config().get("use_real_profile"))
+            except (ValueError, OSError):
+                browser_tools, local_exec = set(), False
+        import copy
+        from dataclasses import replace
+        definitions = list(self._definitions)
+        if local_exec:
+            for index, definition in enumerate(definitions):
+                if definition.name == "browser_exec":
+                    parameters = copy.deepcopy(definition.parameters)
+                    parameters["properties"]["local"] = {"type": "boolean", "default": False,
+                        "description": "Use the explicitly configured isolated copy of a real Chromium profile."}
+                    definitions[index] = replace(definition, parameters=parameters)
+        if self._restart_on_configure:
+            from misaka.core.web.runtime import WebRuntime
 
-    return register
+            self.runtime = WebRuntime(self.scope)
+            self._restart_on_configure = False
+        self.tools = [definition for definition in definitions
+                      if (ready or definition.name not in {"web_search", "web_extract"})
+                      and (x_ready or definition.name != "x_search")
+                      and (not definition.name.startswith("browser_") or definition.name in browser_tools)]
+
+    def registerTool(self, definition):
+        from dataclasses import replace
+
+        async def execute(*args, **kwargs):
+            result = await self.runtime.run(definition.execute, *args, _tool_name=definition.name, _tool_call=True, **kwargs)
+            # Pi marks thrown errors, not an isError field on a normal tool return.
+            if isinstance(result, dict) and result.get("isError"):
+                raise RuntimeError("\n".join(block["text"] for block in result.get("content", [])
+                                             if block.get("type") == "text") or "Web tool failed")
+            return result
+
+        self.tools.append(replace(definition, execute=execute))
+
+    async def session_start(self, event, ctx):
+        if self.runtime.closed:
+            # A start racing teardown must not expose a new pool before the old
+            # owner's work has actually stopped.
+            await self.runtime.close()
+            from misaka.core.web.runtime import WebRuntime
+            self.runtime = WebRuntime(self.scope)
+        self._restart_on_configure = False
+
+    async def session_shutdown(self, event, ctx):
+        from misaka.core.tools._web.negative_cache import clear
+        from misaka.core.web.registry import replace_extension_providers
+
+        self._restart_on_configure = False
+        try:
+            await self.runtime.close()
+        finally:
+            with self.scope.activate():
+                replace_extension_providers([])
+                self.scope.browser_providers = {}
+                clear()
+        # Reopen only after the loader has completed and the tool registry is rebuilt.
+        # That path runs without a UI; an interrupted reload leaves this owner closed.
+        self._restart_on_configure = event.get("reason") == "reload"
+
+
+def part(spec):
+    return WebPart(spec)

@@ -49,7 +49,7 @@ def _sister_command():
                 argv += ["--as", name]
             out = net.request("pane.create",
                               {"argv": argv, "cwd": os.getcwd(), "title": title,
-                               "place": {"tab": os.environ["MISAKA_NET_PANE"]}})   # a tab of her own
+                               "place": {"grid": os.environ["MISAKA_NET_PANE"]}})   # a pane beside her Last Order (grid)
             ctx.ui.notify(
                 f"{name} is now open in pane {out['pane_id']}. "
                 "Select it from the sidebar or press Ctrl+B and its number.",

@@ -165,6 +165,8 @@ class SummaryDAG:
         self.db_path = Path(db_path)
         self._conn: Optional[sqlite3.Connection] = None
         self._db_lock = threading.RLock()
+        self.before_publish: Optional[Callable[[], None]] = None  # misaka: host cancellation checkpoint
+        self.active_node_ids: Optional[set[int]] = None  # misaka: optional host checkpoint scope
         self._init_db()
 
     @property
@@ -246,7 +248,9 @@ class SummaryDAG:
 
     def add_node(self, node: SummaryNode) -> int:
         """Insert a summary node and return its node_id."""
-        with self._db_lock:
+        with self._db_lock, self._conn:  # misaka: roll back if cancellation wins before commit
+            if self.before_publish is not None:
+                self.before_publish()
             cur = self._conn.execute(
                 """INSERT INTO summary_nodes
                    (session_id, depth, summary, token_count, source_token_count,
@@ -266,8 +270,12 @@ class SummaryDAG:
                     node.expand_hint,
                 ),
             )
+            if self.before_publish is not None:  # misaka: also check after a blocked SQLite write
+                self.before_publish()
             self._conn.commit()
             node.node_id = cur.lastrowid
+            if self.active_node_ids is not None:  # misaka: admit only committed publications
+                self.active_node_ids.add(node.node_id)
             return node.node_id
 
     @staticmethod
@@ -342,13 +350,43 @@ class SummaryDAG:
             with self._db_lock:
                 try:
                     self._conn.execute("BEGIN IMMEDIATE")
+                    if min_depth is not None:  # misaka: U07 preserve lineage in the deletion transaction
+                        parents = self._conn.execute(
+                            """SELECT DISTINCT parent.node_id FROM summary_nodes parent
+                               JOIN json_each(parent.source_ids) refs
+                               JOIN summary_nodes child ON child.node_id = CAST(refs.value AS INTEGER)
+                               WHERE parent.source_type = 'nodes' AND child.session_id = ? AND child.depth < ?
+                                 AND (parent.session_id != ? OR parent.depth >= ?)""",
+                            (session_id, min_depth, session_id, min_depth),
+                        ).fetchall()
+                        # Preserve raw references even in a standalone DAG (or when
+                        # messages were archived). Snapshot all parents before editing.
+                        sources = []
+                        for parent in parents:
+                            raw = self._conn.execute(
+                                """WITH RECURSIVE walk(source_type, source_id) AS (
+                                     SELECT n.source_type, CAST(j.value AS INTEGER)
+                                     FROM summary_nodes n, json_each(n.source_ids) j
+                                     WHERE n.node_id = ?
+                                     UNION
+                                     SELECT n.source_type, CAST(j.value AS INTEGER)
+                                     FROM summary_nodes n JOIN walk w
+                                       ON w.source_type = 'nodes' AND n.node_id = w.source_id
+                                     JOIN json_each(n.source_ids) j
+                                   ) SELECT DISTINCT source_id FROM walk
+                                     WHERE source_type = 'messages' ORDER BY source_id""",
+                                (parent[0],),
+                            ).fetchall()
+                            sources.append((json.dumps([row[0] for row in raw]), parent[0]))
+                        self._conn.executemany(
+                            "UPDATE summary_nodes SET source_type='messages', source_ids=? WHERE node_id=?", sources)
                     node_ids = self.delete_node_batch(
                         self._conn,
                         (session_id,),
                         min_depth=min_depth,
                     )
                     self._conn.commit()
-                except Exception:
+                except BaseException:
                     self._conn.rollback()
                     raise
             if not node_ids:

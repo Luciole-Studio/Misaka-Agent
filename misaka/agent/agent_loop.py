@@ -394,7 +394,7 @@ async def stream_assistant_response(
             continue
 
         if event.type in {"done", "error"}:
-            final_message = await response.result()
+            final_message = _uniquify_tool_call_ids(await response.result())
             if added_partial:
                 context.messages[-1] = final_message
             else:
@@ -403,7 +403,7 @@ async def stream_assistant_response(
             await _emit(emit, MessageEndEvent(message=final_message))
             return final_message
 
-    final_message = await response.result()
+    final_message = _uniquify_tool_call_ids(await response.result())
     if added_partial:
         context.messages[-1] = final_message
     else:
@@ -413,6 +413,27 @@ async def stream_assistant_response(
     return final_message
 
 
+def _uniquify_tool_call_ids(message: AssistantMessage) -> AssistantMessage:
+    """Hermes per-turn ID normalization, not action deduplication.
+
+    Normalize before message_end persistence; keep Responses item-id suffixes.
+    """
+    seen = set()
+    for index, block in enumerate(message.content):
+        if block.type != "toolCall":
+            continue
+        call_id = block.id.strip().split("|", 1)[0]
+        if not call_id:
+            continue
+        if call_id in seen:
+            call_id = next(f"{call_id}_d{n}" for n in range(2, len(seen) + 3)
+                           if f"{call_id}_d{n}" not in seen)
+            _, separator, item_id = block.id.partition("|")
+            message.content[index] = block.model_copy(update={"id": call_id + separator + item_id})
+        seen.add(call_id)
+    return message
+
+
 async def execute_tool_calls(
     current_context: AgentContext,
     assistant_message: AssistantMessage,
@@ -420,6 +441,7 @@ async def execute_tool_calls(
     signal: Any | None,
     emit: AgentEventSink,
 ) -> ExecutedToolCallBatch:
+    _uniquify_tool_call_ids(assistant_message)
     tool_calls = [block for block in assistant_message.content if block.type == "toolCall"]
     has_sequential_tool_call = any(
         any(
@@ -639,6 +661,13 @@ async def prepare_tool_call(
 ) -> PreparedToolCall | ImmediateToolCallOutcome:
     tool = next((candidate for candidate in current_context.tools or [] if candidate.name == tool_call.name), None)
     if tool is None:
+        tool = next((candidate for candidate in current_context.tools or []
+                     if tool_call.name in getattr(candidate, "aliases", ())), None)
+        if tool is not None:
+            # Exact names win. Permission/schema checks see the canonical tool,
+            # while the transcript retains its historical wire call and call ID.
+            tool_call = tool_call.model_copy(update={"name": tool.name})
+    if tool is None:
         return ImmediateToolCallOutcome(
             kind="immediate",
             result=create_error_tool_result(f"Tool {tool_call.name} not found"),
@@ -676,6 +705,9 @@ async def prepare_tool_call(
                     result=result,
                     isError=True,
                 )
+            if before_result and before_result.updatedInput is not None:
+                updated_call = tool_call.model_copy(update={"arguments": before_result.updatedInput})
+                validated_args = validate_tool_arguments(tool, updated_call)
         if signal_aborted(signal):
             return ImmediateToolCallOutcome(
                 kind="immediate",
@@ -992,6 +1024,7 @@ def _coerce_before_tool_call_result(
     return BeforeToolCallResult(
         block=value.get("block"),
         reason=value.get("reason"),
+        updatedInput=value.get("updatedInput"),
         # pi agent-loop.ts:637-644 honours `terminate` on a blocked call regardless of how
         # the hook spelled its result; dropping it here silently disarmed dict-returning hooks.
         terminate=value.get("terminate"),

@@ -33,7 +33,8 @@ for answered), ``rescued_from`` and ``backend_error`` (the configured backend fa
 the keyless ring served this one call). Those keys are annotations, never a replacement
 for ``web``.
 
-Extract results are a *list*, one entry per requested URL and in the same order::
+Extract results are a *list*: requested slots first, in order, followed by any
+unassociated material (``requested_url=None``). Never silently discard canonical URLs::
 
     [
         {
@@ -47,9 +48,9 @@ Extract results are a *list*, one entry per requested URL and in the same order:
         ...
     ]
 
-Order parity is a contract, not a courtesy: the tool reconstructs the caller's original
-argument list by position, so a provider that drops a failed URL instead of returning an
-entry with ``error`` set will hand the model somebody else's page under the wrong address.
+The requested prefix has order parity: the tool reconstructs the caller's original
+argument list from that prefix. Batch providers use ``align_documents``; a canonical
+URL remains in ``metadata.sourceURL`` instead of being erased to enforce order.
 
 MISAKA also reaches pages through ``web_fetch``, which dials them itself. The two are not
 redundant: ``web_fetch`` fetches and saves one page as citable evidence, ``web_extract``
@@ -60,6 +61,53 @@ from __future__ import annotations
 
 import abc
 from typing import Any
+
+
+def keyless_setup_schema(name: str, key: str, url: str, tag: str) -> dict[str, Any]:
+    """Hermes' separate free/paid picker rows, backed by the same provider."""
+    return {"name": f"{name} - Free (keyless)", "badge": "free - no key", "tag": tag,
+            "env_vars": [], "web_tier": "free", "variants": [
+                {"name": f"{name} - Paid (API key)", "badge": "paid", "tag": tag,
+                 "web_tier": "paid", "env_vars": [{"key": key, "prompt": f"{name} API key", "url": url}]},
+            ]}
+
+
+def extraction_error(url: str, error: str) -> dict[str, Any]:
+    return {"url": url, "title": "", "content": "", "raw_content": "", "error": error,
+            "metadata": {"sourceURL": url}}
+
+
+def align_documents(urls: list[str], documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Associate by vendor ID/URL, never by returned position or URL similarity.
+
+    Requested slots stay in order (including duplicates and failures). Canonical URLs
+    remain in metadata.sourceURL. Unassociated documents follow the slots with an
+    explicit requested_url=None; the tool saves them but never caches them under a
+    guessed request. One distinct URL and one response is unambiguous even on redirect.
+    """
+    wanted = set(urls)
+    by_url, unmatched = {}, []
+    for document in documents:
+        entry = dict(document)
+        reported = entry.get("url") or ""
+        identifier = entry.pop("id", None)
+        requested = identifier if isinstance(identifier, str) and identifier in wanted else reported
+        metadata = dict(entry.get("metadata") or {})
+        metadata["sourceURL"] = metadata.get("sourceURL") or reported
+        entry["metadata"] = metadata
+        if requested in wanted:
+            entry["url"] = requested
+            by_url.setdefault(requested, entry)
+        else:
+            unmatched.append(entry)
+    if len(wanted) == 1 and len(documents) == 1 and unmatched:
+        requested = urls[0]
+        entry = unmatched.pop()
+        entry["url"] = requested
+        entry["metadata"]["sourceURL"] = entry["metadata"].get("sourceURL") or requested
+        by_url[requested] = entry
+    return [dict(by_url[url]) if url in by_url else extraction_error(url, "no content returned")
+            for url in urls] + [{**entry, "requested_url": None} for entry in unmatched]
 
 
 class WebSearchProvider(abc.ABC):
@@ -113,6 +161,15 @@ class WebSearchProvider(abc.ABC):
         """Whether this provider implements :meth:`search`. Default: True."""
         return True
 
+    def uses_keyless_ring(self) -> bool:
+        """Whether this call uses MISAKA's failover ring, rather than one vendor.
+
+        The dispatcher uses this transport contract for cache identity and to avoid
+        rescuing an exhausted ring twice. Free single-vendor transports keep False;
+        providers inheriting a ring transport inherit its override as well.
+        """
+        return False
+
     def supports_extract(self) -> bool:
         """Whether this provider implements :meth:`extract`. Default: False.
 
@@ -163,13 +220,11 @@ class WebSearchProvider(abc.ABC):
             f"{self.name} does not support extract (override supports_extract)"
         )
 
-    def setup_hint(self) -> dict[str, Any]:
-        """Return provider metadata for a future setup UI.
+    def get_setup_schema(self) -> dict[str, Any]:
+        """Hermes setup metadata, consumed by ``misaka web providers`` and ``web setup``.
 
-        Hermes' ``get_setup_schema``, feeding the ``hermes tools`` picker. MISAKA has no
-        picker yet; the data is carried anyway because it is the only place that records,
-        per vendor, which credential to set and where to get it -- and losing that means
-        losing the reason each ``is_available`` looks at the name it does. Shape::
+        Declare all environment settings read through ``provider_env`` here, so setup,
+        credential redaction and cache identity see the same provider configuration::
 
             {"name": str, "badge": str, "tag": str,
              "env_vars": [{"key": str, "prompt": str, "url": str}, ...]}

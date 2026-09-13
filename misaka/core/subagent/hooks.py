@@ -10,14 +10,17 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import math
 import os
 import re
 import signal
+import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 import httpx
+from pydantic import AnyUrl
 
 from misaka.core.tools._web.bounded import pin_to_address, vet_public_url
 
@@ -36,7 +39,7 @@ HOOK_MAX_OUTPUT_CHARS = 32_000
 
 # One default per hook type, read by both the runtime and the config validator; they used
 # to disagree (the validator assumed 60 for everything).
-HOOK_DEFAULT_TIMEOUTS = {"agent": 60.0}
+HOOK_DEFAULT_TIMEOUTS = {"command": 600.0, "agent": 60.0}
 HOOK_DEFAULT_TIMEOUT = 30.0
 
 
@@ -164,14 +167,18 @@ def parse_hook_output(value: Any, *, expected_event: str | None = None) -> HookR
     if isinstance(permission_request, Mapping):
         decision = permission_request.get("behavior", decision)
         reason = permission_request.get("message") or reason
+        if "updatedInput" in permission_request:
+            specific["updatedInput"] = permission_request["updatedInput"]
 
     legacy_decision = output.get("decision")
-    if decision is None and legacy_decision in {"approve", "block"}:
+    if legacy_decision is not None and not isinstance(legacy_decision, str):
+        return _result(reason="hook decision must be a string")
+    if decision is None and isinstance(legacy_decision, str) and legacy_decision in {"approve", "block"}:
         decision = "allow" if legacy_decision == "approve" else "deny"
     if decision is None and "ok" in output:
         decision = "allow" if output.get("ok") is True else "deny"
 
-    if decision not in {None, "allow", "deny", "ask", "passthrough"}:
+    if decision is not None and (not isinstance(decision, str) or decision not in {"allow", "deny", "ask", "passthrough"}):
         return _result(reason=f"unknown hook decision: {decision}")
     decision = decision or "passthrough"
     if output.get("continue") is False:
@@ -180,13 +187,22 @@ def parse_hook_output(value: Any, *, expected_event: str | None = None) -> HookR
     if decision == "deny":
         reason = reason or "blocked by hook"
 
-    return _result(
+    result = _result(
         allowed=decision not in {"deny", "ask"},
         decision=decision,
         additional_context=(clamp_hook_output(str(additional_context))
                             if additional_context is not None else None),
         reason=str(reason) if reason is not None else None,
     )
+    if "updatedInput" in specific:
+        if not isinstance(specific["updatedInput"], Mapping):
+            return _result(reason="hook updatedInput must be an object")
+        result["updated_input"] = dict(specific["updatedInput"])
+    if "updatedMCPToolOutput" in specific:
+        result["updated_mcp_tool_output"] = specific["updatedMCPToolOutput"]
+    if output.get("continue") is False:
+        result["prevent_continuation"] = True
+    return result
 
 
 def _timeout(hook: Mapping[str, Any]) -> float:
@@ -195,7 +211,7 @@ def _timeout(hook: Mapping[str, Any]) -> float:
         value = float(hook.get("timeout", default))
     except (TypeError, ValueError):
         return default
-    return value if value > 0 else default
+    return value if math.isfinite(value) and value > 0 else default
 
 
 async def _kill_hook_process(process: asyncio.subprocess.Process) -> None:
@@ -267,6 +283,12 @@ async def _command_hook_with_status(
         return _result(reason=f"command hook failed: {error}"), None
 
     out = stdout.decode("utf-8", errors="replace")
+    # VCS lifecycle hooks return a path on stdout, not the model-hook schema.
+    if payload.get("hook_event_name") in {"WorktreeCreate", "WorktreeRemove"}:
+        result = _result()
+        result["output"] = clamp_hook_output(out)
+        result["reason"] = stderr.decode("utf-8", errors="replace").strip() or None
+        return result, process.returncode
     err = stderr.decode("utf-8", errors="replace").strip()
     if process.returncode == 2:
         parsed = parse_hook_output(
@@ -410,7 +432,21 @@ async def _evaluate_hook(
         )
         if inspect.isawaitable(value):
             value = await asyncio.wait_for(value, _timeout(hook))
-        return parse_hook_output(value, expected_event=str(payload.get("hook_event_name") or "") or None)
+        # Model hooks have a different schema from command/HTTP hooks. In
+        # particular {"ok":"false"} is a model error, not a blocking verdict.
+        if isinstance(value, str):
+            value = json.loads(value)
+        if not isinstance(value, Mapping) or not isinstance(value.get("ok"), bool):
+            return _result(reason=f"{kind} hook response must contain boolean ok")
+        if "reason" in value and not isinstance(value["reason"], str):
+            return _result(reason=f"{kind} hook reason must be a string")
+        result = parse_hook_output(
+            {"ok": value["ok"], **({"reason": value["reason"]} if "reason" in value else {})},
+            expected_event=str(payload.get("hook_event_name") or "") or None,
+        )
+        if not value["ok"]:
+            result["prevent_continuation"] = True
+        return result
     except TimeoutError:
         return _result(reason=f"{kind} hook timed out")
     except Exception as error:  # noqa: BLE001 - evaluator failures must not stop the child
@@ -447,3 +483,82 @@ __all__ = [
     "parse_hook_output",
     "set_hook_evaluator",
 ]
+
+
+# CCB src/entrypoints/sdk/coreSchemas.ts HOOK_EVENTS (same pin as agents.py).
+HOOK_EVENTS = frozenset({
+    'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'Notification',
+    'UserPromptSubmit', 'SessionStart', 'SessionEnd', 'Stop', 'StopFailure',
+    'SubagentStart', 'SubagentStop', 'PreCompact', 'PostCompact',
+    'PermissionRequest', 'PermissionDenied', 'Setup', 'TeammateIdle',
+    'TaskCreated', 'TaskCompleted', 'Elicitation', 'ElicitationResult',
+    'ConfigChange', 'WorktreeCreate', 'WorktreeRemove', 'InstructionsLoaded',
+    'CwdChanged', 'FileChanged',
+})
+
+
+def validate_hooks(hooks: Mapping[str, Any]) -> dict[str, Any]:
+    """CCB schemas/hooks.ts: validate AND return the z.object-normalized copy.
+
+    Persisted schema only. Direct programmatic execute_hook calls retain their
+    native adapter; no callback is serialized, no caller-owned object mutated.
+    """
+    if not isinstance(hooks, Mapping):
+        raise TypeError("Agent hooks must be an event mapping")
+    result = {}
+    fields = {
+        "command": {"command", "shell", "async", "asyncRewake"},
+        "prompt": {"prompt", "model"}, "agent": {"prompt", "model"},
+        "http": {"url", "headers", "allowedEnvVars"},
+    }
+    common = {"type", "if", "timeout", "statusMessage", "once"}
+    for event, matchers in hooks.items():
+        if event not in HOOK_EVENTS:
+            raise ValueError(f"Agent hooks has unsupported event {event!r}")
+        if not isinstance(matchers, list):
+            raise ValueError(f"Agent hooks.{event} must be a list")  # noqa: TRY004 - persisted schema errors must propagate through Pydantic
+        normalized = []
+        for matcher in matchers:
+            commands = matcher.get("hooks") if isinstance(matcher, dict) else None
+            if not isinstance(commands, list):
+                raise ValueError(f"Agent hooks.{event} entries need a hooks list")  # noqa: TRY004 - persisted schema errors must propagate through Pydantic
+            if "matcher" in matcher and not isinstance(matcher["matcher"], str):
+                raise ValueError("Hook matcher must be a string")
+            clean = {key: value for key, value in matcher.items() if key == "matcher"}
+            clean["hooks"] = []
+            for hook in commands:
+                if not isinstance(hook, dict):
+                    raise ValueError(f"Agent hooks.{event} entries must be objects")  # noqa: TRY004 - persisted schema errors must propagate through Pydantic
+                kind = hook.get("type")
+                if not isinstance(kind, str) or kind not in fields:
+                    raise ValueError(f"Agent hooks.{event} has unsupported type {kind!r}")
+                hook = {key: value for key, value in hook.items() if key in common | fields[kind]}
+                required = "url" if kind == "http" else "command" if kind == "command" else "prompt"
+                if not isinstance(hook.get(required), str):
+                    raise ValueError(f"Agent hooks.{event} {kind} hook needs a string {required}")  # noqa: TRY004 - persisted schema errors must propagate through Pydantic
+                for key in ("if", "statusMessage", "model"):
+                    if key in hook and not isinstance(hook[key], str):
+                        raise ValueError(f"Hook {key} must be a string")
+                for key in ("once", "async", "asyncRewake"):
+                    if key in hook and not isinstance(hook[key], bool):
+                        raise ValueError(f"Hook {key} must be a boolean")
+                if "timeout" in hook:
+                    timeout = hook["timeout"]
+                    # JSON's JS-number domain is finite doubles, not arbitrary
+                    # Python integers; oversized integer input must be a schema error.
+                    if type(timeout) not in (int, float) or not 0 < timeout <= sys.float_info.max:
+                        raise ValueError(f"Agent hooks.{event} timeout must be positive")
+                if "shell" in hook and hook["shell"] not in ("bash", "powershell"):
+                    raise ValueError("Hook shell must be bash or powershell")
+                if kind == "http":
+                    AnyUrl(hook["url"])
+                    if "headers" in hook and (not isinstance(hook["headers"], dict) or any(
+                            not isinstance(k, str) or not isinstance(v, str) for k, v in hook["headers"].items())):
+                        raise ValueError("Hook headers must map strings to strings")
+                    if "allowedEnvVars" in hook and (not isinstance(hook["allowedEnvVars"], list) or any(
+                            not isinstance(v, str) for v in hook["allowedEnvVars"])):
+                        raise ValueError("Hook allowedEnvVars must be a string list")
+                clean["hooks"].append(hook)
+            normalized.append(clean)
+        result[event] = normalized
+    return result

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import os
 import re
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +18,7 @@ from typing import Any, Literal, NotRequired, Protocol, TypedDict, runtime_check
 from misaka.agent.harness.messages import (
     BashExecutionMessage,
     CustomMessage,
+    convert_to_llm,
     create_branch_summary_message,
     create_compaction_summary_message,
     create_custom_message,
@@ -63,8 +65,6 @@ type SessionListProgress = Callable[[int, int], None]
 
 _LEAF_UNSET = object()
 _UNSET = object()
-_SAFE_PATH_LEADING_SEPARATORS = re.compile(r"^[/\\]+")
-_SAFE_PATH_SEPARATORS = re.compile(r"[/\\:]")
 MAX_CONCURRENT_SESSION_INFO_LOADS = 10
 
 
@@ -218,6 +218,28 @@ def get_latest_compaction_entry(entries: list[SessionEntry]) -> SessionEntry | N
     return None
 
 
+def _entry_starts_transcript(entry: SessionEntry) -> bool:
+    """Keep empty UI/drafts lazy, but persist actual output and adopted checkpoints."""
+    return (entry.get("type") == "custom_message"
+            or (entry.get("type") == "compaction" and entry.get("contextMessages") is not None)
+            or (entry.get("type") == "message" and _message_role(entry.get("message")) == "assistant"))
+
+
+def _copy_context_messages(messages: list[AgentMessage]) -> list[AgentMessage]:
+    """Validate a complete replay view before publishing it, and detach its ownership."""
+    if not isinstance(messages, list):
+        raise TypeError("contextMessages must be a list")
+    supported = {"user", "assistant", "toolResult", "custom", "bashExecution",
+                 "branchSummary", "compactionSummary"}
+    if any(_message_role(message) not in supported for message in messages):
+        raise ValueError("contextMessages contains an unsupported message role")
+    snapshot = copy.deepcopy(messages)
+    # Use the actual provider projection, including native content-block validation.
+    # Keep the original native shapes, not its lossy user-role projection.
+    convert_to_llm(snapshot)
+    return snapshot
+
+
 def session_entry_to_context_messages(entry: SessionEntry) -> list[AgentMessage]:
     """Project one session entry into the messages consumed by the active context."""
     entry_type = entry.get("type")
@@ -257,6 +279,8 @@ def session_entry_to_context_messages(entry: SessionEntry) -> list[AgentMessage]
             )
         ]
     if entry_type == "compaction":
+        if entry.get("contextMessages") is not None:
+            return _copy_context_messages(entry["contextMessages"])
         return [
             create_compaction_summary_message(
                 str(entry.get("summary")),
@@ -313,6 +337,8 @@ def _context_entries_from_path(path: list[SessionEntry]) -> list[SessionEntry]:
         index for index, entry in enumerate(path) if entry.get("id") == compaction_id
     )
     context_entries = [compaction]
+    if compaction.get("contextMessages") is not None:
+        return context_entries + path[compaction_index + 1 :]
     first_kept_entry_id = compaction.get("firstKeptEntryId")
     found_first_kept = False
     for entry in path[:compaction_index]:
@@ -369,11 +395,6 @@ def _canonical_cwd(cwd: str) -> str:
     return os.path.normcase(canonicalize_path(resolve_path(cwd)))
 
 
-def _legacy_encode_cwd(cwd: str) -> str:
-    normalized_cwd = _SAFE_PATH_LEADING_SEPARATORS.sub("", resolve_path(cwd))
-    return f"--{_SAFE_PATH_SEPARATORS.sub('-', normalized_cwd)}--"
-
-
 def encode_cwd(cwd: str) -> str:
     """Encode a canonical working directory as a readable, collision-resistant segment."""
     canonical_cwd = _canonical_cwd(cwd)
@@ -409,12 +430,11 @@ def get_default_session_dir(cwd: str, agent_dir: str | None = None) -> str:
 def sessions_root_of(session_dir: str | None) -> str | None:
     """The store the "any bucket" lookup must search, given this run's session directory.
 
-    ``chat`` / ``dm`` / ``card-shell`` always pass one folder's bucket (``--<slug>-<sha256>--``,
-    see :func:`encode_cwd`), so the same role's other folders are its siblings: the store is the
-    bucket's parent. Anything else -- settings ``sessionDir``,
-    ``$MISAKA_CODING_AGENT_SESSION_DIR`` -- is already the store and stays as it is. Pi's session
-    dir is flat (one directory holding every cwd), which is why ``main.ts:267`` hands ``listAll``
-    the directory itself. ``None`` keeps the engine default.
+    Chats pass a cwd bucket (``--<slug>-<sha256>--``, see :func:`encode_cwd`), so the
+    same role's other folders are its siblings: the store is the bucket's parent.
+    Flat directories -- DM, cards, settings ``sessionDir`` and
+    ``$MISAKA_CODING_AGENT_SESSION_DIR`` -- stay as they are. ``None`` keeps the
+    engine default.
 
     Both ends of "all sessions" go through here: the CLI picker (``cli/engine.py``) and the TUI
     ``/resume`` selector (``ui/tui/interactive/interactive_mode.py``), which is why it lives with
@@ -427,6 +447,26 @@ def sessions_root_of(session_dir: str | None) -> str | None:
     return parent if name.startswith("--") and name.endswith("--") else normalized
 
 
+def iter_session_files(root: str, *, recursive: bool = False) -> Iterator[str]:
+    """Enumerate transcript files without reading, creating or migrating a store."""
+    for directory, dirs, files in os.walk(normalize_path(root)):
+        dirs[:] = [d for d in dirs if d not in {".git", ".catalog"}]
+        for name in files:
+            path = os.path.join(directory, name)
+            if name.endswith(".jsonl") and os.path.isfile(path):
+                yield path
+        if not recursive:
+            break
+
+
+def _is_session_header(value: Any) -> bool:
+    return isinstance(value, dict) and value.get("type") == "session" and isinstance(value.get("id"), str)
+
+
+def _session_cwd_matches(actual: str | None, cwd: str) -> bool:
+    return isinstance(actual, str) and bool(actual) and _canonical_cwd(actual) == _canonical_cwd(cwd)
+
+
 def read_session_header(file_path: str) -> dict[str, Any]:
     """The header line of a session file (``id``, ``cwd``, ``timestamp``), or ``{}``.
     Reads one line: the panel calls this for every file it lists."""
@@ -435,7 +475,7 @@ def read_session_header(file_path: str) -> dict[str, Any]:
             entry = json.loads(handle.readline())
     except (OSError, ValueError):
         return {}
-    return entry if isinstance(entry, dict) and entry.get("type") == "session" else {}
+    return entry if _is_session_header(entry) else {}
 
 
 def load_entries_from_file(
@@ -461,7 +501,7 @@ def load_entries_from_file(
         return entries
 
     header = entries[0]
-    if header.get("type") != "session" or not isinstance(header.get("id"), str):
+    if not _is_session_header(header):
         if strict:
             raise InvalidSessionFileError(resolved_file_path, "missing session header")
         return []
@@ -471,29 +511,17 @@ def load_entries_from_file(
     return entries
 
 
-def find_most_recent_session(session_dir: str) -> str | None:
-    resolved_dir = normalize_path(session_dir)
-    try:
-        files = [
-            os.path.join(resolved_dir, name)
-            for name in os.listdir(resolved_dir)
-            if name.endswith(".jsonl")
-        ]
-    except OSError:
-        return None
-
+def find_most_recent_session(session_dir: str, cwd: str | None = None) -> str | None:
     valid_files = []
-    for file_path in files:
-        if _is_valid_session_file(file_path):
-            try:
-                valid_files.append((file_path, os.stat(file_path).st_mtime))
-            except OSError:
-                continue
-    if not valid_files:
-        return None
-
-    valid_files.sort(key=lambda item: item[1], reverse=True)
-    return valid_files[0][0]
+    for path in iter_session_files(session_dir):
+        header = read_session_header(path)
+        if not header or (cwd is not None and not _session_cwd_matches(header.get("cwd"), cwd)):
+            continue
+        try:
+            valid_files.append((path, os.stat(path).st_mtime))
+        except OSError:
+            continue
+    return max(valid_files, key=lambda item: item[1])[0] if valid_files else None
 
 
 class SessionManager:
@@ -629,14 +657,8 @@ class SessionManager:
 
         serialized_entry = _dump_json(entry)
 
-        has_assistant = (
-            entry.get("type") == "message" and _message_role(entry.get("message")) == "assistant"
-        ) or any(
-            file_entry.get("type") == "message"
-            and _message_role(file_entry.get("message")) == "assistant"
-            for file_entry in self.fileEntries
-        )
-        if not has_assistant:
+        if (not self.flushed and not _entry_starts_transcript(entry)
+                and not any(_entry_starts_transcript(item) for item in self.fileEntries)):
             return False
 
         if not self.flushed:
@@ -702,6 +724,8 @@ class SessionManager:
         details: Any = _UNSET,
         fromHook: bool | None | object = _UNSET,
         usage: Usage | Mapping[str, Any] | None | object = _UNSET,
+        *,
+        contextMessages: list[AgentMessage] | None = None,
     ) -> str:
         entry: SessionEntry = {
             "type": "compaction",
@@ -718,6 +742,8 @@ class SessionManager:
             entry["fromHook"] = fromHook
         if usage is not _UNSET and usage is not None:
             entry["usage"] = usage
+        if contextMessages is not None:
+            entry["contextMessages"] = _copy_context_messages(contextMessages)
         self._appendEntry(entry)
         return str(entry["id"])
 
@@ -952,22 +978,18 @@ class SessionManager:
             existing_ids.add(str(label_entry["id"]))
             parent_id = label_entry["id"]
 
-        self.fileEntries = [header, *path_without_labels, *label_entries]
+        candidate = [header, *path_without_labels, *label_entries]
+        flush = self.persist and any(_entry_starts_transcript(entry) for entry in candidate)
+        if flush:
+            # Do the fallible work before replacing the original session owner/state.
+            atomic.write_text(new_session_file, _dump_jsonl(candidate), mode=0o600)
+
+        self.fileEntries = candidate
         self.sessionId = new_session_id
         if self.persist:
             self.sessionFile = new_session_file
         self._buildIndex()
-
-        has_assistant = any(
-            entry.get("type") == "message" and _message_role(entry.get("message")) == "assistant"
-            for entry in self.fileEntries
-        )
-        if self.persist and has_assistant:
-            self._rewriteFile()
-            self.flushed = True
-            return new_session_file
-
-        self.flushed = False
+        self.flushed = flush
         return new_session_file if self.persist else None
 
     @classmethod
@@ -1029,7 +1051,7 @@ class SessionManager:
     @classmethod
     def continueRecent(cls, cwd: str, sessionDir: str | None = None) -> SessionManager:
         directory = normalize_path(sessionDir) if sessionDir else get_default_session_dir(cwd)
-        most_recent = find_most_recent_session(directory)
+        most_recent = find_most_recent_session(directory, cwd=cwd)
         if most_recent:
             return cls(cwd, directory, most_recent, True)
         return cls(cwd, directory, None, True)
@@ -1091,7 +1113,8 @@ class SessionManager:
         onProgress: SessionListProgress | None = None,
     ) -> list[SessionInfo]:
         directory = normalize_path(sessionDir) if sessionDir else get_default_session_dir(cwd)
-        sessions = await _list_sessions_from_dir(directory, onProgress)
+        sessions = [s for s in await _list_sessions_from_dir(directory, onProgress)
+                    if _session_cwd_matches(s.cwd, cwd)]
         sessions.sort(key=lambda session: session.modified, reverse=True)
         return sessions
 
@@ -1109,49 +1132,16 @@ class SessionManager:
             sessionsRoot, onProgress = None, sessionsRoot
         explicit_root = sessionsRoot is not None
         sessions_dir = normalize_path(sessionsRoot) if sessionsRoot else get_sessions_dir()
-        root_files: list[str] = []
         try:
-            if not os.path.exists(sessions_dir):
-                return []
-            entries = os.listdir(sessions_dir)
-            directories = [
-                os.path.join(sessions_dir, entry)
-                for entry in entries
-                if os.path.isdir(os.path.join(sessions_dir, entry))
-            ]
-            if explicit_root:
-                # A root handed in from outside is not always a tree of per-cwd buckets: pi
-                # (session-manager.ts:1664-1670) lists a custom session dir *flat*, and the dirs
-                # `misaka dm`, card-shell and settings `sessionDir` point at keep their .jsonl
-                # right here rather than one level down. Reading only the subdirectories left
-                # those roots listing nothing at all, so take both shapes -- the files lying
-                # here and the ones in the buckets below -- and a bucket root, a flat dir and a
-                # mix of the two all list.
-                root_files = [
-                    os.path.join(sessions_dir, entry)
-                    for entry in entries
-                    if entry.endswith(".jsonl")
-                    and os.path.isfile(os.path.join(sessions_dir, entry))
-                ]
+            directories = [os.path.join(sessions_dir, entry) for entry in os.listdir(sessions_dir)
+                           if entry not in {".git", ".catalog"} and os.path.isdir(os.path.join(sessions_dir, entry))]
         except OSError:
             return []
-
-        total_files = len(root_files)
-        directory_files: list[list[str]] = [root_files]
-        for directory in directories:
-            try:
-                files = [
-                    os.path.join(directory, name)
-                    for name in os.listdir(directory)
-                    if name.endswith(".jsonl")
-                ]
-                directory_files.append(files)
-                total_files += len(files)
-            except OSError:
-                directory_files.append([])
-
+        if explicit_root:
+            directories.insert(0, sessions_dir)  # explicit stores may contain files and cwd buckets
+        all_files = list(dict.fromkeys(path for directory in directories for path in iter_session_files(directory)))
+        total_files = len(all_files)
         sessions: list[SessionInfo] = []
-        all_files = [file_path for files in directory_files for file_path in files]
         loaded_ref = {"value": 0}
 
         def on_loaded() -> None:
@@ -1183,16 +1173,6 @@ def _parse_jsonl_entries(content: str, *, strict: bool = False) -> list[FileEntr
         elif strict:
             raise TypeError("session entries must be JSON objects")
     return entries
-
-
-def _is_valid_session_file(file_path: str) -> bool:
-    try:
-        with Path(file_path).open("rb") as handle:
-            first_line = handle.read(512).splitlines()[0].decode("utf-8")
-        header = json.loads(first_line)
-    except (IndexError, OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return False
-    return isinstance(header, dict) and header.get("type") == "session" and isinstance(header.get("id"), str)
 
 
 def _message_role(message: Any) -> str | None:
@@ -1274,7 +1254,7 @@ def _build_session_info_sync(file_path: str) -> SessionInfo | None:
             return None
 
         header = entries[0]
-        if header.get("type") != "session":
+        if not _is_session_header(header):
             return None
 
         stats = path.stat()
@@ -1371,15 +1351,7 @@ async def _list_sessions_from_dir(
     progress_offset: int = 0,
     progress_total: int | None = None,
 ) -> list[SessionInfo]:
-    resolved_dir = normalize_path(session_dir)
-    try:
-        files = [
-            os.path.join(resolved_dir, name)
-            for name in os.listdir(resolved_dir)
-            if name.endswith(".jsonl")
-        ]
-    except OSError:
-        return []
+    files = list(iter_session_files(session_dir))
 
     sessions: list[SessionInfo] = []
     total = progress_total if progress_total is not None else len(files)

@@ -66,9 +66,14 @@ def tell(body, *, to_addr="last-order", summary=None, cwd=None):
                 f"Unknown recipient {to_addr!r}. Available recipients: "
                 f"{', '.join(sorted(known))}"
             )
-        messages.send(con, to_addr, body.strip(),
-                      summary=summary or f"Message from ally {sender}",
-                      sender=sender, task_id=task_id)
+        text = f"[card {task_id}] {body.strip()}" if task_id else body.strip()
+        messages.send(
+            con,
+            to_addr,
+            text,
+            summary=summary or f"Message from ally {sender}",
+            sender=sender,
+        )
     finally:
         con.close()
     suffix = f", card {task_id}" if task_id else ""

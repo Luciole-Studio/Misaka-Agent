@@ -1,15 +1,12 @@
 """Persistent token budgets and the Beast Mode cutoff."""
+import contextvars
 import hashlib
 import json
-import logging
 import os
 import secrets
 import sqlite3
 import time
-from contextlib import nullcontext
-
-logger = logging.getLogger(__name__)
-
+from contextlib import contextmanager, nullcontext
 
 DEFAULT_CAP = int(os.environ.get("MISAKA_TOKEN_CAP", "0"))
 BEAST_AT = float(os.environ.get("MISAKA_BEAST_AT", "0.85"))
@@ -18,11 +15,10 @@ SUBAGENT_RESERVATION = int(os.environ.get("MISAKA_SUBAGENT_TOKEN_RESERVATION", "
 BEAST_SUFFIX = """
 
 ---
-⚠️ **The token budget is nearly exhausted (Beast Mode).** No more tools are available.
-Use only information already in context and submit an honest final report. If deliverables could not be written,
-put every useful conclusion in the `summary` and `notes` fields of `report.json`, set `artifacts` to an empty array,
-set `status` to `blocked`, and explain that the budget ended before disk artifacts were completed. Never submit an
-empty report or claim `done` when the deliverables do not exist.
+⚠️ **The token budget is nearly exhausted (Beast Mode).** Only coordination tools remain.
+Use only information already in context and end with an honest, concise summary. If required work is incomplete,
+use `SendMessage` to tell Last Order exactly what remains and why, then stop; do not claim completion.
+On a task card, set `request_input=true` so incomplete work is parked rather than submitted as complete.
 """
 
 
@@ -149,6 +145,12 @@ def reserved(con):
                 return 0   # caller-owned legacy/in-memory ledgers may lack the table
             raise
     return int(row[0] or 0)
+
+
+def exhausted(con, cap=None):
+    """Whether running work must stop. Reserved capacity only blocks NEW admissions."""
+    cap = DEFAULT_CAP if cap is None else cap
+    return bool(cap) and spent(con) >= cap
 
 
 def status(con, cap=None):
@@ -284,6 +286,19 @@ def commit_agent_usage(con, token, task_id, generation, total_tokens):
 _SUBJECT_DIGEST_CHARS = 16
 
 
+_USAGE_CONTEXT = contextvars.ContextVar("misaka_usage_context", default=None)
+
+
+@contextmanager
+def usage_context(path, task_id, generation):
+    """Bill a window turn's tools without changing other sessions' process environment."""
+    token = _USAGE_CONTEXT.set((path, task_id, str(generation)))
+    try:
+        yield
+    finally:
+        _USAGE_CONTEXT.reset(token)
+
+
 def record_external_call(service, *, subject="", **facts):
     """Charge one outbound third-party call to the ledger this turn is billed to.
 
@@ -300,8 +315,8 @@ def record_external_call(service, *, subject="", **facts):
     backend name, a result count, a byte count) are stored verbatim, so nothing that
     identifies a person may be passed as one.
 
-    Addressed by environment rather than by argument because the tools that make these
-    calls hold no board handle: ``MISAKA_USAGE_DB`` / ``_TASK_ID`` / ``_GENERATION`` are
+    A window research turn supplies an async-local usage context. Other callers use
+    the environment because these tools hold no board handle: ``MISAKA_USAGE_DB`` / ``_TASK_ID`` / ``_GENERATION`` are
     what a worker already exports to charge the turn's tokens to a card, and an external
     call rides the same three. A session with none of them (an interactive chat) has no
     card to bill and records nothing, exactly as its tokens are not recorded either.
@@ -309,11 +324,11 @@ def record_external_call(service, *, subject="", **facts):
     Never raises: bookkeeping that can fail a tool call is worse than no bookkeeping.
     """
 
-    path = os.environ.get("MISAKA_USAGE_DB")
-    task_id = os.environ.get("MISAKA_USAGE_TASK_ID")
+    path, task_id, generation = _USAGE_CONTEXT.get() or (
+        os.environ.get("MISAKA_USAGE_DB"), os.environ.get("MISAKA_USAGE_TASK_ID"),
+        os.environ.get("MISAKA_USAGE_GENERATION", ""))
     if not path or not task_id:
         return False
-    generation = os.environ.get("MISAKA_USAGE_GENERATION", "")
     payload = {"service": str(service), **facts}
     if subject:
         payload["subject_sha256"] = hashlib.sha256(
@@ -341,8 +356,7 @@ def record_external_call(service, *, subject="", **facts):
             )
         finally:
             con.close()
-    except Exception as error:  # noqa: BLE001 - a lost ledger row must never cost the call it accounts for
-        logger.debug("external call not accounted (%s): %s", service, error)
+    except Exception:  # noqa: BLE001 - a lost ledger row must never cost the call it accounts for
         return False
     return True
 

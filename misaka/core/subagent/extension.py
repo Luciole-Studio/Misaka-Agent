@@ -10,19 +10,18 @@ no private batch or chain mini-language.
 exports ``route_to_children``, which resumes a child this session spawned, and
 the assembly code plugs it into that layer.
 
-Last Order is excluded at registration time. Every other MISAKA role gets the
-same tools, including named child agents.
+Last Order is excluded at registration time. Sister roots get the management
+tools; generic children use the upstream child-tool filter and retain policy hooks.
 """
 
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import os
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, create_model, field_validator
 
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.subagent import agents as agent_roster
@@ -34,6 +33,7 @@ from misaka.core.subagent.runtime import (
     format_sync_result,
     format_task_output,
 )
+from misaka.utils.values import read_field, semantic_boolean
 
 AGENT_TOOL_NAME = "Agent"
 TASK_OUTPUT_TOOL_NAME = "TaskOutput"
@@ -78,7 +78,8 @@ def allows_subagents(
 
 
 class _StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
+    _semantic_boolean = field_validator("run_in_background", "block", mode="before", check_fields=False)(semantic_boolean)
 
 
 class AgentParams(_StrictModel):
@@ -113,14 +114,24 @@ class AgentParams(_StrictModel):
     )
 
 
+# Two stable native validators, not a JSON-schema-only view that Pi can coerce
+# before a hook rewrite is checked. Provider schemas remain ordinary objects.
+AgentForegroundParams = create_model(
+    "AgentForegroundParams", __base__=_StrictModel,
+    **{name: (field.annotation, field) for name, field in AgentParams.model_fields.items()
+       if name != "run_in_background"},
+)
+
+
 class TaskOutputParams(_StrictModel):
     task_id: str = Field(description="The task ID to get output from")
     block: bool = Field(default=True, description="Whether to wait for completion")
-    timeout: int = Field(default=30_000, ge=0, le=600_000, description="Max wait time in ms")
+    timeout: float = Field(default=30_000, ge=0, le=600_000, description="Max wait time in ms")
 
 
 class TaskStopParams(_StrictModel):
     task_id: str | None = Field(default=None, description="The background task ID to stop")
+    shell_id: str | None = Field(default=None, description="Legacy task identifier; task_id takes precedence")
 
 
 def _text_result(text: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -145,10 +156,55 @@ def _render_result(result: Any, context: Any = None, *_args: Any) -> Any:
         task_id = details.get("agentId") or details.get("task_id")
         if not status or not task_id:
             return None
-        mark = {"completed": "✓", "running": "…", "pending": "…", "failed": "✗", "killed": "■"}.get(
-            status, "·"
-        )
-        return Text(f"{mark} {task_id}  {status}", paddingX=0, paddingY=0)
+        # Source AgentTool/UI.tsx branch structure; native Text/expanded mode
+        # replaces Ink/transcript widgets. Reuse native number/time formatting
+        # instead of recreating Intl or another UI framework.
+        from misaka.core.tools.bash import _format_duration
+        from misaka.core.tools.render_utils import get_text_output
+        from misaka.ui.tui.interactive.components.footer import format_tokens
+
+        expanded = bool(read_field(context, "expanded", False))
+        lines = []
+        if status == "async_launched":
+            lines.append("Backgrounded agent")
+        elif status == "completed" and "agentId" in details:
+            count = details.get("totalToolUseCount", 0)
+            uses = "1 tool use" if count == 1 else f"{count} tool uses"
+            lines.append(f"Done ({uses} · {format_tokens(details.get('totalTokens', 0))} tokens · "
+                         f"{_format_duration(details.get('totalDurationMs', 0))})")
+        elif status in {"running", "pending"} and "agentId" in details:
+            progress = details.get("progress") or {}
+            count, tokens = progress.get("toolUseCount", 0), progress.get("tokenCount", 0)
+            if not progress or (not count and not tokens and not progress.get("recentActivities")):
+                lines.append("Initializing…")
+            else:
+                lines.append(f"In progress… · {count} tool {'use' if count == 1 else 'uses'}" +
+                             (f" · {format_tokens(tokens)} tokens" if tokens else ""))
+                # Source collapsed progress shows the last three rows. The
+                # native tracker owns the bounded five-activity history.
+                activities = progress.get("recentActivities") or []
+                displayed = activities if expanded else activities[-3:]
+                for activity in displayed:
+                    lines.append(str(read_field(activity, "toolName", "")))
+                hidden = max(0, count - len(displayed))
+                if hidden:
+                    lines.append(f"+{hidden} more tool {'use' if hidden == 1 else 'uses'}")
+        else:
+            mark = {"completed": "✓", "running": "…", "pending": "…", "failed": "✗", "killed": "■"}.get(status, "·")
+            lines.append(f"{mark} {task_id}  {status}")
+        if expanded and status in {"completed", "async_launched"}:
+            completion = lines.pop(0) if status == "completed" else None
+            prompt = details.get("prompt")
+            if prompt:
+                lines.extend(("Prompt:", str(prompt)))
+            if status == "completed" and details.get("content"):
+                lines.extend(("Response:", get_text_output(details, False)))
+            if completion is not None:
+                lines.append(completion)
+        # Child names, prompts and output are data; retain the native terminal
+        # escape/control-byte sanitizer, including on expanded renders.
+        text = get_text_output({"content": [{"type": "text", "text": "\n".join(lines)}]}, False)
+        return Text(text, paddingX=0, paddingY=0)
     except Exception:  # noqa: BLE001
         return None
 
@@ -157,13 +213,16 @@ def _agent_prompt(
     context: RoleContext,
     project_trusted: bool | None = None,
     cwd: str | None = None,
+    *,
+    catalog: dict[str, agent_roster.AgentDefinition] | None = None,
+    fork_mode: bool = False,
 ) -> str:
     include_project = (
         getattr(context, "project_trusted", True)
         if project_trusted is None
         else project_trusted
     )
-    agents = agent_roster.discover(
+    agents = catalog if catalog is not None else agent_roster.discover(
         cwd=cwd or context.workspace,
         include_project=include_project,
     )
@@ -175,41 +234,38 @@ def _agent_prompt(
             for name, definition in agents.items()
             if ("general-purpose" if name in {"general", "general-purpose"} else name) in allowed
         }
-    listing = agent_roster.roster_text(agents)
-    return f"""Launch a new agent to handle a complex, multi-step task autonomously.
+    from misaka.core.subagent.prompt import render_prompt
 
-Available agent types and their tools:
-{listing}
-
-Usage notes:
-- Always include a short description and a complete, self-contained prompt.
-- Omit subagent_type to use general-purpose.
-- One Agent call creates one agent. Launch independent agents with multiple Agent calls in one message.
-- Foreground is the default when the result is needed immediately.
-- Background agents notify you automatically; do not sleep or poll them.
-- Continue an agent with SendMessage and read a task with TaskOutput.
-- isolation=\"worktree\" creates a temporary git worktree.
-"""
+    return render_prompt(agents, fork_mode=fork_mode)
 
 
 class SubagentPart:
     """Agent / TaskOutput / TaskStop for one role, the manager behind them, and the role's agent policy."""
 
-    def __init__(self, context: RoleContext, permitted: bool) -> None:
+    def __init__(self, context: RoleContext, permitted: bool, *, disallowed_tools: tuple[str, ...] = ()) -> None:
         from misaka.core.subagent import policy as subagent_policy
 
         self.role_context = context
         self.session: Any = None
         self.commands: list[Any] = []
         self.tools: list[ToolDefinition] = []
+        self._disallowed_tools = frozenset(name.casefold() for name in disallowed_tools)
+        self._can_manage_tasks = not {TASK_OUTPUT_TOOL_NAME.casefold(), TASK_STOP_TOOL_NAME.casefold()} & self._disallowed_tools
         self.policy = subagent_policy.policy_for(context)
         self.manager: SubagentManager | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
-        if not permitted:
+        self._flag_agents: Any = None
+        self._catalog_diagnostics: tuple[tuple[str, str], ...] = ()
+        if not permitted or AGENT_TOOL_NAME.casefold() in self._disallowed_tools:
             return
-        manager = self.manager = SubagentManager(None, context)
+        self.manager = SubagentManager(None, context)
+        from misaka.core.subagent.commands import agent_commands
+
+        self.commands = agent_commands(self)
 
         async def launch_agent(tool_call_id: str, raw: Any, signal: Any, on_update: Any, ctx: Any) -> dict[str, Any]:
+            manager = self.manager
+            assert manager is not None
             params = _coerce(AgentParams, raw)
             assert isinstance(params, AgentParams)
             if params.cwd and params.isolation:
@@ -229,10 +285,17 @@ class SubagentPart:
                 explicit_cwd=params.cwd is not None,
                 session_cwd=session_cwd,
             )
-            definition = manager.resolve_definition(
-                params.subagent_type,
-                call_cwd,
-                include_project,
+            from misaka.core.subagent import fork
+
+            fork_mode = fork.enabled(ctx)
+            if os.environ.get("MISAKA_FORK_CHILD") == "1" or (
+                fork_mode and fork.in_fork_child(manager.session.agent.state.messages)
+            ):
+                raise ValueError("Fork children execute directly; spawning descendants is disabled")
+            definition = (
+                fork.definition(manager.session)
+                if fork_mode and not params.subagent_type
+                else manager.resolve_definition(params.subagent_type, call_cwd, include_project)
             )
             await manager.require_mcp(definition)
             task = await manager.create_task(
@@ -240,7 +303,7 @@ class SubagentPart:
                 description=params.description,
                 prompt=params.prompt,
                 model=params.model,
-                background=params.run_in_background,
+                background=params.run_in_background or fork_mode,
                 name=params.name,
                 isolation=params.isolation,
                 cwd=params.cwd,
@@ -251,7 +314,12 @@ class SubagentPart:
                 project_cwd_explicit=params.cwd is not None,
             )
 
-            if params.run_in_background or bool(manager.field(definition, "background", False)):
+            from misaka.core.subagent.background import background_disabled
+
+            if background_disabled():
+                task.background = False
+                await task.persist()
+            if not background_disabled() and (fork_mode or params.run_in_background or bool(manager.field(definition, "background", False))):
                 manager.run_background(task, params.prompt)
                 data = task.async_result()
                 return _text_result(format_async_launch(data), data)
@@ -260,10 +328,15 @@ class SubagentPart:
                 await manager.run_foreground(task, params.prompt, signal)
             except AgentCancelled:
                 raise asyncio.CancelledError from None
+            if task._backgrounded.is_set() and task.status not in {"completed", "failed", "killed"}:
+                data = task.async_result()
+                return _text_result(format_async_launch(data), data)
             data = task.completed_result()
             return _text_result(format_sync_result(data), data)
 
         async def task_output(_tool_call_id: str, raw: Any, signal: Any, _on_update: Any, ctx: Any) -> dict[str, Any]:
+            manager = self.manager
+            assert manager is not None
             params = _coerce(TaskOutputParams, raw)
             assert isinstance(params, TaskOutputParams)
             data = await manager.task_output(
@@ -276,27 +349,32 @@ class SubagentPart:
             return _text_result(format_task_output(data), data)
 
         async def stop_task(_tool_call_id: str, raw: Any, _signal: Any, _on_update: Any, ctx: Any) -> dict[str, Any]:
+            manager = self.manager
+            assert manager is not None
             params = _coerce(TaskStopParams, raw)
             assert isinstance(params, TaskStopParams)
-            task_id = params.task_id
+            task_id = params.task_id if params.task_id is not None else params.shell_id
             if not task_id:
                 raise ValueError("Missing required parameter: task_id")
             data = await manager.stop_task(task_id, context=ctx)
             return _text_result(json.dumps(data, ensure_ascii=False), data)
 
+        from misaka.core.subagent.background import background_disabled
+
+        agent_schema = AgentForegroundParams if background_disabled() else AgentParams
+        self._launch_agent = launch_agent
         self.agent_tool = ToolDefinition(
             name=AGENT_TOOL_NAME,
+            aliases=("Task",),
             label="Agent",
             description=_agent_prompt(context, False),
-            parameters=AgentParams.model_json_schema(),
+            parameters=agent_schema,
             execute=launch_agent,
             renderResult=_render_result,
             promptSnippet="Delegate one task to an autonomous agent",
+            # Usage lives in the source-derived tool description, not a second
+            # stale copy in the system prompt (especially for fork/disabled BG).
             promptGuidelines=[
-                "Give fresh agents all relevant context; they do not see the parent conversation.",
-                "Use multiple Agent tool calls in one message for independent parallel work.",
-                "Use background only when useful work remains for you to do in parallel.",
-                "Completion arrives as a <task-notification>; never sleep or poll. TaskOutput reads a result, SendMessage continues the same agent, TaskStop stops one that is still running.",
                 "Findings a delegate brings back need the same source verification as your own before you cite them.",
             ],
         )
@@ -304,26 +382,90 @@ class SubagentPart:
             self.agent_tool,
             ToolDefinition(
                 name=TASK_OUTPUT_TOOL_NAME,
+                aliases=("AgentOutputTool", "BashOutputTool"),
                 label="Task Output",
                 description=(
                     "Read or wait for a registered background task. block=true waits up to timeout ms; "
                     "block=false returns its current state."
                 ),
-                parameters=TaskOutputParams.model_json_schema(),
+                parameters=TaskOutputParams,
                 execute=task_output,
                 renderResult=_render_result,
                 promptSnippet="Read output from a background task",
             ),
             ToolDefinition(
                 name=TASK_STOP_TOOL_NAME,
+                aliases=("KillShell",),
                 label="Stop Task",
                 description="Stop a running background task by ID",
-                parameters=TaskStopParams.model_json_schema(),
+                parameters=TaskStopParams,
                 execute=stop_task,
                 renderResult=_render_result,
                 promptSnippet="Stop a running task",
             ),
         ]
+        self.tools = [tool for tool in self.tools if tool.name.casefold() not in self._disallowed_tools]
+
+    def project_tools(self, tools: list[Any]) -> list[Any]:
+        from misaka.core.subagent.background import background_disabled
+        from misaka.core.tools.bash import BackgroundBashToolInput, BashToolInput
+
+        if self.manager is None or (not background_disabled() and
+                {TASK_OUTPUT_TOOL_NAME, TASK_STOP_TOOL_NAME}.issubset(tool.name for tool in tools)):
+            return tools
+        # Do not mutate the registry: leaving a scope restores the exact builtin.
+        # Only our builtin input type is projected; extension/SDK overrides retain
+        # their schema and execution. Reject stale background fields, not a silent
+        # downgrade into a blocking foreground command.
+        schema = BashToolInput.model_json_schema()
+        schema["additionalProperties"] = False
+        return [tool.model_copy(update={
+            "parameters": schema, "description": tool.description.split(" run_in_background=true", 1)[0],
+        }) if tool.name == "bash" and tool.parameters is BackgroundBashToolInput else tool for tool in tools]
+
+    def configure_tool_options(self, options: dict[str, Any]) -> None:
+        from misaka.core.subagent.background import background_disabled
+
+        if self.manager is None or not self._can_manage_tasks or background_disabled():
+            return
+
+        def current_manager(*, required):
+            manager = self.manager  # Reload replaces owners; resolve on each call.
+            available = manager is not None and not background_disabled()
+            if self.session is not None:
+                available = available and {TASK_OUTPUT_TOOL_NAME, TASK_STOP_TOOL_NAME}.issubset(self.session.getActiveToolNames())
+            if not available and required:
+                raise ValueError("Activate TaskOutput and TaskStop before starting a background command")
+            return manager if available else None
+
+        def start_background(**kwargs):
+            from misaka.core.subagent.shell import background_result
+            # Source ShellCommand.background removes its foreground timeout.
+            kwargs['timeout'] = None
+            return background_result(current_manager(required=True).start_shell(**kwargs))
+
+        def register_foreground(**kwargs):
+            manager = current_manager(required=False)
+            if manager is None:
+                return None  # Ordinary Pi foreground semantics in a restricted scope.
+            from misaka.core.tools.bash import _resolve_timeout_seconds
+            _resolve_timeout_seconds(kwargs.pop("timeout"))
+            return manager.start_shell(**kwargs, timeout=None, background=False)
+
+        options.setdefault("bash", {}).update(startBackground=start_background, registerForeground=register_foreground)
+
+    def get_permission_mode(self):
+        return self.policy.permission_mode if self.policy is not None else self.role_context.permission_mode
+
+    def set_permission_mode(self, mode):
+        from misaka.core.subagent import policy as subagent_policy
+        from misaka.core.subagent.configuration import validate_permission_mode
+
+        mode = validate_permission_mode(mode)
+        if self.policy is None:
+            self.policy = subagent_policy.AgentPolicy(self.role_context)
+            self.policy.session = self.session
+        self.policy.permission_mode = mode
 
     def attach(self, session: Any) -> None:
         self.session = session
@@ -332,43 +474,134 @@ class SubagentPart:
         if self.policy is not None:
             self.policy.session = session
 
-    async def _policy(self, name: str, event: Any, ctx: Any) -> Any:
-        if self.policy is None:
-            return None
-        result = getattr(self.policy, name)(event, ctx)
-        if inspect.isawaitable(result):
-            result = await result
+    def configure_agents(self, definitions: Any) -> None:
+        """MISAKA CLI/SDK adapter for CCB --agents JSON (flagSettings)."""
+        self._flag_agents = definitions
+        if self.manager is not None:
+            self.manager.flag_agents = definitions
+
+    async def before_agent_start(self, event: Any, _ctx: Any) -> Any:
+        eligible = await self._refresh_roster(_ctx) if self.manager is not None else {}
+        result = await self.policy.before_agent(event) if self.policy is not None else None
+        from misaka.core.subagent.catalog import list_in_messages, listing_delta
+
+        # A hidden Agent tool must not leak an unactionable catalog into the prompt.
+        if list_in_messages() and self.session is not None:
+            names = self.session.getActiveToolNames()
+            if AGENT_TOOL_NAME in names:
+                message = listing_delta(eligible or {}, self.session.agent.state.messages)
+                if message is not None:
+                    result = dict(result or {})
+                    result["messages"] = [*(result.get("messages") or []), message]
         return result
 
-    async def before_agent_start(self, event: Any, ctx: Any) -> Any:
-        return await self._policy("before_agent", event, ctx)
+    async def context(self, event: Any, ctx: Any) -> Any:
+        from misaka.core.subagent.catalog import list_in_messages, listing_delta
 
-    async def tool_call(self, event: Any, ctx: Any) -> Any:
-        return await self._policy("before_tool", event, ctx)
+        messages = read_field(event, "messages", [])
+        attachments = []
+        if (list_in_messages() and self.manager is not None and self.session is not None
+                and AGENT_TOOL_NAME in self.session.getActiveToolNames()):
+            eligible = await self._refresh_roster(ctx)
+            delta = listing_delta(eligible or {}, messages)
+            if delta is not None:
+                attachments.append({"role": "custom", "timestamp": 0, **delta})
+        reminder = self.role_context.critical_system_reminder
+        if reminder:
+            # CCB getCriticalSystemReminderAttachment + wrapInSystemReminder,
+            # after native engine preflight on EVERY request. This is not
+            # durable chat history and does not mutate the LCM source prefix.
+            attachments.append({
+                "role": "custom", "customType": "critical_system_reminder",
+                "content": f"<system-reminder>\n{reminder}\n</system-reminder>",
+                "display": False, "timestamp": 0,
+            })
+        return {"messages": [*messages, *attachments]} if attachments else None
 
-    async def tool_result(self, event: Any, ctx: Any) -> Any:
-        return await self._policy("after_tool", event, ctx)
+    async def tool_call(self, event: Any, _ctx: Any) -> Any:
+        name = str(read_field(event, "toolName", ""))
+        if name.casefold() in self._disallowed_tools:
+            return {"block": True, "reason": f"{name} is excluded by the upstream generic-child tool policy."}
+        if self.policy is not None:
+            return await self.policy.before_tool(event)
+
+    async def tool_result(self, event: Any, _ctx: Any) -> Any:
+        if self.policy is not None:
+            return await self.policy.after_tool(event)
 
     async def agent_end(self, event: Any, ctx: Any) -> Any:
-        return await self._policy("on_event", event, ctx)
+        if self.policy is not None:
+            return await self.policy.on_event(event, ctx)
 
     async def session_start(self, _event: Any, ctx: Any) -> None:
         manager = self.manager
         if manager is None:
             return
+        # Parts survive reload/session replacement; a closed manager does not.
+        # Tool callbacks resolve self.manager at invocation, never an old closure.
+        if manager._closed:
+            manager = self.manager = SubagentManager(self.session, self.role_context)
+            manager.flag_agents = self._flag_agents
+        owner = getattr(ctx, "sessionManager", None)
+        if owner is not None:
+            from misaka.core.subagent.runtime import _safe_component
+
+            manager._parent_session_id = _safe_component(str(owner.getSessionId()))
         # The loop the session runs on is known here, not when the part was built:
         # ``route_to_children`` and the drains below find this manager through it.
         self._loop = asyncio.get_running_loop()
         _ACTIVE_MANAGERS.setdefault(self._loop, set()).add(manager)
+        await self._refresh_roster(ctx)
+
+    async def _refresh_roster(self, ctx: Any) -> dict[str, agent_roster.AgentDefinition]:
+        manager = self.manager
+        if manager is None:
+            return
+        cwd = getattr(ctx, "cwd", None) or self.role_context.workspace
+        trusted = ctx.isProjectTrusted()
+        catalog = await asyncio.to_thread(manager.catalog, cwd, trusted)
+        diagnostics = tuple((item["path"], item["error"]) for item in catalog.diagnostics)
+        if diagnostics != self._catalog_diagnostics:
+            for path, error in diagnostics:
+                from misaka.core.subagent.runtime import _log_warning
+
+                await asyncio.to_thread(_log_warning, f"Agent definition {path}: {error}")
+            self._catalog_diagnostics = diagnostics
+        get_tools = getattr(self.session, "getAllTools", None)
+        tools = get_tools() if get_tools is not None else []
+        available_servers = [tool.name.split("__", 2)[1] for tool in tools
+                             if tool.name.startswith("mcp__") and tool.name.count("__") >= 2]
+        from misaka.core.subagent.configuration import denied_agent_types
+
+        denied_agents = denied_agent_types(self.session, cwd=cwd, include_project=trusted)
+        eligible = {
+            name: agent for name, agent in catalog.active_agents.items()
+            if agent.name not in denied_agents and agent_roster.has_required_mcp_servers(agent, [
+                *available_servers,
+                # An isolated MISAKA worker owns inline clients; the parent
+                # cannot connect those in advance. Its ready barrier is final.
+                *(server for server, _ in agent_roster.inline_mcp_entries(agent.mcp_servers)),
+            ])
+        }
+        if self.role_context.allowed_agent_types:
+            allowed = {agent_roster._canonical_name(name) for name in self.role_context.allowed_agent_types}
+            eligible = {name: agent for name, agent in eligible.items()
+                        if agent_roster._canonical_name(agent.name) in allowed}
+        from misaka.core.subagent.fork import enabled as fork_enabled
+
         description = _agent_prompt(
-            self.role_context,
-            ctx.isProjectTrusted(),
-            getattr(ctx, "cwd", None) or self.role_context.workspace,
+            self.role_context, trusted, cwd,
+            catalog=eligible, fork_mode=fork_enabled(ctx),
         )
-        if description != self.agent_tool.description:
+
+        from misaka.core.subagent.background import background_disabled
+        schema = AgentForegroundParams if background_disabled() or fork_enabled(ctx) else AgentParams
+        if description != self.agent_tool.description or schema != self.agent_tool.parameters:
             self.agent_tool.description = description
+            self.agent_tool.parameters = schema
             if self.session is not None:
                 self.session.refreshTools()
+        return eligible
 
     async def session_shutdown(self, _event: Any, _ctx: Any) -> None:
         manager = self.manager
@@ -390,6 +623,8 @@ def part_for(
     workspace: str,
     mcp_role: str | None = None,
     tool_ceiling: tuple[str, ...] | list[str] | None | object = _TOOL_CEILING_UNSET,
+    *,
+    disallowed_tools: tuple[str, ...] = (),
 ) -> SubagentPart:
     """The part for an immutable role/workspace snapshot."""
 
@@ -402,7 +637,7 @@ def part_for(
     if tool_ceiling is not _TOOL_CEILING_UNSET:
         capture_args["tool_ceiling"] = tool_ceiling
     context = RoleContext.capture(**capture_args)
-    return SubagentPart(context, allows_subagents(profile_dir, role, _env_role=role))
+    return SubagentPart(context, allows_subagents(profile_dir, role, _env_role=role), disallowed_tools=disallowed_tools)
 
 
 async def wait_for_background_tasks() -> None:
@@ -413,7 +648,7 @@ async def wait_for_background_tasks() -> None:
         runners = [
             task.runner
             for manager in managers
-            for task in manager._tasks.values()
+            for task in (*manager._tasks.values(), *manager._shell_tasks.values())
             if task.background and task.runner is not None and not task.runner.done()
         ]
         if not runners:
@@ -463,7 +698,7 @@ def has_background_tasks() -> bool:
     return any(
         task.background and task.runner is not None and not task.runner.done()
         for manager in managers
-        for task in manager._tasks.values()
+        for task in (*manager._tasks.values(), *manager._shell_tasks.values())
     )
 
 
@@ -485,28 +720,14 @@ async def route_to_children(to: str, message: str, _summary: str, ctx: Any):
         if manager._parent_session_id != sid:
             continue
         try:
-            # No ctx in the lookup on purpose: route only looks for live tasks (in memory or already
-            # bound); binding a blank manager here would poison concurrent sessions (review 2026-08-20).
-            if await manager._find_task_async(to) is None:
+            # Ownership was bound by session_start and checked above. Only this
+            # session's manager may lazily open its persisted child registry.
+            if await manager._find_task_async(to, context=ctx) is None:
                 continue
         except RuntimeError:
             continue
         return await manager.send_message(to, message, context=ctx)
     return None
-
-
-def has_background_task_records() -> bool:
-    """Whether this loop's session launched any detached agent this turn."""
-
-    try:
-        managers = tuple(_ACTIVE_MANAGERS.get(asyncio.get_running_loop(), ()))
-    except RuntimeError:
-        return False
-    return any(
-        task.background
-        for manager in managers
-        for task in manager._tasks.values()
-    )
 
 
 __all__ = [
@@ -519,7 +740,6 @@ __all__ = [
     "TaskStopParams",
     "allows_subagents",
     "has_async_hooks",
-    "has_background_task_records",
     "has_background_tasks",
     "part_for",
     "route_to_children",

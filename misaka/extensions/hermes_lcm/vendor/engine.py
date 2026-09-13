@@ -13,8 +13,10 @@ import os
 import re
 import sqlite3
 import threading
+import contextvars  # misaka: preserve the calling host context in background jobs
 import time
 from collections import deque
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -207,6 +209,9 @@ class _RollupMaintenanceScheduler:
         *,
         owner: object | None = None,
     ) -> bool:
+        job_context = contextvars.copy_context()
+        original_job = job
+        job = lambda: job_context.run(original_job)  # misaka: each queued job owns its context
         with self._condition:
             if key in self._exclusive_keys:
                 logger.info(
@@ -348,6 +353,7 @@ _ROLLUP_MAINTENANCE_SCHEDULER = _RollupMaintenanceScheduler()
 
 _SESSION_END_BUSY_TIMEOUT_MS = 50
 _CODEX_GPT55_COMPACTION_THRESHOLD = 0.85
+_TOTAL_COMPACTIONS_SCOPE = "current_conversation"
 
 # Auto-focus topic derivation: infer a compact focus hint from the most recent
 # real user turns so that summarization can prioritise current user intent.
@@ -358,6 +364,13 @@ _AUTO_FOCUS_MAX_CHARS = 700
 
 _PRESERVED_TODO_CONTEXT_PREFIX = "[Your active task list was preserved across context compression]"
 _LCM_MESSAGE_PREFIX_FINGERPRINT_LIMIT = 8
+
+
+def _normalize_total_compactions(value: Any) -> int:
+    """Return a persisted compaction total only when it is a valid counter."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
 
 
 class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessionMixin, PlaceholderLedgerMixin, BypassMixin, ContextEngine):
@@ -490,6 +503,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         self.last_reasoning_tokens = 0
         self.cache_metrics_available = False
         self.compression_count = 0
+        # Distinguishes this reset-scoped process counter from overlapping or
+        # previous runtimes that write the same conversation telemetry row.
+        self._compaction_telemetry_counter_epoch = uuid.uuid4().hex
+        self._compaction_telemetry_counter_rebaseline_pending = True
+        self._compaction_telemetry_turn_reset_pending = False
         # Wall-clock of the last leaf compaction (ms); surfaced via telemetry only.
         self._last_compaction_duration_ms = 0.0
         # run_agent.py reads these for preflight checks
@@ -1165,14 +1183,82 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             return 0.0
         return self.last_cache_read_tokens / self.last_prompt_tokens
 
+    def _compaction_telemetry_counter_delta(
+        self,
+        existing: Dict[str, Any],
+    ) -> tuple[int, bool, int]:
+        """Return persisted baseline, reset state, and unrecorded compactions."""
+        prev_count = int(existing.get("compression_count_at_record", 0) or 0)
+        epoch_baseline = None
+        watermarks = existing.get("counter_epoch_watermarks", [])
+        if isinstance(watermarks, list):
+            for item in watermarks:
+                if (
+                    isinstance(item, list)
+                    and len(item) == 2
+                    and item[0] == self._compaction_telemetry_counter_epoch
+                    and isinstance(item[1], int)
+                    and not isinstance(item[1], bool)
+                    and item[1] >= 0
+                ):
+                    epoch_baseline = item[1]
+                    break
+        if epoch_baseline is not None:
+            prev_count = epoch_baseline
+        rebaseline_pending = bool(
+            existing
+            and self._compaction_telemetry_counter_rebaseline_pending
+        )
+        delta = (
+            max(0, self.compression_count - epoch_baseline)
+            if epoch_baseline is not None
+            else self.compression_count
+            if rebaseline_pending
+            else max(0, self.compression_count - prev_count)
+        )
+        return prev_count, rebaseline_pending, delta
+
+    def _record_successful_compaction_telemetry(self) -> None:
+        """Durably count a completed leaf compaction before returning it."""
+        conversation_id = self._conversation_id
+        if not conversation_id:
+            return
+        try:
+            existing = self._store.read_compaction_telemetry(conversation_id) or {}
+            _, _, compaction_delta = self._compaction_telemetry_counter_delta(existing)
+            if compaction_delta <= 0:
+                return
+
+            updates = {
+                "conversation_id": conversation_id,
+                "counter_epoch": self._compaction_telemetry_counter_epoch,
+                "compression_count_at_record": self.compression_count,
+                "turns_since_leaf_compaction": 0,
+                "peak_prompt_tokens_since_leaf_compaction": 0,
+                "last_leaf_compaction_at": time.time(),
+                "last_compaction_duration_ms": round(self._last_compaction_duration_ms, 3),
+            }
+            self._store.increment_compaction_telemetry(
+                conversation_id,
+                compaction_delta,
+                updates,
+            )
+            self._compaction_telemetry_counter_rebaseline_pending = False
+            # The response hook still owns per-turn token/cache fields. Keep its
+            # first post-compaction snapshot at turn zero without recounting.
+            self._compaction_telemetry_turn_reset_pending = True
+        except Exception:
+            logger.debug("LCM successful compaction telemetry update failed", exc_info=True)
+
     def _record_turn_compaction_telemetry(self) -> None:
         """Persist a per-conversation compaction-telemetry snapshot for this turn.
 
         Best-effort and diagnostic only: any failure is logged at debug and never
         affects the turn. Turns with no token or cache signal are skipped so idle
         turns do not churn the record. The since-compaction accumulators reset off
-        the monotonic ``compression_count`` (which also drops to 0 on a session
-        reset) rather than instrumenting the compaction hot path.
+        the monotonic ``compression_count``. Session resets mark the next
+        telemetry write for an explicit zero-baseline comparison so compactions
+        that happen before that write are not mistaken for an old baseline.
         """
         conversation_id = self._conversation_id
         if not conversation_id:
@@ -1202,9 +1288,17 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             elif cache_state == "cold":
                 cold_streak += 1
 
-            prev_count = int(existing.get("compression_count_at_record", 0) or 0)
-            compacted = self.compression_count > prev_count
-            rebaselined = self.compression_count != prev_count  # compaction or session reset
+            (
+                prev_count,
+                counter_rebaseline_pending,
+                compaction_delta,
+            ) = self._compaction_telemetry_counter_delta(existing)
+            compacted = compaction_delta > 0
+            rebaselined = (
+                self._compaction_telemetry_turn_reset_pending
+                or counter_rebaseline_pending
+                or self.compression_count != prev_count
+            )
             if rebaselined:
                 turns_since = 0
                 peak_tokens_since = prompt_tokens
@@ -1214,9 +1308,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     int(existing.get("peak_prompt_tokens_since_leaf_compaction", 0) or 0),
                     prompt_tokens,
                 )
-            total_compactions = int(existing.get("total_compactions", 0) or 0)
+            total_compactions = _normalize_total_compactions(
+                existing.get("total_compactions", 0)
+            )
             if compacted:
-                total_compactions += self.compression_count - prev_count
+                total_compactions += compaction_delta
                 last_leaf_compaction_at = time.time()
                 last_compaction_duration_ms = round(self._last_compaction_duration_ms, 3)
             else:
@@ -1241,11 +1337,20 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 "last_leaf_compaction_at": last_leaf_compaction_at,
                 "last_compaction_duration_ms": last_compaction_duration_ms,
                 "total_compactions": total_compactions,
+                "counter_epoch": self._compaction_telemetry_counter_epoch,
                 "compression_count_at_record": self.compression_count,
             })
             if cache_state == "hot":
                 record["last_cache_hit_at"] = time.time()
-            self._store.write_compaction_telemetry(conversation_id, record)
+            # Even zero-delta snapshots use the transactional updater so an
+            # overlapping snapshot cannot overwrite a newly incremented total.
+            self._store.increment_compaction_telemetry(
+                conversation_id,
+                compaction_delta,
+                record,
+            )
+            self._compaction_telemetry_counter_rebaseline_pending = False
+            self._compaction_telemetry_turn_reset_pending = False
         except Exception:
             logger.debug("LCM compaction telemetry update failed", exc_info=True)
 
@@ -1585,6 +1690,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             attempt_number += 1
             source_tokens = count_messages_tokens(attempt_chunk)
             serialized = self._serialize_messages(attempt_chunk)
+            source_store_ids = sorted(dict.fromkeys(
+                self._current_compress_store_ids_by_message_id[id(message)]
+                for message in attempt_chunk
+                if id(message) in self._current_compress_store_ids_by_message_id
+            ))
             token_budget = max(2000, int(source_tokens * 0.20))
             token_budget = min(token_budget, 12000)
 
@@ -1609,6 +1719,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     l3_truncate_tokens=self._config.l3_truncate_tokens,
                     focus_topic=focus_topic or "",
                     custom_instructions=self._config.custom_instructions,
+                    source_provenance={
+                        "source_type": "messages",
+                        "store_ids": source_store_ids,
+                        "message_count": len(attempt_chunk),
+                    },
                 )
                 return attempt_chunk, source_tokens, summary_text, level, attempt_number
             except Exception as exc:
@@ -2495,6 +2610,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         boundary_reason = str(kwargs.get("boundary_reason") or "")
         old_session_id = str(kwargs.get("old_session_id") or "")
         previous_session_id = self._session_id
+        previous_conversation_id = self._conversation_id
+        requested_conversation_id = str(kwargs.get("conversation_id") or session_id)
         self._lcm_current_start_allows_bypass_lineage = False
         requested_platform = str(kwargs.get("platform") or self._session_platform or "")
         pre_reset_preserve_ambiguous_no_frame_old_session = False
@@ -2745,6 +2862,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             self._finalize_pending_reset_boundary(previous_session_id)
             self._reset_session_scoped_runtime_state()
         else:
+            if (
+                previous_conversation_id
+                and requested_conversation_id != previous_conversation_id
+            ):
+                self._reset_session_counters()
             self._clear_pending_reset_boundary()
             self._ingest_cursor = 0
             self._last_compacted_store_id = 0
@@ -3591,7 +3713,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         )
 
         if carry_over_context and boundary_reason == "compression" and old_session_id and old_session_id != new_session_id:
-            before_node_ids = {node.node_id for node in self._dag.get_session_nodes(new_session_id)}
+            # misaka: a rollover receipt counts all moved nodes, not a paginated sample.
+            before_node_ids = {node.node_id for node in self._dag.get_session_nodes(new_session_id, limit=-1)}
             if can_carry_over:
                 self.on_session_end(old_session_id, previous_messages)
             else:
@@ -3605,7 +3728,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 old_session_id=old_session_id,
                 **kwargs,
             )
-            after_node_ids = {node.node_id for node in self._dag.get_session_nodes(new_session_id)}
+            after_node_ids = {node.node_id for node in self._dag.get_session_nodes(new_session_id, limit=-1)}
             return len(after_node_ids - before_node_ids)
 
         if old_session_id and can_carry_over:
@@ -3632,7 +3755,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             return 0
         return self.carry_over_new_session_context(old_session_id, new_session_id)
 
-    def get_tool_schemas(self) -> List[Dict[str, Any]]:
+    @staticmethod  # misaka: schema registration does not require a storage runtime
+    def get_tool_schemas() -> List[Dict[str, Any]]:
         return [
             LCM_GREP,
             LCM_RECALL,
@@ -3815,6 +3939,23 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         session_id = self.current_session_id
         conversation_id = self.current_conversation_id
         lifecycle_state = self._lifecycle.get_by_conversation(conversation_id) if conversation_id else None
+        try:
+            telemetry = self._store.read_compaction_telemetry(conversation_id)
+        except Exception:
+            telemetry = None
+        total_compactions = _normalize_total_compactions(
+            telemetry.get("total_compactions", 0) if telemetry else 0
+        )
+        if conversation_id and conversation_id == self._conversation_id:
+            try:
+                _, _, pending_compactions = self._compaction_telemetry_counter_delta(
+                    telemetry or {}
+                )
+            except (TypeError, ValueError):
+                pending_compactions = 0
+            total_compactions += pending_compactions
+        status["total_compactions"] = total_compactions
+        status["total_compactions_scope"] = _TOTAL_COMPACTIONS_SCOPE
         status["engine"] = "lcm"
         status["runtime_identity"] = self.get_runtime_identity()
         status["ingest_protection"] = sensitive_pattern_status(self._config)
@@ -3883,10 +4024,6 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     "last_reset_at": lifecycle_state.last_reset_at,
                     "updated_at": lifecycle_state.updated_at,
                 }
-            try:
-                telemetry = self._store.read_compaction_telemetry(conversation_id)
-            except Exception:
-                telemetry = None
             if telemetry:
                 status["compaction_telemetry"] = {
                     "cache_state": telemetry.get("cache_state", "unknown"),
@@ -3905,7 +4042,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     "last_observed_cache_read": telemetry.get("last_observed_cache_read", 0),
                     "last_observed_cache_write": telemetry.get("last_observed_cache_write", 0),
                     "activity_band": telemetry.get("activity_band", "low"),
-                    "total_compactions": telemetry.get("total_compactions", 0),
+                    "total_compactions": total_compactions,
                     "last_leaf_compaction_at": telemetry.get("last_leaf_compaction_at"),
                     "last_compaction_duration_ms": telemetry.get("last_compaction_duration_ms"),
                     "provider": telemetry.get("provider"),
@@ -4851,7 +4988,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                         snapshot.store_id,
                         last_error,
                     )
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:  # misaka: cancelled batches still release ownership
             failed += max(1, len(snapshots) - completed)
             last_error = f"{type(exc).__name__}: {exc}"[:300]
             logger.warning("Structured assertion batch failed: %s", last_error)
@@ -4928,8 +5065,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             self._assertion_extraction_sources_scheduled += len(snapshots)
         self._assertion_extraction_idle.clear()
         worker = threading.Thread(
-            target=self._run_assertion_extraction_batch,
-            args=(str(self._store.db_path), tuple(snapshots), model, timeout_seconds),
+            target=contextvars.copy_context().run,  # misaka: inherit the auxiliary provider registry
+            args=(self._run_assertion_extraction_batch, str(self._store.db_path), tuple(snapshots), model, timeout_seconds),
             name="lcm-assertion-extraction",
             daemon=True,
         )
@@ -5444,8 +5581,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         # the deepest existing node + 1, so condensation can always
         # create the next depth level.
         if max_depth < 0:
-            all_nodes = self._dag.get_session_nodes(self._session_id)
-            upper = (max(n.depth for n in all_nodes) + 1) if all_nodes else 1
+            # misaka: retain native depth discovery unless the host scopes a checkpoint.
+            depths = (self._dag.get_session_depth_stats(self._session_id) if self._dag.active_node_ids is None
+                      else (node.depth for node in self._summary_frontier_nodes()))
+            upper = max(depths, default=0) + 1
         else:
             upper = max_depth
 
@@ -5454,9 +5593,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         fanin = max(1, self._config.condensation_fanin)
 
         for depth in range(upper):
-            uncondensed = self._dag.get_uncondensed_at_depth(
-                self._session_id, depth
-            )
+            # misaka: a host checkpoint uses the same scope for condensation and assembly.
+            uncondensed = (self._dag.get_uncondensed_at_depth(self._session_id, depth, limit=-1)
+                           if self._dag.active_node_ids is None else
+                           [node for node in self._summary_frontier_nodes() if node.depth == depth])
             if len(uncondensed) < fanin:
                 continue
 
@@ -5526,6 +5666,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             l3_truncate_tokens=self._config.l3_truncate_tokens,
             focus_topic=focus_topic or "",
             custom_instructions=self._config.custom_instructions,
+            source_provenance={
+                "source_type": "summary_nodes",
+                "node_ids": [node.node_id for node in nodes],
+                "source_depth": depth,
+            },
         )
         earliest_at, latest_at = self._dag.get_source_time_window(
             [node.node_id for node in nodes]
@@ -5550,7 +5695,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
 
     def _summary_frontier_nodes(self) -> List[SummaryNode]:
         """Return all provider-visible summary frontier nodes for the active session."""
-        all_nodes = self._dag.get_session_nodes(self._session_id, limit=100_000)
+        # misaka: frontier membership depends on every parent, not an arbitrary page cap.
+        all_nodes = self._dag.get_session_nodes(self._session_id, limit=-1)
+        if self._dag.active_node_ids is not None:  # misaka: archived sibling nodes stay retrievable
+            all_nodes = [node for node in all_nodes if node.node_id in self._dag.active_node_ids]
         referenced = {
             source_id
             for node in all_nodes
@@ -5964,26 +6112,21 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         # Node ids placed in the summary prefix — used to dedupe proactive-recall
         # injection against summaries already visible in the active context.
         active_summary_node_ids: set = set()
-        all_nodes = self._dag.get_session_nodes(self._session_id)
-        if all_nodes:
-            # Group by depth, take the most recent uncondensed at each level
-            # For active context, we want the highest-level summaries
-            # that haven't been condensed into even higher levels
-            depths = sorted(set(n.depth for n in all_nodes), reverse=True)
-            for d in depths:
-                uncondensed = self._dag.get_uncondensed_at_depth(self._session_id, d)
-                for node in uncondensed:
-                    active_summary_node_ids.add(node.node_id)
-                    depth_label = {
-                        0: "Recent",
-                        1: "Session Arc",
-                        2: "Durable",
-                    }.get(d, f"Depth-{d}")
-                    summary_parts.append(
-                        f"[{depth_label} Summary (d{d}, node {node.node_id})]\n"
-                        f"{node.summary}\n"
-                        f"[Expand for details: {node.expand_hint}]"
-                    )
+        # misaka: share the complete frontier; only the token budget may omit nodes.
+        # Stable sorting preserves created_at order within each depth.
+        for node in sorted(self._summary_frontier_nodes(), key=lambda node: -node.depth):
+            active_summary_node_ids.add(node.node_id)
+            d = node.depth
+            depth_label = {
+                0: "Recent",
+                1: "Session Arc",
+                2: "Durable",
+            }.get(d, f"Depth-{d}")
+            summary_parts.append(
+                f"[{depth_label} Summary (d{d}, node {node.node_id})]\n"
+                f"{node.summary}\n"
+                f"[Expand for details: {node.expand_hint}]"
+            )
 
         if summary_parts:
             selected_parts = summary_parts

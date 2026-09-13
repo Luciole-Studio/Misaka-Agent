@@ -11,8 +11,9 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from misaka.config import CFG, current_config, sisters
+from misaka.config.identity import COORDINATOR_APPROVAL, COORDINATOR_RECEIPTS
 from misaka.core.network import validate
-from misaka.core.network.sister_runtime import ACTIVE_BOARD_STATUSES, SisterRuntime
+from misaka.core.network.sister_runtime import SisterRuntime
 from misaka.core.platform import budget, toolkit
 from misaka.core.platform import tasks as db
 from misaka.core.platform.prompt_guard import untrusted
@@ -106,9 +107,22 @@ def _task_ids(args):
 
 def _require_project_tasks(ctx, args):
     workspace = _workspace(ctx)
+    try:
+        dm_cards = json.loads(os.environ.get("MISAKA_DM_CARD_ALLOWLIST", "[]"))
+    except (TypeError, ValueError):
+        dm_cards = []
+    if not isinstance(dm_cards, list):
+        dm_cards = []
+    generation = getattr(args, "generation", None)
     for task_id in _task_ids(args):
         row = db.get(_con(), task_id)
-        if row is None or db.workspace_for(row) != workspace:
+        allowed_dm_card = (
+            row is not None
+            and generation is not None
+            and int(row["generation"]) == int(generation)
+            and [task_id, int(generation), db.workspace_for(row)] in dm_cards
+        )
+        if row is None or (db.workspace_for(row) != workspace and not allowed_dm_card):
             raise ValueError(f"Task card not found in this project: {task_id}")
 
 
@@ -132,6 +146,12 @@ def _install(harn, runtime):
 
     class StrictParams(BaseModel):
         model_config = ConfigDict(extra="forbid")
+
+    class CardReadParams(StrictParams):
+        generation: int | None = Field(
+            None, ge=1,
+            description="For a contact-session help request, supply its generation with its task ID; required to read that card outside its project.",
+        )
 
     class BoardParams(BaseModel):
         status: str | None = Field(None, description=(
@@ -162,6 +182,7 @@ def _install(harn, runtime):
         mine = _session_line(ctx)
         lines = [f"{'*' if r['origin_session'] in mine else ' '} {r['id']}  "
                  f"{r['status']:<10} {r['assignee']:<14} {r['title'][:50]}"
+                 + (f"  [{r['signal']}]" if r.get("signal") else "")
                  + ("  (no card file: run `misaka init --migrate`)" if r.get("missing_file") else "")
                  for r in rows]
         if total > len(rows):
@@ -193,7 +214,6 @@ def _install(harn, runtime):
             None, description="Model for this card only, in the form `misaka create --model` takes; "
                               "default: the Sister's own configured model."
         )
-        timeout: int = Field(900, ge=60, le=3600, description="Seconds one attempt may run, 60–3600.")
 
 
     @_register(
@@ -203,14 +223,14 @@ def _install(harn, runtime):
         snippet="Create a Sister task card with goal, boundaries, and acceptance criteria",
         guidelines=[
             "The body should contain `## goal` and `## boundaries`, and must contain `## acceptance criteria` with verifiable outcomes (the only section that is validated).",
-            "After creating cards, show the plan and wait for explicit user approval before calling `misaka_dispatch`.",
+            COORDINATOR_APPROVAL,
         ],
         parameters=CardParams)
     async def misaka_card(tool_call_id, params, signal, on_update, ctx):
         con = _con()
         cards, errs = validate.validate_cards(
             [{"title": params.title, "body": params.body, "assignee": params.assignee,
-              "priority": params.priority, "model": params.model, "timeout": params.timeout}],
+              "priority": params.priority, "model": params.model}],
             set(_sisters()))
         if errs:
             raise ValueError(';'.join(errs))
@@ -221,7 +241,7 @@ def _install(harn, runtime):
         c = cards[0]
         from misaka.core.platform import cards as card_files
         tid = card_files.create(con, _workspace(ctx), c["title"], c["body"], c["assignee"],
-                                model=c["model"], priority=c["priority"], timeout_seconds=c["timeout"],
+                                model=c["model"], priority=c["priority"],
                                 reviewer=params.reviewer, origin_session=_session_id(ctx))
         review = f" → reviewer {params.reviewer}" if params.reviewer else ""
         return _text(
@@ -345,7 +365,7 @@ def _install(harn, runtime):
         name="misaka_dispatch", label="Start approved work",
         description="Start ready Sister task cards. This spends model quota and requires explicit user approval.",
         snippet="Start ready task cards after explicit user approval",
-        guidelines=["Do not call `misaka_dispatch` until the user explicitly says to start, run, or execute the planned work."],
+        guidelines=[COORDINATOR_APPROVAL],
         parameters=DispatchParams)
     async def misaka_dispatch(tool_call_id, params, signal, on_update, ctx):
         if not params.confirmed:
@@ -373,7 +393,7 @@ def _install(harn, runtime):
                 try:
                     out = await asyncio.to_thread(
                         net.request, "pane.run_card",
-                        {"task_id": row["id"], "place": {"tab": os.environ["MISAKA_NET_PANE"]}})
+                        {"task_id": row["id"], "place": {"grid": os.environ["MISAKA_NET_PANE"]}})
                     started += 1
                     lines.append(f"""  {row['id']} → {row['assignee']}  pane {out['pane_id']}""")
                 except Exception as error:  # noqa: BLE001 - report individual launch failures
@@ -414,7 +434,7 @@ def _install(harn, runtime):
         name="misaka_sister", label="Start Sister task",
         description="Start one ready task card and return its durable task ID. This is separate from generic subagents.",
         snippet="Start one Sister task after explicit user approval",
-        guidelines=["Start only user-approved cards; manage them with `misaka_sister_output`, `misaka_sister_message`, and `misaka_sister_stop`."],
+        guidelines=[COORDINATOR_APPROVAL, "Manage Sister tasks with `misaka_sister_output`, `misaka_sister_message`, and `misaka_sister_stop`."],
         parameters=SisterParams)
     async def misaka_sister(tool_call_id, params, signal, on_update, ctx):
         if not params.confirmed:
@@ -424,7 +444,7 @@ def _install(harn, runtime):
             from misaka.ui.panel import client as net
             out = await asyncio.to_thread(
                 net.request, "pane.run_card",
-                {"task_id": params.task_id, "place": {"tab": os.environ["MISAKA_NET_PANE"]}})
+                {"task_id": params.task_id, "place": {"grid": os.environ["MISAKA_NET_PANE"]}})
             return _text(f"Card {params.task_id} started in pane {out['pane_id']}.")
         result = await runtime.launch(
             params.task_id,
@@ -435,7 +455,7 @@ def _install(harn, runtime):
         return _text(json.dumps(result, ensure_ascii=False))
 
 
-    class SisterOutputParams(StrictParams):
+    class SisterOutputParams(CardReadParams):
         # The default is the non-blocking read. Progress arrives on its own as a
         # <sister-notification>, and Last Order's charter tells her not to poll while
         # work is running, so a bare call is asking "where is this card now" -- it must
@@ -456,7 +476,7 @@ def _install(harn, runtime):
         name="misaka_sister_output", label="Get Sister result",
         description="Inspect a Sister task or wait for its accepted, failed, or stopped result.",
         snippet="Inspect or wait for a Sister task",
-        guidelines=["Progress arrives as a <sister-notification>; do not poll. Read a result with misaka_sister_output after the notification or when the user asks; misaka_sister_peek is for diagnosing a stuck task, not for progress checks."],
+        guidelines=[COORDINATOR_RECEIPTS, "Read a result with misaka_sister_output after the notification or when the user asks; misaka_sister_peek is for diagnosing a stuck task, not for progress checks."],
         parameters=SisterOutputParams)
     async def misaka_sister_output(tool_call_id, params, signal, on_update, ctx):
         result = await runtime.output(
@@ -465,10 +485,11 @@ def _install(harn, runtime):
             timeout_ms=params.timeout,
             signal=signal,
         )
+        _require_project_tasks(ctx, params)  # A blocking read may span a new generation.
         return _text(json.dumps(result, ensure_ascii=False))
 
 
-    class SisterPeekParams(StrictParams):
+    class SisterPeekParams(CardReadParams):
         task_id: TaskId = Field(description="Sister task-card ID to inspect.")
         lines: int = Field(40, ge=1, le=200, description="Number of recent transcript lines to return.")
 
@@ -482,6 +503,7 @@ def _install(harn, runtime):
         parameters=SisterPeekParams)
     async def misaka_sister_peek(tool_call_id, params, signal, on_update, ctx):
         text, error = await asyncio.to_thread(runtime.peek, params.task_id, params.lines)
+        _require_project_tasks(ctx, params)
         if error:
             return _text(error)
         return _text(
@@ -492,6 +514,10 @@ def _install(harn, runtime):
 
     class SisterMessageParams(StrictParams):
         task_id: TaskId = Field(description="Sister task-card ID.")
+        generation: int = Field(
+            ge=1,
+            description="Task generation shown in the Sister message or current card state.",
+        )
         message: str = Field(description="Full message to send into the task's existing Sister session.")
         summary: str = Field(description="Short, nonempty summary shown in the UI.")
         confirmed: bool = Field(
@@ -515,41 +541,76 @@ def _install(harn, runtime):
         snippet="Send guidance to an existing Sister task",
         parameters=SisterMessageParams)
     async def misaka_sister_message(tool_call_id, params, signal, on_update, ctx):
-        row = db.get(_con(), params.task_id)
+        con = _con()
+        row = db.get(con, params.task_id)
         if row is None:
             raise ValueError(f"Card not found: {params.task_id}")
+        if int(row["generation"]) != params.generation:
+            raise ValueError(
+                f"Card {params.task_id} moved to generation {row['generation']}; "
+                f"the reply for generation {params.generation} is stale."
+            )
+        if row["status"] == "review":
+            return _text(
+                f"Task card {params.task_id} is under review; wait for the review before messaging its Sister."
+            )
+
         in_panel = bool(os.environ.get("MISAKA_NET_PANE"))
-        net_owned = str(row["claim_lock"] or "").startswith("net:")
-        if net_owned or (in_panel and await asyncio.to_thread(_pane_for_card, params.task_id)):
-            if row["status"] not in ACTIVE_BOARD_STATUSES and not params.confirmed:
-                return _text(f"Card {params.task_id} is {row['status']}; continuing it starts a new "
-                             "model turn. Ask the user, then call again with confirmed=true.")
-            # A network-owned or reopened task receives steering through its live pane.
+        try:
+            pane = await asyncio.to_thread(_pane_for_card, params.task_id)
+        except (ConnectionError, OSError, RuntimeError):
+            pane = None
+        row = db.get(_con(), params.task_id)
+        if row is None or int(row["generation"]) != params.generation:
+            generation = row["generation"] if row is not None else "missing"
+            raise ValueError(
+                f"Card {params.task_id} moved to generation {generation}; "
+                f"the reply for generation {params.generation} is stale."
+            )
+        if row["status"] == "review":
+            return _text(
+                f"Task card {params.task_id} is under review; wait for the review before messaging its Sister."
+            )
+        help_reply = (
+            row["status"] in {"blocked", "triage"}
+            and row["block_kind"] == "needs_input"
+        )
+        if row["status"] == "running" and pane:
+            # A running panel-owned card receives steering through its terminal.
             from misaka.ui.panel import client as net
             await asyncio.to_thread(
                 net.request, "pane.send",
-                {"card": params.task_id, "text": params.message, "enter": True})
+                {"id": pane["id"], "card": params.task_id,
+                 "text": params.message, "enter": True,
+                 "expected_generation": params.generation})
             _card_log(row["workspace"], params.task_id, "last-order", f"[steer] {params.message}")
             return _text(f"Message sent to card {params.task_id}'s pane.")
-        if in_panel and row["status"] not in ACTIVE_BOARD_STATUSES:
-            # Her session is closed: reopen it beside Last Order with the message as its first
-            # turn. Like the headless path, a finished card only restarts on the user's nod.
-            if not params.confirmed:
+        if row["status"] != "running" and (in_panel or pane or help_reply):
+            # The daemon drains any old pane/headless runner, then owns the new attempt beyond
+            # this contact turn. A finished card still only restarts on the user's nod.
+            if not (params.confirmed or help_reply):
                 return _text(f"Card {params.task_id} is {row['status']}; continuing it starts a new "
                              "model turn. Ask the user, then call again with confirmed=true.")
             from misaka.ui.panel import client as net
-            out = await asyncio.to_thread(
-                net.request, "pane.continue_card",
-                {"task_id": params.task_id, "place": {"tab": os.environ["MISAKA_NET_PANE"]},
-                 "say": params.message})
+            if not (in_panel or pane):
+                await asyncio.to_thread(net.ensure)
+            request = {
+                "task_id": params.task_id,
+                "say": params.message,
+                "expected_generation": params.generation,
+            }
+            if in_panel:
+                request["place"] = {"grid": os.environ["MISAKA_NET_PANE"]}
+            out = await asyncio.to_thread(net.request, "pane.continue_card", request)
             _card_log(row["workspace"], params.task_id, "last-order", f"[message] {params.message}")
-            return _text(f"Continued card {params.task_id} in pane {out['pane_id']} (a new attempt "
-                         "under this session's claim) and delivered the message.")
+            return _text(f"Continued card {params.task_id} in persistent runner {out['pane_id']} "
+                         "(a new attempt under the daemon's claim) and delivered the message.")
         result = await runtime.message(
             params.task_id,
             params.message,
             summary=params.summary,
-            confirmed=params.confirmed,
+            confirmed=params.confirmed or help_reply,
+            expected_generation=params.generation,
             context=ctx,
         )
         row = db.get(_con(), params.task_id)
@@ -559,7 +620,7 @@ def _install(harn, runtime):
         return _text(json.dumps(result, ensure_ascii=False))
 
 
-    class CardTodosParams(StrictParams):
+    class CardTodosParams(CardReadParams):
         task_id: TaskId = Field(description="Card whose to-do list to show.")
 
 
@@ -571,7 +632,9 @@ def _install(harn, runtime):
         parameters=CardTodosParams)
     async def misaka_card_todos(tool_call_id, params, signal, on_update, ctx):
         from misaka.core.network import todo
-        return _text(todo.render(_con(), params.task_id))
+        text = todo.render(_con(), params.task_id)
+        _require_project_tasks(ctx, params)
+        return _text(text)
 
 
     class SisterResumeParams(StrictParams):
@@ -595,7 +658,7 @@ def _install(harn, runtime):
         from misaka.ui.panel import client as net
         out = await asyncio.to_thread(
             net.request, "pane.open_card_session",
-            {"task_id": params.task_id, "place": {"tab": os.environ["MISAKA_NET_PANE"]}})
+            {"task_id": params.task_id, "place": {"grid": os.environ["MISAKA_NET_PANE"]}})
         return _text(f"Reopened card {params.task_id}'s session in pane {out['pane_id']} (a tab of its own).")
 
 
@@ -649,7 +712,7 @@ def _install(harn, runtime):
         )
 
 
-    class CardCommentsParams(StrictParams):
+    class CardCommentsParams(CardReadParams):
         task_id: TaskId = Field(description="Task-card ID whose comments should be listed")
         after_id: int = Field(0, ge=0, description="Only return log entries whose index is greater than this value (each returned line starts with its index)")
         limit: int = Field(50, ge=1, le=200, description="Maximum comments to return")
@@ -669,6 +732,7 @@ def _install(harn, runtime):
             lines = card_files.read_log(row["workspace"], params.task_id)
         except OSError:
             lines = []
+        _require_project_tasks(ctx, params)
         entries = [(index, line) for index, line in enumerate(lines, 1) if index > params.after_id][-params.limit:]
         log = "\n".join(f"{index}: {line}" for index, line in entries)
         if not log:
@@ -714,7 +778,7 @@ def _install(harn, runtime):
         return _text(f"Attached reference URL to card {params.task_id}.")
 
 
-    class CardAttachmentsParams(StrictParams):
+    class CardAttachmentsParams(CardReadParams):
         task_id: TaskId = Field(description="Task-card ID whose attachments should be listed.")
 
     @_register(
@@ -729,6 +793,7 @@ def _install(harn, runtime):
             raise ValueError(f"Task card not found: {params.task_id}")
         from misaka.core.platform import cards as card_files
         items = card_files.attachment_list(row["workspace"], params.task_id)
+        _require_project_tasks(ctx, params)
         return _text("\n".join(
             f"[{item['kind']}] {item['name']} — {item.get('path') or item.get('source')}"
             for item in items
@@ -822,9 +887,8 @@ def _install(harn, runtime):
 class NetworkPart:
     """Last Order's board: the coordination tools, the Sister runtime behind them, and what a session hears at its start."""
 
-    # How often a live coordinator session looks at the notification outbox. The card
-    # shell polls its own report on the same cadence, so a card is announced within
-    # seconds of settling rather than at Last Order's next turn.
+    # How often a live coordinator session looks at the notification outbox, so a card
+    # is announced within seconds of settling rather than at Last Order's next turn.
     PENDING_POLL_SECONDS = 5.0
 
     def __init__(self):

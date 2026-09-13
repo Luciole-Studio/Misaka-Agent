@@ -24,7 +24,7 @@ from misaka.utils.frontmatter import parse_frontmatter
 
 LOG_HEADING = "## log"
 _FIELD_ORDER = ("id", "title", "status", "generation", "assignee", "reviewer", "executor", "model",
-                "priority", "timeout_seconds", "origin_session", "needs", "urls", "created_at")
+                "priority", "origin_session", "needs", "urls", "created_at")
 _AT_REST_STATUSES = frozenset({
     "ready", "todo", "review", "done", "failed", "stopped", "blocked", "triage", "archived", "held",
 })
@@ -179,23 +179,32 @@ def iter_cards(workspace):
 
 
 def create(con, workspace, title, body, assignee, *, reviewer=None, model=None,
-           priority=0, timeout_seconds=900, executor=None, origin_session=None, after_row=None):
+           priority=0, executor=None, origin_session=None, after_row=None, needs=()):
     """The one front door for new cards: index row first (it mints the id), then ``after_row(tid)``
     for whatever else the row must be tied to (a research link), then the file. Any failure before
     the file exists rolls the row back -- no card exists without its truth, and no file without its row."""
     workspace = tasks.canonical_workspace(workspace)
+    needs = list(dict.fromkeys(needs))
+    for parent_id in needs:
+        parent = tasks.get(con, parent_id)
+        if parent is None or parent["workspace"] != workspace:
+            raise ValueError("A dependency must name an existing task in the same project.")
     tid = tasks.create_task(con, title, body=body, assignee=assignee, model=model,
-                            priority=priority, timeout_seconds=timeout_seconds,
+                            priority=priority,
                             executor=executor, reviewer=reviewer, workspace=workspace,
                             origin_session=origin_session)
     fields = {"id": tid, "title": title, "status": "ready", "generation": 1, "assignee": assignee,
               "reviewer": reviewer, "executor": executor, "model": model,
-              "priority": priority, "timeout_seconds": timeout_seconds,
+              "priority": priority,
               "origin_session": origin_session, "created_at": _now_iso()}
     text = body.strip() + f"\n\n{LOG_HEADING}\n- {_now_iso()} last-order: created\n"
     try:
         if after_row is not None:
             after_row(tid)
+        if needs:
+            # Publish the entire contract at once, never a ready file with half its edges.
+            fields.update(needs=needs, status="todo")
+            con.execute("UPDATE tasks SET status='todo' WHERE id=?", (tid,))
         _write_file(card_path(workspace, tid), _dump(fields, text))
     except BaseException:
         tasks.delete_task(con, tid, allow_active=True)
@@ -215,8 +224,12 @@ def _rewrite(workspace, task_id, mutate):
 
 
 def append_log(workspace, task_id, author, text):
-    """Append one line to the card's ``## log`` section (created if missing)."""
-    line = f"- {_now_iso()} {author}: {' '.join(str(text).split())}"
+    """Append one line to the card's ``## log`` section (created if missing).
+
+    The log goes into git with the card, so credentials a tool echoed into the note are
+    masked here."""
+    from misaka.utils.redact import redact
+    line = f"- {_now_iso()} {author}: {' '.join(redact(str(text)).split())}"
 
     def mutate(fields, body):
         if LOG_HEADING not in body:
@@ -317,12 +330,31 @@ def read_log(workspace, task_id):
     return [line[2:] for line in section.splitlines() if line.startswith("- ")]
 
 
+STUCK_SECONDS = 24 * 3600       # a card blocked this long is waiting on nobody in particular
+FAILING_AFTER = 2               # consecutive failed attempts before the board says so
+
+
+def card_signal(row, now=None):
+    """What a reader should notice about a card beyond its status: ``failing`` (attempts are
+    running out) or ``stuck`` (blocked for a day); None otherwise."""
+    if row is None:
+        return None
+    if int(row["consecutive_failures"] or 0) >= FAILING_AFTER:
+        return "failing"
+    now = int(time.time()) if now is None else int(now)
+    if (row["status"] in ("blocked", "triage") and row["blocked_at"]
+            and now - int(row["blocked_at"]) >= STUCK_SECONDS):
+        return "stuck"
+    return None
+
+
 def board(con, workspace):
     """The board, file-first: every card file joined with its live index status; index rows
     without a file (pre-migration strays) listed last so nothing hides."""
     workspace = tasks.canonical_workspace(workspace)
     rebuild(con, workspace)
     out, seen = [], set()
+    now = int(time.time())
     for tid, path in iter_cards(workspace):
         card = try_read(path)
         note = _INVALID.get(str(path))
@@ -343,11 +375,13 @@ def board(con, workspace):
                         "origin_session": row["origin_session"] if row is not None else None})
             continue
         fields = card["fields"]
+        signal = card_signal(row, now)
         out.append({"id": tid, "title": str(fields.get("title") or ""),
                     "assignee": str(fields.get("assignee") or ""),
                     "status": str(row["status"] if row is not None else fields.get("status") or "?"),
                     "origin_session": (row["origin_session"] if row is not None
-                                       else fields.get("origin_session"))})
+                                       else fields.get("origin_session")),
+                    **({"signal": signal} if signal else {})})
     for row in con.execute(
             "SELECT id,title,assignee,status,origin_session FROM tasks "
             "WHERE workspace=? ORDER BY created_at", (workspace,)):
@@ -416,7 +450,7 @@ def migrate(con):
                   "assignee": row["assignee"], "reviewer": row["reviewer"],
                   "executor": json.loads(row["executor"]) if row["executor"] else None,
                   "model": row["model"],
-                  "priority": row["priority"], "timeout_seconds": row["timeout_seconds"],
+                  "priority": row["priority"],
                   "origin_session": row["origin_session"],
                   "created_at": _now_iso(row["created_at"])}
         body = ((row["body"] or "").strip()
@@ -438,13 +472,12 @@ def _card_values(fields, body):
         "assignee": str(fields.get("assignee") or ""), "reviewer": fields.get("reviewer"),
         "executor": json.dumps(fields["executor"]) if fields.get("executor") else None,
         "model": fields.get("model"), "priority": int(fields.get("priority") or 0),
-        "timeout_seconds": int(fields.get("timeout_seconds") or 900),
         "origin_session": fields.get("origin_session"), "status": status, "generation": generation,
     }
 
 
 _MIRRORED = ("title", "body", "assignee", "reviewer", "executor", "model", "priority",
-             "timeout_seconds", "origin_session", "status", "generation")
+             "origin_session", "status", "generation")
 
 
 def reconcile_one(con, workspace, task_id):
@@ -514,7 +547,7 @@ def reconcile_one(con, workspace, task_id):
     # a mirror of the live state, and the next pass reads both again.
     con.execute(
         "UPDATE tasks SET title=?,body=?,assignee=?,reviewer=?,executor=?,model=?,priority=?,"
-        "timeout_seconds=?,origin_session=?,status=?,generation=? WHERE id=? AND status=?",
+        "origin_session=?,status=?,generation=? WHERE id=? AND status=?",
         (*(values[column] for column in _MIRRORED), task_id, row["status"]),
     )
     return card
@@ -645,7 +678,7 @@ def _git(folder, *args):
         ) from None
 
 
-def init_project(folder):
+def init_project(folder, *, draft_brief=True):
     """Make a folder a MISAKA project: a git repository with the skeleton (PROJECT.md,
     cards/) and its cards indexed. Only a repository this call itself created gets the
     initial commit; an existing repository is never committed to."""
@@ -657,7 +690,7 @@ def init_project(folder):
         actions.append("git repository created")
     os.makedirs(os.path.join(folder, "cards"), exist_ok=True)
     project_md = os.path.join(folder, "PROJECT.md")
-    if not os.path.exists(project_md):
+    if draft_brief and not os.path.exists(project_md):
         _write_file(project_md, PROJECT_TEMPLATE.format(name=os.path.basename(folder) or folder))
         actions.append("PROJECT.md written")
     con = tasks.connect(os.path.expanduser(_cfg_db()))
@@ -670,7 +703,7 @@ def init_project(folder):
     if fresh:
         _git(folder, "add", "-A")
         _git(folder, "-c", "user.name=misaka", "-c", "user.email=misaka@local",
-             "commit", "-q", "-m", "misaka init: project skeleton")
+             "commit", "--allow-empty", "-q", "-m", "misaka init: project skeleton")
         actions.append("initial commit")
     return actions or ["already initialized"]
 

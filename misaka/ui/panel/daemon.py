@@ -4,11 +4,10 @@ Process model (after herdr): this long-lived process owns every pane (PTY);
 the panel and CLI are thin clients, and a disconnect only removes an observer.
 The protocol is newline-delimited JSON (requests carry id/method/params).
 
-Card panes: ``pane.run_card`` drives the board state machine -- claim a lease,
-open a pane running an interactive session, watch for submission/timeout/exit,
-then accept the submission, send the card back, or fail it. The daemon only owns
-the process and never judges
-its own work.
+Card panes: ``pane.run_card`` claims a lease and opens the worker.  The daemon
+keeps that lease alive and reconciles the real process exit; the Sister's own
+lifecycle hook submits her result.  External ally panes retain their exit
+adapter.
 """
 import asyncio
 import base64
@@ -24,26 +23,26 @@ import subprocess
 import sys
 import termios
 import time
-import unicodedata
 
 import psutil
-import pyte
 
 from misaka.config import CFG
 from misaka.config import sessions as session_roots
 from misaka.ui.panel import (
     geometry as hui,  # layout.rs port: split_at / remove_pane / pane_ids
 )
+from misaka.ui.panel import ghostty as vt
 from misaka.utils.streams import STREAM_LIMIT
 
 # Wire protocol version (strict equality, as in herdr). Bump it whenever *server
 # behaviour* changes, not only method/event shapes: an unbumped behaviour change
 # once let a stale daemon slip through the version gate.
-PROTOCOL = 31   # 31: the daemon owns the layout (spaces/tabs/trees, herdr server model); pane.create takes `place`; no pane parent
+PROTOCOL = 47   # 47: drag resizes are fire-and-forget (id=None, no reply) and the layout is persisted at drag end, so the divider never blocks on a busy daemon; 46: a drag resizes the program as fast as it repaints; 44: reflow held until repaint; 43: libghostty-vt; 42: panes.resize acknowledged first; 40: shown frame in a sync block; 38: input state, extract, kitty
 RING_CAP = 256 * 1024          # output tail kept per pane
 FRAME_SECONDS = 0.008          # coalescing window for dirty-row broadcasts (~120 fps)
-SCROLLBACK_LINES = 2000        # scrollback history per pane
 IDLE_QUIET_SECONDS = 1.0       # screen unchanged this long = idle (a static spinner glyph does not count)
+RESIZE_HOLD_SECONDS = 1.5      # after a resize, keep the last complete frame until the program repaints (fallback ceiling)
+RESIZE_MIN_INTERVAL = 0.016    # a drag resizes the program no faster than herdr's 16 ms render pace (MIN_RENDER_INTERVAL)
 CARD_POLL_SECONDS = 5.0        # card-pane polling interval
 DEFAULT_ROWS, DEFAULT_COLS = 32, 120
 CARD_SHELL = [sys.executable, "-m", "misaka", "card-shell"]   # tests may override
@@ -93,110 +92,61 @@ def _write_pty(fd, data):
         view = view[written:]
 
 
-# pyte does not understand these modern terminal sequences and would leak them
-# as visible characters; strip them before emulation.
-_UNSUPPORTED = re.compile(
-    rb"\x1b\[[<>=?][0-9;]*u"          # Kitty keyboard protocol
-    rb"|\x1b\[>[0-9;]*[mn]"           # XTMODKEYS / modifyOtherKeys
-    rb"|\x1b\[\?2026[hl]"             # Synchronized output
-    rb"|\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\)"   # OSC 8 hyperlink
-)
-_ALTSCREEN = re.compile(rb"\x1b\[\?(?:1049|1047|47)[hl]")
-# Applications in a pane query the "terminal" and wait for a reply (pi's kitty
-# negotiation ends on a DA sentinel). herdr answers from its embedded ghostty;
-# here the emulated screen answers, and the query itself never reaches the screen.
-_QUERY = re.compile(
-    rb"\x1b\[(?P<da1>0?c)"                       # Primary device attributes
-    rb"|\x1b\[>(?P<da2>0?c)"                     # Secondary device attributes
-    rb"|\x1b\[(?P<dsr>6n)"                       # Cursor position report
-    rb"|\x1b\](?P<osc>1[01]);\?(?:\x07|\x1b\\)"  # OSC 10/11 color query
-)
+# Synchronized output (DEC 2026): a program's repaint between `h` and `l` is one frame.
+# ghostty holds the screen for herdr until the block closes; here the broadcast is held
+# instead, so the panel never sees a half-drawn transcript (pi's TUI wraps every render in
+# this pair). A block is abandoned once the program has been silent for SYNC_TIMEOUT,
+# measured from the last byte: a long transcript's repaint arrives in many chunks.
+SYNC_TIMEOUT = 1.0
 
 
-def _answer_queries(pane, data):
-    """Answer terminal queries on behalf of the emulated screen; the queries themselves are dropped."""
-
-    def reply(match):
-        group = match.lastgroup
-        if group == "da1":
-            answer = b"\x1b[?62;22c"
-        elif group == "da2":
-            answer = b"\x1b[>1;10;0c"
-        elif group == "dsr":
-            answer = (f"\x1b[{pane.screen.cursor.y + 1};{pane.screen.cursor.x + 1}R").encode()
-        else:
-            # OSC 10/11 foreground/background: follow the pane's theme variant so
-            # full-screen apps in a light terminal see a light background.
-            light = pane.theme == "light"
-            if match.group("osc") == b"11":
-                color = b"faf4/f4f4/f6f6" if light else b"1e1e/1e1e/1e1e"
-            else:
-                color = b"3320/2020/2828" if light else b"e6e6/e6e6/e6e6"
-            answer = b"\x1b]" + match.group("osc") + b";rgb:" + color + b"\x07"
-        try:
-            if pane.fd is not None:
-                os.write(pane.fd, answer)
-        except OSError:
-            pass
-        return b""
-
-    return _QUERY.sub(reply, data)
-# The tail may be a truncated escape sequence: carry it over to the next read
-# (capped at 64 bytes).
-_PARTIAL_ESC = re.compile(rb"\x1b(?:\[[0-9;<>=?]*|\][^\x07\x1b]*)?$")
-
-_FG = {"black": 30, "red": 31, "green": 32, "brown": 33, "blue": 34, "magenta": 35,
-       "cyan": 36, "white": 37, "brightblack": 90, "brightred": 91, "brightgreen": 92,
-       "brightbrown": 93, "brightblue": 94, "brightmagenta": 95, "brightcyan": 96,
-       "brightwhite": 97}
+def _colour_sgr(colour, base):
+    """A ghostty colour (palette index or rgb) as SGR parameters for fg (30) or bg (40)."""
+    if isinstance(colour, tuple):
+        return f"{base + 8};2;{colour[0]};{colour[1]};{colour[2]}"
+    if colour < 8:
+        return str(base + colour)
+    if colour < 16:
+        return str(base + 60 + colour - 8)
+    return f"{base + 8};5;{colour}"
 
 
-def _render_row(screen, row):
-    """Render one live screen row; see ``_render_line``."""
-    return _render_line(screen, screen.buffer[row])
+def _sgr(style):
+    """The SGR sequence that sets a cell style from scratch."""
+    fg, bg, bold, faint, italic, underline, blink, inverse, strikethrough = style
+    parts = ["0"]
+    for on, code in ((bold, "1"), (faint, "2"), (italic, "3"), (underline, "4"),
+                     (blink, "5"), (inverse, "7"), (strikethrough, "9")):
+        if on:
+            parts.append(code)
+    if fg is not None:
+        parts.append(_colour_sgr(fg, 30))
+    if bg is not None:
+        parts.append(_colour_sgr(bg, 40))
+    return "\x1b[" + ";".join(parts) + "m"
 
 
-def _render_line(screen, line):
-    """Render one emulated line (a live row or a history line) as an ANSI string (SGR only on attribute change, reset at end of row)."""
-    out, last, skip_stub = [], None, False
-    for col in range(screen.columns):
-        if skip_stub:  # wide (CJK) characters span two columns; pyte leaves a placeholder cell after them
-            skip_stub = False
+def _render_cells(cells):
+    """One viewport row as an ANSI string (SGR only on a style change, reset at the end).
+    A wide character is written once and its tail cell skipped; a spacer head reads as a
+    blank (herdr ``ghostty_blank_symbol_for_width``). Every attribute ghostty tracks
+    reaches the host: bold, faint, italic, underline, blink, inverse, strikethrough."""
+    out, last = [], None
+    for text, width, style in cells:
+        if width == 0:
             continue
-        ch = line[col]
-        attrs = (ch.fg, ch.bg, ch.bold, ch.reverse, ch.underscore)
-        if attrs != last:
-            last = attrs
-            sgr = ["0"]
-            if ch.bold:
-                sgr.append("1")
-            if ch.underscore:
-                sgr.append("4")
-            if ch.reverse:
-                sgr.append("7")
-            if ch.fg in _FG:
-                sgr.append(str(_FG[ch.fg]))
-            elif len(str(ch.fg)) == 6:      # hex truecolor
-                try:
-                    r, g, b = (int(str(ch.fg)[i:i + 2], 16) for i in (0, 2, 4))
-                    sgr.append(f"38;2;{r};{g};{b}")
-                except ValueError:
-                    pass
-            if ch.bg in _FG:
-                sgr.append(str(_FG[ch.bg] + 10))
-            elif len(str(ch.bg)) == 6:
-                try:
-                    r, g, b = (int(str(ch.bg)[i:i + 2], 16) for i in (0, 2, 4))
-                    sgr.append(f"48;2;{r};{g};{b}")
-                except ValueError:
-                    pass
-            out.append("\x1b[" + ";".join(sgr) + "m")
-        data = ch.data or " "
-        out.append(data)
-        if data and unicodedata.east_asian_width(data[0]) in ("W", "F"):
-            skip_stub = True
+        if style != last:
+            out.append(_sgr(style))
+            last = style
+        out.append(text)
     out.append("\x1b[0m")
     return "".join(out)
+
+
+def _screen_lines(pane):
+    """The rows of the active area as text (herdr's detection text: what a shell or agent
+    shows at the bottom, whatever the viewer has scrolled to)."""
+    return pane.term.recent_text(pane.term.rows).split("\n")
 
 
 # Spinner frames: braille and geometric dots only. Never add ASCII such as |/-\ --
@@ -346,14 +296,14 @@ def _ally_verdict(pane):
     The shell heuristic in ``_pane_busy`` cannot speak for these panes: to it, codex sitting at
     its prompt is simply "a foreground process that is not the shell", i.e. permanently busy.
     """
-    title = (getattr(pane.screen, "title", "") or "").strip()
+    title = pane.term.title().strip()
     low = title.lower()
     if any(sign in low for sign in _ALLY_TITLE_BLOCKED):
         return "blocked", f"its terminal title asks for you ({title!r})"
     if any(ch in _SPINNER_CHARS for ch in title):
         return "working", f"a spinner is running in its terminal title ({title!r})"
     try:                     # herdr's bottom_non_empty_lines region: trailing blank rows say nothing
-        lines = [row.strip() for row in pane.screen.display if row.strip()]
+        lines = [row.strip() for row in _screen_lines(pane) if row.strip()]
         tail = "\n".join(lines[-_ALLY_TAIL_ROWS:]).lower()
     except Exception:  # noqa: BLE001 - a screen we cannot read says nothing
         tail = ""
@@ -402,10 +352,10 @@ def _pane_busy(pane, ally_state=None):
     if time.time() - pane.last_output > IDLE_QUIET_SECONDS:
         return False
     try:
-        for line in pane.screen.display:
+        for line in _screen_lines(pane):
             if any(ch in _SPINNER_CHARS for ch in line):
                 return True
-    except Exception:  # noqa: BLE001, S110 - an emulator screen mid-update is not an error
+    except RuntimeError:                       # a screen the emulator cannot read says nothing
         pass
     return False
 
@@ -431,81 +381,102 @@ def _busy_reason(pane):
     quiet = time.time() - pane.last_output
     if quiet > IDLE_QUIET_SECONDS:
         return f"Agent pane: no output for {quiet:.1f}s (threshold {IDLE_QUIET_SECONDS}s); classified as idle."
-    spins = sorted({ch for line in pane.screen.display for ch in line
+    spins = sorted({ch for line in _screen_lines(pane) for ch in line
                     if ch in _SPINNER_CHARS})
     if spins:
         return f"Agent pane: active spinner {''.join(spins)} detected; classified as busy."
     return f"Agent pane: last output was {quiet:.1f}s ago with no spinner; classified as idle."
 
 
-class PaneScreen(pyte.HistoryScreen):
-    """pyte's history screen, plus a count of the lines it has pushed into history.
+def input_state(pane):
+    """What the program in the pane asked its terminal for: the modes that decide how the
+    panel must encode keys, mouse, paste and focus for it (herdr ``InputState``)."""
+    term = pane.term
+    if term.mode(vt.MODE_SGR_PIXELS_MOUSE):
+        encoding = "sgr_pixels"
+    elif term.mode(vt.MODE_SGR_MOUSE):
+        encoding = "sgr"
+    elif term.mode(vt.MODE_UTF8_MOUSE):
+        encoding = "utf8"
+    else:
+        encoding = "default"
+    return {
+        "alternate_screen": term.alternate_screen(),
+        "application_cursor": term.mode(vt.MODE_DECCKM),
+        "bracketed_paste": term.mode(vt.MODE_BRACKETED_PASTE),
+        "focus_reporting": term.mode(vt.MODE_FOCUS_EVENT),
+        "mouse_mode": term.mouse_tracking(),
+        "mouse_encoding": encoding,
+        "mouse_alternate_scroll": term.mode(vt.MODE_ALT_SCROLL),
+        "modify_other_keys": 2 if term.modify_other_keys() else 0,
+        "kitty_flags": term.kitty_flags(),
+    }
 
-    The daemon never pages this screen: pyte's ``prev_page`` moves history lines into the
-    live buffer, and its ``before_event`` snaps back to the bottom on *every* later event
-    -- a spinner redraw included -- so a pane could not be scrolled while its app was
-    working. The viewport is the daemon's own (``Pane.view_offset``); this counter is what
-    lets it stay anchored to content while output keeps arriving.
-    """
 
-    def __init__(self, *args, **kwargs):
-        self.pushed = 0
-        super().__init__(*args, **kwargs)
-
-    def index(self):
-        _top, bottom = self.margins or (0, self.lines - 1)
-        if self.cursor.y == bottom:
-            self.pushed += 1
-        super().index()
-
-
-def _follow_history(pane):
-    """Content stays put while scrolled back: every line the app pushed into history since
-    the last look moves the viewport's anchor one line further from the bottom (what a
-    terminal, tmux and herdr do; the old pyte paging snapped to the bottom instead)."""
-    screen = pane.primary
-    grown = screen.pushed - pane.pushed_seen
-    pane.pushed_seen = screen.pushed
-    if pane.view_offset and not pane.alt_screen:
-        pane.view_offset = min(pane.view_offset + grown, len(screen.history.top))
+def extract_text(pane, start, end):
+    """The text between two absolute ``(row, col)`` points, both inclusive, the way herdr's
+    ``extract_selection`` reads it (``read_text_screen``: rows count from the top of the
+    scrollback, soft wraps joined, trailing blanks dropped). Points past the screen read as
+    empty."""
+    (start_row, start_col), (end_row, end_col) = start, end
+    if (end_row, end_col) < (start_row, start_col):
+        (start_row, start_col), (end_row, end_col) = (end_row, end_col), (start_row, start_col)
+    term = pane.term
+    last_row, last_col = term.total_rows() - 1, term.cols - 1
+    if last_row < 0 or start_row > last_row:
+        return ""
+    clamp = lambda value, high: max(0, min(int(value), high))
+    return term.read_text((clamp(start_col, last_col), clamp(start_row, last_row)),
+                          (clamp(end_col, last_col), clamp(end_row, last_row)))
 
 
 def _scroll_metrics(pane):
     """Scrollback position, total scrollable lines, and viewport rows (herdr's ScrollMetrics)."""
-    if pane.alt_screen:
-        return {"offset_from_bottom": 0, "max_offset_from_bottom": 0, "viewport_rows": pane.screen.lines}
-    return {"offset_from_bottom": pane.view_offset,
-            "max_offset_from_bottom": len(pane.primary.history.top),
-            "viewport_rows": pane.screen.lines}
+    return pane.term.scroll_metrics()
 
 
 def _scroll_pane(pane, delta=0, to=None):
-    """Move the viewport by whole lines: negative ``delta`` goes back into history, "bottom" returns to the live screen."""
-    if pane.alt_screen:
-        return                          # a full-screen app scrolls itself
-    _follow_history(pane)
-    limit = len(pane.primary.history.top)
+    """Move the viewport by whole rows: negative ``delta`` goes back into history, "bottom"
+    returns to the live screen. On the alternate screen ghostty keeps the viewport live."""
     if to == "bottom":
-        pane.view_offset = 0
+        pane.term.scroll_to_bottom()
     else:
-        pane.view_offset = max(0, min(limit, pane.view_offset - int(delta)))
+        pane.term.scroll(int(delta))
     pane.sent_cursor = None             # visibility changes with the offset; resend it
 
 
-def _viewport_lines(pane):
-    """The lines the viewer sees: the live buffer, or a window into history ending inside it."""
-    screen = pane.screen
-    if not pane.view_offset or pane.alt_screen:
-        return [screen.buffer[r] for r in range(screen.lines)]
-    history = list(pane.primary.history.top)
-    offset = min(pane.view_offset, len(history))
-    start = len(history) - offset
-    return [history[j] if j < len(history) else screen.buffer[j - len(history)]
-            for j in range(start, start + screen.lines)]
-
-
 def _rows_for(pane):
-    return [_render_line(pane.screen, line) for line in _viewport_lines(pane)]
+    """Every viewport row rendered (and marked clean: the caller is showing them)."""
+    pane.render.update(pane.term)
+    return [_render_cells(cells) for _index, cells in pane.render.rows(all_rows=True)]
+
+
+def _display(pane, rows):
+    """The pane as a viewer sees it right now: rows, cursor, metrics, modes."""
+    x, y, visible = pane.render.cursor()
+    return {"rows": rows,
+            "cursor": [x, y],
+            "cursor_hidden": not visible,
+            "size": [pane.term.rows, pane.term.cols],
+            "scroll": pane.term.scroll_metrics(),
+            "alt_screen": pane.term.alternate_screen(),
+            "input": input_state(pane)}
+
+
+def _shown(pane, rendered=None):
+    """Remember what the panel is showing (herdr's renderer holds its last frame while a
+    synchronized block is open; the daemon answers ``pane.screen`` from this copy then).
+    ``rendered`` maps the rows just sent; None means every row was."""
+    shown = pane.shown
+    if rendered is None or shown is None or len(shown["rows"]) != pane.term.rows:
+        rows = _rows_for(pane)
+    else:
+        rows = list(shown["rows"])
+        for row, line in rendered.items():
+            if row < len(rows):
+                rows[row] = line
+    pane.shown = _display(pane, rows)
+    return pane.shown
 
 
 def _seated_pane_ids(spaces):
@@ -521,112 +492,105 @@ def _seated_pane_ids(spaces):
 class Pane:
     __slots__ = (
         "ally",
-        "alt",
-        "alt_screen",
         "argv",
         "buf",
         "card",
-        "carry",
         "claim_lock",
         "cwd",
-        "deadline",
         "exit_code",
         "fd",
         "fg_at",
         "fg_seen",
         "flush",
+        "full_frame",
         "generation",
         "id",
         "last_heartbeat",
         "last_output",
-        "primary",
         "proc",
-        "pushed_seen",
+        "render",
         "reported",
-        "screen",
+        "resize_applied_at",
+        "resize_apply",
+        "resize_hold",
+        "resize_target",
         "seen_status",
         "sent_cursor",
+        "sent_input",
+        "shown",
         "started",
         "started_at",
-        "stream",
-        "submitted",
+        "sync_until",
+        "term",
         "theme",
         "title",
-        "view_offset",
     )
 
     def __init__(self, pane_id, title, argv, cwd, card=None):
         self.id, self.title, self.argv, self.cwd, self.card = pane_id, title, argv, cwd, card
         self.reported = None          # the session's own word: {"state", "message", "seq"} (herdr hook authority); None = guess from the screen
-        self.claim_lock = self.generation = self.deadline = None
+        self.claim_lock = self.generation = None
         self.proc = self.fd = self.exit_code = None
         self.buf = bytearray()
         self.started = None           # card-hosting start time (set by _host_card; None for plain panes)
         self.started_at = int(time.time())
-        self.submitted = False
         self.seen_status = None       # board status seen while focused ("finished but not yet looked at")
-        # HistoryScreen keeps scrollback (the scrollbar needs it); ratio=1/rows makes paging line-granular
-        self.primary = PaneScreen(DEFAULT_COLS, DEFAULT_ROWS,
-                                  history=SCROLLBACK_LINES, ratio=1 / DEFAULT_ROWS)
-        self.view_offset = 0          # lines scrolled back from the live screen (0 = following output)
-        self.pushed_seen = 0          # history pushes accounted for in view_offset
-        self.alt = None               # alternate-screen buffer, made on the first ?1049h
-        self.screen = self.primary
-        self.stream = pyte.ByteStream(self.screen)
-        self.carry = b""              # truncated escape sequence carried to the next read
-        self.alt_screen = False       # in the alternate screen (full-screen app): no scrollbar
-        self.theme = "dark"           # theme variant (set from env at create; OSC replies follow it)
+        # The pane's terminal is ghostty's (as herdr's): it parses, keeps the scrollback,
+        # reflows on resize, answers queries, and tracks every mode the panel encodes for.
+        self.term = vt.Terminal(DEFAULT_COLS, DEFAULT_ROWS, on_write_pty=self.reply)
+        self.render = vt.RenderState()
+        self.full_frame = True        # the next frame carries every row (first sight, resize, a client that fell behind)
+        self.theme = "dark"           # theme variant (set from env at create; OSC 10/11 answers follow it)
+        self.set_theme(self.theme)
         self.ally = None              # ally label (only for third-party agent panes started by Last Order)
         self.flush = None             # pending frame-coalescing timer
         self.sent_cursor = None       # last cursor broadcast (position + visibility)
+        self.sent_input = None        # last input state broadcast (a mode change alone is a frame)
+        self.sync_until = None        # inside a synchronized-output block: frames are held until this deadline
+        self.shown = None             # the display as the panel last received it (rows, cursor, metrics)
+        self.resize_target = None     # (rows, cols) the client wants; driven to the program as fast as it repaints
+        self.resize_apply = None      # the pending _apply_resize timer (paces resizes at the render rate)
+        self.resize_applied_at = 0.0  # loop time of the last applied resize (render-pace throttle)
+        self.resize_hold = None       # after a resize: hold the last complete frame until the program repaints
         self.fg_at = None             # monotonic stamp of the cached foreground reading
         self.fg_seen = None           # cached _foreground() result
         self.last_output = 0.0        # time of the last output (is the screen still moving?)
         self.last_heartbeat = 0.0     # last lease heartbeat for a card pane
 
-    def alive(self):
-        return self.proc is not None and self.proc.poll() is None
+    def reply(self, data):
+        """What the terminal answers the program (device attributes, cursor and size
+        reports, the kitty keyboard query, OSC 10/11 colours) goes back down the pty."""
+        if self.fd is not None:
+            try:
+                os.write(self.fd, data)
+            except OSError:
+                pass
 
-    def switch_screen(self, to_alt):
-        """Enter or leave the alternate screen, the way a real multiplexer does.
-
-        pyte has no notion of ?1049; this used to be handled with ``screen.reset()``, and
-        ``HistoryScreen.reset`` clears both history deques -- so one ``less`` (git's default
-        pager) threw away the pane's whole scrollback, and leaving it wiped the main screen
-        as well, leaving a blank pane behind (audit 2026-09-02, ui-panel-12). Two buffers
-        instead: the alternate one is a plain Screen (a full-screen app repaints itself and
-        keeps no scrollback), and the primary one is never touched while it is parked.
-        """
-        if bool(to_alt) == bool(self.alt_screen):
-            return
-        self.alt_screen = bool(to_alt)
-        self.view_offset = 0          # the alternate screen has no history; the primary comes back live
-        if to_alt:
-            if self.alt is None:
-                self.alt = pyte.Screen(self.primary.columns, self.primary.lines)
-            else:
-                self.alt.resize(self.primary.lines, self.primary.columns)
-                self.alt.reset()      # a fresh full-screen app starts on a clean buffer
-            self.screen = self.alt
+    def set_theme(self, theme):
+        """OSC 10/11 answers follow the pane's theme variant, so a full-screen app in a
+        light terminal sees a light background."""
+        self.theme = theme
+        if theme == "light":
+            self.term.set_colors((0x33, 0x20, 0x28), (0xFA, 0xF4, 0xF6))
         else:
-            self.screen = self.primary
-        self.stream = pyte.ByteStream(self.screen)
-        # The client's view is of the buffer we just left: repaint every row of the new one.
-        self.screen.dirty.update(range(self.screen.lines))
+            self.term.set_colors((0xE6, 0xE6, 0xE6), (0x1E, 0x1E, 0x1E))
+
+    def size(self):
+        return (self.term.rows, self.term.cols)
 
     def resize(self, rows, cols):
-        """Resize both buffers, and keep paging line-granular.
+        """ghostty reflows the primary screen and keeps the offset from the bottom (herdr
+        ``TerminalRuntime::resize``); every row is sent with the next frame."""
+        self.term.resize(cols, rows)
+        self.full_frame = True
+        self.sent_cursor = None
 
-        ``History.ratio`` is fixed when HistoryScreen is built and ``Screen.resize`` does not
-        touch it, so a pane grown past its initial 32 rows paged 2-3 lines per scroll step
-        while ``_scroll_pane`` counted one (audit 2026-09-02, ui-panel-03).
-        """
-        self.primary.resize(rows, cols)
-        self.primary.history = self.primary.history._replace(ratio=1 / max(1, rows))
-        self.view_offset = min(self.view_offset, len(self.primary.history.top))
-        if self.alt is not None:
-            self.alt.resize(rows, cols)
-        self.screen.dirty.clear()
+    def close_terminal(self):
+        self.render.close()
+        self.term.close()
+
+    def alive(self):
+        return self.proc is not None and self.proc.poll() is None
 
 
 class Daemon:
@@ -649,6 +613,7 @@ class Daemon:
         self._panels: set[asyncio.StreamWriter] = set()        # panels (attach "*"): when the last one leaves, so do we
         self._clients: set[asyncio.StreamWriter] = set()
         self._stopping = asyncio.Event()
+        self._socket_identity = None
 
     # ── Panes ─────────────────────────────────────────────
 
@@ -667,15 +632,15 @@ class Daemon:
         try:
             fcntl.ioctl(slave, termios.TIOCSWINSZ,
                         struct.pack("HHHH", DEFAULT_ROWS, DEFAULT_COLS, 0, 0))
+            child_env = {**os.environ, **(env or {}), "TERM": "xterm-256color",
+                         "COLORTERM": "truecolor", "MISAKA_NET_PANE": pane.id}
+            child_env.pop("MISAKA_DM_CARD_ALLOWLIST", None)  # contact-session capability
             pane.proc = subprocess.Popen(
                 pane.argv, cwd=pane.cwd, stdin=slave, stdout=slave, stderr=slave,
                 preexec_fn=_become_session_leader,  # noqa: PLW1509 - panes are spawned from the daemon's main thread only; setsid must run in the child
-                env={**os.environ, **(env or {}), "TERM": "xterm-256color",
-                     # The pane's terminal is OUR pyte relay, which passes 24-bit SGR through
-                     # untouched -- without this hint the engine pre-bakes every theme colour
-                     # down to the 256 palette (rose #cb3862 -> 167 salmon).
-                     "COLORTERM": "truecolor",
-                     "MISAKA_NET_PANE": pane.id},
+                # The pane's terminal is our ghostty relay, which passes 24-bit SGR through
+                # untouched -- COLORTERM keeps the engine from pre-baking 24-bit colours.
+                env=child_env,
             )
         except BaseException:
             os.close(master)
@@ -709,82 +674,147 @@ class Daemon:
         pane.last_output = time.time()
         if len(pane.buf) > RING_CAP:
             del pane.buf[: len(pane.buf) - RING_CAP]
-        data = pane.carry + chunk
-        pane.carry = b""
-        tail = _PARTIAL_ESC.search(data)
-        if tail and len(data) - tail.start() <= 64:
-            pane.carry, data = data[tail.start():], data[: tail.start()]
-        data = _answer_queries(pane, data)
-        data = _UNSUPPORTED.sub(b"", data)
-        try:
-            # pyte does not know alternate-screen switches: drive the pane's two buffers
-            # by hand (Pane.switch_screen). The panel also reads `alt_screen`, where no
-            # scrollbar is shown.
-            pieces = _ALTSCREEN.split(data)
-            switches = [m.group().endswith(b"h") for m in _ALTSCREEN.finditer(data)]
-            for index, piece in enumerate(pieces):
-                if index:
-                    pane.switch_screen(switches[index - 1])
-                if piece:
-                    pane.stream.feed(piece)
-        except Exception:  # noqa: BLE001, S110 - a sequence the emulator cannot digest must not take the pane down
-            pass
-        if self._attached and pane.flush is None:
-            # Coalesce per frame instead of pushing every read. The PTY splits one
-            # repaint into several chunks with the cursor parked mid-way (e.g. end
-            # of line); pushing chunks makes clients place the cursor at those
-            # intermediate spots, so IME candidate windows drift to the right edge.
-            # Sending a whole frame means clients see the end-of-frame state.
-            pane.flush = asyncio.get_running_loop().call_later(
-                FRAME_SECONDS, self._flush, pane)
+        pane.term.write(chunk)                # ghostty parses; its answers come back through Pane.reply
+        # A synchronized block (DEC 2026) holds frames until it closes; the grace period
+        # restarts with every chunk, so a slow repaint is never shown half-painted.
+        pane.sync_until = time.monotonic() + SYNC_TIMEOUT if pane.term.mode(vt.MODE_SYNC_OUTPUT) else None
+        if pane.resize_hold is not None:
+            # The program answered the resize (a repaint, in practice a synchronized full
+            # redraw). The hold has done its job; the sync logic governs from here.
+            pane.resize_hold = None
+        # Coalesce per frame instead of pushing every read. The PTY splits one repaint
+        # into several chunks with the cursor parked mid-way (e.g. end of line); pushing
+        # chunks makes clients place the cursor at those intermediate spots, so IME
+        # candidate windows drift to the right edge. Sending a whole frame means clients
+        # see the end-of-frame state.
+        self._schedule_flush(pane, FRAME_SECONDS)
+
+    def _schedule_flush(self, pane: Pane, delay):
+        """Broadcast the pane's frame in ``delay`` seconds, or sooner if a flush is already
+        due sooner. A later one is pulled in: the flush parked at a synchronized block's
+        safety deadline must not hold the frame once the block has closed."""
+        if not self._attached:
+            return
+        loop = asyncio.get_running_loop()
+        if pane.flush is not None:
+            if pane.flush.when() <= loop.time() + delay:
+                return
+            pane.flush.cancel()
+        pane.flush = loop.call_later(delay, self._flush, pane)
 
     def _flush(self, pane: Pane):
         pane.flush = None
         if not self._attached:
-            pane.screen.dirty.clear()
             return
-        _follow_history(pane)
-        if pane.view_offset:
-            # Scrolled back: the frame is the whole window into history, and the cursor
-            # belongs to the live screen -- hidden, as herdr and pi hide it while scrolled.
-            pane.screen.dirty.clear()
-            pane.sent_cursor = None
-            self._broadcast(pane.id, {
-                "event": "screen", "id": pane.id,
-                "rows": {str(r): line for r, line in enumerate(_rows_for(pane))},
-                "cursor": [pane.screen.cursor.x, pane.screen.cursor.y],
-                "cursor_hidden": True,
-                "scroll": _scroll_metrics(pane),
-                "alt_screen": pane.alt_screen,
-            })
-            return
-        dirty = sorted(pane.screen.dirty)
-        pane.screen.dirty.clear()
-        cursor = ([pane.screen.cursor.x, pane.screen.cursor.y],
-                  bool(pane.screen.cursor.hidden))
-        # Cursor moves must be broadcast too: pyte's dirty set only tracks
-        # content, and moving the cursor does not dirty a row.
-        if not dirty and cursor == pane.sent_cursor:
+        if pane.resize_hold is not None:
+            remaining = pane.resize_hold - time.monotonic()
+            if remaining > 0:
+                # The size changed and ghostty has reflowed the old content, but the program
+                # has not repainted yet. Broadcasting ghostty's reflow here is the "排版重组
+                # 失败" the user photographed: full-width rows spill their last cells onto a
+                # continuation row, and bg-styled rows each gain a blank line. herdr never
+                # shows it because pi (bun) repaints within a frame; pi in Python is slower,
+                # so the last complete frame stays on screen until the repaint lands (_pump
+                # lifts the hold on the program's first byte) or this deadline passes.
+                self._schedule_flush(pane, remaining)
+                return
+            pane.resize_hold = None                    # the program ignored SIGWINCH: show what ghostty has
+        if pane.sync_until is not None:
+            remaining = pane.sync_until - time.monotonic()
+            if remaining > 0 and pane.term.mode(vt.MODE_SYNC_OUTPUT):
+                self._schedule_flush(pane, remaining)   # mid-frame: look again at the deadline
+                return
+            pane.sync_until = None                     # closed, or a block nobody closed: show what there is
+        state = input_state(pane)
+        pane.render.update(pane.term)
+        rendered = {index: _render_cells(cells) for index, cells in pane.render.rows(all_rows=pane.full_frame)}
+        pane.full_frame = False
+        x, y, visible = pane.render.cursor()
+        cursor = ([x, y], not visible)
+        # Cursor moves and mode changes are frames too: neither dirties a row.
+        if not rendered and cursor == pane.sent_cursor and state == pane.sent_input:
             return
         pane.sent_cursor = cursor
-        # Include scroll metrics: a clear wipes scrollback and the panel must collapse its scrollbar.
+        pane.sent_input = state
+        shown = _shown(pane, rendered)
+        # Scroll metrics ride along: a clear wipes scrollback and the panel must collapse its scrollbar.
         self._broadcast(pane.id, {
             "event": "screen", "id": pane.id,
-            "rows": {str(r): _render_row(pane.screen, r)
-                     for r in dirty if r < pane.screen.lines},
+            "rows": {str(r): line for r, line in rendered.items()},
             "cursor": cursor[0],
             "cursor_hidden": cursor[1],
-            "scroll": _scroll_metrics(pane),
-            "alt_screen": pane.alt_screen,
+            "scroll": shown["scroll"],
+            "alt_screen": shown["alt_screen"],
+            "input": state,
         })
+        # The program has finished this frame; if a drag moved on while it rendered, resize it
+        # toward the size the client now wants (herdr resizes each render, as fast as pi keeps up).
+        self._drive_resize(pane)
+
+    def _request_resize(self, pane: Pane, rows, cols):
+        """Record the size the client wants and drive it toward the program. The panel never
+        waits on this: it acknowledges the size and tracks the divider from its own cache. A
+        drag calls this on every step; the size is handed to the program as fast as the program
+        can repaint it (see ``_drive_resize``). False when nothing changes (an unchanged size
+        must not SIGWINCH the program into a pointless full repaint on every tab switch)."""
+        current = pane.resize_target if pane.resize_target is not None else pane.size()
+        if current == (rows, cols):
+            return False
+        pane.resize_target = (rows, cols)
+        self._drive_resize(pane)
+        return True
+
+    def _drive_resize(self, pane: Pane):
+        """Apply the pending size once the program is idle -- it has finished repainting the
+        last size and is not mid-frame -- capped at herdr's render pace. herdr resizes during
+        every render (16 ms) and bun-pi always finishes within it, so it is never resized
+        mid-repaint; pi in Python takes longer, so a drag resizes it as fast as it actually
+        repaints, showing each intermediate width cleanly instead of thrashing it with renders
+        it would drop. Runs off the request (a scheduled apply), so the client is never blocked
+        on the reflow, and again after each frame is broadcast, to pick up a drag that moved on
+        while the program was rendering."""
+        if pane.resize_target is None or pane.fd is None or pane.resize_apply is not None:
+            return
+        if pane.resize_hold is not None or pane.sync_until is not None:
+            return                              # still repainting the last size: apply the next when it lands
+        loop = asyncio.get_running_loop()
+        delay = max(0.0, RESIZE_MIN_INTERVAL - (loop.time() - pane.resize_applied_at))
+        pane.resize_apply = loop.call_later(delay, self._apply_resize, pane)
+
+    def _apply_resize(self, pane: Pane):
+        """The size a client asked for, in terminal order: pty first, emulator, then the
+        program hears of it; the frame with every row follows at once."""
+        pane.resize_apply = None
+        target, pane.resize_target = pane.resize_target, None
+        if target is None or pane.fd is None:
+            return
+        rows, cols = target
+        if pane.size() == (rows, cols):
+            return
+        pane.resize_applied_at = asyncio.get_running_loop().time()
+        try:
+            fcntl.ioctl(pane.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        except OSError:
+            pass
+        pane.resize(rows, cols)
+        if pane.proc is not None:
+            try:
+                os.killpg(pane.proc.pid, signal.SIGWINCH)
+            except OSError:
+                pass
+        # Keep the last complete frame on screen until the program repaints at the new size,
+        # instead of broadcasting ghostty's reflow of the old content. _pump lifts the hold on
+        # the program's first byte; the deadline is the fallback for one that never answers.
+        pane.resize_hold = time.monotonic() + RESIZE_HOLD_SECONDS
+        self._schedule_flush(pane, RESIZE_HOLD_SECONDS)
 
     def _leave_scrollback(self, pane: Pane):
-        if not pane.view_offset:
+        """A keystroke into the program returns the viewer to the live screen, as in a terminal."""
+        if not pane.term.scroll_metrics()["offset_from_bottom"]:
             return
         _scroll_pane(pane, to="bottom")
-        pane.screen.dirty.update(range(pane.screen.lines))
-        if self._attached and pane.flush is None:
-            pane.flush = asyncio.get_running_loop().call_later(FRAME_SECONDS, self._flush, pane)
+        pane.full_frame = True
+        self._schedule_flush(pane, FRAME_SECONDS)
 
     def _broadcast(self, pane_id, payload):
         line = (json.dumps(payload, ensure_ascii=False) + "\n").encode()
@@ -806,7 +836,7 @@ class Daemon:
                 self._attached.pop(writer, None)
         pane = self.panes.get(pane_id) if behind else None
         if pane is not None and pane.fd is not None:
-            pane.screen.dirty.update(range(pane.screen.lines))
+            pane.full_frame = True
             pane.sent_cursor = None
 
     def create(self, argv, cwd, *, title="", card=None, env=None, place=None) -> Pane:
@@ -814,7 +844,8 @@ class Daemon:
         pane = Pane(f"p{self._seq}", title or (argv[0] if argv else ""), list(argv),
                     cwd or os.getcwd(), card=card)
         if env and env.get("MISAKA_THEME") in ("dark", "light"):
-            pane.theme = self._theme = env["MISAKA_THEME"]   # remember the session variant
+            self._theme = env["MISAKA_THEME"]   # remember the session variant
+            pane.set_theme(self._theme)
         if env and env.get("MISAKA_ALLY"):
             pane.ally = env["MISAKA_ALLY"]      # transient ally: in the roster until the process exits
         self._spawn(pane, env=env)
@@ -835,13 +866,20 @@ class Daemon:
 
     def _seat(self, pane, place):
         """``{"split": pane_id[, "direction": "h"|"v"]}`` splits that pane in its own tab (herdr
-        split_at, 50/50); ``{"tab": pane_id}`` opens a new tab in the space holding that pane;
-        anything else (or an unknown pane) opens a new space in the pane's folder. ``name``
-        names a new tab (herdr custom_name); a new tab is otherwise named after its pane."""
-        ref = place.get("split") or place.get("tab")
+        split_at, 50/50); ``{"grid": pane_id}`` adds the pane to that pane's tab and re-lays the
+        tab as a balanced grid (a Last Order and the Sisters she summoned share one tab this
+        way); ``{"tab": pane_id}`` opens a new tab in the space holding that pane; anything else
+        (or an unknown pane) opens a new space in the pane's folder. ``name`` names a new tab
+        (herdr custom_name); a new tab is otherwise named after its pane."""
+        ref = place.get("split") or place.get("tab") or place.get("grid")
         at = self._tab_holding(ref) if ref else None
         name = place.get("name") or pane.title
-        if at and place.get("split"):
+        if at and place.get("grid"):
+            tab = at[1]
+            ids = hui.pane_ids(hui.from_jsonable(tab["tree"])) + [pane.id]
+            tab["tree"] = hui.to_jsonable(hui.grid_tree(ids))
+            tab["grid"] = True     # remembered so a later add or close re-balances (survives the client round-trip)
+        elif at and place.get("split"):
             tab = at[1]
             tab["tree"] = hui.to_jsonable(hui.split_at(
                 hui.from_jsonable(tab["tree"]), ref, place.get("direction") or "h", pane.id, 0.5))
@@ -860,6 +898,8 @@ class Daemon:
                 tree = hui.from_jsonable(tab.get("tree"))
                 if tree and pane_id in hui.pane_ids(tree):
                     tree = hui.remove_pane(tree, pane_id)
+                    if tree and tab.get("grid"):
+                        tree = hui.grid_tree(hui.pane_ids(tree))   # a grid closes its gap by re-balancing
                     tab["tree"] = hui.to_jsonable(tree) if tree else None
             space["tabs"] = [tab for tab in (space.get("tabs") or []) if tab.get("tree")]
         self.spaces = [space for space in self.spaces if space["tabs"]]
@@ -903,10 +943,34 @@ class Daemon:
         while proc.poll() is None:
             await asyncio.sleep(0.05)
 
-    def close(self, pane_id):
-        pane = self.panes.pop(pane_id, None)
+    @staticmethod
+    def _check_generation(pane, expected_generation):
+        if expected_generation is not None and pane.generation != int(expected_generation):
+            raise ValueError(
+                f"Pane {pane.id} is generation {pane.generation}; "
+                f"expected generation {int(expected_generation)}."
+            )
+
+    def close(self, pane_id, *, expected_generation=None):
+        pane = self.panes.get(pane_id)
         if pane is None:
             raise ValueError(f"Pane not found: {pane_id}")
+        self._check_generation(pane, expected_generation)
+        if pane.card and pane.claim_lock:
+            # Explicit close (including daemon shutdown) must not orphan the claim.
+            # Natural card exits stay in the pane registry for _watch_cards to settle.
+            from misaka.core.platform import tasks as db
+            con = self._board()
+            db.add_event(con, pane.card, "stopped", {},
+                         generation=pane.generation, claim_lock=pane.claim_lock)
+            db.mark_stopped(con, pane.card,
+                            generation=pane.generation, claim_lock=pane.claim_lock)
+            pane.claim_lock = None
+        self.panes.pop(pane_id)
+        if pane.resize_apply is not None:      # a coalesced resize must not fire on a freed terminal
+            pane.resize_apply.cancel()
+            pane.resize_apply = None
+        pane.close_terminal()
         if pane.alive():
             # herdr kills and moves on: waiting here froze every pane for up to 4s
             # per close (cascades serially longer). SIGTERM now; a background task
@@ -991,7 +1055,6 @@ class Daemon:
             "MISAKA_DB": _expand(CFG["db"]),
             "MISAKA_MESSAGES": _expand(CFG["messages_db"]),
             "MISAKA_TASKS": _expand(CFG["tasks_root"]),
-            "MISAKA_TASK_DIR": db.task_state_dir(row["id"]),
             "MISAKA_TASK_OUTPUT_DIR": str(row["output_dir"] or db.workspace_for(row)),
         }
 
@@ -999,41 +1062,91 @@ class Daemon:
         """A card whose session can be reopened: not live in a pane, with a saved transcript."""
         from misaka.core.network.sister_runtime import ACTIVE_BOARD_STATUSES
         from misaka.core.platform import tasks as db
+        from misaka.core.session_manager import find_most_recent_session
         row = db.get(self._board(), task_id)
         if row is None:
             raise ValueError(f"Card not found: {task_id}")
         if row["status"] in ACTIVE_BOARD_STATUSES:
             raise ValueError(f"Card {task_id} is still {row['status']}; steer its running pane instead.")
         session = session_roots.card_session_dir(row)
-        if not (os.path.isdir(session) and any(n.endswith(".jsonl") for n in os.listdir(session))):
+        if find_most_recent_session(session) is None:
             raise ValueError(f"Card {task_id} has no saved session to reopen.")
         return row
 
     def open_card_session(self, task_id, place=None) -> Pane:
         """Reopen a card's saved session to look at it: no claim, no contract, no model turn.
         The panel uses it for a click on a card session, Last Order to bring a Sister back into
-        view. A turn typed into such a pane is not an attempt: without a claim nothing settles
-        the card, and a report it writes carries a stale generation and is ignored."""
+        view. A turn typed into such a pane is not an attempt: without a claim its lifecycle
+        cannot settle the card."""
         row = self._settled_card_with_session(task_id)
         pane = self.create([*CARD_SHELL, task_id, "--resume"], self._card_workspace(row),
                            title=f"{row['assignee']}·{task_id}", card=task_id,
                            env=self._card_env(row), place=place)
+        pane.generation = int(row["generation"])
         self._save_snapshot()
         return pane
 
-    def continue_card(self, task_id, say, place=None) -> Pane:
+    def _drain_blocked_run(self, con, row):
+        """Stop the exact old process group before a blocked card starts a new generation."""
+        from misaka.core.platform import processes as process_tree
+        from misaka.core.subagent.child import PROCESS_GROUP_IDENTITY
+
+        old_panes = [pane for pane in self.panes.values() if pane.card == row["id"]]
+        for old_pane in old_panes:
+            old_process = old_pane.proc
+            self.close(old_pane.id)
+            if old_process is None or old_process.poll() is not None:
+                continue
+            try:
+                old_process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(old_process.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                old_process.wait(timeout=2)
+        previous = con.execute(
+            "SELECT pid,process_identity FROM task_runs WHERE id=? AND task_id=? "
+            "AND generation=?",
+            (row["current_run_id"], row["id"], row["generation"]),
+        ).fetchone()
+        if previous is None or previous["pid"] is None:
+            return
+        pid = int(previous["pid"])
+        identity = str(previous["process_identity"] or "")
+        if identity.startswith(PROCESS_GROUP_IDENTITY):
+            drained = process_tree.terminate_orphaned_group(
+                pid, identity[len(PROCESS_GROUP_IDENTITY):]
+            )
+        elif not identity:
+            drained = not psutil.pid_exists(pid)
+        else:
+            drained = not process_tree.identity_is_alive(pid, identity)
+        if not drained:
+            raise ValueError(
+                f"Card {row['id']}'s previous process is still running; try again."
+            )
+
+    def continue_card(self, task_id, say, place=None, *, expected_generation=None) -> Pane:
         """Continue a settled card with a new model turn: the same ``claim_resume`` as the
-        in-process Sister runtime (a new generation under our lock), after which the card
-        shell's Supervisor settles the card exactly like a first run."""
+        in-process Sister runtime (a new generation under our lock), after which the
+        session lifecycle settles the card exactly like a first run."""
         from misaka.core.platform import admission
         from misaka.core.platform import tasks as db
         row = self._settled_card_with_session(task_id)
+        generation = int(row["generation"])
+        if expected_generation is not None and generation != int(expected_generation):
+            raise ValueError(
+                f"Card {task_id} is generation {generation}; "
+                f"expected generation {int(expected_generation)}."
+            )
         con = self._board()
+        if row["status"] in {"blocked", "triage"}:
+            self._drain_blocked_run(con, row)
         lock = f"net:{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(4)}"
         host_cap, assignee_cap = admission.limits()
         if not db.claim_resume(con, task_id, lock, os.getpid(),
-                               ttl_seconds=max(1800, int(row["timeout_seconds"]) + 60),
-                               expected_generation=int(row["generation"]),
+                               expected_generation=generation,
                                host_cap=host_cap, assignee_cap=assignee_cap):
             raise ValueError(f"Card {task_id} could not be claimed for continuation; it changed "
                              "underneath, or the host is at capacity.")
@@ -1068,7 +1181,6 @@ class Daemon:
         lock = f"net:{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(4)}"
         host_cap, assignee_cap = admission.limits()
         if not db.claim(con, task_id, lock,
-                        ttl_seconds=max(1800, int(row["timeout_seconds"]) + 60),
                         generation=generation, pid=os.getpid(),
                         host_cap=host_cap, assignee_cap=assignee_cap):
             raise ValueError(db.claim_refusal(task_id) or f"Card {task_id} was claimed by another dispatcher.")
@@ -1091,8 +1203,7 @@ class Daemon:
         return self._host_card(con, row, lock, generation, argv, place, undo=undo, env=env)
 
     def _host_card(self, con, row, lock, generation, argv, place, *, undo, env=None, event="claimed"):
-        """Host a claimed card in a pane. The pane's environment carries the claim so the card
-        drives itself (card_shell.Supervisor); ``undo`` releases the claim when no pane starts."""
+        """Host a claimed card in a pane; ``undo`` releases its claim if no pane starts."""
         from misaka.core.platform import processes as process_tree
         from misaka.core.platform import tasks as db
         task_id = row["id"]
@@ -1115,7 +1226,6 @@ class Daemon:
                                place=place)
             pane.claim_lock, pane.generation = lock, generation
             pane.started = time.time()
-            pane.deadline = pane.started + int(row["timeout_seconds"])
             # Owner = the pane's process group: if the daemon dies, reconcile reclaims by group identity (same marker as child.py).
             identity = process_tree.identity(pane.proc.pid)
             db.set_pid(con, task_id, pane.proc.pid,
@@ -1137,15 +1247,15 @@ class Daemon:
         return pane
 
     async def _watch_cards(self):
-        """Watch ALLY card panes only: an external CLI cannot supervise itself, so the daemon
-        keeps its heartbeat, deadline, and exit reconciliation. A MISAKA card drives itself
-        (card_shell.Supervisor, phase 2); the daemon just hosts its pane.
+        """Keep every card pane's lease alive and reconcile its process exit.
+
+        A Sister's lifecycle hook owns submission; an external ally has no such hook, so
+        its process exit is adapted into a submission.  Neither is interrupted for taking
+        a long time.
 
         Everything slow here runs off the loop. This coroutine shares its thread with every
-        pane's PTY reader and frame timer, and the engine import alone is ~1s: while it ran,
-        no pane moved and no keystroke reached one (audit 2026-09-02, ui-panel-04). The
-        module import, `check_report`'s workspace scan, `ally_runner.finish` and
-        `dispatch.accept` go through `asyncio.to_thread`; the board's own statements stay
+        pane's PTY reader and frame timer. The ally adapter import, `ally_runner.finish`,
+        and `dispatch.accept` go through `asyncio.to_thread`; the board's own statements stay
         inline (single indexed CAS updates on a WAL connection, and keeping them here keeps
         every mutation of pane state on one thread). Each await is a suspension point, so the
         pane is re-checked afterwards -- `card.stop` or `pane.close` may have run meanwhile.
@@ -1157,14 +1267,18 @@ class Daemon:
         def still_ours(pane):
             return self.panes.get(pane.id) is pane and pane.claim_lock is not None
 
-        worker = None
         while not self._stopping.is_set():
-            allies = [p for p in self.panes.values() if p.card and p.claim_lock and p.ally]
-            if allies and worker is None:
-                # ~1s of engine imports: loaded only when an ally card pane actually
-                # exists, never at daemon startup (it blocked the first ping for 0.7s).
-                worker = await asyncio.to_thread(importlib.import_module, "misaka.core.network.worker")
-            for pane in allies:
+            if self._socket_identity is not None:
+                try:
+                    info = os.stat(self.sock_path, follow_symlinks=False)
+                    owned = (info.st_dev, info.st_ino) == self._socket_identity
+                except OSError:
+                    owned = False
+                if not owned:
+                    self._stopping.set()    # no address remains through which this daemon can be managed
+                    break
+            cards = [p for p in self.panes.values() if p.card and p.claim_lock]
+            for pane in cards:
                 if not still_ours(pane):
                     continue
                 con = self._board()
@@ -1174,95 +1288,107 @@ class Daemon:
                     pane.claim_lock = None          # ownership changed: observe only, never touch state
                     continue
                 if not pane.alive():
-                    if pane.ally:
-                        # An ally neither submits nor reports; do both on its behalf at
-                        # exit so the artifact reconciliation below is identical for
-                        # both kinds of executor (the board is the single bus).
-                        ally_runner = await asyncio.to_thread(
-                            importlib.import_module,
-                            "misaka.core.network.ally.runner")
-                        # The tail is snapshotted here, on the loop's thread: decoding the
-                        # live bytearray from the worker would race _pump's append.
-                        tail = pane.buf.decode("utf-8", errors="replace")
-                        await asyncio.to_thread(
-                            ally_runner.finish,
-                            pane.cwd,
-                            pane.exit_code if pane.exit_code is not None else -1,
-                            tail,
-                            assignee=pane.ally, task_id=pane.card,
-                            output_dir=row["output_dir"], generation=pane.generation,
-                            since=getattr(pane, "started", None))
-                        if not still_ours(pane):
-                            continue
-                    ok, report = await asyncio.to_thread(
-                        worker.check_report, pane.cwd, con=con, task_id=pane.card,
-                        generation=pane.generation)
+                    exit_code = (
+                        pane.exit_code
+                        if pane.exit_code is not None
+                        else pane.proc.poll()
+                    )
+                    if not pane.ally:
+                        if exit_code:
+                            tail = pane.buf.decode("utf-8", errors="replace")
+                            tail = re.sub(
+                                r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|[\r\x00]",
+                                "",
+                                tail,
+                            ).strip()
+                            reason = f"Sister process exited with code {exit_code}"
+                            if tail:
+                                reason += f": {tail[-500:]}"
+                            if db.add_event(
+                                con,
+                                pane.card,
+                                "failed",
+                                {"reason": reason},
+                                generation=pane.generation,
+                                claim_lock=pane.claim_lock,
+                            ):
+                                db.mark_failed(
+                                    con,
+                                    pane.card,
+                                    generation=pane.generation,
+                                    claim_lock=pane.claim_lock,
+                                    failure_kind="crash",
+                                    reason=reason,
+                                )
+                        else:
+                            db.mark_unsettled(
+                                con,
+                                pane.card,
+                                generation=pane.generation,
+                                claim_lock=pane.claim_lock,
+                            )
+                        pane.claim_lock = None
+                        continue
+                    # An ally has no lifecycle hook, so adapt its exit into the same
+                    # submission object the board accepts for Sisters.
+                    ally_runner = await asyncio.to_thread(
+                        importlib.import_module,
+                        "misaka.core.network.ally.runner")
+                    # The tail is snapshotted here, on the loop's thread: decoding the
+                    # live bytearray from the worker would race _pump's append.
+                    tail = pane.buf.decode("utf-8", errors="replace")
+                    submission, summary = await asyncio.to_thread(
+                        ally_runner.finish,
+                        pane.cwd,
+                        exit_code if exit_code is not None else -1,
+                        tail,
+                        assignee=pane.ally, task_id=pane.card,
+                        output_dir=row["output_dir"], generation=pane.generation,
+                        since=getattr(pane, "started", None))
                     if not still_ours(pane):
                         continue
-                    blocked_reason = (str(report)[len("blocked:"):].strip()
-                                      if not ok and str(report).startswith("blocked:") else None)
-                    if blocked_reason:
-                        db.block_abandoned(
-                            con, pane.card, "needs_input", blocked_reason,
-                            generation=pane.generation, claim_lock=row["claim_lock"],
-                            worker_pid=row["worker_pid"],
-                            worker_identity=row["worker_identity"],
-                            claim_expires=row["claim_expires"],
+                    accepted = False
+                    if submission is not None:
+                        dispatch = await asyncio.to_thread(
+                            importlib.import_module, "misaka.core.network.dispatch"
                         )
-                    elif db.reclaim_abandoned(
-                        con, pane.card, generation=pane.generation,
-                        claim_lock=row["claim_lock"], worker_pid=row["worker_pid"],
-                        worker_identity=row["worker_identity"],
-                        claim_expires=row["claim_expires"], submitted=bool(ok),
-                    ):
-                        db.add_event(con, pane.card,
-                                     "submitted" if ok else "reclaimed",
-                                     {"summary": report["summary"],
-                                      "artifacts": report.get("artifacts", [])}
-                                     if ok else {"reason": str(report)[:500]},
-                                     generation=pane.generation)
+                        accepted = await asyncio.to_thread(
+                            dispatch.accept,
+                            con,
+                            row,
+                            submission,
+                            generation=pane.generation,
+                            claim_lock=pane.claim_lock,
+                            workspace=pane.cwd,
+                        )
+                    else:
+                        # No submission to adapt: a crash if the ally died, otherwise a turn
+                        # that ended without one. Both count against the card's attempts.
+                        db.mark_failed(
+                            con, pane.card, generation=pane.generation,
+                            claim_lock=pane.claim_lock,
+                            failure_kind="protocol_violation" if exit_code == 0 else "crash",
+                            reason=str(summary)[:500],
+                        )
                     pane.claim_lock = None
-                elif not pane.submitted:
+                    head = "finished and submitted" if accepted else "could not submit"
+                    try:
+                        await asyncio.to_thread(
+                            ally_runner.notify,
+                            pane.card,
+                            f"Ally {pane.ally} {head} (card {pane.card}):\n\n{summary}",
+                            sender=pane.ally,
+                        )
+                    except Exception:  # noqa: BLE001, S110 - notification cannot change board state
+                        pass
+                else:
+                    # The lease says the pane's process exists; progress is the Sister's own
+                    # session to stamp.
                     if time.time() - pane.last_heartbeat >= 60 and db.heartbeat(
                         con, pane.card, pane.claim_lock,
-                        generation=pane.generation,
-                        ttl_seconds=max(1800, int(row["timeout_seconds"]) + 60),
+                        generation=pane.generation, progress=False,
                     ):
                         pane.last_heartbeat = time.time()
-                    ok, report = await asyncio.to_thread(
-                        worker.check_report, pane.cwd, con=con, task_id=pane.card,
-                        generation=pane.generation)
-                    if not still_ours(pane) or pane.submitted:
-                        continue
-                    if ok:
-                        dispatch = await asyncio.to_thread(
-                            importlib.import_module, "misaka.core.network.dispatch")
-                        claim_lock = pane.claim_lock
-                        await asyncio.to_thread(
-                            dispatch.accept, con, row, report, generation=pane.generation,
-                            claim_lock=claim_lock, workspace=pane.cwd)
-                        pane.submitted = True   # keep the pane after submission so a person can continue the chat
-                    elif str(report).startswith("blocked:"):
-                        db.block_task(
-                            con, pane.card, "needs_input",
-                            str(report)[len("blocked:"):].strip(),
-                            generation=pane.generation, claim_lock=pane.claim_lock,
-                        )
-                        pane.submitted = True
-                        pane.claim_lock = None
-                    elif pane.deadline and time.time() > pane.deadline:
-                        if db.add_event(con, pane.card, "failed",
-                                        {"reason": "Sister timeout"},
-                                        generation=pane.generation,
-                                        claim_lock=pane.claim_lock) and db.mark_failed(
-                                con, pane.card, generation=pane.generation,
-                                claim_lock=pane.claim_lock):
-                            pass
-                        pane.claim_lock = None
-                        try:
-                            self.close(pane.id)
-                        except ValueError:
-                            pass
             try:
                 await asyncio.wait_for(self._stopping.wait(), CARD_POLL_SECONDS)
             except TimeoutError:
@@ -1299,6 +1425,10 @@ class Daemon:
         if method == "ping":
             return {"pong": True, "pid": os.getpid(), "panes": len(self.panes),
                     "panels": len(self._panels), "proto": PROTOCOL}
+        if method == "panes.status":
+            # Research waits on lifecycle only; no mailbox/roster/foreground/UI scans.
+            return {"panes": [{"id": p.id, "card": p.card, "alive": p.alive(), "reported": p.reported}
+                              for p in self.panes.values()]}
         if method == "panes.list":
             status, mail = {}, {}
             cards = [p.card for p in self.panes.values() if p.card]
@@ -1325,6 +1455,7 @@ class Daemon:
                 ally = _ally_name(p)             # non-empty = a third-party agent runs in this pane
                 state = _ally_state(p) if ally and p.alive() else None
                 return {"id": p.id, "title": p.title, "card": p.card, "cwd": p.cwd,
+                        "generation": p.generation,
                         "reported": p.reported,
                         "alive": p.alive(), "exit_code": p.exit_code,
                         "status": status.get(p.card),
@@ -1350,19 +1481,29 @@ class Daemon:
             from misaka.core.platform import tasks as db
             workspace = (db.canonical_workspace(params["workspace"])
                          if params.get("workspace") else None)
-            sql = "SELECT id,status,title,assignee,workspace,origin_session FROM tasks"
-            args = []
-            if workspace:
-                sql += " WHERE workspace=?"
-                args.append(workspace)
+            from misaka.core.research import runs
+            from misaka.core.session_manager import find_most_recent_session
+            contexts = runs.task_contexts(self._board())
             cards = []
-            for r in self._board().execute(sql + " ORDER BY created_at", args):
+            for r in self._board().execute(
+                    "SELECT id,status,title,assignee,workspace,origin_session,session_file,session_dir FROM tasks ORDER BY created_at"):
+                context = contexts.get(r["id"])
+                project = context["workspace"] if context else r["workspace"]
+                if workspace and project != workspace:
+                    continue
                 sess = session_roots.card_session_dir(r)
+                available = (os.path.isdir(r["workspace"] or "")
+                             and os.path.isdir(project or ""))
+                transcript = find_most_recent_session(sess) if available else None
                 cards.append({"id": r["id"], "status": r["status"], "title": r["title"],
-                              "assignee": r["assignee"], "workspace": r["workspace"],
-                              "origin_session": r["origin_session"],
-                              "has_session": os.path.isdir(sess) and bool(os.listdir(sess))})
-            return {"cards": cards}
+                              "assignee": r["assignee"], "workspace": r["workspace"], "project": project,
+                              "origin_session": r["origin_session"], "research": context,
+                              "has_session": transcript is not None, "session_file": transcript})
+            from misaka.core import session_catalog
+            paths = [(p.reported or {}).get("session") for p in getattr(self, "panes", {}).values()]
+            entries = [entry for entry in session_catalog.list_entries(self._board(), extra_paths=paths)
+                       if not workspace or entry["workspace"] == workspace]
+            return {"cards": cards, "sessions": entries}
         if method == "card.delete":
             # A running card still occupies a pane: refuse and let the user stop it first (the panel uses card.stop).
             if any(p.card == params["task_id"] and p.alive()
@@ -1389,6 +1530,13 @@ class Daemon:
             seq = int(params.get("seq") or 0)
             if pane.reported and seq < pane.reported["seq"]:
                 return {"ok": False, "stale": True}
+            session_file = str(params.get("session") or "")
+            if pane.card and session_file and os.path.isabs(session_file):
+                from misaka.core.platform import tasks as db
+                row = db.get(self._board(), pane.card)
+                if row is not None and pane.generation is not None:
+                    db.set_runtime(self._board(), pane.card, row["agent_id"], session_file,
+                                   generation=pane.generation, claim_lock=pane.claim_lock)
             pane.reported = {"state": state, "message": str(params.get("message") or "")[:240],
                              "seq": seq,
                              # The session file this pane writes: the panel marks its list with it.
@@ -1414,14 +1562,6 @@ class Daemon:
                          if p.card == params["task_id"]), None)
             if pane is None:
                 raise ValueError(f"Card {params['task_id']} is not running in a pane.")
-            from misaka.core.platform import tasks as db
-            con = self._board()
-            if pane.claim_lock:
-                db.add_event(con, pane.card, "stopped", {},
-                             generation=pane.generation, claim_lock=pane.claim_lock)
-                db.mark_stopped(con, pane.card,
-                                generation=pane.generation, claim_lock=pane.claim_lock)
-            pane.card = pane.claim_lock = None   # detach before closing so the watcher does not treat it as a crash
             self.close(pane.id)
             return {"stopped": True}
         if method == "layout.get":       # the daemon owns the layout (herdr server model)
@@ -1441,7 +1581,10 @@ class Daemon:
             pane = self.open_card_session(params["task_id"], place=params.get("place"))
             return {"pane_id": pane.id, "pid": pane.proc.pid, "card": pane.card}
         if method == "pane.continue_card":
-            pane = self.continue_card(params["task_id"], params["say"], place=params.get("place"))
+            pane = self.continue_card(
+                params["task_id"], params["say"], place=params.get("place"),
+                expected_generation=params.get("expected_generation"),
+            )
             return {"pane_id": pane.id, "pid": pane.proc.pid, "card": pane.card}
         if method == "pane.read":
             pane = self.panes.get(params["id"])
@@ -1460,6 +1603,22 @@ class Daemon:
                  if p.card and p.card == params.get("card")), None)
             if pane is None or pane.fd is None:
                 raise ValueError(f"Pane is missing or has exited: {params.get('id') or params.get('card')}")
+            expected_generation = params.get("expected_generation")
+            self._check_generation(pane, expected_generation)
+            if expected_generation is not None and pane.card:
+                from misaka.core.platform import tasks as db
+                row = db.get(self._board(), pane.card)
+                if row is None or int(row["generation"]) != int(expected_generation):
+                    generation = row["generation"] if row is not None else "missing"
+                    raise ValueError(
+                        f"Card {pane.card} is generation {generation}; "
+                        f"expected generation {int(expected_generation)}."
+                    )
+                if row["status"] != "running" or row["claim_lock"] != pane.claim_lock:
+                    raise ValueError(
+                        f"Pane {pane.id} no longer owns running card {pane.card} "
+                        f"at expected generation {int(expected_generation)}."
+                    )
             _write_pty(pane.fd, params["text"].encode())
             if params.get("enter"):
                 _write_pty(pane.fd, b"\r")
@@ -1475,40 +1634,56 @@ class Daemon:
             pane = self.panes.get(params["id"])
             if pane is None or pane.fd is None:
                 raise ValueError(f"Pane is missing or has exited: {params['id']}")
-            rows, cols = int(params["rows"]), int(params["cols"])
-            if (pane.screen.lines, pane.screen.columns) == (rows, cols):
-                # herdr resizes only on a real change: an unchanged size must not
-                # SIGWINCH the app into a pointless full repaint on every tab switch.
-                return {"resized": False}
-            fcntl.ioctl(pane.fd, termios.TIOCSWINSZ,
-                        struct.pack("HHHH", rows, cols, 0, 0))
-            pane.resize(rows, cols)
-            try:
-                os.killpg(pane.proc.pid, signal.SIGWINCH)
-            except OSError:
-                pass
-            return {"resized": True}
+            return {"resized": self._request_resize(pane, int(params["rows"]), int(params["cols"]))}
+        if method == "panes.resize":
+            # One round trip for a whole layout (herdr's client hands the server the layout
+            # and the server sizes every pane): {"sizes": {pane_id: [rows, cols]}}.
+            resized = {}
+            for pane_id, (rows, cols) in params["sizes"].items():
+                pane = self.panes.get(pane_id)
+                if pane is None or pane.fd is None:
+                    continue
+                resized[pane_id] = self._request_resize(pane, int(rows), int(cols))
+            return {"resized": resized}
         if method == "pane.screen":
             pane = self.panes.get(params["id"])
             if pane is None:
                 raise ValueError(f"Pane not found: {params['id']}")
-            pane.screen.dirty.clear()
-            _follow_history(pane)
-            return {"rows": _rows_for(pane),
-                    "cursor": [pane.screen.cursor.x, pane.screen.cursor.y],
-                    "cursor_hidden": bool(pane.screen.cursor.hidden) or bool(pane.view_offset),
-                    "size": [pane.screen.lines, pane.screen.columns],
-                    "scroll": _scroll_metrics(pane),
-                    "alt_screen": pane.alt_screen}
+            if (pane.sync_until is not None or pane.resize_hold is not None) and pane.shown is not None:
+                # A frame is being painted, or a resize is waiting for the program to repaint:
+                # the viewer keeps seeing the last complete frame (ghostty's renderer does not
+                # draw inside a synchronized block, and its reflow of the old content is the
+                # photographed spill/blank rows). Answering from the live buffer here showed
+                # the transcript's first rows -- pi repaints from the top -- on every
+                # divider-drag step, and cleared the dirty set so the rows painted before the
+                # request never reached the panel afterwards.
+                return dict(pane.shown, held=True)
+            return _shown(pane)
+        if method == "pane.extract":
+            # The text between two absolute (row, col) points: the panel's selection lives in
+            # screen-buffer coordinates (herdr selection.rs), so it survives scrolling and
+            # can span rows that are no longer on screen.
+            pane = self.panes.get(params["id"])
+            if pane is None:
+                raise ValueError(f"Pane not found: {params['id']}")
+            start, end = params["start"], params["end"]
+            return {"text": extract_text(pane, (int(start[0]), int(start[1])),
+                                         (int(end[0]), int(end[1])))}
         if method == "pane.scroll":
             # Negative delta scrolls up; positive scrolls down; "bottom" jumps to the end.
             pane = self.panes.get(params["id"])
             if pane is None:
                 raise ValueError(f"Pane not found: {params['id']}")
             _scroll_pane(pane, params.get("delta", 0), params.get("to"))
-            return {"scroll": _scroll_metrics(pane), "rows": _rows_for(pane)}
+            if (pane.sync_until is not None or pane.resize_hold is not None) and pane.shown is not None:
+                # Mid-frame, or awaiting a repaint after a resize: the new viewport is shown
+                # when the frame completes.
+                pane.full_frame = True
+                return {"scroll": pane.shown["scroll"], "rows": pane.shown["rows"], "held": True}
+            shown = _shown(pane)
+            return {"scroll": shown["scroll"], "rows": shown["rows"]}
         if method == "pane.close":
-            self.close(params["id"])
+            self.close(params["id"], expected_generation=params.get("expected_generation"))
             return {"closed": True}
         if method == "server.stop":
             self._stopping.set()
@@ -1550,6 +1725,8 @@ class Daemon:
         self._clients.add(writer)
         try:
             while not self._stopping.is_set():
+                notify = False        # set once the line parses; a fire-and-forget request wants no reply
+                request_id = None     # the id the reply answers to, error replies included
                 try:
                     # The read belongs inside the try: on a line past the reader's limit it
                     # raises ValueError, and letting that out killed the connection without a
@@ -1560,6 +1737,8 @@ class Daemon:
                     if not line:
                         break
                     req = json.loads(line)
+                    request_id = req.get("id")
+                    notify = request_id is None      # a fire-and-forget request expects no reply (drag resizes)
                     method = req.get("method", "")
                     if method == "pane.attach":   # subscription stream; "*" = screen events from every pane (tiled panel)
                         wanted = (req.get("params") or {}).get("id", "")
@@ -1573,9 +1752,11 @@ class Daemon:
                         result = {"attached": wanted}
                     else:
                         result = self._api(method, req.get("params") or {})
-                    out = {"id": req.get("id"), "result": result}
+                    out = {"id": request_id, "result": result}
                 except Exception as error:  # noqa: BLE001 - one failed request (or one unreadable line) must not drop the connection
-                    out = {"id": None, "error": f"{type(error).__name__}: {error}"}
+                    out = {"id": request_id, "error": f"{type(error).__name__}: {error}"}
+                if notify:                    # fire-and-forget (id=None): apply it, send nothing back
+                    continue
                 writer.write((json.dumps(out, ensure_ascii=False) + "\n").encode())
                 try:
                     await writer.drain()
@@ -1651,6 +1832,8 @@ class Daemon:
             finally:
                 os.umask(old_umask)
             os.chmod(self.sock_path, 0o600)
+            info = os.stat(self.sock_path, follow_symlinks=False)
+            self._socket_identity = (info.st_dev, info.st_ino)
         finally:
             os.close(lock_fd)   # releases the flock
         ally_commands()   # seed allies.json on first run so the user can edit it at any time
@@ -1664,6 +1847,7 @@ class Daemon:
         watcher = asyncio.create_task(self._watch_cards())
         await self._stopping.wait()
         watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
         for pane_id in list(self.panes):
             try:
                 self.close(pane_id)

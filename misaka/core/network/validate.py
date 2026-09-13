@@ -1,4 +1,4 @@
-"""Small schema validators for task cards and reports."""
+"""Small schema validators for task cards and model JSON."""
 import json
 
 
@@ -13,8 +13,25 @@ def extract_json(text):
     strictly valid document decodes the same.
     """
     dec = json.JSONDecoder(strict=False)
-    for i, ch in enumerate(text or ""):
-        if ch in "[{":
+    text = text or ""
+    depth, in_string, escaped = 0, False, False
+    for i, ch in enumerate(text):
+        if depth:
+            # Never turn a malformed outer response into a valid nested fragment.
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+            elif ch == '"':
+                in_string = True
+            elif ch in "[{":
+                depth += 1
+            elif ch in "]}":
+                depth -= 1
+        elif ch in "[{":
             try:
                 obj, _ = dec.raw_decode(text[i:])
                 return obj
@@ -24,7 +41,7 @@ def extract_json(text):
                 obj, _ = dec.raw_decode(_escape_prose_quotes(text[i:]))
                 return obj
             except ValueError:
-                continue
+                depth = 1
     return None
 
 
@@ -95,6 +112,5 @@ def validate_cards(obj, sisters):
         cards.append({
             "title": (title or "").strip(), "body": body or "", "assignee": assignee,
             "model": c.get("model"), "priority": int(c.get("priority") or 0),
-            "timeout": min(max(int(c.get("timeout") or 900), 60), 3600),
         })
     return cards, errors

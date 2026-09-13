@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
+import logging
 import os
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
@@ -273,6 +276,7 @@ class AgentSession:
             else set()
         )
         self._disallowedToolNames: set[str] = set()
+        self._toolAdmission: Callable[[str], bool] | None = None
         self._alwaysAllowedToolNames: set[str] = set()
         self._baseToolsOverride = dict(resolved.baseToolsOverride or {})
         self._extensionRunnerRef = resolved.extensionRunnerRef
@@ -293,6 +297,7 @@ class AgentSession:
         self._pendingNextTurnMessages: list[dict[str, Any]] = []
         self._pendingBashMessages: list[BashExecutionMessage] = []
         self._pendingCustomMessages: list[dict[str, Any]] = []
+        self._customMessageReceipts: dict[str, dict[str, Any]] = {}
         self._bashAbortControllers: set[AbortController] = set()
         self._auto_compaction_abort_controller: AbortController | None = None
         self._compactionAbortController: AbortController | None = None
@@ -314,6 +319,8 @@ class AgentSession:
         self._baseSystemPrompt = ""
         self._baseSystemPromptOptions: BuildSystemPromptOptions = {"cwd": self._cwd}
         self._systemPromptOverride: str | None = None
+        self._toolScopes: list[dict[str, Any]] = []
+        self._unscopedToolNames: list[str] = []
 
         self._install_agent_tool_hooks()
         self._install_agent_next_turn_refresh()
@@ -467,6 +474,8 @@ class AgentSession:
         except Exception:  # noqa: BLE001,S110 - Pi disposal ignores abort-hook failures
             pass
 
+        for delivery_id in list(self._customMessageReceipts):
+            self._fail_custom_receipt(delivery_id, RuntimeError("session closed before persistence"))
         self._extensionRunner.invalidate(_STALE_CONTEXT_MESSAGE)
         self._disconnect_from_agent()
         self._eventListeners = []
@@ -656,64 +665,69 @@ class AgentSession:
             messages.append(self._build_user_message(current_text, current_images))
             messages.extend(self._pendingNextTurnMessages)
             self._pendingNextTurnMessages = []
-            # MISAKA fork: the session's own parts run first; an extension sees the prompt
-            # and the messages as core left them.
-            core = await self.moments.before_agent_start(
-                current_text,
-                current_images,
-                self._baseSystemPrompt,
-                self._baseSystemPromptOptions,
-            )
-            if core.block:
-                raise RuntimeError(core.reason or "a core part blocked the turn")
-            base_system_prompt = core.system_prompt
-            contributed: list[Any] = list(core.messages)
-            system_prompt: Any = base_system_prompt if core.system_prompt_changed else None
-            if self._extensionRunner.has_handlers("before_agent_start"):
-                before_result = await self._extensionRunner.emit_before_agent_start(
-                    current_text,
-                    current_images,
-                    base_system_prompt,
-                    self._baseSystemPromptOptions,
-                )
-                if before_result and _event_field(before_result, "block", False):
-                    raise RuntimeError(
-                        str(
-                            _event_field(
-                                before_result,
-                                "reason",
-                                "before_agent_start hook blocked the turn",
-                            )
-                        )
-                    )
-                contributed.extend(_event_field(before_result, "messages") or [])
-                if _event_field(before_result, "systemPrompt") is not None:
-                    system_prompt = _event_field(before_result, "systemPrompt")
-            for message in contributed:
-                normalized_message = _message_dict(message)
-                messages.append(
-                    _normalize_nullish_message_content(
-                        {
-                            "role": "custom",
-                            "customType": read_field(normalized_message, "customType"),
-                            "content": _message_content(normalized_message),
-                            "display": bool(read_field(normalized_message, "display")),
-                            "details": read_field(normalized_message, "details"),
-                            "timestamp": int(time.time() * 1000),
-                        }
-                    )
-                )
-            if system_prompt is not None:
-                self._systemPromptOverride = str(system_prompt)
-                self.agent.state.systemPrompt = self._systemPromptOverride
-            else:
-                self._systemPromptOverride = None
-                self.agent.state.systemPrompt = self._baseSystemPrompt
+            messages = await self._prepare_agent_start(messages, current_text, current_images)
             report_preflight(True)
             await self._run_agent_prompt(messages)
         except Exception:
             report_preflight(False)
             raise
+
+    async def _prepare_agent_start(self, messages, current_text, current_images):
+        """One hook/prompt assembly path for ordinary prompts and opted-in custom turns."""
+        # MISAKA fork: the session's own parts run first; an extension sees the prompt
+        # and the messages as core left them.
+        core = await self.moments.before_agent_start(
+            current_text,
+            current_images,
+            self._baseSystemPrompt,
+            self._baseSystemPromptOptions,
+        )
+        if core.block:
+            raise RuntimeError(core.reason or "a core part blocked the turn")
+        base_system_prompt = core.system_prompt
+        contributed: list[Any] = list(core.messages)
+        system_prompt: Any = base_system_prompt if core.system_prompt_changed else None
+        if self._extensionRunner.has_handlers("before_agent_start"):
+            before_result = await self._extensionRunner.emit_before_agent_start(
+                current_text,
+                current_images,
+                base_system_prompt,
+                self._baseSystemPromptOptions,
+            )
+            if before_result and _event_field(before_result, "block", False):
+                raise RuntimeError(
+                    str(
+                        _event_field(
+                            before_result,
+                            "reason",
+                            "before_agent_start hook blocked the turn",
+                        )
+                    )
+                )
+            contributed.extend(_event_field(before_result, "messages") or [])
+            if _event_field(before_result, "systemPrompt") is not None:
+                system_prompt = _event_field(before_result, "systemPrompt")
+        for message in contributed:
+            normalized_message = _message_dict(message)
+            messages.append(
+                _normalize_nullish_message_content(
+                    {
+                        "role": "custom",
+                        "customType": read_field(normalized_message, "customType"),
+                        "content": _message_content(normalized_message),
+                        "display": bool(read_field(normalized_message, "display")),
+                        "details": read_field(normalized_message, "details"),
+                        "timestamp": int(time.time() * 1000),
+                    }
+                )
+            )
+        if system_prompt is not None:
+            self._systemPromptOverride = str(system_prompt)
+            self.agent.state.systemPrompt = self._systemPromptOverride
+        else:
+            self._systemPromptOverride = None
+            self.agent.state.systemPrompt = self._baseSystemPrompt
+        return messages
 
     async def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         if text.startswith("/"):
@@ -769,6 +783,11 @@ class AgentSession:
         self._steeringMessages = []
         self._followUpMessages = []
         self.agent.clearAllQueues()
+        retained = {(message.get("details") or {}).get("delivery_id")
+                    for message in [*self._pendingCustomMessages, *self._pendingNextTurnMessages]
+                    if isinstance(message.get("details"), dict)}
+        for delivery_id in set(self._customMessageReceipts) - retained:
+            self._fail_custom_receipt(delivery_id, RuntimeError("message queue cleared before persistence"))
         self._emit_queue_update()
         return {"steering": steering, "followUp": follow_up}
 
@@ -964,10 +983,31 @@ class AgentSession:
         self.agent.followUpMode = mode
         self.settingsManager.setFollowUpMode(mode)
 
+    def getPermissionMode(self) -> str | None:
+        for part in self.moments.parts:
+            getter = getattr(part, "get_permission_mode", None)
+            if callable(getter):
+                return getter()
+        return None
+
+    def setPermissionMode(self, mode: str) -> None:
+        for part in self.moments.parts:
+            setter = getattr(part, "set_permission_mode", None)
+            if callable(setter):
+                setter(mode)
+                return
+        raise ValueError("This session has no agent permission policy part")
+
     def registerCustomTools(self, definitions: list[Any]) -> None:
         # MISAKA fork: a part adding tools after startup (an MCP server that answered late)
         # takes the door ``customTools`` took, then the refresh an extension's registerTool gets.
         self._customTools.extend(definitions)
+        self.refreshTools()
+
+    def unregisterCustomTools(self, definitions: list[Any]) -> None:
+        """Remove precisely the temporary definitions the caller installed, not namesakes."""
+        identities = {id(definition) for definition in definitions}
+        self._customTools = [tool for tool in self._customTools if id(tool) not in identities]
         self.refreshTools()
 
     def refreshTools(self) -> None:
@@ -1041,10 +1081,67 @@ class AgentSession:
         return commands
 
     def setActiveToolsByName(self, toolNames: list[str]) -> None:
-        active = [self._toolRegistry[name] for name in toolNames if name in self._toolRegistry]
+        scopes = getattr(self, "_toolScopes", ())
+        if scopes:
+            # An explicit user/extension selection still changes the underlying
+            # session, but never escapes a temporary scope's ceiling.
+            self._unscopedToolNames = list(dict.fromkeys(toolNames))
+            scopes[-1]["active"] = list(toolNames)
+        self._applyActiveToolsByName(toolNames)
+
+    @contextmanager
+    def toolScope(self, toolNames: Sequence[str]):
+        """Temporary selection AND ceiling, independent of registry refresh.
+
+        Keep the normal selection live underneath: late registrations, removals,
+        reloads and explicit user changes survive leaving the scope. Nested scopes
+        intersect; they never change the session's persistent permission settings.
+        """
+        if not self._toolScopes:
+            self._unscopedToolNames = self.getActiveToolNames()
+        scope = {"allowed": frozenset(toolNames), "active": list(toolNames)}
+        self._toolScopes.append(scope)
+        try:
+            self._applyActiveToolsByName(scope["active"])
+            yield
+        finally:
+            self._toolScopes = [item for item in self._toolScopes if item is not scope]
+            names = self._toolScopes[-1]["active"] if self._toolScopes else self._unscopedToolNames
+            self._applyActiveToolsByName(names)
+
+    def _applyActiveToolsByName(self, toolNames: Sequence[str]) -> None:
+        for scope in getattr(self, "_toolScopes", ()):
+            toolNames = [name for name in toolNames if name in scope["allowed"]]
+        active = [self._toolRegistry[name] for name in dict.fromkeys(toolNames) if name in self._toolRegistry]
+        if not any(tool.name == "bash" for tool in active):
+            active = [tool for tool in active if tool.name != "browser_exec"]
+        elif any(tool.name == "browser_exec" for tool in active):
+            from misaka.core.web.browser.settings import BASE_TOOLS
+            active = [tool for tool in active if tool.name not in BASE_TOOLS]
+        active = self.moments.project_tools(active)
         valid_names = [tool.name for tool in active]
         self.agent.state.tools = active
+        previous_base = self._baseSystemPrompt.rstrip()
         self._baseSystemPrompt = self._rebuild_system_prompt(valid_names)
+        # Hooks commonly wrap/append to the base (including SkillsPart). Rebase that
+        # owned text without replaying hooks or discarding their additions. An opaque
+        # full replacement remains the extension's explicit prompt contract.
+        if self._systemPromptOverride is not None and previous_base:
+            override = self._systemPromptOverride
+            if previous_base in override:
+                override = override.replace(previous_base, self._baseSystemPrompt.rstrip(), 1)
+            else:
+                # A hook may edit identity/context but retain the generated tool blocks.
+                # Update only verbatim owned blocks; custom replacement text stays intact.
+                for pattern in (
+                    r"^Available tools:\n.*?(?=\n\n|\Z)",
+                    r"^Guidelines:\n.*?(?=\n\n<project_context>|\nCurrent working directory:|\Z)",
+                ):
+                    old = re.search(pattern, previous_base, re.MULTILINE | re.DOTALL)
+                    new = re.search(pattern, self._baseSystemPrompt, re.MULTILINE | re.DOTALL)
+                    if old is not None and new is not None:
+                        override = override.replace(old[0], new[0], 1)
+            self._systemPromptOverride = override
         self.agent.state.systemPrompt = (
             self._systemPromptOverride
             if self._systemPromptOverride is not None
@@ -1055,12 +1152,15 @@ class AgentSession:
         self,
         toolNames: list[str],
         alwaysAllowed: list[str] | None = None,
+        *,
+        admission: Callable[[str], bool] | None = None,
     ) -> None:
         """Apply a case-insensitive deny-list to current and future tools."""
 
         self._disallowedToolNames = {
             name.casefold() for name in toolNames if isinstance(name, str) and name
         }
+        self._toolAdmission = admission
         self._alwaysAllowedToolNames = {
             name
             for name in (alwaysAllowed or [])
@@ -1089,6 +1189,7 @@ class AgentSession:
         await self._extend_resources_from_extensions(
             "reload" if _event_field(self._sessionStartEvent, "reason") == "reload" else "startup"
         )
+        await self.moments.resources_ready({"type": "resources_ready"})
 
     async def reload(self, options: dict[str, Any] | None = None) -> None:
         previous_flag_values = self._extensionRunner.get_flag_values()
@@ -1104,7 +1205,7 @@ class AgentSession:
         await self._resourceLoader.reload()
         self._build_runtime(
             {
-                "activeToolNames": self.getActiveToolNames(),
+                "activeToolNames": (list(self._unscopedToolNames) if self._toolScopes else self.getActiveToolNames()),
                 "flagValues": previous_flag_values,
                 "includeAllExtensionTools": True,
             }
@@ -1125,9 +1226,17 @@ class AgentSession:
                 result = before_session_start()
                 if inspect.isawaitable(result):
                     await result
-            await self.moments.session_start({"type": "session_start", "reason": "reload"})  # MISAKA fork
+        # Native parts were shut down above even for a bound headless session.
+        # Their lifecycle does not depend on UI/error/command bindings.
+        if has_bindings or self._extensionBindings is not None:
+            await self.moments.session_start({"type": "session_start", "reason": "reload"})
+        if has_bindings:
             await self._extensionRunner.emit({"type": "session_start", "reason": "reload"})
+        # A started headless session can have no UI/command/error bindings. Refresh
+        # its resources too, but do not start discovery on a never-bound session.
+        if self._extensionBindings is not None:
             await self._extend_resources_from_extensions("reload")
+            await self.moments.resources_ready({"type": "resources_ready", "reason": "reload"})
 
     def createReplacedSessionContext(self) -> Any:
         context = self._extensionRunner.create_command_context()
@@ -1157,39 +1266,91 @@ class AgentSession:
                 "timestamp": int(time.time() * 1000),
             }
         )
-        deliver_as = resolved_options.get("deliverAs")
-        if deliver_as == "nextTurn":
-            self._pendingNextTurnMessages.append(app_message)
-        elif self.isStreaming and resolved_options.get("triggerTurn") is False:
-            # triggerTurn=False: record the message without interrupting the running turn
-            # (pi #8022/47b5119d0). It cannot go into agent.state.messages from here: a
-            # turn in flight has already appended the assistant message carrying its
-            # toolCalls, so a custom message landing now sits between the calls and their
-            # results -- and convert_to_llm turns it into a user message, which the
-            # Messages API rejects on every later request. Hold it out of the conversation
-            # and let the flush put it in at the next turn boundary, where the toolCalls
-            # are answered. The UI is told there too, not here: the TUI answers a custom
-            # message_end by rebuilding the chat from the transcript, so announcing a
-            # message that has not been written yet only draws it long enough for the next
-            # toolResult to erase it.
-            self._pendingCustomMessages.append(app_message)
-        elif self.isStreaming:
-            if deliver_as == "followUp":
-                self.agent.followUp(app_message)
+        delivery_id = resolved_options.get("_deliveryId")
+        if delivery_id:
+            app_message["details"] = {**(app_message["details"] or {}), "delivery_id": delivery_id}
+            if self._custom_message_recorded(delivery_id):
+                self._custom_receipt_callback(resolved_options, "_onPersist")
+                return
+            already_queued = delivery_id in self._customMessageReceipts
+            self._customMessageReceipts[delivery_id] = resolved_options
+            if already_queued:
+                return
+        try:
+            deliver_as = resolved_options.get("deliverAs")
+            if deliver_as == "nextTurn":
+                self._pendingNextTurnMessages.append(app_message)
+            elif self.isStreaming and resolved_options.get("triggerTurn") is False:
+                # triggerTurn=False: record the message without interrupting the running turn
+                # (pi #8022/47b5119d0). It cannot go into agent.state.messages from here: a
+                # turn in flight has already appended the assistant message carrying its
+                # toolCalls, so a custom message landing now sits between the calls and their
+                # results -- and convert_to_llm turns it into a user message, which the
+                # Messages API rejects on every later request. Hold it out of the conversation
+                # and let the flush put it in at the next turn boundary, where the toolCalls
+                # are answered. The UI is told there too, not here: the TUI answers a custom
+                # message_end by rebuilding the chat from the transcript, so announcing a
+                # message that has not been written yet only draws it long enough for the next
+                # toolResult to erase it.
+                self._pendingCustomMessages.append(app_message)
+            elif self.isStreaming:
+                if deliver_as == "followUp":
+                    self.agent.followUp(app_message)
+                else:
+                    self.agent.steer(app_message)
+            elif resolved_options.get("triggerTurn"):
+                if resolved_options.get("prepareTurn"):
+                    await self._run_agent_prompt(app_message, prepare=True)
+                else:
+                    await self._run_agent_prompt(app_message)
             else:
-                self.agent.steer(app_message)
-        elif resolved_options.get("triggerTurn"):
-            await self._run_agent_prompt(app_message)
-        else:
-            self.agent.state.messages.append(app_message)
-            self.sessionManager.appendCustomMessageEntry(
-                str(app_message["customType"]),
-                app_message["content"],
-                bool(app_message["display"]),
-                app_message["details"],
-            )
-            self._emit({"type": "message_start", "message": app_message})
-            self._emit({"type": "message_end", "message": app_message})
+                self._append_custom_message(app_message)
+                self.agent.state.messages.append(app_message)
+                self._emit({"type": "message_start", "message": app_message})
+                self._emit({"type": "message_end", "message": app_message})
+
+        except BaseException as error:
+            self._fail_custom_receipt(delivery_id, error)
+            raise
+
+    def _custom_message_recorded(self, delivery_id):
+        return bool(self.sessionManager.flushed and any(
+            entry.get("type") == "custom_message" and isinstance(entry.get("details"), dict)
+            and entry["details"].get("delivery_id") == delivery_id
+            for entry in self.sessionManager.getEntries()))
+
+    @staticmethod
+    def _custom_receipt_callback(receipt, name, *args):
+        callback = receipt.get(name)
+        if callback is None:
+            return
+        try:
+            callback(*args)
+        except Exception:  # a failed outbox ACK stays retryable
+            logging.getLogger(__name__).warning("custom message receipt failed", exc_info=True)
+
+    def _fail_custom_receipt(self, delivery_id, error):
+        receipt = self._customMessageReceipts.pop(delivery_id, None)
+        if receipt and receipt.get("_onError"):
+            self._custom_receipt_callback(receipt, "_onError", error)
+
+    def _append_custom_message(self, message):
+        details = read_field(message, "details")
+        delivery_id = details.get("delivery_id") if isinstance(details, dict) else None
+        try:
+            if not delivery_id or not self._custom_message_recorded(delivery_id):
+                self.sessionManager.appendCustomMessageEntry(
+                    str(read_field(message, "customType")), _message_content(message),
+                    bool(read_field(message, "display")), details)
+        except BaseException as error:
+            self._fail_custom_receipt(delivery_id, error)
+            raise
+        if delivery_id and self.sessionManager.flushed:
+            receipt = self._customMessageReceipts.pop(delivery_id, None)
+            if receipt:
+                # The file has landed. A failed ACK is retried via the delivery id,
+                # never by appending a second copy of the notification.
+                self._custom_receipt_callback(receipt, "_onPersist")
 
     async def sendMessage(self, message: Any, options: dict[str, Any] | None = None) -> None:
         await self.sendCustomMessage(message, options)
@@ -1308,6 +1469,112 @@ class AgentSession:
         if self._branchSummaryAbortController is not None:
             self._branchSummaryAbortController.abort()
 
+    def _compaction_source(self) -> tuple[Any, ...]:
+        """Owner and immutable branch identity captured before awaiting a summarizer."""
+        manager = self.sessionManager
+        return (manager, manager.getSessionId(), manager.getSessionFile(),
+                tuple(entry.get("id") for entry in manager.getBranch()),
+                len(manager.getEntries()), (self.model.model_dump(mode="json")
+                                          if isinstance(self.model, Model) else self.model),
+                copy.deepcopy(self.settingsManager.getCompactionSettings()))
+
+    def _publish_compaction(self, result: SessionCompactionResult, from_hook: bool,
+                            source: tuple[Any, ...]) -> Any:
+        if self._compaction_source() != source:
+            raise RuntimeError("Session, branch, model or settings changed during compaction")
+        options = ({"contextMessages": result.contextMessages}
+                   if result.contextMessages is not None else {})
+        entry_id = self.sessionManager.appendCompaction(
+            result.summary, result.firstKeptEntryId, result.tokensBefore,
+            result.details, from_hook, result.usage, **options,
+        )
+        # appendCompaction commits before changing either view. A failed write leaves
+        # the previous archive, leaf and provider context intact.
+        session_context = self.sessionManager.buildSessionContext()
+        self.agent.state.messages = session_context.messages
+        result.estimatedTokensAfter = sum(
+            estimate_compaction_tokens(message) for message in session_context.messages
+        )
+        return next((entry for entry in self.sessionManager.getEntries()
+                     if entry.get("id") == entry_id), None)
+
+    async def _prepare_compaction_operation(self, reason, signal, custom_instructions=None,
+                                            *, preflight=False, current_tokens=None, will_retry=False):
+        """Ask an installed context engine before native auth, threshold or cut points.
+
+        A returned operation owns the whole replay; an explicit empty operation owns
+        the no-op too. Only an absent engine goes through Pi's existing summary hook.
+        """
+        event = {"type": "session_context_prepare", "reason": reason, "signal": signal,
+                 "preflight": preflight, "currentTokens": current_tokens,
+                 "customInstructions": custom_instructions, "messages": list(self.messages),
+                 "systemPrompt": self.systemPrompt,
+                 "tools": [{"name": tool.name, "description": tool.description, "parameters": tool.parameters}
+                           for tool in self.agent.state.tools],
+                 "allowCompression": reason == "manual" or bool(self.settingsManager.getCompactionSettings().get("enabled"))}
+        decision = await self.moments.session_context_prepare(event)
+        if decision is None and self._extensionRunner.has_handlers("session_context_prepare"):
+            decision = await self._extensionRunner.emit(event)
+        if decision is not None:
+            operation = _event_field(decision, "execute")
+            if operation is None:
+                return None
+            if not callable(operation):
+                raise TypeError("Context engine execute must be callable or None")
+            async def engine_operation():
+                result = await operation()
+                if result is not None and _event_field(result, "contextMessages") is None:
+                    raise ValueError("Context engine must return its complete contextMessages")
+                return result, True
+            return engine_operation
+
+        if self.model is None:
+            if reason == "manual":
+                raise RuntimeError(format_no_model_selected_message())
+            return None
+        settings = CompactionSettings(**self.settingsManager.getCompactionSettings())
+        if reason == "threshold" and (preflight or current_tokens is not None):
+            tokens = (estimate_compaction_context_tokens(list(self.messages)).tokens
+                      if current_tokens is None else current_tokens)
+            if not should_compact(tokens, self.model.contextWindow, settings):
+                return None
+        auth = await self._get_compaction_request_auth(self.model)
+        branch_entries = self.sessionManager.getBranch()
+        preparation = prepare_compaction(branch_entries, settings)
+        if preparation is None or _is_noop_compaction(preparation):
+            if reason == "manual":
+                if branch_entries and branch_entries[-1].get("type") == "compaction":
+                    raise RuntimeError("Already compacted")
+                raise RuntimeError("Nothing to compact (session too small)")
+            return None
+
+        async def native_operation():
+            event = {"type": "session_before_compact", "preparation": preparation,
+                     "branchEntries": branch_entries, "customInstructions": custom_instructions,
+                     "reason": reason, "willRetry": will_retry,
+                     "signal": signal}
+            provided = await self.moments.session_before_compact(event)
+            if provided is None and self._extensionRunner.has_handlers("session_before_compact"):
+                provided = await self._extensionRunner.emit(event)
+            if _result_flag(provided, "cancel", False):
+                raise RuntimeError("Compaction cancelled")
+            provided = _result_flag(provided, "compaction")
+            if provided is not None:
+                return SessionCompactionResult(
+                    summary=_event_field(provided, "summary"),
+                    firstKeptEntryId=_event_field(provided, "firstKeptEntryId"),
+                    tokensBefore=int(_event_field(provided, "tokensBefore", 0)),
+                    details=_event_field(provided, "details"), usage=_event_field(provided, "usage"),
+                    contextMessages=_event_field(provided, "contextMessages")), True
+            result = await run_compaction(
+                preparation, auth.get("model", self.model), auth.get("apiKey"), auth.get("headers"),
+                custom_instructions, signal, self.thinkingLevel, self.agent.streamFn,
+                retry=self._summarization_retry_policy(), env=auth.get("env"),
+                callbacks=self._summarization_retry_callbacks({"source": "compaction", "reason": reason}),
+                session_id=None)
+            return result, False
+        return native_operation
+
     async def compact(self, customInstructions: str | None = None) -> SessionCompactionResult:
         # Keep the agent subscription live across compaction (pi #7370/e56893f4c):
         # unsubscribing here would drop the aborted partial message's
@@ -1316,94 +1583,24 @@ class AgentSession:
         self._compactionAbortController = AbortController()
         self._emit({"type": "compaction_start", "reason": "manual"})
 
+        published_result = None
         try:
-            if self.model is None:
-                raise RuntimeError(format_no_model_selected_message())
-
-            auth = await self._get_compaction_request_auth(self.model)
-            request_model = auth.get("model", self.model)
-            api_key = auth.get("apiKey")
-
-            settings = CompactionSettings(**self.settingsManager.getCompactionSettings())
-            branch_entries = self.sessionManager.getBranch()
-            preparation = prepare_compaction(branch_entries, settings)
-            if preparation is None or _is_noop_compaction(preparation):
-                last_entry = branch_entries[-1] if branch_entries else None
-                if isinstance(last_entry, dict) and last_entry.get("type") == "compaction":
-                    raise RuntimeError("Already compacted")
-                raise RuntimeError("Nothing to compact (session too small)")
-
-            from_hook = False
-            compact_event = {
-                "type": "session_before_compact",
-                "preparation": preparation,
-                "branchEntries": branch_entries,
-                "customInstructions": customInstructions,
-                "reason": "manual",
-                "willRetry": False,
-                "signal": self._compactionAbortController.signal,
-            }
-            # MISAKA fork: the session's own parts get the compaction first; an extension is
-            # asked only if none took it.
-            hook_result = await self.moments.session_before_compact(compact_event)
-            if hook_result is None and self._extensionRunner.has_handlers("session_before_compact"):
-                hook_result = await self._extensionRunner.emit(compact_event)
-            if _result_flag(hook_result, "cancel", False):
-                raise RuntimeError("Compaction cancelled")
-
-            provided = _result_flag(hook_result, "compaction")
-            if provided is not None:
-                result = SessionCompactionResult(
-                    summary=_event_field(provided, "summary"),
-                    firstKeptEntryId=_event_field(provided, "firstKeptEntryId"),
-                    tokensBefore=int(_event_field(provided, "tokensBefore", 0)),
-                    details=_event_field(provided, "details"),
-                    usage=_event_field(provided, "usage"),
-                )
-                from_hook = True
-            else:
-                result = await run_compaction(
-                    preparation,
-                    request_model,
-                    api_key,
-                    auth.get("headers"),
-                    customInstructions,
-                    self._compactionAbortController.signal,
-                    self.thinkingLevel,
-                    self.agent.streamFn,
-                    retry=self._summarization_retry_policy(),
-                    env=auth.get("env"),
-                    callbacks=self._summarization_retry_callbacks(
-                        {"source": "compaction", "reason": "manual"}
-                    ),
-                    session_id=None,
-                )
+            source = self._compaction_source()
+            operation = await self._prepare_compaction_operation(
+                "manual", self._compactionAbortController.signal, customInstructions)
+            if operation is None:
+                raise RuntimeError("Nothing to compact")
+            if self._compaction_source() != source:
+                raise RuntimeError("Session, branch, model or settings changed during compaction")
+            result, from_hook = await operation()
+            if result is None:
+                raise RuntimeError("Nothing to compact")
 
             if self._compactionAbortController.signal.aborted:
                 raise RuntimeError("Compaction cancelled")
 
-            self.sessionManager.appendCompaction(
-                result.summary,
-                result.firstKeptEntryId,
-                result.tokensBefore,
-                result.details,
-                from_hook,
-                result.usage,
-            )
-            session_context = self.sessionManager.buildSessionContext()
-            self.agent.state.messages = session_context.messages
-            result.estimatedTokensAfter = sum(
-                estimate_compaction_tokens(message) for message in session_context.messages
-            )
-
-            saved_entry = next(
-                (
-                    entry
-                    for entry in reversed(self.sessionManager.getEntries())
-                    if entry.get("type") == "compaction" and entry.get("summary") == result.summary
-                ),
-                None,
-            )
+            saved_entry = self._publish_compaction(result, from_hook, source)
+            published_result = result
             if saved_entry is not None:
                 await self.moments.session_compact({  # MISAKA fork
                     "type": "session_compact", "compactionEntry": saved_entry, "fromExtension": from_hook,
@@ -1432,6 +1629,15 @@ class AgentSession:
                 }
             )
             return result
+        except asyncio.CancelledError:
+            self._compactionAbortController = None
+            self._emit({"type": "compaction_end", "reason": "manual",
+                        "result": published_result, "aborted": published_result is None,
+                        "willRetry": False})
+            if published_result is None:
+                await self._emit_session_compact_failed(
+                    reason="manual", aborted=True, will_retry=False)
+            raise
         except Exception as error:
             message = str(error)
             aborted = message == "Compaction cancelled" or getattr(error, "name", None) == "AbortError"
@@ -1440,15 +1646,17 @@ class AgentSession:
                 {
                     "type": "compaction_end",
                     "reason": "manual",
-                    "result": None,
-                    "aborted": aborted,
+                    "result": published_result,
+                    "aborted": aborted and published_result is None,
                     "willRetry": False,
-                    "errorMessage": None if aborted else f"Compaction failed: {message}",
+                    "errorMessage": (f"Compaction notification failed: {message}" if published_result is not None
+                                     else None if aborted else f"Compaction failed: {message}"),
                 }
             )
-            await self._emit_session_compact_failed(
-                reason="manual", aborted=aborted, will_retry=False,
-                error_message=None if aborted else f"Compaction failed: {message}")
+            if published_result is None:
+                await self._emit_session_compact_failed(
+                    reason="manual", aborted=aborted, will_retry=False,
+                    error_message=None if aborted else f"Compaction failed: {message}")
             raise
         finally:
             self._compactionAbortController = None
@@ -1916,12 +2124,7 @@ class AgentSession:
     def _persist_message(self, message: Any) -> None:
         role = _message_role(message)
         if role == "custom":
-            self.sessionManager.appendCustomMessageEntry(
-                str(read_field(message, "customType")),
-                _message_content(message),
-                bool(read_field(message, "display")),
-                read_field(message, "details"),
-            )
+            self._append_custom_message(message)
         elif role in {"user", "assistant", "toolResult"}:
             self.sessionManager.appendMessage(_message_dict(message))
 
@@ -2239,10 +2442,19 @@ class AgentSession:
 
     def _refresh_tool_registry(self, options: dict[str, Any] | None = None) -> None:
         resolved_options = dict(options or {})
+        if self.moments.parts:
+            self._customTools = self.moments.configure_tools(
+                self._customTools, self._resourceLoader.getExtensions().extensions
+            )
         previous_registry_names = set(self._toolRegistry)
-        previous_active_tool_names = self.getActiveToolNames()
+        previous_active_tool_names = (list(self._unscopedToolNames) if getattr(self, "_toolScopes", ())
+                                      else self.getActiveToolNames())
 
         def is_allowed_tool(name: str) -> bool:
+            if self._toolAdmission is not None and not self._toolAdmission(name):
+                return False
+            if name == "browser_exec" and ("bash" not in self._baseToolDefinitions or not is_allowed_tool("bash")):
+                return False
             if name in self._excludedToolNames:
                 return False
             normalized = name.casefold()
@@ -2320,7 +2532,11 @@ class AgentSession:
             next_active_tool_names = list(previous_active_tool_names)
         next_active_tool_names = [name for name in next_active_tool_names if is_allowed_tool(name)]
 
-        if self._allowedToolNames is not None:
+        if getattr(self, "_toolScopes", ()):
+            # A scope is not permission to revive tools the underlying user
+            # selection had turned off. Only genuinely new registrations join it.
+            next_active_tool_names.extend(name for name in self._toolRegistry if name not in previous_registry_names)
+        elif self._allowedToolNames is not None:
             for tool_name in self._toolRegistry:
                 if tool_name in self._allowedToolNames:
                     next_active_tool_names.append(tool_name)
@@ -2338,7 +2554,11 @@ class AgentSession:
             if name in self._toolRegistry and name not in seen:
                 seen.add(name)
                 active_tool_names.append(name)
-        self.setActiveToolsByName(active_tool_names)
+        if getattr(self, "_toolScopes", ()):
+            self._unscopedToolNames = active_tool_names
+            self._applyActiveToolsByName(self._toolScopes[-1]["active"])
+        else:
+            self.setActiveToolsByName(active_tool_names)
 
     def _build_runtime(self, options: dict[str, Any] | None = None) -> None:
         resolved_options = dict(options or {})
@@ -2352,13 +2572,12 @@ class AgentSession:
                 for name, tool in self._baseToolsOverride.items()
             }
         else:
-            base_tool_definitions = create_all_tool_definitions(
-                self._cwd,
-                {
-                    "read": {"autoResizeImages": auto_resize_images},
-                    "bash": {"commandPrefix": shell_command_prefix, "shellPath": shell_path},
-                },
-            )
+            tool_options = {
+                "read": {"autoResizeImages": auto_resize_images},
+                "bash": {"commandPrefix": shell_command_prefix, "shellPath": shell_path},
+            }
+            self.moments.configure_tool_options(tool_options)
+            base_tool_definitions = create_all_tool_definitions(self._cwd, tool_options)
 
         self._baseToolDefinitions = dict(base_tool_definitions)
         self._extensionRunner = self._create_extension_runner(resolved_options.get("flagValues"))
@@ -2367,7 +2586,7 @@ class AgentSession:
         default_active_tool_names = (
             list(self._baseToolsOverride)
             if self._baseToolsOverride
-            else ["read", "bash", "edit", "write"]
+            else ["read", "bash", "edit", "write", "office"]
         )
         base_active_tool_names = (
             list(resolved_options["activeToolNames"])
@@ -2451,6 +2670,13 @@ class AgentSession:
 
     def _install_agent_tool_hooks(self) -> None:
         async def before_tool_call(payload: Any, _signal: Any | None = None) -> Any:
+            name = read_field(_event_field(payload, "toolCall"), "name", "")
+            if self._toolAdmission is not None and not self._toolAdmission(name):
+                return {"block": True, "reason": f"Tool {name!r} is outside the current agent tool policy."}
+            if getattr(self, "_toolScopes", ()):
+                name = read_field(_event_field(payload, "toolCall"), "name")
+                if name not in self.getActiveToolNames():
+                    return {"block": True, "reason": f"Tool {name!r} is outside the current tool scope."}
             runner = self._extensionRunner
             # MISAKA fork: the parts are asked first; a block from them is final.
             if not self.moments.parts and not runner.has_handlers("tool_call"):
@@ -2467,6 +2693,11 @@ class AgentSession:
             if _event_field(result, "block", False) or not runner.has_handlers("tool_call"):
                 return result
             extension_result = await runner.emit_tool_call(event)  # type: ignore[attr-defined]
+            if extension_result and _event_field(result, "updatedInput") is not None:
+                return {"block": _event_field(extension_result, "block", False),
+                        "reason": _event_field(extension_result, "reason"),
+                        "terminate": _event_field(extension_result, "terminate"),
+                        "updatedInput": _event_field(result, "updatedInput")}
             return extension_result if extension_result else result
 
         async def after_tool_call(payload: Any, _signal: Any | None = None) -> Any:
@@ -2538,15 +2769,41 @@ class AgentSession:
                     if hook_result is not None
                     else None
                 ),
+                "terminate": _event_field(hook_result, "terminate") if hook_result is not None else None,
             }
 
         self.agent.beforeToolCall = before_tool_call
         self.agent.afterToolCall = after_tool_call
 
+    def _has_context_engine(self) -> bool:
+        runner = getattr(self, "_extensionRunner", None)
+        return bool(runner is not None and runner.has_handlers("session_context_prepare")) or any(
+            callable(getattr(part, "session_context_prepare", None))
+            for part in getattr(getattr(self, "moments", None), "parts", ()))
+
+    async def prepareContextMessages(self, messages, signal=None):
+        """Engine preflight before EVERY provider request, before transient context hooks.
+
+        prepareNextTurn runs only after a completed assistant/tool turn. It misses the
+        initial request and newly drained steering, so it is not the engine boundary.
+        Only the durable engine publication mutates the loop's source list here.
+        """
+        if self._has_context_engine():
+            before = self.agent.state.messages
+            await self._run_auto_compaction(
+                "threshold", False, preflight=True,
+                current_tokens=estimate_compaction_context_tokens(messages).tokens,
+                parent_signal=signal)
+            if self.agent.state.messages is not before:
+                messages[:] = self.agent.state.messages
+        return messages
+
     async def _compact_before_next_assistant_response(
         self,
         context: AgentContext,
     ) -> AgentContext:
+        if self._has_context_engine():
+            return context  # Engine preparation runs at the provider boundary.
         model = self.model
         settings = CompactionSettings(**self.settingsManager.getCompactionSettings())
         if (
@@ -2603,9 +2860,19 @@ class AgentSession:
 
         self.agent.prepareNextTurnWithContext = prepare_next_turn
 
-    async def _run_agent_prompt(self, messages: AgentMessage | list[AgentMessage]) -> None:
+    async def _run_agent_prompt(self, messages: AgentMessage | list[AgentMessage], *, prepare: bool = False) -> None:
         self._isAgentRunActive = True
         try:
+            if prepare:
+                # Own the run BEFORE awaiting hooks: a notification cannot take
+                # this window while the Research turn prepares its capabilities.
+                messages = list(messages) if isinstance(messages, list) else [messages]
+                content = _message_content(messages[0])
+                text = content if isinstance(content, str) else "".join(
+                    str(read_field(part, "text", "")) for part in content or [])
+                messages.extend(self._pendingNextTurnMessages)
+                self._pendingNextTurnMessages = []
+                messages = await self._prepare_agent_start(messages, text, None)
             await self.agent.prompt(messages)
             while await self._handle_post_agent_run():
                 await self.agent.continue_()
@@ -2644,6 +2911,8 @@ class AgentSession:
         self._isAgentRunActive = False
         try:
             await self._extensionRunner.emit({"type": "agent_settled"})
+            if not self._isAgentRunActive:
+                await self.moments.agent_settled({"type": "agent_settled"})
             self._emit({"type": "agent_settled"})
         finally:
             self._settle_agent_run()
@@ -2808,13 +3077,8 @@ class AgentSession:
         if not self._pendingCustomMessages:
             return
         for custom_message in self._pendingCustomMessages:
+            self._append_custom_message(custom_message)
             self.agent.state.messages.append(custom_message)
-            self.sessionManager.appendCustomMessageEntry(
-                str(custom_message["customType"]),
-                custom_message["content"],
-                bool(custom_message["display"]),
-                custom_message["details"],
-            )
             self._emit({"type": "message_start", "message": custom_message})
             self._emit({"type": "message_end", "message": custom_message})
         self._pendingCustomMessages = []
@@ -2898,7 +3162,6 @@ class AgentSession:
                 self.agent.state.messages = messages[:-1]
             return await self._run_auto_compaction("overflow", True)
 
-        settings = CompactionSettings(**settings_data)
         direct_context_tokens = calculate_compaction_context_tokens(assistant_message.usage)
         # Without provider usage direct=0 and threshold compaction would never fire,
         # so fall back to a message-size estimate (pi #8328/4495469a5).
@@ -2922,90 +3185,34 @@ class AgentSession:
         else:
             context_tokens = direct_context_tokens
 
-        if should_compact(context_tokens, context_window, settings):
-            return await self._run_auto_compaction("threshold", False)
-        return False
+        return await self._run_auto_compaction("threshold", False, current_tokens=context_tokens)
 
-    async def _run_auto_compaction(self, reason: str, will_retry: bool) -> bool:
+    async def _run_auto_compaction(self, reason: str, will_retry: bool, *,
+                                   preflight=False, current_tokens=None, parent_signal=None) -> bool:
         started = False
         from_hook = False
+        published_result = None
         try:
-            if self.model is None:
-                return False
-
-            auth = await self._get_compaction_request_auth(self.model)
-            request_model = auth.get("model", self.model)
-            api_key = auth.get("apiKey")
-            headers = auth.get("headers")
-            env = auth.get("env")
-
-            settings = CompactionSettings(**self.settingsManager.getCompactionSettings())
-            branch_entries = self.sessionManager.getBranch()
-            preparation = prepare_compaction(branch_entries, settings)
-            if preparation is None or _is_noop_compaction(preparation):
-                return False
-
-            # As pi: compaction_start only once there is something to compact.
-            self._emit({"type": "compaction_start", "reason": reason})
+            source = self._compaction_source()
             self._auto_compaction_abort_controller = AbortController()
+            from misaka.ai.utils.abort import combine_abort_signals
+            operation_signal = combine_abort_signals(self._auto_compaction_abort_controller.signal, parent_signal)
+            operation = await self._prepare_compaction_operation(
+                reason, operation_signal,
+                preflight=preflight, current_tokens=current_tokens, will_retry=will_retry)
+            if operation is None:
+                return False
+            if self._compaction_source() != source:
+                raise RuntimeError("Session, branch, model or settings changed during compaction")
+            self._emit({"type": "compaction_start", "reason": reason})
             started = True
-            compact_event = {
-                "type": "session_before_compact",
-                "preparation": preparation,
-                "branchEntries": branch_entries,
-                "customInstructions": None,
-                "reason": reason,
-                "willRetry": will_retry,
-                "signal": self._auto_compaction_abort_controller.signal,
-            }
-            # MISAKA fork: the session's own parts get the compaction first; an extension is
-            # asked only if none took it.
-            hook_result = await self.moments.session_before_compact(compact_event)
-            if hook_result is None and self._extensionRunner.has_handlers("session_before_compact"):
-                hook_result = await self._extensionRunner.emit(compact_event)
-            if _result_flag(hook_result, "cancel", False):
-                self._emit(
-                    {
-                        "type": "compaction_end",
-                        "reason": reason,
-                        "result": None,
-                        "aborted": True,
-                        "willRetry": False,
-                    }
-                )
-                await self._emit_session_compact_failed(
-                    reason=reason, aborted=True, will_retry=False)
+            result, from_hook = await operation()
+            if result is None:
+                self._emit({"type": "compaction_end", "reason": reason, "result": None,
+                            "aborted": False, "willRetry": False})
                 return False
 
-            provided = _result_flag(hook_result, "compaction")
-            if provided is not None:
-                result = SessionCompactionResult(
-                    summary=_event_field(provided, "summary"),
-                    firstKeptEntryId=_event_field(provided, "firstKeptEntryId"),
-                    tokensBefore=int(_event_field(provided, "tokensBefore", 0)),
-                    details=_event_field(provided, "details"),
-                    usage=_event_field(provided, "usage"),
-                )
-                from_hook = True
-            else:
-                result = await run_compaction(
-                    preparation,
-                    request_model,
-                    api_key,
-                    headers,
-                    None,
-                    self._auto_compaction_abort_controller.signal,
-                    self.thinkingLevel,
-                    self.agent.streamFn,
-                    retry=self._summarization_retry_policy(),
-                    env=env,
-                    callbacks=self._summarization_retry_callbacks(
-                        {"source": "compaction", "reason": reason}
-                    ),
-                    session_id=None,
-                )
-
-            if self._auto_compaction_abort_controller.signal.aborted:
+            if operation_signal.aborted:
                 self._emit(
                     {
                         "type": "compaction_end",
@@ -3020,28 +3227,8 @@ class AgentSession:
                     from_extension=from_hook)
                 return False
 
-            self.sessionManager.appendCompaction(
-                result.summary,
-                result.firstKeptEntryId,
-                result.tokensBefore,
-                result.details,
-                from_hook,
-                result.usage,
-            )
-            session_context = self.sessionManager.buildSessionContext()
-            self.agent.state.messages = session_context.messages
-            result.estimatedTokensAfter = sum(
-                estimate_compaction_tokens(message) for message in session_context.messages
-            )
-
-            saved_entry = next(
-                (
-                    entry
-                    for entry in reversed(self.sessionManager.getEntries())
-                    if entry.get("type") == "compaction" and entry.get("summary") == result.summary
-                ),
-                None,
-            )
+            saved_entry = self._publish_compaction(result, from_hook, source)
+            published_result = result
             if saved_entry is not None:
                 await self.moments.session_compact({  # MISAKA fork
                     "type": "session_compact", "compactionEntry": saved_entry, "fromExtension": from_hook,
@@ -3076,27 +3263,42 @@ class AgentSession:
                 return True
 
             return self.agent.hasQueuedMessages()
-        except Exception as error:  # noqa: BLE001 - compaction failure is reported to the user, never fatal
+        except asyncio.CancelledError:
+            if started:
+                self._emit({"type": "compaction_end", "reason": reason,
+                            "result": published_result, "aborted": published_result is None,
+                            "willRetry": False})
+            if published_result is None:
+                await self._emit_session_compact_failed(
+                    reason=reason, aborted=True, will_retry=False)
+            raise
+        except Exception as error:
             error_message = str(error) if str(error) else "compaction failed"
-            formatted_error = (
+            aborted = error_message == "Compaction cancelled" or getattr(error, "name", None) == "AbortError"
+            formatted_error = None if aborted else (
                 f"Context overflow recovery failed: {error_message}"
                 if reason == "overflow"
                 else f"Auto-compaction failed: {error_message}"
             )
+            if published_result is not None:
+                formatted_error = f"Compaction notification failed: {error_message}"
             if started:
                 self._emit(
                     {
                         "type": "compaction_end",
                         "reason": reason,
-                        "result": None,
-                        "aborted": False,
+                        "result": published_result,
+                        "aborted": aborted and published_result is None,
                         "willRetry": False,
                         "errorMessage": formatted_error,
                     }
                 )
+            if published_result is None:
                 await self._emit_session_compact_failed(
-                    reason=reason, aborted=False, will_retry=False,
+                    reason=reason, aborted=aborted, will_retry=False,
                     error_message=formatted_error, from_extension=from_hook)
+            if preflight and not aborted:
+                raise
             return False
         finally:
             self._auto_compaction_abort_controller = None

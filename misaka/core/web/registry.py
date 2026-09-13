@@ -1,57 +1,32 @@
-"""Which backend serves a search or an extract, and whether anything can serve one at all.
+"""Which provider serves each Web capability, scoped to its WebPart/extension owners.
 
-Ported from Hermes' ``agent/web_search_registry.py`` plus the selection half of
-``tools/web_tools.py`` (``_get_backend`` / ``_get_search_backend`` /
-``_get_extract_backend`` / ``_get_capability_backend`` / ``_is_backend_available`` /
-``check_web_api_key``). Both halves are kept because they are not the same mechanism and
-Hermes runs both: the *selection ladder* answers "which name", strictly and without
-probing, so a broken stored selection surfaces the vendor's own error; the *resolution
-walk* answers "which registered provider", filtered by availability, and only runs when
-the ladder's name is not registered.
+Hermes keeps separate selection and resolution ladders: an explicit selection wins
+without hiding missing credentials; fallback walks filter capability and availability.
+MISAKA preserves those ladders, with a built-in base and an overlay rebuilt from the
+existing loader's successfully loaded Extensions. Removing an owner reveals the lower
+owner. No separate plugin manager or process-wide extension registration table.
 
-Hermes' registry has two dimensions MISAKA's flat process-global table does not: it is
-scoped, one map per plugin home. The other one -- the capability filter -- is real here.
-Search and extract are separate questions with separate config keys, and the filter runs
-at *every* step of the walk, not just the configured one: a search-only backend named as
-``extract_backend`` has to fall through rather than be handed a batch of URLs it has no
-renderer for, and equally must not be reached by the single-eligible shortcut, the legacy
-preference order or the keyless ring. Everything else -- the preference order, the
-"explicit config wins even when unavailable" rule, the last-resort keyless walk -- is
-carried over as it stands.
-
-Two names in Hermes' ladders are absent from the tables below rather than merely
-unimplemented. The Nous managed tool-gateway (``NOUS_MANAGED_PROVIDER``,
-``_is_tool_gateway_ready``, the ``firecrawl`` gateway client) is Hermes' subscription
-product, and there is nothing to point it at. ``_disabled_web_plugin_for`` -- which tells
-a user "you configured this backend but you also disabled its plugin" -- has nothing to
-key that diagnosis on here: no plugin identity, no enable/disable state, so the only way
-to name a backend that is not registered is a typo, which the dispatcher's existing error
-already says.
-
-``xai`` is present, and -- as in Hermes -- is a selectable backend that the preference
-walk never reaches on its own. Hermes keeps it out of ``_LEGACY_PREFERENCE`` because its
-results are model-generated rather than index-backed, a different trust model that should
-be chosen deliberately rather than inherited from an availability scan.
+xAI remains explicit-only. Nous uses a distinct managed provider, never a hidden
+billing fallback for a stored vendor selection.
 """
 
 from __future__ import annotations
 
 import logging
-import threading
+import secrets
 
 from misaka.core.web.config import (
     config_name,
     has_env,
     keyless_tier_enabled,
+    provider_disabled,
+    provider_selected,
 )
 from misaka.core.web.keyless import keyless_walk_order
 from misaka.core.web.provider import WebSearchProvider
+from misaka.core.web.scope import current_scope
 
 logger = logging.getLogger(__name__)
-
-_providers: dict[str, WebSearchProvider] = {}
-_lock = threading.Lock()
-_builtins_registered = False
 
 # The built-in backends whose availability is driven by the hardcoded env-var / package
 # probes below. Any name NOT in this set is a candidate externally-registered provider
@@ -68,6 +43,7 @@ _BUILTIN_BACKENDS = frozenset(
         "ddgs",
         "keenable",
         "xai",
+        "perplexity",
     }
 )
 
@@ -80,6 +56,7 @@ _LEGACY_PREFERENCE = (
     "parallel",
     "tavily",
     "exa",
+    "perplexity",
     "searxng",
     "brave-free",
     "ddgs",
@@ -93,12 +70,8 @@ _LEGACY_PREFERENCE = (
 _DEFAULT_BACKEND = "firecrawl"
 
 
-def register_provider(provider: WebSearchProvider) -> None:
-    """Register a web search provider.
-
-    Re-registration (same ``name``) overwrites the previous entry and logs a debug
-    message -- makes hot-reload scenarios (tests, dev loops) behave predictably.
-    """
+def validate_provider(provider: WebSearchProvider) -> str:
+    """The same boundary for direct registration and the session extension API."""
     if not isinstance(provider, WebSearchProvider):
         raise TypeError(
             f"register_provider() expects a WebSearchProvider instance, "
@@ -108,32 +81,69 @@ def register_provider(provider: WebSearchProvider) -> None:
     if not isinstance(raw_name, str) or not raw_name.strip():
         raise ValueError("Web provider .name must be a non-empty string")
     name = raw_name.strip()
-    with _lock:
-        existing = _providers.get(name)
-        _providers[name] = provider
-    if existing is not None:
-        logger.debug(
-            "Web provider '%s' re-registered (was %r)", name, type(existing).__name__
-        )
-    else:
-        logger.debug(
-            "Registered web provider '%s' (%s)", name, type(provider).__name__
-        )
+    if name != name.lower() or any(char.isspace() for char in name):
+        raise ValueError("Web provider names must be lowercase with no spaces")
+    validate_setup_schema(provider.get_setup_schema())
+    return name
 
 
-def list_providers() -> list[WebSearchProvider]:
+def validate_setup_schema(schema):
+    """Shared Web/browser plugin metadata consumed by setup and secret isolation."""
+    if not isinstance(schema, dict) or not isinstance(schema.get("variants", []), list):
+        raise TypeError("Web setup schema must be an object with an optional variants list")
+    for row in [schema, *schema.get("variants", [])]:
+        if not isinstance(row, dict) or not isinstance(row.get("env_vars", []), list):
+            raise TypeError("Web setup rows must be objects with an env_vars list")
+        for variable in row.get("env_vars", []):
+            key = variable.get("key") if isinstance(variable, dict) else None
+            if not isinstance(key, str) or not key.isascii() or not key.isidentifier():
+                raise ValueError("Web setup environment keys must be ASCII identifiers")
+
+
+def register_provider(provider: WebSearchProvider) -> None:
+    """Register in the current scope. Extensions use registerWebSearchProvider instead."""
+    name = validate_provider(provider)
+    scope = current_scope()
+    with scope.lock:
+        scope.providers[name] = provider
+        scope.registration_id = secrets.token_hex(16)
+
+
+def replace_extension_providers(extensions) -> None:
+    """Rebuild from live owners: failed loads never publish; unload restores lower owners."""
+    providers, owners = {}, {}
+    for extension in extensions:
+        for name, provider in extension.webProviders.items():
+            providers[name], owners[name] = provider, extension.path
+    scope = current_scope()
+    with scope.lock:
+        if (scope.owners == owners and scope.extensions.keys() == providers.keys()
+                and all(scope.extensions[name] is provider for name, provider in providers.items())):
+            return
+        scope.extensions, scope.owners = providers, owners
+        scope.registration_id = secrets.token_hex(16)
+
+
+def list_providers(*, include_disabled: bool = False) -> list[WebSearchProvider]:
     """Return all registered providers, sorted by name."""
-    with _lock:
-        items = list(_providers.values())
+    scope = current_scope()
+    with scope.lock:
+        items = list({**scope.providers, **scope.extensions}.values())
+    if not include_disabled:
+        items = [provider for provider in items if not provider_disabled(provider.name)]
     return sorted(items, key=lambda p: p.name)
 
 
-def get_provider(name: str) -> WebSearchProvider | None:
+def get_provider(name: str, *, include_disabled: bool = False) -> WebSearchProvider | None:
     """Return the provider registered under *name*, or None."""
     if not isinstance(name, str):
         return None
-    with _lock:
-        return _providers.get(name.strip())
+    name = name.strip()
+    if not include_disabled and provider_disabled(name):
+        return None
+    scope = current_scope()
+    with scope.lock:
+        return scope.extensions.get(name, scope.providers.get(name))
 
 
 def ensure_backends_registered() -> None:
@@ -146,33 +156,30 @@ def ensure_backends_registered() -> None:
     The guard is a flag rather than "is the map empty", because an externally registered
     provider landing first would otherwise convince this that the built-ins are loaded.
     """
-    global _builtins_registered
-    with _lock:
-        if _builtins_registered:
+    scope = current_scope()
+    with scope.lock:
+        if scope.builtins_registered:
             return
-    from misaka.core.web.backends import register_builtin_providers
+        from misaka.core.web.backends import register_builtin_providers
 
-    try:
-        register_builtin_providers()
-    except Exception as exc:  # noqa: BLE001 - a broken backend must not cost the others
-        # Warning, not debug, and the flag stays down. Hermes' equivalent
-        # (``tools/web_tools.py:826-836``) is non-fatal for the same reason: an import
-        # that breaks halfway would otherwise leave the registry permanently
-        # half-populated, and the user would meet "no provider configured" for the rest
-        # of the session with nothing saying why. Registration skips names already
-        # present, so the retry this allows is free.
-        logger.warning("web backend registration failed: %s", exc)
-        return
-    with _lock:
-        _builtins_registered = True
+        try:
+            register_builtin_providers()
+        except Exception as exc:  # noqa: BLE001 - retry a broken import on the next probe
+            logger.warning("web backend registration failed: %s", exc)
+            return
+        scope.builtins_registered = True
 
 
 def reset_for_tests() -> None:
     """Clear the registry. **Test-only.**"""
-    global _builtins_registered
-    with _lock:
-        _providers.clear()
-        _builtins_registered = False
+    scope = current_scope()
+    with scope.lock:
+        scope.providers.clear()
+        scope.builtins.clear()
+        scope.extensions.clear()
+        scope.owners.clear()
+        scope.builtins_registered = False
+        scope.registration_id = ""
 
 
 # ---------------------------------------------------------------------------
@@ -205,8 +212,7 @@ def _is_available_safe(provider: WebSearchProvider) -> bool:
     """Wrap ``is_available()`` so a buggy provider does not kill resolution."""
     try:
         return bool(provider.is_available())
-    except Exception as exc:  # noqa: BLE001 - a broken provider is "unavailable"
-        logger.debug("provider %s.is_available() raised %s", provider.name, exc)
+    except Exception:  # noqa: BLE001 - a broken provider is "unavailable"
         return False
 
 
@@ -219,24 +225,21 @@ def is_backend_available(backend: str) -> bool:
     registration time and on every dispatch.
     """
     backend = (backend or "").lower().strip()
-    if backend not in _BUILTIN_BACKENDS:
-        provider = get_provider(backend)
-        if provider is not None:
-            return _is_available_safe(provider)
+    if provider_disabled(backend):
+        return False
+    provider = get_provider(backend)
+    if provider is not None and provider is not current_scope().builtins.get(backend):
+        return _is_available_safe(provider)
     if backend == "exa":
         return has_env("EXA_API_KEY")
     if backend == "parallel":
         return has_env("PARALLEL_API_KEY")
+    if backend == "perplexity":
+        return has_env("PERPLEXITY_API_KEY")
     if backend == "keenable":
         return has_env("KEENABLE_API_KEY")
     if backend == "firecrawl":
-        # Hermes calls ``check_firecrawl_api_key()`` here, which additionally answers True
-        # for an explicit firecrawl selection with no credentials (it would be served
-        # keyless) and for a ready Nous gateway. The gateway does not exist here, and the
-        # keyless half is already covered: an explicit selection resolves to the
-        # registered provider, whose ``is_keyless_available()`` :func:`provider_is_ready`
-        # then accepts. Same answer, one probe instead of two.
-        return has_env("FIRECRAWL_API_KEY") or has_env("FIRECRAWL_API_URL")
+        return has_env("FIRECRAWL_API_KEY") or has_env("FIRECRAWL_API_URL") or provider_selected("firecrawl")
     if backend == "tavily":
         return has_env("TAVILY_API_KEY") or _tavily_explicitly_configured()
     if backend == "searxng":
@@ -309,17 +312,25 @@ def backend_name() -> str:
         # on, reached without consulting the environment.
         return _DEFAULT_BACKEND
 
+    from misaka.core.web.gateway import available as gateway_available
+
     for candidate, available in (
         ("tavily", has_env("TAVILY_API_KEY")),
         ("exa", has_env("EXA_API_KEY")),
         ("parallel", has_env("PARALLEL_API_KEY")),
         ("keenable", has_env("KEENABLE_API_KEY")),
+        ("perplexity", has_env("PERPLEXITY_API_KEY")),
         ("firecrawl", has_env("FIRECRAWL_API_KEY") or has_env("FIRECRAWL_API_URL")),
+        ("nous", gateway_available()),
         ("searxng", has_env("SEARXNG_URL")),
         ("brave-free", has_env("BRAVE_SEARCH_API_KEY")),
         ("ddgs", ddgs_package_importable()),
     ):
-        if available:
+        if available and not provider_disabled(candidate):
+            provider = get_provider(candidate)
+            if (provider is not None and provider is not current_scope().builtins.get(candidate)
+                    and not _is_available_safe(provider)):
+                continue
             return candidate
 
     # Everything below consults the registry, so it has to be populated first --
@@ -331,7 +342,7 @@ def backend_name() -> str:
     # A provider registered from outside this package (no built-in credential probe
     # covers it), gated by its own is_available().
     for provider in list_providers():
-        if provider.name in _BUILTIN_BACKENDS:
+        if provider is current_scope().builtins.get(provider.name):
             continue
         if _is_available_safe(provider):
             return provider.name
@@ -346,8 +357,8 @@ def backend_name() -> str:
             try:
                 if provider.is_keyless_available():
                     return name
-            except Exception as exc:  # noqa: BLE001 - skip a broken provider
-                logger.debug("provider %r.is_keyless_available() raised: %s", name, exc)
+            except Exception:  # noqa: BLE001, S112 - skip a broken provider
+                continue
 
     return _DEFAULT_BACKEND  # default (backward compat)
 
@@ -398,8 +409,7 @@ def _resolve(configured: str | None, *, capability: str) -> WebSearchProvider | 
     Returns None when nothing matches; the dispatcher then tells the user to set a
     provider up.
     """
-    with _lock:
-        snapshot = dict(_providers)
+    snapshot = {provider.name.strip(): provider for provider in list_providers()}
 
     def _capable(provider: WebSearchProvider) -> bool:
         if capability == "extract":
@@ -410,16 +420,6 @@ def _resolve(configured: str | None, *, capability: str) -> WebSearchProvider | 
         provider = snapshot.get(configured)
         if provider is not None and _capable(provider):
             return provider
-        if provider is None:
-            logger.debug(
-                "web backend '%s' configured but not registered; falling back", configured
-            )
-        else:
-            logger.debug(
-                "web backend '%s' configured but does not support '%s'; falling back",
-                configured,
-                capability,
-            )
 
     eligible = [p for p in snapshot.values() if _capable(p) and _is_available_safe(p)]
     if len(eligible) == 1:
@@ -438,8 +438,8 @@ def _resolve(configured: str | None, *, capability: str) -> WebSearchProvider | 
             try:
                 if provider.is_keyless_available():
                     return provider
-            except Exception as exc:  # noqa: BLE001 - buggy provider skipped
-                logger.debug("provider %s.is_keyless_available() raised %s", name, exc)
+            except Exception:  # noqa: BLE001, S112 - buggy provider skipped
+                continue
 
     return None
 
@@ -481,13 +481,11 @@ def provider_is_ready(provider: WebSearchProvider | None) -> bool:
     try:
         if provider.is_available():
             return True
-    except Exception as exc:  # noqa: BLE001 - broken provider == not ready
-        logger.debug("provider %r.is_available() raised: %s", provider, exc)
+    except Exception:  # noqa: BLE001 - broken provider == not ready
         return False
     try:
         return bool(provider.is_keyless_available())
-    except Exception as exc:  # noqa: BLE001 - broken provider == not ready
-        logger.debug("provider %r.is_keyless_available() raised: %s", provider, exc)
+    except Exception:  # noqa: BLE001 - broken provider == not ready
         return False
 
 

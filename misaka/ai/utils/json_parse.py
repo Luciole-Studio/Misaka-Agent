@@ -185,6 +185,9 @@ def _complete_json_prefix(partial_json: str) -> str | None:
             run_end = index
             while run_end < len(text) and (text[run_end].isalnum() or text[run_end] in "+-.eE"):
                 run_end += 1
+            if run_end == index:
+                # Reject unknown syntax; skipping it would silently change the value.
+                return None
             token = text[index:run_end]
             completed = _complete_bare_token(token, run_end >= len(text))
             if completed is None:

@@ -17,10 +17,10 @@ ctrl+b again sends a literal ctrl+b.
 """
 import base64
 import concurrent.futures
+import enum
 import fcntl
 import json
 import os
-import re
 import select
 import signal
 import socket
@@ -31,6 +31,11 @@ import time
 
 from misaka.ui.panel import client as net
 from misaka.ui.panel import geometry as hui
+from misaka.ui.panel import host_input as hin
+from misaka.ui.panel import pane_input as pin
+from misaka.ui.panel import screen as sc
+from misaka.ui.panel.selection import Selection
+from misaka.ui.panel.selection import absolute_row as _abs_row
 
 
 def _prefix_key():
@@ -38,8 +43,8 @@ def _prefix_key():
     MISAKA_PANEL_PREFIX=ctrl+g (or similar) to change it."""
     name = os.environ.get("MISAKA_PANEL_PREFIX", "ctrl+b").lower().strip()
     if name.startswith("ctrl+") and len(name) == 6 and name[5].isalpha():
-        return bytes([ord(name[5]) - 96])
-    return b"\x02"
+        return hin.Key(name[5], hin.CTRL)
+    return hin.Key("b", hin.CTRL)
 
 
 PREFIX = _prefix_key()
@@ -47,12 +52,137 @@ POLL_SECONDS = 2.0
 GIT_TTL_SECONDS = 10.0     # a branch row is not worth a git subprocess every other second
 SIDEBAR_W = 26            # herdr ui.sidebar_width default (config/model.rs:1010); the separator column is the last one.
 SIDEBAR_COLLAPSED_W = 4   # herdr ui.rs:229: the collapsed sidebar.
-_MOUSE = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
-_MOUSE_X10 = re.compile(rb"\x1b\[M[\x20-\xff]{3}")   # Legacy X10 mouse reports (some terminals lack SGR mode).
+MOUSE_SCROLL_LINES = 3    # herdr DEFAULT_MOUSE_SCROLL_LINES
+SELECTION_AUTOSCROLL_INTERVAL = 0.03   # herdr app/mod.rs:40 SELECTION_AUTOSCROLL_INTERVAL (30 ms, 1 line/tick)
+
+
+def _selection_edge_scroll_lines(distance):
+    """herdr selection.rs selection_edge_scroll_lines: the further past the edge the pointer
+    is, the faster the immediate scroll, clamped to a sane band."""
+    return min(max(distance * 3, 3), 15)
+SPLIT_DRAG_INTERVAL = 0.016  # herdr applies a divider drag at its render pace (MIN_RENDER_INTERVAL 16 ms).
+#                            The re-wrap that once forced a slower pace here now happens once, on the daemon,
+#                            when the drag settles (daemon RESIZE_COALESCE_SECONDS), so the divider tracks at
+#                            render pace again: only the border and the clipped cache move per step.
+PANE_DOUBLE_CLICK_WINDOW = 0.35      # herdr app/mod.rs:48
+PANE_COPY_HIGHLIGHT_DURATION = 0.5   # herdr app/mod.rs:49: a double-clicked word stays lit this long
+COPY_FEEDBACK_DURATION = 2.0         # herdr app/mod.rs:50: "copied to clipboard"
+TOAST_DURATION = 4.0                 # a failure notice (herdr NeedsAttention toast)
 # Word-break characters for double-click selection (herdr's embedded set) plus whitespace.
 _WORD_BREAK = set(" \t" + "!\"#$%&'()*+,-./:;<=>?@[\\]^`{|}~")
 
 _wcwidth = hui.display_width
+
+
+class Mode(enum.Enum):
+    """What the panel's keys and mouse mean right now (herdr app::Mode). Exactly one is
+    in force; every drawing path asks it, so the host cursor, the mode bar and the popups
+    can never disagree about which layer owns the screen."""
+    TERMINAL = "terminal"
+    PREFIX = "prefix"
+    COPY = "copy"
+    RESIZE = "resize"
+    RENAME = "rename"
+    GLOBAL_MENU = "global_menu"
+    KEYBIND_HELP = "keybind_help"
+    NAVIGATOR = "navigator"
+
+
+def key_text(key):
+    """The character a key types (shift applied), for command tables keyed by
+    characters: ``T`` for shift+t however the host reported it. None for chords."""
+    if not key.is_char or key.kind == "release":
+        return None
+    mods = key.mods & ~hin.LOCK_MASK
+    if mods == 0:
+        return key.code
+    if mods == hin.SHIFT:
+        return pin.encode_key(hin.Key(key.code, key.mods, key.kind, key.shifted), pin.DEFAULT_STATE).decode() or None
+    return None
+
+
+def format_copy_feedback(message, area):
+    """herdr status.rs render_copy_feedback: a green-bordered box, "● message" bold on
+    panel_bg, three rows tall, at the bottom centre of ``area`` (ToastClipboardPosition::
+    BottomCenter). Returns ``(rect, rows)`` with rows = [(y, x, ansi)]. Pure, so testable."""
+    if area.width == 0 or area.height == 0:
+        return None, []
+    width = min(_wcwidth(message) + 4, area.width)
+    height = min(3, area.height)
+    rect = hui.Rect(area.x + (area.width - width) // 2, area.y + area.height - height, width, height)
+    return rect, _boxed_rows(rect, [[("●", {"fg": hui.PALETTE["green"]}), (" " + message, {"fg": hui.TEXT, "bold": True})]],
+                             hui.PALETTE["green"])
+
+
+def format_toast(title, context, kind, area):
+    """herdr status.rs render_toast_notification at ToastHerdrPosition::BottomRight: an
+    overlay0 border on panel_bg, "● title" (red dot for needs_attention, green for
+    finished) and an indented context line. Returns ``(rect, rows)``. Pure, so testable."""
+    if area.width == 0 or area.height == 0:
+        return None, []
+    content = max(_wcwidth(title), _wcwidth(context)) + 4
+    width = min(content + 2, area.width)
+    height = min((2 if context else 1) + 2, area.height)
+    rect = hui.Rect(area.x + area.width - width, area.y + area.height - height, width, height)
+    dot = hui.PALETTE["red"] if kind == "needs_attention" else hui.PALETTE["green"]
+    lines = [[("●", {"fg": dot}), (" " + title, {"fg": hui.TEXT, "bold": True})]]
+    if context:
+        lines.append([("  " + context, {"fg": hui.OVERLAY0})])
+    return rect, _boxed_rows(rect, lines, hui.OVERLAY0)
+
+
+class DragPacer:
+    """Coalesces the positions of a divider drag: herdr resizes panes when it renders, at
+    most every 16 ms (app/mod.rs MIN_RENDER_INTERVAL), so a burst of motion events costs one
+    resize per frame. Applying every motion event here re-wrapped every pane on each one and
+    the drag stuttered; the latest position is applied once the interval is up or the drag ends."""
+
+    __slots__ = ("applied_at", "interval", "pending")
+
+    def __init__(self, interval=SPLIT_DRAG_INTERVAL):
+        self.interval = interval
+        self.applied_at = None
+        self.pending = None
+
+    def offer(self, position, now):
+        """A new position: returns it when it can be applied now, else keeps it for later."""
+        if self.applied_at is not None and now - self.applied_at < self.interval:
+            self.pending = position
+            return None
+        self.applied_at = now
+        self.pending = None
+        return position
+
+    def due(self):
+        """When the pending position should be applied (None when nothing is pending)."""
+        return None if self.pending is None else self.applied_at + self.interval
+
+    def take(self, now, final=False):
+        """The pending position once its time has come (or at the end of the drag)."""
+        if self.pending is None or (not final and now < self.applied_at + self.interval):
+            return None
+        position, self.pending, self.applied_at = self.pending, None, now
+        return position
+
+
+def _boxed_rows(rect, lines, border):
+    """A bordered panel on panel_bg with styled text lines inside (widgets.rs render_panel_shell)."""
+    if rect.width < 2 or rect.height < 2:
+        return []
+    canvas = _Canvas(rect.width, rect.height)
+    for y in range(rect.height):
+        canvas.fill_bg(0, rect.width, y, hui.PANEL_BG)
+    canvas.put(0, 0, "┌" + "─" * (rect.width - 2) + "┐", fg=border)
+    for y in range(1, rect.height - 1):
+        canvas.put(0, y, "│", fg=border)
+        canvas.put(rect.width - 1, y, "│", fg=border)
+    canvas.put(0, rect.height - 1, "└" + "─" * (rect.width - 2) + "┘", fg=border)
+    for offset, spans in enumerate(lines[:max(0, rect.height - 2)]):
+        x = 1
+        for text, style in spans:
+            canvas.put(x, 1 + offset, text, clip=rect.width - 1, **style)
+            x += _wcwidth(text)
+    return [(rect.y + y, rect.x, canvas.row(y)) for y in range(rect.height)]
 
 
 # Random quips shown when someone opens the panel inside a pane (herdr main.rs:13-20, MISAKA edition).
@@ -842,47 +972,9 @@ def folder_groups(items):
             for folder, members in by_folder.items()]
 
 
-def session_lineage(path, limit=10):
-    """The files a session was forked from (header ``parentSession``), nearest first.
-    One header line read per hop; safe on missing files."""
-    from misaka.core.session_manager import read_session_header
-    out, current = [], path
-    for _ in range(limit):
-        parent = (read_session_header(current) or {}).get("parentSession")
-        if not parent or parent in out:
-            break
-        out.append(parent)
-        current = parent
-    return out
-
-
-def kin_pane(path, listing):
-    """The pane already holding a blood relative of this session (fork lineage, either
-    direction): reopening seats the click beside it, so a fork pair always comes up the
-    same way it was born -- split in one tab. None when no relative is open."""
-    target = os.path.realpath(path)
-    ancestors = {os.path.realpath(p) for p in session_lineage(target)}
-    for pane in listing:
-        if not pane.get("alive"):
-            continue
-        reported = (pane.get("reported") or {}).get("session") or session_arg(pane.get("argv"))
-        if not reported:
-            continue
-        open_path = os.path.realpath(reported)
-        if open_path == target:
-            continue                    # the same session: reopen_session focuses it instead
-        if (open_path in ancestors
-                or target in {os.path.realpath(p) for p in session_lineage(open_path)}):
-            return pane["id"]
-    return None
-
-
 def session_key(action):
-    """The identity of the session a row points at: the file, or the card that owns one."""
-    if action[0] == "sess-card":
-        return ("card", action[1])
+    """A canonical transcript path (or ephemeral inventory record), independent of kind."""
     return os.path.realpath(action[-1])
-
 
 def session_arg(argv):
     """The session file a pane was launched on (``--session <path>``). Known the moment the
@@ -890,7 +982,7 @@ def session_arg(argv):
     needs the engine up, which can take a while): until this, clicking a starting session
     again opened it a second time. Pure, so testable."""
     argv = list(argv or ())
-    return argv[argv.index("--session") + 1] if "--session" in argv[:-1] else None
+    return next((argv[argv.index(flag) + 1] for flag in ("--session", "--catalog") if flag in argv[:-1]), None)
 
 
 def open_session_panes(listing):
@@ -903,24 +995,34 @@ def open_session_panes(listing):
             continue
         if pane.get("card"):
             live[("card", pane["card"])] = pane["id"]
-        path = (pane.get("reported") or {}).get("session") or session_arg(pane.get("argv"))
+        argv = list(pane.get("argv") or ())
+        path = (pane.get("reported") or {}).get("session") or session_arg(argv)
         if path:
-            live[os.path.realpath(path)] = pane["id"]
+            if {"--read-only", "--attach"} & set(argv):
+                live.setdefault(os.path.realpath(path), pane["id"])
+            else:
+                live[os.path.realpath(path)] = pane["id"]
     return live
 
 
+def session_pane_id(action, live):
+    return live.get(session_key(action))
+
 def mark_open_sessions(rows, listing, focused):
-    """Give every session row that already lives in a pane that pane's state dot, and mark the
-    focused one the way the active space is marked."""
+    """Mark open conversations; only a writer pane overrides the session's state dot."""
     live = open_session_panes(listing)
     by_id = {pane["id"]: pane for pane in listing}
     out = []
     for row in rows:
-        pane_id = live.get(session_key(row["action"])) if row["kind"] == "item" else None
+        pane_id = (session_pane_id(row["action"], live) or live.get(tuple(row.get("live_key") or ()))
+                   if row["kind"] == "item" else None)
         if pane_id:
-            state, seen = pane_state(by_id[pane_id])
-            row = {**row, "pane": pane_id, "state": state, "seen": seen,
-                   "active": pane_id == focused}
+            row = {**row, "pane": pane_id, "active": pane_id == focused}
+            # An attached/history window owns no model. Window lifetime is not
+            # agent lifetime, even when that window can send the original agent input.
+            if not ({"--read-only", "--attach"} & set(by_id[pane_id].get("argv") or ())):
+                state, seen = pane_state(by_id[pane_id])
+                row.update(state=state, seen=seen)
         out.append(row)
     return out
 
@@ -968,9 +1070,8 @@ def _render_sessions(canvas, entries, area, scroll, hits, mode="here"):
                      else {"fg": P["subtext0"]})
             if indent:
                 canvas.put(body.x + 1, y, "↳", fg=hui.OVERLAY0, clip=clip_x)
-            if entry.get("pane"):              # already open: wear that pane's state dot
-                glyph, color = hui.state_dot(entry["state"], entry["seen"])
-                canvas.put(body.x + 1 + indent, y, glyph, fg=color, clip=clip_x)
+            glyph, color = hui.state_dot(entry.get("state", "saved"), entry.get("seen", False))
+            canvas.put(body.x + 1 + indent, y, glyph, fg=color, clip=clip_x)
             canvas.put(body.x + 3 + indent, y, hui.truncate_end(entry["label"], label_w),
                        clip=clip_x, **style)
             canvas.put(clip_x - _wcwidth(when) - 1, y, when, fg=hui.OVERLAY0, clip=clip_x)
@@ -1015,52 +1116,6 @@ def format_sidebar(spaces, agents, width, rows, *, collapsed=False, scrolls=None
         canvas.put(toggle.x, toggle.y, "«", fg=hui.OVERLAY0)
         hits.append((toggle, ("toggle",)))
     return [canvas.row(y) for y in range(rows)], hits, sections
-
-
-def draw_scrollbar(metrics, track, focused):
-    """herdr scrollbar.rs:135-162 render_scrollbar: track '▕' plus thumb, brighter and
-    thicker when focused. Returns an escape-sequence string. Pure, so testable."""
-    thumb = hui.scrollbar_thumb(metrics, track)
-    if thumb is None:
-        return ""
-    thumb_top, thumb_len = thumb
-    track_color, thumb_color, thumb_symbol = hui.scrollbar_style(focused)
-    out = [hui.sgr_fg(track_color)]
-    for y in range(track.y, track.y + track.height):
-        out.append(f"\x1b[{y + 1};{track.x + 1}H▕")
-    out.append(hui.sgr_fg(thumb_color))
-    for y in range(thumb_top, min(thumb_top + thumb_len, track.y + track.height)):
-        out.append(f"\x1b[{y + 1};{track.x + 1}H{thumb_symbol}")
-    out.append("\x1b[0m")
-    return "".join(out)
-
-
-def draw_pane_borders(chromed, splits=(), area=None, titles=None):
-    """Draw every pane border (output side of herdr panes.rs:484-528 render_pane_borders):
-    focused edges in accent, the rest in overlay0; then each pane's title on its top border
-    (panes.rs:614-665: from the second column, accent + bold when focused, overlay0 otherwise).
-    ``titles`` maps pane id -> label. Called after all pane content has been rendered, as in
-    herdr. Pure, so testable."""
-    cells = hui.pane_border_cells(chromed, splits=splits, area=area)
-    out, last_color = [], None
-    for (x, y), (symbol, focused) in sorted(cells.items(), key=lambda kv: kv[0][::-1]):
-        color = hui.ACCENT if focused else hui.PALETTE["border"]
-        if color != last_color:
-            out.append(hui.sgr_fg(color))
-            last_color = color
-        out.append(f"\x1b[{y + 1};{x + 1}H{symbol}")
-    for item in chromed:
-        rect = item["rect"]
-        if "top" not in item["borders"] or rect.width <= 4:
-            continue
-        title = hui.pane_border_title((titles or {}).get(item["id"], ""), rect.width)
-        if title is None:
-            continue
-        style = (hui.sgr_fg(hui.ACCENT) + "\x1b[1m") if item["focused"] else hui.sgr_fg(hui.OVERLAY0)
-        out.append(f"\x1b[0m{style}\x1b[{rect.y + 1};{rect.x + 2}H{title}")
-    if out:
-        out.append("\x1b[0m")
-    return "".join(out)
 
 
 def format_mode_bar(badge_text, hints, width):
@@ -1155,51 +1210,6 @@ def _cut(text, width):
     return out, used
 
 
-_ANSI = re.compile(r"\x1b\[[0-9;]*m")
-
-
-def _clip_row(line, width):
-    """Truncate one rendered pane row to ``width`` display columns, keeping its SGR sequences.
-
-    The daemon renders a row at the pane's own ``screen.columns``, which is not always the
-    width of the slice the panel gave it: ``relayout`` skips ``pane.resize`` for a pane whose
-    inner rect is under 2x2, and again when the resize errors, leaving the daemon on the old
-    (120-column) size. Painting that row unclipped runs it straight through the border and
-    over the neighbouring pane until the next full redraw (audit 2026-09-02, ui-panel-18)."""
-    if width <= 0:
-        return ""
-    out, col, index = [], 0, 0
-    while index < len(line):
-        code = _ANSI.match(line, index)
-        if code is not None:                      # zero-width: styles pass through untouched
-            out.append(code.group(0))
-            index = code.end()
-            continue
-        step = _wcwidth(line[index])
-        if col + step > width:
-            break
-        out.append(line[index])
-        col += step
-        index += 1
-    if index < len(line):     # cut mid-line: close whatever style we were inside of
-        out.append("\x1b[0m")
-    return "".join(out)
-
-
-def _cols(plain, c0, c1):
-    """Substring by display-column range [c0, c1) (CJK is 2 columns; a wide character straddling
-    the boundary is included). Selections are dragged in screen columns, not character indexes."""
-    out, col = "", 0
-    for ch in plain:
-        if col >= c1:
-            break
-        w = _wcwidth(ch)
-        if col + w > c0:
-            out += ch
-        col += w
-    return out
-
-
 def _clipboard(text):
     """Copy to the system clipboard: pbcopy on macOS (what herdr does), otherwise OSC 52 and let the terminal handle it."""
     import subprocess
@@ -1224,21 +1234,39 @@ def format_help_lines(width=46):
 
 
 class _Sock:
-    """Minimal JSONL client over the daemon's Unix socket (one for requests, one for the event stream)."""
+    """Minimal JSONL client over the daemon's Unix socket (one for requests, one for the event stream).
+
+    Every request carries an id of its own and ``request`` answers only to that id: a reply that
+    arrives after its request timed out (the daemon was busy for longer than the socket timeout)
+    is skipped when the next request reads the stream, instead of being handed to that next
+    request as its result -- which is how ``panes.list`` once received ``cards.list``'s reply and
+    the panel died on ``KeyError: 'panes'``."""
 
     def __init__(self, path):
         self.sock = socket.socket(socket.AF_UNIX)
         self.sock.connect(path)
         self.sock.settimeout(15)   # If the daemon hangs, fail with a "disconnected" error instead of freezing the keyboard.
         self.buf = b""
+        self.seq = 0
 
     def send(self, method, params=None):
+        self.seq += 1
+        request_id = str(self.seq)
         self.sock.sendall((json.dumps(
-            {"id": "1", "method": method, "params": params or {}},
+            {"id": request_id, "method": method, "params": params or {}},
+            ensure_ascii=False) + "\n").encode())
+        return request_id
+
+    def notify(self, method, params=None):
+        """Fire-and-forget: the daemon applies it and sends no reply (id=None), so the caller
+        never blocks on the daemon. Used for a divider drag's resizes -- herdr's client never
+        waits on its server for a resize."""
+        self.sock.sendall((json.dumps(
+            {"id": None, "method": method, "params": params or {}},
             ensure_ascii=False) + "\n").encode())
 
     def request(self, method, params=None):
-        self.send(method, params)
+        request_id = self.send(method, params)
         while True:
             line = self.readline(block=True)
             if line is None:
@@ -1246,6 +1274,8 @@ class _Sock:
             msg = json.loads(line)
             if "event" in msg:
                 continue
+            if msg.get("id") != request_id:
+                continue               # the late reply to a request that timed out: not this one's
             if msg.get("error"):
                 raise RuntimeError(msg["error"])
             return msg["result"]
@@ -1284,29 +1314,16 @@ def _send_pane_input(control, pane_id, data, note):
         control.request("pane.input", {
             "id": pane_id, "data": base64.b64encode(bytes(data)).decode()})
     except RuntimeError as error:
-        note(f"{hui.sgr_fg(hui.OVERLAY1)}Input not delivered: {error}")
+        note(f"Input not delivered: {error}")
 
 
-def _restore_bottom_row(paint, control, slices, rows, main_col):
-    """Repaint the main area's bottom row from the panes that own it, inside one synchronized
-    update. Module level so the escape pairing is testable: the closing ``\\x1b[?2026l`` used to
-    hang off the per-pane paint inside the loop, so with borders — where no pane's inner rect
-    reaches the bottom row and every iteration hits the `continue` — the opening ``?2026h`` was
-    never closed and the terminal froze until its own synchronized-update timeout
-    (audit 2026-09-02, ui-panel-17)."""
-    paint(f"\x1b[?25l\x1b[?2026h\x1b[{rows};{main_col}H\x1b[K".encode())
-    try:
-        for pane_id, rect in slices:
-            if rect.y + rect.height < rows:      # This pane does not reach the bottom row.
-                continue
-            try:
-                screen = control.request("pane.screen", {"id": pane_id})
-            except (RuntimeError, ConnectionError):
-                continue
-            if screen["rows"]:
-                paint(f"\x1b[{rows};{rect.x + 1}H{screen['rows'][-1]}".encode())
-    finally:
-        paint(b"\x1b[?2026l")
+def _close_exited_pane(control, pane_id):
+    """Leave card exits to the daemon's watcher, including cards not in our last poll."""
+    current = control.request("panes.list")["panes"]
+    if any(pane["id"] == pane_id and pane["card"] for pane in current):
+        return False
+    control.request("pane.close", {"id": pane_id})
+    return True
 
 
 def _write_all(data):
@@ -1409,7 +1426,6 @@ def launch():
         listing = panes()
         lo = next(p for p in listing if p["id"] == created["pane_id"])
     focused = lo["id"]
-    zoom = False
     # Cursor state is kept per pane: position and visibility belong to each pane (the engine
     # hides the real cursor and draws its own block; a shell shows it). With one global value,
     # any path that forgot to resync on pane switch would stack the real cursor on top of the
@@ -1418,7 +1434,7 @@ def launch():
     slices = []
     # herdr semantics: a tab is a page holding a BSP split tree (layout.rs port; nodes in geometry.py).
     # The daemon owns the layout and seats every pane (herdr server model); this is a view of it.
-    spaces = []          # [{"id", "folder", "name", "tabs": [trees], "tab_names": [str | None]}]
+    spaces = []          # [{"id", "folder", "name", "tabs": [trees], "tab_names": [str | None], "zoomed": [bool], "grid": [bool]}]
     auto_names = {}      # pane -> the session file its tab name came from (renamed when the pane moves on)
 
     def active_space():
@@ -1436,26 +1452,35 @@ def launch():
     layout_rev = {"n": None}          # the daemon revision the current view is based on
 
     def _layout_snapshot():
-        return [(s["id"], list(s["tabs"]), list(s["tab_names"]), s["name"]) for s in spaces]
+        return [(s["id"], list(s["tabs"]), list(s["tab_names"]), list(s["zoomed"]), list(s["grid"]), s["name"])
+                for s in spaces]
 
     def reload_layout():
         """Pull the daemon's layout. Panes the last listing reported dead are left out of the
         view (the poll closes them); see _without_dead. Returns True when anything changed."""
+        if drag[0] is not None and drag[0].get("kind") == "split":
+            # Mid divider-drag the panel owns the layout: the dragged ratio lives in the local
+            # tree and is not pushed until drag_end, so pulling the daemon's (still pre-drag)
+            # layout here would overwrite the drag and the divider would snap back. Leave the
+            # local tree alone until the drag settles.
+            return False
         before = _layout_snapshot()
         dead = {p["id"] for p in listing if not p["alive"]}
         payload = control.request("layout.get")
         layout_rev["n"] = payload.get("revision")
         got = []
         for space in payload["spaces"]:
-            trees, names = [], []
+            trees, names, zoomed, grids = [], [], [], []
             for tab in space["tabs"]:
                 tree = _without_dead(hui.from_jsonable(tab["tree"]), dead)
                 if tree is not None:
                     trees.append(tree)
                     names.append(tab.get("name"))
+                    zoomed.append(bool(tab.get("zoomed")))   # herdr Tab.zoomed: each tab keeps its own
+                    grids.append(bool(tab.get("grid")))      # a grid tab re-balances when a pane is added/closed
             if trees:
                 got.append({"id": space["id"], "folder": space["folder"], "name": space.get("name"),
-                            "tabs": trees, "tab_names": names})
+                            "tabs": trees, "tab_names": names, "zoomed": zoomed, "grid": grids})
         spaces[:] = got
         if side["ws"] is not None and side["ws"] not in {space["id"] for space in spaces}:
             # The active space left the layout (its last pane died): `active_space()` was None
@@ -1463,7 +1488,6 @@ def launch():
             # folder the panel was launched in -- for a `~` space that read as zero sessions.
             side["ws"] = space_of(focused) or (spaces[0]["id"] if spaces else None)
             refresh_sessions()
-            chrome_cache["rows"] = []
         return before != _layout_snapshot()
 
     def push_layout():
@@ -1472,8 +1496,9 @@ def launch():
         try:
             out = control.request("layout.set", {"revision": layout_rev["n"], "spaces": [
                 {"id": s["id"], "folder": s["folder"], "name": s["name"],
-                 "tabs": [{"name": name, "tree": hui.to_jsonable(tree)}
-                          for name, tree in zip(s["tab_names"], s["tabs"])]}
+                 "tabs": [{"name": name, "tree": hui.to_jsonable(tree), "zoomed": zoomed, "grid": grid}
+                          for name, tree, zoomed, grid in
+                          zip(s["tab_names"], s["tabs"], s["zoomed"], s["grid"])]}
                 for s in spaces]})
             layout_rev["n"] = out.get("revision", layout_rev["n"])
         except RuntimeError:
@@ -1501,6 +1526,22 @@ def launch():
         name = space["tab_names"][index] if space and index < len(space["tab_names"]) else None
         return name or str(index + 1)
 
+    def tab_zoomed(index):
+        """herdr Tab.zoomed for a tab of the active space."""
+        space = active_space()
+        return bool(space and index < len(space["zoomed"]) and space["zoomed"][index])
+
+    def toggle_zoom():
+        """herdr apply_pane_zoom (actions.rs:1918-1970): flip the active tab's zoom; a tab
+        with one pane has nothing to zoom and stays as it is (no " Z" either)."""
+        space = active_space()
+        index, tree = current_tree()
+        if space is None or tree is None or len(hui.pane_ids(tree)) <= 1:
+            return
+        space["zoomed"][index] = not space["zoomed"][index]
+        push_layout()
+        relayout()
+
     def rename_tab_of(pane_id, name):
         space = space_holding(pane_id)
         if space is None:
@@ -1520,7 +1561,6 @@ def launch():
         """herdr switch_workspace: the main area shows that space's tabs, focus returns to its last pane."""
         side["ws"] = key
         refresh_sessions()     # the sessions list belongs to the space's folder
-        chrome_cache["rows"] = []
         alive = {p["id"] for p in listing if p["alive"]}
         target = last_focus.get(key)
         if target not in alive or space_of(target) != key:
@@ -1549,15 +1589,16 @@ def launch():
             index = side_order.index(side["ws"]) if side["ws"] in side_order else 0
             switch_space(candidates[min(index, len(candidates) - 1)])
 
-    cards_cache = {"items": []}       # the board's cards (cards.list): card sessions in the list, and where to seat one
+    cards_cache = {"items": [], "sessions": []}       # Board cards and the unified session inventory
     sessions_cache = {"rows": []}     # the sidebar draws from here: scanning on every frame would stat the disk per keystroke
     sess_folds = set()                # session groups start open; a click folds one
     meta_cache = {}
 
     def refresh_cards():
         try:
-            cards_cache["items"] = control.request("cards.list")["cards"]
-        except (RuntimeError, ConnectionError):
+            response = control.request("cards.list")
+            cards_cache.update(items=response["cards"], sessions=response["sessions"])
+        except (RuntimeError, OSError):
             pass
 
     git_cache = {}      # realpath folder -> {"at": monotonic, "info": git_info() or None}
@@ -1651,64 +1692,51 @@ def launch():
         return meta_cache[key][1]
 
     def gather_sessions():
-        """Past sessions: Last Order's, each Sister's direct chats, and card sessions from the
-        board, newest first. "here" = the active space's folder; "all" = every folder, grouped.
-        Every item carries the folder it worked in: reopening always goes back there."""
-        from misaka.config import sisters as roster
-        from misaka.core.session_manager import get_session_dir_for_cwd
-        raw = effective_space_folder(spaces, listing, focused, side["ws"])   # the folder the row shows
+        """One row per session, whatever its kind or storage layout."""
+        from misaka.core import session_catalog
+        raw = effective_space_folder(spaces, listing, focused, side["ws"])
         folder = os.path.realpath(raw)
         everything = side["sess_mode"] == "all"
-        from misaka.config import sessions as session_roots
-        root = session_roots.sessions_root()
-
-        def files(role):
-            if everything:
-                try:
-                    buckets = [b for b in os.listdir(os.path.join(root, role)) if b.startswith("--")]
-                except OSError:
-                    buckets = []
-                directories = [os.path.join(root, role, bucket) for bucket in buckets]
-            else:
-                directories = [get_session_dir_for_cwd(raw, os.path.join(root, role))]
-            names = []
-            for here in directories:
-                try:
-                    names += [os.path.join(here, n) for n in os.listdir(here) if n.endswith(".jsonl")]
-                except OSError:
-                    pass
-            return sorted(names, key=lambda p: os.path.getmtime(p), reverse=True)
-
-        def item(path, who=None):
-            meta = session_meta(path)
+        lo, others = [], []
+        for entry in cards_cache["sessions"]:
+            if not session_catalog.available(entry) or (not everything and entry["workspace"] != folder):
+                continue
+            path = entry["path"]
+            meta = session_meta(path) if path else {}
             try:
-                when, t = session_stamp(os.path.getmtime(path)), os.path.getmtime(path)
+                stamp = os.path.getmtime(path) if path else 0
             except OSError:
-                when, t = "", 0
-            return {"label": meta["title"] if who is None else f"{who} · {meta['title']}",
-                    "when": when, "folder": os.path.realpath(meta["cwd"] or folder), "_t": t,
-                    "path": os.path.realpath(path),
-                    "parent": os.path.realpath(meta["parent"]) if meta.get("parent") else None,
-                    "action": ("sess-lo", path) if who is None else ("sess-sis", who, path)}
-
-        lo = [item(p) for p in files("last-order")]
-        sis = [item(p, who) for who in sorted(roster()) for p in files(who)]
-        for card in cards_cache["items"]:
-            workspace = os.path.realpath(card["workspace"])
-            if card.get("has_session") and (everything or workspace == folder):
-                sis.append({"label": f"{card.get('assignee', '?')} · {card['id']} {card.get('title', '')}",
-                            "when": card.get("status", ""), "folder": workspace, "_t": 0,
-                            "action": ("sess-card", card["id"], card.get("assignee", "?"))})
-        sis.sort(key=lambda item: -item.get("_t", 0))
+                if not session_catalog.available(entry):
+                    continue
+                stamp = 0  # A live session can reserve its path before the first saved reply.
+            role, kind = entry["role"], entry["kind"]
+            title = entry.get("title") or meta.get("title") or entry["id"]
+            if kind == "node" and entry.get("node_id"):
+                title = f"{entry['node_id']} · {title}"
+            label = f"{role} · {title} [{kind}]"
+            if entry.get("run_id"):
+                label += f" · {entry['run_id']} · depth {entry.get('depth', '?')}"
+            if kind == "node":
+                label = f"d{entry.get('depth', '?')} {entry.get('node_status', '?')} · {label}"
+            elif entry.get("task_status"):
+                label = f"{entry['task_status']} · {label}"
+            if entry.get("paused"):
+                label = f"pause requested · {label}"
+            row = {**entry, "kind": "item", "label": label, "when": session_stamp(stamp) if stamp else "live · unsaved",
+                   "folder": entry["workspace"], "_t": stamp, "session_kind": kind,
+                   "parent": meta.get("parent"), "action": ("sess-open", path or entry["catalog_file"])}
+            (lo if role == "last-order" else others).append(row)
+        lo.sort(key=lambda item: -item["_t"])
+        others.sort(key=lambda item: -item["_t"])
         if everything:
-            return session_rows(folder_groups(lo + sis), sess_folds)
-        return session_rows([("last-order", "Last Order", lo), ("sisters", "Sisters", sis)], sess_folds)
+            return session_rows(folder_groups(lo + others), sess_folds)
+        return session_rows([("last-order", "Last Order", lo), ("sisters", "Sisters / Agents", others)], sess_folds)
 
     def refresh_sessions():
         try:
             sessions_cache["rows"] = gather_sessions()
         except OSError:
-            pass
+            sessions_cache["rows"] = []  # a failed scan must not keep deleted rows alive
 
     def prune_meta_cache():
         """Drop cached titles for session files the sidebar no longer lists.
@@ -1723,98 +1751,118 @@ def launch():
 
     def session_pane(action):
         """The live pane already writing this session, if any (one session, one tab)."""
-        return open_session_panes(listing).get(session_key(action))
+        live = open_session_panes(listing)
+        row = session_row(action) or {}
+        return session_pane_id(action, live) or live.get(tuple(row.get("live_key") or ()))
 
     def session_row(action):
         return next((row for row in sessions_cache["rows"]
                      if row["kind"] == "item" and row["action"] == action), None)
 
     def reopen_session(hit):
-        """A click on a past session: go to its open pane, or reopen it where it worked. A fork
-        relative already open gets its kin split beside it (the fork rule). Otherwise a Last
-        Order conversation opens a space of its own in its folder, named after the conversation;
-        a Sister's chat or card session opens a new tab in the space of its folder (the active
-        one first). A folder that is gone is refused, never recreated."""
-        nonlocal listing
+        """Focus the owner pane or attach to its session; history never starts a worker."""
+        from misaka.core import session_catalog
         open_pane = session_pane(hit)
-        if open_pane:                                 # already in a tab: go there, never open a second one
+        if open_pane:
             focus(open_pane)
             return
-        row = session_row(hit) or {}
-        folder = row.get("folder")
-        if hit[0] == "sess-card":
-            card = next((c for c in cards_cache["items"] if c["id"] == hit[1]), {})
-            folder = os.path.realpath(card.get("workspace") or folder or "")
-        if not folder or not os.path.isdir(folder):
-            show_bottom_bar(f" cannot reopen: folder {folder or '?'} is gone")
+        row = session_row(hit)
+        if row is None or not session_catalog.available(row):
+            refresh_sessions()
+            draw_sidebar()
+            show_bottom_bar(" session or its working folder is gone")
             return
-
-        def tab_in(folder):
-            """A new tab in the space of this folder (the active one first), else a space of its own."""
-            current = active_space()
-            space = (current if current and current["folder"] == folder
-                     else next((s for s in spaces if s["folder"] == folder), None))
-            return {"tab": hui.pane_ids(space["tabs"][0])[0]} if space else {"space": True}
-
-        if hit[0] == "sess-card":
-            try:
-                out = control.request("pane.open_card_session", {"task_id": hit[1], "place": tab_in(folder)})
-            except RuntimeError as error:
-                show_bottom_bar(f" {error}")
-                return
-            listing = panes()
-            reload_layout()
-            focus(out["pane_id"], force_layout=True)
-            return
-        if hit[0] == "sess-lo":
-            kin = kin_pane(hit[1], listing)     # a fork relative already open: sit beside it
-            place = {"split": kin} if kin else {"space": True, "name": row.get("label") or LO_TITLE}
-            pane_id = new_pane([sys.executable, "-m", "misaka", "chat", "--session", hit[1]],
-                               LO_TITLE, place=place, cwd=folder)
-            if kin is None:
-                auto_names[pane_id] = hit[1]
+        folder, path = row["cwd"], row["path"]
+        role, kind = row["role"], row["session_kind"]
+        is_fork = bool(session_meta(path).get("parent")) if path else False
+        current = active_space()
+        space = (current if current and current["folder"] == folder
+                 else next((s for s in spaces if s["folder"] == folder and s["tabs"]), None))
+        # A reopened session stands on its own: closing a pane released it, and reopening never
+        # rejoins the Last Order it branched from -- a new fork calling a Sister makes a fresh
+        # session anyway. So it opens as a plain tab; only a fresh (non-fork) Last Order takes a
+        # space of its own, being a workspace root.
+        place = ({"tab": hui.pane_ids(space["tabs"][0])[0]} if space and space["tabs"]
+                 else {"space": True, "name": row["label"]})
+        # Only ordinary interactive conversations are resumed as a new interactive runtime.
+        # DM/node/child/card sessions belong to their own lifecycle, even when idle.
+        from misaka.config import sisters
+        if kind == "foreground" and row["state"] == "saved" and (role == "last-order" or role in sisters()):
+            argv = [sys.executable, "-m", "misaka", "chat"]
+            if role != "last-order":
+                argv += ["--as", role]
+            elif not is_fork:
+                place = {"space": True, "name": row["label"]}
+            argv += ["--session", path]
         else:
-            kin = kin_pane(hit[2], listing)
-            new_pane([sys.executable, "-m", "misaka", "chat", "--as", hit[1], "--session", hit[2]],
-                     hit[1], place={"split": kin} if kin else tab_in(folder), cwd=folder)
+            argv = [sys.executable, "-m", "misaka", "chat", "--attach" if row.get("control") else "--read-only",
+                    "--session" if path else "--catalog", path or row["catalog_file"]]
+        pane_id = new_pane(argv, row["label"], place=place, cwd=folder)
+        if kind == "foreground" and role == "last-order":
+            auto_names[pane_id] = path
+
+    # ── Mode (herdr app::Mode): one value every handler and every drawing path reads ──
+    mode = Mode.TERMINAL
+
+    def leave_command_mode():
+        """navigate.rs leave_command_mode: back to the copy mode still owning the focused
+        pane, else the terminal."""
+        nonlocal mode
+        mode = Mode.COPY if copy["pane"] is not None and copy["pane"] == focused else Mode.TERMINAL
+        if mode is Mode.COPY:
+            copy_bar()
+            draw_copy_cursor()
+        else:
+            restore_bottom()
+
+    def redraw_overlay():
+        """After a resize or a repaint underneath: put the current mode's layer back
+        (herdr simply re-renders the whole frame from the mode)."""
+        if mode is Mode.GLOBAL_MENU:
+            draw_menu()
+        elif mode is Mode.NAVIGATOR:
+            draw_nav()
+        elif mode is Mode.RENAME:
+            draw_rename()
+        elif mode is Mode.KEYBIND_HELP:
+            draw_help_overlay()
+        elif mode is Mode.PREFIX:
+            draw_prefix_bar()
+        elif mode is Mode.RESIZE:
+            draw_resize_bar()
+        elif mode is Mode.COPY:
+            copy_clamp()
+            copy_bar()
 
     # The Sister roster popup (herdr's global menu, Mode::GlobalMenu): a modal that eats
     # keys and clicks until it closes.
-    menu = {"open": False, "items": [], "hl": 0, "scroll": 0, "rect": None, "hits": []}
+    menu = {"items": [], "hl": 0, "scroll": 0, "rect": None, "hits": [], "lines": []}
 
     def draw_menu():
         agents_area = (ui_map["sections"].get("agents") or {}).get("rect") or hui.Rect(0, 0, side["w"] - 1, rows)
         launcher = hui.global_launcher_rect(agents_area, SISTERS_LABEL)
         rect = hui.menu_popup_rect(hui.Rect(0, 0, cols, rows), launcher, menu["items"])
         menu["scroll"] = menu_scroll_for(menu["hl"], menu["scroll"], rect.height - 2)
-        lines, menu["hits"] = format_menu_popup(menu["items"], menu["hl"], menu["scroll"], rect)
+        menu["lines"], menu["hits"] = format_menu_popup(menu["items"], menu["hl"], menu["scroll"], rect)
         menu["rect"] = rect
-        paint(("\x1b[?25l\x1b[?2026h"
-               + "".join(f"\x1b[{y + 1};{x + 1}H{line}" for y, x, line in lines)
-               + "\x1b[?2026l").encode())
+        request_render()
 
     def open_menu():
+        nonlocal mode
         from misaka.config import sisters
-        menu.update(items=sorted(sisters()) or ["no sisters"], hl=0, scroll=0, open=True)
-        _write_all(b"\x1b[?1003h")     # herdr highlights on hover: report every mouse move while the popup is up.
+        menu.update(items=sorted(sisters()) or ["no sisters"], hl=0, scroll=0)
+        mode = Mode.GLOBAL_MENU
         draw_menu()
 
     def close_menu():
-        menu["open"] = False
-        _write_all(b"\x1b[?1003l\x1b[?1002h")    # Back to motion-only-while-pressed (drag selection).
-        # The popup sat on rows the sidebar cache believes are unchanged: drop the cache so every
-        # row is rewritten, or a ghost popup stays on screen (looked like a freeze).
-        chrome_cache["rows"] = []
-        rect = menu["rect"]
-        if rect and rect.x + rect.width > side["w"]:
-            relayout()             # It spilled into the main area: repaint the panes under it too.
-        else:
-            draw_sidebar()
+        nonlocal mode
+        mode = Mode.TERMINAL
+        request_render()
 
     def menu_hover(x, y):
         """herdr mouse.rs:146-153: the pointer moves the highlight."""
         hit = next((index for rect, index in menu["hits"]
-                    if rect.x <= x - 1 < rect.x + rect.width and rect.y == y - 1), None)
+                    if rect.x <= x < rect.x + rect.width and rect.y == y), None)
         if hit is not None and hit != menu["hl"]:
             menu["hl"] = hit
             draw_menu()
@@ -1826,12 +1874,44 @@ def launch():
     def menu_choose(index):
         name = menu["items"][index]
         close_menu()
-        if name != "no sisters":   # A Sister gets a tab of her own in the active space.
-            new_pane([sys.executable, "-m", "misaka", "chat", "--as", name], name, place={"tab": focused})
+        if name != "no sisters":   # A Sister joins the focused pane's tab as a grid pane.
+            new_pane([sys.executable, "-m", "misaka", "chat", "--as", name], name, place={"grid": focused})
+
+    def menu_key(key):
+        """herdr modal.rs:147-160 handle_global_menu_key: esc closes, k/up and j/down move, enter picks."""
+        if key.kind == "release":
+            return
+        if key.matches("esc"):
+            close_menu()
+        elif key.matches("up") or key.matches("k"):
+            menu_move(-1)
+        elif key.matches("down") or key.matches("j"):
+            menu_move(1)
+        elif key.matches("enter"):
+            menu_choose(menu["hl"])
+
+    def menu_mouse(event):
+        """mouse.rs:146-172: hover highlights, a click picks or closes, the wheel scrolls."""
+        rect = menu["rect"]
+        inside = rect and rect.x <= event.x < rect.x + rect.width and rect.y <= event.y < rect.y + rect.height
+        if event.kind == "move":
+            menu_hover(event.x, event.y)
+        elif event.kind == "press" and event.button == 0:
+            hit = next((index for r, index in menu["hits"]
+                        if r.x <= event.x < r.x + r.width and r.y == event.y), None)
+            if hit is None:
+                close_menu()
+            else:
+                menu_choose(hit)
+        elif event.kind in ("wheel_up", "wheel_down") and inside:
+            cap = max(0, len(menu["items"]) - (rect.height - 2))
+            menu["scroll"] = max(0, min(menu["scroll"] + (1 if event.kind == "wheel_down" else -1), cap))
+            menu["hl"] = max(menu["scroll"], min(menu["hl"], menu["scroll"] + rect.height - 3))
+            draw_menu()
 
     # The navigator (prefix+g, herdr Mode::Navigator): a modal tree of every space and agent.
-    nav = {"open": False, "query": "", "search": False, "filter": None, "selected": 0,
-           "scroll": 0, "rows": [], "hits": [], "rect": None, "collapsed": set()}
+    nav = {"query": "", "search": False, "filter": None, "selected": 0,
+           "scroll": 0, "rows": [], "hits": [], "rect": None, "collapsed": set(), "lines": []}
 
     def nav_rows():
         rows_, agents = sidebar_model(spaces, listing, focused, side["ws"])
@@ -1859,28 +1939,24 @@ def launch():
         rect = navigator_popup_rect(hui.Rect(0, 0, cols, rows))
         nav["scroll"] = menu_scroll_for(nav["selected"], nav["scroll"], rect.height - 7)
         current = nav["rows"][nav["selected"]] if nav["rows"] else None
-        lines, nav["hits"] = format_navigator(
+        nav["lines"], nav["hits"] = format_navigator(
             nav["rows"], nav["selected"], nav["scroll"], rect, query=nav["query"],
             search_focused=nav["search"], state_filter=nav["filter"], detail=nav_detail(current))
         nav["rect"] = rect
-        paint(("\x1b[?25l\x1b[?2026h"
-               + "".join(f"\x1b[{y + 1};{x + 1}H{line}" for y, x, line in lines)
-               + "\x1b[?2026l").encode())
+        request_render()
 
     def open_nav():
-        nav.update(open=True, query="", search=False, filter=None, scroll=0)
+        nonlocal mode
+        nav.update(query="", search=False, filter=None, scroll=0)
         nav["rows"] = nav_rows()
         nav["selected"] = next((i for i, r in enumerate(nav["rows"]) if r["pane"] == focused), 0)
+        mode = Mode.NAVIGATOR
         draw_nav()
 
     def close_nav():
-        nav["open"] = False
-        # It covered the sidebar and the panes. Repaint the sidebar first (cache cleared, every
-        # row rewritten), then the panes: relayout clears the main area at once but refreshes
-        # the sidebar only at its end, after a pause, which left the popup's left half lingering.
-        chrome_cache["rows"] = []
-        draw_sidebar()
-        relayout()
+        nonlocal mode
+        mode = Mode.TERMINAL
+        request_render()
 
     def nav_accept():
         row = nav["rows"][nav["selected"]] if nav["rows"] else None
@@ -1895,113 +1971,121 @@ def launch():
     def nav_move(delta):
         nav["selected"] = max(0, min(nav["selected"] + delta, len(nav["rows"]) - 1))
 
-    def nav_keys(chunk):
+    def nav_key(key):
         """modal.rs:162-270 handle_navigator_key, both halves: typing in the search line, and
         the list keys (/, a, b/w/i/d, j/k, space to fold a space, G/End, Home)."""
-        text = chunk.decode("utf-8", "ignore")
-        index = 0
-        while index < len(text) and nav["open"]:
-            if text.startswith("\x1b[", index):
-                end = index + 2
-                while end < len(text) and not "\x40" <= text[end] <= "\x7e":
-                    end += 1
-                seq, index = text[index:end + 1], end + 1
-                if seq == "\x1b[A":
-                    nav_move(-1)
-                elif seq == "\x1b[B":
-                    nav_move(1)
-                elif seq in ("\x1b[H", "\x1b[1~"):
-                    nav["selected"] = 0
-                elif seq in ("\x1b[F", "\x1b[4~"):
-                    nav["selected"] = max(0, len(nav["rows"]) - 1)
-                continue
-            key, index = text[index], index + 1
-            if nav["search"]:
-                if key == "\x1b":
-                    nav["search"] = False
-                elif key == "\r":
-                    nav_accept()
-                elif key in ("\x7f", "\x08"):
-                    nav["filter"] = None
-                    nav["query"] = nav["query"][:-1]
-                    nav["selected"] = 0
-                elif key == "\x0e":
-                    nav_move(1)
-                elif key == "\x10":
-                    nav_move(-1)
-                elif key == "\x15":
-                    nav.update(query="", filter=None)
-                elif key >= " " and key != "\x7f":
-                    nav["query"] += key
-                    nav["selected"] = 0
+        if key.kind == "release":
+            return
+        text = key_text(key)
+        if nav["search"]:
+            if key.matches("esc"):
+                nav["search"] = False
+            elif key.matches("enter"):
+                nav_accept()
+                return
+            elif key.matches("backspace"):
+                nav["filter"] = None
+                nav["query"] = nav["query"][:-1]
+                nav["selected"] = 0
+            elif key.matches("up") or key.matches("p", hin.CTRL):
+                nav_move(-1)
+            elif key.matches("down") or key.matches("n", hin.CTRL):
+                nav_move(1)
+            elif key.matches("u", hin.CTRL):
+                nav.update(query="", filter=None)
+            elif text is not None and text >= " ":
+                nav["query"] += text
+                nav["selected"] = 0
+        else:
+            if key.matches("esc"):
+                close_nav()
+                return
+            elif key.matches("enter"):
+                nav_accept()
+                return
+            elif text == "/":
+                nav.update(search=True, filter=None)
+            elif key.matches("backspace"):
+                nav["filter"] = None
+            elif text == "a":
+                nav.update(query="", filter=None)
+            elif text in NAV_FILTERS:
+                nav.update(query="", filter=NAV_FILTERS[text], selected=0)
+            elif text == "j" or key.matches("down"):
+                nav_move(1)
+            elif text == "k" or key.matches("up"):
+                nav_move(-1)
+            elif text == " " and nav["rows"]:
+                space_key = nav["rows"][nav["selected"]]["key"]
+                nav["collapsed"].symmetric_difference_update({space_key})
+            elif text == "G" or key.matches("end"):
+                nav["selected"] = max(0, len(nav["rows"]) - 1)
+            elif key.matches("home"):
+                nav["selected"] = 0
+        draw_nav()
+
+    def nav_paste(text):
+        """input/mod.rs paste_into_active_text_input: only the search box takes a paste."""
+        if nav["search"]:
+            nav["query"] += "".join(ch for ch in text if ch >= " ")
+            nav["selected"] = 0
+            draw_nav()
+
+    def nav_mouse(event):
+        """overlays.rs:121-180: a row jumps, the wheel scrolls, anywhere else closes."""
+        if event.kind == "press" and event.button == 0:
+            hit = next((index for rect, index in nav["hits"]
+                        if rect.x <= event.x < rect.x + rect.width and rect.y == event.y), None)
+            if hit is None:
+                close_nav()
             else:
-                if key == "\x1b":
-                    close_nav()
-                elif key == "\r":
-                    nav_accept()
-                elif key == "/":
-                    nav.update(search=True, filter=None)
-                elif key in ("\x7f", "\x08"):
-                    nav["filter"] = None
-                elif key == "a":
-                    nav.update(query="", filter=None)
-                elif key in NAV_FILTERS:
-                    nav.update(query="", filter=NAV_FILTERS[key], selected=0)
-                elif key in ("j", "\x0e"):
-                    nav_move(1)
-                elif key in ("k", "\x10"):
-                    nav_move(-1)
-                elif key == " " and nav["rows"]:
-                    space_key = nav["rows"][nav["selected"]]["key"]
-                    nav["collapsed"].symmetric_difference_update({space_key})
-                elif key == "G":
-                    nav["selected"] = max(0, len(nav["rows"]) - 1)
-            if nav["open"]:
-                draw_nav()
+                nav["selected"] = hit
+                nav_accept()
+        elif event.kind in ("wheel_up", "wheel_down"):
+            body_h = max(1, nav["rect"].height - 7) if nav["rect"] else 1
+            cap = max(0, len(nav["rows"]) - body_h)
+            nav["scroll"] = max(0, min(nav["scroll"] + (1 if event.kind == "wheel_down" else -1), cap))
+            nav["selected"] = max(nav["scroll"], min(nav["selected"], nav["scroll"] + body_h - 1))
+            draw_nav()
 
     # ── Resize mode (prefix+r, herdr Mode::Resize: modal.rs:713-735, menus.rs:259-285) ──
-    resize_on = [False]
 
     def current_tree():
         vis = visible_tabs()
         index = active_tab()
         return (index, vis[index]) if vis and index < len(vis) else (None, None)
 
-    def enter_resize():
-        resize_on[0] = True
+    def draw_resize_bar():
         show_bottom_bar(format_mode_bar("RESIZE", (("h/l", "width"), ("j/k", "height"), ("esc", "done")),
                                         max(10, cols - side["w"])))
 
-    def resize_keys(chunk):
-        nonlocal listing
-        text = chunk.decode("utf-8", "ignore")
-        index = 0
-        while index < len(text) and resize_on[0]:
-            nav = None
-            if text.startswith("\x1b[", index):
-                end = index + 2
-                while end < len(text) and not "\x40" <= text[end] <= "\x7e":
-                    end += 1
-                seq, index = text[index:end + 1], end + 1
-                nav = {"\x1b[D": "left", "\x1b[C": "right", "\x1b[A": "up", "\x1b[B": "down"}.get(seq)
-            else:
-                key, index = text[index], index + 1
-                if key in ("\x1b", "\r"):
-                    resize_on[0] = False
-                    restore_bottom()
-                    return
-                nav = {"h": "left", "l": "right", "k": "up", "j": "down"}.get(key)
-            if nav is None:
-                continue
-            _tab_index, tree = current_tree()
-            if tree is None or zoom:
-                continue
-            new_tree = hui.resize_focused(tree, focused, nav, 0.05, chrome_state["area"])   # actions.rs:1858: 5% steps
-            if new_tree != tree:
-                trees = tabs_of()
-                trees[trees.index(tree)] = new_tree
-                push_layout()   # relayout() re-pulls the daemon's layout; unpushed, the resize would be discarded
-                relayout()
+    def enter_resize():
+        nonlocal mode
+        mode = Mode.RESIZE
+        draw_resize_bar()
+
+    def resize_key(key):
+        """modal.rs handle_resize_key: esc, enter or the resize binding leave; h/l and j/k
+        (or the arrows) move the nearest split by 5% (actions.rs:1858)."""
+        if key.kind == "release":
+            return
+        text = key_text(key)
+        if key.matches("esc") or key.matches("enter") or text == "r":
+            leave_command_mode()
+            return
+        nav_dir = ({"h": "left", "l": "right", "k": "up", "j": "down"}.get(text)
+                   or {"left": "left", "right": "right", "up": "up", "down": "down"}.get(key.code))
+        if nav_dir is None:
+            return
+        _tab_index, tree = current_tree()
+        if tree is None or tab_zoomed(active_tab()):
+            return
+        new_tree = hui.resize_focused(tree, focused, nav_dir, 0.05, chrome_state["area"])
+        if new_tree != tree:
+            trees = tabs_of()
+            trees[trees.index(tree)] = new_tree
+            push_layout()   # relayout() re-pulls the daemon's layout; unpushed, the resize would be discarded
+            relayout()
 
     # ── Mouse drags: split dividers and pane scrollbars (app/input/mouse.rs drag state machine) ──
     drag = [None]
@@ -2018,7 +2102,6 @@ def launch():
             return
         scroll_state.setdefault(pane_id, {})["metrics"] = out["scroll"]
         paint_rows(pane_id, {str(i): line for i, line in enumerate(out["rows"])}, clear=True)
-        draw_borders()
 
     def press_on_chrome(x, y):
         """A left press on a scrollbar gutter or a split divider starts a drag; returns True when it did."""
@@ -2035,12 +2118,12 @@ def launch():
                 drag[0] = {"kind": "bar", "pane": pane_id, "gutter": gutter, "grab": grab}
                 return True
         _index, tree = current_tree()
-        if tree is None or zoom or not chrome_state["area"]:
+        if tree is None or tab_zoomed(active_tab()) or not chrome_state["area"]:
             return False
         split = hui.divider_at(hui.collect_splits(tree, chrome_state["area"]), x, y)
         if split is None:
             return False
-        drag[0] = {"kind": "split", "split": split, "tree": tree}
+        drag[0] = {"kind": "split", "split": split, "tree": tree, "pacer": DragPacer()}
         return True
 
     def drag_to(x, y):
@@ -2050,24 +2133,49 @@ def launch():
             if metrics:
                 scroll_to(state["pane"], hui.scrollbar_offset_from_drag_row(metrics, state["gutter"], y, state["grab"]))
             return
+        position = state["pacer"].offer((x, y), time.monotonic())
+        if position is not None:
+            move_split(state, *position)
+
+    def drag_due():
+        state = drag[0]
+        return state["pacer"].due() if state and state["kind"] == "split" else None
+
+    def drag_tick(now, final=False):
+        """Apply a coalesced divider position whose time has come."""
+        state = drag[0]
+        if state is None or state["kind"] != "split":
+            return
+        position = state["pacer"].take(now, final)
+        if position is not None:
+            move_split(state, *position)
+
+    def move_split(state, x, y):
         ratio = hui.drag_ratio(state["split"], x, y)
         tree, trees = state["tree"], tabs_of()
         if tree in trees and hui.get_ratio_at(tree, state["split"]["path"]) != ratio:
             new_tree = hui.set_ratio_at(tree, state["split"]["path"], ratio)
             trees[trees.index(tree)] = new_tree
-            push_layout()
             state["tree"] = new_tree
             state["split"] = next((s for s in hui.collect_splits(new_tree, chrome_state["area"])
                                    if s["path"] == state["split"]["path"]), state["split"])
-            relayout()
+            # No push/reload per step: keep the dragged tree local and render from it, so the
+            # drag never blocks on the daemon; the final ratio is persisted at drag_end.
+            relayout(reload=False)
 
     def drag_end():
-        drag[0] = None
+        drag_tick(time.monotonic(), final=True)
+        was_split = drag[0] is not None and drag[0].get("kind") == "split"
+        drag[0] = None                        # cleared first, so push_layout's conflict path can reload normally
+        if was_split:
+            push_layout()                     # persist the settled ratio (deferred through the drag)
 
     # ── Rename (prefix+T tab, prefix+W space; herdr dialogs.rs:43-110 rename modal) ──
-    rename = {"open": False, "kind": "tab", "target": None, "value": "", "hits": [], "rect": None}
+    rename = {"kind": "tab", "target": None, "value": "", "hits": [], "rect": None,
+              "replace_on_type": False, "lines": []}
 
     def open_rename(kind):
+        nonlocal mode
         current = active_space()
         if kind == "tab":
             index, tree = current_tree()
@@ -2078,23 +2186,24 @@ def launch():
         else:
             target = side["ws"]
             value = (current or {}).get("name") or ""
-        rename.update(open=True, kind=kind, target=target, value=value)
+        rename.update(kind=kind, target=target, value=value, replace_on_type=False)
+        mode = Mode.RENAME
         draw_rename()
 
     def draw_rename():
+        nonlocal mode
         area = hui.Rect(side["w"], 0, max(1, cols - side["w"]), rows)
         rect = hui.centered_popup_rect(area, 56, 7)
         if rect is None:
-            rename["open"] = False
+            mode = Mode.TERMINAL
             return
         title = "rename tab" if rename["kind"] == "tab" else "rename space"
-        lines, rename["hits"] = format_rename_popup(title, rename["value"], rect)
+        rename["lines"], rename["hits"] = format_rename_popup(title, rename["value"], rect)
         rename["rect"] = rect
-        paint(("\x1b[?25l\x1b[?2026h"
-               + "".join(f"\x1b[{y + 1};{x + 1}H{line}" for y, x, line in lines)
-               + "\x1b[?2026l").encode())
+        request_render()
 
     def close_rename(save):
+        nonlocal mode
         if save:
             value = rename["value"].strip()
             if rename["kind"] == "tab":
@@ -2102,78 +2211,109 @@ def launch():
                 if space is not None and index < len(space["tabs"]):
                     for pid in hui.pane_ids(space["tabs"][index]):
                         auto_names.pop(pid, None)   # a typed name is never auto-refreshed
-                    space["tab_names"][index] = value or None
+                    # modal.rs:840-856: a name equal to the automatic one keeps auto naming.
+                    space["tab_names"][index] = value if value and value != str(index + 1) else None
             else:
                 space = next((s for s in spaces if s["id"] == rename["target"]), None)
                 if space is not None:
                     space["name"] = value or None
             if space is not None:
                 push_layout()
-        rename["open"] = False
-        chrome_cache["rows"] = []
-        relayout()
+        mode = Mode.TERMINAL
+        request_render()
 
-    def rename_keys(chunk):
-        text = chunk.decode("utf-8", "ignore")
-        index = 0
-        while index < len(text) and rename["open"]:
-            if text.startswith("\x1b[", index):            # arrows etc.: ignored
-                end = index + 2
-                while end < len(text) and not "\x40" <= text[end] <= "\x7e":
-                    end += 1
-                index = end + 1
-                continue
-            key, index = text[index], index + 1
-            if key == "\x1b":
-                close_rename(False)
-            elif key == "\r":
-                close_rename(True)
-            elif key == "\x03":
-                rename["value"] = ""
-            elif key in ("\x7f", "\x08"):
+    def rename_insert(text):
+        if rename["replace_on_type"]:
+            rename.update(value="", replace_on_type=False)
+        rename["value"] += "".join(ch for ch in text if ch >= " ")
+
+    def rename_delete_word():
+        """modal.rs delete_rename_input_word: blanks, then one run of word or separator characters."""
+        if rename["replace_on_type"]:
+            rename.update(value="", replace_on_type=False)
+            return
+        value = rename["value"].rstrip()
+        if not value:
+            rename["value"] = value
+            return
+        word = value[-1].isalnum() or value[-1] == "_"
+        while value and not value[-1].isspace() and (value[-1].isalnum() or value[-1] == "_") == word:
+            value = value[:-1]
+        rename["value"] = value
+
+    def rename_key(key):
+        """modal.rs RENAME_ACTIONS + handle_rename_edit_key: enter saves, ctrl+c clears,
+        esc cancels; ctrl+u / super+backspace clear, ctrl+w / ctrl+h / alt+backspace
+        delete a word, backspace one character, a printable character inserts."""
+        if key.kind == "release":
+            return
+        if key.matches("enter"):
+            close_rename(True)
+            return
+        if key.matches("esc"):
+            close_rename(False)
+            return
+        if key.matches("c", hin.CTRL) or key.matches("u", hin.CTRL) or key.matches("backspace", hin.SUPER):
+            rename.update(value="", replace_on_type=False)
+        elif (key.matches("backspace", hin.CTRL) or key.matches("backspace", hin.ALT)
+              or key.matches("w", hin.CTRL) or key.matches("h", hin.CTRL)):
+            rename_delete_word()
+        elif key.matches("backspace"):
+            if rename["replace_on_type"]:
+                rename.update(value="", replace_on_type=False)
+            else:
                 rename["value"] = rename["value"][:-1]
-            elif key >= " ":
-                rename["value"] += key
-            if rename["open"]:
-                draw_rename()
+        else:
+            text = key_text(key)
+            if text is not None and text >= " ":
+                rename_insert(text)
+            else:
+                return
+        draw_rename()
+
+    def rename_mouse(event):
+        """dialogs.rs buttons: save / clear / cancel; a press anywhere else cancels."""
+        if event.kind != "press" or event.button != 0:
+            return
+        hit = next((action for rect, action in rename["hits"]
+                    if rect.x <= event.x < rect.x + rect.width and rect.y == event.y), None)
+        if hit == "save":
+            close_rename(True)
+        elif hit == "clear":
+            rename.update(value="", replace_on_type=False)
+            draw_rename()
+        else:
+            close_rename(False)
 
     # ── Copy mode (prefix+[, herdr app/input/copy_mode.rs + menus.rs:63-128) ──
-    copy = {"on": False, "pane": None, "row": 0, "col": 0, "anchor": None, "line": False,
-            "prompt": None, "query": "", "dir": 1, "status": ""}
+    # ``pane`` stays set while a prefix command runs (copy mode survives focus moves
+    # that come back); ``anchor`` is the absolute row/col a v/space selection started at.
+    copy = {"pane": None, "row": 0, "col": 0, "anchor": None, "linewise": None,
+            "entry_offset": 0, "prompt": None, "query": "", "dir": 1, "status": ""}
 
     def copy_rect():
         sl = slice_of(copy["pane"])
         return sl[1] if sl else None
 
+    def copy_metrics():
+        return scroll_state.get(copy["pane"], {}).get("metrics") or {}
+
     def copy_plain_rows():
+        """The viewport rows as plain text (one character per cell, a wide one once)."""
         rect = copy_rect()
-        buf = pane_rows.get(copy["pane"], [])
-        return [_ANSI.sub("", buf[r]) if r < len(buf) else "" for r in range(rect.height if rect else 0)]
+        return ["".join(symbol for symbol, _s in row) for row in pane_cells.get(copy["pane"], [])][:rect.height if rect else 0]
+
+    def copy_clamp():
+        rect = copy_rect()
+        if rect is not None:
+            copy["row"] = min(copy["row"], max(0, rect.height - 1))
+            copy["col"] = min(copy["col"], max(0, rect.width - 1))
 
     def draw_copy_cursor():
-        rect = copy_rect()
-        if rect is None or not copy["on"]:
-            return
-        rows_ = copy_plain_rows()
-        line = rows_[copy["row"]] if copy["row"] < len(rows_) else ""
-        cells = []
-        for ch in line:
-            cells += [ch] * max(1, _wcwidth(ch))
-        ch = cells[copy["col"]] if copy["col"] < len(cells) else " "
-        y, x = rect.y + copy["row"] + 1, rect.x + copy["col"] + 1
-        _write_all(f"\x1b[{y};{x}H\x1b[7m{ch if ch.strip() else ' '}\x1b[0m".encode())
+        request_render()               # the copy cursor is composed into the frame (compose_copy_cursor)
 
     def erase_copy_cursor():
-        rect = copy_rect()
-        if rect is None:
-            return
-        buf = pane_rows.get(copy["pane"], [])
-        row = copy["row"]
-        line = buf[row] if row < len(buf) else ""
-        y = rect.y + row + 1
-        _write_all(f"\x1b[{y};{rect.x + 1}H\x1b[0m{' ' * rect.width}\x1b[{y};{rect.x + 1}H{line}".encode())
-        if sel["pane"] == copy["pane"] and sel["a"] and sel["b"]:
-            paint_selection([row])
+        request_render()
 
     def copy_bar():
         width = max(10, cols - side["w"])
@@ -2181,38 +2321,48 @@ def launch():
             marker = "/" if copy["prompt"]["dir"] > 0 else "?"
             hints = ((f"{marker} {copy['prompt']['query']}█", ""), ("enter", "search"), ("esc", "cancel"))
             return show_bottom_bar(format_mode_bar("COPY", hints, width))
-        selecting = copy["anchor"] is not None
+        selecting = copy["anchor"] is not None or copy["linewise"] is not None
         status = f" {copy['status']}" if copy["status"] else ""
+        clearable = selecting or bool(copy["query"])
         hints = (("h/j/k/l w/b/e { }", "move"), ("/ ?", "search"), ("n/N", f"repeat{status}"),
                  ("v/space", "selecting" if selecting else "select"), ("y/enter", "copy"),
-                 ("esc", "clear  q exit") if selecting else ("q/esc", "exit"))
+                 ("esc", "clear  q exit") if clearable else ("q/esc", "exit"))
         show_bottom_bar(format_mode_bar("COPY", hints, width))
 
     def enter_copy():
+        """copy_mode.rs enter_copy_mode: the cursor starts where the pane's cursor is (or
+        the bottom-left when it is hidden) and the scroll position is remembered for exit."""
+        nonlocal mode
         rect = slice_of(focused)
         if rect is None:
             return
         rect = rect[1]
-        at = pane_cursor.get(focused, {}).get("at", [0, rect.height - 1])
-        copy.update(on=True, pane=focused, anchor=None, line=False, prompt=None, status="",
+        if rect.width == 0 or rect.height == 0:
+            return
+        state = pane_cursor.get(focused) or {}
+        at = state.get("at", [0, rect.height - 1]) if not state.get("hidden") else [0, rect.height - 1]
+        clear_selection()
+        copy.update(pane=focused, anchor=None, linewise=None, prompt=None, status="", query="",
+                    entry_offset=(scroll_state.get(focused, {}).get("metrics") or {}).get("offset_from_bottom", 0),
                     row=min(max(at[1], 0), max(0, rect.height - 1)),
                     col=min(max(at[0], 0), max(0, rect.width - 1)))
+        mode = Mode.COPY
         copy_bar()
         draw_copy_cursor()
 
     def exit_copy(yank):
-        if yank and sel["pane"] == copy["pane"] and sel["a"] and sel["b"]:
+        """copy_mode.rs exit_copy_mode: copy or drop the selection, then put the pane back
+        at the scroll position it had when copy mode began."""
+        nonlocal mode
+        if yank and sel["it"] is not None and sel["it"].pane == copy["pane"]:
             copy_selection()
+        else:
+            clear_selection()
         erase_copy_cursor()
-        clear_selection()
-        copy["on"] = False
-        try:
-            out = control.request("pane.scroll", {"id": copy["pane"], "to": "bottom"})
-            scroll_state.setdefault(copy["pane"], {})["metrics"] = out["scroll"]
-            paint_rows(copy["pane"], {str(i): line for i, line in enumerate(out["rows"])}, clear=True)
-            draw_borders()
-        except (RuntimeError, ConnectionError):
-            pass
+        pane_id, offset = copy["pane"], copy["entry_offset"]
+        copy["pane"] = None
+        mode = Mode.TERMINAL
+        scroll_to(pane_id, offset)
         restore_bottom()
 
     def copy_scroll(delta):
@@ -2221,11 +2371,23 @@ def launch():
             out = control.request("pane.scroll", {"id": copy["pane"], "delta": delta})
         except RuntimeError:
             return False
-        before = (scroll_state.get(copy["pane"], {}).get("metrics") or {}).get("offset_from_bottom")
+        before = copy_metrics().get("offset_from_bottom")
         scroll_state.setdefault(copy["pane"], {})["metrics"] = out["scroll"]
         paint_rows(copy["pane"], {str(i): line for i, line in enumerate(out["rows"])}, clear=True)
-        draw_borders()
         return out["scroll"]["offset_from_bottom"] != before
+
+    def copy_sync_selection():
+        """copy_mode.rs sync_copy_mode_selection: the selection follows the cursor."""
+        rect = copy_rect()
+        if rect is None:
+            return
+        if copy["linewise"] is not None:
+            cursor_row = _abs_row(copy["row"], copy_metrics())
+            sel["it"] = Selection.lines(copy["pane"], copy["linewise"], cursor_row, max(0, rect.width - 1))
+            paint_selection()
+        elif copy["anchor"] is not None and sel["it"] is not None:
+            sel["it"].drag(rect.x + copy["col"], rect.y + copy["row"], rect, copy_metrics())
+            paint_selection()
 
     def copy_move(drow, dcol):
         rect = copy_rect()
@@ -2240,9 +2402,7 @@ def launch():
             copy_scroll(row - rect.height + 1)
             row = rect.height - 1
         copy["row"], copy["col"] = row, min(max(col, 0), max(0, rect.width - 1))
-        if copy["anchor"] is not None:
-            sel.update(pane=copy["pane"], a=copy["anchor"], b=(copy["col"], copy["row"]))
-            paint_selection()
+        copy_sync_selection()
         draw_copy_cursor()
 
     def copy_word(motion):
@@ -2295,6 +2455,7 @@ def launch():
                     copy["row"], copy["col"] = r, col
                     matches = sum(1 for line in rows_ if (line.lower() if fold else line).count(needle))
                     copy["status"] = f"{matches} on screen"
+                    copy_sync_selection()
                     draw_copy_cursor()
                     copy_bar()
                     return
@@ -2308,128 +2469,158 @@ def launch():
         draw_copy_cursor()
         copy_bar()
 
-    def copy_keys(chunk):
-        text = chunk.decode("utf-8", "ignore")
-        index = 0
-        while index < len(text) and copy["on"]:
-            seq = None
-            if text.startswith("\x1b[", index):
-                end = index + 2
-                while end < len(text) and not "\x40" <= text[end] <= "\x7e":
-                    end += 1
-                seq, index = text[index:end + 1], end + 1
-            else:
-                seq, index = text[index], index + 1
-            if copy["prompt"] is not None:                # search prompt (copy_mode.rs:133-165)
-                if seq == "\x1b":
-                    copy["prompt"] = None
-                elif seq == "\r":
-                    copy["query"], copy["dir"] = copy["prompt"]["query"], copy["prompt"]["dir"]
-                    copy["prompt"] = None
-                    copy_find(copy["dir"])
-                elif seq in ("\x7f", "\x08"):
-                    copy["prompt"]["query"] = copy["prompt"]["query"][:-1]
-                elif seq == "\x15":
-                    copy["prompt"]["query"] = ""
-                elif len(seq) == 1 and seq >= " ":
-                    copy["prompt"]["query"] += seq
-                if copy["on"]:
-                    copy_bar()
-                continue
-            rect = copy_rect()
-            page = rect.height if rect else 1
-            if seq in ("q",):
-                exit_copy(False)
-            elif seq == "\x1b":
-                if copy["anchor"] is not None:
-                    copy["anchor"] = None
-                    clear_selection()
-                    draw_copy_cursor()
-                    copy_bar()
-                else:
-                    exit_copy(False)
-            elif seq in ("y", "\r"):
-                exit_copy(True)
-            elif seq in ("v", " "):
-                copy["anchor"] = (copy["col"], copy["row"])
-                sel.update(pane=copy["pane"], a=copy["anchor"], b=copy["anchor"])
-                copy_bar()
-            elif seq == "V":
-                copy["anchor"] = (0, copy["row"])
-                copy_move(0, (rect.width - 1) - copy["col"] if rect else 0)
-                copy_bar()
-            elif seq in ("h", "\x1b[D"):
-                copy_move(0, -1)
-            elif seq in ("l", "\x1b[C"):
-                copy_move(0, 1)
-            elif seq in ("j", "\x1b[B"):
-                copy_move(1, 0)
-            elif seq in ("k", "\x1b[A"):
-                copy_move(-1, 0)
-            elif seq in ("\x02", "\x1b[5~"):
-                copy_move(-page, 0)
-            elif seq in ("\x06", "\x1b[6~"):
-                copy_move(page, 0)
-            elif seq == "\x15":
-                copy_move(-(page // 2), 0)
-            elif seq == "\x04":
-                copy_move(page // 2, 0)
-            elif seq == "g":
-                metrics = scroll_state.get(copy["pane"], {}).get("metrics") or {}
-                erase_copy_cursor()
-                copy_scroll(-(metrics.get("max_offset_from_bottom", 0) - metrics.get("offset_from_bottom", 0)))
-                copy["row"] = 0
-                draw_copy_cursor()
-            elif seq == "G":
-                metrics = scroll_state.get(copy["pane"], {}).get("metrics") or {}
-                erase_copy_cursor()
-                copy_scroll(metrics.get("offset_from_bottom", 0))
-                copy["row"] = max(0, page - 1)
-                draw_copy_cursor()
-            elif seq in ("0", "\x1b[H"):
-                copy_move(0, -copy["col"])
-            elif seq in ("$", "\x1b[F"):
-                copy_move(0, (rect.width - 1) - copy["col"] if rect else 0)
-            elif seq == "^":
-                line = copy_plain_rows()[copy["row"]] if rect else ""
-                copy_move(0, (len(line) - len(line.lstrip())) - copy["col"])
-            elif seq in ("/", "?"):
-                copy["prompt"] = {"dir": 1 if seq == "/" else -1, "query": ""}
-                copy_bar()
-            elif seq == "n":
-                copy_find(copy["dir"])
-            elif seq == "N":
-                copy_find(-copy["dir"])
-            elif seq in ("w", "b", "e"):
-                copy_word(seq)
-            elif seq == "{":
-                copy_paragraph(-1)
-            elif seq == "}":
-                copy_paragraph(1)
+    def copy_begin_selection():
+        """copy_mode.rs begin_copy_mode_selection: anchor at the cursor, absolute rows."""
+        rect = copy_rect()
+        if rect is None:
+            return
+        copy["linewise"] = None
+        copy["anchor"] = (_abs_row(copy["row"], copy_metrics()), copy["col"])
+        sel["it"] = Selection.at(copy["pane"], copy["row"], copy["col"], copy_metrics())
+        paint_selection()
+        copy_bar()
 
-    def menu_keys(chunk):
-        """herdr modal.rs:147-160 handle_global_menu_key: esc closes, k/up and j/down move, enter picks."""
-        index = 0
-        while index < len(chunk) and menu["open"]:
-            if chunk.startswith(b"\x1b[", index):          # CSI: arrows arrive as ESC [ A / ESC [ B
-                end = index + 2
-                while end < len(chunk) and not 0x40 <= chunk[end] <= 0x7e:
-                    end += 1
-                seq, index = chunk[index:end + 1], end + 1
-                if seq == b"\x1b[A":
-                    menu_move(-1)
-                elif seq == b"\x1b[B":
-                    menu_move(1)
-                continue
-            key, index = chunk[index:index + 1], index + 1
-            if key == b"\x1b":
-                close_menu()
-            elif key == b"k":
-                menu_move(-1)
-            elif key == b"j":
-                menu_move(1)
-            elif key == b"\r":
-                menu_choose(menu["hl"])
+    def copy_select_line():
+        """copy_mode.rs select_copy_mode_line: whole rows from here (V)."""
+        rect = copy_rect()
+        if rect is None:
+            return
+        copy["anchor"] = None
+        copy["linewise"] = _abs_row(copy["row"], copy_metrics())
+        copy_sync_selection()
+        copy_bar()
+
+    def copy_clear_selection():
+        copy.update(anchor=None, linewise=None)
+        clear_selection()
+
+    def copy_key(key):
+        """copy_mode.rs handle_copy_mode_key. The prefix key opens the prefix layer on top
+        of copy mode (copy_mode.rs:17-24); esc clears a selection or search before it exits."""
+        nonlocal mode
+        if key.kind == "release":
+            return
+        if key.matches(PREFIX.code, PREFIX.mods):
+            erase_copy_cursor()                       # panes.rs:672: the copy cursor is drawn in Copy mode only
+            mode = Mode.PREFIX
+            draw_prefix_bar()
+            return
+        text = key_text(key)
+        if copy["prompt"] is not None:                # search prompt (copy_mode.rs:133-165)
+            if key.matches("esc"):
+                copy["prompt"] = None
+            elif key.matches("enter"):
+                copy["query"], copy["dir"] = copy["prompt"]["query"], copy["prompt"]["dir"]
+                copy["prompt"] = None
+                copy_find(copy["dir"])
+            elif key.matches("backspace"):
+                copy["prompt"]["query"] = copy["prompt"]["query"][:-1]
+            elif key.matches("u", hin.CTRL):
+                copy["prompt"]["query"] = ""
+            elif text is not None and text >= " ":
+                copy["prompt"]["query"] += text
+            copy_bar()
+            return
+        rect = copy_rect()
+        page = max(1, rect.height - 2) if rect else 1     # copy_mode_page_lines
+        half = max(1, rect.height // 2) if rect else 1
+        if text == "q":
+            exit_copy(False)
+        elif key.matches("esc"):
+            if copy["anchor"] is not None or copy["linewise"] is not None or copy["query"]:
+                copy_clear_selection()
+                copy.update(query="", status="")
+                draw_copy_cursor()
+                copy_bar()
+            else:
+                exit_copy(False)
+        elif text == "y" or key.matches("enter"):
+            exit_copy(True)
+        elif text in ("v", " "):
+            copy_begin_selection()
+        elif text == "V":
+            copy_select_line()
+        elif text == "h" or key.matches("left"):
+            copy_move(0, -1)
+        elif text == "l" or key.matches("right"):
+            copy_move(0, 1)
+        elif text == "j" or key.matches("down"):
+            copy_move(1, 0)
+        elif text == "k" or key.matches("up"):
+            copy_move(-1, 0)
+        elif key.matches("b", hin.CTRL) or key.matches("pageup"):
+            copy_move(-page, 0)
+        elif key.matches("f", hin.CTRL) or key.matches("pagedown"):
+            copy_move(page, 0)
+        elif key.matches("u", hin.CTRL):
+            copy_move(-half, 0)
+        elif key.matches("d", hin.CTRL):
+            copy_move(half, 0)
+        elif text == "g":
+            metrics = copy_metrics()
+            erase_copy_cursor()
+            copy_scroll(-(metrics.get("max_offset_from_bottom", 0) - metrics.get("offset_from_bottom", 0)))
+            copy["row"] = 0
+            copy_sync_selection()
+            draw_copy_cursor()
+        elif text == "G":
+            metrics = copy_metrics()
+            erase_copy_cursor()
+            copy_scroll(metrics.get("offset_from_bottom", 0))
+            copy["row"] = max(0, (rect.height if rect else 1) - 1)
+            copy_sync_selection()
+            draw_copy_cursor()
+        elif text == "0" or key.matches("home"):
+            copy_move(0, -copy["col"])
+        elif text == "$" or key.matches("end"):
+            line = copy_plain_rows()[copy["row"]] if rect else ""
+            last = sum(max(1, _wcwidth(ch)) for ch in line.rstrip()) - 1   # last_character_col
+            copy_move(0, max(0, last) - copy["col"])
+        elif text == "^":
+            line = copy_plain_rows()[copy["row"]] if rect else ""
+            copy_move(0, (len(line) - len(line.lstrip())) - copy["col"])
+        elif text in ("/", "?"):
+            copy["prompt"] = {"dir": 1 if text == "/" else -1, "query": ""}
+            copy_bar()
+        elif text == "n":
+            copy_find(copy["dir"])
+        elif text == "N":
+            copy_find(-copy["dir"])
+        elif text in ("w", "b", "e"):
+            copy_word(text)
+        elif text == "{":
+            copy_paragraph(-1)
+        elif text == "}":
+            copy_paragraph(1)
+
+    def copy_paste(text):
+        """A paste while the search prompt is open types into it (paste_into_active_text_input)."""
+        if copy["prompt"] is not None:
+            copy["prompt"]["query"] += "".join(ch for ch in text if ch >= " ")
+            copy_bar()
+
+    # ── Key help (prefix+?, herdr Mode::KeybindHelp) ──
+    help_state = {"rect": None, "lines": []}
+
+    def help_key(key):
+        """modal.rs handle_keybind_help_key: esc, enter or ? close the box."""
+        if key.kind == "release":
+            return
+        if key.matches("esc") or key.matches("enter") or key_text(key) == "?":
+            close_help()
+
+    def close_help():
+        nonlocal mode
+        mode = Mode.TERMINAL
+        request_render()
+
+    def help_mouse(event):
+        """overlays.rs:184-236: a press outside the box closes it; the box eats the rest."""
+        rect = help_state["rect"]
+        if event.kind != "press" or event.button != 0 or rect is None:
+            return
+        if not (rect.x <= event.x < rect.x + rect.width and rect.y <= event.y < rect.y + rect.height):
+            close_help()
 
     def main_col():
         """First (1-based) column of the main area: flush against the sidebar separator."""
@@ -2441,21 +2632,40 @@ def launch():
     def slice_of(pane_id):
         return next((s for s in slices if s[0] == pane_id), None)
 
-    def cursor_tail():
-        """Where the cursor goes once this frame is drawn; appended to the frame so both land in one write.
+    pane_input = {}      # pane id -> the daemon's input state (what the program asked its terminal for)
 
-        Position follows the application in the focused pane (IME composition and candidate
-        windows attach to the real terminal cursor). Visibility follows too (herdr
-        host_cursor="auto"): the engine draws its own cursor block and hides the real one,
-        so showing ours as well would stack into one brighter block."""
+    def input_state_of(pane_id):
+        return pane_input.get(pane_id) or pin.DEFAULT_STATE
+
+    def rename_caret():
+        """dialogs.rs:44-76: the host cursor sits after the typed text (IMEs compose
+        there); the text stops one column short so the caret always has a blank cell."""
+        rect = rename["rect"]
+        if rect is None:
+            return None
+        x = min(rect.x + 2 + _wcwidth(rename["value"]), rect.x + rect.width - 2)
+        return (x, rect.y + 3)
+
+    def host_cursor():
+        """Where the host cursor goes once a frame is written; sent with every frame
+        (tab_surface.rs tab_surface_cursor + dialogs.rs:44-76).
+
+        Terminal mode: the focused pane's cursor, at its position, hidden while that pane is
+        scrolled back or while its program hides it (the engine draws its own block and hides
+        the real one; showing ours too would stack into one brighter block). The rename box:
+        the caret after the typed text, so an IME composes there. Any other mode: hidden --
+        a popup or the copy-mode cursor owns the screen, and the pane cursor blinking
+        underneath was the IME's cue to open its candidate window in the wrong place."""
+        if mode is Mode.RENAME:
+            caret = rename_caret()
+            return b"\x1b[?25l" if caret is None else f"\x1b[{caret[1] + 1};{caret[0] + 1}H\x1b[?25h".encode()
+        if mode is not Mode.TERMINAL:
+            return b"\x1b[?25l"
         sl = slice_of(focused)
         state = pane_cursor.get(focused)
         if sl is None or state is None:
-            return b""
+            return b"\x1b[?25l"
         if (scroll_state.get(focused, {}).get("metrics") or {}).get("offset_from_bottom"):
-            # Viewing scrollback: the cursor belongs to the live screen, and that coordinate
-            # points at different content in history. Hide it rather than show a ghost block
-            # (herdr and pi both hide the cursor while scrolled back).
             return b"\x1b[?25l"
         rect = sl[1]
         at = state["at"]
@@ -2464,64 +2674,60 @@ def launch():
         return (f"\x1b[{min(row, rows)};{col}H".encode()
                 + (b"\x1b[?25l" if state["hidden"] else b"\x1b[?25h"))
 
-    def paint(data):
-        """All drawing goes through here: the frame ends with the cursor back in place, with no gap in between.
+    # ── Frames (herdr: ratatui Buffer + Terminal::draw) ──
+    # Every drawing path writes cells; one render per loop turn composes the frame from
+    # state and writes the diff against the frame before. Nothing on the host is ever
+    # cleared and repainted: a closed popup is simply not composed any more.
+    frame = {"previous": None, "dirty": True, "cursor": b""}
 
-        Always paint, never _write_all, on drawing paths. Otherwise the cursor stays on the last
-        character drawn and the IME candidate window drifts with it: the sidebar fade repaints
-        every 0.12 s, which dragged the cursor to the sidebar's bottom row and dropped the
-        candidate window to the bottom of the screen."""
-        _write_all(data + cursor_tail())
-        # herdr redraws the mode bar every frame; here any paint (a pane's screen update, the
-        # borders, a relayout) can cover the bottom row, so the bar is put back after each one.
-        if bottom_bar[0] and not repainting_bar[0]:
-            repainting_bar[0] = True
-            try:
-                _write_all(f"\x1b[{rows};{main_col()}H{bottom_bar[0]}".encode() + cursor_tail())
-            finally:
-                repainting_bar[0] = False
+    def request_render():
+        frame["dirty"] = True
 
-    repainting_bar = [False]
-    bottom_bar = [None]               # The mode bar (prefix / resize / copy) while one is up.
+    def invalidate():
+        """Next frame is written in full (after a resize)."""
+        frame["previous"] = None
+        frame["dirty"] = True
+
+    def invalidate_rect(rect):
+        """Next frame rewrites this rectangle whatever the buffer believes is there: the
+        host drew an IME pre-edit over those cells, which no frame of ours accounts for."""
+        previous = frame["previous"]
+        if previous is None:
+            return
+        previous.fill(rect, ("\0", sc.DEFAULT_STYLE))
+        frame["dirty"] = True
+
+    draw_sidebar = request_render      # the sidebar is composed every frame; callers only ask for one
+    bottom_bar = [None]                # The mode bar (prefix / resize / copy) while one is up.
 
     def show_bottom_bar(line):
         bottom_bar[0] = line
-        paint(f"\x1b[?2026h\x1b[{rows};{main_col()}H\x1b[K{line}\x1b[?2026l".encode())
-    chrome_cache = {"rows": []}       # Only changed rows are written (herdr's row-level diffing).
+        request_render()
+
+    def restore_bottom():
+        """Take the mode bar down; the pane row under it comes back with the next frame."""
+        bottom_bar[0] = None
+        request_render()
+
+    def draw_prefix_bar():
+        # herdr: entering prefix mode pops a mode bar on the bottom row (menus.rs
+        # render_prefix_overlay). It spans only the main area; the sidebar is permanent
+        # navigation and must not be covered.
+        show_bottom_bar(format_prefix_bar(max(10, cols - side["w"])))
+
     chrome_state = {"chromed": [], "area": None, "tracks": []}   # Border and scrollbar geometry.
     side_scrolls = {}              # Scroll offset (in entries) per sidebar section: spaces / sessions / agents.
     scroll_state = {}    # pane id -> {"metrics": ..., "alt": bool} (scroll readings from the daemon)
-
-    def draw_borders():
-        """herdr panes.rs:412: borders are always drawn last, on top of content, and redrawn when
-        focus changes. Scrollbars likewise (render_pane_scrollbar also runs after content)."""
-        if not chrome_state["chromed"]:
-            return
-        out = ["\x1b[?25l\x1b[?2026h",
-               draw_pane_borders(chrome_state["chromed"], area=chrome_state["area"],
-                                 titles={p["id"]: p.get("ally") or p["title"] for p in listing})]
-        for pane_id, gutter, focused in chrome_state["tracks"]:
-            if gutter is None:
-                continue
-            state = scroll_state.get(pane_id, {})
-            metrics = state.get("metrics")
-            if hui.should_show_scrollbar(metrics) and not state.get("alt"):
-                out.append(draw_scrollbar(metrics, gutter, focused))
-            else:
-                # History cleared or alternate screen entered: wipe the gutter so no stale scrollbar sticks around.
-                out.append("\x1b[0m")
-                for y in range(gutter.y, gutter.y + gutter.height):
-                    out.append(f"\x1b[{y + 1};{gutter.x + 1}H ")
-        out.append("\x1b[?2026l")
-        paint("".join(out).encode())
     ui_map = {"bar": None, "hits": [], "sections": {}}   # Mouse hit areas: tab bar geometry plus sidebar hit rects.
 
-    def draw_sidebar():
+    def compose_sidebar(buf):
+        """The sidebar and the tab row into the frame; refreshes the mouse hit map."""
         nonlocal tab_scroll
         names = [tab_label(index) for index in range(len(tabs_of()))]
         view = hui.compute_view(hui.Rect(0, 0, cols, rows), side["w"], len(names))
         # mouse_chrome=True: herdr's "+" new-tab button and overflow scroll buttons.
-        zoomed = {active_tab()} if zoom else ()   # herdr: zoom is per tab; only the active one can be zoomed here
+        space = active_space()
+        zoomed = {i for i, z in enumerate(space["zoomed"]) if z} if space else ()   # tabs.rs:36-45 " Z"
         bar = hui.compute_tab_bar_view(names, active_tab(), view["tab_bar_rect"],
                                        tab_scroll, tab_follow, True, zoomed)
         tab_scroll = bar.scroll
@@ -2539,201 +2745,288 @@ def launch():
             session_mode=side["sess_mode"])
         for key, section in ui_map["sections"].items():   # herdr ui.rs:247-252: compute_view clamps the scroll.
             side_scrolls[key] = section["scroll"]
-        wanted = []
-        for row, line in enumerate(side_lines, 1):
-            cell = f"\x1b[{row};1H{line}"
-            if row == 1:
-                cell += (f"\x1b[1;{view['tab_bar_rect'].x + 1}H\x1b[K"
-                         f"\x1b[1;{view['tab_bar_rect'].x + 1}H{tab_line}")
-            wanted.append(cell)
-        cached = chrome_cache["rows"]
-        out = ["\x1b[?25l\x1b[?2026h"]
-        for index, chunk in enumerate(wanted):
-            if index >= len(cached) or cached[index] != chunk:
-                out.append(chunk)
-        chrome_cache["rows"] = wanted
-        out.append("\x1b[?2026l")
-        if len(out) > 2:
-            paint("".join(out).encode())
-        if menu["open"]:           # A sidebar refresh under a popup must not erase it.
-            draw_menu()
-        if nav["open"]:
-            draw_nav()
-        if rename["open"]:
-            draw_rename()
+        for y, line in enumerate(side_lines):
+            buf.put_ansi(0, y, line, clip=side["w"])
+        tab_rect = view["tab_bar_rect"]
+        if tab_rect.width:
+            buf.put_ansi(tab_rect.x, tab_rect.y, tab_line, clip=tab_rect.x + tab_rect.width)
 
-    def draw_prefix_bar():
-        # herdr: entering prefix mode pops a mode bar on the bottom row (menus.rs
-        # render_prefix_overlay). It spans only the main area; the sidebar is permanent
-        # navigation and must not be covered.
-        show_bottom_bar(format_prefix_bar(max(10, cols - side["w"])))
+    def compose_panes(buf):
+        """Pane content from the row cache, then borders, titles and scrollbars on top
+        (panes.rs render_panes: content first, chrome last)."""
+        for pane_id, inner in slices:
+            cache = pane_cells.get(pane_id, [])
+            for row in range(inner.height):
+                # The whole row goes in and the buffer clips it: cutting the list first
+                # left a wide glyph's head on the last column without its tail, and the
+                # terminal then drew it two columns wide, over the scrollbar or the border
+                # (and every cell written after it in that run landed one column right).
+                buf.put_cells(inner.x, inner.y + row, cache[row] if row < len(cache) else (),
+                              clip=inner.x + inner.width)
+        chromed, area = chrome_state["chromed"], chrome_state["area"]
+        if chromed and area is not None:
+            titles = {p["id"]: p.get("ally") or p["title"] for p in listing}
+            for (x, y), (symbol, is_focused) in hui.pane_border_cells(chromed, area=area).items():
+                buf.put_text(x, y, symbol, sc.style(fg=hui.ACCENT if is_focused else hui.PALETTE["border"]))
+            for item in chromed:                          # panes.rs:614-665 titles on the top border
+                rect = item["rect"]
+                if "top" not in item["borders"] or rect.width <= 4:
+                    continue
+                title = hui.pane_border_title(titles.get(item["id"], ""), rect.width)
+                if title is None:
+                    continue
+                colour = hui.ACCENT if item["focused"] else hui.OVERLAY0
+                buf.put_text(rect.x + 1, rect.y, title, sc.style(fg=colour, bold=item["focused"]),
+                             clip=rect.x + rect.width - 1)
+        for pane_id, gutter, is_focused in chrome_state["tracks"]:
+            if gutter is None:
+                continue
+            state = scroll_state.get(pane_id, {})
+            metrics = state.get("metrics")
+            if not hui.should_show_scrollbar(metrics) or state.get("alt"):
+                continue
+            thumb = hui.scrollbar_thumb(metrics, gutter)
+            if thumb is None:
+                continue
+            track_colour, thumb_colour, thumb_symbol = hui.scrollbar_style(is_focused)
+            for y in range(gutter.y, gutter.y + gutter.height):
+                buf.put_text(gutter.x, y, "▕", sc.style(fg=track_colour))
+            for y in range(thumb[0], min(thumb[0] + thumb[1], gutter.y + gutter.height)):
+                buf.put_text(gutter.x, y, thumb_symbol, sc.style(fg=thumb_colour))
 
-    def bottom_note(text):
-        """One-line hint on the bottom row, main area only (never spills into the sidebar)."""
-        width = max(10, cols - side["w"] - 1)
-        plain = re.sub(r"\x1b\[[0-9;]*m", "", text)
-        while _wcwidth(plain) > width and plain:
-            text, plain = text[:-1], plain[:-1]
-        paint(f"\x1b[{rows};{main_col()}H\x1b[K{text}\x1b[0m".encode())
+    def compose_selection(buf):
+        """panes.rs render_selection_highlight: restyle the covered cells."""
+        selection = sel["it"]
+        if selection is None or not selection.visible:
+            return
+        sl = slice_of(selection.pane)
+        if sl is None:
+            return
+        rect, metrics = sl[1], sel_metrics(selection.pane)
+        highlight = sc.style(fg=hui.TEXT, bg=hui.SURFACE0)
+        for row in range(rect.height):
+            span = selection.span(row, rect.width, metrics)
+            if span and span[1] > span[0]:
+                buf.restyle(rect.x + span[0], rect.y + row, span[1] - span[0], lambda _s: highlight)
 
-    def restore_bottom():
-        """Remove the mode bar: clear the main area's bottom row, then restore that row for any
-        pane that reaches it (the sidebar was never covered, so it needs nothing)."""
-        bottom_bar[0] = None
-        _restore_bottom_row(paint, control, slices, rows, main_col())
+    def compose_copy_cursor(buf):
+        """panes.rs:672-690 render_copy_mode_cursor: accent block, contrast text, bold."""
+        if mode is not Mode.COPY:
+            return
+        rect = copy_rect()
+        if rect is None or copy["row"] >= rect.height or copy["col"] >= rect.width:
+            return
+        x, y = rect.x + copy["col"], rect.y + copy["row"]
+        if buf.get(x, y)[0] == "":
+            x -= 1
+        buf.restyle(x, y, 1, lambda _s: sc.style(fg=hui.panel_contrast_fg(), bg=hui.ACCENT, bold=True))
+
+    def compose_overlays(buf):
+        """The mode bar, notices and the modal layer for the current mode (ui.rs render)."""
+        if bottom_bar[0]:
+            buf.put_ansi(side["w"], rows - 1, bottom_bar[0], clip=cols)
+        if notice["kind"] is not None:
+            for y, x, line in notice["lines"]:
+                buf.put_ansi(x, y, line)
+        layer = {Mode.GLOBAL_MENU: menu, Mode.NAVIGATOR: nav, Mode.RENAME: rename,
+                 Mode.KEYBIND_HELP: help_state}.get(mode)
+        if layer is not None:
+            for y, x, line in layer.get("lines") or ():
+                buf.put_ansi(x, y, line)
+
+    def render():
+        """Compose the frame from state and write what changed since the last one."""
+        if not frame["dirty"]:
+            return
+        frame["dirty"] = False
+        buf = sc.ScreenBuffer(cols, rows)
+        compose_sidebar(buf)
+        compose_panes(buf)
+        compose_selection(buf)
+        compose_copy_cursor(buf)
+        compose_overlays(buf)
+        data = buf.diff(frame["previous"])
+        cursor = host_cursor()
+        if data or cursor != frame["cursor"]:
+            _write_all(data + cursor)
+        frame["previous"], frame["cursor"] = buf, cursor
+
+    # ── Notices (herdr status.rs): the clipboard feedback box and failure toasts ──
+    notice = {"kind": None, "text": "", "context": "", "deadline": 0.0, "rect": None, "lines": []}
+
+    def terminal_area():
+        return hui.compute_view(hui.Rect(0, 0, cols, rows), side["w"], len(tabs_of()))["terminal_area"]
+
+    def layout_notice():
+        if notice["kind"] is None:
+            return
+        if notice["kind"] == "clipboard":
+            rect, lines = format_copy_feedback(notice["text"], terminal_area())
+        else:
+            rect, lines = format_toast(notice["text"], notice["context"], notice["kind"],
+                                       hui.Rect(0, 0, cols, rows))
+        notice.update(rect=rect, lines=lines)
+
+    def show_notice(kind, text, context="", duration=COPY_FEEDBACK_DURATION):
+        notice.update(kind=kind, text=text, context=context, deadline=time.monotonic() + duration)
+        layout_notice()
+        request_render()
+
+    def report_failure(text):
+        """A failure the user must see (herdr: a NeedsAttention toast), e.g. input a pane refused."""
+        title, _, context = text.partition(": ")
+        show_notice("needs_attention", title, context, TOAST_DURATION)
+
+    def clear_notice():
+        notice.update(kind=None, rect=None, lines=[])
+        request_render()
 
     def draw_help_overlay():
         # herdr: "?" shows the full key help (keybind_help), centered in the main area,
-        # closed by any key. Width is clamped to the main area so narrow screens do not overflow.
+        # closed by esc/enter/?. Width is clamped to the main area so narrow screens do not overflow.
         avail = cols - main_col() + 1
         width = max(24, min(46, avail))
         lines = format_help_lines(width=width)
         top = max(2, (rows - len(lines)) // 2)
         left = main_col() + max(0, (avail - width) // 2)
-        out = ["\x1b[?25l\x1b[?2026h"]
-        for index, line in enumerate(lines):
-            out.append(f"\x1b[{top + index};{left}H\x1b[0m{line}")
-        out.append("\x1b[?2026l")
-        paint("".join(out).encode())
+        help_state["rect"] = hui.Rect(left - 1, top - 1, width, len(lines))
+        box = f"{hui.sgr_bg(hui.PANEL_BG)}{hui.sgr_fg(hui.TEXT)}"
+        help_state["lines"] = [(top - 1 + index, left - 1, box + line) for index, line in enumerate(lines)]
+        request_render()
 
-    # ── Mouse selection and copy (built into herdr; does not rely on disabling mouse capture) ──
-    # herdr keeps capturing the mouse and implements selection itself: dragging paints
-    # selection_background, releasing copies (copy_on_select defaults to true), and
-    # double-click selects a word. shift+mouse is left alone for the terminal's native selection.
-    pane_rows = {}      # pane id -> full rendered rows; selection highlight and text extraction use these.
-    sel = {"pane": None, "a": None, "b": None}    # Endpoints as in-pane (col, row).
-    last_press = [0.0, -1, -1]                    # Double-click detection: time plus screen coordinates.
+    def open_help():
+        nonlocal mode
+        mode = Mode.KEYBIND_HELP
+        draw_help_overlay()
 
-    def sel_rows(pane_id=None):
-        pane_id = pane_id or sel["pane"]
-        if pane_id is None or sel["a"] is None or sel["b"] is None:
-            return set()
-        return set(range(min(sel["a"][1], sel["b"][1]),
-                         max(sel["a"][1], sel["b"][1]) + 1))
+    # ── Mouse selection and copy (herdr selection.rs + actions.rs copy_selection) ──
+    # herdr keeps capturing the mouse and implements selection itself: dragging paints the
+    # selection background, releasing copies (copy_on_select defaults to true), and a
+    # double-click selects a word. Rows are absolute (screen-buffer coordinates), so a
+    # selection stays on its text while the pane scrolls or its program prints more.
+    pane_cells = {}     # pane id -> rows of cells for the viewport (the daemon's frames, parsed)
+    sel = {"it": None, "clear_at": None, "autoscroll": None, "autoscroll_at": None}
+    last_pane_click = {"pane": None, "row": 0, "col": 0, "at": 0.0}   # PaneClickState (app/mod.rs:82-97)
 
-    def sel_span(row, width):
-        """Column range [c0, c1) the selection covers on ``row``; linear selection, shaped like the terminal's own."""
-        if sel["a"] is None or sel["b"] is None:
-            return None
-        (x0, y0), (x1, y1) = sorted((sel["a"], sel["b"]), key=lambda p: (p[1], p[0]))
-        if not y0 <= row <= y1:
-            return None
-        return (x0 if row == y0 else 0, (x1 + 1) if row == y1 else width)
+    def sel_metrics(pane_id):
+        return scroll_state.get(pane_id, {}).get("metrics") or {}
 
-    def paint_selection(dirty=(), pane_id=None):
-        """Repaint affected rows: restore from the cache first, then paint the selected span in the selection background."""
-        pane_id = pane_id or sel["pane"]
-        sl = slice_of(pane_id) if pane_id else None
-        if sl is None:
-            return
-        rect = sl[1]
-        buf = pane_rows.get(pane_id, [])
-        out = ["\x1b[?25l\x1b[?2026h"]
-        for row in sorted(set(dirty) | sel_rows(pane_id)):
-            if not 0 <= row < rect.height:
-                continue
-            at = f"\x1b[{rect.y + row + 1};{rect.x + 1}H"
-            line = buf[row] if row < len(buf) else ""
-            out.append(f"{at}\x1b[0m{' ' * rect.width}{at}{line}")
-            span = sel_span(row, rect.width)
-            if span:
-                c0, c1 = span
-                text = _cols(_ANSI.sub("", line), c0, c1)
-                text += " " * max(0, (c1 - c0) - _wcwidth(text))
-                out.append(f"\x1b[{rect.y + row + 1};{rect.x + c0 + 1}H"
-                           f"{hui.sgr_bg(hui.SURFACE0)}{hui.sgr_fg(hui.TEXT)}"
-                           f"{text}\x1b[0m")
-        out.append("\x1b[?2026l")
-        paint("".join(out).encode())
+    def paint_selection():
+        request_render()
 
     def clear_selection():
-        if sel["pane"] is None:
-            return
-        pane_id, dirty = sel["pane"], sel_rows()
-        sel.update(pane=None, a=None, b=None)
-        paint_selection(dirty, pane_id)
+        """actions.rs clear_selection: forget it; the next frame shows the rows plain."""
+        sel["clear_at"] = None
+        sel["autoscroll"] = None
+        sel["autoscroll_at"] = None
+        if sel["it"] is not None:
+            sel["it"] = None
+            request_render()
+
+    def selection_text(selection):
+        (start, end) = selection.ordered()
+        try:
+            return control.request("pane.extract", {"id": selection.pane, "start": list(start), "end": list(end)})["text"]
+        except RuntimeError:
+            return ""
 
     def copy_selection():
-        sl = slice_of(sel["pane"])
-        if sl is None:
+        """actions.rs copy_selection: the text between the endpoints, then the selection is gone."""
+        selection = sel["it"]
+        if selection is None:
             return
-        rect = sl[1]
-        buf = pane_rows.get(sel["pane"], [])
-        lines = []
-        for row in sorted(sel_rows()):
-            span = sel_span(row, rect.width)
-            if span is None or row >= len(buf):
-                continue
-            lines.append(_cols(_ANSI.sub("", buf[row]), *span).rstrip())
-        text = "\n".join(lines).strip("\n")
-        if not text.strip():
+        if not selection.finalized and not selection.finish():
+            clear_selection()
             return
-        _clipboard(text)
-        bottom_note(f"{hui.sgr_fg(hui.OVERLAY1)}Copied {len(text)} characters")
+        text = selection_text(selection)
+        clear_selection()
+        if text.strip():
+            _clipboard(text)
+            show_notice("clipboard", "copied to clipboard")
 
-    def pane_at(mx, my):
-        """Which pane a 1-based screen coordinate falls in: ``(pane_id, col, row)`` in pane-local terms, or None."""
+    def pane_at(x, y):
+        """Which pane a zero-based screen cell falls in: ``(pane_id, inner rect)`` for a
+        cell inside the content, or None (mouse.rs pane_at)."""
         for pane_id, rect in slices:
-            if (rect.x < mx <= rect.x + rect.width
-                    and rect.y < my <= rect.y + rect.height):
-                return pane_id, mx - rect.x - 1, my - rect.y - 1
+            if rect.x <= x < rect.x + rect.width and rect.y <= y < rect.y + rect.height:
+                return pane_id, rect
         return None
 
-    def select_word(pane_id, col, row):
-        """herdr: double-click selects the word under the pointer and copies it (same word-break set)."""
-        buf = pane_rows.get(pane_id, [])
-        if row >= len(buf):
-            return
-        plain = _ANSI.sub("", buf[row])
-        # Expand to one entry per display column (wide characters take two) so columns index directly.
+    def pane_frame_at(x, y):
+        """The pane whose outer frame (border included) holds the cell (mouse.rs pane_frame_at)."""
+        for item in chrome_state["chromed"]:
+            rect = item["rect"]
+            if rect.x <= x < rect.x + rect.width and rect.y <= y < rect.y + rect.height:
+                return item["id"]
+        return None
+
+    def pane_row_text(pane_id, row):
+        """A cached viewport row as plain text, one entry per display column."""
+        cache = pane_cells.get(pane_id, [])
+        if row >= len(cache):
+            return []
         cells = []
-        for ch in plain:
-            cells += [ch] * max(1, _wcwidth(ch))
+        for symbol, _style in cache[row]:
+            cells.append(symbol if symbol else cells[-1] if cells else " ")
+        return cells
+
+    def select_word_at(pane_id, row, col):
+        """actions.rs select_word_at_pane_cell: the token under a double-click, copied at
+        once; a pane whose program reads the mouse keeps its own double-click."""
+        if pin.wants_mouse(input_state_of(pane_id)):
+            return False
+        cells = pane_row_text(pane_id, row)
         if col >= len(cells) or cells[col] in _WORD_BREAK:
-            return
+            return False
         start = end = col
         while start > 0 and cells[start - 1] not in _WORD_BREAK:
             start -= 1
         while end + 1 < len(cells) and cells[end + 1] not in _WORD_BREAK:
             end += 1
-        sel.update(pane=pane_id, a=(start, row), b=(end, row))
-        paint_selection()
-        copy_selection()
+        selection = Selection.range(pane_id, row, start, end, sel_metrics(pane_id))
+        selection.finish()
+        sel["it"] = selection
+        request_render()
+        text = selection_text(selection)
+        if text.strip():
+            _clipboard(text)
+            show_notice("clipboard", "copied to clipboard")
+        sel["clear_at"] = time.monotonic() + PANE_COPY_HIGHLIGHT_DURATION
+        return True
 
     def paint_rows(pane_id, rendered, cur=None, clear=False, hidden=None):
-        sl = slice_of(pane_id)
-        if sl is None:
-            return
-        rect = sl[1]
+        """Take a daemon frame into the pane's row cache (and cursor state). ``clear``
+        means a whole new viewport (a scroll, a relayout): rows it does not mention are
+        blank. Nothing is written to the host here; the next frame composes it."""
         if cur is not None or hidden is not None:
             state = pane_cursor.setdefault(pane_id, {"at": [0, 0], "hidden": False})
             if cur is not None:
                 state["at"] = list(cur)
             if hidden is not None:
                 state["hidden"] = bool(hidden)
-        buf = pane_rows.setdefault(pane_id, [])
-        if clear or len(buf) != rect.height:
-            buf[:] = [""] * rect.height
-        out = ["\x1b[?25l\x1b[?2026h"]
-        if clear:      # Full refresh (scrollback or relayout): wipe our own area first so no old rows linger.
-            for row in range(rect.y, rect.y + rect.height):
-                out.append(f"\x1b[{row + 1};{rect.x + 1}H" + " " * rect.width)
+        sl = slice_of(pane_id)
+        height = sl[1].height if sl else 0
+        cache = pane_cells.setdefault(pane_id, [])
+        if clear or len(cache) != height:
+            cache[:] = [[] for _ in range(height)]
         for row_str, line in rendered.items():
             row = int(row_str)
-            if row < rect.height:                # Only inside our own rectangle (herdr hard-clips).
-                clipped = _clip_row(line, rect.width)   # ... in the column direction too.
-                out.append(f"\x1b[{rect.y + row + 1};{rect.x + 1}H{clipped}")
-                buf[row] = clipped
-        out.append("\x1b[?2026l")
-        paint("".join(out).encode())
-        if sel["pane"] == pane_id:       # New content painted over the highlight; put it back.
-            paint_selection()
-        if copy["on"] and copy["pane"] == pane_id:   # ... and the copy-mode cursor.
-            draw_copy_cursor()
+            if row < height:                    # Only inside our own rectangle (herdr hard-clips).
+                cache[row] = sc.cells_from_ansi(line)
+        request_render()
 
-    def relayout():
+    def relayout(reload=True):
+        """Recompute the pane rectangles for the active tab, resize the panes that changed,
+        and refresh their viewports (ui.rs compute_view + panes.rs compute_pane_infos).
+
+        ``reload`` pulls the daemon's layout first; a divider drag passes False so it renders
+        from its own in-memory tree instead. Pulling (and pushing) the layout every drag step
+        cost two synchronous daemon round-trips, which stalled the drag whenever the daemon was
+        busy repainting a pane (a 165 ms freeze was seen mid-drag). During a drag the panel owns
+        the layout, so it keeps it local and persists once at drag end."""
         nonlocal slices
-        reload_layout()
+        if reload:
+            reload_layout()
         view = hui.compute_view(hui.Rect(0, 0, cols, rows), side["w"], len(tabs_of()))
         term = view["terminal_area"]
         # herdr: only the active tab is drawn; its layout is the BSP tree cut into rectangles (layout.rs collect_panes).
@@ -2741,15 +3034,20 @@ def launch():
         tree = vis[active_tab()] if vis else None
         if tree is None:
             slices = []
-            draw_sidebar()
+            chrome_state.update(chromed=[], area=term, tracks=[])
+            request_render()
             return
-        if zoom:
-            placed = [(focused, term, True)]
+        if tab_zoomed(active_tab()):
+            # panes.rs:246-252: a zoomed pane of a multi-pane tab keeps a full frame (and its
+            # title) as the visible cue that the others are still there.
+            chromed = [{"id": focused, "rect": term, "focused": True,
+                        "borders": {"top", "bottom", "left", "right"}
+                        if len(hui.pane_ids(tree)) > 1 else set()}]
         else:
             placed = hui.collect_panes(tree, term, focused)
-        # herdr panes.rs: with several panes each gets a full border (adjacent edges shared); content goes inside.
-        chromed = hui.apply_pane_chrome(
-            [{"id": pid, "rect": rect, "focused": f} for pid, rect, f in placed])
+            # herdr panes.rs: with several panes each gets a full border (adjacent edges shared); content goes inside.
+            chromed = hui.apply_pane_chrome(
+                [{"id": pid, "rect": rect, "focused": f} for pid, rect, f in placed])
         slices, tracks = [], []
         for item in chromed:
             pane_inner = hui.pane_inner_rect(item["rect"], item["borders"])
@@ -2758,33 +3056,39 @@ def launch():
             content, _track = hui.stable_scrollbar_gutter(
                 pane_inner, state.get("metrics"), alt_screen=state.get("alt", False))
             slices.append((item["id"], content))
-            # The gutter is always reserved (herdr stable gutter); draw_borders decides per frame whether to draw a bar in it.
             gutter = (None if content == pane_inner else
                       hui.Rect(pane_inner.x + pane_inner.width - 1, pane_inner.y,
                                1, pane_inner.height))
             tracks.append((item["id"], gutter, item["focused"]))
-        chrome_state["tracks"] = tracks
-        paint(b"\x1b[?25l\x1b[?2026h")
-        any_resized = False
+        chrome_state.update(chromed=chromed, area=term, tracks=tracks)
+        sizes = {pane_id: [inner.height, inner.width] for pane_id, inner in slices
+                 if inner.width >= 2 and inner.height >= 2}
+        if not reload:
+            # A drag: resize fire-and-forget so the divider never blocks on a busy daemon
+            # (herdr's client never waits on its server for a resize). The panes' new content
+            # arrives as broadcast frames; until then the cache is drawn clipped, so nothing is
+            # refetched here.
+            if sizes:
+                control.notify("panes.resize", {"sizes": sizes})
+            request_render()
+            return
+        refresh = set()
+        try:
+            resized = control.request("panes.resize", {"sizes": sizes})["resized"] if sizes else {}
+        except RuntimeError:
+            resized = {}
         for pane_id, inner in slices:
-            if inner.width < 2 or inner.height < 2:
-                continue
-            try:
-                out = control.request("pane.resize", {"id": pane_id,
-                                                      "rows": inner.height, "cols": inner.width})
-                any_resized = any_resized or bool(out.get("resized", True))
-            except RuntimeError:
-                continue
-        for row in range(term.y + 1, term.y + term.height + 1):     # Clear the main area.
-            paint(f"\x1b[{row};{term.x + 1}H\x1b[K".encode())
-        paint(b"\x1b[?2026l")
-        if any_resized:
-            # Full-screen applications repaint only after SIGWINCH; wait briefly before grabbing
-            # the screen or we get the blank one from right after the resize (herdr solves the
-            # same problem with a nudge plus a forced full frame). An unchanged layout (the
-            # common tab switch) skips both the SIGWINCH and this wait.
-            time.sleep(0.08)
+            # A resized pane's rows arrive as a frame once the daemon has re-wrapped them
+            # (herdr's client never waits on its server for a resize); until then the cache
+            # is drawn clipped. Only a pane seen for the first time, or one the daemon
+            # already had at this size while our cache does not match, is fetched here.
+            if not resized.get(pane_id, False) and len(pane_cells.get(pane_id, [])) != inner.height:
+                refresh.add(pane_id)
+            if pane_id not in pane_cells:
+                refresh.add(pane_id)
         for pane_id, _inner in slices:
+            if pane_id not in refresh:
+                continue
             try:
                 screen = control.request("pane.screen", {"id": pane_id})
             except RuntimeError:
@@ -2793,13 +3097,10 @@ def launch():
                                      "alt": screen.get("alt_screen", False)}
             pane_cursor[pane_id] = {"at": list(screen["cursor"]),
                                     "hidden": bool(screen.get("cursor_hidden"))}
-            paint_rows(pane_id, {str(i): line for i, line in enumerate(screen["rows"])})
-        # herdr panes.rs:412: borders are redrawn after all pane content, otherwise content
-        # covers them and the highlight fails to follow focus changes.
-        chrome_state["chromed"] = chromed
-        chrome_state["area"] = term
-        draw_borders()
-        draw_sidebar()
+            if screen.get("input"):
+                pane_input[pane_id] = screen["input"]
+            paint_rows(pane_id, {str(i): line for i, line in enumerate(screen["rows"])}, clear=True)
+        request_render()
 
     def focus(pane_id, *, force_layout=False):
         nonlocal focused
@@ -2808,7 +3109,6 @@ def launch():
             side["ws"] = key
             force_layout = True
             refresh_sessions()          # the sessions list belongs to the space's folder (as switch_space)
-            chrome_cache["rows"] = []
         last_focus[side["ws"]] = pane_id
         changed = focused != pane_id
         focused = pane_id
@@ -2821,24 +3121,14 @@ def launch():
         except RuntimeError:
             pass
         # Changing focus while zoomed means the new pane takes over the zoom (herdr zoom follows focus).
-        if force_layout or (changed and (zoom or slice_of(pane_id) is None)):
+        if force_layout or (changed and (tab_zoomed(active_tab()) or slice_of(pane_id) is None)):
             relayout()
-        else:
-            sl = slice_of(pane_id)
-            if sl is not None:
-                try:
-                    shot = control.request("pane.screen", {"id": pane_id})
-                except RuntimeError:
-                    pass
-                else:
-                    pane_cursor[pane_id] = {
-                        "at": list(shot["cursor"]),
-                        "hidden": bool(shot.get("cursor_hidden"))}
-            if changed:     # Focus moved: the border highlight moves with it (herdr redraws borders every frame; we do it on demand).
-                for item in chrome_state["chromed"]:
-                    item["focused"] = item["id"] == pane_id
-                draw_borders()
-            draw_sidebar()
+            return
+        if changed:     # Focus moved: the border highlight moves with it.
+            for item in chrome_state["chromed"]:
+                item["focused"] = item["id"] == pane_id
+            chrome_state["tracks"] = [(pid, gutter, pid == pane_id) for pid, gutter, _f in chrome_state["tracks"]]
+        request_render()
 
     def new_pane(argv, title, *, place, cwd=None):
         """Ask the daemon for a pane seated at ``place`` (Daemon._seat): {"split": pane},
@@ -2864,11 +3154,11 @@ def launch():
                  cwd=space["folder"] if space else os.getcwd())
 
     def switch_tab(index):
-        nonlocal tab_follow, zoom
+        """herdr switch_tab: the tab's own zoom state comes back with it."""
+        nonlocal tab_follow
         vis = visible_tabs()
         if 0 <= index < len(vis):
             tab_follow = True
-            zoom = False           # herdr: zoom is per-tab state; switching tabs leaves it.
             focus(hui.pane_ids(vis[index])[0], force_layout=True)
 
     def close_focused():
@@ -2884,150 +3174,493 @@ def launch():
         refocus(survivors[0] if survivors else None, page_idx)
         return False
 
-    def on_wheel(x, y, delta):
-        """Mouse wheel: scroll the roster popup, the navigator, a sidebar section, or the pane under the pointer."""
-        if nav["open"]:
-            body_h = max(1, nav["rect"].height - 7) if nav["rect"] else 1
-            cap = max(0, len(nav["rows"]) - body_h)
-            nav["scroll"] = max(0, min(nav["scroll"] + (1 if delta > 0 else -1), cap))
-            nav["selected"] = max(nav["scroll"], min(nav["selected"], nav["scroll"] + body_h - 1))
-            draw_nav()
-            return
-        rect = menu["rect"] if menu["open"] else None
-        if rect and rect.x <= x - 1 < rect.x + rect.width and rect.y <= y - 1 < rect.y + rect.height:
-            cap = max(0, len(menu["items"]) - (rect.height - 2))
-            menu["scroll"] = max(0, min(menu["scroll"] + (1 if delta > 0 else -1), cap))
-            menu["hl"] = max(menu["scroll"], min(menu["hl"], menu["scroll"] + rect.height - 3))
-            draw_menu()
-            return
-        if x <= side["w"]:
+    # ── Mouse (herdr app/input/mouse.rs handle_mouse + input/mod.rs handle_mouse_from_input_source) ──
+    # Coordinates are zero-based screen cells; the modal layers take the event first, then
+    # chrome (tab bar, sidebar, dividers, scrollbars), then the panes.
+
+    def tab_bar_mouse(event):
+        """Tab row: click a tab, a scroll button or "+"; the wheel cycles tabs (mouse.rs:845-870)."""
+        nonlocal tab_scroll, tab_follow
+        bar = ui_map.get("bar")
+        if bar is None:
+            return False
+        if event.kind in ("wheel_up", "wheel_down"):
+            vis = visible_tabs()
+            if vis:
+                switch_tab((active_tab() + (1 if event.kind == "wheel_down" else -1)) % len(vis))
+            return True
+        if event.kind != "press" or event.button != 0:
+            return True
+        for index, rect in enumerate(bar.tab_hit_areas):
+            if rect.width and rect.x <= event.x < rect.x + rect.width:
+                switch_tab(index)
+                return True
+        for rect, step in ((bar.scroll_left_hit_area, -1), (bar.scroll_right_hit_area, 1)):
+            if rect.width and rect.x <= event.x < rect.x + rect.width:
+                tab_follow = False
+                tab_scroll = max(0, tab_scroll + step)
+                draw_sidebar()
+                return True
+        rect = bar.new_tab_hit_area
+        if rect.width and rect.x <= event.x < rect.x + rect.width:
+            new_pane([os.environ.get("SHELL", "sh")], "shell", place={"tab": focused})
+        return True
+
+    def sidebar_mouse(event):
+        """Sidebar: the wheel scrolls the section under the pointer; a click acts on the hit
+        rect drawn last (the toggle sits over the list)."""
+        if event.kind in ("wheel_up", "wheel_down"):
             for key, section in ui_map["sections"].items():   # One entry per notch, clamped like herdr.
                 rect = section["rect"]
-                if rect.height and rect.y <= y - 1 < rect.y + rect.height:
-                    step = 1 if delta > 0 else -1
-                    side_scrolls[key] = max(
-                        0, min(section["scroll"] + step, section["max_scroll"]))
+                if rect.height and rect.y <= event.y < rect.y + rect.height:
+                    step = 1 if event.kind == "wheel_down" else -1
+                    side_scrolls[key] = max(0, min(section["scroll"] + step, section["max_scroll"]))
                     draw_sidebar()
                     return
             return
-        for pane_id, rect in slices:
-            if not (rect.x < x <= rect.x + rect.width
-                    and rect.y < y <= rect.y + rect.height):
-                continue
-            if scroll_state.get(pane_id, {}).get("alt"):
-                return  # Alternate-screen applications handle their own scrolling.
-            try:
-                out = control.request("pane.scroll", {"id": pane_id, "delta": delta})
-            except RuntimeError:
-                return
-            scroll_state.setdefault(pane_id, {})["metrics"] = out["scroll"]
-            paint_rows(pane_id, {str(i): line for i, line in enumerate(out["rows"])},
-                       clear=True)
-            draw_borders()
+        if event.kind != "press" or event.button != 0:
             return
+        hit = next((action for rect, action in reversed(ui_map["hits"])
+                    if rect.x <= event.x < rect.x + rect.width
+                    and rect.y <= event.y < rect.y + rect.height), None)
+        if hit is None:
+            return
+        sidebar_action(hit)
 
-    def on_click(x, y):
-        nonlocal tab_scroll, tab_follow, help_open, prefix_pending
-        if copy["on"]:                                # A click ends copy mode first (herdr: any mouse press leaves it).
+    def sidebar_action(hit):
+        nonlocal mode
+        if hit[0] == "pane":
+            focus(hit[1])
+        elif hit[0] == "space":                   # herdr: click a space = switch workspace.
+            switch_space(hit[1])
+        elif hit[0] == "new":                     # herdr: new workspace in the same folder.
+            new_space_here()
+        elif hit[0] == "prefix":                  # a mouse press of the prefix key: next key is a command
+            if mode is Mode.PREFIX:               # pressed again: cancel, like esc
+                leave_command_mode()
+            else:
+                mode = Mode.PREFIX
+                draw_prefix_bar()
+        elif hit[0] == "sisters":                 # agents footer: summon a Sister as a new tab.
+            open_menu()
+        elif hit[0] == "sessgroup":               # MISAKA: the Last Order / Sisters groups fold.
+            sess_folds.symmetric_difference_update({hit[1]})
+            refresh_sessions()
+            draw_sidebar()
+        elif hit[0] == "sessnew":                 # agents footer: a fresh Last Order session, a space of its own here
+            space = active_space()
+            new_pane([sys.executable, "-m", "misaka", "chat"], LO_TITLE, place={"space": True},
+                     cwd=space["folder"] if space else None)
+        elif hit[0] == "sessmode":                # sessions header: this folder <-> every folder
+            side["sess_mode"] = "all" if side["sess_mode"] == "here" else "here"
+            refresh_sessions()
+            draw_sidebar()
+        elif hit[0] == "sess-open":
+            reopen_session(hit)
+        elif hit[0] == "toggle":                  # herdr toggle_sidebar: 26 columns <-> 4.
+            side["collapsed"] = not side["collapsed"]
+            side["w"] = SIDEBAR_COLLAPSED_W if side["collapsed"] else SIDEBAR_W
+            relayout()
+        elif hit[0] == "sort":                    # herdr: click the header label to flip grouped / priority.
+            side["sort"] = "priority" if side["sort"] == "grouped" else "grouped"
+            draw_sidebar()
+
+    def forward_mouse(pane_id, rect, event):
+        """Give the event to the program in the pane when it asked for mouse reports
+        (mouse.rs forward_pane_mouse_button/motion/wheel). True when it went there."""
+        state = input_state_of(pane_id)
+        data = pin.encode_mouse(event, event.x - rect.x, event.y - rect.y, state)
+        if data is None:
+            return False
+        send_to_pane(pane_id, data)
+        return True
+
+    def pane_wheel(pane_id, rect, event):
+        """mouse.rs handle_terminal_wheel: the pane's own routing first (mouse report or
+        alternate-screen arrows), else the host scrolls its history."""
+        state = input_state_of(pane_id)
+        routing = pin.wheel_routing(state)
+        if routing == "mouse_report":
+            forward_mouse(pane_id, rect, event)
+            return
+        if routing == "alternate_scroll":
+            data = pin.encode_alternate_scroll(event, state)
+            if data:
+                send_to_pane(pane_id, data)
+            return
+        if event.kind not in ("wheel_up", "wheel_down"):
+            return
+        scroll_pane(pane_id, -MOUSE_SCROLL_LINES if event.kind == "wheel_up" else MOUSE_SCROLL_LINES)
+
+    def scroll_pane(pane_id, delta):
+        try:
+            out = control.request("pane.scroll", {"id": pane_id, "delta": delta})
+        except RuntimeError:
+            return
+        scroll_state.setdefault(pane_id, {})["metrics"] = out["scroll"]
+        paint_rows(pane_id, {str(i): line for i, line in enumerate(out["rows"])}, clear=True)
+
+    def pane_press(pane_id, rect, event):
+        """A left press inside a pane (mouse.rs:590-612): leave any command layer, focus
+        it, then either hand the press to its program or anchor a selection."""
+        nonlocal mode
+        if mode is Mode.COPY:
             exit_copy(False)
-        if rename["open"]:                            # dialogs.rs buttons: save / clear / cancel; elsewhere cancels.
-            hit = next((action for rect, action in rename["hits"]
-                        if rect.x <= x - 1 < rect.x + rect.width and rect.y == y - 1), None)
-            if hit == "save":
-                close_rename(True)
-            elif hit == "clear":
-                rename["value"] = ""
-                draw_rename()
-            else:
-                close_rename(False)
+        elif mode is not Mode.TERMINAL:
+            leave_command_mode()
+        if focused != pane_id:
+            focus(pane_id)
+        if forward_mouse(pane_id, rect, event):
+            sel["it"] = None
             return
-        if nav["open"]:                               # Navigator: a row jumps, anywhere else closes.
-            hit = next((index for rect, index in nav["hits"]
-                        if rect.x <= x - 1 < rect.x + rect.width and rect.y == y - 1), None)
-            if hit is None:
-                close_nav()
-            else:
-                nav["selected"] = hit
-                nav_accept()
+        sel["it"] = Selection.at(pane_id, event.y - rect.y, event.x - rect.x, sel_metrics(pane_id))
+
+    def pane_double_click(pane_id, rect, event, now):
+        """input/mod.rs handle_pane_double_click: the second unmodified left press within
+        350 ms, in the same pane, at most one row away, selects the word (and copies it)."""
+        if mode is not Mode.TERMINAL or event.mods & ~hin.LOCK_MASK:
+            last_pane_click["pane"] = None
+            return False
+        row, col = event.y - rect.y, event.x - rect.x
+        last = last_pane_click
+        double = (last["pane"] == pane_id and now - last["at"] <= PANE_DOUBLE_CLICK_WINDOW
+                  and abs(last["row"] - row) <= 1)
+        last_pane_click.update(pane=None if double else pane_id, row=row, col=col, at=now)
+        return double and select_word_at(pane_id, row, col)
+
+    def handle_mouse(event, now):
+        nonlocal mode
+        if mode is Mode.GLOBAL_MENU:
+            menu_mouse(event)
             return
-        if menu["open"]:                              # herdr mouse.rs:164-172: an item picks, anywhere else closes.
-            hit = next((index for rect, index in menu["hits"]
-                        if rect.x <= x - 1 < rect.x + rect.width and rect.y == y - 1), None)
-            if hit is None:
-                close_menu()
-            else:
-                menu_choose(hit)
+        if mode is Mode.NAVIGATOR:
+            nav_mouse(event)
             return
-        bar = ui_map.get("bar")
-        if y == 1 and x > side["w"] and bar is not None:   # Tab row (main area only): herdr's hit areas.
-            cx = x - 1                                # Rects are 0-based.
-            for index, rect in enumerate(bar.tab_hit_areas):
-                if rect.width and rect.x <= cx < rect.x + rect.width:
-                    switch_tab(index)
-                    return
-            for rect, step in ((bar.scroll_left_hit_area, -1),
-                               (bar.scroll_right_hit_area, 1)):
-                if rect.width and rect.x <= cx < rect.x + rect.width:
-                    tab_follow = False
-                    tab_scroll = max(0, tab_scroll + step)
-                    draw_sidebar()
-                    return
-            rect = bar.new_tab_hit_area
-            if rect.width and rect.x <= cx < rect.x + rect.width:
-                new_pane([os.environ.get("SHELL", "sh")], "shell", place={"tab": focused})
+        if mode is Mode.KEYBIND_HELP:
+            help_mouse(event)
             return
-        if x <= side["w"]:                            # Sidebar: hit rects, last drawn wins (the toggle sits over the list).
-            hit = next((action for rect, action in reversed(ui_map["hits"])
-                        if rect.x <= x - 1 < rect.x + rect.width
-                        and rect.y <= y - 1 < rect.y + rect.height), None)
-            if hit is None:
+        if mode is Mode.RENAME:
+            rename_mouse(event)
+            return
+        x, y = event.x, event.y
+        in_sidebar = x < side["w"]
+        on_tab_bar = not in_sidebar and y == 0
+        if event.kind == "press" and event.button == 0:
+            hit = None if in_sidebar or on_tab_bar else pane_at(x, y)
+            if hit is not None and pane_double_click(hit[0], hit[1], event, now):
                 return
-            if hit[0] == "pane":
-                focus(hit[1])
-            elif hit[0] == "space":                   # herdr: click a space = switch workspace.
-                switch_space(hit[1])
-            elif hit[0] == "new":                     # herdr: new workspace in the same folder.
-                new_space_here()
-            elif hit[0] == "prefix":                  # a mouse press of the prefix key: next key is a command
-                if prefix_pending:                    # pressed again: cancel, like esc
-                    prefix_pending = 0
-                    restore_bottom()
-                else:
-                    prefix_pending = 1
-                    draw_prefix_bar()
-            elif hit[0] == "sisters":                 # agents footer: summon a Sister as a new tab.
-                open_menu()
-            elif hit[0] == "sessgroup":               # MISAKA: the Last Order / Sisters groups fold.
-                sess_folds.symmetric_difference_update({hit[1]})
-                refresh_sessions()
-                chrome_cache["rows"] = []
-                draw_sidebar()
-            elif hit[0] == "sessnew":                 # agents footer: a fresh Last Order session, a space of its own here
-                space = active_space()
-                new_pane([sys.executable, "-m", "misaka", "chat"], LO_TITLE, place={"space": True},
-                         cwd=space["folder"] if space else None)
-            elif hit[0] == "sessmode":                # sessions header: this folder <-> every folder
-                side["sess_mode"] = "all" if side["sess_mode"] == "here" else "here"
-                refresh_sessions()
-                chrome_cache["rows"] = []
-                draw_sidebar()
-            elif hit[0] in ("sess-lo", "sess-sis", "sess-card"):
-                reopen_session(hit)
-            elif hit[0] == "toggle":                  # herdr toggle_sidebar: 26 columns <-> 4.
-                side["collapsed"] = not side["collapsed"]
-                side["w"] = SIDEBAR_COLLAPSED_W if side["collapsed"] else SIDEBAR_W
-                paint(b"\x1b[0m\x1b[2J")
-                chrome_cache["rows"] = []
-                relayout()
-            elif hit[0] == "sort":                    # herdr: click the header label to flip grouped / priority.
-                side["sort"] = "priority" if side["sort"] == "grouped" else "grouped"
-                draw_sidebar()
-            return
-        for pane_id, rect in slices:                  # Click a pane: focus it (rectangle hit test).
-            if (rect.x < x <= rect.x + rect.width
-                    and rect.y < y <= rect.y + rect.height):
-                focus(pane_id)
+            clear_selection()
+            if not in_sidebar and not on_tab_bar and press_on_chrome(x, y):
+                grabbed = drag[0]
+                if grabbed and grabbed["kind"] == "bar" and focused != grabbed["pane"]:
+                    focus(grabbed["pane"])          # mouse.rs:422-445: a scrollbar press focuses its pane
+                if mode is Mode.COPY:
+                    exit_copy(False)
+                elif mode is not Mode.TERMINAL:
+                    leave_command_mode()
                 return
+            if on_tab_bar:
+                tab_bar_mouse(event)
+                return
+            if in_sidebar:
+                sidebar_mouse(event)
+                return
+            if hit is not None:
+                pane_press(hit[0], hit[1], event)
+                return
+            frame = pane_frame_at(x, y)
+            if frame is not None:                    # a border click focuses (mouse.rs:613-624)
+                if mode is Mode.COPY:
+                    exit_copy(False)
+                elif mode is not Mode.TERMINAL:
+                    leave_command_mode()
+                if focused != frame:
+                    focus(frame)
+            return
+        if event.kind == "press":                    # middle / right press
+            clear_selection()
+            hit = None if in_sidebar or on_tab_bar else pane_at(x, y)
+            if hit is not None:
+                forward_mouse(hit[0], hit[1], event)
+            return
+        if event.kind == "drag":
+            if event.button == 0 and sel["it"] is not None:
+                update_selection_drag(x, y)
+                return
+            if drag[0] is not None and event.button == 0:
+                drag_to(x, y)
+                return
+            hit = None if in_sidebar else pane_at(x, y)
+            if hit is not None:
+                forward_mouse(hit[0], hit[1], event)
+            return
+        if event.kind == "release":
+            if event.button == 0 and sel["it"] is not None:
+                selection = sel["it"]
+                clear_autoscroll()                   # herdr stops autoscroll on mouse-up
+                drag_end()
+                if selection.just_click:
+                    sel["it"] = None
+                elif not selection.finalized:
+                    copy_selection()                 # copy_on_select
+                return
+            if drag[0] is not None:
+                drag_end()
+                return
+            hit = None if in_sidebar else pane_at(x, y)
+            if hit is not None:
+                forward_mouse(hit[0], hit[1], event)
+            return
+        if event.kind.startswith("wheel"):
+            if on_tab_bar:
+                tab_bar_mouse(event)
+                return
+            if in_sidebar:
+                sidebar_mouse(event)
+                return
+            if sel["it"] is not None and sel["it"].in_progress and event.kind in ("wheel_up", "wheel_down"):
+                scroll_pane(sel["it"].pane, -MOUSE_SCROLL_LINES if event.kind == "wheel_up" else MOUSE_SCROLL_LINES)
+                update_selection_drag(x, y)
+                return
+            clear_selection()
+            hit = pane_at(x, y)
+            if hit is not None:
+                pane_wheel(hit[0], hit[1], event)
+                return
+            frame = pane_frame_at(x, y)
+            if frame is not None and event.kind in ("wheel_up", "wheel_down"):
+                sl = slice_of(frame)
+                if sl is not None:
+                    pane_wheel(frame, sl[1], event)
+            return
+        if event.kind == "move" and mode is Mode.TERMINAL and not in_sidebar:
+            hit = pane_at(x, y)
+            if hit is not None:
+                forward_mouse(hit[0], hit[1], event)
+
+    def clear_autoscroll():
+        sel["autoscroll"] = None
+        sel["autoscroll_at"] = None
+
+    def update_selection_drag(x, y):
+        """selection.rs update_selection_drag: extend the selection to the pointer; when the
+        pointer is past (or on) the pane's top/bottom edge, scroll the pane so the selection
+        runs beyond the viewport, then keep scrolling on a timer while it is held there
+        (selection_autoscroll_tick). The immediate step scales with the distance past the edge."""
+        selection = sel["it"]
+        sl = slice_of(selection.pane)
+        if sl is None:
+            return
+        pane, rect = selection.pane, sl[1]
+        top = rect.y
+        bottom = rect.y + max(0, rect.height - 1)
+        anchor_row, anchor_col = selection.anchor_screen_pos(rect, sel_metrics(pane))
+        is_dragging = selection.phase == "dragging" or (anchor_row, anchor_col) != (y, x)
+        selection.drag(x, y, rect, sel_metrics(pane))
+        if is_dragging and selection.just_click:
+            selection.force_dragging()
+
+        def arm(direction):
+            sel["autoscroll"] = {"dir": direction, "x": x, "y": y, "rect": rect}
+            sel["autoscroll_at"] = time.monotonic() + SELECTION_AUTOSCROLL_INTERVAL
+
+        if y < top:
+            if is_dragging:
+                scroll_pane(pane, -_selection_edge_scroll_lines(top - y))
+                selection.drag(x, y, rect, sel_metrics(pane))   # re-advance onto the revealed rows
+                arm(-1)
+        elif y > bottom:
+            if is_dragging:
+                scroll_pane(pane, _selection_edge_scroll_lines(y - bottom))
+                selection.drag(x, y, rect, sel_metrics(pane))
+                arm(1)
+        elif y == top and is_dragging:                          # hot zone: hold to keep scrolling up
+            arm(-1)
+        elif y == bottom and is_dragging:                       # hot zone: hold to keep scrolling down
+            arm(1)
+        else:                                                   # safe zone (or a plain click): no autoscroll
+            clear_autoscroll()
+        paint_selection()
+
+    def selection_autoscroll_tick(now):
+        """runtime.rs tick_selection_autoscroll: while the pointer is held at a pane edge, keep
+        scrolling one line per interval and extend the selection to the last pointer position,
+        stopping at the scrollback boundary, when the pane resizes, or when the drag ends."""
+        auto = sel["autoscroll"]
+        if auto is None:
+            return
+        selection = sel["it"]
+        if selection is None or selection.phase != "dragging":
+            clear_autoscroll()
+            return
+        pane = selection.pane
+        sl = slice_of(pane)
+        if sl is None or sl[1] != auto["rect"]:                 # the pane moved/resized: stop
+            clear_autoscroll()
+            return
+        metrics = sel_metrics(pane)
+        if auto["dir"] < 0:
+            if metrics.get("offset_from_bottom", 0) >= metrics.get("max_offset_from_bottom", 0):
+                clear_autoscroll()                              # already at the oldest line
+                return
+            scroll_pane(pane, -1)
+        else:
+            if metrics.get("offset_from_bottom", 0) == 0:
+                clear_autoscroll()                              # already at the newest line
+                return
+            scroll_pane(pane, 1)
+        selection.drag(auto["x"], auto["y"], auto["rect"], sel_metrics(pane))
+        paint_selection()
+        sel["autoscroll_at"] = now + SELECTION_AUTOSCROLL_INTERVAL
+
+    # ── Keys ──
+    pane_out = {"pane": None, "data": bytearray()}   # keys for one pane in one read, sent as one request
+
+    def send_to_pane(pane_id, data):
+        if pane_out["pane"] not in (None, pane_id):
+            flush_pane_out()
+        pane_out["pane"] = pane_id
+        pane_out["data"] += data
+
+    def flush_pane_out():
+        nonlocal repaint_after_typing
+        if pane_out["pane"] is None or not pane_out["data"]:
+            pane_out.update(pane=None, data=bytearray())
+            return
+        _send_pane_input(control, pane_out["pane"], bytes(pane_out["data"]), report_failure)
+        pane_out.update(pane=None, data=bytearray())
+        repaint_after_typing = time.monotonic() + 0.9   # Repaint after typing stops to erase IME leftovers.
+
+    def terminal_key(key):
+        """terminal.rs prepare_terminal_key_forward: a key clears a retained selection, the
+        prefix key opens the prefix layer, a plain PageUp/PageDown scrolls a shell
+        transcript, everything else is encoded for the pane's protocol."""
+        nonlocal mode
+        if key.kind != "release":
+            clear_selection()
+        if key.matches(PREFIX.code, PREFIX.mods) and key.kind != "release":
+            mode = Mode.PREFIX
+            draw_prefix_bar()
+            return
+        if key.code == "modifier" and not input_state_of(focused)["kitty_flags"]:
+            return
+        state = input_state_of(focused)
+        if key.code in ("pageup", "pagedown") and not key.mods & ~hin.LOCK_MASK \
+                and pin.plain_page_keys_use_host_scrollback(state):
+            if key.kind == "release":
+                return
+            sl = slice_of(focused)
+            lines = max(1, sl[1].height) if sl else 10
+            scroll_pane(focused, -lines if key.code == "pageup" else lines)
+            return
+        data = pin.encode_key(key, state)
+        if data:
+            send_to_pane(focused, data)
+
+    def prefix_key(key):
+        """navigate.rs handle_prefix_key: the prefix again sends it through; esc and any
+        unbound key leave; bound keys run their command (bindings in §10 of the parity audit)."""
+        nonlocal mode, exit_reason
+        if key.kind == "release" or key.code == "modifier":
+            return
+        if key.matches(PREFIX.code, PREFIX.mods):
+            send_to_pane(focused, pin.encode_key(key, input_state_of(focused)))
+            leave_command_mode()
+            return
+        text = key_text(key)
+        if key.matches("esc") or text is None:
+            leave_command_mode()
+            return
+        mode = Mode.TERMINAL
+        restore_bottom()
+        # navigate.rs copy_mode_survives_prefix_action: only focus moves keep copy mode
+        # alive (it comes back if the focus returns to its pane); anything else cancels it.
+        if copy["pane"] is not None and text not in ("1", "2", "3", "4", "5", "6", "7", "8", "9",
+                                                     "n", "p", "h", "j", "k", "l"):
+            exit_copy(False)
+            mode = Mode.TERMINAL
+        if text in "123456789":                  # herdr: digits switch tabs.
+            switch_tab(int(text) - 1)
+        elif text in ("n", "p") and visible_tabs():   # Cycle the active space's tabs.
+            switch_tab((active_tab() + (1 if text == "n" else -1)) % len(visible_tabs()))
+        elif text in ("h", "j", "k", "l"):       # herdr focus_pane_h/j/k/l.
+            target = hui.find_in_direction(
+                focused, {"h": "left", "j": "down", "k": "up", "l": "right"}[text],
+                [(pid, rect) for pid, rect in slices])
+            if target:
+                focus(target)
+        elif text == "z":                        # herdr zoom: the focused pane fills the tab.
+            toggle_zoom()
+        elif text == "c":                        # herdr new_tab.
+            new_pane([os.environ.get("SHELL", "sh")], "shell", place={"tab": focused})
+        elif text == "v":                        # split_vertical: side by side.
+            new_pane([os.environ.get("SHELL", "sh")], "shell", place={"split": focused, "direction": "h"})
+        elif text == "-":                        # split_horizontal: stacked.
+            new_pane([os.environ.get("SHELL", "sh")], "shell", place={"split": focused, "direction": "v"})
+        elif text == "g":                        # herdr goto: the navigator.
+            open_nav()
+        elif text == "[":                        # herdr copy_mode.
+            enter_copy()
+        elif text == "r":                        # herdr resize_mode.
+            enter_resize()
+        elif text == "T":                        # herdr rename_tab (prefix+shift+t).
+            open_rename("tab")
+        elif text == "W":                        # herdr rename_workspace (prefix+shift+w).
+            open_rename("space")
+        elif text == "d":
+            return "quit"
+        elif text == "x":
+            # herdr prefix+x = ClosePane: one key, no confirmation (actions.rs:2035 only
+            # confirms when closing a worktree group, which MISAKA does not have).
+            # Closing the last pane exits the panel.
+            if close_focused():
+                exit_reason[0] = "closed_all"
+                return "quit"
+        elif text == "?":
+            open_help()
+        if mode is Mode.TERMINAL and copy["pane"] is not None:
+            leave_command_mode()                 # back to copy mode when its pane has the focus again
+        return None
+
+    def handle_key(key):
+        if mode is Mode.TERMINAL:
+            terminal_key(key)
+        elif mode is Mode.PREFIX:
+            return prefix_key(key)
+        elif mode is Mode.COPY:
+            copy_key(key)
+        elif mode is Mode.RESIZE:
+            resize_key(key)
+        elif mode is Mode.RENAME:
+            rename_key(key)
+        elif mode is Mode.GLOBAL_MENU:
+            menu_key(key)
+        elif mode is Mode.NAVIGATOR:
+            nav_key(key)
+        elif mode is Mode.KEYBIND_HELP:
+            help_key(key)
+        return None
+
+    def handle_paste(text):
+        """input/mod.rs handle_paste: text inputs take it; a pane gets it as a paste
+        (bracketed when it asked), never as keystrokes."""
+        if mode is Mode.RENAME:
+            rename_insert(text)
+            draw_rename()
+        elif mode is Mode.NAVIGATOR:
+            nav_paste(text)
+        elif mode is Mode.COPY:
+            copy_paste(text)
+        elif mode is Mode.TERMINAL:
+            clear_selection()
+            send_to_pane(focused, pin.paste_bytes(text, input_state_of(focused)))
+
+    def handle_focus(gained):
+        """The host window's focus, forwarded to the focused pane when it asked (pane.rs
+        try_send_focus_event)."""
+        data = pin.focus_bytes(gained, input_state_of(focused))
+        if data:
+            send_to_pane(focused, data)
 
     old_attrs = termios.tcgetattr(0)
     new_attrs = termios.tcgetattr(0)
@@ -3036,15 +3669,17 @@ def launch():
     termios.tcsetattr(0, termios.TCSANOW, new_attrs)
     # Alternate screen (standard for herdr and every proper TUI): without it Terminal.app
     # adds a "mark" to every line that gets a carriage return, which renders as a pair of
-    # dim brackets. ?1002 reports motion only while a button is held, which is what
-    # drag selection needs (?1003 reports all motion, for hover UIs; we have none).
-    _write_all(b"\x1b[?1049h\x1b[?7l\x1b[?1000;1002;1006h")
-    prefix_pending = 0
+    # dim brackets. Mouse: every motion (?1003, as crossterm's EnableMouseCapture) so a pane
+    # program that asked for any-motion reports gets them and popups can highlight on hover;
+    # SGR encoding. Bracketed paste and focus events come in as their own events; the kitty
+    # keyboard flags are herdr's IME-compatible set (a host that lacks the protocol ignores
+    # the push and sends legacy sequences, which the parser also reads).
+    _write_all(b"\x1b[?1049h\x1b[?7l\x1b[?1000;1002;1003;1006h\x1b[?2004h\x1b[?1004h"
+               + f"\x1b[>{pin.HOST_KITTY_FLAGS}u".encode())
+    host = hin.HostInput()
     exit_reason = ["detached"]     # detached: user left; closed_all: the last pane was closed.
-    help_open = False
     try:
-        paint(b"\x1b[0m\x1b[2J")
-        chrome_cache["rows"] = []          # The row cache must be invalidated after a clear, or the sidebar draws nothing.
+        _write_all(b"\x1b[0m\x1b[2J")
         stream.send("pane.attach", {"id": "*"})
         refresh_cards()
         reload_layout()        # the daemon seated every pane (Last Order included) in a space
@@ -3058,172 +3693,64 @@ def launch():
         repaint_after_typing = 0.0   # After typing pauses, repaint the focused pane once to erase IME leftovers.
         while True:
             if resized.pop("hit", None):
+                # ui.rs compute_view on a new size: geometry is recomputed, the mode stays.
                 rows, cols = _term_size()
-                paint(b"\x1b[0m\x1b[2J")
-                chrome_cache["rows"] = []
-                menu["open"] = nav["open"] = rename["open"] = False   # Geometry changed under a popup; it is simply gone.
-                copy["on"], resize_on[0], bottom_bar[0] = False, False, None
+                _write_all(b"\x1b[0m\x1b[2J")
+                invalidate()
                 relayout()
-            readable, _, _ = select.select([0, stream.sock], [], [], 0.05)
+                layout_notice()
+                redraw_overlay()
             now = time.monotonic()
+            wait = 0.05
+            pending = host.deadline()
+            if pending is not None:
+                wait = min(wait, max(0.0, pending - now))
+            split_due = drag_due()
+            if split_due is not None:
+                wait = min(wait, max(0.0, split_due - now))
+            if sel["autoscroll_at"] is not None:
+                wait = min(wait, max(0.0, sel["autoscroll_at"] - now))
+            readable, _, _ = select.select([0, stream.sock], [], [], wait)
+            now = time.monotonic()
+            drag_tick(now)
+            if sel["autoscroll_at"] is not None and now >= sel["autoscroll_at"]:
+                selection_autoscroll_tick(now)
+            events = []
+            if pending is not None and now >= pending and 0 not in readable:
+                events = host.flush()
             if repaint_after_typing and now > repaint_after_typing:
-                # IME pre-edit text is drawn directly by the terminal: the application never sees
-                # it and our emulated screen does not have it, so nothing restores that area once
-                # it is withdrawn and the content looks shifted. Once typing pauses, repaint the
-                # focused pane from its real content to wipe the leftovers.
+                # IME pre-edit text is drawn directly by the host terminal over our cells: the
+                # application never sees it, so no frame restores that area once it is
+                # withdrawn. Once typing pauses, write the whole frame again.
                 repaint_after_typing = 0.0
-                try:
-                    shot = control.request("pane.screen", {"id": focused})
-                    scroll_state[focused] = {"metrics": shot.get("scroll"),
-                                             "alt": shot.get("alt_screen", False)}
-                    pane_cursor[focused] = {
-                        "at": list(shot["cursor"]),
-                        "hidden": bool(shot.get("cursor_hidden"))}
-                    paint_rows(focused,
-                               {str(i): line for i, line in enumerate(shot["rows"])},
-                               clear=True)
-                    draw_borders()
-                except (RuntimeError, ConnectionError):
-                    pass
+                sl = slice_of(focused)
+                if sl is not None:
+                    invalidate_rect(sl[1])
+            if notice["kind"] is not None and now >= notice["deadline"]:
+                clear_notice()
+            if sel["clear_at"] is not None and now >= sel["clear_at"]:
+                clear_selection()
 
             if 0 in readable:
-                chunk = os.read(0, 4096)
-                # Mouse: left click focuses, drag selects, release copies, double-click selects a word, wheel scrolls back.
-                for m in _MOUSE.finditer(chunk):
-                    button, mx, my = (int(m.group(1)), int(m.group(2)),
-                                      int(m.group(3)))
-                    press = m.group(4) == b"M"
-                    if menu["open"] and press and button in (32, 35):   # Pointer motion over the open popup.
-                        menu_hover(mx, my)
-                        continue
-                    if button in (64, 65):
-                        on_wheel(mx, my, -3 if button == 64 else 3)
-                    elif drag[0] and press and button == 32:   # Dragging a divider or a scrollbar thumb.
-                        drag_to(mx - 1, my - 1)
-                    elif drag[0] and not press:
-                        drag_end()
-                    elif (press and button in (0, 1) and not (menu["open"] or nav["open"] or rename["open"])
-                          and press_on_chrome(mx - 1, my - 1)):
-                        pass                                # The press started a drag; nothing else to do.
-                    elif button == 32 and press:            # Drag with the left button held.
-                        sl = slice_of(sel["pane"]) if sel["pane"] else None
-                        if sl and sel["a"]:
-                            rect = sl[1]   # Dragging outside the pane clamps to its edge; never select into a neighbor.
-                            spot = (min(max(mx - rect.x - 1, 0), rect.width - 1),
-                                    min(max(my - rect.y - 1, 0), rect.height - 1))
-                            if spot != sel["b"]:
-                                dirty = sel_rows()
-                                sel["b"] = spot
-                                paint_selection(dirty)
-                    elif press and button in (0, 1):
-                        hit = pane_at(mx, my)
-                        double = (hit and now - last_press[0] < 0.4
-                                  and last_press[1:] == [mx, my])
-                        clear_selection()
-                        last_press[:] = [0.0 if double else now, mx, my]
-                        if double:
-                            on_click(mx, my)
-                            select_word(*hit)
-                        else:
-                            if hit:      # A selection starts only inside a pane; sidebar clicks do not count.
-                                sel.update(pane=hit[0], a=hit[1:], b=None)
-                            on_click(mx, my)
-                    elif press and button == 2:             # Right button.
-                        clear_selection()
-                    elif not press and button == 0 and sel["b"]:
-                        copy_selection()    # herdr copy_on_select: releasing copies to the clipboard.
-                chunk = _MOUSE.sub(b"", chunk)
-                chunk = _MOUSE_X10.sub(b"", chunk)     # Legacy reports are only stripped, so they never reach a pane as input.
-                if menu["open"]:                       # The roster popup is modal: it takes every key.
-                    menu_keys(chunk)
-                    chunk = b""
-                elif nav["open"]:                      # So are the navigator, the rename box, and the two modes.
-                    nav_keys(chunk)
-                    chunk = b""
-                elif rename["open"]:
-                    rename_keys(chunk)
-                    chunk = b""
-                elif copy["on"]:
-                    copy_keys(chunk)
-                    chunk = b""
-                elif resize_on[0]:
-                    resize_keys(chunk)
-                    chunk = b""
-                plain = bytearray()
-                quitting = False   # prefix+d ends the panel, and everything it started
-                for offset in range(len(chunk)):       # Byte by byte: prefix and command may arrive in one read.
-                    key = chunk[offset:offset + 1]
-                    if help_open:                      # Key help is open: any key closes it and redraws.
-                        help_open = False
-                        relayout()
-                        continue
-                    if not prefix_pending:
-                        if key == PREFIX:
-                            prefix_pending = 1
-                            draw_prefix_bar()          # herdr: the PREFIX mode bar takes over the bottom row.
-                        else:
-                            plain += key
-                        continue
-                    prefix_pending = 0
-                    restore_bottom()                   # Mode bar goes away; the bottom row returns to the pane.
-                    if key == b"\x1b":                 # esc cancels the prefix (as in herdr).
-                        continue
-                    if key != PREFIX and 1 <= key[0] <= 26:
-                        key = bytes([key[0] + 96])   # ctrl+d counts as d: a slip of the finger still works.
-                    if key == PREFIX:
-                        plain += PREFIX
-                    elif key in b"123456789":          # herdr: digits switch tabs.
-                        switch_tab(int(key) - 1)
-                    elif key in b"np" and visible_tabs():   # Cycle the active space's tabs.
-                        switch_tab((active_tab() + (1 if key == b"n" else -1))
-                                   % len(visible_tabs()))
-                    elif key in b"hjkl":              # herdr focus_pane_h/j/k/l (1051-1054).
-                        target = hui.find_in_direction(
-                            focused,
-                            {b"h": "left", b"j": "down",
-                             b"k": "up", b"l": "right"}[key],
-                            [(pid, rect) for pid, rect in slices])
-                        if target:
-                            focus(target)
-                    elif key == b"z":                 # herdr zoom (1065): the focused pane fills the tab.
-                        zoom = not zoom
-                        relayout()
-                    elif key == b"c":                  # herdr new_tab (model.rs:1039).
-                        new_pane([os.environ.get("SHELL", "sh")], "shell", place={"tab": focused})
-                    elif key == b"v":                  # split_vertical (1062): side by side.
-                        new_pane([os.environ.get("SHELL", "sh")], "shell", place={"split": focused, "direction": "h"})
-                    elif key == b"-":                  # split_horizontal (1063): stacked.
-                        new_pane([os.environ.get("SHELL", "sh")], "shell", place={"split": focused, "direction": "v"})
-                    elif key == b"g":                  # herdr goto (prefix+g): the navigator.
-                        open_nav()
-                    elif key == b"[":                  # herdr copy_mode (prefix+[).
-                        enter_copy()
-                    elif key == b"r":                  # herdr resize_mode (prefix+r).
-                        enter_resize()
-                    elif key == b"T":                  # herdr rename_tab (prefix+shift+t).
-                        open_rename("tab")
-                    elif key == b"W":                  # herdr rename_workspace (prefix+shift+w).
-                        open_rename("space")
-                    elif key == b"d":
+                events = host.feed(os.read(0, 4096), now)
+            quitting = False
+            for event in events:
+                if isinstance(event, hin.Mouse):
+                    flush_pane_out()
+                    handle_mouse(event, now)
+                elif isinstance(event, hin.Paste):
+                    handle_paste(event.text)
+                elif isinstance(event, hin.Focus):
+                    handle_focus(event.gained)
+                else:
+                    if handle_key(event) == "quit":
                         quitting = True
-                    elif key == b"x":
-                        # herdr prefix+x = ClosePane: one key, no confirmation (actions.rs:2035 only
-                        # confirms when closing a worktree group, which MISAKA does not have).
-                        # Closing the last pane exits the panel.
-                        if close_focused():
-                            exit_reason[0] = "closed_all"
-                            quitting = True
-                    elif key == b"?":
-                        help_open = True
-                        draw_help_overlay()
-                if plain:
-                    _send_pane_input(control, focused, plain, bottom_note)
-                    repaint_after_typing = now + 0.9   # Repaint after typing stops to erase IME leftovers.
-                if quitting:
-                    return
+                        break
+            flush_pane_out()
+            if quitting:
+                return
 
             if stream.sock in readable or stream.buf:
-                painted = False
                 while (line := stream.readline()) is not None:
                     msg = json.loads(line)
                     if msg.get("event") == "screen":
@@ -3231,15 +3758,17 @@ def launch():
                             scroll_state[msg["id"]] = {
                                 "metrics": msg["scroll"],
                                 "alt": msg.get("alt_screen", False)}
+                        if msg.get("input"):
+                            pane_input[msg["id"]] = msg["input"]
                         paint_rows(msg["id"], msg["rows"], msg.get("cursor"),
                                    hidden=msg.get("cursor_hidden"))
-                        painted = True
                     elif msg.get("event") == "exited":
-                        # The application exited, so the pane is done: close it; when none are left, return to the shell.
+                        # Card exits must reach the daemon's watcher before their pane goes.
                         page = active_tab()
                         note_exit(msg["id"], msg.get("exit_code"))
                         try:
-                            control.request("pane.close", {"id": msg["id"]})
+                            if not _close_exited_pane(control, msg["id"]):
+                                continue
                         except RuntimeError:
                             pass
                         listing = panes()
@@ -3251,11 +3780,12 @@ def launch():
                             refocus(page_idx=page)
                         else:
                             relayout()
-                        painted = False
-                if painted:
-                    draw_borders()      # Content paints over borders; herdr redraws them at the end of every frame.
 
-            if now - last_poll > POLL_SECONDS:
+            if drag[0] is None and now - last_poll > POLL_SECONDS:
+                # Not while dragging: this poll makes blocking daemon requests (cards, panes,
+                # sessions) and runs git, any of which stalls a drag if it lands mid-gesture
+                # while the daemon is busy repainting a big pane. It resumes the moment the
+                # drag ends (last_poll is stale, so the next turn runs it).
                 last_poll = now
                 refresh_cards()
                 refresh_git(now)
@@ -3270,6 +3800,8 @@ def launch():
                     pane_cursor.pop(gone, None)      # per-pane state dies with its pane
                 for gone in [pane_id for pane_id in scroll_state if pane_id not in open_ids]:
                     scroll_state.pop(gone, None)
+                for gone in [pane_id for pane_id in pane_input if pane_id not in open_ids]:
+                    pane_input.pop(gone, None)
                 for pane in listing:      # /new and in-place forks swap the file under a named tab
                     source = auto_names.get(pane["id"])
                     reported = (pane.get("reported") or {}).get("session")
@@ -3297,7 +3829,8 @@ def launch():
                 if reload_layout():    # a pane opened elsewhere (a summoned Sister, a fork): lay the panes out again
                     relayout()
                 else:
-                    draw_sidebar()
+                    request_render()
+            render()
     except Exception as error:   # noqa: BLE001
         import traceback
         log = os.path.expanduser("~/.misaka/panel-crash.log")
@@ -3315,8 +3848,9 @@ def launch():
         # the panel is on its way out.
         git_pool.shutdown(wait=False, cancel_futures=True)
         termios.tcsetattr(0, termios.TCSANOW, old_attrs)
-        # Turn off mouse tracking, leave the alternate screen, and show the cursor again.
-        _write_all(b"\x1b[?1000;1002;1003;1006l\x1b[?7h\x1b[0m\x1b[2J\x1b[?1049l\x1b[?25h")
+        # Pop the keyboard flags, turn off mouse tracking, paste and focus reporting, leave
+        # the alternate screen, and show the cursor again.
+        _write_all(b"\x1b[<u\x1b[?1000;1002;1003;1006l\x1b[?2004l\x1b[?1004l\x1b[?7h\x1b[0m\x1b[2J\x1b[?1049l\x1b[?25h")
         if exit_reason[0] == "closed_all":
             print("All panes closed (their last lines are in ~/.misaka/panel-crash.log). "
                   "Run `misaka` to open the panel again.")

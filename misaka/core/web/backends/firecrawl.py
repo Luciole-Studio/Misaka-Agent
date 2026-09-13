@@ -1,7 +1,6 @@
 """Firecrawl web search and scraping (keyed or self-hosted over REST, or keyless).
 
-Ported from Hermes' ``plugins/web/firecrawl/provider.py``, minus the Nous tool-gateway,
-which has no MISAKA counterpart. Both halves are here: ``/v2/search`` with the
+Ported from Hermes' ``plugins/web/firecrawl/provider.py``. Both halves are here: ``/v2/search`` with the
 response-shape normalizer Firecrawl needs because it answers in three different shapes
 depending on whether the caller used the SDK, the cloud API or a self-hosted instance, and
 the per-URL ``/v2/scrape`` loop with its policy gate, its post-redirect re-checks and its
@@ -35,9 +34,11 @@ import httpx
 
 from misaka.core.tools._web.bounded import UnsafeUrlError, vet_public_url
 from misaka.core.tools._web.website_policy import check_website_access
+from misaka.core.web.accounting import account_call
 from misaka.core.web.config import (
     keyless_tier_enabled,
     provider_env,
+    provider_selected,
     provider_tier,
     use_keyless,
 )
@@ -46,14 +47,15 @@ from misaka.core.web.keyless import (
     extract_with_failover,
     search_with_failover,
 )
+from misaka.core.web.network import proxy_for_url
 from misaka.core.web.provider import WebSearchProvider
+from misaka.core.web.runtime import api_client
 
 logger = logging.getLogger(__name__)
 
 # Hermes' per-URL ceiling (``plugins/web/firecrawl/provider.py:675``). A scrape renders
 # JavaScript on the vendor's servers, so a slow page is normal and a stuck one is common;
 # without a wall-clock bound one bad URL holds the whole batch open.
-_SCRAPE_TIMEOUT_SECONDS = 60
 
 
 def _normalize_result_list(values: Any) -> list[dict[str, Any]]:
@@ -141,35 +143,170 @@ def _blocked(
     return entry
 
 
-async def _scrape(
-    endpoint: str, headers: dict[str, str], url: str, formats: list[str]
-) -> dict[str, Any]:
-    """One ``/v2/scrape`` call, normalized to the object Firecrawl buried the page in.
+async def _post(endpoint, headers, operation, payload, *, sdk):
+    """The keyed/self-hosted SDK route retries 502 and transport errors, three attempts total."""
+    from misaka.core.web import gateway
+    try:
+        managed = gateway.available() and endpoint == gateway.origin("firecrawl") and headers.get("Authorization") == "Bearer " + gateway.peek_token()
+    except ValueError:
+        managed = False  # A stored direct vendor never consumes unrelated gateway configuration.
+    refresh_tried = False
+    if managed:
+        # Use the same payload/parser/SDK retry contract; a rejected grant is refreshed once.
+        headers = dict(headers)
+    async with api_client("firecrawl", endpoint, headers.get("Authorization", ""),
+                          follow_redirects=sdk) as client:
+        for attempt in range(3 if sdk else 1):
+            try:
+                subject = payload.get("query") or payload.get("url", "")
+                service = "web_search" if operation == "search" else "web_extract"
+                async with account_call(service, "nous" if managed else "firecrawl", subject, managed=managed) as facts:
+                    response = await client.post(f"{endpoint}/v2/{operation}", json=payload, headers=headers)
+                    if managed and response.headers.get("x-external-call-id"):
+                        facts["external_call_id"] = response.headers["x-external-call-id"][:200]
+                if managed and not refresh_tried and response.status_code == 401:
+                    access, _ = await gateway.token(rejected=headers["Authorization"][7:])
+                    headers["Authorization"] = "Bearer " + access
+                    refresh_tried = True
+                    async with account_call(service, "nous", subject, managed=True) as facts:
+                        response = await client.post(f"{endpoint}/v2/{operation}", json=payload, headers=headers)
+                        if response.headers.get("x-external-call-id"):
+                            facts["external_call_id"] = response.headers["x-external-call-id"][:200]
+            except httpx.TransportError:
+                if not sdk or attempt == 2:
+                    raise
+            else:
+                if not sdk or response.status_code != 502 or attempt == 2:
+                    if response.status_code >= 400:
+                        detail = (response.text or "").strip() or f"HTTP {response.status_code}"
+                        raise ValueError(f"Firecrawl {operation} failed (HTTP {response.status_code}): {detail}")
+                    response.raise_for_status()
+                    data = response.json()
+                    if sdk and not isinstance(data, dict):
+                        raise ValueError("Firecrawl returned a non-object response")
+                    if isinstance(data, dict) and (not data.get("success") if sdk else data.get("success") is False):
+                        raise ValueError(data.get("error") or "Firecrawl response did not report success")
+                    return data
+                await response.aclose()
+            await asyncio.sleep(0.5 * 2 ** attempt)
+        raise AssertionError("Firecrawl retry loop exhausted without a result")
 
-    The 60-second ceiling is wall clock and belongs to the whole request. httpx's own
-    timeout is per operation, so a page that dribbles one byte at a time satisfies it
-    forever while holding the batch open; Hermes wraps each scrape in
-    ``asyncio.wait_for(..., 60)`` for exactly that reason, and the httpx timeout stays
-    alongside it so a hung connect fails at the same bound.
 
-    The last three lines are Hermes' ``_extract_scrape_payload``: depending on which
-    Firecrawl build answered -- cloud, self-hosted, or its SDK -- the scraped object is
-    either the body itself or nested one level down under ``data``.
-    """
-    async with asyncio.timeout(_SCRAPE_TIMEOUT_SECONDS):
-        async with httpx.AsyncClient(timeout=_SCRAPE_TIMEOUT_SECONDS) as client:
-            response = await client.post(
-                f"{endpoint}/v2/scrape",
-                json={"url": url, "formats": formats},
-                headers=headers,
+async def _scrape(endpoint, headers, url, formats, *, sdk=False):
+    """The configurable outer bound includes retries; SDK scrape defaults to four-hour maxAge."""
+    from misaka.core.web.timeouts import operation_seconds
+    payload = {"url": url, "formats": formats}
+    if sdk:
+        # Firecrawl 4.17.0 prepare_scrape_options defaults. These govern the
+        # vendor's page renderer, not HTTPX's certificate verification (kept on).
+        payload.update(onlyMainContent=True, mobile=False, skipTlsVerification=True,
+                       removeBase64Images=True, fastMode=False, blockAds=True,
+                       maxAge=14_400_000, storeInCache=True)
+    seconds = operation_seconds("firecrawl_scrape")
+    if seconds == 0:
+        raise TimeoutError("Firecrawl scrape deadline is 0s; no request started")
+    async with asyncio.timeout(seconds):
+        data = await _post(endpoint, headers, "scrape", payload, sdk=sdk)
+    if isinstance(data, dict) and isinstance(data.get("data"), dict):
+        data = data["data"]
+    return data if isinstance(data, dict) else {}
+
+
+async def scrape_urls(
+    endpoint: str, headers: dict[str, str], urls: list[str], *, format: str | None = None, sdk: bool = False
+) -> list[dict[str, Any]]:
+    """One Firecrawl extraction path, including policy and reported redirect checks."""
+    if format == "markdown":
+        formats = ["markdown"]
+    elif format == "html":
+        formats = ["html"]
+    else:
+        formats = ["markdown", "html"]
+
+    logger.info("Firecrawl extract: %d URL(s) (formats=%s)", len(urls), formats)
+    results: list[dict[str, Any]] = []
+    for url in urls:
+        blocked = check_website_access(url)
+        if blocked:
+            logger.info(
+                "Blocked web_extract for %s by rule %s",
+                blocked["host"],
+                blocked["rule"],
             )
-    if response.status_code >= 400:
-        detail = (response.text or "").strip() or f"HTTP {response.status_code}"
-        raise ValueError(f"Firecrawl scrape failed: {detail}")
-    payload = response.json()
-    if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
-        payload = payload["data"]
-    return payload if isinstance(payload, dict) else {}
+            results.append(_blocked(url, blocked))
+            continue
+
+        try:
+            payload = await _scrape(endpoint, headers, url, formats, sdk=sdk)
+        except (TimeoutError, httpx.TimeoutException):
+            # Both spellings: ``asyncio.timeout`` raises the builtin, httpx raises its
+            # own, and neither is a subclass of the other.
+            logger.warning("Firecrawl scrape timed out for %s", url)
+            results.append(
+                _failed(
+                    url,
+                    "Scrape reached its configured HTTP or operation timeout -- page may "
+                    "be too large or unresponsive. Try web_fetch instead.",
+                )
+            )
+            continue
+        except Exception as exc:  # noqa: BLE001 - per-URL error entry, as in Hermes
+            results.append(_failed(url, str(exc)))
+            continue
+
+        metadata = payload.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        title = str(metadata.get("title") or "")
+        final_url = str(metadata.get("sourceURL") or url)
+
+        try:
+            await vet_public_url(final_url, proxy=proxy_for_url(final_url))
+        except UnsafeUrlError as exc:
+            logger.info(
+                "Blocked redirected web_extract for unsafe final URL: %s", final_url
+            )
+            results.append(
+                _failed(
+                    url,
+                    # The gate's own reason, not a claim on top of it: it refuses a
+                    # metadata endpoint, a private answer and an unresolvable name
+                    # alike, and only one of those is "private network address".
+                    f"Blocked: Firecrawl reported reading {final_url}, refused by "
+                    f"the outbound URL check ({exc})",
+                    title=title,
+                    source_url=final_url,
+                )
+            )
+            continue
+
+        final_blocked = check_website_access(final_url)
+        if final_blocked:
+            logger.info(
+                "Blocked redirected web_extract for %s by rule %s",
+                final_blocked["host"],
+                final_blocked["rule"],
+            )
+            results.append(
+                _blocked(url, final_blocked, title=title, source_url=final_url)
+            )
+            continue
+
+        markdown = str(payload.get("markdown") or "")
+        html = str(payload.get("html") or "")
+        if format == "markdown" or (format is None and markdown):
+            content = markdown or html
+        else:
+            content = html or markdown
+        results.append(
+            {
+                "url": url,
+                "title": title,
+                "content": content,
+                "raw_content": content,
+                "metadata": {**metadata, "sourceURL": final_url, "title": title},
+            }
+        )
+    return results
 
 
 class FirecrawlWebSearchProvider(WebSearchProvider):
@@ -184,8 +321,8 @@ class FirecrawlWebSearchProvider(WebSearchProvider):
         return "Firecrawl"
 
     def is_available(self) -> bool:
-        """Return True when a key or a self-hosted instance URL is configured."""
-        return bool(provider_env("FIRECRAWL_API_KEY") or provider_env("FIRECRAWL_API_URL"))
+        """Direct credentials, self-hosting, or an explicitly selected anonymous route."""
+        return bool(provider_env("FIRECRAWL_API_KEY") or provider_env("FIRECRAWL_API_URL") or provider_selected("firecrawl"))
 
     def is_keyless_available(self) -> bool:
         """Firecrawl's public cloud API accepts anonymous rate-limited requests.
@@ -194,29 +331,26 @@ class FirecrawlWebSearchProvider(WebSearchProvider):
         """
         return keyless_tier_enabled() and provider_tier("firecrawl") != "paid"
 
+    def uses_keyless_ring(self) -> bool:
+        return use_keyless("firecrawl", provider_env("FIRECRAWL_API_KEY"))
+
     def supports_extract(self) -> bool:
         """Firecrawl renders and scrapes pages through ``/v2/scrape``; see :meth:`extract`."""
         return True
 
+    async def connection(self):
+        return provider_env("FIRECRAWL_API_KEY"), provider_env("FIRECRAWL_API_URL").rstrip("/")
+
     async def search(self, query: str, limit: int = 5) -> dict[str, Any]:
         """Execute a Firecrawl search."""
         try:
-            api_key = provider_env("FIRECRAWL_API_KEY")
-            api_url = provider_env("FIRECRAWL_API_URL").rstrip("/")
-            # A self-hosted instance is a deliberate setup even without a key: it must
-            # never be traded for the public cloud endpoint by the keyless ring.
-            #
-            # Divergence from Hermes, deliberate: its ``_use_keyless_ring()`` returns
-            # False the moment FIRECRAWL_API_KEY is set, so a ``"firecrawl": "free"``
-            # tier pin is silently ignored here and honoured by every other vendor.
-            # Firecrawl is the odd one out in its own tree; ``use_keyless`` is the
-            # documented chokepoint ("free forces the keyless endpoint even when the
-            # vendor API key is present"), so this asks it like the other four do.
-            if not api_url and use_keyless("firecrawl", api_key):
+            api_key, api_url = await self.connection()
+            # Direct credentials/self-hosting take precedence over the anonymous ring.
+            if self.uses_keyless_ring():
                 logger.info("Firecrawl keyless search: '%s' (limit=%d)", query, limit)
                 return await search_with_failover("firecrawl", query, limit)
 
-            if not api_key and not api_url:
+            if not api_key and not api_url and not provider_selected("firecrawl"):
                 return {
                     "success": False,
                     "error": (
@@ -231,19 +365,10 @@ class FirecrawlWebSearchProvider(WebSearchProvider):
                 headers["Authorization"] = f"Bearer {api_key}"
 
             logger.info("Firecrawl search: '%s' (limit=%d)", query, limit)
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.post(
-                    f"{api_url or FIRECRAWL_API_URL}/v2/search",
-                    json={"query": query, "limit": max(1, int(limit))},
-                    headers=headers,
-                )
-            if response.status_code >= 400:
-                detail = (response.text or "").strip() or f"HTTP {response.status_code}"
-                return {"success": False, "error": f"Firecrawl search failed: {detail}"}
-            return {
-                "success": True,
-                "data": {"web": normalize_search_results(response.json())},
-            }
+            data = await _post(api_url or FIRECRAWL_API_URL, headers, "search",
+                               {"query": query, "limit": max(1, int(limit))}, sdk=bool(api_key or api_url))
+            return {"success": True, "data": {"web": normalize_search_results(data)}}
+
         except Exception as exc:  # noqa: BLE001 - surface as failure, as in Hermes
             logger.warning("Firecrawl search error: %s", exc)
             return {"success": False, "error": f"Firecrawl search failed: {exc}"}
@@ -286,17 +411,16 @@ class FirecrawlWebSearchProvider(WebSearchProvider):
         contract's ``content`` a null when ``format="markdown"`` was asked of a page that
         produced no markdown.
         """
-        api_key = provider_env("FIRECRAWL_API_KEY")
-        api_url = provider_env("FIRECRAWL_API_URL").rstrip("/")
+        api_key, api_url = await self.connection()
         # The same decision :meth:`search` makes, self-hosted guard included: a private
         # instance is a deliberate setup even without a key and must never be traded for
         # the public cloud endpoint. A vendor whose two capabilities disagree about which
         # tier they are on is the kind of bug nobody finds for months.
-        if not api_url and use_keyless("firecrawl", api_key):
+        if self.uses_keyless_ring():
             logger.info("Firecrawl keyless extract: %d URL(s)", len(urls))
             return await extract_with_failover("firecrawl", list(urls))
 
-        if not api_key and not api_url:
+        if not api_key and not api_url and not provider_selected("firecrawl"):
             # A configuration refusal rather than a raise: every URL failed for one
             # reason and each says so, and the dispatcher's all-entries-failed check
             # gives the batch the same one-shot rescue a raise would have.
@@ -310,105 +434,12 @@ class FirecrawlWebSearchProvider(WebSearchProvider):
                 for url in urls
             ]
 
-        if format == "markdown":
-            formats = ["markdown"]
-        elif format == "html":
-            formats = ["html"]
-        else:
-            formats = ["markdown", "html"]
-
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        endpoint = api_url or FIRECRAWL_API_URL
+        return await scrape_urls(api_url or FIRECRAWL_API_URL, headers, urls, format=format, sdk=bool(api_key or api_url))
 
-        logger.info("Firecrawl extract: %d URL(s) (formats=%s)", len(urls), formats)
-        results: list[dict[str, Any]] = []
-        for url in urls:
-            blocked = check_website_access(url)
-            if blocked:
-                logger.info(
-                    "Blocked web_extract for %s by rule %s",
-                    blocked["host"],
-                    blocked["rule"],
-                )
-                results.append(_blocked(url, blocked))
-                continue
-
-            try:
-                payload = await _scrape(endpoint, headers, url, formats)
-            except (TimeoutError, httpx.TimeoutException):
-                # Both spellings: ``asyncio.timeout`` raises the builtin, httpx raises its
-                # own, and neither is a subclass of the other.
-                logger.warning("Firecrawl scrape timed out for %s", url)
-                results.append(
-                    _failed(
-                        url,
-                        f"Scrape timed out after {_SCRAPE_TIMEOUT_SECONDS}s -- page may "
-                        "be too large or unresponsive. Try web_fetch instead.",
-                    )
-                )
-                continue
-            except Exception as exc:  # noqa: BLE001 - per-URL error entry, as in Hermes
-                logger.debug("Firecrawl scrape failed for %s: %s", url, exc)
-                results.append(_failed(url, str(exc)))
-                continue
-
-            metadata = payload.get("metadata")
-            metadata = metadata if isinstance(metadata, dict) else {}
-            title = str(metadata.get("title") or "")
-            final_url = str(metadata.get("sourceURL") or url)
-
-            try:
-                await vet_public_url(final_url)
-            except UnsafeUrlError as exc:
-                logger.info(
-                    "Blocked redirected web_extract for unsafe final URL: %s", final_url
-                )
-                results.append(
-                    _failed(
-                        url,
-                        # The gate's own reason, not a claim on top of it: it refuses a
-                        # metadata endpoint, a private answer and an unresolvable name
-                        # alike, and only one of those is "private network address".
-                        f"Blocked: Firecrawl reported reading {final_url}, refused by "
-                        f"the outbound URL check ({exc})",
-                        title=title,
-                        source_url=final_url,
-                    )
-                )
-                continue
-
-            final_blocked = check_website_access(final_url)
-            if final_blocked:
-                logger.info(
-                    "Blocked redirected web_extract for %s by rule %s",
-                    final_blocked["host"],
-                    final_blocked["rule"],
-                )
-                results.append(
-                    _blocked(url, final_blocked, title=title, source_url=final_url)
-                )
-                continue
-
-            markdown = str(payload.get("markdown") or "")
-            html = str(payload.get("html") or "")
-            if format == "markdown" or (format is None and markdown):
-                content = markdown
-            else:
-                content = html or markdown
-            results.append(
-                {
-                    "url": url,
-                    "title": title,
-                    "content": content,
-                    "raw_content": content,
-                    "metadata": {**metadata, "sourceURL": final_url, "title": title},
-                }
-            )
-        return results
-
-    def setup_hint(self) -> dict[str, Any]:
+    def get_setup_schema(self) -> dict[str, Any]:
         return {
             "name": "Firecrawl",
             "badge": "free - key optional",
@@ -426,3 +457,27 @@ class FirecrawlWebSearchProvider(WebSearchProvider):
                 },
             ],
         }
+
+
+class NousWebSearchProvider(FirecrawlWebSearchProvider):
+    """The same Firecrawl protocol, with an explicit managed credential/endpoint."""
+    name = property(lambda self: "nous")
+    display_name = property(lambda self: "Nous managed Firecrawl")
+
+    def is_available(self):
+        from misaka.core.web.gateway import available
+        return available()
+
+    def is_keyless_available(self):
+        return False
+
+    def uses_keyless_ring(self):
+        return False
+
+    async def connection(self):
+        from misaka.core.web.gateway import resolve
+        return await resolve("firecrawl")
+
+    def get_setup_schema(self):
+        return {"name": self.display_name, "badge": "managed", "env_vars": [],
+                "tag": "Run misaka web gateway-login, then select nous. Entitlement is checked on use."}

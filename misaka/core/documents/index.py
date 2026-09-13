@@ -24,9 +24,17 @@ from misaka.utils import atomic
 DOC_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 
 
-def corpus_root():
-    """Content-addressed PageIndex store shared by every project folder."""
-    return os.path.expanduser(os.environ.get("MISAKA_PAGEINDEX", "~/.misaka/pageindex"))
+def corpus_root(workspace=None):
+    """Project-local content-addressed store. Explicit workspace always wins over configuration."""
+    if workspace is None:
+        workspace = os.getcwd()
+        override = os.environ.get("MISAKA_PAGEINDEX")
+        if override:
+            return os.path.expanduser(override)
+    root = os.path.join(os.path.realpath(workspace), ".pageindex")
+    if not under(root, workspace):
+        raise ValueError("Document store resolves outside the workspace.")
+    return root
 
 
 def _real_directory(path, root):
@@ -55,7 +63,7 @@ def resolve_doc(doc_id, workspace=None):
     """Return one valid corpus directory, optionally owned by ``workspace``."""
     if not isinstance(doc_id, str) or not DOC_ID_RE.fullmatch(doc_id):
         return None
-    root = os.path.realpath(corpus_root())
+    root = os.path.realpath(corpus_root(workspace))
     ddir = os.path.join(root, doc_id)
     if not _real_directory(ddir, root):
         return None
@@ -109,15 +117,32 @@ def _pdf_text_layer(p):
             return _form_feed_pages(out.stdout)
     except (OSError, subprocess.SubprocessError):
         pass
+    # The pdfium fallback runs in a child process: a native fault inside the library on a
+    # malformed PDF (a double free, seen once on a downloaded broker report) then ends the
+    # child and the extraction reports no text, instead of taking the Sister's whole process
+    # -- her session, her card -- down with SIGABRT.
     try:
-        import pypdfium2 as pdfium
-        pdf = pdfium.PdfDocument(p)
-        try:
-            return [page.get_textpage().get_text_bounded() for page in pdf]
-        finally:
-            pdf.close()
-    except Exception:  # noqa: BLE001
-        return []
+        out = subprocess.run([sys.executable, "-c", _PDFIUM_TEXT_CHILD, p], capture_output=True,
+                             text=True, timeout=300, check=False)
+        if out.returncode == 0 and out.stdout.strip():
+            pages = json.loads(out.stdout)
+            if isinstance(pages, list) and all(isinstance(page, str) for page in pages):
+                return pages
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    return []
+
+
+_PDFIUM_TEXT_CHILD = """
+import json, sys
+import pypdfium2 as pdfium
+pdf = pdfium.PdfDocument(sys.argv[1])
+try:
+    pages = [page.get_textpage().get_text_bounded() for page in pdf]
+finally:
+    pdf.close()
+json.dump(pages, sys.stdout)
+"""
 
 
 def _form_feed_pages(text):
@@ -179,7 +204,7 @@ def _ocr_pages(p, meta=None):
     if not shutil.which(OCR_BINARY):
         return None
     langs = os.environ.get("MISAKA_OCR_LANGS") or OCR_LANGS_DEFAULT
-    with tempfile.TemporaryDirectory(prefix="misaka-ocr-") as tmp:
+    with tempfile.TemporaryDirectory(prefix=".ocr-", dir=os.path.dirname(os.path.abspath(p))) as tmp:
         sidecar = os.path.join(tmp, "sidecar.txt")
         try:
             out = subprocess.run(
@@ -594,6 +619,97 @@ def _html_pages(p, chars=3000, meta=None):
     return _paginate(htmltext.readable(_read_text(p, meta))[0], chars)
 
 
+def _office_pages(p, chars=3000, meta=None):
+    """A workbook, deck or data file as pages, cut at its own boundaries.
+
+    The rendering itself is ``documents/office``'s and is shared with ``core/tools/read.py``
+    verbatim -- which is the point: what a model reads in the working directory is what it
+    later cites out of the corpus, so a quotation copied from one verifies against the
+    other. See that package's docstring.
+
+    Paging is two steps rather than ``_paginate`` alone. A sheet is the unit a citation can
+    name, so blocks are cut there first; only a block that is still oversized goes on to
+    ``_paginate``, and every page it produces after the first opens with the block's own
+    title and column header, or 400 lines of numbers arrive with nothing saying what they
+    are. The import is local because ``office`` is only needed for these suffixes and
+    openpyxl is not free to import.
+    """
+    from misaka.core.documents import office
+
+    fmt = office.format_of(p)
+    rendered = office.render(p, meta=meta)
+    _note(meta, "office_format", fmt)
+    pages = []
+    for block in office.blocks(rendered, fmt):
+        parts = _paginate(block, chars)
+        header = office.resume_context(block, fmt)
+        if header and len(parts) > 1:
+            parts = [parts[0], *[header + part for part in parts[1:]]]
+        pages.extend(parts)
+    return pages
+
+
+def _legacy_office_pages(p, chars=3000, meta=None):
+    """A .doc, .xls or .ppt, converted to its modern format first.
+
+    These are OLE compound files, not zip packages: nothing in the Office stack reads them
+    and there is no pure-Python option worth the name. LibreOffice converts them, and when
+    it is absent the refusal says so with the command that fixes it -- a model told only
+    "cannot index .doc" hands the same file back.
+
+    ``.xls`` has one fallback that the other two do not: ``xlrd`` still reads the old
+    BIFF format, giving values without formulas or styling. Worse than a conversion, much
+    better than a refusal.
+    """
+    from misaka.core.documents.office import soffice
+
+    suffix = os.path.splitext(p)[1].lower()
+    if soffice.binary() is not None:
+        with tempfile.TemporaryDirectory(prefix=".convert-", dir=os.path.dirname(os.path.abspath(p))) as staging:
+            converted = soffice.convert(p, soffice.LEGACY[suffix], into=staging, meta=meta)
+            if converted is not None:
+                _note(meta, "converted_from", suffix)
+                return _office_pages(converted, chars, meta)
+    if suffix == ".xls":
+        pages = _xls_pages(p, chars, meta)
+        if pages is not None:
+            return pages
+    detail = meta.get("soffice_error") if meta else None
+    raise ValueError(
+        f"Cannot index {suffix}: {soffice.INSTALL_HINT} to convert legacy Office files, "
+        f"or save it as .{soffice.LEGACY[suffix]}."
+        + (f" (LibreOffice failed: {detail})" if detail else ""))
+
+
+def _xls_pages(p, chars, meta):
+    """A pre-2007 workbook through ``xlrd``, or ``None`` when that cannot read it either.
+
+    Values only: BIFF keeps formulas in a form xlrd does not evaluate and the styling is
+    not worth reconstructing. The rows go through the same relational rendering a csv
+    takes, so a quotation of a row verifies the way every other one in this corpus does.
+    """
+    try:
+        import xlrd
+    except ImportError:                                             # pragma: no cover
+        return None
+    try:
+        book = xlrd.open_workbook(p)
+    except Exception as error:              # noqa: BLE001 - xlrd raises its own hierarchy
+        _note(meta, "xlrd_error", str(error)[:200])
+        return None
+    from misaka.core.documents.office import xlsx as renderer
+
+    _note(meta, "office_format", "xls")
+    pages = []
+    for sheet in book.sheets():
+        rows = [[sheet.cell_value(r, c) for c in range(sheet.ncols)]
+                for r in range(sheet.nrows)]
+        if not rows:
+            continue
+        pages.extend(_paginate(renderer.render_rows(sheet.name, rows), chars))
+    return pages or None
+
+
 # -- EPUB ---------------------------------------------------------------------------------------
 #
 # An EPUB is a zip holding XHTML chapters plus a package document that says which of them the
@@ -785,8 +901,17 @@ _EXTRACTORS = {
     ".pdf": _pdf_pages,
     ".epub": _epub_pages,
     ".html": _html_pages, ".htm": _html_pages, ".xhtml": _html_pages,
+    ".xlsx": _office_pages, ".xlsm": _office_pages,
+    ".docx": _office_pages, ".docm": _office_pages,
+    ".pptx": _office_pages, ".pptm": _office_pages,
+    ".doc": _legacy_office_pages, ".xls": _legacy_office_pages,
+    ".ppt": _legacy_office_pages,
+    # A csv moved off ``_text_pages``: read as running text it is a wall of commas with no
+    # header row named and no column typed, and the corpus can say all three. It stays a
+    # swept suffix, so ``doc scan`` picks up a folder of data files as it always did.
+    ".csv": _office_pages, ".tsv": _office_pages,
     ".md": _text_pages, ".markdown": _text_pages, ".txt": _text_pages,
-    ".bib": _text_pages, ".csv": _text_pages, ".tsv": _text_pages, ".rst": _text_pages,
+    ".bib": _text_pages, ".rst": _text_pages,
     ".tex": _text_pages,
     ".json": _text_pages, ".jsonl": _text_pages, ".ndjson": _text_pages, ".log": _text_pages,
     ".yaml": _text_pages, ".yml": _text_pages,
@@ -798,7 +923,11 @@ _EXTRACTORS = {
 # working tree is full of package.json, config.yml and run.log that nobody meant as materials.
 # Named one by one they are read; swept up by a net they are noise, and download_file indexes
 # arrivals by this set too. Everything else in the table is document-shaped enough for both.
-_NOT_SWEPT = frozenset({".json", ".jsonl", ".ndjson", ".log", ".yaml", ".yml"})
+# The legacy three join them for a different reason: reading one costs a LibreOffice
+# process, so a folder walk that happens to pass a directory of 1990s attachments would
+# spend minutes converting files nobody asked for. Named one by one they are read.
+_NOT_SWEPT = frozenset({".json", ".jsonl", ".ndjson", ".log", ".yaml", ".yml",
+                        ".doc", ".xls", ".ppt"})
 SCAN_SUFFIXES = frozenset(_EXTRACTORS) - _NOT_SWEPT
 
 
@@ -822,10 +951,13 @@ def extract_pages(p, meta=None):
 
 
 def source_title(p):
-    """The title a document carries inside itself (EPUB ``dc:title``, HTML ``<title>``), or None.
+    """The title a document carries inside itself (EPUB/Word ``dc:title``, HTML ``<title>``,
+    a deck's first slide title), or None.
 
     Preferred over the file name, which for a downloaded book is whatever the URL ended in.
     """
+    from misaka.core.documents import office
+
     ext = os.path.splitext(p)[1].lower()
     try:
         if ext == ".epub":
@@ -833,6 +965,9 @@ def source_title(p):
                 title = _epub_spine(archive)[0]
         elif _EXTRACTORS.get(ext) is _html_pages:
             title = htmltext.readable(_read_text(p))[1]
+        elif office.format_of(p) in office.TITLE_OF:
+            # A .docx carries ``dc:title`` and a .pptx carries its first slide's title.
+            title = office.TITLE_OF[office.format_of(p)](p)
         else:
             return None
     except (ValueError, OSError, zipfile.BadZipFile):
@@ -1062,7 +1197,7 @@ def _link(ddir, p, task_id):
     return int(m.get("pages", 0))
 
 
-def ingest(p, title=None, with_tree=True, task_id=None):
+def ingest(p, title=None, with_tree=True, task_id=None, workspace=None):
     """Index a file under its content hash and return ``(doc_id, page_count)``.
 
     Re-ingesting a known document links the new ``task_id`` and backfills an outline the first
@@ -1070,11 +1205,13 @@ def ingest(p, title=None, with_tree=True, task_id=None):
     formats it does read.
     """
     p = os.path.abspath(os.path.expanduser(p))
+    if workspace is not None and not under(p, workspace):
+        raise ValueError("Document source resolves outside the workspace.")
     _extractor(p)          # refuse an unreadable format before hashing, and before extracting
     sha = sha256_file(p)
     doc_id = sha[:12]
-    ddir = os.path.join(corpus_root(), doc_id)
-    existing = resolve_doc(doc_id)
+    ddir = os.path.join(corpus_root(workspace), doc_id)
+    existing = resolve_doc(doc_id, workspace=workspace)
     if existing:
         if (_read_meta_at(existing) or {}).get("sha256") != sha:
             raise ValueError(f"Document ID collision: {doc_id}")
@@ -1100,9 +1237,11 @@ def ingest(p, title=None, with_tree=True, task_id=None):
                 # Settled: this document has no outline to find. A missing extra or a failed
                 # parse is not settled -- installing the extra is how a corpus gets repaired,
                 # so those keep asking.
-                meta["tree_attempted_version"] = TREE_ATTEMPT_VERSION
-                atomic.write_text(os.path.join(existing, "meta.json"),
-                                  json.dumps(meta, ensure_ascii=False, indent=1))
+                with _meta_lock(existing):
+                    meta = _read_meta_at(existing) or {}
+                    meta["tree_attempted_version"] = TREE_ATTEMPT_VERSION
+                    atomic.write_text(os.path.join(existing, "meta.json"),
+                                      json.dumps(meta, ensure_ascii=False, indent=1))
         return doc_id, count
     if os.path.lexists(ddir):
         raise ValueError(f"Invalid or colliding corpus entry: {doc_id}")
@@ -1115,7 +1254,7 @@ def ingest(p, title=None, with_tree=True, task_id=None):
     tree = _build_tree_with_reason(p, tree_reason) if tree_wanted else None
     # Build the document beside its final place and move it in with one rename: the corpus holds
     # a complete document or none, never a half-written directory that reads as "already indexed".
-    _sweep_stale_stages(corpus_root())      # whatever a killed ingest left behind, before adding ours
+    _sweep_stale_stages(corpus_root(workspace))      # whatever a killed ingest left behind, before adding ours
     stage = f"{ddir}{STAGE_SUFFIX}{os.getpid()}-{threading.get_ident()}"
     shutil.rmtree(stage, ignore_errors=True)
     try:
@@ -1142,7 +1281,7 @@ def ingest(p, title=None, with_tree=True, task_id=None):
         try:
             os.replace(stage, ddir)
         except OSError:
-            existing = resolve_doc(doc_id)
+            existing = resolve_doc(doc_id, workspace=workspace)
             if not existing or (_read_meta_at(existing) or {}).get("sha256") != sha:
                 # Not a concurrent ingest of the same content.
                 raise
@@ -1154,7 +1293,7 @@ def ingest(p, title=None, with_tree=True, task_id=None):
     return doc_id, len(pages)
 
 
-def scan(directory, task_id=None, with_tree=True):
+def scan(directory, task_id=None, with_tree=True, workspace=None):
     """Ingest every file under ``directory`` the corpus can read (``SCAN_SUFFIXES``), skipping
     hidden entries.
 
@@ -1168,7 +1307,7 @@ def scan(directory, task_id=None, with_tree=True):
                 continue
             p = os.path.join(base, fn)
             try:
-                ingested.append((ingest(p, task_id=task_id, with_tree=with_tree)[0], p))
+                ingested.append((ingest(p, task_id=task_id, with_tree=with_tree, workspace=workspace)[0], p))
             except (ValueError, OSError) as e:
                 skipped.append((p, str(e)))
     return ingested, skipped
@@ -1176,7 +1315,7 @@ def scan(directory, task_id=None, with_tree=True):
 
 def docs(workspace=None):
     """List indexed documents oldest first; ``workspace`` keeps only those whose source file lives under that folder."""
-    root, out = corpus_root(), []
+    root, out = corpus_root(workspace), []
     for name in (os.listdir(root) if os.path.isdir(root) else []):
         ddir = resolve_doc(name, workspace=workspace)
         if not ddir:
@@ -1490,7 +1629,12 @@ def structure(doc_id, workspace=None):
     # missing rides along with it. "(pages)" on its own reads as a property of the document
     # rather than as "structure extraction never ran on this machine".
     mode = "pages only, no structure tree"
-    if not pageindex_available():
+    # Outlines come from PageIndex, which reads PDFs. A workbook or a deck has no outline
+    # to miss, so naming the pageindex extra there sends a user to install something that
+    # would change nothing -- and leaves them believing their corpus is broken.
+    if os.path.splitext(m.get("orig_path") or "")[1].lower() != ".pdf":
+        mode += " (this format has no outline)"
+    elif not pageindex_available():
         from .pageindex import INSTALL_HINT
         mode += (f": the pageindex extra is not installed. {INSTALL_HINT}, "
                  "then re-run `misaka doc add <file>` to build it")

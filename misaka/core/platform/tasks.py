@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import sqlite3
@@ -12,6 +13,8 @@ import time
 from contextlib import contextmanager, nullcontext
 from functools import wraps
 from pathlib import Path
+
+from misaka.utils.redact import redact, redact_payload
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +33,12 @@ CREATE TABLE IF NOT EXISTS tasks (
  model TEXT,
  status TEXT NOT NULL DEFAULT 'ready',
  priority INTEGER NOT NULL DEFAULT 0,
- timeout_seconds INTEGER NOT NULL DEFAULT 900,
  workspace TEXT NOT NULL,
  output_dir TEXT,
  origin_session TEXT, -- id of the Last Order conversation that created the card
  agent_id TEXT,
  session_file TEXT,
+ session_dir TEXT, -- stable storage address; survives runtime resets and workspace changes
  claim_lock TEXT,
  claim_expires INTEGER,
  worker_pid INTEGER,
@@ -56,6 +59,8 @@ CREATE TABLE IF NOT EXISTS tasks (
  blocked_at INTEGER,
  heartbeat_at INTEGER,
  next_attempt_at INTEGER,
+ consecutive_failures INTEGER NOT NULL DEFAULT 0, -- failed attempts in a row; a settled or resumed card starts over
+ last_failure_error TEXT, -- why the last attempt failed, shown to the next one
  created_at INTEGER NOT NULL,
  started_at INTEGER,
  completed_at INTEGER
@@ -131,9 +136,25 @@ CREATE INDEX IF NOT EXISTS idx_task_runs_status ON task_runs(status);
 -- its next open -- IF NOT EXISTS is the migration.
 CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id, kind, id);
 """
-RECLAIM_CAP = 2
-TASK_SCHEMA_VERSION = 5
+TASK_SCHEMA_VERSION = 8
 MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
+# One failure model for every way an attempt can end badly -- a crash, a timeout, a provider
+# error, a turn that ended without settling the card. Each counts against the same limit and the
+# card returns to ready with the error kept for the next attempt; at the limit it stays failed.
+# A rate limit is the one exception: it only defers the card and counts nothing.
+FAILURE_LIMIT = 3
+# A retry cannot help these: no credentials or credit, or a board that names an assignee the
+# installation does not have.
+TERMINAL_FAILURE_KINDS = frozenset({"auth_or_quota", "configuration"})
+RETRY_BASE_SECONDS = 30
+RETRY_CAP_SECONDS = 900
+# A running card whose worker is alive but has shown no progress for this long is wedged.
+# Progress is what the worker's own session stamps (``heartbeat`` with ``progress=True``);
+# a supervisor renewing the lease proves only that a process exists.
+HEARTBEAT_STALE_SECONDS = 3600
+UNSETTLED_REASON = ("the session ended without settling the card: no summary was produced, "
+                    "so nothing was submitted")
+ABANDONED_REASON = "worker exited before the card lifecycle settled"
 
 
 class _SerializedCursor(sqlite3.Cursor):
@@ -260,11 +281,22 @@ def _migrate(con):
         "review_identity": "TEXT",
         "output_dir": "TEXT",
         "origin_session": "TEXT",
+        "session_dir": "TEXT",
+        "consecutive_failures": "INTEGER NOT NULL DEFAULT 0",
+        "last_failure_error": "TEXT",
     }
     existing = _columns(con, "tasks")
     for name, definition in task_columns.items():
         if name not in existing:
             con.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")
+    if "session_dir" not in existing:
+        # Preserve physical storage in place exactly once. New cards allocate by immutable
+        # card id; runtime code never searches old layouts or derives storage from a worktree.
+        from misaka.config import sessions
+        for row in con.execute("SELECT id,session_file FROM tasks"):
+            directory = (os.path.dirname(row["session_file"]) if row["session_file"] else
+                         sessions.card_session_dir(row))
+            con.execute("UPDATE tasks SET session_dir=? WHERE id=?", (directory, row["id"]))
     # Phases 2-3 moved comments, attachments and links into the card file / repo. Nothing copies
     # the old rows over, so a table that still holds any is renamed, not dropped: the data stays
     # reachable until someone migrates it by hand.
@@ -287,28 +319,6 @@ def _migrate(con):
     if "run_id" not in _columns(con, "events"):
         con.execute("ALTER TABLE events ADD COLUMN run_id TEXT")
     con.execute("CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id, id)")
-    # Older builds recorded a blocked report as a ``blocked`` event but left the
-    # task row at failed.  Promote those rows now that a real blocked state exists.
-    legacy = con.execute(
-        "SELECT t.id,t.generation,e.payload,e.created_at FROM tasks t JOIN events e ON e.id=("
-        " SELECT MAX(id) FROM events WHERE task_id=t.id AND generation=t.generation"
-        ") WHERE t.status='failed' AND e.kind='blocked'"
-    ).fetchall()
-    for row in legacy:
-        try:
-            payload = json.loads(row["payload"] or "{}")
-        except (TypeError, ValueError):
-            payload = {}
-        reason = str(payload.get("reason") or 'Waiting for external input')
-        if reason.startswith("blocked:"):
-            reason = reason[len("blocked:"):].strip()
-        fingerprint = hashlib.sha256(f"needs_input\0{reason}".encode()).hexdigest()[:16]
-        con.execute(
-            "UPDATE tasks SET status='blocked',block_kind='needs_input',block_reason=?,"
-            "block_fingerprint=?,block_recurrence=MAX(block_recurrence,1),blocked_at=? "
-            "WHERE id=? AND status='failed' AND generation=?",
-            (reason, fingerprint, row["created_at"], row["id"], row["generation"]),
-        )
     con.execute(
         "INSERT OR IGNORE INTO schema_migrations(component,version,applied_at) VALUES(?,?,?)",
         ("tasks", TASK_SCHEMA_VERSION, int(time.time())),
@@ -386,20 +396,6 @@ def canonical_workspace(path=None):
     return str(Path(path or os.getcwd()).expanduser().resolve())
 
 
-def set_aside_report(task_id):
-    """Set aside the previous report.json: a new attempt must submit fresh proof, never reuse stale."""
-    from pathlib import Path
-    root = Path(task_state_dir(task_id))
-    current, previous = root / "report.json", root / ".previous-report.json"
-    if not current.is_file():
-        return
-    try:
-        previous.unlink(missing_ok=True)
-        current.replace(previous)
-    except OSError:
-        current.unlink(missing_ok=True)
-
-
 def task_state_dir(task_id):
     from misaka.config import CFG
     return str(Path(CFG.get("tasks_root", "~/.misaka/tasks")).expanduser() / str(task_id))
@@ -419,7 +415,7 @@ def _card_dispatchable(con, task_id):
 
 
 @_serialized
-def create_task(con, title, body="", assignee="", model=None, priority=0, timeout_seconds=900,
+def create_task(con, title, body="", assignee="", model=None, priority=0,
                 executor=None, reviewer=None, workspace=None, output_dir=None,
                 origin_session=None):
     """Insert a card, record its ``created`` event, and return the new id.
@@ -433,17 +429,26 @@ def create_task(con, title, body="", assignee="", model=None, priority=0, timeou
         raise ValueError("The reviewer must be different from the assignee.")
     if not workspace:
         raise ValueError("A task card needs a workspace folder.")
-    tid = "t_" + secrets.token_hex(3)
     workspace = canonical_workspace(workspace)
     output_dir = canonical_workspace(output_dir) if output_dir else None
-    con.execute(
-        "INSERT INTO tasks (id,title,body,assignee,reviewer,executor,model,priority,"
-        "timeout_seconds,workspace,output_dir,origin_session,created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (tid, title, body, assignee, reviewer, json.dumps(executor) if executor else None,
-         model, priority, timeout_seconds, workspace, output_dir, origin_session or None,
-         int(time.time())),
-    )
+    # Three bytes of id keep card names short enough to say aloud; a board of a few thousand
+    # cards will see the odd collision, which costs a fresh draw, never a failed create.
+    for draw in range(3):
+        tid = "t_" + secrets.token_hex(3)
+        try:
+            con.execute(
+                "INSERT INTO tasks (id,title,body,assignee,reviewer,executor,model,priority,"
+                "workspace,output_dir,origin_session,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (tid, title, body, assignee, reviewer, json.dumps(executor) if executor else None,
+                 model, priority, workspace, output_dir, origin_session or None,
+                 int(time.time())),
+            )
+        except sqlite3.IntegrityError:
+            if draw == 2:
+                raise
+            continue
+        break
     add_event(con, tid, "created", {"title": title, "assignee": assignee,
                                     "reviewer": reviewer,
                                     "workspace": workspace, "executor": executor})
@@ -467,9 +472,14 @@ def add_event(
     owner-fenced event additionally requires the still-live running lease, so
     an expired worker cannot publish output after an orphan takeover in the
     same generation.
+
+    The ledger is kept for good, so whatever a tool echoed into a summary, a note or a
+    failure message is masked here, at the one door every event goes through.
     """
     if isinstance(payload, (dict, list)):
-        payload = json.dumps(payload, ensure_ascii=False)
+        payload = json.dumps(redact_payload(payload), ensure_ascii=False)
+    elif isinstance(payload, str):
+        payload = redact(payload)
     now = int(time.time())
     if run_id is None:
         row = con.execute("SELECT current_run_id FROM tasks WHERE id=?", (task_id,)).fetchone()
@@ -564,6 +574,13 @@ def _start_run(
     return run_id
 
 
+def _clear_failures(con, task_id):
+    """A settled, unblocked or resumed card starts its failure budget over."""
+    con.execute(
+        "UPDATE tasks SET consecutive_failures=0,last_failure_error=NULL WHERE id=?", (task_id,)
+    )
+
+
 def _finish_current_run(
     con,
     task_id,
@@ -580,7 +597,7 @@ def _finish_current_run(
         "failure_kind=COALESCE(?,failure_kind),"
         "failure_fingerprint=COALESCE(?,failure_fingerprint),summary=COALESCE(?,summary) "
         "WHERE id=(SELECT current_run_id FROM tasks WHERE id=?) AND status='running'",
-        (status, now, exit_code, failure_kind, failure_fingerprint, summary, task_id),
+        (status, now, exit_code, failure_kind, failure_fingerprint, redact(summary), task_id),
     )
 
 
@@ -592,12 +609,13 @@ def _note_refusal(task_id, reason):
 
 
 def claim_refusal(task_id):
-    """Why the last ``claim`` of this card said no, when it was an admission limit.
+    """Why the last ``claim`` of this card said no, when the reason is worth telling.
 
     ``claim`` answers a bare False for every reason -- taken by another dispatcher, wrong
-    generation, a cooldown, a full host, a Sister at her cap -- and its callers reported all
-    of them as "claimed by another dispatcher". The two admission limits are the ones a
-    person can do something about, so they are kept here for the message. Cleared on read.
+    generation, a backoff, a full host, a Sister at her cap -- and its callers reported all
+    of them as "claimed by another dispatcher". The admission limits and a retry backoff are
+    the ones a person can do something about, so they are kept here for the message.
+    Cleared on read.
     """
     return _LAST_REFUSAL.pop(str(task_id), None)
 
@@ -624,20 +642,19 @@ def claim(
         if row is None or (generation is not None and int(row["generation"]) != int(generation)):
             return False
         if row["next_attempt_at"] is not None and int(row["next_attempt_at"]) > now:
+            _note_refusal(task_id, f"Card {task_id} is waiting out a retry backoff for another "
+                                   f"{int(row['next_attempt_at']) - now} s; it will be ready then")
             return False
+        if host_cap is not None or assignee_cap is not None:
+            from misaka.core.platform import admission
+            occupied = admission.occupied(con)
         if host_cap is not None:
-            running = con.execute(
-                "SELECT COUNT(*) FROM tasks WHERE status='running' AND claim_lock IS NOT NULL"
-            ).fetchone()[0]
+            running = len(occupied)
             if running >= max(0, int(host_cap)):
                 _note_refusal(task_id, f"{running} cards are running on this host (limit {int(host_cap)}); waiting for a slot")
                 return False
         if assignee_cap is not None:
-            hers = con.execute(
-                "SELECT COUNT(*) FROM tasks WHERE status='running' AND claim_lock IS NOT NULL "
-                "AND assignee=?",
-                (row["assignee"],),
-            ).fetchone()[0]
+            hers = sum(assignee == row["assignee"] for assignee in occupied.values())
             if hers >= max(0, int(assignee_cap)):
                 _note_refusal(task_id, f"Sister {row['assignee']} is already running {hers} cards (limit {int(assignee_cap)}); waiting for a slot")
                 return False
@@ -651,7 +668,6 @@ def claim(
         if cur.rowcount != 1:
             return False
         _start_run(con, task_id, actual_generation, "worker", lock, pid, worker_identity)
-    set_aside_report(task_id)   # a fresh attempt submits fresh proof, even inside the same generation
     return True
 
 
@@ -666,13 +682,13 @@ def insert_index_row(con, fields, body, *, workspace):
     the truth; this only re-derives the index and never overwrites an existing row."""
     cur = con.execute(
         "INSERT OR IGNORE INTO tasks (id,title,body,assignee,reviewer,executor,model,"
-        "priority,timeout_seconds,workspace,origin_session,status,generation,created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "priority,workspace,origin_session,status,generation,created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (str(fields.get("id")), str(fields.get("title") or ""), body,
          str(fields.get("assignee") or ""), fields.get("reviewer"),
          json.dumps(fields["executor"]) if fields.get("executor") else None,
          fields.get("model"), int(fields.get("priority") or 0),
-         int(fields.get("timeout_seconds") or 900), canonical_workspace(workspace),
+         canonical_workspace(workspace),
          fields.get("origin_session"), str(fields.get("status") or "ready"),
          max(1, int(fields.get("generation") or 1)),
          int(time.time())),
@@ -803,11 +819,35 @@ def fair_ready(con, *, limit=None, lane="workers", advance=True, now=None, works
 
 @_serialized
 def link_tasks(con, parent_id, child_id) -> bool:
-    """Make ``child`` wait for ``parent``. The edge lives on the child's card file
-    (frontmatter ``needs``); same project only. Rejects self-links, cycles, children already
-    moving, and links whose acyclicity cannot be checked because a card on the way up is
-    unreadable; holds the child at todo until every dependency is done. Re-posting an edge the
-    child's file already carries is a no-op (``False``) whatever the child is doing."""
+    return link_dependencies(con, [parent_id], child_id)
+
+
+@_serialized
+def link_dependencies(con, parents, child_id) -> bool:
+    """Validate every new edge before publishing the child's complete needs list."""
+    with _write_txn(con):
+        parents = list(dict.fromkeys(parents))
+        if not parents:
+            return False
+        needs = parent_ids(con, child_id, strict=True)
+        additions = [pid for pid in parents if pid not in needs]
+        if not additions:
+            return False
+        for parent_id in additions:
+            _validate_dependency(con, parent_id, child_id)
+        from misaka.core.platform import cards
+        child = get(con, child_id)
+        cards.set_fields(child["workspace"], child_id, needs=[*needs, *additions])
+        con.execute("UPDATE tasks SET status='todo' WHERE id=? AND status='ready'", (child_id,))
+        for parent_id in additions:
+            add_event(con, child_id, "dependency_linked", {"parent_id": parent_id})
+        promote_task(con, child_id)
+        _mirror_status(con, child_id)
+    return True
+
+
+def _validate_dependency(con, parent_id, child_id):
+    """Check one proposed edge without changing the card's published contract."""
     if parent_id == child_id:
         raise ValueError("A task cannot depend on itself.")
     parent, child = get(con, parent_id), get(con, child_id)
@@ -844,16 +884,6 @@ def link_tasks(con, parent_id, child_id) -> bool:
                     f"Dependency refused: {error} Its dependencies could decide whether this "
                     "link closes a cycle, so fix that card first."
                 ) from error
-    from misaka.core.platform import cards
-    cards.set_fields(child["workspace"], child_id, needs=[*needs, parent_id])
-    with _write_txn(con):
-        con.execute(
-            "UPDATE tasks SET status='todo' WHERE id=? AND status='ready'", (child_id,)
-        )
-        add_event(con, child_id, "dependency_linked", {"parent_id": parent_id})
-        promote_task(con, child_id)
-        _mirror_status(con, child_id)
-    return True
 
 
 def _mirror_status(con, task_id, *, commit=False):
@@ -1020,9 +1050,6 @@ def _invalidate_descendants(con, task_id):
             descendants,
         ).fetchall()]
         for child_id in changed:
-            # A new epoch: the old report carries the old generation and can never be accepted again,
-            # and it is set aside so a re-run submits fresh proof rather than finding stale proof.
-            set_aside_report(child_id)
             add_event(con, child_id, "dependency_invalidated", {"reopened_ancestor": task_id})
             _mirror_status(con, child_id)
     return changed
@@ -1038,39 +1065,41 @@ def set_workspace(con, task_id, workspace, generation=None, claim_lock=None):
     if claim_lock is not None:
         clauses.extend(["status='running'", "claim_lock=?", "claim_expires>=?"])
         values.extend([claim_lock, int(time.time())])
-    cur = con.execute(
-        f"UPDATE tasks SET workspace=? WHERE {' AND '.join(clauses)}",
-        tuple(values),
-    )
-    if cur.rowcount == 1:
-        con.execute(
-            "UPDATE task_runs SET workspace=? WHERE id=(SELECT current_run_id FROM tasks WHERE id=?)",
-            (workspace, task_id),
+    with _write_txn(con):
+        cur = con.execute(
+            f"UPDATE tasks SET workspace=? WHERE {' AND '.join(clauses)}",
+            tuple(values),
         )
-    return cur.rowcount == 1
+        if cur.rowcount == 1:
+            con.execute(
+                "UPDATE task_runs SET workspace=? WHERE id=(SELECT current_run_id FROM tasks WHERE id=?)",
+                (workspace, task_id),
+            )
+        return cur.rowcount == 1
 
 
 @_serialized
 def set_runtime(con, task_id, agent_id, session_file, generation=None, claim_lock=None):
     """Record the Sister's agent id and session file on the card so it can be addressed later."""
     clauses = ["id=?"]
-    values = [agent_id, session_file, task_id]
+    values = [agent_id, session_file, os.path.dirname(session_file) if session_file else None, task_id]
     if generation is not None:
         clauses.append("generation=?")
         values.append(generation)
     if claim_lock is not None:   # Same fence as set_workspace/set_pid: the lease must still be live.
         clauses.extend(["status='running'", "claim_lock=?", "claim_expires>=?"])
         values.extend([claim_lock, int(time.time())])
-    cur = con.execute(
-        f"UPDATE tasks SET agent_id=?, session_file=? WHERE {' AND '.join(clauses)}",
-        tuple(values),
-    )
-    if cur.rowcount == 1:
-        con.execute(
-            "UPDATE task_runs SET session_file=? WHERE id=(SELECT current_run_id FROM tasks WHERE id=?)",
-            (session_file, task_id),
+    with _write_txn(con):
+        cur = con.execute(
+            f"UPDATE tasks SET agent_id=?, session_file=?, session_dir=COALESCE(session_dir,?) WHERE {' AND '.join(clauses)}",
+            tuple(values),
         )
-    return cur.rowcount == 1
+        if cur.rowcount == 1:
+            con.execute(
+                "UPDATE task_runs SET session_file=? WHERE id=(SELECT current_run_id FROM tasks WHERE id=?)",
+                (session_file, task_id),
+            )
+        return cur.rowcount == 1
 
 
 @_serialized
@@ -1100,17 +1129,18 @@ def set_pid(con, task_id, pid, worker_identity=None, generation=None, claim_lock
     if claim_lock is not None:
         clauses.extend(["status='running'", "claim_lock=?", "claim_expires>=?"])
         values.extend([claim_lock, int(time.time())])
-    cur = con.execute(
-        f"UPDATE tasks SET worker_pid=?, worker_identity=? WHERE {' AND '.join(clauses)}",
-        tuple(values),
-    )
-    if cur.rowcount == 1:
-        con.execute(
-            "UPDATE task_runs SET pid=?,process_identity=? "
-            "WHERE id=(SELECT current_run_id FROM tasks WHERE id=?)",
-            (pid, worker_identity, task_id),
+    with _write_txn(con):
+        cur = con.execute(
+            f"UPDATE tasks SET worker_pid=?, worker_identity=? WHERE {' AND '.join(clauses)}",
+            tuple(values),
         )
-    return cur.rowcount == 1
+        if cur.rowcount == 1:
+            con.execute(
+                "UPDATE task_runs SET pid=?,process_identity=? "
+                "WHERE id=(SELECT current_run_id FROM tasks WHERE id=?)",
+                (pid, worker_identity, task_id),
+            )
+        return cur.rowcount == 1
 
 
 @_serialized
@@ -1162,6 +1192,7 @@ def _terminal_transition(
                 failure_fingerprint=failure_fingerprint, summary=summary,
             )
             if status == "done":
+                _clear_failures(con, task_id)
                 con.execute(
                     "UPDATE tasks SET block_kind=NULL,block_reason=NULL,block_fingerprint=NULL,"
                     "block_recurrence=0,blocked_at=NULL WHERE id=?",
@@ -1172,21 +1203,54 @@ def _terminal_transition(
         return cur.rowcount == 1
 
 
+# Ordered: the first kind whose pattern matches wins. Quota and billing markers go before the
+# rate-limit check because a provider reports an exhausted quota with the same 429 status.
+# Every marker is a word or phrase; a bare status code is only trusted where nothing else uses
+# that number, since the reason is often the tail of a crashed process's stderr.
+_FAILURE_KINDS = (
+    # Quota means an exhausted allowance, not a rate limit that mentions one: Gemini's 429
+    # reads "Resource has been exhausted (e.g. check quota)" and must stay retryable.
+    ("auth_or_quota", re.compile(
+        r"authentication|unauthori[sz]ed|permission[ _]error|permissiondeniederror"
+        r"|\b403 forbidden\b|invalid[ _-]?(?:api[ _-]?key|token)|api[ _-]?key"
+        r"|insufficient[ _-]?quota|quota exceeded|exceeded your (?:current )?quota"
+        r"|billing|payment required|credit balance|insufficient[ _-]?credit")),
+    ("rate_limit", re.compile(r"rate[ _-]?limit|too many requests|\b429\b")),
+    ("context_overflow", re.compile(
+        r"context[ _-]?(?:length|window)|maximum context|too many tokens|prompt is too long"
+        r"|input is too long|exceeds? the (?:context|token)")),
+    ("timeout", re.compile(r"time(?:d[ -]?| )?out|deadline exceeded")),
+    ("server_error", re.compile(
+        r"overloaded|internal server error|service unavailable|bad gateway|\b(?:500|502|503|529)\b")),
+    ("protocol_violation", re.compile(r"without settling|unparsable|bad schema|protocol")),
+    ("crash", re.compile(r"reclaim|crash|supervisor|exited with code|killed by signal|segfault")),
+)
+
+
 def classify_failure(reason):
     text = str(reason or "").casefold()
-    if "rate limit" in text or "429" in text:
-        return "rate_limit"
-    if any(marker in text for marker in ("quota", "authentication", "unauthorized", "forbidden")):
-        return "auth_or_quota"
-    if "timeout" in text or "timed out" in text:
-        return "timeout"
-    if any(marker in text for marker in ("no report.json", "unparsable", "bad schema", "protocol")):
-        return "protocol_violation"
-    if "verification" in text or "verify" in text or "review" in text:
-        return "verification_failure"
-    if "reclaim" in text or "crash" in text or "supervisor" in text:
-        return "crash"
+    for kind, pattern in _FAILURE_KINDS:
+        if pattern.search(text):
+            return kind
     return "failure"
+
+
+def retry_delay(kind, failures):
+    """Seconds to hold a card back after its ``failures``-th consecutive failure of ``kind``."""
+    if kind == "protocol_violation":
+        return 0          # the model ended its turn early; there is nothing external to wait for
+    return min(RETRY_CAP_SECONDS, RETRY_BASE_SECONDS * (2 ** max(0, int(failures) - 1)))
+
+
+def _owner_clauses(task_id, generation, claim_lock, now):
+    clauses, values = ["id=?"], [task_id]
+    if claim_lock is not None:
+        clauses.extend(["status='running'", "claim_lock=?", "claim_expires>=?"])
+        values.extend([claim_lock, now])
+    if generation is not None:
+        clauses.append("generation=?")
+        values.append(generation)
+    return " AND ".join(clauses), values
 
 
 @_serialized
@@ -1194,51 +1258,98 @@ def mark_failed(
     con, task_id, generation=None, claim_lock=None,
     *, failure_kind=None, reason=None,
 ):
+    """Record one failed attempt under the card's ownership fence.
+
+    A rate limit defers the card and counts nothing. Any other failure counts against
+    ``FAILURE_LIMIT``: below it the card returns to ready after a backoff, keeping the error for
+    the next attempt; at it, or for a kind a retry cannot fix, the card stays failed.
+    """
     if reason is None:
         raw = latest_payload(con, task_id, "failed", generation=generation)
         try:
             reason = json.loads(raw or "{}").get("reason")
         except (ValueError, AttributeError, TypeError):
             reason = raw
+    reason = redact(reason)        # kept as the next attempt's context and the run's summary
     kind = failure_kind or classify_failure(reason)
     fingerprint = (hashlib.sha256(str(reason).encode()).hexdigest()[:16]
                    if reason else None)
+    summary = str(reason)[:1000] if reason else None
+    now = int(time.time())
+    where, values = _owner_clauses(task_id, generation, claim_lock, now)
     if kind == "rate_limit":
-        now = int(time.time())
         previous = con.execute(
             "SELECT COUNT(*) FROM task_runs WHERE task_id=? AND failure_kind='rate_limit'",
             (task_id,),
         ).fetchone()[0]
-        delay = min(900, 30 * (2 ** min(5, int(previous))))
-        clauses, values = ["id=?"], [task_id]
-        if claim_lock is not None:
-            clauses.extend(["status='running'", "claim_lock=?", "claim_expires>=?"])
-            values.extend([claim_lock, now])
-        if generation is not None:
-            clauses.append("generation=?")
-            values.append(generation)
+        delay = min(RETRY_CAP_SECONDS, RETRY_BASE_SECONDS * (2 ** min(5, int(previous))))
         with _write_txn(con):
             cur = con.execute(
                 "UPDATE tasks SET status='ready',next_attempt_at=?,completed_at=NULL,"
                 "worker_pid=NULL,worker_identity=NULL,claim_lock=NULL,claim_expires=NULL "
-                f"WHERE {' AND '.join(clauses)}",
+                f"WHERE {where}",
                 (now + delay, *values),
             )
             if cur.rowcount == 1:
                 _finish_current_run(
                     con, task_id, "deferred", failure_kind=kind,
-                    failure_fingerprint=fingerprint,
-                    summary=str(reason)[:1000] if reason else None,
+                    failure_fingerprint=fingerprint, summary=summary,
                 )
                 add_event(con, task_id, "cooldown", {
                     "failure_kind": kind, "seconds": delay, "until": now + delay,
                 }, generation=generation)
                 _mirror_status(con, task_id)
             return cur.rowcount == 1
-    return _terminal_transition(
-        con, task_id, "failed", generation, claim_lock,
-        failure_kind=kind, failure_fingerprint=fingerprint,
-        summary=str(reason)[:1000] if reason else None,
+    row = con.execute("SELECT consecutive_failures FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if row is None:
+        return False
+    failures = int(row["consecutive_failures"]) + 1
+    error = summary or kind
+    tally = {"failure_kind": kind, "failures": failures, "limit": FAILURE_LIMIT, "reason": error[:500]}
+    if kind in TERMINAL_FAILURE_KINDS or failures >= FAILURE_LIMIT:
+        with _write_txn(con):
+            if not _terminal_transition(
+                con, task_id, "failed", generation, claim_lock,
+                failure_kind=kind, failure_fingerprint=fingerprint, summary=summary,
+            ):
+                return False
+            # The transition above matched the fence, so this row is ours to stamp.
+            con.execute(
+                "UPDATE tasks SET consecutive_failures=?,last_failure_error=? WHERE id=?",
+                (failures, error, task_id),
+            )
+            add_event(con, task_id, "gave_up", tally, generation=generation)
+        return True
+    delay = retry_delay(kind, failures)
+    with _write_txn(con):
+        cur = con.execute(
+            "UPDATE tasks SET status='ready',next_attempt_at=?,consecutive_failures=?,"
+            "last_failure_error=?,completed_at=NULL,worker_pid=NULL,worker_identity=NULL,"
+            "claim_lock=NULL,claim_expires=NULL,review_lock=NULL,review_expires=NULL,"
+            "review_pid=NULL,review_identity=NULL "
+            f"WHERE {where}",
+            (now + delay if delay else None, failures, error, *values),
+        )
+        if cur.rowcount == 1:
+            _finish_current_run(
+                con, task_id, "failed", failure_kind=kind,
+                failure_fingerprint=fingerprint, summary=summary,
+            )
+            add_event(con, task_id, "retry_scheduled",
+                      {**tally, "seconds": delay, "until": now + delay}, generation=generation)
+            _mirror_status(con, task_id)
+        return cur.rowcount == 1
+
+
+def mark_unsettled(con, task_id, *, generation, claim_lock, reason=UNSETTLED_REASON):
+    """The worker's session ended cleanly but never settled the card: a protocol violation.
+
+    Counted like any failure, so a model that keeps ending its turn without a summary runs out
+    of attempts instead of being dispatched forever.
+    """
+    return mark_failed(
+        con, task_id, generation=generation, claim_lock=claim_lock,
+        failure_kind="protocol_violation", reason=reason,
     )
 
 
@@ -1277,9 +1388,8 @@ def mark_stopped(con, task_id, generation=None, claim_lock=None):
 
 
 @_serialized
-def submit_task(con, task_id, generation=None, claim_lock=None):
-    """Submission is acceptance: a card with a valid report is done, unless it names a reviewer,
-    in which case it waits for that review first."""
+def submit_task(con, task_id, generation=None, claim_lock=None, *, commit=True):
+    """Accept a running card, or hand its submitted payload to the named reviewer."""
     now = int(time.time())
     clauses = ["id=?"]
     values = [now, task_id]
@@ -1300,7 +1410,7 @@ def submit_task(con, task_id, generation=None, claim_lock=None):
         )
         if cur.rowcount == 1:
             _settle_done(con, task_id)
-            _mirror_status(con, task_id, commit=True)
+            _mirror_status(con, task_id, commit=commit)
         return cur.rowcount == 1
 
 
@@ -1309,6 +1419,7 @@ def _settle_done(con, task_id):
     its dependents."""
     status = con.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()[0]
     _finish_current_run(con, task_id, "done" if status == "done" else "submitted")
+    _clear_failures(con, task_id)
     if status == "done":
         con.execute(
             "UPDATE tasks SET block_kind=NULL,block_reason=NULL,block_fingerprint=NULL,"
@@ -1378,6 +1489,7 @@ def approve_review(con, task_id, lock, *, generation=None, summary=None) -> bool
         )
         if cur.rowcount == 1:
             _finish_current_run(con, task_id, "approved", summary=summary)
+            _clear_failures(con, task_id)
             con.execute(
                 "UPDATE tasks SET block_kind=NULL,block_reason=NULL,block_fingerprint=NULL,"
                 "block_recurrence=0,blocked_at=NULL WHERE id=?", (task_id,),
@@ -1397,7 +1509,7 @@ def approve_review(con, task_id, lock, *, generation=None, summary=None) -> bool
 def request_review_changes(
     con, task_id, lock, feedback, *, generation=None
 ) -> bool:
-    feedback = str(feedback or "").strip()
+    feedback = redact(str(feedback or "").strip())
     if not feedback:
         raise ValueError("Review feedback cannot be empty.")
     now = int(time.time())
@@ -1501,58 +1613,50 @@ def reclaim_abandoned(
     worker_pid,
     worker_identity,
     claim_expires,
-    submitted=False,
-) -> bool:
+    reason=ABANDONED_REASON,
+) -> str | None:
     """Release a running card whose worker died, matching its exact ownership fence.
 
-    Unsubmitted work goes back to ready, or to failed once ``RECLAIM_CAP``
-    reclaims have been recorded; submitted work is accepted (or waits for its reviewer).
+    The dead attempt counts against ``FAILURE_LIMIT`` like any other failure: the card returns
+    to ready (``"ready"``) or, at the limit, stays failed (``"failed"``). ``None`` means the
+    fence no longer matched. Acceptance only happens through a generation-scoped ``submitted``
+    event.
     """
     ownership_where = (
         "WHERE id=? AND generation=? AND status='running' AND claim_lock IS ? "
         "AND worker_pid IS ? AND worker_identity IS ? AND claim_expires IS ?"
     )
     ownership = (task_id, generation, claim_lock, worker_pid, worker_identity, claim_expires)
-    if not submitted:
-        crashes = con.execute(
-            "SELECT COUNT(*) FROM events WHERE task_id=? AND kind='reclaimed'",
-            (task_id,),
-        ).fetchone()[0]
-        if crashes >= RECLAIM_CAP:
-            with _write_txn(con):
-                cur = con.execute(
-                    "UPDATE tasks SET status='failed', completed_at=?, claim_lock=NULL, "
-                    "claim_expires=NULL, worker_pid=NULL, worker_identity=NULL, "
-                    "review_lock=NULL,review_expires=NULL,review_pid=NULL,review_identity=NULL "
-                    + ownership_where,
-                    (int(time.time()), *ownership),
-                )
-                if cur.rowcount == 1:
-                    _finish_current_run(
-                        con, task_id, "failed", failure_kind="crash",
-                        failure_fingerprint="reclaim-cap",
-                    )
-                    add_event(con, task_id, "crash_gave_up",
-                              {"reclaimed_times": crashes, "cap": RECLAIM_CAP},
-                              generation=generation)
-                    _mirror_status(con, task_id, commit=True)
-                return False
-    reviewer = con.execute("SELECT reviewer FROM tasks WHERE id=?", (task_id,)).fetchone()
-    status = ("review" if reviewer and reviewer["reviewer"] else "done") if submitted else "ready"
     with _write_txn(con):
+        row = con.execute(
+            "SELECT consecutive_failures FROM tasks " + ownership_where, ownership
+        ).fetchone()
+        if row is None:
+            return None
+        failures = int(row["consecutive_failures"]) + 1
+        gave_up = failures >= FAILURE_LIMIT
+        status = "failed" if gave_up else "ready"
+        error = str(reason)[:1000]
         cur = con.execute(
-            f"UPDATE tasks SET status='{status}', completed_at=?, claim_lock=NULL, claim_expires=NULL, "
-            "worker_pid=NULL, worker_identity=NULL,review_lock=NULL,review_expires=NULL,"
-            "review_pid=NULL,review_identity=NULL " + ownership_where,
-            (int(time.time()) if status == "done" else None, *ownership),
+            f"UPDATE tasks SET status='{status}', completed_at=?, claim_lock=NULL, "
+            "claim_expires=NULL, worker_pid=NULL, worker_identity=NULL, "
+            "review_lock=NULL,review_expires=NULL,review_pid=NULL,review_identity=NULL, "
+            "consecutive_failures=?, last_failure_error=? " + ownership_where,
+            (int(time.time()) if gave_up else None, failures, error, *ownership),
         )
-        if cur.rowcount == 1:
-            if submitted:
-                _settle_done(con, task_id)
-            else:
-                _finish_current_run(con, task_id, "reclaimed", failure_kind="stale_reclaim")
-            _mirror_status(con, task_id, commit=True)
-        return cur.rowcount == 1
+        if cur.rowcount != 1:
+            return None
+        _finish_current_run(
+            con, task_id, "failed" if gave_up else "reclaimed",
+            failure_kind="crash", failure_fingerprint="reclaim", summary=error,
+        )
+        if gave_up:
+            add_event(con, task_id, "gave_up",
+                      {"failure_kind": "crash", "failures": failures, "limit": FAILURE_LIMIT,
+                       "reason": error[:500]},
+                      generation=generation)
+        _mirror_status(con, task_id, commit=True)
+        return status
 
 
 @_serialized
@@ -1593,6 +1697,7 @@ def claim_resume(
             "claim_lock=?, claim_expires=?, worker_pid=?, worker_identity=?, "
             "review_lock=NULL,review_expires=NULL,review_pid=NULL,review_identity=NULL,"
             "block_kind=NULL,block_reason=NULL,blocked_at=NULL,heartbeat_at=?,next_attempt_at=NULL, "
+            "consecutive_failures=0,last_failure_error=NULL, "
             "generation=generation+1 WHERE id=? "
             "AND status IN ('done','failed','stopped','blocked','triage')"
             + generation_clause + " RETURNING generation",
@@ -1603,7 +1708,12 @@ def claim_resume(
             return False
         _invalidate_descendants(con, task_id)     # work built on the old answer goes back to todo
         _start_run(con, task_id, int(row["generation"]), "worker", lock, pid, worker_identity)
-    set_aside_report(task_id)   # the reopened attempt starts with no report of its own
+        # Publish the new generation under the card lock before its worker can run.
+        # Submission's Git tail holds that lock without a SQLite transaction, so an
+        # old generation can never commit bytes written by this continuation.
+        from misaka.core.platform import cards
+        workspace = get(con, task_id)["workspace"]
+        cards.set_fields(workspace, task_id, generation=int(row["generation"]))
     return True
 
 
@@ -1639,7 +1749,8 @@ def reopen_task(
             "worker_pid=NULL,worker_identity=NULL,review_rounds=0,"
             "review_feedback=NULL,review_lock=NULL,review_expires=NULL,review_pid=NULL,"
             "review_identity=NULL,block_kind=NULL,"
-            "block_reason=NULL,blocked_at=NULL,heartbeat_at=NULL,next_attempt_at=NULL "
+            "block_reason=NULL,blocked_at=NULL,heartbeat_at=NULL,next_attempt_at=NULL,"
+            "consecutive_failures=0,last_failure_error=NULL "
             "WHERE id=? AND generation=?",
             (target_status, generation, task_id, row["generation"]),
         )
@@ -1668,10 +1779,11 @@ def block_task(
     *,
     generation=None,
     claim_lock=None,
+    message_id=None,
 ) -> str | None:
     """Record a block; the same cause reported twice in a row routes the card to triage."""
     kind = str(kind or "").strip()
-    reason = str(reason or "").strip()
+    reason = redact(str(reason or "").strip())
     if kind not in BLOCK_KINDS:
         raise ValueError("Block kind must be dependency, needs_input, capability, or transient.")
     if not reason:
@@ -1709,12 +1821,11 @@ def block_task(
             con, task_id, status, failure_kind=f"blocked:{kind}",
             failure_fingerprint=fingerprint, summary=reason,
         )
-        add_event(
-            con, task_id, status,
-            {"kind": kind, "reason": reason, "fingerprint": fingerprint,
-             "recurrence": recurrence},
-            generation=generation,
-        )
+        payload = {"kind": kind, "reason": reason, "fingerprint": fingerprint,
+                   "recurrence": recurrence}
+        if message_id is not None:
+            payload["message_id"] = int(message_id)
+        add_event(con, task_id, status, payload, generation=generation)
         _mirror_status(con, task_id, commit=True)
         return status
 
@@ -1730,7 +1841,8 @@ def unblock_task(con, task_id) -> bool:
     target = "todo" if parent_ids(con, task_id) else "ready"
     with _write_txn(con):
         cur = con.execute(
-            "UPDATE tasks SET status=?,block_kind=NULL,block_reason=NULL,blocked_at=NULL "
+            "UPDATE tasks SET status=?,block_kind=NULL,block_reason=NULL,blocked_at=NULL,"
+            "consecutive_failures=0,last_failure_error=NULL "
             "WHERE id=? AND status IN ('blocked','triage')",
             (target, task_id),
         )
@@ -1743,83 +1855,35 @@ def unblock_task(con, task_id) -> bool:
 
 
 @_serialized
-def block_abandoned(
-    con,
-    task_id,
-    kind,
-    reason,
-    *,
-    generation,
-    claim_lock,
-    worker_pid,
-    worker_identity,
-    claim_expires,
-) -> str | None:
-    """Apply a blocked report recovered from a dead worker, matching its exact ownership fence."""
-    if kind not in BLOCK_KINDS or not str(reason or "").strip():
-        raise ValueError("invalid abandoned block")
-    reason = str(reason).strip()
-    fingerprint = hashlib.sha256(f"{kind}\0{reason}".encode()).hexdigest()[:16]
-    row = get(con, task_id)
-    if row is None:
-        return None
-    recurrence = int(row["block_recurrence"] or 0) + 1 \
-        if row["block_fingerprint"] == fingerprint else 1
-    status = "triage" if recurrence >= 2 else "blocked"
-    with _write_txn(con):
-        cur = con.execute(
-            "UPDATE tasks SET status=?,block_kind=?,block_reason=?,block_fingerprint=?,"
-            "block_recurrence=?,blocked_at=?,claim_lock=NULL,claim_expires=NULL,"
-            "worker_pid=NULL,worker_identity=NULL,review_lock=NULL,review_expires=NULL,"
-            "review_pid=NULL,review_identity=NULL WHERE id=? AND generation=? "
-            "AND status='running' AND claim_lock IS ? AND worker_pid IS ? "
-            "AND worker_identity IS ? AND claim_expires IS ?",
-            (status, kind, reason, fingerprint, recurrence, int(time.time()), task_id,
-             generation, claim_lock, worker_pid, worker_identity, claim_expires),
-        )
-        if cur.rowcount != 1:
-            return None
-        _finish_current_run(
-            con, task_id, status, failure_kind=f"blocked:{kind}",
-            failure_fingerprint=fingerprint, summary=reason,
-        )
-        add_event(
-            con, task_id, status,
-            {"kind": kind, "reason": reason, "fingerprint": fingerprint,
-             "recurrence": recurrence, "reconciled": True},
-            generation=generation,
-        )
-        _mirror_status(con, task_id, commit=True)
-        return status
+def heartbeat(con, task_id, lock, *, generation=None, ttl_seconds=1800, progress=True) -> bool:
+    """Renew whichever lease (worker or reviewer) ``lock`` holds.
 
-
-
-
-
-
-
-
-@_serialized
-def heartbeat(con, task_id, lock, *, generation=None, ttl_seconds=1800) -> bool:
-    """Renew whichever lease (worker or reviewer) ``lock`` holds and stamp the heartbeat."""
+    With ``progress`` the card's ``heartbeat_at`` is stamped too: the worker's own session
+    calls it on activity, so the stamp means the model is getting somewhere. A supervisor
+    that only keeps a lease alive renews with ``progress=False``, so a wedged worker still
+    reads as stale for ``HEARTBEAT_STALE_SECONDS``.
+    """
     now = int(time.time())
+    stamp = ",heartbeat_at=?" if progress else ""
+    stamped = [now] if progress else []
     generation_clause = " AND generation=?" if generation is not None else ""
     suffix = [generation] if generation is not None else []
-    cur = con.execute(
-        "UPDATE tasks SET claim_expires=?,heartbeat_at=? WHERE id=? AND status='running' "
-        "AND claim_lock=?" + generation_clause,
-        (now + max(60, int(ttl_seconds)), now, task_id, lock, *suffix),
-    )
-    if cur.rowcount != 1:
+    with _write_txn(con):
         cur = con.execute(
-            "UPDATE tasks SET review_expires=?,heartbeat_at=? WHERE id=? "
-            "AND status='review' AND review_lock=?" + generation_clause,
-            (now + max(60, int(ttl_seconds)), now, task_id, lock, *suffix),
+            f"UPDATE tasks SET claim_expires=?{stamp} WHERE id=? AND status='running' "
+            "AND claim_lock=?" + generation_clause,
+            (now + max(60, int(ttl_seconds)), *stamped, task_id, lock, *suffix),
         )
-    if cur.rowcount == 1:
-        con.execute(
-            "UPDATE task_runs SET heartbeat_at=? "
-            "WHERE id=(SELECT current_run_id FROM tasks WHERE id=?) AND status='running'",
-            (now, task_id),
-        )
-    return cur.rowcount == 1
+        if cur.rowcount != 1:
+            cur = con.execute(
+                f"UPDATE tasks SET review_expires=?{stamp} WHERE id=? "
+                "AND status='review' AND review_lock=?" + generation_clause,
+                (now + max(60, int(ttl_seconds)), *stamped, task_id, lock, *suffix),
+            )
+        if cur.rowcount == 1 and progress:
+            con.execute(
+                "UPDATE task_runs SET heartbeat_at=? "
+                "WHERE id=(SELECT current_run_id FROM tasks WHERE id=?) AND status='running'",
+                (now, task_id),
+            )
+        return cur.rowcount == 1

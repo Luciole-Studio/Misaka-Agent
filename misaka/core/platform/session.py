@@ -90,7 +90,7 @@ def run_coro(coro):
 
 
 async def open_session(flags, cwd, assembly=None):
-    """Open a session and return ``(runtime, session, error)``."""
+    """Open and bind a headless session; return ``(runtime, session, error)``."""
     from misaka.cli.args import parse_args
     from misaka.cli.engine import create_runtime_factory, resolve_cli_paths
     from misaka.config import get_agent_dir
@@ -133,6 +133,12 @@ async def open_session(flags, cwd, assembly=None):
         return runtime, None, "; ".join(hard)
     if runtime.session.model is None:
         return runtime, None, "No model is available; check provider, model, and credentials."
+    try:
+        # Both one-shot sessions and persisted subagent children need the same
+        # startup hooks (inbox, subagent registry and dynamic extension tools).
+        await runtime.session.bindExtensions({"mode": "json" if parsed.mode == "json" else "print"})
+    except Exception as error:  # noqa: BLE001 - the caller owns runtime disposal
+        return runtime, None, f"{type(error).__name__}: {error}"
     return runtime, runtime.session, None
 
 
@@ -189,6 +195,35 @@ async def _env_window():
         _ENV_LOCK.release()
 
 
+async def settle_after_prompt(session):
+    """Keep a one-shot session open until everything its turn set in motion has ended.
+
+    A session that cannot outlive its event loop would otherwise cut off detached agents,
+    their completion notifications and the model's follow-up turn; and a turn a part starts
+    at settle time, such as a card's "submission incomplete" follow-up, which is queued
+    while ``prompt`` is still returning. Two quiet passes in a row (nothing running, nothing
+    streaming) end the wait; a session with none of that pays a fifth of a second.
+    """
+    from misaka.core.subagent import extension as subagent
+
+    quiet_passes = 0
+    while quiet_passes < 2:
+        await subagent.wait_for_background_tasks()
+        await subagent.wait_for_async_hooks()
+        await asyncio.sleep(0.05)
+        await session.agent.waitForIdle()
+        await asyncio.sleep(0.05)
+        quiet_passes = (
+            0
+            if (
+                subagent.has_background_tasks()
+                or subagent.has_async_hooks()
+                or session.isStreaming
+            )
+            else quiet_passes + 1
+        )
+
+
 async def run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
                       assembly=None):
     """Run one prompt in a throwaway session and return its final text, timeout flag, error, and token usage.
@@ -224,37 +259,12 @@ async def _run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
         if on_event:
             session.subscribe(lambda ev: on_event(event_line(ev)))
 
-        async def prompt_and_drain_subagents():
+        async def prompt_and_settle():
             await session.prompt(prompt)
-            # One-shot worker sessions cannot outlive their event loop.  Keep
-            # them open long enough for detached agents, their completion
-            # notification, and the model's follow-up turn to settle.
-            from misaka.core.subagent import extension as subagent
-
-            if not (
-                subagent.has_background_task_records()
-                or subagent.has_async_hooks()
-            ):
-                return
-            quiet_passes = 0
-            while quiet_passes < 2:
-                await subagent.wait_for_background_tasks()
-                await subagent.wait_for_async_hooks()
-                await asyncio.sleep(0.05)
-                await session.agent.waitForIdle()
-                await asyncio.sleep(0.05)
-                quiet_passes = (
-                    0
-                    if (
-                        subagent.has_background_tasks()
-                        or subagent.has_async_hooks()
-                        or session.isStreaming
-                    )
-                    else quiet_passes + 1
-                )
+            await settle_after_prompt(session)
 
         try:
-            await asyncio.wait_for(prompt_and_drain_subagents(), timeout)
+            await asyncio.wait_for(prompt_and_settle(), timeout)
         except TimeoutError:
             timed_out = True
             try:
@@ -295,14 +305,3 @@ async def _run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-
-
-def run_text(prompt, cwd, provider, model, *, timeout=600, max_tokens=None):
-    """Run one tool-free, personality-free model turn and return its text."""
-
-    flags = ["--provider", provider, "--model", model, "--no-session", "-nt"]
-    env = {"MISAKA_TURN_TOKEN_LIMIT": str(int(max_tokens))} if max_tokens else None
-    result = run_coro(run_session(flags, prompt, cwd, timeout=timeout, env=env))
-    if result["timed_out"] or result["error"]:
-        return None
-    return result["text"]

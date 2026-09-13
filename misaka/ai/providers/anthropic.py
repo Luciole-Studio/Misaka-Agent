@@ -68,6 +68,10 @@ from misaka.ai.types import (
     ToolResultMessage,
 )
 from misaka.ai.utils.deferred_tools import split_deferred_tools
+from misaka.ai.utils.diagnostics import (
+    append_assistant_message_diagnostic,
+    create_assistant_message_diagnostic,
+)
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
 from misaka.ai.utils.json_parse import StreamingArgs, parse_json_with_repair
@@ -675,15 +679,21 @@ def convert_messages(
         index += 1
 
     if cache_control and params:
+        from misaka.utils.prompt_cache_wire import _apply_cache_marker
+
         last_message = params[-1]
         if last_message.get("role") == "user":
             content = last_message.get("content")
             if isinstance(content, list) and content:
                 last_block = content[-1]
-                if isinstance(last_block, dict) and last_block.get("type") in {"text", "image", "tool_result"}:
+                if len(content) == 1 and last_block.get("type") == "text":
+                    text_message = {"role": "user", "content": last_block["text"]}
+                    _apply_cache_marker(text_message, cache_control, native_anthropic=True)
+                    last_message["content"] = text_message["content"]
+                elif isinstance(last_block, dict) and last_block.get("type") in {"text", "image", "tool_result"}:
                     last_block["cache_control"] = cache_control
             elif isinstance(content, str):
-                last_message["content"] = [{"type": "text", "text": content, "cache_control": cache_control}]
+                _apply_cache_marker(last_message, cache_control, native_anthropic=True)
 
     return params
 
@@ -701,17 +711,25 @@ def convert_tools(
     defer_loading: bool = False,
 ) -> list[dict[str, Any]]:
     converted: list[dict[str, Any]] = []
+    root_combinators = {"oneOf", "allOf", "anyOf"}
     for index, tool in enumerate(tools):
-        strict = resolve_json_schema_strict_sampling(tool, supports_strict_tools)
-        parameters = get_json_schema_tool_parameters(tool, strict)
-        # The legacy pair is always sent; a strict tool sends the full schema *around* it,
-        # which is what lets Anthropic constrain sampling without losing the old fields.
-        legacy_input_schema = {
+        parameters = get_json_schema_tool_parameters(tool, None)
+        # Anthropic rejects root combinators even without strict sampling. A projected
+        # schema must not promise strict enforcement of constraints it no longer sends.
+        strict = resolve_json_schema_strict_sampling(
+            tool, supports_strict_tools and not root_combinators.intersection(parameters)
+        )
+        if strict is True:
+            parameters = get_json_schema_tool_parameters(tool, strict)
+        # Keep $defs and nested schemas; the untouched original still validates calls.
+        # ponytail: current tools declare fields at the root; branch-only field
+        # definitions would need schema lowering rather than this wire-only projection.
+        input_schema = {
+            **{key: value for key, value in parameters.items() if key not in root_combinators},
             "type": "object",
             "properties": parameters.get("properties", {}),
             "required": parameters.get("required", []),
         }
-        input_schema = {**parameters, **legacy_input_schema} if strict is True else legacy_input_schema
         converted_tool = {
             "name": to_claude_code_name(tool.name) if is_oauth else tool.name,
             "description": tool.description,
@@ -1088,6 +1106,9 @@ def stream_anthropic(
             stream.push(StartEvent(partial=output))
             provider_indexes: dict[int, int] = {}
             tool_partial_json: dict[int, StreamingArgs] = {}
+            # Deltas whose block index was never started: a compatible endpoint's framing
+            # fault. Counted so a tool call that ends empty can say where its input went.
+            dropped_deltas: dict[str, int] = {}
 
             if hasattr(raw_response, "http_response") or hasattr(raw_response, "iter_lines") or hasattr(raw_response, "aiter_lines"):
                 event_iter: AsyncIterator[dict[str, Any]] = iterate_anthropic_events(raw_response, _option(options, "signal"))
@@ -1160,6 +1181,8 @@ def stream_anthropic(
                         continue
                     content_index = provider_indexes.get(provider_index)
                     if content_index is None:
+                        kind = str(delta.get("type") or "?")
+                        dropped_deltas[kind] = dropped_deltas.get(kind, 0) + 1
                         continue
                     block = output.content[content_index]
                     delta_type = delta.get("type")
@@ -1202,6 +1225,7 @@ def stream_anthropic(
                         accumulated = tool_partial_json.get(provider_index)
                         if accumulated is not None and accumulated.raw:
                             block.arguments = accumulated.finish()
+                        _note_empty_tool_arguments(output, block, accumulated, dropped_deltas)
                         stream.push(ToolCallEndEvent(contentIndex=content_index, toolCall=block, partial=output))
                     continue
 
@@ -1221,7 +1245,7 @@ def stream_anthropic(
         except Exception as error:  # noqa: BLE001 - every failure becomes an error event on the stream
             output.stopReason = "aborted" if signal_aborted(_option(options, "signal")) else "error"
             output.errorMessage = _format_anthropic_error(error)
-            stream.push(ErrorEvent(reason=output.stopReason, error=output))
+            stream.push(ErrorEvent(reason=output.stopReason, error=output), cause=error)
         finally:
             await _close_stream(raw_response)
             if owned_client is not None:
@@ -1236,8 +1260,31 @@ def stream_anthropic(
                     pass
             stream.end()
 
-    spawn_stream_task(run())
+    spawn_stream_task(run(), stream=stream)
     return stream
+
+
+def _note_empty_tool_arguments(output: AssistantMessage, block: ToolCall, accumulated: StreamingArgs | None,
+                               dropped_deltas: dict[str, int]) -> None:
+    """A tool call that ends with ``{}`` although its input was streamed is a silent failure
+    with two possible causes -- the streamed buffer did not parse, or its deltas were framed
+    under a block that never started -- and the tool's validation error ("received {}") shows
+    neither. The message keeps a diagnostic with what actually arrived, so the transcript can
+    say which it was. A tool call that genuinely takes no arguments records nothing."""
+    if block.arguments != {}:
+        return
+    raw = accumulated.raw if accumulated is not None else ""
+    if raw.strip() not in ("", "{}"):
+        kind, why = "tool_arguments_unparsed", f"{len(raw)} streamed characters did not parse as a JSON object"
+    elif dropped_deltas.get("input_json_delta"):
+        kind, why = "tool_arguments_missing", "input_json_delta events arrived for a block that was never started"
+    else:
+        return
+    append_assistant_message_diagnostic(output, create_assistant_message_diagnostic(
+        kind, RuntimeError(f"tool {block.name}: {why}"),
+        {"tool": block.name, "toolCallId": block.id, "rawLength": len(raw),
+         "rawHead": raw[:200], "rawTail": raw[-200:] if len(raw) > 200 else "",
+         "droppedDeltas": dict(dropped_deltas)}))
 
 
 def map_thinking_level_to_effort(model: Model, level: str | None) -> AnthropicEffort:

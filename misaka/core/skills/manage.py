@@ -1,18 +1,29 @@
 """Validated entry point for creating and modifying skills."""
 import contextvars
+import copy
 import logging
 import os
 import shutil
+import tempfile
 from pathlib import Path
 
 from misaka.core.skills import write as skill_write
-from misaka.core.skills.linter import NAME_RE
+from misaka.core.skills.vendor.fuzzy_match import (
+    format_no_match_hint,
+    fuzzy_find_and_replace,
+)
+from misaka.core.skills.vendor.manager import (
+    MAX_DESCRIPTION_LENGTH,
+    SKILL_MANAGE_SCHEMA,
+    _validate_category,
+    _validate_content_size,
+)
+from misaka.core.skills.vendor.manager import (
+    VALID_NAME_RE as NAME_RE,
+)
 from misaka.utils import atomic
 
 logger = logging.getLogger(__name__)
-
-MAX_SKILL_CONTENT_CHARS = 40_000
-MAX_DESCRIPTION_LENGTH = 1024
 
 _bypass = contextvars.ContextVar("misaka_skill_gate_bypass", default=False)
 _VISIBLE_ROOTS_UNSET = object()
@@ -46,9 +57,14 @@ def _skill_dir(profile_dir, name):
     err = lookup_path_error(name)
     if err:
         return None, err
-    if not NAME_RE.fullmatch(name) or len(name) > 64:
+    parts = Path(name).parts
+    org_mirror = parts[0] == '_org'
+    checked_parts = parts[1:] if org_mirror else parts
+    if any(not NAME_RE.fullmatch(part) or len(part) > 64 for part in checked_parts):
         return None, f"Invalid skill name '{name}'; use up to 64 lowercase letters, numbers, underscores, and hyphens."
     root = _skills_root(profile_dir)
+    if org_mirror and (len(parts) < 3 or not (root / name / 'SKILL.md').is_file()):
+        return None, "Organisation mirror writes require an existing, resolved Skill."
     skill_dir = root / name
     try:
         resolved, root_resolved = skill_dir.resolve(), root.resolve()
@@ -57,6 +73,10 @@ def _skill_dir(profile_dir, name):
         return None, f"Skill '{name}' resolves outside this role's skill directory."
     except OSError as error:
         return None, f"Cannot resolve skill '{name}': {error}"
+    try:
+        skill_write._safe_parents(skill_dir)
+    except (OSError, ValueError) as error:
+        return None, str(error)
     return skill_dir, None
 
 
@@ -120,18 +140,14 @@ def name_mismatch(name, content):
     all address a skill by it, so the two must not drift apart."""
     from misaka.utils.frontmatter import parse_frontmatter
     declared = str((parse_frontmatter(str(content)).frontmatter or {}).get("name") or "").strip()
+    name = Path(name).name
     if declared != name:
         return f"Frontmatter name '{declared}' must equal the skill directory name '{name}'."
     return None
 
 
 def validate_content_size(content, label="SKILL.md"):
-    if len(str(content or "")) > MAX_SKILL_CONTENT_CHARS:
-        return (
-            f"{label} is {len(content):,} characters; the upper limit is {MAX_SKILL_CONTENT_CHARS:,}. "
-            "Keep SKILL.md concise and move detail into references/."
-        )
-    return None
+    return _validate_content_size(str(content or ""), label)
 
 
 def _security_scan(skill_dir):
@@ -329,7 +345,7 @@ def _support_file_error(text, label):
     from misaka.core.skills.guard import MAX_SINGLE_FILE_KB
     if len(text.encode("utf-8")) > MAX_SINGLE_FILE_KB * 1024:
         return f"{label} exceeds {MAX_SINGLE_FILE_KB} KB, the security scanner's single-file limit."
-    return None
+    return validate_content_size(text, label)
 
 
 def _require_skill(profile_dir, name):
@@ -438,16 +454,12 @@ def _patch_skill(profile_dir, name, old_string, new_string, file_path=None,
     content, err = _read_text_file(target, label)
     if err:
         return {"success": False, "error": err}
-    count = content.count(old_string)
-    if count == 0:
-        return {"success": False,
-                "error": "old_string did not match; whitespace and indentation must match exactly",
+    new_content, count, _strategy, match_error = fuzzy_find_and_replace(
+        content, old_string, new_string, replace_all)
+    if match_error:
+        match_error += format_no_match_hint(match_error, count, old_string, content)
+        return {"success": False, "error": match_error,
                 "file_preview": content[:500] + ("..." if len(content) > 500 else "")}
-    if count > 1 and not replace_all:
-        return {"success": False,
-                "error": f"old_string matched {count} locations; make it unique or set replace_all=true"}
-    new_content = content.replace(old_string, new_string) if replace_all \
-        else content.replace(old_string, new_string, 1)
 
     if not file_path or _is_skill_md(target, skill_dir):
         err = (validate_content_size(new_content) or validate_frontmatter(new_content)
@@ -486,6 +498,11 @@ def _delete_skill(profile_dir, name, absorbed_into=None):
     if resolved == root or root not in resolved.parents:
         return {"success": False, "error": "Deletion target is outside this role's skill directory."}
 
+    from .vendor.skill_provenance import is_background_review
+    if is_background_review():
+        from .vendor.skill_usage import archive_skill
+        ok, message = archive_skill(name)
+        return {"success": ok, "message": message, "_archived": ok}
     shutil.rmtree(skill_dir)
     message = f"Skill {name!r} deleted."
     if absorbed_target:
@@ -520,11 +537,10 @@ def _remove_file(profile_dir, name, file_path):
         if parent != skill_dir and parent.exists() and not any(parent.iterdir()):
             parent.rmdir()
     except OSError:                         # tidying an emptied directory is best-effort; the file is gone either way
-        logger.debug("Could not remove empty support directory %s", parent, exc_info=True)
+        pass
     return {"success": True, "message": f"Deleted {file_path} from '{name}'."}
 
 
-_ACTIONS = ("create", "edit", "patch", "delete", "write_file", "remove_file")
 
 
 def _gist(action, name, content="", file_path="", old_string=""):
@@ -567,133 +583,308 @@ def _precheck(action, skill_dir, name, content, file_path, file_content, old_str
     return None
 
 
-def _pending_payload(action, name, profile_dir, content, file_path, file_content,
-                     old_string, new_string, replace_all, absorbed_into, base,
-                     visible_roots=_VISIBLE_ROOTS_UNSET):
-    """The exact payload whose canonical hash is reviewed and later executed."""
-    payload = {"action": action, "name": name, "profile_dir": profile_dir,
-               "content": content, "file_path": file_path,
-               "file_content": file_content, "old_string": old_string,
-               "new_string": new_string, "replace_all": replace_all,
-               "absorbed_into": absorbed_into, "base": base}
-    if visible_roots is not _VISIBLE_ROOTS_UNSET:
-        payload["visible_roots"] = visible_roots
-    return payload
+# Hermes exposes ONE shape; legacy calls are normalized before schema validation.
+# Keep unknown keys so validation reports them rather than silently dropping work.
+_OPERATION_KEYS = {"action", "name", "content", "category", "file_path", "file_content",
+                   "old_string", "new_string", "replace_all", "absorbed_into"}
+MANAGE_PARAMETERS = copy.deepcopy(SKILL_MANAGE_SCHEMA["parameters"])
+MANAGE_PARAMETERS["additionalProperties"] = False
+MANAGE_PARAMETERS["properties"]["operations"]["items"]["additionalProperties"] = True
 
 
-def manage(action, name, *, profile_dir, content=None, file_path=None,
-           file_content=None, old_string=None, new_string=None,
-           replace_all=False, absorbed_into=None, base=None,
-           approved_payload_hash=None, visible_roots=_VISIBLE_ROOTS_UNSET):
-    """Apply one validated skill mutation through the write gate, under the skill lock, into the
-    ledger; ``base`` is the digest of the live tree an approved pending write was reviewed against."""
-    if action not in _ACTIONS:
-        return {"success": False,
-                "error": f"Unknown action {action!r}. Available: {', '.join(_ACTIONS)}"}
-    roots_supplied = visible_roots is not _VISIBLE_ROOTS_UNSET
-    bound_roots, roots_error = (None, None)
-    if action == "create":
-        bound_roots, roots_error = _normalize_visible_roots(profile_dir, visible_roots)
-    skill_dir, err = _skill_dir(profile_dir, name)
-    err = err or _precheck(action, skill_dir, name, content or "", file_path or "",
-                           file_content, old_string or "", new_string)
-    err = err or roots_error
-    if not err and action == "create":
-        err = _create_conflict_error(name, bound_roots)
-    if err:
-        return {"success": False, "error": err}
-
-    if not _bypass.get():
-        decision, note = skill_write.evaluate_gate()
-        if decision == "off":
-            return {"success": False, "error": note}
-        if decision == "stage":
-            payload = _pending_payload(
-                action, name, profile_dir, content, file_path, file_content,
-                old_string, new_string, replace_all, absorbed_into,
-                skill_write.digest(skill_dir),
-                bound_roots if roots_supplied and action == "create"
-                else _VISIBLE_ROOTS_UNSET)                            # what the reviewer will look at
-            gist = _gist(action, name, content or "", file_path or "", old_string or "")
-            try:
-                record = skill_write.stage(payload, summary=gist)
-            except OSError as error:
-                return {"success": False,
-                        "error": f"Could not stage the skill write for review: {error}"}
-            return {"success": True, "staged": True, "pending_id": record["id"],
-                    "gist": gist, "message": note}
-
-    with skill_write.mutation_lock():
-        if approved_payload_hash is not None:
-            execution_payload = _pending_payload(
-                action, name, profile_dir, content, file_path, file_content,
-                old_string, new_string, replace_all, absorbed_into, base,
-                bound_roots if roots_supplied and action == "create"
-                else _VISIBLE_ROOTS_UNSET)
-            try:
-                execution_hash = skill_write.payload_sha256(execution_payload)
-            except (TypeError, ValueError):
-                return {"success": False, "error": "Approved skill payload is not valid canonical JSON."}
-            if execution_hash != approved_payload_hash:
-                return {"success": False, "error": (
-                    "Pending skill payload changed after review; nothing was applied. "
-                    "Inspect and stage the request again.")}
-        if base is not None and skill_write.digest(skill_dir) != base:
-            return {"success": False, "error": (f"Skill '{name}' changed after this write was reviewed; look at it "
-                                                "again with `misaka skills pending` and stage it anew.")}
-        before = skill_write.snapshot(skill_dir)
-
-        if action == "create":
-            result = _create(profile_dir, name, content or "", bound_roots)
-        elif action == "edit":
-            result = _edit_skill(profile_dir, name, content or "")
-        elif action == "patch":
-            result = _patch_skill(profile_dir, name, old_string or "", new_string,
-                                  file_path=file_path, replace_all=replace_all)
-        elif action == "delete":
-            result = _delete_skill(profile_dir, name, absorbed_into=absorbed_into)
-        elif action == "remove_file":
-            result = _remove_file(profile_dir, name, file_path or "")
-        else:
-            result = _write_file(profile_dir, name, file_path or "", file_content)
-
-        if result.get("success"):
-            evidence = {k: v for k, v in (("file_path", file_path),
-                                          ("absorbed_into", absorbed_into),
-                                          ("payload_sha256", approved_payload_hash)) if v is not None}
-            try:
-                skill_write.record(action, name, before=before, after_root=skill_dir, evidence=evidence)
-            except OSError as error:                       # unrecorded is unapplied: the tree goes back
-                skill_write.restore(skill_dir, before)
-                result = {"success": False,
-                          "error": f"The skill ledger could not be written ({error}); the change was rolled back."}
-            _invalidate_index()
+def prepare_arguments(raw):
+    if not isinstance(raw, dict):
+        return raw
+    result = copy.deepcopy(raw)
+    if result.get("operations") is not None:
+        default_name = result.get("name")
+        result = {k: v for k, v in result.items() if k not in _OPERATION_KEYS}
+        if isinstance(result["operations"], list):
+            for op in result["operations"]:
+                if isinstance(op, dict) and not op.get("name") and default_name:
+                    op["name"] = default_name
+    else:
+        op = {k: v for k, v in result.items() if k in _OPERATION_KEYS}
+        result = {k: v for k, v in result.items() if k not in _OPERATION_KEYS and k != "operations"}
+        result["operations"] = [op]
+    if isinstance(result.get("operations"), list):
+        for op in result["operations"]:
+            if isinstance(op, dict) and op.get("action") == "edit":
+                op["action"] = "patch"
     return result
 
 
+def _validate_operations(operations):
+    from .vendor.batch import _BATCH_MAX_OPS, _validate_batch_ops
+    if not isinstance(operations, list) or not operations:
+        return "operations must be a non-empty array."
+    if len(operations) > _BATCH_MAX_OPS:
+        return f"operations is capped at {_BATCH_MAX_OPS} ops per call."
+    for op in operations:
+        if not isinstance(op, dict):
+            return "Every operation must be an object."
+        if unknown := op.keys() - _OPERATION_KEYS:
+            return f"Unknown operation fields: {', '.join(sorted(unknown))}"
+        for k, v in op.items():
+            if k == "replace_all":
+                if not isinstance(v, bool):
+                    return "replace_all must be a boolean."
+            elif not isinstance(v, str):
+                return f"{k} must be a string."
+        if not op.get("name") or not op.get("action"):
+            return "Every operation needs a name and action."
+    if any(op["action"] == "delete" for op in operations):
+        return None if len(operations) == 1 else "delete must be the SOLE op in its call."
+    _, err = _validate_batch_ops(operations, None, lambda message, **_: message, lambda *_: None)
+    return err
+
+
+def _apply_operation(profile_dir, op):
+    action, name = op["action"], op["name"]
+    if action == "create":
+        return _create(profile_dir, name, op.get("content", ""), ())
+    if action == "patch":
+        if op.get("content") and (op.get("old_string") or op.get("new_string") is not None):
+            return {"success": False, "error": "Pass EITHER content (full SKILL.md rewrite) OR old_string/new_string (targeted replacement), not both."}
+        if op.get("content"):
+            return _edit_skill(profile_dir, name, op["content"])
+        return _patch_skill(profile_dir, name, op.get("old_string"), op.get("new_string"), op.get("file_path"), op.get("replace_all", False))
+    if action == "delete":
+        return _delete_skill(profile_dir, name, op.get("absorbed_into"))
+    if action == "write_file":
+        return _write_file(profile_dir, name, op.get("file_path", ""), op.get("file_content"))
+    return _remove_file(profile_dir, name, op.get("file_path", ""))
+
+
+def _bind_operations(profile_dir, operations, visible_roots):
+    """Read and write resolve the same identity; only this role's objects are mutable."""
+    from . import index
+    root = _skills_root(profile_dir).absolute()
+    created = {}
+    bound = []
+    for original in operations:
+        op = dict(original)
+        name = op["name"]
+        if op["action"] == "create":
+            if err := _validate_category(op.get("category")):
+                return None, err
+            if "/" in name or "\\" in name:
+                return None, "New skill names are identifiers; use category for the category directory."
+            if err := _create_conflict_error(name, visible_roots):
+                return None, err
+            rel = str(Path(op.get("category") or "") / name)
+            created[name] = rel
+            created[rel] = rel
+        elif name in created:
+            rel = created[name]
+        else:
+            entry, err = index.resolve(visible_roots, name, require_compatible=False)
+            if err:
+                return None, err
+            if entry.get("legacy"):
+                return None, "Legacy flat Skill documents are read-only; create a directory Skill to migrate one."
+            if Path(entry.get("root", "")).resolve() != root.resolve():
+                return None, f"Skill '{name}' belongs to the {entry['layer']} layer; this session only manages its own role."
+            rel = str(Path(entry["dir"]).relative_to(root))
+        _directory, err = _skill_dir(profile_dir, rel)
+        if err:
+            return None, err
+        op["name"] = rel
+        if op.get("absorbed_into"):
+            target, err = index.resolve(visible_roots, op["absorbed_into"], require_compatible=False)
+            if err or target.get("legacy") or Path(target.get("root", "")).resolve() != root.resolve():
+                return None, "The absorbing skill must exist in this role."
+            op["absorbed_into"] = target["rel"]
+        bound.append(op)
+    return bound, None
+
+
+def manage(action=None, name=None, *, profile_dir, content=None, file_path=None,
+           file_content=None, old_string=None, new_string=None, category=None,
+           replace_all=False, absorbed_into=None, base=None, operations=None,
+           approved_payload_hash=None, visible_roots=_VISIBLE_ROOTS_UNSET,
+           workspace=None, _reviewed=None):
+    """One isolated, recoverable transaction for single calls, batches, and approvals."""
+    from .layers import skill_roots
+    from .scope import scope_for, using_scope
+    if profile_dir is None:
+        return {"success": False, "error": "Skill writing requires a role profile."}
+    workspace = os.path.abspath(workspace if workspace is not None else os.getcwd())
+    profile_dir = os.path.abspath(os.path.expanduser(profile_dir))
+    flat = {k: v for k, v in {"action": action, "name": name, "content": content, "file_path": file_path,
+            "file_content": file_content, "old_string": old_string, "new_string": new_string,
+            "category": category, "replace_all": replace_all, "absorbed_into": absorbed_into}.items() if v is not None}
+    canonical = prepare_arguments({**flat, **({"operations": operations} if operations is not None else {})})["operations"]
+    if err := _validate_operations(canonical):
+        return {"success": False, "error": err}
+    if visible_roots is _VISIBLE_ROOTS_UNSET:
+        visible_roots = skill_roots(profile_dir, workspace)
+    supplied, err = _normalize_visible_roots(profile_dir, visible_roots)
+    if err:
+        return {"success": False, "error": err}
+    # Fixed workspace identity, but fresh discovery: absent project roots can appear
+    # between staging and approval. Explicit extension roots remain part of review.
+    extensions = [root for layer, root in supplied if layer == "extension"]
+    def roots_now():
+        return list(dict.fromkeys([*skill_roots(profile_dir, workspace, extension_paths=extensions), *supplied]))
+    try:
+        with using_scope(scope_for(profile_dir, workspace)), skill_write.mutation_lock():
+            # Recover before discovery: a crash mid-delete can make the target
+            # temporarily absent, so resolving first would strand its journal.
+            skill_write.recover_transactions()
+            if approved_payload_hash is not None and (_reviewed is None or skill_write.payload_sha256(_reviewed) != approved_payload_hash):
+                return {"success": False, "error": "Approved skill payload changed after review; nothing applied."}
+            bound, err = _bind_operations(profile_dir, canonical, roots_now())
+            if err:
+                return {"success": False, "error": err}
+            from .operations import guards as maintenance_guards
+            if denied := maintenance_guards(bound, profile_dir, workspace):
+                return denied
+            # Cheap validation precedes staging; do not ask the user to approve a
+            # malformed main document or an invalid support-file target.
+            for op in bound:
+                a = "edit" if op["action"] == "patch" and op.get("content") else op["action"]
+                err = _precheck(a, _skills_root(profile_dir) / op["name"], op["name"], op.get("content", ""), op.get("file_path", ""), op.get("file_content"), op.get("old_string", ""), op.get("new_string"))
+                if err:
+                    return {"success": False, "error": err}
+            if err := _validate_operations(bound):
+                return {"success": False, "error": err}
+            from .vendor.skill_provenance import is_background_review
+            curator_archive = is_background_review() and any(op['action'] == 'delete' for op in bound)
+            paths = ([str(_skills_root(profile_dir))] if curator_archive else
+                     list(dict.fromkeys(str(_skills_root(profile_dir) / op["name"]) for op in bound)))
+            dependencies = list(dict.fromkeys(str(_skills_root(profile_dir) / op["absorbed_into"])
+                                               for op in bound if op.get("absorbed_into")))
+            bases = {path: skill_write.digest(path) for path in [*paths, *dependencies]}
+            if _reviewed is not None and bases != _reviewed.get("bases"):
+                return {"success": False, "error": "Skill changed after this write was reviewed; inspect and stage it again."}
+            if base is not None and len(paths) == 1 and bases[paths[0]] != base:
+                return {"success": False, "error": "Skill changed after review."}
+            from .release import token as writer_token
+            from .vendor.skill_provenance import get_current_write_origin
+            generation = writer_token(profile_dir)
+            if _reviewed is not None and _reviewed.get("writer_generation") != generation:
+                return {"success": False, "error": "Writer generation changed after review; stage again."}
+            payload = {"version": 2, "writer_generation": generation, "write_origin": (_reviewed or {}).get("write_origin", get_current_write_origin()), "profile_dir": profile_dir, "workspace": workspace,
+                       "operations": canonical, "visible_roots": supplied, "bases": bases,
+                       "bound_names": [op["name"] for op in bound]}
+            if payload["write_origin"] == "background_review":
+                from .vendor.skill_manager_guards import _background_review_has_read
+                targets = [_skills_root(profile_dir) / op['name'] / (op.get('file_path') or 'SKILL.md') for op in bound]
+                payload['read_paths'] = [str(path.resolve()) for path in targets if _background_review_has_read(path)]
+            if _reviewed is not None and payload["bound_names"] != _reviewed.get("bound_names"):
+                return {"success": False, "error": "Skill identity changed after review; stage again."}
+            if not _bypass.get():
+                decision, note = skill_write.evaluate_gate()
+                if decision == "off":
+                    return {"success": False, "error": note}
+                if decision == "stage":
+                    gist = "; ".join(_gist(op["action"], op["name"], op.get("content", ""), op.get("file_path", ""), op.get("old_string", "")) for op in canonical)
+                    try:
+                        staged = skill_write.stage(payload, summary=gist)
+                    except OSError as error:
+                        return {"success": False, "error": f"Could not stage the skill write for review: {error}"}
+                    return {"success": True, "staged": True, "pending_id": staged["id"], "gist": gist, "message": note}
+            from .vendor.skill_provenance import get_current_write_origin
+            evidence = {"profile_dir": profile_dir, "workspace": workspace,
+                        "operations": canonical, "bound_operations": bound, "write_origin": payload["write_origin"],
+                        "payload_sha256": approved_payload_hash, "curator_archive": curator_archive}
+            journal = skill_write.prepare_transaction(paths, action=action if operations is None else "batch", skill=", ".join(dict.fromkeys(op["name"] for op in canonical)), evidence=evidence)
+            # Work outside every live Skill tree. The transaction commits only after
+            # ALL operations, validations and scans succeeded. No partial rmtree.
+            with tempfile.TemporaryDirectory(prefix="misaka-skill-stage-") as temp:
+                stage_profile = Path(temp)
+                for change in journal["changes"]:
+                    dest = stage_profile / "skills" / Path(change["root"]).relative_to(_skills_root(profile_dir))
+                    skill_write._materialize(dest, change["before"])
+                for dependency in dependencies:
+                    dest = stage_profile / "skills" / Path(dependency).relative_to(_skills_root(profile_dir))
+                    if not dest.exists():
+                        skill_write._materialize(dest, skill_write.tree_image(dependency))
+                results = []
+                try:
+                    for i, op in enumerate(bound):
+                        if curator_archive:
+                            from dataclasses import replace
+
+                            from .scope import SkillScope, _current, using_scope
+                            scope = _current.get() or SkillScope(Path(profile_dir), Path(workspace), origin='background_review')
+                            with using_scope(replace(scope, storage=stage_profile)):
+                                result = _apply_operation(str(stage_profile), op)
+                        else:
+                            result = _apply_operation(str(stage_profile), op)
+                        if not result.get("success"):
+                            skill_write.abort_transaction(journal)
+                            if operations is None:
+                                return result
+                            return {**result, "failed_index": i, "completed_before_failure": i,
+                                    "error": f"operations[{i}] failed: {result.get('error')}; live skills unchanged."}
+                        results.append(result)
+                    after = [skill_write.tree_image(stage_profile / "skills" / Path(path).relative_to(_skills_root(profile_dir))) for path in paths]
+                    if curator_archive:
+                        from .distribution import _pre_publish
+                        _pre_publish(journal['changes'][0]['before'], after[0], scope, 'archive')
+                    entry_id = skill_write.commit_transaction(journal, after)
+                except BaseException as error:
+                    if journal["state"] == "prepared":
+                        skill_write._recover(journal)
+                    if journal["state"] == "aborted" and isinstance(error, Exception):
+                        return {"success": False, "error": f"Skill transaction failed and was rolled back ({error}); live skills retain their before-images."}
+                    raise
+                for result in results:
+                    for key in ("path", "skill_md"):
+                        if isinstance(result.get(key), str):
+                            result[key] = result[key].replace(str(stage_profile), profile_dir, 1)
+                _invalidate_index()
+                from .operations import flush_usage
+                try:
+                    flush_usage(profile_dir, workspace)
+                except Exception:
+                    logger.warning("Committed Skill usage effects await ledger replay", exc_info=True)
+                from .operations import org_edit_notes
+                try:
+                    notes = org_edit_notes(bound, profile_dir, workspace)
+                except Exception as error:  # Post-commit sharing must not falsify the committed local receipt.
+                    logger.warning("Skill committed; organisation sharing failed", exc_info=True)
+                    notes = [f"Local Skill committed; organisation sharing failed: {error}"]
+                sharing = {"org_sharing": " ".join(notes)} if notes else {}
+                if operations is None:
+                    single = {**results[0], "ledger_id": entry_id, **sharing}
+                    if notes:
+                        single["message"] = (single.get("message", "") + " " + sharing["org_sharing"]).strip()
+                    return single
+                return {"success": True, "operations_applied": len(results), "ledger_id": entry_id, **sharing,
+                        "results": [{"name": raw["name"], "action": raw["action"], "file_path": raw.get("file_path"), "success": True} for raw in canonical]}
+    except (OSError, ValueError, TypeError) as error:
+        return {"success": False, "error": f"Skill transaction did not complete: {error}"}
+
+
 def apply_pending(record):
-    """Apply one integrity-checked review record, bypassing the gate it already passed."""
-    integrity_error = skill_write.pending_integrity_error(
-        record, file_id=record.get("_pending_file_id") if isinstance(record, dict) else None)
+    """Verify original ID and payload BEFORE interpreting or converting it."""
+    integrity_error = skill_write.pending_integrity_error(record, file_id=record.get("_pending_file_id") if isinstance(record, dict) else None)
     if integrity_error:
         return {"success": False, "error": f"Approval integrity check failed: {integrity_error}"}
-    payload = dict(record["payload"])
+    payload = copy.deepcopy(record["payload"])
+    if payload.get("version") == 3 and payload.get("kind") == "distribution":
+        from .distribution import apply_pending
+        return apply_pending(payload)
+    if payload.get("version") != 2 or not payload.get("workspace") or not payload.get("profile_dir"):
+        return {"success": False, "error": "Legacy pending write has no bound workspace/source identity; inspect the original request and stage it again."}
+    if skill_write.evaluate_gate()[0] == 'off':
+        return {"success": False, "error": skill_write.evaluate_gate()[1]}
+    from .scope import SkillScope, using_scope
+    from .vendor.skill_manager_guards import mark_background_review_skill_read
+    scope = SkillScope(Path(payload['profile_dir']), Path(payload['workspace']), origin=payload.get('write_origin', 'foreground'))
     token = _bypass.set(True)
     try:
-        root_args = ({"visible_roots": payload["visible_roots"]}
-                     if "visible_roots" in payload else {})
-        return manage(payload.get("action", ""), payload.get("name", ""),
-                      profile_dir=payload.get("profile_dir", ""),
-                      content=payload.get("content"),
-                      file_path=payload.get("file_path"),
-                      file_content=payload.get("file_content"),
-                      old_string=payload.get("old_string"),
-                      new_string=payload.get("new_string"),
-                      replace_all=bool(payload.get("replace_all")),
-                      absorbed_into=payload.get("absorbed_into"),
-                      base=payload.get("base"),
-                      approved_payload_hash=record["payload_sha256"],
-                      **root_args)
+        with using_scope(scope):
+            # The immutable staged payload records actual read marks. Original base
+            # digests are rechecked by manage before any operation is committed.
+            for path in payload.get('read_paths', []):
+                mark_background_review_skill_read(Path(path))
+            return manage(profile_dir=payload["profile_dir"], operations=payload["operations"],
+                          workspace=payload["workspace"], visible_roots=payload.get("visible_roots", ()),
+                          _reviewed=payload, approved_payload_hash=record["payload_sha256"])
     finally:
         _bypass.reset(token)
 
@@ -702,7 +893,49 @@ def pending_diff(payload):
     """Unified diff a pending write would produce, resolving paths exactly as ``apply_pending`` will."""
     import difflib
 
+    if payload.get("version") == 2:
+        # Simulate the SAME ordered operations on detached copies. Previewing
+        # each against live files lies for create->write_file and patch chains.
+        from .layers import skill_roots
+        profile = payload["profile_dir"]
+        supplied = payload.get("visible_roots", [])
+        extensions = [root for layer, root in supplied if layer == "extension"]
+        roots = list(dict.fromkeys([*skill_roots(profile, payload["workspace"], extension_paths=extensions),
+                                  *(tuple(r) for r in supplied)]))
+        with skill_write.mutation_lock(), tempfile.TemporaryDirectory(prefix="misaka-skill-preview-") as temp:
+            bound, err = _bind_operations(profile, payload["operations"], roots)
+            if err or [op["name"] for op in bound] != payload["bound_names"]:
+                return f"(cannot preview: {err or 'Skill identity changed after review'})"
+            for source, expected in payload["bases"].items():
+                if skill_write.digest(source) != expected:
+                    return "(cannot preview: Skill changed after review; stage again)"
+                path = Path(source)
+                if path.exists():
+                    skill_write._safe_parents(path)
+                    dest = Path(temp) / "skills" / path.relative_to(_skills_root(profile))
+                    if not dest.exists():  # A whole-role base already contains its dependencies.
+                        shutil.copytree(path, dest, symlinks=True)
+            from .scope import SkillScope, using_scope
+            scope = SkillScope(Path(profile), Path(payload['workspace']), storage=Path(temp),
+                               origin=payload.get('write_origin', 'foreground'))
+            diffs = []
+            token = _bypass.set(True)  # Only detached preview storage, never the live gate.
+            try:
+                with using_scope(scope):
+                    for i, op in enumerate(bound):
+                        diff = pending_diff({**op, "profile_dir": temp})
+                        result = _apply_operation(temp, op)
+                        if not result.get("success"):
+                            return f"(cannot preview: operations[{i}] failed: {result.get('error')}; nothing applied)"
+                        if result.get('_archived'):
+                            diff = "Recoverable archive (not hard deletion); restore retains this content.\n" + diff
+                        diffs.append(f"operations[{i}] {op['action']} {op['name']}\n{diff}")
+            finally:
+                _bypass.reset(token)
+            return "\n\n".join(diffs)
     action = str(payload.get("action") or "")
+    if action == "patch" and payload.get("content"):
+        action = "edit"
     name = str(payload.get("name") or "")
     skill_dir, err = _skill_dir(payload.get("profile_dir") or "", name)
     if err:
@@ -757,8 +990,9 @@ def pending_diff(payload):
         new_string = str(payload.get("new_string") or "")
         if old is None:
             return f"(cannot preview: {rel_name(target)} is a binary file)"
-        if not old_string or old_string not in old:
-            return "(cannot preview: old_string does not match the live file)"
-        new = old.replace(old_string, new_string) if payload.get("replace_all") \
-            else old.replace(old_string, new_string, 1)
+        if not old_string:
+            return "(cannot preview: old_string is empty)"
+        new, _, _, error = fuzzy_find_and_replace(old, old_string, new_string, payload.get("replace_all", False))
+        if error:
+            return f"(cannot preview: {error})"
     return udiff(rel_name(target), old, new) or "(no changes)"

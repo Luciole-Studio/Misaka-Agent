@@ -1,48 +1,50 @@
-"""Persistent, depth-bounded Research Workflow: breadth-first over a tree of conclusions.
+"""Persistent Research Workflow: breadth-first over a depth-bounded tree of conclusions.
 
-A node is one conclusion. Its routine (``_expand``) is the same for the root and for every
-node opened under it: Last Order plans, Sisters research, Last Order synthesizes, the
-red-team Sister she named finds issues, one probe card tests each issue, Last Order triages,
-and only an issue that undermines the conclusion opens a child node. Each issue is investigated by
-a fork of the node's Last Order session (its own process, its own Sisters) that returns the verdict;
-the fork that found the conclusion undermined becomes the child node's Last Order. The frontier is FIFO by
-(depth, created_at); the depth limit bounds how many times a conclusion may be overturned in
-a chain. Code enforces the order, the depth, persistence, and artifact integrity; the models
-keep every judgement call.
+Every node follows the same routine: Last Order plans and assigns Sisters, synthesizes their
+research, receives the chosen Sister's red-team review, and directly dispatches each material
+issue to a fork of her session at depth + 1. That fork is the child node's Last Order from the
+start, not a preliminary investigator. No verdict round or second fork precedes its research.
+Code enforces phase order, depth, persistence, and artifact integrity; models make the judgements.
 """
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
-import shutil
 import socket
 import sys
+from datetime import UTC, datetime
+from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
 
 from misaka import workspace as workspace_index
-from misaka.core.platform import budget, repo
+from misaka.core.platform import budget
 from misaka.core.platform import cards as card_files
 from misaka.core.platform import tasks as task_store
+from misaka.core.research import bundle, commands, ledger, planner, report, runs
 from misaka.core.research import context as context_packet
-from misaka.core.research import ledger, planner, report, runs
 
 POLL_SECONDS = 2.0
-MAX_PROBE_ROUNDS = 3          # ponytail: a fork opens cards at most this many times before it must judge
-DEFAULT_FANOUT = 4            # how many node/probe processes one driver may hold open at once
+_LOG = logging.getLogger(__name__)
 ACTIVE_TASKS = ("running", "review")
 # Statuses on which a *missing* plan edge is history rather than a fault: the card is finished (or
 # gone) and has nothing left to wait for. `running` is excluded on purpose -- see `_submit_tasks`.
 _EDGES_ARE_HISTORY = runs.SETTLED_TASK_STATUSES - {"running"}
 RESEARCH_DISCIPLINE = """[Research Workflow active]
 Last Order is now in Research mode. Each node of the research tree runs the same routine: Last Order plans and assigns
-Sisters (every task starts with a preflight plan), Last Order writes the node's conclusion in one pass, the red-team Sister she
-named finds issues in it, and a fork of Last Order's session investigates each issue with Sisters of its own and returns a
-verdict. Only an issue that undermines the conclusion opens a child node (the fork becomes its Last Order); the tree is
-expanded breadth-first up to the chosen depth.
+Sisters (each Sister plans and executes within its own task session); once their cards are back she either writes the
+node's conclusion or sends Sisters out for another round first (up to the run's follow-up limit), and the red-team
+Sister she named returns her review to that Last Order. Every plan -- the root's, a fork's, a follow-up round's -- waits
+for the user's go-ahead in conversation before its cards exist. Last Order explicitly dispatches a fork of her session for each material issue;
+each fork IS a child node at depth + 1 and performs the same full routine with its own Sisters and red team.
+There is no preliminary investigation or second fork. The tree expands breadth-first; max_depth is the
+largest allowed depth (root = 0). At that depth red-team review still runs, but its issues remain parked
+for final adjudication rather than spawning more research.
 
 Code enforces phase order, depth, persistence, and artifact integrity. The models keep the judgement calls: framing, methods,
 Sister selection, source quality, task count, and what shakes a conclusion. The rule against answering lifts only at final
@@ -62,7 +64,7 @@ async def _progress(callback, stage, message, run=None, **details):
 
 
 def _bid(node):
-    """Artifact scope: root artifacts carry no branch id (they sit at the top of the run directory)."""
+    """Artifact scope: root artifacts carry no branch id (their folder is named by the run)."""
     return node["id"] if node["parent_id"] else None
 
 
@@ -71,9 +73,29 @@ def _scope(node):
 
 
 def _write(con, run, node, kind, title, name, content, **metadata):
-    return runs.write_text(con, run["id"], kind, title, runs.node_prefix(node) + name, content,
-                           branch_id=_bid(node), metadata=metadata or None,
-                           source_workspace=runs.node_root(run, node))
+    return runs.write_text(con, run["id"], kind, title, runs.generated_path(run, name, branch_id=_bid(node)), content,
+                           branch_id=_bid(node), metadata=metadata or None)
+
+
+def _bundle(con, run, *, task=None, node=None):
+    """Gather sources beside a settled card, a closed node, or the run's delivered document.
+    A bundle is derived from what the ledger and the project already hold, so its failure is
+    recorded (an event on the card, a log line otherwise) and the workflow carries on: no card,
+    node or run state depends on it."""
+    try:
+        if task is not None:
+            bundle.card_bundle(con, run, task)
+        elif node is not None:
+            bundle.node_bundle(con, run, node)
+        else:
+            bundle.final_bundle(con, run)
+    except Exception as error:  # noqa: BLE001 - derived output must never undo a settled state
+        if task is not None:
+            task_store.add_event(con, task["id"], "bundle_error", {"error": str(error)[:200]},
+                                 generation=int(task["generation"]))
+        else:
+            _LOG.warning("research %s: sources bundle for %s failed: %s",
+                         run["id"], node["id"] if node is not None else "final/", error)
 
 
 def _artifact_path(con, run, node, kind):
@@ -81,104 +103,110 @@ def _artifact_path(con, run, node, kind):
     return runs.artifact_path(rows[-1]) if rows else None
 
 
-def _json_artifact(con, run, node, kind):
+def _artifact_paths(con, run, node, kind):
+    """Every artifact of a kind on the node, oldest first, for a prompt: a node that planned
+    more than once has more than one plan."""
     rows = runs.artifacts(con, run["id"], kind=kind, **_scope(node))
-    return json.loads(runs.artifact_text(rows[-1])) if rows else None
+    return ", ".join(f"`{runs.artifact_path(row)}`" for row in rows) if rows else "`(none)`"
+
+
+def _write_plan(con, run, node, plan, round):
+    """The round's plan as Markdown and JSON: ``plan.md`` for the first round, ``plan-<n>.md`` after."""
+    suffix = "" if round <= 1 else f"-{round}"
+    title = "Research plan" if round <= 1 else f"Research plan (round {round})"
+    _write(con, run, node, "plan", title, f"plan{suffix}.md", plan["plan_markdown"].rstrip() + "\n")
+    _write(con, run, node, "plan_json", title + " (JSON)", f"plan{suffix}.json",
+           json.dumps(plan, ensure_ascii=False, indent=2))
+
+
+def _forget_plan(con, run, node, round):
+    """Drop a withdrawn follow-up round's plan files and their registrations: the round never
+    ran, and a plan nobody executed must not sit beside the ones that did (the red team and the
+    final report read every plan of a node). Only rounds after the first can be withdrawn."""
+    if round <= 1:
+        return
+    names = {f"plan-{round}.md", f"plan-{round}.json"}
+    for row in runs.artifacts(con, run["id"], **_scope(node)):
+        if row["kind"] in ("plan", "plan_json") and os.path.basename(row["path"]) in names:
+            con.execute("DELETE FROM research_artifacts WHERE id=?", (row["id"],))
+            with contextlib.suppress(OSError):
+                os.unlink(row["path"])
+
+
+def _followup_recorded(con, run, node, round):
+    return runs.plan_round(con, run["id"], node["id"]) > round
+
+
+def _followup_tool(con, cfg, run, node, round):
+    """The next round's plan tool for the synthesis turn: recorded like any phase command, and
+    read by the driver as the node's decision to research more before concluding."""
+    current = runs.node(con, node["id"])
+    return commands.tool(
+        con, run, current, key=runs.plan_key(round + 1), name="misaka_research_assign",
+        description=f"Last Order: assign a follow-up round of research cards (round {round + 1}) on this node",
+        model=commands.Plan,
+        validate=lambda value: planner.validate_plan(value, planner._roster({**cfg, "workspace": run["workspace"]})),
+        session_dir=planner._lo_session(run, node),
+        session_file=run["root_session"] if node["parent_id"] is None else current["session_file"],
+        supersede=True)
 
 
 def _refresh_workspace_index(con, run):
+    """Export a dated navigation snapshot at a run boundary; agents use the live view."""
     tree = workspace_index.outline(
         con, workspace=run["workspace"], run_id=run["id"], research_store=runs)
+    tree["snapshot_at"] = datetime.now(UTC).isoformat(timespec="seconds")
     runs.write_text(
         con, run["id"], "workspace_index_json", 'Project / PageIndex workspace index',
-        "workspace-index.json", json.dumps(tree, ensure_ascii=False, indent=2),
+        runs.run_path(run, "workspace-index.json"), json.dumps(tree, ensure_ascii=False, indent=2),
     )
     return runs.write_text(
         con, run["id"], "workspace_index", 'Project / PageIndex workspace index',
-        "workspace-index.md", '# Project / PageIndex workspace index\n\n```text\n'
+        runs.run_path(run, "workspace-index.md"), '# Project / PageIndex workspace index\n\n'
+        f"Snapshot at {tree['snapshot_at']}; not live state.\n"
+        f'For current state, call misaka_research_view(view="workspace", run_id="{run["id"]}").\n\n```text\n'
         + workspace_index.render(tree) + "\n```\n",
     )
 
 
-def _node_argv(run, node):
-    return [sys.executable, "-m", "misaka", "research", "--node", run["id"], node["id"]]
-
-
-def _probe_argv(run, issue):
-    return [sys.executable, "-m", "misaka", "research", "--probe", run["id"], issue["id"]]
+def _node_argv(run, node, key):
+    return [sys.executable, "-m", "misaka", "research", "--node", run["id"], node["id"], "--runner-key", key]
 
 
 def _label(node):
     return "the root question" if node["parent_id"] is None else f"node {node['id']}"
 
 
-def _scope_local_ids(specs, prefix):
-    """Copies of ``specs`` with ``local_id`` and ``dependencies`` prefixed by ``prefix``. Local
-    ids are unique inside one plan only; probes of different issues (and rounds) on the same node
-    reuse ``a``/``b``, so they get ``<issue>.r<round>.`` in front before anything is keyed on them."""
-    if not prefix:
+def _round_specs(specs, round):
+    """A later round's cards carry the round in their local ids (``r2/source``): the ids are the
+    plan's own namespace, and a round-two card named like a round-one card is a new card."""
+    if round <= 1:
         return list(specs)
-    out = []
-    for spec in specs:
-        scoped = dict(spec)
-        scoped["local_id"] = prefix + str(spec["local_id"])
-        scoped["dependencies"] = [prefix + str(dep) for dep in (spec.get("dependencies") or [])]
-        out.append(scoped)
-    return out
+    prefix = f"r{round}/"
+    return [{**spec, "local_id": prefix + spec["local_id"],
+             "dependencies": [prefix + dep for dep in (spec.get("dependencies") or [])]} for spec in specs]
 
 
-async def _preflight_specs(run, cfg, worker, node, specs, *, progress):
-    """Plan every spec's approach, one session at a time. Returns one ``planner.preflight`` result
-    per spec, in the specs' own order.
+async def _submit_tasks(con, run, node, specs, *, kind, progress=None, round=1, previous=()):
+    """Create the LO's cards directly in dependency order; each Sister plans in its own session.
 
-    One at a time is not a preference; it is the only thing this process can do, and saying so is
-    the point of this function. A preflight is a whole in-process model session, and
-    ``platform.session.run_session`` opens every one of those inside ``_env_window``, a process-wide
-    lock held for the *entire* session rather than for the ``os.environ`` mutation it is named
-    after. The window cannot simply be narrowed: a session's identity travels through the
-    environment and is read out of it all the way through the turn -- ``budget.record_external_call``
-    reads ``MISAKA_USAGE_DB``/``_TASK_ID``/``_GENERATION`` at every accounted call,
-    ``messages.register`` and ``roster`` read the card and the role, ``core.mcp`` reads the
-    profile, a spawned sub-agent re-reads all three -- and ``_run_session`` restores the keys it
-    saved, which two overlapping sessions cannot both do. So overlapping the calls bought no
-    wall-clock at all: they queued on that lock exactly as they had queued on each other.
-
-    It was not free, either. ``worker.run_llm_json`` reserves budget capacity *before* it reaches
-    the session, so N overlapping preflights held N reservations while N-1 of them sat waiting for
-    the lock. Under a token cap that is how a run that used to finish starts failing: the
-    reservations cross the Beast threshold, one takes the whole remainder, the next is refused, and
-    ``planner.preflight`` raises "shared token budget exhausted" where the serial pass had simply
-    planned the next card. Serial, exactly one reservation exists at a time and it is settled
-    before the next is asked for.
-
-    Real concurrency here needs a preflight to run in its own process -- the same answer headless
-    card dispatch reached (``research.node.HeadlessRunner``) -- not a thread in this one.
+    Card, research link and output directory land together, with every dependency present in
+    the first published file. A resumed dispatch reuses cards already created. ``round`` is the
+    node's planning round; ``previous`` the earlier rounds' cards the new ones build on.
     """
-    planned = []
-    for spec in specs:
-        await _progress(progress, "preflight",
-                        f"Sister {spec['assignee']} is planning its approach for {spec['title']!r}.", run)
-        # The failure of one spec ends the submit, so the specs behind it never open a session:
-        # the exception leaves this loop before the next preflight is reached.
-        planned.append(await asyncio.to_thread(planner.preflight, run, cfg, worker, spec, node=node))
-    return planned
-
-
-async def _submit_tasks(con, run, cfg, worker, node, specs, *, kind, issue_id=None, evidence="", progress=None,
-                        local_prefix=""):
-    """Preflight every spec, then open its card on the node's line. Returns local_id -> task id
-    (the scoped id when ``local_prefix`` is set).
-
-    Three passes, because only the middle one may leave the loop thread: which specs still need a
-    card is read off the board here, their plans are written in worker threads, and the cards are
-    then created in the plan's own order -- so creation, link and output directory stay one
-    transaction, and the card a dependency points at still exists before the card that needs it.
-    """
-    root = runs.node_root(run, node)
+    root = run["workspace"]
+    specs = _round_specs(specs, round)
     local_to_task = {}
-    specs = _scope_local_ids(specs, local_prefix)
-    pending = []
-    for spec in specs:
+    by_id = {spec["local_id"]: spec for spec in specs}
+    graph = {lid: spec.get("dependencies") or [] for lid, spec in by_id.items()}
+    missing = {dep for deps in graph.values() for dep in deps} - by_id.keys()
+    if missing:
+        raise RuntimeError(f"Research dependency was not created: {sorted(missing)}")
+    try:
+        ordered = [by_id[lid] for lid in TopologicalSorter(graph).static_order()]
+    except CycleError as error:
+        raise RuntimeError("Research task dependencies contain a cycle.") from error
+    for spec in ordered:
         if runs.stop_requested(con, run["id"]):
             break
         existing = con.execute(
@@ -190,23 +218,20 @@ async def _submit_tasks(con, run, cfg, worker, node, specs, *, kind, issue_id=No
             continue
         if existing:                                   # the card was deleted: drop the stale link and rebuild it
             con.execute("DELETE FROM research_run_tasks WHERE task_id=?", (existing["task_id"],))
-        pending.append(spec)
-    planned = await _preflight_specs(run, cfg, worker, node, pending, progress=progress) if pending else []
-    for spec, (preflight, _raw, session) in zip(pending, planned, strict=True):   # one plan per spec, in order
-        if runs.stop_requested(con, run["id"]):
-            break                                      # a stop that arrived while the plans were being written
-        aid, path = _write(con, run, node, "preflight", f"{spec['title']} · preflight",
-                           f"tasks/{spec['local_id']}-preflight.md",
-                           preflight["preflight_markdown"].rstrip() + "\n",
-                           assignee=spec["assignee"], session_file=session)
         with task_store.write_txn(con):                # card, link and output dir land together or not at all
             tid = card_files.create(
-                con, root, spec["title"], planner.task_body(spec, path, evidence=evidence), spec["assignee"],
-                priority=spec.get("priority", 0), timeout_seconds=runs.call_timeout(cfg, 1800),
-                after_row=lambda tid, aid=aid, spec=spec: runs.link_task(   # linked before the file exists
-                    con, run["id"], tid, kind=kind, node=node, preflight_artifact=aid,
-                    local_id=spec["local_id"], issue_id=issue_id, dependencies=spec.get("dependencies") or []))
+                con, root, spec["title"],
+                planner.task_body(spec, run_id=run["id"], node=node, siblings=specs, previous=previous),
+                spec["assignee"], priority=spec.get("priority", 0),
+                needs=[local_to_task[dep] for dep in spec.get("dependencies") or []],
+                after_row=lambda tid, spec=spec: runs.link_task(   # linked before the file exists
+                    con, run["id"], tid, kind=kind, node=node, round=round,
+                    local_id=spec["local_id"], dependencies=spec.get("dependencies") or []))
         local_to_task[spec["local_id"]] = tid
+        await _progress(progress, "assigned", f"Created {kind} card {tid}: {spec['title']} → Sister {spec['assignee']}.",
+                        run, task_id=tid, local_id=spec["local_id"], dependencies=spec.get("dependencies") or [])
+    if runs.stop_requested(con, run["id"]):
+        return local_to_task
     # depends_json keeps Last Order's plan as written; the cards' frontmatter `needs` is the executable projection of it.
     for spec in specs:
         if spec["local_id"] not in local_to_task:
@@ -229,17 +254,8 @@ async def _submit_tasks(con, run, cfg, worker, node, specs, *, kind, issue_id=No
         # short-circuits inside `link_tasks` before any status check, so a plain replay is quiet.)
         if child is None or child["status"] in _EDGES_ARE_HISTORY:
             continue
-        # A refusal here is raised, not caught: the submit fails and the node with it. That is on
-        # purpose -- a missing edge silently dropped is out-of-order research with nothing on the
-        # board to say so -- but it is only half a guarantee, and the honest name for the other
-        # half is a known gap: these edges are posted one at a time, and each `link_tasks` that
-        # succeeds ends with its own ready -> todo + `promote_task`. So for a child with several
-        # parents, if the first edge lands and the second is refused, the child may already be
-        # `ready` (its remaining written parent being done is enough) and stays dispatchable after
-        # the raise. Nothing short of writing all of one node's edges in a single transaction
-        # closes that, which is a design change and deliberately not attempted here.
-        for dependency in dependencies:
-            task_store.link_tasks(con, local_to_task[dependency], local_to_task[spec["local_id"]])
+        task_store.link_dependencies(
+            con, [local_to_task[dep] for dep in dependencies], child["id"])
     return local_to_task
 
 
@@ -283,11 +299,42 @@ async def _stop_active(runner, task_ids, context):
     )
 
 
+def _help_waiting(con, row):
+    """True only for a card parked by its own current SendMessage help request."""
+    if row["status"] not in {"blocked", "triage"} or row["block_kind"] != "needs_input":
+        return False
+    try:
+        payload = json.loads(
+            task_store.latest_payload(
+                con,
+                row["id"],
+                row["status"],
+                generation=row["generation"],
+            )
+            or "{}"
+        )
+    except (TypeError, ValueError):
+        return False
+    return isinstance(payload, dict) and payload.get("message_id") is not None
+
+
+async def _wait_unpaused(con, run_id, session):
+    from misaka.core.session_control import for_session
+
+    control = for_session(session) if session is not None else None
+    while control is not None and control.paused and not runs.stop_requested(con, run_id):
+        control.check_active()
+        await asyncio.sleep(.1)
+
+
 async def _drive_tasks(con, cfg, runner, run_id, *, scope, context=None,
-                       tool_call_id="research", poll_seconds=POLL_SECONDS, progress=None):
+                       tool_call_id="research", poll_seconds=POLL_SECONDS, progress=None, check_active=None, session=None):
     """Drive the cards in ``scope`` (task ids) until none is open; tasks waiting on dependencies stay in ``todo``."""
     last_snapshot = None
     while True:
+        await _wait_unpaused(con, run_id, session)
+        if check_active:
+            check_active()
         run = runs.get(con, run_id)
         linked = [row for row in runs.tasks(con, run_id) if row["id"] in scope]
         snapshot = tuple((row["id"], row["status"]) for row in linked)
@@ -296,22 +343,25 @@ async def _drive_tasks(con, cfg, runner, run_id, *, scope, context=None,
             for _task_id, status in snapshot:
                 counts[status] = counts.get(status, 0) + 1
             text = ','.join(f"{status} {count}" for status, count in sorted(counts.items()))
-            await _progress(progress, "tasks", f"Task status: {text or 'no tasks'}.", run, counts=counts)
+            await _progress(progress, "tasks", f"Task status: {text or 'no tasks'}.", run,
+                            counts=counts, task_ids=sorted(scope))
             last_snapshot = snapshot
         active = [row["id"] for row in linked if row["status"] in ACTIVE_TASKS]
+        pending = getattr(runner, "pending", None)
+        flying = set(await pending(scope)) if pending is not None else set()
         halt = ("stopped" if runs.stop_requested(con, run_id) else
-                "budget" if budget.status(con, cfg.get("token_cap"))["mode"] == "stop" else None)
+                "budget" if budget.exhausted(con, cfg.get("token_cap")) else None)
         if halt:
-            await _stop_active(runner, active, context)
-            if active:
+            await _stop_active(runner, set(active) | flying, context)
+            if active or flying:
                 # Those cards were just killed mid-turn, so every one of their rows still reads
                 # ``running`` with its claim on it and half an hour left on the lease -- and
                 # ``db.claim``'s admission counter counts a claimed running row with no expiry
                 # filter at all, host-wide. Left standing they refuse every claim on the machine,
                 # in every project, until a human clears them. ``dispatch.reconcile`` is the one
                 # path that settles a card whose worker is gone -- each under that card's exact
-                # ownership fence -- and it validates reports and can reach git, so it goes off
-                # the loop thread.
+                # ownership fence -- and it can rewrite card/Git state, so it goes off the loop
+                # thread.
                 from misaka.core.network import dispatch
                 await asyncio.to_thread(dispatch.reconcile, con, cfg)
                 linked = [row for row in runs.tasks(con, run_id) if row["id"] in scope]
@@ -319,15 +369,16 @@ async def _drive_tasks(con, cfg, runner, run_id, *, scope, context=None,
             return halt
         await asyncio.to_thread(_release_dependencies, con, run_id)
         linked = [row for row in runs.tasks(con, run_id) if row["id"] in scope]
-        # `research_parallel` is not in `config/product.py`'s CFG, so this is 4 in every
-        # shipped configuration; the read is the seam a future key connects through.
+        waiting = [row["id"] for row in linked if _help_waiting(con, row)]
+        # Per-node Sister slots are independent of the run's LO-node parallelism.
         free = max(0, max(1, int(cfg.get("research_parallel", 4)))
-                   - sum(1 for row in linked if row["status"] in ACTIVE_TASKS))
+                   - len(flying | {row["id"] for row in linked if row["status"] in ACTIVE_TASKS}
+                         | set(waiting)))
         ready = [row["id"] for row in linked if row["status"] == "ready"][:free]
         active = [row["id"] for row in linked if row["status"] in ACTIVE_TASKS]
-        if ready or active:
+        if ready or active or waiting or flying:
             await runner.launch_ready(context=context, tool_call_id=tool_call_id,
-                                      task_ids=[*ready, *active])
+                                      task_ids=[*ready, *active, *waiting])
             await asyncio.sleep(poll_seconds)
             continue
         if any(row["status"] == "todo" for row in linked):
@@ -339,35 +390,77 @@ async def _drive_tasks(con, cfg, runner, run_id, *, scope, context=None,
         return "done" if complete_scope and all(row["status"] == "done" for row in linked) else "failed"
 
 
-def _register_task_artifacts(con, run, task):
-    """Register a done card's text artifacts where they are: on the card's line, at their project-relative
-    path (the same path once the node merges). Nothing is copied."""
+def _submitted_payload(con, task):
+    try:
+        payload = json.loads(task_store.latest_payload(
+            con, task["id"], "submitted", generation=task["generation"]
+        ) or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+ARTIFACT_ROOTS = ("nodes", "final")
+
+
+def _register_task_artifacts(con, run, task, submitted):
+    """Register submitted project files at their original location. Nothing is copied or moved.
+
+    Only files under the by-node layout (``nodes/``, ``final/``) are a card's outputs. A Sister
+    who lists a page from the shared ``downloads/`` cache, or a file at the project root, has
+    named a source, not a product: those are gathered by the bundles beside her outputs and
+    are neither registered nor committed with the node. Each such path is recorded on the card."""
     link = con.execute("SELECT * FROM research_run_tasks WHERE task_id=?", (task["id"],)).fetchone()
     if not link or not task["workspace"]:
         return
-    try:
-        data = json.loads(Path(task_store.task_state_dir(task["id"]), "report.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return
     node = runs.node(con, link["branch_id"])
-    for rel in data.get("artifacts") or []:
+    for rel in submitted.get("artifacts") or []:
         source = Path(task["workspace"], str(rel)).resolve()
         try:
-            inside = source.relative_to(Path(task["workspace"]).resolve())
+            inside = source.relative_to(Path(run["workspace"]).resolve())
         except ValueError:
             continue
         if not source.is_file():
             continue
+        if inside.parts[:1] not in {(root,) for root in ARTIFACT_ROOTS}:
+            task_store.add_event(con, task["id"], "artifact_outside_layout", {"path": str(rel)},
+                                 generation=int(dict(task).get("generation") or 1))
+            continue
         try:
             raw = source.read_bytes()
+        except OSError:
+            continue
+        try:
             raw.decode("utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue  # binary originals are handled by corpus/PageIndex ingestion
-        kind = "critique" if link["kind"] == "red_team" else "task_output"
+            binary = False
+        except UnicodeDecodeError:
+            # Keep binary deliverables by identity. Document tools read their content;
+            # registration neither decodes them as prose nor certifies any quotation.
+            binary = True
+        kind = {"red_team": "critique", "final_review": "final_critique"}.get(link["kind"], "task_output")
         runs.register_file(con, run["id"], kind, f"[{task['id']}] {source.name}",
-                           os.path.join(run["workspace"], str(inside)), sha256=hashlib.sha256(raw).hexdigest(),
+                           str(source), sha256=hashlib.sha256(raw).hexdigest(),
                            branch_id=_bid(node), task_id=task["id"],
-                           metadata={"source_workspace": str(source), "source_file": str(rel)})
+                           metadata={"source_file": str(rel),
+                                     **({"binary": True} if binary else {})})
+
+
+def _clear_task_outputs(con, run_id, task_id):
+    """Drop the derived result set that an older generation of this task supplied."""
+    con.execute(
+        "DELETE FROM research_claims WHERE finding_id IN ("
+        "SELECT id FROM research_findings WHERE run_id=? AND task_id=?)",
+        (run_id, task_id),
+    )
+    con.execute(
+        "DELETE FROM research_findings WHERE run_id=? AND task_id=?",
+        (run_id, task_id),
+    )
+    con.execute(
+        "DELETE FROM research_artifacts WHERE run_id=? AND task_id=? "
+        "AND kind IN ('task_output','critique','final_critique')",
+        (run_id, task_id),
+    )
 
 
 def settle_done_tasks(con, *, run_id):
@@ -379,44 +472,113 @@ def settle_done_tasks(con, *, run_id):
         generation = int(task["generation"])
         if task_store.latest_payload(con, task["id"], "research_v2_settled", generation=generation):
             continue
-        _register_task_artifacts(con, run, task)
-        result = {"kind": task["research_kind"]}
-        if task["research_kind"] != "red_team":
-            try:
-                payload = json.loads(Path(task_store.task_state_dir(task["id"]), "report.json")
-                                     .read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                payload = {}
-            result = ledger.ingest_report(con, run, task, payload)
-        task_store.add_event(con, task["id"], "research_v2_settled", result, generation=generation)
+        settled = False
+        with task_store.write_txn(con):
+            # The unlocked scan is only a fast path. Another LO may have settled or
+            # resumed this card before we acquired the writer lock.
+            current = task_store.get(con, task["id"])
+            if current is None or current["generation"] != generation or current["status"] != "done":
+                continue
+            if task_store.latest_payload(con, task["id"], "research_v2_settled", generation=generation):
+                continue
+            submitted = _submitted_payload(con, current)
+            _clear_task_outputs(con, run["id"], task["id"])
+            _register_task_artifacts(con, run, current, submitted)
+            result = {"kind": task["research_kind"]}
+            if task["research_kind"] not in runs.REVIEW_KINDS:
+                result = ledger.ingest_report(con, run, task, submitted)
+            task_store.add_event(
+                con, task["id"], "research_v2_settled", result, generation=generation
+            )
+            settled = True
+        if settled:                                   # once per generation, after the ledger has its findings
+            _bundle(con, run, task=task)
 
 
 def _done(con, run, node, kind):
     return [row for row in runs.tasks(con, run["id"], kind=kind, node_id=node["id"]) if row["status"] == "done"]
 
 
-def _ingest_critique(con, run, node, task):
-    """Register the red team's material issues. Returns None, or why the critique could not be
-    read: a card that came back done without a usable critique.json fails its node, because an
-    exception here escapes to the driver and takes the whole run down with the node."""
-    rows = [a for a in runs.artifacts(con, run["id"], kind="critique", task_id=task["id"])
-            if a["path"].endswith(".json")]
-    if not rows:
-        return f"The red team card {task['id']} delivered no critique.json."
-    try:
-        data = json.loads(runs.artifact_text(rows[-1]))
-    except (OSError, ValueError) as error:
-        return f"The red team card {task['id']} delivered an unreadable critique.json: {error}"
-    for item in (data.get("issues") if isinstance(data, dict) else None) or []:
-        if not isinstance(item, dict) or not item.get("material"):
-            continue
-        try:
-            priority = int(item.get("priority") or 0)
-        except (TypeError, ValueError):
-            priority = 0
-        runs.add_issue(con, run["id"], node=node, kind=item.get("kind"),
-                       question=item.get("question"), rationale=item.get("rationale"), priority=priority)
+def _receive_critique(con, run, node, task):
+    """Receive the red team's frozen tool submission. Opening forks is a separate LO command."""
+    submitted = _submitted_payload(con, task)
+    if "issues" not in submitted:
+        return f"Red-team card {task['id']} has not recorded issues through misaka_card_note."
+    with task_store.write_txn(con):
+        for item in submitted["issues"]:
+            if item["material"]:
+                runs.add_issue(con, run["id"], node=node, kind=item["kind"], question=item["question"],
+                               rationale=item["rationale"], priority=item["priority"])
     return None
+
+
+async def _return_review(con, run, node, red, issues, reason, *, session=None):
+    """Record a no-dispatch review in its owning LO conversation, without waking a model."""
+    from misaka.core.session_manager import SessionManager
+
+    path = node["session_file"]
+    if not path or not os.path.isfile(path):
+        raise RuntimeError(f"Node {node['id']} has no persisted Last Order session for its review.")
+    delivery = f"research-review:{run['id']}:{node['id']}:{red['id']}:{red['generation']}"
+    content = f"# Red-team review returned\n\n{reason}\n" + await asyncio.to_thread(
+        planner.review_context, con, run, red, issues)
+    details = {"run_id": run["id"], "node_id": node["id"], "task_id": red["id"], "delivery_id": delivery}
+
+    def check_owner():
+        if runs.stop_requested(con, run["id"]):
+            raise InterruptedError("Research stopped before the review was recorded.")
+        owner = runs.node(con, node["id"])
+        if (owner is None or owner["runner_key"] != node["runner_key"]
+                or runs.get(con, run["id"])["driver_lock"] != run["driver_lock"]):
+            raise RuntimeError("Research review belongs to a superseded node or driver.")
+
+    if session is not None:
+        while not session.isIdle:
+            check_owner()
+            await asyncio.sleep(0.2)
+        if session.sessionManager.sessionFile != path:
+            raise RuntimeError("Research window changed conversation before the review was recorded.")
+    check_owner()
+    if session is not None:
+        # Idle delivery persists and updates the live context/UI in the same event-loop turn.
+        await session.sendCustomMessage(
+            {"customType": "research-review", "content": content, "display": True, "details": details},
+            {"triggerTurn": False, "_deliveryId": delivery, "_onPersist": lambda: None})
+    else:
+        def record():
+            manager = SessionManager.open(path)
+            if not any(entry.get("type") == "custom_message" and
+                       isinstance(entry.get("details"), dict) and entry["details"].get("delivery_id") == delivery
+                       for entry in manager.getEntries()):
+                manager.appendCustomMessageEntry("research-review", content, True, details)
+        await asyncio.to_thread(record)
+
+
+def _dispatch_children(con, run, node):
+    """Project the accepted LO assignments into formal children, once even across a crash.
+
+    The child/issue link is atomic. Session files are written outside the writer transaction;
+    a fork persisted just before a crash is reused in this child's dedicated directory.
+    """
+    from misaka.core.session_manager import find_most_recent_session
+
+    command = runs.action(con, run["id"], node["id"], "investigate")
+    if command is None:
+        raise RuntimeError(f"Node {node['id']} has no Last Order investigation dispatch command.")
+    children = []
+    for assignment in command["payload"]["assignments"]:
+        if runs.stop_requested(con, run["id"]):
+            return children
+        child = runs.assign_child(con, run["id"], node, assignment["issue_id"])
+        if not child["session_file"]:
+            directory = planner._lo_session(run, child)
+            session = (find_most_recent_session(directory)
+                       or planner.fork_session(command["session_file"], directory))
+            if not session:
+                raise RuntimeError(f"Node {child['id']}: parent Last Order session has no forkable history.")
+            child = runs.set_node(con, child["id"], session_file=session)
+        children.append(child)
+    return children
 
 
 def _children_settled(con, run, node):
@@ -424,30 +586,21 @@ def _children_settled(con, run, node):
 
 
 def _close(con, run, node, status):
-    """Leave the node. Post-order: a node closes -- and merges its line into its parent's -- only
-    after every child has closed; until then it waits as ``closing``. Failure keeps the branch unmerged."""
+    """Close after child completion. Artifacts are already in the project; nothing moves."""
+    if status == "failed" and not runs.node(con, node["id"])["last_error"]:
+        details = []
+        for card in runs.tasks(con, run["id"], node_id=node["id"]):
+            if card["status"] not in {"failed", "stopped"}:
+                continue
+            payload = task_store.latest_payload(con, card["id"], "failed", generation=card["generation"])
+            details.append(f"{card['id']} ({card['status']}): {payload or 'no failure detail recorded'}")
+        reason = f"{node['status']}: " + ("; ".join(details) or "node did not complete this phase")
+        con.execute("UPDATE research_branches SET last_error=? WHERE id=?", (reason, node["id"]))
+        runs.set_state(con, run["id"], error=f"node {node['id']}: {reason}")
     if status == "closed" and not _children_settled(con, run, node):
         runs.set_node(con, node["id"], status="closing")
         return "closing"
-    if node["worktree"]:
-        parent = runs.node(con, node["parent_id"])
-        into = parent["worktree"] if parent and parent["worktree"] else run["workspace"]
-        # A failed node keeps its worktree: its cards still point there and a human may want to look.
-        outcome = repo.branch_finish(
-            run["workspace"], runs.node_branch(node["id"]), node["worktree"], into=into,
-            merge=status == "closed", remove=status == "closed",
-            message=f"research {run['id']}/{node['id']}: {status}")
-        expected = "merged" if status == "closed" else "closed"
-        if outcome != expected:
-            runs.set_state(con, run["id"],
-                           error=f"node {node['id']}: its line could not be safely finished or removed; "
-                                 f"resolve branch {runs.node_branch(node['id'])} by hand")
-            runs.set_node(con, node["id"], status="conflict")     # a state, not a string: resume cannot clear it
-            return "conflict"
-        if outcome == "merged":
-            runs.relocate_node_tasks(con, node, node["worktree"], into)
-    if status != "closed":
-        con.execute("UPDATE research_issues SET status='parked' WHERE child_branch_id=?", (node["id"],))
+    _bundle(con, run, node=node)                      # the node's folder is complete: gather what it rests on
     runs.set_node(con, node["id"], status=status)
     return status
 
@@ -462,7 +615,7 @@ def _settle_closing(con, run):
         _close(con, run, waiting[-1], "closed")
 
 
-async def _expand(con, cfg, runner, worker, run, node, *, spawner, context, tool_call_id, poll_seconds, progress):
+async def _expand(con, cfg, runner, worker, run, node, *, context, tool_call_id, poll_seconds, progress, session=None):
     """Advance one node through its routine. Returns the node's terminal status, a halt
     ("stopped" / "budget"), or a waiting_input result dict."""
     nid = node["id"]
@@ -470,26 +623,22 @@ async def _expand(con, cfg, runner, worker, run, node, *, spawner, context, tool
     def drive(kind):
         scope = {row["id"] for row in runs.tasks(con, run["id"], kind=kind, node_id=nid)}
         return _drive_tasks(con, cfg, runner, run["id"], scope=scope, context=context,
-                            tool_call_id=tool_call_id, poll_seconds=poll_seconds, progress=progress)
+                            tool_call_id=tool_call_id, poll_seconds=poll_seconds, progress=progress, session=session)
     while True:
+        await _wait_unpaused(con, run["id"], session)
         node = runs.node(con, nid)
+        if runs.stop_requested(con, run["id"]):
+            scope = {row["id"] for row in runs.tasks(con, run["id"], node_id=nid)}
+            return await _drive_tasks(con, cfg, runner, run["id"], scope=scope, context=context,
+                                      poll_seconds=poll_seconds)
         status = node["status"]
         if status == "queued":
-            if node["parent_id"]:
-                parent = runs.node(con, node["parent_id"])
-                worktree = repo.branch_start(
-                    run["workspace"], runs.node_branch(nid), runs.node_worktree(run, nid),
-                    base=runs.node_branch(parent["id"]) if parent["parent_id"] else None)
-                if not worktree:                        # isolation is the node's precondition, not a nicety
-                    runs.set_state(con, run["id"], error=f"node {nid}: its worktree could not be created")
-                    return _close(con, run, node, "failed")
-                runs.set_node(con, nid, worktree=worktree)
             runs.set_node(con, nid, status="planning")
 
-        elif status in ("planning", "waiting_input"):
-            plan = _json_artifact(con, run, node, "plan_json")
-            if plan is not None and plan.get("status") == "clarify":
-                plan = None                       # resume the same Last Order session with the user's answer
+        elif status in ("planning", "waiting_input", "awaiting_approval"):
+            round, command = runs.current_plan(con, run["id"], nid)
+            round = round or 1
+            plan = command["payload"] if command else None
             context_path = None
             if plan is None and node["parent_id"]:
                 issue = con.execute("SELECT * FROM research_issues WHERE child_branch_id=?", (nid,)).fetchone()
@@ -498,26 +647,45 @@ async def _expand(con, cfg, runner, worker, run, node, *, spawner, context, tool
             if plan is None:
                 await _progress(progress, "planning", f"Last Order is planning {_label(node)}.", run)
                 plan, _raw, session_file = await asyncio.to_thread(
-                    planner.plan, run, cfg, worker, node, context_path=context_path)
-                _write(con, run, node, "plan", "Research plan", "plan.md", plan["plan_markdown"].rstrip() + "\n")
-                runs.set_node(con, nid, session_file=session_file)
-                if node["parent_id"] is None:
-                    runs.set_state(con, run["id"], root_session=session_file)
-                # plan.json is the checkpoint: its Markdown and session lineage
-                # have both landed before this final marker.
-                _write(con, run, node, "plan_json", "Research plan (JSON)", "plan.json",
-                       json.dumps(plan, ensure_ascii=False, indent=2))
-            elif not _artifact_path(con, run, node, "plan"):
-                _write(con, run, node, "plan", "Research plan", "plan.md", plan["plan_markdown"].rstrip() + "\n")
+                    planner.plan, run, cfg, worker, node, con=con, context_path=context_path)
+            else:
+                session_file = command["session_file"]
+            # The tool command is the checkpoint. Rebuild its projections even if the
+            # process died just after acceptance, or these still show a prior clarification.
+            _write_plan(con, run, node, plan, round)
+            if node["parent_id"] is None:
+                session_file = run["root_session"] or session_file
+            runs.set_node(con, nid, session_file=session_file)
+            if node["parent_id"] is None:
+                runs.set_state(con, run["id"], root_session=session_file)
             if plan["status"] == "clarify":
                 runs.set_node(con, nid, status="waiting_input")
                 runs.set_state(con, run["id"], phase="waiting_input", status="waiting_input")
                 return {"reason": "waiting_input", "questions": plan["clarifying_questions"],
                         "run": runs.summary(con, run["id"])}
+            if planner.plan_waits_for_user(cfg, worker) and not runs.plan_started(con, run["id"], nid):
+                halted = await _await_approval(con, cfg, runner, worker, run, node, round=round,
+                                               poll_seconds=poll_seconds, progress=progress)
+                if halted == "skipped":
+                    return await _skip_node(con, run, node, progress)
+                if halted:
+                    return halted
+                continue                                  # the plan as it now stands has the user's go-ahead
+            if plan.get("reframed_question"):
+                runs.reframe(con, run["id"], node, plan["reframed_question"])
+                run, node = runs.get(con, run["id"]), runs.node(con, nid)
+            if node["parent_id"] is None:
+                planner.publish_project_brief(run["workspace"], plan, round=round)
             await _progress(progress, "plan_ready",
-                            f"Planning produced {len(plan['tasks'])} research tasks for {_label(node)}.", run,
-                            tasks=[{"title": t["title"], "assignee": t["assignee"]} for t in plan["tasks"]])
-            await _submit_tasks(con, run, cfg, worker, node, plan["tasks"], kind="research", progress=progress)
+                            f"Planning produced {len(plan['tasks'])} research tasks for {_label(node)}"
+                            + (f" (round {round})." if round > 1 else "."), run,
+                            tasks=[{"title": t["title"], "assignee": t["assignee"], "local_id": t["local_id"],
+                                    "dependencies": t.get("dependencies") or []} for t in plan["tasks"]],
+                            red_team=plan["red_team"], plan=plan, round=round)
+            previous = [row for row in runs.tasks(con, run["id"], kind="research", node_id=nid)
+                        if row["status"] == "done" and int(row["wave"] or 1) < round]
+            await _submit_tasks(con, run, node, plan["tasks"], kind="research", progress=progress,
+                                round=round, previous=previous)
             runs.set_node(con, nid, status="executing")
 
         elif status == "executing":
@@ -532,23 +700,61 @@ async def _expand(con, cfg, runner, worker, run, node, *, spawner, context, tool
             runs.set_node(con, nid, status="synthesizing")
 
         elif status == "synthesizing":
-            await _progress(progress, "synthesizing", f"Last Order is writing the conclusion for {_label(node)}.", run)
-            text = await asyncio.to_thread(planner.synthesize, con, run, cfg, worker, node,
-                                           _done(con, run, node, "research"))
+            done = _done(con, run, node, "research")
+            # The round whose cards she is reading is the latest one with cards back, not the
+            # latest plan: a follow-up plan recorded just before a crash has no cards yet.
+            round = max((int(row["wave"] or 1) for row in done), default=1)
+            left = runs.limits(run)["max_followups"] - (round - 1)    # follow-ups still allowed on this node
+            if _artifact_path(con, run, node, "synthesis"):
+                runs.set_node(con, nid, status="critiquing")
+                continue
+            if _followup_recorded(con, run, node, round):   # a crash after she asked for more cards
+                runs.set_node(con, nid, status="planning")
+                continue
+            await _progress(progress, "synthesizing",
+                            f"Last Order is reading the cards of {_label(node)}"
+                            + (f" (round {round}; {max(left, 0)} more round(s) possible)" if round > 1 or left > 0 else "")
+                            + ".", run)
+            followup = _followup_tool(con, cfg, run, node, round) if left > 0 else None
+            text = await asyncio.to_thread(planner.synthesize, con, run, cfg, worker, node, done,
+                                           followup=followup, round=round, left=max(left, 0))
+            if _followup_recorded(con, run, node, round):
+                new_round, command = runs.current_plan(con, run["id"], nid)
+                _write_plan(con, run, node, command["payload"], new_round)
+                await _progress(progress, "followup_planned",
+                                f"Last Order asked for round {new_round} on {_label(node)}: "
+                                f"{len(command['payload']['tasks'])} more card(s).", run, node=nid, round=new_round)
+                runs.set_node(con, nid, status="planning")
+                continue
             _write(con, run, node, "synthesis", f"Conclusion · {_label(node)}", "synthesis.md", text)
             runs.set_node(con, nid, status="critiquing")
 
         elif status == "critiquing":
             if not runs.tasks(con, run["id"], kind="red_team", node_id=nid):
-                plan = _json_artifact(con, run, node, "plan_json")
+                plan = runs.current_plan(con, run["id"], nid)[1]["payload"]
                 await _progress(progress, "red_team",
-                                f"Sister {plan['red_team']['assignee']} is red-teaming the conclusion for {_label(node)}.", run)
+                                f"Preparing Sister {plan['red_team']['assignee']}'s red-team assignment for {_label(node)}.", run)
+                # Her reasoning is a fourth material, distinct from the three the red team already
+                # holds (conclusion and plan by path, evidence inline): only the thinking and
+                # working prose of her own turns, written once as an artifact and given by path.
+                deliberation = planner.deliberation_text(node["session_file"])
+                if deliberation:
+                    _write(con, run, node, "deliberation", f"Deliberation · {_label(node)}", "deliberation.md",
+                           deliberation)
                 body = planner.red_team_body(node, synthesis_path=_artifact_path(con, run, node, "synthesis"),
-                                             plan_path=_artifact_path(con, run, node, "plan"),
-                                             evidence=planner.evidence_block(con, run, node))
-                tid = card_files.create(con, runs.node_root(run, node), f"Red team · {_label(node)}", body,
-                                        plan["red_team"]["assignee"], timeout_seconds=runs.call_timeout(cfg, 1800))
-                runs.link_task(con, run["id"], tid, kind="red_team", node=node, local_id="red-team")
+                                             plan_path=_artifact_paths(con, run, node, "plan"),
+                                             deliberation_path=_artifact_path(con, run, node, "deliberation"),
+                                             evidence=planner.evidence_block(con, run, node),
+                                             own_cards=[row for row in _done(con, run, node, "research")
+                                                        if row["assignee"] == plan["red_team"]["assignee"]])
+                spec = {
+                    # '@' is outside LO task IDs, so research named 'red-team' cannot collide.
+                    "local_id": "@red-team", "title": f"Red team · {_label(node)}",
+                    "question": node["trigger_text"], "rationale": plan["red_team"]["reason"],
+                    "assignee": plan["red_team"]["assignee"], "deliverable": "critique.md",
+                    "instructions": body,
+                }
+                await _submit_tasks(con, run, node, [spec], kind="red_team", progress=progress)
             outcome = await drive("red_team")
             # Terminal, as in the executing phase: a node left non-terminal by a process that has
             # already exited is what the driver turns into a dead run.
@@ -560,100 +766,146 @@ async def _expand(con, cfg, runner, worker, run, node, *, spawner, context, tool
             red = _done(con, run, node, "red_team")
             if not red:
                 return _close(con, run, node, "failed")
-            unusable = _ingest_critique(con, run, node, red[-1])
+            unusable = _receive_critique(con, run, node, red[-1])
             if unusable:
-                task_store.add_event(con, red[-1]["id"], "research_critique_unusable", {"reason": unusable})
+                task_store.add_event(con, red[-1]["id"], "research_review_missing", {"reason": unusable})
+                con.execute("UPDATE research_branches SET last_error=? WHERE id=?", (unusable, nid))
                 runs.set_state(con, run["id"], error=f"node {nid}: {unusable}")
                 return _close(con, run, node, "failed")
-            runs.set_node(con, nid, status="probing")
+            runs.set_node(con, nid, status="reviewing")
 
-        elif status == "probing":
-            pending = [i for i in runs.issues(con, run["id"], node_id=nid) if i["status"] in ("open", "probing")]
-            if pending:
-                await _progress(progress, "probing",
-                                f"The red team left {len(pending)} issues on {_label(node)}; a Last Order fork investigates each.",
-                                run, issues=[i["id"] for i in pending])
-                # A red team may raise any number of material issues; each fork is a Last Order
-                # session with cards of its own, so they go out `_fanout` at a time. An issue not
-                # yet spawned stays `open` and is picked up by the next batch (or by a resume).
-                for batch in _batches(pending, _fanout(cfg)):
-                    handles = {}
-                    try:
-                        for issue in batch:
-                            probe_dir = runs.probe_session_dir(run, issue["id"])
-                            if not os.path.isdir(probe_dir):         # resume: a fork already forked keeps its session
-                                planner.fork_session(planner._lo_session(run, node), probe_dir)
-                            runs.set_issue(con, issue["id"], "probing")
-                            await asyncio.to_thread(_reap_orphan_runner, con, "research_issues", issue)
-                            handle = spawner.spawn(_probe_argv(run, issue), cwd=run["workspace"],
-                                                   title=f"LO·{nid}·{issue['id']}", place="tab")
-                            handles[issue["id"]] = handle
-                            _record_runner(con, "research_issues", issue["id"], handle)
-                    except BaseException:
-                        await _stop_all_off_loop(spawner, handles)
-                        raise
-                    outcome = await _wait_probes(con, cfg, spawner, run, handles, poll_seconds=poll_seconds)
-                    if outcome != "done":
-                        return outcome
-            runs.set_node(con, nid, status="triaging")
-
-        elif status == "triaging":
-            for issue in runs.issues(con, run["id"], node_id=nid):
-                if issue["status"] != "undermines" or issue["child_branch_id"]:
-                    continue
-                if node["depth"] < runs.limits(run)["max_depth"]:
-                    child = next((n for n in runs.nodes(con, run["id"], parent_id=nid)     # created before a crash
-                                  if n["trigger_text"] == issue["question"]), None) \
-                        or runs.create_node(con, run["id"], trigger=issue["question"], parent_id=nid,
-                                            depth=node["depth"] + 1)
-                    probe_dir = runs.probe_session_dir(run, issue["id"])
-                    if os.path.isdir(probe_dir):                 # the fork that found it becomes the child's Last Order
-                        shutil.copytree(probe_dir, planner._lo_session(run, child), dirs_exist_ok=True)
-                    runs.set_issue(con, issue["id"], "undermines", child_branch_id=child["id"])
-                else:
-                    runs.set_issue(con, issue["id"], "parked")
+        elif status == "reviewing":
+            red = _done(con, run, node, "red_team")
+            if not red:
+                raise RuntimeError(f"Node {nid} has no completed red-team review to dispatch.")
+            issues = list(runs.issues(con, run["id"], node_id=nid))
+            at_limit = node["depth"] >= runs.limits(run)["max_depth"]
+            if at_limit or not issues:
+                reason = ("Depth limit reached; no child research was performed. The review remains available for final adjudication."
+                          if at_limit else "No material issues were reported; no child research is needed.")
+                try:
+                    await _return_review(con, run, node, red[-1], issues, reason, session=session)
+                except InterruptedError:
+                    return "stopped"
+                if runs.stop_requested(con, run["id"]):
+                    return "stopped"
+                if at_limit:
+                    con.execute("UPDATE research_issues SET status='parked',reason=? WHERE run_id=? AND branch_id=?",
+                                (reason, run["id"], nid))
+                outcome = await asyncio.to_thread(_close, con, run, node, "closed")
+                await _progress(progress, "review_returned", reason, run)
+                return outcome
+            await _progress(progress, "review_returned", "The red-team review is back with the node Last Order for dispatch.", run)
+            await asyncio.to_thread(planner.investigate, con, run, cfg, worker, node, red[-1])
+            children = await asyncio.to_thread(_dispatch_children, con, run, node)
+            if runs.stop_requested(con, run["id"]):
+                return "stopped"
+            if children:
+                await _progress(progress, "children_assigned",
+                                f"Last Order assigned {len(children)} fork LO node(s) at depth {node['depth'] + 1}.",
+                                run, depth=node["depth"] + 1, nodes=[c["id"] for c in children])
             return _close(con, run, node, "closed")
 
         else:
             raise RuntimeError(f"Node {nid} is in an unknown state: {status}")
 
 
+async def _await_approval(con, cfg, runner, worker, run, node, *, poll_seconds, progress, round=1):
+    """Hold the node at its accepted plan until its Last Order records the user's go-ahead.
+
+    The node's conversation stays open the whole time: the root's is the user's own window, a
+    fork's is its own window in the panel (or, headless, a chat attached to its live session).
+    Two tools are put in that conversation for the wait -- revise the plan, start it -- and taken out after;
+    nothing here reads the user's words. A revised plan is republished as it lands. Returns
+    "stopped" if the run was stopped meanwhile, "skipped" if the user chose to close the node unresearched
+    (a fork's first plan), else None once the go-ahead is recorded."""
+    nid = node["id"]
+    runs.set_node(con, nid, status="awaiting_approval")
+    current = runs.node(con, nid)
+    session_file = current["session_file"] or run["root_session"]   # the conversation that recorded the plan
+    roster = planner._roster({**cfg, "workspace": run["workspace"]})
+    tools = commands.review_tools(con, run, current, validate=lambda value: planner.validate_plan(value, roster),
+                                  session_file=session_file, round=round)
+    plan = runs.action(con, run["id"], nid, runs.plan_key(round))
+    if node["parent_id"] is None:
+        where = "in this window"
+    elif getattr(runner, "home", None):
+        where = "in its own tab"
+    else:
+        where = f"with `misaka chat --attach --session {session_file}`"
+    await _progress(progress, "plan_review",
+                    f"{_label(node)}: the plan{f' (round {round})' if round > 1 else ''} is written and waits for "
+                    f"your go-ahead. Talk it over with its Last Order {where}; she records the start once you agree.",
+                    run, node=nid, plan_path=_artifact_path(con, run, node, "plan"), session_file=session_file,
+                    round=round)
+    session = getattr(worker, "session", None)
+    control = _session_control(session)
+    if session is not None:
+        session.registerCustomTools(tools)               # the window's own turns see them
+    if control is not None:
+        control.review_tools = tools                     # an attached chat's turns see them too
+    try:
+        while True:
+            if runs.stop_requested(con, run["id"]):
+                return "stopped"
+            latest = runs.action(con, run["id"], nid, runs.plan_key(round))
+            if latest is None:                          # withdrawn: the round never ran, so its plan goes too
+                _forget_plan(con, run, node, round)
+                return None
+            if runs.skipped(con, run["id"], nid):       # the user chose not to research this node at all
+                return "skipped"
+            if latest["tool_call_id"] != plan["tool_call_id"]:
+                plan = latest
+                _write_plan(con, run, node, plan["payload"], round)
+                await _progress(progress, "plan_revised", f"{_label(node)}: Last Order revised the plan; it still waits for your go-ahead.",
+                                run, node=nid, round=round)
+            if runs.plan_started(con, run["id"], nid):
+                return None
+            await asyncio.sleep(poll_seconds)
+    finally:
+        if session is not None:
+            session.unregisterCustomTools(tools)
+        if control is not None:
+            control.review_tools = ()
+        runs.set_node(con, nid, status="planning")
+
+
+async def _skip_node(con, run, node, progress):
+    """Close a node the user chose not to research: its plan stays on record as the proposal it
+    was, its issue is parked with the reason, and no card or conclusion ever exists. The final
+    adjudication sees the issue as unresolved, which is the honest empty ticket."""
+    nid = node["id"]
+    decision = runs.skipped(con, run["id"], nid)
+    reason = "Skipped by the user before any research: " + ((decision or {}).get("payload") or {}).get("reason", "")
+    con.execute("UPDATE research_issues SET status='parked', reason=? WHERE run_id=? AND child_branch_id=?",
+                (reason, run["id"], nid))
+    outcome = await asyncio.to_thread(_close, con, run, node, "parked")
+    await _progress(progress, "node_skipped",
+                    f"{_label(node)}: skipped by the user; no research was done, and its issue stays parked "
+                    "for final adjudication.", run, node=nid, reason=reason)
+    return outcome
+
+
+def _session_control(session):
+    if session is None:
+        return None
+    from misaka.core.session_control import for_session
+    try:
+        return for_session(session)
+    except Exception:  # noqa: BLE001 - a session without parts (a test double) has no control
+        return None
+
+
 def _unfinished_reason(con, run_id):
-    """Why the run must not be adjudicated as done: nodes that failed, or nodes whose branch is
-    still in conflict (their work is not on the line the report is written from).
-
-    A run with no node at all is the third case: ``runs.create`` writes the root node, so its
-    absence means that create was interrupted between the row and the node. ``next_level``
-    returns nothing for such a run, which reads exactly like "every node is closed" -- without
-    this check the run would be finalized into a report with no research behind it."""
-    if not runs.nodes(con, run_id):
+    """Incomplete nodes or a missing root must never pass final adjudication."""
+    nodes = runs.nodes(con, run_id)
+    if not nodes:
         return "the run has no research node: its creation was interrupted, so there is nothing to adjudicate"
-    parts = []
-    for status, label in (("failed", "failed"), ("conflict", "in merge conflict")):
-        ids = [n["id"] for n in runs.nodes(con, run_id) if n["status"] == status]
-        if ids:
-            parts.append(f"{len(ids)} node(s) {label}: {', '.join(ids)}")
-    return "; ".join(parts) or None
-
-
-def _settle_conflicts(con, run):
-    """A human merged a conflicted branch by hand: the node closes and its cards move to the parent line."""
-    for node in runs.nodes(con, run["id"]):
-        if node["status"] != "conflict" or not node["worktree"]:
-            continue
-        parent = runs.node(con, node["parent_id"])
-        into = parent["worktree"] if parent and parent["worktree"] else run["workspace"]
-        if repo.branch_merged(run["workspace"], runs.node_branch(node["id"]), into):
-            outcome = repo.branch_finish(
-                run["workspace"], runs.node_branch(node["id"]), node["worktree"], into=into,
-                merge=False, remove=True)
-            if outcome != "closed":
-                runs.set_state(con, run["id"],
-                               error=f"node {node['id']}: its merged worktree could not be safely removed; "
-                                     f"resolve branch {runs.node_branch(node['id'])} by hand")
-                continue
-            runs.relocate_node_tasks(con, node, node["worktree"], into)
-            runs.set_node(con, node["id"], status="closed")
+    failed = [n for n in nodes if n["status"] == "failed"]
+    if not failed:
+        return None
+    details = [f"{n['id']} ({n['last_error']})" if n["last_error"] else n["id"] for n in failed]
+    return f"{len(failed)} node(s) failed: {', '.join(details)}"
 
 
 async def _keep_lease(con, run_id, lock, lost):
@@ -661,7 +913,12 @@ async def _keep_lease(con, run_id, lock, lost):
     renewal (another driver took over) raises the flag the main loop checks."""
     while True:
         await asyncio.sleep(runs.DRIVER_TTL_SECONDS / 3)
-        if not runs.heartbeat_driver(con, run_id, lock):
+        try:
+            renewed = runs.heartbeat_driver(con, run_id, lock)
+        except Exception:  # No renewal means no authority, including a database failure.
+            lost.set()
+            raise
+        if not renewed:
             lost.set()
             return
 
@@ -669,15 +926,14 @@ async def _keep_lease(con, run_id, lock, lost):
 _INCOMPLETE_BANNER = (
     "> **This research is incomplete.** The run stopped before its final adjudication, so nothing below has\n"
     "> been weighed against anything else. Each conclusion is quoted exactly as the node that reached it wrote\n"
-    "> it: none has been reconciled with the others, none has been through the citation gate, and the issues\n"
+    "> it: final-report red-team review and adjudication have not completed, and the issues\n"
     "> listed below were never settled. This is the material the run had produced when it stopped, not its\n"
     "> answer.")
 
 
 def _cell(value):
-    """One table cell. ``report._one_line`` is what decides where a row begins, so text the run
-    fetched cannot open a row of its own; escaping the pipes stops it opening a *column*."""
-    return report._one_line(value).replace("|", r"\|")
+    """Keep quoted table data from opening new rows or columns."""
+    return " ".join(str(value or "").splitlines()).strip().replace("|", r"\|")
 
 
 _HEADING = re.compile(r"^(#{1,6})(\s|$)")
@@ -738,7 +994,7 @@ def _conclusions(con, run):
                 # A conclusion moved or edited under the run costs this document that one section.
                 # It must never cost the document: this is a halted run's whole deliverable.
                 texts.append(f"*(This conclusion could not be read back: {error})*")
-        out.append(f"### [{node['id']}] depth {node['depth']} — {report._one_line(node['trigger_text'])}\n\n"
+        out.append(f"### [{node['id']}] depth {node['depth']} — {_cell(node['trigger_text'])}\n\n"
                    + "\n\n".join(texts))
     return out
 
@@ -752,23 +1008,23 @@ def _open_issues(con, run):
     """
     rows = report._boundary(con, run)
     if not rows:
-        return ["No issue was left open, inconclusive, or parked."]
-    return ["The issues this run left open, inconclusive, or parked by the depth limit:", "",
+        return ["No issue was left open, assigned, or parked."]
+    return ["The issues this run left open, assigned, or parked by the depth limit:", "",
             "| Issue | Node | Status | Question | Why it was raised |",
             "| --- | --- | --- | --- | --- |",
             *(f"| {_cell(row['issue'])} | {_cell(row['node'])} | {_cell(row['status'])} "
               f"| {_cell(row['question'])} | {_cell(row['rationale'])} |" for row in rows)]
 
 
-def _partial_result(con, run, reason, *, status="stopped"):
+def _partial_result(con, run, reason, *, status="stopped", driver_lock=None):
     """What a run that cannot finish hands back -- a deliverable, never a list of paths.
 
     Assembled with no model call at all, because the halt this most often answers is the token
     budget: at that moment there is nothing left to spend, and everything the document needs is
     already on disk. Each node's conclusion as that node wrote it, the ledger's count of what the
-    run actually verified, and the issues it never settled.
+    run recorded, and the issues it never settled.
     """
-    findings = len(ledger.findings(con, run["id"], limit=report._LEDGER_LIMIT))
+    findings = len(ledger.findings(con, run["id"]))
     lines = ['# Incomplete research run', "", f"- Run: `{run['id']}`",
              f"- Project: `{runs.project_name(run)}` (`{run['workspace']}`)",
              f"- Reason: {reason}", "", _INCOMPLETE_BANNER, "", '## Original question',
@@ -776,16 +1032,19 @@ def _partial_result(con, run, reason, *, status="stopped"):
     for section in _conclusions(con, run) or ["No node had written its conclusion yet."]:
         lines += ["", section]
     lines += ["", '## Evidence on record', "",
-              (f"The ledger holds {findings} verified finding{'' if findings == 1 else 's'}: each rests on a "
-               "quotation checked verbatim against the source the card registered for it."),
+              (f"The ledger holds {findings} declared finding{'' if findings == 1 else 's'}. "
+               "These are researchers' records, not machine-verified conclusions."),
               "", '## Unresolved issues', ""]
     lines += _open_issues(con, run)
     lines += ["", '## Saved artifacts', ""]
     lines.extend(f"- [{row['kind']}] {row['title']} — `{row['path']}`"
                  for row in runs.artifacts(con, run["id"]))
     lines += [""]
-    aid, path = runs.write_text(con, run["id"], "partial", 'Incomplete research run', "partial.md", "\n".join(lines))
-    runs.set_state(con, run["id"], status=status, final_artifact=aid)
+    aid, path = runs.write_text(con, run["id"], "partial", 'Incomplete research run', runs.run_path(run, "partial.md"), "\n".join(lines))
+    runs.set_state(con, run["id"], status=status, final_artifact=aid, driver_lock=driver_lock)
+    _refresh_workspace_index(con, runs.get(con, run["id"]))
+    _bundle(con, run)
+    runs._commit(con, run, f"research {run['id']}: {status}")
     return {"reason": status, "final": {"artifact": aid, "path": path,
             "content": Path(path).read_text(encoding="utf-8")},
             "run": runs.summary(con, run["id"])}
@@ -805,9 +1064,8 @@ def _stop_all(spawner, handles):
 async def _stop_all_off_loop(spawner, handles):
     """``_stop_all`` from a coroutine, on a worker thread.
 
-    Both spawners take real time per handle: ``ProcessSpawner.stop`` walks and suspends the whole
-    process tree, then waits out two five-second grace periods, and ``PaneSpawner.stop`` talks to
-    the panel daemon. A four-node level is tens of seconds, and the loop this unwinds on is often
+    ``ProcessSpawner.stop`` walks and suspends the whole process tree, then waits out two
+    five-second grace periods. A four-node level is tens of seconds, and the loop this unwinds on is often
     not the research driver's own -- ``last_order.research`` starts ``workflow.run`` as a task on
     Last Order's loop, so this cleanup ran in the middle of her streaming and her inbox.
 
@@ -824,260 +1082,237 @@ async def _stop_all_off_loop(spawner, handles):
         pass
 
 
-async def _wait_probes(con, cfg, spawner, run, handles, *, poll_seconds):
-    """Wait until every fork has written its verdict (or the run halted). If one fork's process
-    dies, the others are stopped before the error propagates."""
-    try:
-        return await _wait_probes_inner(con, cfg, spawner, run, handles, poll_seconds=poll_seconds)
-    except BaseException:
-        await _stop_all_off_loop(spawner, handles)
-        raise
-
-
-async def _wait_probes_inner(con, cfg, spawner, run, handles, *, poll_seconds):
-    while handles:
-        await asyncio.sleep(poll_seconds)
-        halted = (runs.stop_requested(con, run["id"])
-                  or budget.status(con, cfg.get("token_cap"))["mode"] == "stop")
-        for iid, handle in list(handles.items()):
-            if runs.issue(con, iid)["status"] != "probing":
-                handles.pop(iid)
-            elif not spawner.alive(handle):
-                if halted:
-                    handles.pop(iid)
-                else:
-                    raise RuntimeError(f"The fork on issue {iid} ended without a verdict; resume the run to retry it.")
-    if runs.stop_requested(con, run["id"]):
-        return "stopped"
-    if budget.status(con, cfg.get("token_cap"))["mode"] == "stop":
-        return "budget"
-    return "done"
-
-
-async def expand_node(con, cfg, runner, worker, *, run_id, node_id, spawner, progress=None):
+async def expand_node(con, cfg, runner, worker, *, run_id, node_id, progress=None, session=None):
     """One node's routine, as run by its own process (misaka.core.research.node)."""
     runs.init(con)
     run, node = runs.get(con, run_id), runs.node(con, node_id)
     if not run or not node:
         raise ValueError(f"Research node not found: {run_id}/{node_id}")
-    return await _expand(con, dict(cfg), runner, worker, run, node, spawner=spawner, context=None,
+    runs.require_layout(run)
+    return await _expand(con, dict(cfg), runner, worker, run, node, context=None,
                          tool_call_id=f"research:{run_id}:{node_id}", poll_seconds=POLL_SECONDS,
-                         progress=progress)
+                         progress=progress, session=session)
 
 
-def _probe_gave_up(con, issue_id, reason):
-    """A fork whose cards failed still leaves a verdict. Its node waits on the issue's status, so
-    a verdict-less fork whose process is gone kills that node -- and with it the run."""
-    verdict = {"verdict": "inconclusive", "reason": reason}
-    runs.set_issue(con, issue_id, verdict["verdict"], reason=verdict["reason"])
-    return verdict["verdict"]
-
-
-def _probe_rounds_done(con, run_id, issue_id):
-    """How many rounds this fork already opened cards for, read off the scoped local ids."""
-    rounds = 0
-    for t in runs.tasks(con, run_id, issue_id=issue_id):
-        found = re.match(rf"{re.escape(issue_id)}\.r(\d+)\.", t["local_id"] or "")
-        if found:
-            rounds = max(rounds, int(found.group(1)))
-    return rounds
-
-
-async def probe(con, cfg, runner, worker, *, run_id, issue_id, progress=None, poll_seconds=POLL_SECONDS):
-    """Last Order's fork on one issue, as run by its own process: open cards, read what they
-    returned, judge. Ends with the issue's verdict written; halts propagate like a node's."""
-    runs.init(con)
-    run, issue = runs.get(con, run_id), runs.issue(con, issue_id)
-    if not run or not issue:
-        raise ValueError(f"Research issue not found: {run_id}/{issue_id}")
-    node = runs.node(con, issue["branch_id"])
-    synthesis_path = _artifact_path(con, run, node, "synthesis")
-    # A resumed fork continues where it stopped: open cards of the last round are driven first,
-    # and the round counter comes from the cards on record, so the three-round cap holds.
-    unfinished = {t["id"] for t in runs.tasks(con, run_id, issue_id=issue_id) if t["status"] != "done"}
-    if unfinished:
-        outcome = await _drive_tasks(con, dict(cfg), runner, run_id, scope=unfinished,
-                                     tool_call_id=f"research:{run_id}:{issue_id}", poll_seconds=poll_seconds,
-                                     progress=progress)
-        if outcome == "failed":
-            return _probe_gave_up(con, issue_id, "The fork's open cards failed; no verdict could be reached.")
-        if outcome != "done":
-            return outcome
-        settle_done_tasks(con, run_id=run_id)
-    for round_no in range(_probe_rounds_done(con, run_id, issue_id) + 1, MAX_PROBE_ROUNDS + 1):
-        cards = [t for t in runs.tasks(con, run_id, issue_id=issue_id) if t["status"] == "done"]
-        await _progress(progress, "probe", f"Fork on issue {issue_id}: round {round_no}, {len(cards)} card(s) in.", run)
-        tasks, verdict = await asyncio.to_thread(
-            planner.probe_step, con, run, dict(cfg), worker, node, issue, cards,
-            synthesis_path=synthesis_path, round_no=round_no, rounds=MAX_PROBE_ROUNDS)
-        if verdict:
-            runs.set_issue(con, issue_id, verdict["verdict"], reason=verdict["reason"])
-            return verdict["verdict"]
-        opened = await _submit_tasks(con, run, dict(cfg), worker, node, tasks, kind="probe", issue_id=issue_id,
-                                     evidence=planner.evidence_block(con, run, node), progress=progress,
-                                     local_prefix=f"{issue_id}.r{round_no}.")
-        outcome = await _drive_tasks(con, dict(cfg), runner, run_id, scope=set(opened.values()),
-                                     tool_call_id=f"research:{run_id}:{issue_id}", poll_seconds=poll_seconds,
-                                     progress=progress)
-        if outcome == "failed":
-            return _probe_gave_up(con, issue_id,
-                                  f"Round {round_no}'s cards failed; no verdict could be reached.")
-        if outcome != "done":
-            return outcome
-        settle_done_tasks(con, run_id=run_id)
-    # The last round's cards came back too: Last Order judges them before the fork gives up.
-    cards = [t for t in runs.tasks(con, run_id, issue_id=issue_id) if t["status"] == "done"]
-    verdict, reason = None, f"No verdict after {MAX_PROBE_ROUNDS} rounds of cards."
-    try:
-        _more, verdict = await asyncio.to_thread(
-            planner.probe_step, con, run, dict(cfg), worker, node, issue, cards,
-            synthesis_path=synthesis_path, round_no=MAX_PROBE_ROUNDS + 1, rounds=MAX_PROBE_ROUNDS, final=True)
-    except (RuntimeError, ValueError) as error:
-        reason = f"{reason[:-1]} ({error})."
-    if verdict is None:
-        verdict = {"verdict": "inconclusive", "reason": reason}
-    runs.set_issue(con, issue_id, verdict["verdict"], reason=verdict["reason"])
-    return verdict["verdict"]
-
-
-def _record_runner(con, table, row_id, handle):
-    """Persist a spawned child's identity so a successor driver can see and reap it."""
+def _record_runner(con, table, row_id, handle, *, key=None):
+    """The parent also records identity; the child's atomic claim covers a lost spawn reply."""
     pid = getattr(handle, "pid", None)
     if pid is None:
-        return                                   # a pane handle: the panel daemon owns that process
+        return
     from misaka.core.platform import processes
-    con.execute(f'UPDATE "{table}" SET runner_pid=?, runner_identity=? WHERE id=?',
-                (int(pid), processes.identity(int(pid)), row_id))
+    identity = processes.identity(int(pid))
+    if identity is not None:
+        con.execute(f'UPDATE "{table}" SET runner_pid=?, runner_identity=? WHERE id=? AND runner_key IS ? '
+                    'AND (runner_pid IS NULL OR (runner_pid=? AND runner_identity=?))',
+                    (int(pid), identity, row_id, key, int(pid), identity))
+
+
+def _clear_runner(con, table, row_id, *, key=None):
+    con.execute(f'UPDATE "{table}" SET runner_pid=NULL, runner_identity=NULL, runner_key=NULL '
+                'WHERE id=? AND runner_key IS ?', (row_id, key))
 
 
 def _reap_orphan_runner(con, table, row):
-    """A previous driver's child may still be running this node or probe. Never start a second
-    one beside it: terminate the recorded tree first (its own claim fences any late writes).
+    """Fence late spawns atomically, then prove the prior process dead before replacing it.
 
-    Blocking, and called from a worker thread for it: ``processes.terminate`` suspends the whole
-    tree, signals it, and waits out its grace periods before the fallback kill."""
-    keys = row.keys() if hasattr(row, "keys") else row
-    pid = row["runner_pid"] if "runner_pid" in keys else None
-    identity = row["runner_identity"] if "runner_identity" in keys else None
+    RETURNING observes a child that claimed between the caller's read and this fence. The
+    key is invalidated even without a PID: a delayed pane.create must never start old work.
+    """
+    old = con.execute(f'UPDATE "{table}" SET runner_key=NULL WHERE id=? AND runner_key IS ? '
+                      'RETURNING runner_pid, runner_identity', (row["id"], row["runner_key"])).fetchone()
+    if old is None:
+        raise RuntimeError(f"Research execution {row['id']} changed owners before cleanup")
+    pid, identity = old
     if pid and identity:
         from misaka.core.platform import processes
         if processes.identity_is_alive(int(pid), identity):
             processes.terminate(int(pid))
-    if pid or identity:
-        con.execute(f'UPDATE "{table}" SET runner_pid=NULL, runner_identity=NULL WHERE id=?', (row["id"],))
+        if processes.identity_is_alive(int(pid), identity):
+            raise RuntimeError(f"Research process {pid} for {row['id']} did not stop")
+    _clear_runner(con, table, row["id"])
 
 
-def _fanout(cfg):
-    """How many node or probe processes may be open at once. Each one is a Last Order session that
-    opens up to ``research_parallel`` card processes of its own, so an unbatched level is a
-    multiplier on the machine: the frontier has no width limit (a red team may raise any number of
-    undermining issues), only a depth limit.
-
-    Reads ``cfg["research_parallel"]``, which no shipped configuration sets (it is absent
-    from ``config/product.py``'s ``CFG``), so this is ``DEFAULT_FANOUT`` everywhere today.
-    The read is deliberate: adding the key to ``CFG`` connects the knob without touching
-    this file."""
-    try:
-        return max(1, int(cfg.get("research_parallel", DEFAULT_FANOUT)))
-    except (TypeError, ValueError):
-        return DEFAULT_FANOUT
-
-
-def _batches(items, size):
-    for start in range(0, len(items), size):
-        yield items[start:start + size]
+def _runner_error(label, row):
+    reason = row["last_error"] or ("no exception was recorded (the process may have been killed externally, "
+                                   "or its window closed)")
+    return RuntimeError(f"{label} ended while {row['status']}: {reason}; resume the run to retry it.")
 
 
 async def _expand_level(con, cfg, spawner, run, level, *, poll_seconds, progress, driver_lock=None):
-    """Spawn the level's nodes -- at most ``_fanout(cfg)`` of them at a time -- and wait until each
-    batch has left the frontier (terminal, closing, or waiting for input) before starting the next.
-    Returns "done", a halt, or a waiting_input result. If one node's process dies, the batch's other
-    processes are stopped before the error propagates."""
-    batches = list(_batches(list(level), _fanout(cfg))) or [[]]   # an empty level still reports the run's halt state
-    for batch in batches:
-        handles = {}
-        try:
-            for node in batch:                          # registered one by one: a failed spawn stops the started ones
-                await asyncio.to_thread(_reap_orphan_runner, con, "research_branches", node)
-                # A tab, not a split: split beside Last Order's chat at 50/50, then narrowed
-                # by every later layout change, the node pane ended up ten columns wide.
-                handle = spawner.spawn(_node_argv(run, node), cwd=run["workspace"],
-                                       title=f"LO·{node['id']}", place="tab")
-                handles[node["id"]] = handle
-                _record_runner(con, "research_branches", node["id"], handle)
-            outcome = await _wait_level(con, cfg, spawner, run, handles, poll_seconds=poll_seconds,
-                                        progress=progress, driver_lock=driver_lock)
-        except BaseException:
-            await _stop_all_off_loop(spawner, handles)
-            raise
-        if outcome != "done":            # a halt or waiting_input: the untouched batches stay queued for the resume
-            return outcome
-    return "done"
+    """Run the level's nodes through a window as wide as the run's parallelism: a node starts as
+    soon as a slot is free, and a slot frees the moment a node leaves the frontier (terminal,
+    closing, or waiting for input) -- so one node held at its plan, or on a slow Sister, does not
+    hold the nodes queued behind it. Returns "done", a halt, or a waiting_input result; on a halt
+    or a node waiting for input nothing more is started, and the untouched nodes stay queued for
+    the resume. If one node's process dies, the others are stopped before the error propagates."""
+    handles = {}
+
+    async def start(node):                          # registered one by one: a failed spawn stops the started ones
+        await asyncio.to_thread(_reap_orphan_runner, con, "research_branches", node)
+        key = runs.prepare_runner(con, "research_branches", node["id"])
+        handle = spawner.spawn(_node_argv(run, node, key), cwd=run["workspace"])
+        handles[node["id"]] = handle
+        _record_runner(con, "research_branches", node["id"], handle, key=key)
+        return key
+    try:
+        return await _wait_level(con, cfg, spawner, run, handles, poll_seconds=poll_seconds, progress=progress,
+                                 driver_lock=driver_lock, pending=list(level), width=runs.limits(run)["parallel"],
+                                 start=start)
+    except BaseException:
+        await _stop_all_off_loop(spawner, handles)
+        raise
 
 
-async def _wait_level(con, cfg, spawner, run, handles, *, poll_seconds, progress, driver_lock=None):
-    last = {}
+async def _wait_level(con, cfg, spawner, run, handles, *, poll_seconds, progress, driver_lock=None,
+                      pending=(), width=None, start=None):
+    """Watch the running nodes until none is left, starting the next of ``pending`` (through
+    ``start``, which returns the node's runner key) whenever fewer than ``width`` run -- unless
+    the run halted or a node stopped to wait for the user's input, after which nothing more starts."""
+    last, held = {}, set()
+    keys = {nid: runs.node(con, nid)["runner_key"] for nid in handles}
+    pending, hold = list(pending), False
+
+    async def top_up():
+        while pending and not hold and (width is None or len(handles) < width):
+            node = pending.pop(0)
+            keys[node["id"]] = await start(node)
+
+    await top_up()
     while handles:
         await asyncio.sleep(poll_seconds)
         if driver_lock and not runs.heartbeat_driver(con, run["id"], driver_lock):
             raise RuntimeError(f"Research run {run['id']}: the driver lease was taken over by another process.")
         halted = (runs.stop_requested(con, run["id"])
-                  or budget.status(con, cfg.get("token_cap"))["mode"] == "stop")
+                  or budget.exhausted(con, cfg.get("token_cap")))
+        if halted:
+            hold = True
+            await _stop_all_off_loop(spawner, handles)
+            await _settle_stopped_tasks(con, cfg, run["id"])
         for nid, handle in list(handles.items()):
             node = runs.node(con, nid)
             if node["status"] != last.get(nid):
                 last[nid] = node["status"]
                 await _progress(progress, "node", f"{_label(node)}: {node['status']}.", run, node=nid)
-            if node["status"] in ("closing", "waiting_input", "conflict", *runs.NODE_TERMINAL):
-                handles.pop(nid)
-            elif not spawner.alive(handle):
-                if halted:
+            # A node is settled when its process has exited (headless) or when it released the
+            # runner it held while staying alive (an interactive node keeps its window open after
+            # its routine). Either way the row already carries the terminal state. A runner that
+            # never recorded a pid (an in-process stand-in) is only ever settled by its exit.
+            if node["runner_pid"] is not None:
+                held.add(nid)
+            if not spawner.alive(handle) or (nid in held and node["runner_pid"] is None):
+                node = runs.node(con, nid)
+                if halted or (not node["last_error"] and node["status"] in (
+                        "closing", "waiting_input", *runs.NODE_TERMINAL)):
                     handles.pop(nid)
+                    _clear_runner(con, "research_branches", nid, key=keys[nid])
+                    hold = hold or node["status"] == "waiting_input"   # the run is about to pause for the user
                 else:
-                    raise RuntimeError(f"Node {nid}'s process ended while {node['status']}; resume the run to retry it.")
+                    raise _runner_error(f"Node {nid}'s process", node)
+        await top_up()
+    if runs.stop_requested(con, run["id"]):
+        return "stopped"
+    if budget.exhausted(con, cfg.get("token_cap")):
+        return "budget"
     waiting = [n for n in runs.nodes(con, run["id"]) if n["status"] == "waiting_input"]
     if waiting:
         questions = [f"[{n['id']}] {q}" for n in waiting
-                     for q in ((_json_artifact(con, run, n, "plan_json") or {}).get("clarifying_questions") or [])]
-        runs.set_state(con, run["id"], phase="waiting_input", status="waiting_input")
+                     for q in ((runs.current_plan(con, run["id"], n["id"])[1] or {}).get("payload", {}).get("clarifying_questions") or [])]
+        runs.set_state(con, run["id"], phase="waiting_input", status="waiting_input", driver_lock=driver_lock)
         return {"reason": "waiting_input", "questions": questions, "run": runs.summary(con, run["id"])}
-    if runs.stop_requested(con, run["id"]):
-        return "stopped"
-    if budget.status(con, cfg.get("token_cap"))["mode"] == "stop":
-        return "budget"
     return "done"
 
 
-async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, progress=None):
+async def _settle_stopped_tasks(con, cfg, run_id):
+    from misaka.core.network import dispatch
+    await asyncio.to_thread(dispatch.reconcile, con, cfg)
+    await asyncio.to_thread(_stop_pending, con, runs.tasks(con, run_id))
+
+
+async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, progress=None,
+              resume=False, clarification="", origin_session=None, session=None):
     """Advance one persisted research run until it finishes, stops, or needs user input.
-    Nodes are processes (misaka.core.research.node); ``spawner`` starts one and says whether it lives."""
+    With ``session``, that existing window is the root LO. Child node LOs are processes; ``spawner`` starts one and says whether it lives."""
     runs.init(con)
     run = runs.get(con, run_id)
     if not run:
         raise ValueError(f"Research run not found: {run_id}")
+    runs.require_layout(run)
+    if (any(n["status"] in {"probing", "triaging"} for n in runs.nodes(con, run_id))
+            or con.execute("SELECT 1 FROM research_actions WHERE run_id=? "
+                           "AND (action_key LIKE 'probe:%' OR action_key='triage') LIMIT 1", (run_id,)).fetchone()):
+        raise ValueError("This run used the removed probe workflow; start a new run. "
+                         "Its artifacts and sessions are preserved.")
     if not os.path.isdir(run["workspace"]):
         raise RuntimeError(f"The research run's project folder no longer exists: {run['workspace']}")
     driver_lock = f"driver:{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(3)}"
     if not runs.acquire_driver(con, run_id, driver_lock):
         raise RuntimeError(f"Research run {run_id} is already being driven by another process "
                            f"(lease {run['driver_lock']}); wait for it or stop that process.")
-    runs.ensure_layout(run)
     cfg = dict(cfg)
     halts = {"stopped": "The user requested a stop.", "budget": "The shared token budget limit was reached."}
+    window = root_runner = None
     lost = asyncio.Event()
     keeper = asyncio.create_task(_keep_lease(con, run_id, driver_lock, lost))
+    def check_active(*, allow_stop=False):
+        current = runs.get(con, run_id)
+        if lost.is_set() or current["driver_lock"] != driver_lock:
+            cause = keeper.exception() if keeper.done() and not keeper.cancelled() else None
+            raise RuntimeError(f"Research run {run_id}: driver lease lost" +
+                               (f": {cause}" if cause else "."))
+        if not allow_stop and current["stop_requested"]:
+            raise InterruptedError("The user requested a stop.")
+
+    def partial(reason, *, status="stopped"):
+        check_active(allow_stop=True)
+        return _partial_result(con, run, reason, status=status, driver_lock=driver_lock)
+
     try:
-        _settle_conflicts(con, run)
+        # Stop shallower writers before refreshing the child inventory: one may have
+        # created a child after our first read. No task generation changes until all stop.
+        reaped = set()
+        while pending := [n for n in runs.nodes(con, run_id) if n["id"] not in reaped]:
+            for row in pending:
+                check_active(allow_stop=True)
+                await asyncio.to_thread(_reap_orphan_runner, con, "research_branches", row)
+                reaped.add(row["id"])
+        if origin_session:
+            from misaka.core.platform import notifications
+            with task_store.write_txn(con):
+                current = runs.get(con, run_id)
+                if current["origin_session"] != origin_session:
+                    con.execute("UPDATE research_runs SET origin_session=? WHERE id=? AND driver_lock=?",
+                                (origin_session, run_id, driver_lock))
+                    subscription = notifications.subscribe(con, run_id, "research-chat")
+                    con.execute("UPDATE notification_subscriptions SET lease_token=NULL,leased_event_id=NULL,"
+                                "lease_expires=NULL WHERE id=?", (subscription,))
+        if resume:
+            run = runs.resume(con, run_id, driver_lock=driver_lock, clarification=clarification)
+        elif run["status"] == "done":
+            raise ValueError(f"Research run {run_id} is done; start a new run.")
+        run = runs.get(con, run_id)
+        runs.ensure_layout(run)
         if runs.stop_requested(con, run_id):
-            return _partial_result(con, run, halts["stopped"])
-        if budget.status(con, cfg.get("token_cap"))["mode"] == "stop":
-            return _partial_result(con, run, halts["budget"])
-        _refresh_workspace_index(con, run)
+            await _settle_stopped_tasks(con, cfg, run_id)
+            return partial(halts["stopped"])
+        if budget.exhausted(con, cfg.get("token_cap")):
+            return partial(halts["budget"])
+        if session is not None:
+            from misaka.core.research.node import HeadlessRunner, PaneRunner
+            from misaka.core.research.window import WindowLO
+            window = WindowLO(session, check_active)
+            runs.set_state(con, run_id, root_session=window.session_file, driver_lock=driver_lock)
+            root = next(n for n in runs.nodes(con, run_id) if n["parent_id"] is None)
+            # A window is not a killable node subprocess. The driver epoch fences its
+            # commands without storing this foreground process as a child runner.
+            runs.prepare_runner(con, "research_branches", root["id"])
+            runs.set_node(con, root["id"], session_file=window.session_file)
+            pane = os.environ.get("MISAKA_NET_PANE")
+            root_runner = PaneRunner(con, cfg, run_id, pane) if pane else HeadlessRunner(con, cfg)
+        run = runs.get(con, run_id)
         if run["phase"] == "created":
             runs.set_state(con, run_id, phase="active", driver_lock=driver_lock)
         while True:                                   # breadth-first: one level at a time, its nodes in parallel
-            if lost.is_set():
-                raise RuntimeError(f"Research run {run_id}: the driver lease was taken over by another process.")
+            check_active()
             _settle_closing(con, run)
             level = runs.next_level(con, run_id)
             if not level:
@@ -1085,31 +1320,96 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
             runs.set_state(con, run_id, wave=level[0]["depth"], driver_lock=driver_lock)
             await _progress(progress, "level", f"Depth {level[0]['depth']}: {len(level)} node(s) expanding.", run,
                             nodes=[n["id"] for n in level])
-            result = await _expand_level(con, cfg, spawner, run, level, poll_seconds=poll_seconds, progress=progress,
-                                         driver_lock=driver_lock)
+            if window is not None and level[0]["parent_id"] is None:
+                result = await _expand(
+                    con, cfg, root_runner, window, run, level[0], context=None,
+                    tool_call_id=f"research:{run_id}:{level[0]['id']}", poll_seconds=poll_seconds, progress=progress,
+                    session=session)
+            else:
+                result = await _expand_level(con, cfg, spawner, run, level, poll_seconds=poll_seconds, progress=progress,
+                                             driver_lock=driver_lock)
             if isinstance(result, dict):
                 return result
             if result in halts:
                 settle_done_tasks(con, run_id=run_id)
-                return _partial_result(con, run, halts[result])
-        if lost.is_set():
-            raise RuntimeError(f"Research run {run_id}: the driver lease was taken over by another process.")
+                return partial(halts[result])
+        check_active()
         unfinished = _unfinished_reason(con, run_id)
         if unfinished:
             settle_done_tasks(con, run_id=run_id)
             await _progress(progress, "unfinished", f"The run cannot be adjudicated: {unfinished}", run)
-            return _partial_result(con, run, unfinished, status="failed")
+            return partial(unfinished, status="failed")
         runs.set_state(con, run_id, phase="finalizing", driver_lock=driver_lock)
-        await _progress(progress, "finalizing", "Every node is closed; Last Order is adjudicating the final report.", run)
-        result = await asyncio.to_thread(report.finalize, con, run, cfg, worker)
+        await _progress(progress, "finalizing", "Every node is closed; Last Order is drafting the report for independent red-team review.", run)
+        draft = await asyncio.to_thread(report.prepare, con, runs.get(con, run_id), cfg, window or worker,
+                                        check_active=check_active)
+        check_active()
+        root = next(n for n in runs.nodes(con, run_id) if n["parent_id"] is None)
+        plan = runs.current_plan(con, run_id, root["id"])[1]["payload"]
+        spec = {"local_id": "@final-review", "title": "Red team · final report",
+                "assignee": plan["red_team"]["assignee"], "instructions": report.review_body(con, run, draft)}
+        linked = await _submit_tasks(con, run, root, [spec], kind="final_review", progress=progress)
+        check_active()
+        review_id = linked["@final-review"]
+        target = {"artifact": draft["id"], "sha256": draft["sha256"]}
+        previous = task_store.latest_payload(con, review_id, "research_review_target")
+        if previous is None:
+            task_store.add_event(con, review_id, "research_review_target", target)
+        elif json.loads(previous) != target:
+            raise ValueError("Final red-team card belongs to a different draft.")
+        if root_runner is None:
+            from misaka.core.research.node import HeadlessRunner
+            root_runner = HeadlessRunner(con, cfg)
+        await _progress(progress, "final_review", "The independent red team is reviewing the saved report draft.", run,
+                        task_id=review_id, draft_path=draft["path"])
+        outcome = await _drive_tasks(con, cfg, root_runner, run_id, scope={review_id},
+                                     tool_call_id=f"research:{run_id}:final-review", poll_seconds=poll_seconds,
+                                     progress=progress, check_active=lambda: check_active(allow_stop=True), session=session)
+        check_active(allow_stop=True)
+        settle_done_tasks(con, run_id=run_id)
+        if outcome in halts:
+            return partial(halts[outcome])
+        if outcome != "done":
+            return partial("Final-report red-team review failed.", status="failed")
+        try:
+            report.review_receipt(con, run, draft, review_id)
+        except (OSError, TypeError, ValueError) as error:
+            task_store.add_event(con, review_id, "research_review_missing", {"reason": str(error)})
+            return partial(str(error), status="failed")
+        check_active()
+        await _progress(progress, "adjudicating", "Last Order is weighing the final red team's objections; objections are not automatic verdicts.", run)
+        result = await asyncio.to_thread(report.finalize, con, runs.get(con, run_id), cfg, window or worker,
+                                         review_task_id=review_id, check_active=check_active)
+        check_active()
         runs.set_state(con, run_id, phase="done", status="done", final_artifact=result["artifact"],
                        driver_lock=driver_lock)
         _refresh_workspace_index(con, runs.get(con, run_id))
+        _bundle(con, run)
+        runs._commit(con, run, f"research {run_id}: complete artifacts")
         return {"reason": "done", "final": result, "run": runs.summary(con, run_id)}
+    except asyncio.CancelledError:
+        current = runs.get(con, run_id)
+        if current["driver_lock"] == driver_lock:
+            runs.request_stop(con, run_id)
+            await _settle_stopped_tasks(con, cfg, run_id)
+            partial(halts["stopped"])
+        raise
+    except InterruptedError:
+        return partial(halts["stopped"])
     except Exception as error:
-        runs.set_state(con, run_id, status="failed", error=f"{type(error).__name__}: {error}"[:500],
-                       driver_lock=driver_lock)               # a stale driver's word no longer lands
+        if run["status"] == "done":
+            raise
+        if runs.get(con, run_id)["driver_lock"] == driver_lock:
+            runs.set_state(con, run_id, status="failed", error=f"{type(error).__name__}: {error}"[:500],
+                           driver_lock=driver_lock)
         raise
     finally:
-        keeper.cancel()
-        runs.release_driver(con, run_id, driver_lock)
+        try:
+            if window is not None:
+                await window.close()
+            if root_runner is not None and hasattr(root_runner, "close"):
+                await asyncio.to_thread(root_runner.close)
+        finally:
+            keeper.cancel()
+            await asyncio.gather(keeper, return_exceptions=True)
+            runs.release_driver(con, run_id, driver_lock)

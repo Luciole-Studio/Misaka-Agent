@@ -1,6 +1,4 @@
-"""Run cards headlessly and settle their submissions. Submission is acceptance: a valid
-report.json, committed on the card's line, makes the card done (or hands it to the reviewer
-it names); nothing re-checks it afterwards."""
+"""Run cards headlessly and settle their board-owned submissions."""
 import json
 import os
 import secrets
@@ -106,32 +104,65 @@ def _worker_identity():
     return PROCESS_GROUP_IDENTITY + me if leads_group else me
 
 
-def reconcile(con, cfg):
+def _last_order_lock(lock):
+    return str(lock or "").split(":", 1)[0] in {"lo", "lo-retry", "lo-resume"}
+
+
+def _idle_seconds(t, now):
+    """How long the card has shown no progress, once past the wedge threshold; else None."""
+    last = t["heartbeat_at"]
+    if last is None:
+        return None
+    idle = now - int(last)
+    return idle if idle >= db.HEARTBEAT_STALE_SECONDS else None
+
+
+def reconcile(con, cfg, *, task_ids=None, workspace=None):
+    """Settle every running card whose worker is gone, or wedged.
+
+    A worker is gone when its lease has lapsed and neither its claimer nor its recorded
+    process identity is alive; its claim is released under the exact ownership fence, so
+    a paused-but-live Last Order keeps the Sister it still owns. A worker is wedged when
+    its process is alive but the card has shown no progress for ``HEARTBEAT_STALE_SECONDS``.
+    Only a headless card process is stopped for that: it runs in its own process group under
+    its own lease, whereas a Last Order's or the panel's lease stands for a process that
+    hosts other work and stops its own wedged Sisters itself. ``task_ids`` and ``workspace``
+    narrow the pass.
+    """
     import time as _time
 
     from misaka.core.network.sister_runtime import _claimer_alive, _owner_alive
     from misaka.core.platform import processes as process_tree
     from misaka.core.subagent.child import PROCESS_GROUP_IDENTITY
 
+    wanted = set(task_ids) if task_ids is not None else None
     now = int(_time.time())
-    for t in db.by_status(con, "running"):
+    for t in db.by_status(con, "running", workspace=workspace):
+        if wanted is not None and t["id"] not in wanted:
+            continue
         expires = t["claim_expires"]
         if expires is not None and int(expires) >= now and _claimer_alive(t["claim_lock"]):
             continue
         stored = str(t["worker_identity"] or "")
+        reason = db.ABANDONED_REASON
         if stored.startswith(PROCESS_GROUP_IDENTITY):
-            # Match sister_runtime: reclaim a grouped orphan only after its process group is gone.
             leader = stored[len(PROCESS_GROUP_IDENTITY):]
-            if process_tree.identity_is_alive(t["worker_pid"], leader):
+            idle = None if _last_order_lock(t["claim_lock"]) else _idle_seconds(t, now)
+            alive = process_tree.identity_is_alive(t["worker_pid"], leader)
+            if idle is None and alive:
                 continue
+            # A dead leader's group is fenced before its lease goes; a wedged live group is
+            # stopped the same way (SIGTERM, then SIGKILL) and reclaimed only once it is gone.
             if not process_tree.terminate_orphaned_group(int(t["worker_pid"]), leader):
                 continue
+            if idle is not None and alive:
+                reason = f"the worker showed no progress for {idle} s and was stopped"
         elif _owner_alive(t):
-            # Also the Sister path's rule: a recorded identity is checked against the PID that
-            # holds it now, so a reused PID does not read as the original worker.
+            # A recorded identity is checked against the PID that holds it now, so a reused
+            # PID does not read as the original worker.
             continue
         try:
-            finish_abandoned(con, t)
+            finish_abandoned(con, t, reason=reason)
         except Exception as error:  # noqa: BLE001 - one card must not strand the rest
             # A card whose workspace has gone (project deleted or moved) cannot have its file
             # rewritten, so settling it raises. Without this guard that exception leaves the
@@ -158,10 +189,11 @@ def run_task(con, t, cfg):
             if db.claim(con, t["id"], lock, ttl_seconds=60,
                         generation=generation, pid=os.getpid(), worker_identity=identity,
                         host_cap=host_cap, assignee_cap=assignee_cap):
-                db.add_event(con, t["id"], "failed",
-                             {"reason": f"Assignee profile not found: {t['assignee']}"},
+                reason = f"Assignee profile not found: {t['assignee']}"
+                db.add_event(con, t["id"], "failed", {"reason": reason},
                              generation=generation, claim_lock=lock)
-                db.mark_failed(con, t["id"], generation=generation, claim_lock=lock)
+                db.mark_failed(con, t["id"], generation=generation, claim_lock=lock,
+                               failure_kind="configuration", reason=reason)
         return False
 
     lock = f"{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(4)}"
@@ -170,7 +202,7 @@ def run_task(con, t, cfg):
         con,
         t["id"],
         lock,
-        ttl_seconds=max(1800, int(t["timeout_seconds"]) + 60),
+        ttl_seconds=1800,
         generation=generation,
         pid=os.getpid(),
         worker_identity=identity,
@@ -199,6 +231,8 @@ def run_task(con, t, cfg):
     task = dict(t)
     from misaka.core.platform import cards as card_files
     task["_attachments"] = card_files.attachment_list(run_dir, t["id"], workspace=workspace)
+    task["_handoffs"] = worker.card_handoffs(con, t)
+    task.update(worker.card_extras(con, t, cfg))
     bud = budget.status(con, cfg.get("token_cap"))
     if bud["mode"] == "stop":
         if db.back_to_ready(
@@ -234,10 +268,17 @@ def run_task(con, t, cfg):
             usage_token_cap=cfg.get("token_cap"),
             con=con,
         )
-    except BaseException:  # Ensure a terminating dispatcher never leaves the task marked running.
-        if db.back_to_ready(con, t["id"], generation=generation, claim_lock=lock):
-            db.add_event(con, t["id"], "dispatch_error",
-                         {"reason": "run_card crashed"}, generation=generation)
+    except BaseException as error:
+        # Cancellation may be retried; an actual startup/runtime fault must not spawn
+        # the same broken card every scheduler tick. Preserve its actionable cause.
+        with db.write_txn(con):
+            settle = db.mark_failed if isinstance(error, Exception) else db.back_to_ready
+            reason = f"{type(error).__name__}: {error}"[:2000]
+            details = {"reason": reason} if isinstance(error, Exception) else {}
+            if settle(con, t["id"], generation=generation, claim_lock=lock, **details):
+                db.add_event(con, t["id"], "dispatch_error",
+                             {"reason": reason},
+                             generation=generation)
         raise
     if verdict.get("budget_stop"):
         if db.back_to_ready(
@@ -250,13 +291,14 @@ def run_task(con, t, cfg):
                 budget.status(con, cfg.get("token_cap")),
                 generation=generation,
             )
-    elif verdict["ok"]:
-        accept(con, t, verdict["report"], generation=generation, claim_lock=lock, workspace=run_dir)
+    elif verdict.get("settled"):
+        pass
+    elif verdict.get("exit_code") == 0:
+        db.mark_unsettled(con, t["id"], generation=generation, claim_lock=lock)
     else:
         failure = {
             "reason": str(verdict["reason"]),
             "exit_code": verdict["exit_code"],
-            "timed_out": verdict["timed_out"],
             "stderr_tail": verdict.get("stderr_tail", "")[-500:],
         }
         blocked = str(verdict["reason"]).startswith("blocked:")
@@ -274,56 +316,32 @@ def run_task(con, t, cfg):
     return True
 
 
-def _submitted(report):
-    return {"summary": report["summary"], "artifacts": report.get("artifacts", []),
-            "notes": report.get("notes", ""), "uncertain": report.get("uncertain", [])}
+def _submitted(submission):
+    return {"summary": submission["summary"], "artifacts": submission.get("artifacts", []),
+            "notes": submission.get("notes", ""), "uncertain": submission.get("uncertain", []),
+            "findings": submission.get("findings", []),
+            **({"issues": submission["issues"]} if "issues" in submission else {})}
 
 
-def _owned(con, task_id, *, generation, claim_lock):
-    """True while the card is still running under this exact claim (the fence ``submit_task``
-    applies), so no git side effect happens on behalf of an owner the board has already replaced."""
-    row = db.get(con, task_id)
-    if row is None or (generation is not None and int(row["generation"]) != int(generation)):
-        return False
-    if claim_lock is None:
-        return True
-    return (row["status"] == "running" and row["claim_lock"] == claim_lock
-            and row["claim_expires"] is not None and int(row["claim_expires"]) >= int(_now()))
+def finish_abandoned(con, t, *, reason=db.ABANDONED_REASON):
+    """Release a dead worker's unfinished claim.
 
-
-def _now():
-    import time
-    return int(time.time())
-
-
-def finish_abandoned(con, t):
-    """The shared tail of both reconcilers (``reconcile`` here, the Sister runtime's
-    ``_reconcile_abandoned``): validate the dead worker's report and, under its exact ownership
-    fence, block it, accept it (commit + corpus) or send it back. Returns ``"blocked"``,
-    ``"submitted"``, ``"reclaimed"`` or ``None`` when someone else got there first."""
-    from misaka.core.platform import repo
-    ok, result = worker.check_report(db.workspace_for(t), con=con, task_id=t["id"], generation=t["generation"])
+    A completed lifecycle hook has already moved the row out of ``running`` and written its
+    ``submitted`` event atomically.  A dead worker still owning a running row therefore has no
+    result to recover or inspect.
+    """
     fence = {"generation": t["generation"], "claim_lock": t["claim_lock"], "worker_pid": t["worker_pid"],
                  "worker_identity": t["worker_identity"], "claim_expires": t["claim_expires"]}
-    if not ok and str(result).startswith("blocked:"):
-        return "blocked" if db.block_abandoned(
-            con, t["id"], "needs_input", str(result)[len("blocked:"):].strip(), **fence) else None
-    if ok:
-        workspace = db.workspace_for(t)
-        with db.write_txn(con):               # acceptance and its submitted payload land together
-            if not db.reclaim_abandoned(con, t["id"], submitted=True, **fence):
-                return None
-            db.add_event(con, t["id"], "submitted", {**_submitted(result), "reconciled": True},
-                         generation=t["generation"])
-        if repo.enabled(workspace) and not repo.commit_card(
-                workspace, t["id"], result, f"card {t['id']}: submit (reconciled)"):
-            db.add_event(con, t["id"], "git_commit_pending", {"reason": "submit-reconciled"},
-                         generation=t["generation"])
-        index_artifacts(con, t["id"], result.get("artifacts", []), t["generation"])
-        return "submitted"
-    if not db.reclaim_abandoned(con, t["id"], submitted=False, **fence):
-        return None
-    db.add_event(con, t["id"], "reclaimed", {"reason": str(result)[:500]}, generation=t["generation"])
+    outcome = db.reclaim_abandoned(con, t["id"], reason=reason, **fence)
+    if outcome != "ready":
+        return outcome            # None: the fence moved on; "failed": out of attempts, gave_up recorded
+    db.add_event(
+        con,
+        t["id"],
+        "reclaimed",
+        {"reason": reason},
+        generation=t["generation"],
+    )
     return "reclaimed"
 
 
@@ -341,21 +359,63 @@ def index_after_review(con, task_id, generation):
     index_artifacts(con, task_id, artifacts, generation)
 
 
-def accept(con, t, report, *, generation, claim_lock, workspace):
-    """Submission is acceptance: the ownership CAS in ``submit_task`` is the final word, and done
-    lands with its submitted payload in one transaction. Git records the acceptance afterwards --
-    only the CAS winner commits, so a losing owner can no longer leave a stale commit; a failed
-    commit leaves a ``git_commit_pending`` event (the cards model: git is history, not a veto)."""
-    from misaka.core.platform import repo
-    if not _owned(con, t["id"], generation=generation, claim_lock=claim_lock):
-        return False
+def accept_state(con, t, submission, *, generation, claim_lock):
+    """Land the ownership CAS and its immutable payload without yielding to another turn."""
     with db.write_txn(con):                                # done and its submitted payload land together
-        if not db.submit_task(con, t["id"], generation=generation, claim_lock=claim_lock):
+        if not db.submit_task(
+            con, t["id"], generation=generation, claim_lock=claim_lock, commit=False
+        ):
             return False
-        db.add_event(con, t["id"], "submitted", _submitted(report), generation=generation)
-    if repo.enabled(workspace) and not repo.commit_card(workspace, t["id"], report, f"card {t['id']}: submit"):
+        db.add_event(con, t["id"], "submitted", _submitted(submission), generation=generation)
+    return True
+
+
+def _research_linked(con, task_id):
+    """True when the card belongs to a research run: its Git history is written per node when
+    the node closes, not per card, so acceptance skips the per-card commit."""
+    try:
+        if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_run_tasks'").fetchone():
+            return False
+        return con.execute("SELECT 1 FROM research_run_tasks WHERE task_id=?", (task_id,)).fetchone() is not None
+    except Exception:  # noqa: BLE001 - a board without the research schema is an ordinary board
+        return False
+
+
+def accept_side_effects(con, t, submission, *, generation, workspace):
+    """Commit and index a submission whose state transition has already landed."""
+    from filelock import FileLock
+
+    from misaka.core.platform import cards, repo
+
+    committed = True
+    # Generation changes publish through this same card lock. Read the file fence,
+    # not SQLite, while holding it: transitions acquire DB -> card, never card -> DB.
+    # Git can wait on its own repository lock without occupying the board's writer.
+    with FileLock(os.path.join(db.task_state_dir(t["id"]), "card.lock")):
+        try:
+            fields = cards.read(cards.card_path(workspace, t["id"]))["fields"]
+            current = (int(fields.get("generation", 1)) == int(generation)
+                       and fields.get("status") in {"done", "review"})
+        except (OSError, ValueError, TypeError):
+            current = False
+        if current and repo.enabled(workspace) and not _research_linked(con, t["id"]):
+            committed = repo.commit_card(
+                workspace, t["id"], submission, f"card {t['id']}: submit"
+            )
+    if not committed:
         db.add_event(con, t["id"], "git_commit_pending", {"reason": "submit"}, generation=generation)
-    index_artifacts(con, t["id"], report.get("artifacts", []), generation)
+    index_artifacts(con, t["id"], submission.get("artifacts", []), generation)
+
+
+def accept(con, t, submission, *, generation, claim_lock, workspace):
+    """Accept atomically, then run the slower Git and indexing tail."""
+    if not accept_state(
+        con, t, submission, generation=generation, claim_lock=claim_lock
+    ):
+        return False
+    accept_side_effects(
+        con, t, submission, generation=generation, workspace=workspace,
+    )
     return True
 
 
@@ -382,4 +442,3 @@ def index_artifacts(con, task_id, artifacts, generation):
     if missed:
         db.add_event(con, task_id, "index_skipped", {"artifacts": missed[:20]},
                      generation=generation)
-

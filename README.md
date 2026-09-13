@@ -1,15 +1,32 @@
 # MISAKA
 
-A multi-agent research system for the humanities and social sciences. Last Order (the coordinator) breaks a research question into task cards; Sisters (worker agents) execute them in their own processes and hand back `report.json`; accepted results are committed to the project's git repository and indexed into a document corpus.
+A multi-agent research system for the humanities and social sciences. Last Order (the coordinator) breaks a research question into task cards; Sisters (worker agents) execute them in their own processes, and a normally settled run is recorded on its card automatically. Research products are written directly into the selected project, one folder per node: `nodes/<node>/` holds that node's plan, conclusion and review, and `nodes/<node>/cards/<card>/` each of its Sisters' outputs (the root node's folder is named by the run id); run-level products -- question, survey, draft, final report -- go to `final/<run>-<file>`. Evidence and extracted pages stay in that project too. When a card settles, a node closes, or the run ends, misaka writes a `SOURCES.md` beside the products and hard-links every file they cite into a `sources/` folder next to them (a copy only where linking is impossible; originals never move), so a folder holds a conclusion and what it rests on; these bundles are derived and are not registered, indexed, or committed. Git records optional history (one commit per closed node and one at the end); delivery requires no worktree or merge.
+
+Before a node's plan becomes cards, it waits for the user: the root Last Order presents it in the user's window, a fork's in its own tab (in the panel the fork node process is that tab: its Last Order runs as an interactive window beside its parent's), the user and she talk it over, she revises it as needed, and she records the start once the user agrees; no keyword or approval command is involved; `MISAKA_RESEARCH_PLAN_APPROVAL=0` turns the wait off, and a command-line `misaka research` run (whose root has no conversation) runs unattended as a whole. A node may plan more than once: at its conclusion turn Last Order can send her Sisters out for another round instead of concluding, up to the run's follow-up limit (`--followups N`, default 2: how many more times after the first cards are back; talking a plan over with the user is never counted), and every round's plan waits for the user like the first; the conclusion is then written from all rounds, and the red team comes after it. A fork's first plan can instead be skipped at the user's decision (`misaka_research_skip`): the node closes unresearched and its issue stays parked for final adjudication with the reason on record. Research assignments become cards directly. Each Sister briefly outlines her approach in ordinary prose, then uses her tools and completes the work in that same task session; there is no separate preflight process, planning JSON handoff, or required planning file. Red-team cards follow the same rule at every depth. Dependencies, concurrency limits, evidence checks, and final submission still apply.
+
+A red-team review with no material issues, or at the depth limit, is recorded in its node's existing Last Order conversation without a model turn. The driver closes the node and parks depth-limited issues for final adjudication; Last Order is asked to dispatch children only when there is research to assign.
+
+Fork Last Orders keep one AgentSession throughout their node execution, including waits for Sisters and the red team. In the panel a fork node is a tab of its own: the node process runs its Last Order as an interactive window in a new tab beside its parent's (the same chat the root has, on the node's own session), its routine driven from inside that window, its Sisters gridded into that tab; what you type there is a turn of that very Last Order. The window stays open after the node closes, so you can go on asking her about what she found; closing it mid-run ends the node, and `/research resume` retries it. A command-line `misaka research` run has no panel, so its nodes are background processes; Sessions shows the model state separately from the node phase/depth, and opening such a live background conversation uses `misaka chat --attach --session PATH`: the normal conversation screen and editor send input directly to the original owner, without another model or writer. Enter steers a busy session or starts a turn in an idle one; `/pause` holds its next request/tool/workflow boundary and `/resume` releases it. Already running tools and other agents are not stopped. Closing an attached window only detaches it. Completed sessions open as saved history; they do not silently restart a worker. Original Sister card tabs and research stop/resume retain their own lifecycle.
 
 ## Install
 
+MISAKA is not on PyPI (the name `misaka` there is an unrelated package); install it from the repository.
+
 ```sh
-uv venv .venv --python 3.13
-uv sync                        # development: product, every provider SDK, PDF outline extraction, test tooling
-pip install 'misaka[anthropic]'   # a user install picks its provider SDKs: anthropic / openai / google / bedrock / mistral
-                                  # (misaka[providers] = all five; misaka[pageindex] = PDF outline extraction)
+# a user install, with the provider SDKs you talk to: anthropic / openai / google / bedrock / mistral
+pip install "misaka[anthropic] @ git+https://github.com/Luciole-Studio/Misaka-Agent.git"
+#   misaka[providers] = all five; misaka[pageindex] = PDF outline extraction; misaka[browser] = browser tools
+# or from a checkout:
+git clone https://github.com/Luciole-Studio/Misaka-Agent.git && cd Misaka-Agent && pip install ".[anthropic]"
+# development:
+uv venv .venv --python 3.13 && uv sync   # product, every provider SDK, PDF outline extraction, test tooling
 ```
+
+Then run the wizard: `misaka setup`. It checks the environment (git, ripgrep, fd, pdftotext), stores a
+provider credential and default model and sends one test request, creates the first Sisters, offers the
+PDF outline extra, pins a web-search backend if you have a key, and initializes a project folder. Each
+section can be re-run alone (`misaka setup model`). A bare `misaka` with no credential configured starts the
+wizard by itself.
 
 `git` is required: `misaka init` creates the project repository, and accepted results are
 committed into it. Install it first (`xcode-select --install`, `apt install git`).
@@ -45,6 +62,9 @@ misaka web status      # web search: active backend, keyless ring, configured cr
 Web search works with no configuration at all — a keyless vendor ring serves it. To pin a
 backend or add a vendor key: `misaka web set backend tavily`, `misaka web set env.TAVILY_API_KEY tvly-…`
 (written 0600 to `~/.misaka/web.json`; an exported variable always wins over the file).
+`misaka web setup` provides the provider/tier picker and hidden credential prompts;
+`--profile DIR` writes `DIR/web.json` over shared defaults. `misaka web --help` covers
+discovery, enable/disable, reload and current limits.
 
 ## Configure
 
@@ -66,6 +86,19 @@ Environment variables override the files (all optional):
 | `MISAKA_PROVIDER` / `MISAKA_MODEL` | `settings.json`, then `anthropic` / `claude-sonnet-4-5` | provider and model for Sisters and chat |
 | `MISAKA_LO_MODEL` | Last Order's pinned model, then `MISAKA_MODEL` | Last Order's model |
 | `MISAKA_SUBAGENT_MODEL` | the parent's model | model for subagents a Sister spawns |
+| `MISAKA_DISABLE_BACKGROUND_TASKS` | unset | disable subagent background launch and transitions |
+| `MISAKA_AUTO_BACKGROUND_TASKS` | unset | move foreground subagents into the background after 120 seconds, after the child acknowledges its policy change |
+| `MISAKA_FORK_SUBAGENT` | unset | opt-in interactive implicit Agent forks; `/agents fork <directive>` preserves native `/fork` navigation |
+| `MISAKA_COORDINATOR_MODE` | unset | reserves coordinator ownership and disables implicit forks; does not enable an upstream coordinator implementation |
+| `MISAKA_MANAGED_AGENTS_DIR` | unset | operator-managed agent definitions, highest definition precedence |
+| `MISAKA_EFFORT_LEVEL` | unset | subagent effort payload fallback, independent of thinking mode |
+| `MISAKA_DISABLE_AUTO_MEMORY` | unset | explicit true/false override for automatic agent memory |
+| `MISAKA_SIMPLE` | unset | disable automatic agent memory in simple mode |
+| `MISAKA_REMOTE` | unset | remote memory context; automatic memory requires an explicit remote memory directory |
+| `MISAKA_REMOTE_MEMORY_DIR` | unset | remote-host agent-memory directory |
+| `MISAKA_AGENT_MEMORY_SNAPSHOT` | unset | enable agent user-memory snapshot initialization checks; existing memory is not silently overwritten |
+| `MISAKA_SUBAGENT_HOOKS_DISABLED` | internal | parent-to-child hook-disable fence; applies to frontmatter hooks too |
+| `MISAKA_SUBAGENT_MANAGED_HOOKS_ONLY` | internal | parent-to-child managed-hook-only fence |
 | `MISAKA_SMALL_FAST_MODEL` | the provider's own small model | model for cheap internal calls |
 | `MISAKA_FORCE_MODEL` | none | overrides every model choice, card configuration included |
 | `MISAKA_CACHE_RETENTION` | `short` | `long` asks the provider for long prompt-cache retention |
@@ -77,18 +110,19 @@ Paths — each is a directory or file MISAKA owns:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MISAKA_CODING_AGENT_DIR` | `~/.misaka/agent` | the engine directory: settings, auth, models, sessions |
+| `MISAKA_CODING_AGENT_DIR` | `~/.misaka/agent` | the engine directory: settings, auth and models (an explicit SDK engine home may also own sessions) |
 | `MISAKA_DB` / `MISAKA_MESSAGES` / `MISAKA_LCM_DB` | `~/.misaka/{board,messages,lcm}.db` | task board, message queue, compaction store |
-| `MISAKA_TASKS` | `~/.misaka/tasks` | per-card state: sessions, reports, locks |
+| `MISAKA_TASKS` | `~/.misaka/tasks` | per-card locks and read-only skill copies; no transcripts or research reports |
 | `MISAKA_PROFILES` | `~/.misaka/profiles` | roles: personalities, skills, MCP config (created on first run) |
-| `MISAKA_SESSIONS` | `~/.misaka/sessions` | every conversation: `<role>/<folder bucket>/`, with a card's under `cards/<id>/` and intake drafts under `intake/` |
-| `MISAKA_SUBAGENT_DIR` | `~/.misaka/subagents` | subagent state |
-| `MISAKA_PAGEINDEX` | `~/.misaka/pageindex` | the document corpus index |
+| `MISAKA_SESSIONS` | `~/.misaka/sessions` | every conversation: `<role>/<folder bucket>/`, with a card's under `cards/<id>/`, research conversations under `research/<run>--<scope>/`, nested agents beside their parent, or under `subagents/<parent>/` for in-memory parents |
+| `MISAKA_PAGEINDEX` | `<cwd>/.pageindex` | unscoped library calls only; CLI and session tools always use `<workspace>/.pageindex` |
+| `MISAKA_OFFICE_CACHE` | `~/.misaka/cache/office` | unscoped library cache; session tools use `<workspace>/.office-cache` |
+| `MISAKA_OFFICE_INTENT` | `~/.misaka/office_intent` | unscoped library archive; session tools use `<workspace>/.office-intent` |
 | `MISAKA_OCR_LANGS` | `eng+chi_sim+jpn` | tesseract language codes for scanned PDFs, joined with `+`; needs `ocrmypdf` on PATH (`brew install ocrmypdf`) |
-| `MISAKA_RUNS_HOME` | `~/.misaka/runs` | research run artifacts |
 | `MISAKA_WORKTREE_DIR` | `~/.misaka/worktrees` | git worktrees for isolated agents |
 | `MISAKA_AGENT_MEMORY_HOME` | `~/.misaka/memory` | agent memory files |
 | `MISAKA_NET_SOCK` / `MISAKA_NET_SNAPSHOT` | `~/.misaka/net.sock` / `net.json` | the panel daemon's socket and roster snapshot |
+| `MISAKA_GHOSTTY_VT` | `misaka/ui/panel/lib/libghostty-vt.<dylib\|so>` | the terminal emulator behind every pane (libghostty-vt, herdr's; `misaka/ui/panel/lib/README.md` has the rebuild recipe) |
 | `MISAKA_INPUT_HISTORY` | none — the feature is off unless set | file for persistent chat input history |
 | `MISAKA_TELEMETRY` | unset — the `enableInstallTelemetry` setting decides (default on) | whether this install may be identified to an outside service; set at all (`0` included) and it wins over the setting |
 | `MISAKA_TIMING` | `0` | `1` prints startup timings to stderr, grouped by namespace (`main`, `extensions`) |
@@ -110,6 +144,7 @@ Budget, concurrency, and limits:
 | `MISAKA_TASK_MAX_OUTPUT` | `32000` (max `160000`) | characters of a subagent's output kept |
 | `MISAKA_SKILL_COPY_CAP_MB` | `200` | size ceiling when copying a skill into a sandbox |
 | `MISAKA_JUDGE_TIMEOUT` | `600` | seconds a research planner / judge call may take |
+| `MISAKA_RESEARCH_PLAN_APPROVAL` | `1` (on) | a research node's plan waits for the user's go-ahead in conversation before its cards exist; `0` for unattended runs |
 | `MISAKA_MCP_INIT_TIMEOUT` / `MISAKA_MCP_CALL_TIMEOUT` | `30` / `120` | seconds for MCP startup and per call |
 | `MISAKA_MCP_REQUIRED_WAIT` | `30` | seconds to wait for a required MCP server |
 
@@ -117,51 +152,53 @@ Context engine:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MISAKA_LCM_SUMMARY_PROVIDER` / `MISAKA_LCM_SUMMARY_MODEL` / `MISAKA_LCM_SUMMARY_FALLBACK_MODELS` | the product provider / model | the summariser; fallbacks are comma-separated |
-| `MISAKA_LCM_SUMMARY_TIMEOUT` | `60` | seconds per summary |
-| `MISAKA_LCM_RETRIEVAL_MODE` / `MISAKA_LCM_EMBEDDING_MODEL` | `fts` / none | retrieval over compacted history; `hybrid` plus a model name is also the on-switch for semantic retrieval, as a local `fastembed` provider (`uv sync --extra lcm-semantic`, then `misaka lcm embed warmup` and `misaka lcm embed backfill --apply`). Upstream's `LCM_EMBEDDING_PROVIDER`/`LCM_EMBEDDING_MODEL` reach `voyage` and `ollama` instead |
+| `LCM_SUMMARY_MODEL` / `LCM_SUMMARY_FALLBACK_MODELS` | upstream LCM defaults | summary model overrides; provider routing lives in global `settings.json` under `auxiliary.compression` |
+| `LCM_SUMMARY_TIMEOUT_MS` | upstream task timeout | milliseconds per summary; `auxiliary.<task>.timeout` uses seconds |
+| `LCM_EMBEDDINGS_ENABLED` / `LCM_EMBEDDING_PROVIDER` / `LCM_EMBEDDING_MODEL` | upstream LCM defaults | semantic retrieval is explicit; install `lcm-semantic` for fastembed, then run `misaka lcm embed warmup` |
+
+LCM algorithm settings use the upstream `LCM_*` names, without product aliases.
+`misaka lcm import --help`, `misaka lcm externalize-backfill --help` and
+`misaka lcm state-embedding-backfill --help` expose the original operator grammars.
+Backfill reads the DB without changing history and tracks sidecars in an ownership manifest.
+
 
 #### The context engine
 
-Long sessions are compacted by [hermes-lcm](https://github.com/stephenschoettler/hermes-lcm),
-ported whole into `misaka/extensions/hermes_lcm/vendor/` (60 modules, byte-identical to the
-commit in `UPSTREAM_COMMIT`, with misaka's adapters quarantined in `host/`). It keeps every
-message in `~/.misaka/lcm.db`, compacts older context into a hierarchical summary DAG, and
-rebuilds the prompt from the best summaries plus a protected fresh tail -- so nothing is
-lost, only moved out of the way and retrievable through the fifteen `lcm_*` tools.
+Long sessions use the pinned [hermes-lcm](https://github.com/stephenschoettler/hermes-lcm)
+policy, with the complete plugin tree in `misaka/extensions/hermes_lcm/vendor/` and
+registered native-host adaptations in `host/`. LCM owns triggering, fresh-tail
+selection, chunking and summary assembly. MISAKA stores the adopted full replay in
+its ordinary session checkpoint; original session entries remain append-only.
+Derived history and summaries use `~/.misaka/lcm.db` and the fifteen `lcm_*` tools.
+LCM's configured redaction, ignore, retention and explicit GC policies still apply;
+this is not a promise of unconditional permanent raw retention.
 
-It reads upstream's own `LCM_*` environment variables -- all of them, documented upstream --
-and the `MISAKA_LCM_*` names above fill in as lower-precedence aliases for the four they
-overlap. `PORT_NOTES.md` records every deviation from upstream (currently none) and
-`docs/plans/hermes-lcm-sync.md` is the procedure for taking a newer upstream release.
+Algorithm settings use the upstream `LCM_*` names, without old product aliases.
+Native paths, authentication and `auxiliary` task settings belong to MISAKA.
+`misaka/extensions/hermes_lcm/PORT_NOTES.md` records the source adaptations,
+known upstream fixes and remaining host differences. Source coverage is not a claim
+that every Hermes host behavior has been reproduced.
 
-#### The four opt-in families
+#### Optional context features
 
-Everything the port added beyond compaction is off by default, which is upstream's
-posture. Each family is one switch, and each has a price:
-
-| Family | Switch | What it does | What it costs when on |
-|---|---|---|---|
-| Large-output externalization | `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` | tool results over `LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS` (12,000) move to side files next to the database, leaving a reference the model can expand | no model calls at all; disk beside `lcm.db` instead of megabytes inside it. Add `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` to stub them in the live prompt too |
-| Temporal rollups | `LCM_TEMPORAL_ROLLUPS_ENABLED` | day/week/month summaries beside the DAG, so `lcm_recent("this week")` answers from a rollup instead of re-reading leaves | one summariser call per period built, `LCM_ROLLUP_BUILDS_PER_PASS` (2) per maintenance pass. A quiet session builds a handful a day |
-| Semantic retrieval | `LCM_EMBEDDINGS_ENABLED` + `LCM_EMBEDDING_PROVIDER`/`LCM_EMBEDDING_MODEL` | `lcm_grep` gains `semantic` and `hybrid` modes, which find a paraphrase full-text cannot | one vector per summary node and chunk. `fastembed` runs locally and costs nothing per call (`uv sync --extra lcm-semantic`, ~130 MB model download); `voyage` is billed per token, and `misaka lcm embed backfill` prints the estimate before `--apply` spends it |
-| V4 assertions | `LCM_ASSERTIONS_ENABLED` + `LCM_ASSERTION_EXTRACTION_ENABLED` | claims with exact provenance, extracted from stored messages and queryable through `lcm_query_state` | one auxiliary model call per source row, bounded at `LCM_ASSERTION_EXTRACTION_MAX_SOURCES_PER_PASS` (4, ceiling 8) per compaction. `misaka lcm assertions rebuild --apply` is the unbounded one: `--limit` (100, max 500) is all that stands between it and 500 calls |
-
-Turning a family on helps traffic from that moment; history already in the database
-catches up only when told to. `misaka lcm externalize-backfill`, `misaka lcm rollups
---rebuild`, `misaka lcm embed backfill` and `misaka lcm assertions rebuild` are those
-four commands, and all of them print a plan first and write only on `--apply`.
+Use each feature's upstream configuration: `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED`,
+`LCM_TEMPORAL_ROLLUPS_ENABLED`, `LCM_EMBEDDINGS_ENABLED`, and
+`LCM_ASSERTIONS_ENABLED` / `LCM_ASSERTION_EXTRACTION_ENABLED`. Retrieval, preanswer,
+extraction and rollups retain their individual upstream defaults and budgets.
+The semantic extra supplies fastembed: `uv sync --extra lcm-semantic`.
+These features do not add an independent user-profile or long-term memory service.
 
 #### Operator commands
 
-`misaka lcm <op>`: `status` and `doctor` report; `backup` snapshots; `rotate SESSION_ID` compacts one session in place
-(advancing the lifecycle frontier past its pre-tail raw rows without changing its
-identity, deleting nothing, calling no model, backup-first on `--apply`); `preset
-show|suggest|apply` reads upstream's benchmarked model-family settings, and never writes
-any -- upstream's apply is preview-only, so `--apply` has nothing to commit.
-`--apply` is what commits, everywhere.
-The ported ops answer in upstream's own text, which names its slash command: read
-`/lcm X` there as `misaka lcm X`.
+`misaka lcm status`, `doctor`, `backup`, `rotate`, `preset`, `embed`, `assertions`
+and `rollups` use the original dispatcher and its command-specific grammar.
+`misaka lcm import --help`, `externalize-backfill --help` and
+`state-embedding-backfill --help` expose the original dedicated operators.
+Historical externalization reads the DB without rewriting old rows; it writes
+sidecars and ownership manifests, and rollback only removes matching, unreferenced
+files owned by that manifest. A dry run can write a dry-run manifest: it does not
+mean that every command has zero filesystem effects. Check each command's help.
+The optional interactive `/lcm` command requires `LCM_ENABLE_SLASH_COMMAND=1`.
 
 **Prompt caching.** Every compaction rewrites the front of the context and so invalidates
 an Anthropic prompt-cache prefix. `LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED=1` keeps the
@@ -183,7 +220,7 @@ Terminal and panel:
 
 A number that does not parse stops the command with the variable's name and value. Every
 `MISAKA_*` name not in these tables is set by MISAKA for its own child processes — a test
-(`tests/test_env_documented.py`) keeps that claim true in both directions.
+in the development tree keeps that claim true in both directions.
 
 ## Diagnose
 
@@ -193,8 +230,37 @@ diagnostic switch — there are no debug environment variables.
 
 ## Check
 
-```sh
-make check             # tests, -W error, compileall, import sweep, wheel build
-```
+This distribution ships the `misaka/` package only. The test suite and the `make check`
+gate it runs behind (tests, `-W error`, compileall, import sweep, wheel build) live in the
+development tree and are not included here.
 
-`misaka/documents/pageindex/flash` is vendored from [PageIndex](https://github.com/VectifyAI/PageIndex) (MIT); see `UPSTREAM.md` there.
+`misaka/core/documents/pageindex/flash` is vendored from [PageIndex](https://github.com/VectifyAI/PageIndex) (MIT); see `UPSTREAM.md` there.
+
+### Sub-agent management and compatibility
+
+`/agents list` includes shadowed definitions grouped by source. `/agents create
+<user|role|project> <name>`, `/agents edit <name>`, and `/agents delete <name>`
+manage file-backed definitions through the native editor. Create/edit also accept
+`--file PATH`; delete accepts an explicit `--yes`. Existing files are addressed by
+actual discovered path and checked for concurrent edits. Built-in, plugin,
+managed and JSON-only definitions remain read-only in this editor.
+
+`/agents memory <agent-id> [status|replace|keep]` inspects or explicitly resolves
+project memory snapshot updates. Replacement requires confirmation and retains
+other local files; active agents using the same memory must finish first.
+
+`MISAKA_AGENT_LIST_IN_MESSAGES=1` opts into the upstream catalog-delta behavior:
+the Agent description stays static, and filtered types are announced separately.
+Compaction reconstructs the list; mid-turn changes use a deterministic request-local
+projection rather than rewriting an active transcript. The default remains off.
+`MISAKA_SUBAGENT_LIVE_PERMISSIONS` is an internal parent/child protocol capability,
+set by the parent, not a user permission override. Children refresh inherited
+allow/ask/deny settings before tool admission. `permissions.additionalDirectories`
+are resolved before crossing working-directory boundaries; protected paths,
+plan-mode restrictions and the native role tool ceiling still apply.
+
+Network MCP supports `headersHelper` (10-second timeout, JSON string headers),
+static headers and WebSocket IDE `authToken`. Helpers receive
+`MISAKA_MCP_SERVER_NAME` and `MISAKA_MCP_SERVER_URL`; project/local helpers require
+project trust, including headless runs. This does not imply that the upstream
+OAuth login lifecycle, Teams/CCR or cross-type task registry has been ported.
