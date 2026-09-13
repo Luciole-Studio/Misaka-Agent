@@ -1,6 +1,6 @@
 """``misaka setup``: the first-run wizard, section by section.
 
-Modelled on Hermes's setup wizard: one command, a banner, a fixed list of sections that can
+Modelled on Hermes's setup wizard: one command, the logo, a fixed list of sections that can
 also be run one at a time (``misaka setup model``), a ✓/✗ summary at the end that says what
 works and what to run next. Every prompt shows the current value and Enter keeps it, so
 running it again on a configured install is a review, not a reset.
@@ -430,12 +430,12 @@ def run(section: str | None = None) -> int:
                 ui.print_error(f"Unknown section {section!r}; one of: {', '.join(SECTIONS)}")
                 return 2
             label, action = by_key[section]
-            ui.print_banner(f"MISAKA Setup — {label}")
+            ui.print_logo(f"Setup · {label}")
             ui.run_steps([(label, action)])
             ui.print_success(f"{label} done.")
             return 0
-        ui.print_banner("MISAKA Setup", "Configure this install: model, Sisters, documents, web, project.",
-                        "Enter keeps a current value · ← previous section · Esc or Ctrl+C exits.")
+        ui.print_logo("Setup", "Configure this install: model, Sisters, documents, web, project.",
+                      "Enter keeps a current value · ← previous section · Esc or Ctrl+C exits.")
         if configured_anywhere():
             ui.print_info("", "A provider is already configured: each prompt shows the current value.")
         ui.run_steps(steps)
