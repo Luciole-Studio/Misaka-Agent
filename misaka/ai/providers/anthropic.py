@@ -108,6 +108,8 @@ INTERLEAVED_THINKING_BETA = "interleaved-thinking-2025-05-14"
 # Managed-effort models (`compat.supportsMidConvoEffort`): the request carries the effort of
 # every past turn as an effort-only system message, and binds thinking blocks so a prefix
 # that no longer matches is dropped instead of returning 400.
+# Anthropic may answer a refused request from a permitted fallback model instead of failing.
+SERVER_SIDE_FALLBACK_BETA = "server-side-fallback-2026-07-01"
 MID_CONVERSATION_OUTPUT_CONFIG_BETA = "mid-conversation-output-config-2026-07-01"
 THINKING_BINDING_CONTROLS_BETA = "thinking-binding-controls-2026-08-01"
 ANTHROPIC_MESSAGE_EVENTS = frozenset(
@@ -173,6 +175,15 @@ def _merge_headers(*header_sources: Mapping[str, Any] | None) -> dict[str, Any]:
     return merged
 
 
+def allowed_fallback_models(model: Model) -> list[Any]:
+    """The models Anthropic will accept in ``fallbacks`` for this one, with their own prices.
+
+    Empty for everything but the models whose catalog entry lists them: Anthropic rejects the
+    field outright when a model has no permitted targets.
+    """
+    return list(getattr(model.compat, "allowedFallbackModels", None) or [])
+
+
 def supports_mid_convo_effort(model: Model) -> bool:
     """Whether this model's transport takes effort-only system messages and binding controls.
 
@@ -236,6 +247,9 @@ def get_anthropic_compat(model: Model) -> dict[str, bool]:
             else not is_fireworks
         ),
         "supportsStrictTools": bool(getattr(compat, "supportsStrictTools", None)),
+        # Default false. True on the kimi-coding models, whose endpoint emits and accepts
+        # thinking blocks with an empty signature.
+        "allowEmptySignature": bool(getattr(compat, "allowEmptySignature", None)),
         # Default true. False on every Claude Opus 4.7 and later across six providers, which
         # reject the parameter outright; sending it there is a 400, not a silent ignore.
         "supportsTemperature": (
@@ -334,6 +348,8 @@ def create_client(
         beta_features.append(FINE_GRAINED_TOOL_STREAMING_BETA)
     if needs_interleaved_beta:
         beta_features.append(INTERLEAVED_THINKING_BETA)
+    if allowed_fallback_models(model):
+        beta_features.append(SERVER_SIDE_FALLBACK_BETA)
     if supports_mid_convo_effort(model):
         beta_features.extend((MID_CONVERSATION_OUTPUT_CONFIG_BETA, THINKING_BINDING_CONTROLS_BETA))
 
@@ -566,6 +582,10 @@ def build_params(
     if tool_choice:
         params["tool_choice"] = {"type": tool_choice} if isinstance(tool_choice, str) else tool_choice
 
+    fallbacks = allowed_fallback_models(model)
+    if fallbacks:
+        params["fallbacks"] = [{"model": fallback.model} for fallback in fallbacks]
+
     return params
 
 
@@ -633,6 +653,7 @@ def convert_messages(
     same provider produced count: an effort level from another provider's transcript means
     nothing to this one."""
     params: list[dict[str, Any]] = []
+    compat = get_anthropic_compat(model)
     transformed_messages = transform_messages(messages, model, normalize_tool_call_id)
     deferred_names: AbstractSet[str] = deferred_tool_names or frozenset()
     loaded_tool_names: set[str] = set()
@@ -681,10 +702,21 @@ def convert_messages(
                     if block.redacted:
                         blocks.append({"type": "redacted_thinking", "data": block.thinkingSignature or ""})
                         continue
-                    if not block.thinking.strip():
+                    has_signature = bool(block.thinkingSignature and block.thinkingSignature.strip())
+                    # A block with neither text nor signature carries nothing. One with a
+                    # signature is kept even when the text is empty: the signature is what
+                    # the next request replays, and dropping it breaks the chain.
+                    if not block.thinking.strip() and not has_signature:
                         continue
-                    if not block.thinkingSignature or not block.thinkingSignature.strip():
-                        blocks.append({"type": "text", "text": sanitize_surrogates(block.thinking)})
+                    if not has_signature:
+                        # No signature, as after an aborted stream. Anthropic rejects the
+                        # block, so it degrades to text -- except where the provider says it
+                        # emits empty signatures itself and will take one back.
+                        blocks.append(
+                            {"type": "thinking", "thinking": sanitize_surrogates(block.thinking), "signature": ""}
+                            if compat["allowEmptySignature"]
+                            else {"type": "text", "text": sanitize_surrogates(block.thinking)}
+                        )
                     else:
                         blocks.append(
                             {
@@ -1099,6 +1131,21 @@ async def _iter_event_objects(stream_like: Any, signal: Any = None) -> AsyncIter
         except Exception as error:
             raise RuntimeError(f"Could not serialize Anthropic stream event: {error}") from error
 
+def _fallback_usage_model(model: Model, answered_by: str) -> Model:
+    """The model to price this response against.
+
+    A server-side fallback answers as a different model, and billing follows the model that
+    answered. The catalog carries each permitted target's own cost for exactly this; without
+    a match the request model stands, which is also the ordinary no-fallback case.
+    """
+    if answered_by == model.id:
+        return model
+    for fallback in allowed_fallback_models(model):
+        if fallback.provider == model.provider and fallback.model == answered_by:
+            return model.model_copy(update={"id": answered_by, "cost": fallback.cost})
+    return model
+
+
 def _update_usage_from_anthropic_usage(output: AssistantMessage, usage: Mapping[str, Any], model: Model) -> None:
     input_tokens = usage.get("input_tokens")
     output_tokens = usage.get("output_tokens")
@@ -1141,6 +1188,9 @@ def stream_anthropic(
             providerThinkingLevel=((_option(options, "effort") or "high")
                                    if supports_mid_convo_effort(model) else None),
         )
+        # What the usage is priced against. It becomes the fallback's own entry if the server
+        # answers as one; until `message_start` says otherwise the request model stands.
+        usage_model = model
         raw_response: Any = None
         owned_client: Any = None       # a client made here is closed here
 
@@ -1210,9 +1260,13 @@ def stream_anthropic(
                         message_id = message.get("id")
                         if isinstance(message_id, str):
                             output.responseId = message_id
+                        answered_by = message.get("model")
+                        if isinstance(answered_by, str) and answered_by:
+                            output.model = answered_by
+                            usage_model = _fallback_usage_model(model, answered_by)
                         usage = message.get("usage")
                         if isinstance(usage, Mapping):
-                            _update_usage_from_anthropic_usage(output, usage, model)
+                            _update_usage_from_anthropic_usage(output, usage, usage_model)
                     continue
 
                 if event_type == "content_block_start":
@@ -1322,7 +1376,7 @@ def stream_anthropic(
                         output.stopReason = map_stop_reason(delta["stop_reason"])
                     usage = event.get("usage")
                     if isinstance(usage, Mapping):
-                        _update_usage_from_anthropic_usage(output, usage, model)
+                        _update_usage_from_anthropic_usage(output, usage, usage_model)
 
             if signal_aborted(_option(options, "signal")):
                 raise RuntimeError("Request was aborted")
