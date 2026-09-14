@@ -514,6 +514,11 @@ class AnthropicMessagesCompat(SchemaModel):
     supportsTemperature: bool | None = None
     allowEmptySignature: bool | None = None
     supportsStrictTools: bool | None = None
+    # "Whether the exact model transport supports effort-only system messages and thinking
+    # binding controls" (upstream types.ts). Set on claude-opus-5 and claude-fable-5-1: the
+    # request carries `output_config.effort` system messages, adaptive thinking with
+    # `block_binding`, and two extra beta features. See `anthropic.py`.
+    supportsMidConvoEffort: bool | None = None
     allowedFallbackModels: list[AnthropicAllowedFallbackModel] | None = None
     supportsToolReferences: bool | None = None
 
