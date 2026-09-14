@@ -353,9 +353,11 @@ class _OAuthServerInfo:
         server: asyncio.base_events.Server | None,
         future: asyncio.Future[dict[str, str] | None],
         signal: Any = None,
+        connections: set[Any] | None = None,
     ) -> None:
         self._server = server
         self._future = future
+        self._connections: set[Any] = connections if connections is not None else set()
         # Upstream registers `interaction.signal.addEventListener("abort", () =>
         # server.cancelWait())` before it starts waiting (auth/oauth/openai-codex.ts). Without
         # it, a caller that offers no paste box -- `ai/cli.py` passes `onManualCodeInput =
@@ -391,6 +393,19 @@ class _OAuthServerInfo:
         if self._server is None:
             return
         self._server.close()
+        # Do not wait for peers that never spoke. `Server.wait_closed()` has waited for
+        # every handler task since Python 3.12, and this server's handler sits in
+        # `readline()` until the peer sends a request line. Chrome opens speculative
+        # preconnect sockets to the redirect origin and sends nothing on them, so after the
+        # real callback landed, closing the server waited for Chrome's idle keep-alive to
+        # lapse -- minutes of a frozen dialog with the login already done. Upstream never
+        # waits at all (`server.server.close()`, auth/oauth/*.ts), so aborting the sockets
+        # we still hold and then reaping is the same observable behaviour, tidier.
+        for writer in list(self._connections):
+            # A peer that already vanished needs no abort.
+            with contextlib.suppress(Exception):
+                writer.transport.abort()
+        self._connections.clear()
         await self._server.wait_closed()
 
 
@@ -406,9 +421,19 @@ async def _start_local_oauth_server(state: str, signal: Any = None) -> _OAuthSer
         }.get(status, "OK")
         return f"HTTP/1.1 {status} {reason}\r\n"
 
+    connections: set[Any] = set()
+
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        connections.add(writer)
         try:
             request_line = await reader.readline()
+            if not request_line.strip():
+                # A peer that opened a socket and said nothing: a browser preconnect, a port
+                # scan, or one of our own aborts on the way out. There is nothing to answer
+                # and nothing to report -- answering raised IndexError on `split(" ")[1]`
+                # and then ConnectionResetError writing the 500 to a socket already gone,
+                # which asyncio prints as an unhandled error straight through the TUI.
+                return
             path = request_line.decode("utf-8", "ignore").split(" ")[1]
             while True:
                 line = await reader.readline()
@@ -462,18 +487,22 @@ async def _start_local_oauth_server(state: str, signal: Any = None) -> _OAuthSer
                 "Connection: close\r\n\r\n"
                 f"{body}"
             )
-            writer.write(response.encode("utf-8"))
-            await writer.drain()
+            # The peer may be gone already; the 500 is best effort, not a second failure.
+            with contextlib.suppress(OSError, ConnectionError):
+                writer.write(response.encode("utf-8"))
+                await writer.drain()
         finally:
-            writer.close()
-            await writer.wait_closed()
+            connections.discard(writer)
+            with contextlib.suppress(OSError, ConnectionError):
+                writer.close()
+                await writer.wait_closed()
 
     try:
         server = await asyncio.start_server(handler, get_callback_host(), CALLBACK_PORT)
     except OSError:
         future.set_result(None)
         return _OAuthServerInfo(None, future)
-    return _OAuthServerInfo(server, future, signal)
+    return _OAuthServerInfo(server, future, signal, connections)
 
 
 def _get_account_id(access_token: str) -> str | None:

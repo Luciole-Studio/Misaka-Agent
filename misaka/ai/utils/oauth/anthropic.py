@@ -10,7 +10,7 @@ import os
 import secrets
 import time
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -59,6 +59,7 @@ class _CallbackServerInfo:
     # rather than a listener, as `openrouter.py` and `radius.py` already do, because
     # misaka's signals are duck-typed rather than DOM events.
     aborting: asyncio.Task[None] | None = None
+    connections: set[Any] = field(default_factory=set)
 
     def watch_abort(self, signal: Any) -> None:
         if signal is not None and self.aborting is None:
@@ -81,6 +82,20 @@ class _CallbackServerInfo:
             with contextlib.suppress(asyncio.CancelledError):
                 await self.aborting
         self.server.close()
+        # Do not wait for peers that never spoke. `Server.wait_closed()` has waited for
+        # every handler task since Python 3.12, and the handler below sits in `readline()`
+        # until the peer sends a request line. A browser opens speculative preconnect
+        # sockets to the redirect origin and sends nothing on them, so closing the server
+        # waited for the browser's idle keep-alive to lapse -- minutes of a frozen dialog
+        # with the login already done. Upstream never waits at all (`server.close()`,
+        # auth/oauth/anthropic.ts), so aborting what we still hold is the same observable
+        # behaviour. Seen in the wild on `openai_codex.py`, whose port a browser reaches
+        # more often; this flow has the identical shape.
+        for writer in list(self.connections):
+            # A peer that already vanished needs no abort.
+            with contextlib.suppress(Exception):
+                writer.transport.abort()
+        self.connections.clear()
         await self.server.wait_closed()
 
 
@@ -150,6 +165,7 @@ async def _start_callback_server(expected_state: str, signal: Any = None) -> _Ca
     """
     loop = asyncio.get_running_loop()
     future: asyncio.Future[dict[str, str] | None] = loop.create_future()
+    connections: set[Any] = set()
 
     def _status_line(status: int) -> str:
         reason = {
@@ -160,8 +176,15 @@ async def _start_callback_server(expected_state: str, signal: Any = None) -> _Ca
         return f"HTTP/1.1 {status} {reason}\r\n"
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        connections.add(writer)
         try:
             request_line = await reader.readline()
+            if not request_line.strip():
+                # A peer that opened a socket and said nothing: a browser preconnect, a port
+                # scan, or one of our own aborts on the way out. Answering raised IndexError
+                # on `split(" ")[1]` and then ConnectionResetError writing the 500 to a
+                # socket already gone, which asyncio prints straight through the TUI.
+                return
             path = request_line.decode("utf-8", "ignore").split(" ")[1]
             while True:
                 line = await reader.readline()
@@ -214,11 +237,15 @@ async def _start_callback_server(expected_state: str, signal: Any = None) -> _Ca
                 "Connection: close\r\n\r\n"
                 "Internal error"
             )
-            writer.write(response.encode("utf-8"))
-            await writer.drain()
+            # The peer may be gone already; the 500 is best effort, not a second failure.
+            with contextlib.suppress(OSError, ConnectionError):
+                writer.write(response.encode("utf-8"))
+                await writer.drain()
         finally:
-            writer.close()
-            await writer.wait_closed()
+            connections.discard(writer)
+            with contextlib.suppress(OSError, ConnectionError):
+                writer.close()
+                await writer.wait_closed()
 
     # Upstream rejects on a listen error rather than degrading to paste-only
     # (auth/oauth/anthropic.ts `server.on("error", reject)`), and so does this. Only the
@@ -232,7 +259,8 @@ async def _start_callback_server(expected_state: str, signal: Any = None) -> _Ca
             f"Port {CALLBACK_PORT} is already in use, so the browser cannot hand the code "
             f"back. Close whatever is holding it and sign in again ({error})."
         ) from error
-    info = _CallbackServerInfo(server=server, redirect_uri=REDIRECT_URI, future=future)
+    info = _CallbackServerInfo(server=server, redirect_uri=REDIRECT_URI, future=future,
+                               connections=connections)
     info.watch_abort(signal)
     return info
 
