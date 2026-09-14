@@ -119,6 +119,10 @@ misaka setup
 （たとえば `misaka setup model`）。認証情報が未設定のまま `misaka` を実行すると、
 ウィザードが自分から立ち上がります。
 
+`misaka update` はこのインストールがリポジトリの `main` より遅れていないかを報告し、
+`--apply` で早送りします。リリースタグではなくブランチを追い、早送りできない
+チェックアウトは解決せずに理由を出して止まります。
+
 その反対側が `misaka uninstall` です。`~/.misaka` の下に何がどれだけ入っているかを先に
 示したうえで、認証情報・ボード・コンテキストエンジンの記憶・各種キャッシュをまとめて
 削除します。プロジェクトフォルダには一切触れず、触れないことを示すために一覧を出します。
@@ -149,7 +153,7 @@ misaka web status      # 現在の検索バックエンドと認証情報
 ```
 
 残りは `misaka --help` にあります: `task`、`tell`、`dm`、`net`、`skills`、`bundles`、
-`moa`、`lcm`、`auth`、`remove`、`uninstall`。
+`moa`、`lcm`、`auth`、`remove`、`uninstall`、`update`。
 
 ## パネル
 

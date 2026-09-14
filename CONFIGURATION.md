@@ -70,6 +70,13 @@ Each is a directory or file MISAKA owns.
 | `MISAKA_MCP_CONFIG` | the profile's `mcp/` | MCP server configuration |
 | `MISAKA_MCP_CACHE` | `~/.misaka/cache/mcp_schema_cache.json` | cached MCP tool schemas |
 
+`misaka update` reports whether this install is behind the repository's `main` branch, and
+`--apply` fast-forwards it. It follows the branch rather than release tags, the way Hermes
+updates itself: a fast-forward or nothing. A checkout with uncommitted changes, one that has
+commits `main` does not, or a detached HEAD is refused with the reason rather than resolved.
+How the install was made is read from PEP 610 metadata, not guessed, so the command it offers
+matches the tool that made it. Nothing polls: the check runs only when you ask.
+
 `misaka uninstall` removes every path in this section, after listing what each holds and
 what it costs. It refuses any path that resolves to your home directory or a filesystem
 root, never touches a project folder, and prints the command for removing the package

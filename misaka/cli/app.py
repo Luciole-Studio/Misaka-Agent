@@ -50,6 +50,8 @@ def _parser():
     dmp.add_argument("--wait-message", type=int, help=argparse.SUPPRESS)
 
     st = sub.add_parser("setup", help="First-run wizard: environment, model & provider, Sisters, documents, web search, project")
+    up = sub.add_parser("update", help="Report whether this install is behind the repository; --apply fast-forwards it")
+    up.add_argument("--apply", action="store_true", help="Run the update instead of only reporting it")
     un = sub.add_parser("uninstall", help="Remove this machine's MISAKA data (~/.misaka); project folders are never touched")
     un.add_argument("--yes", action="store_true", help="Skip the confirmation")
     un.add_argument("--dry-run", action="store_true", help="List what would be removed and stop")
@@ -702,6 +704,11 @@ def _cmd_setup(args):
     sys.exit(setup.run(args.section))
 
 
+def _cmd_update(args):
+    from misaka.cli import update
+    sys.exit(update.run(apply=args.apply))
+
+
 def _cmd_uninstall(args):
     from misaka.cli import uninstall
     sys.exit(uninstall.run(assume_yes=args.yes, dry_run=args.dry_run))
@@ -709,6 +716,7 @@ def _cmd_uninstall(args):
 
 COMMANDS = {
     "setup": _cmd_setup,
+    "update": _cmd_update,
     "uninstall": _cmd_uninstall,
     "chat": _cmd_chat,
     "panel": _cmd_panel,

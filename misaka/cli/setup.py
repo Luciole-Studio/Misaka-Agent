@@ -125,6 +125,9 @@ class Wizard:
                              "`misaka setup project` afterwards.")
         if missing:
             ui.print_info("", "Install what is missing in another terminal; the wizard goes on regardless.")
+        # Named, not checked: a network call here would make the wizard hang on a bad
+        # connection, and nothing about MISAKA polls for updates on its own.
+        ui.print_info("", ui.color("  `misaka update` says whether this install is behind the repository.", ui.DIM))
 
     # -- 2. model & provider ------------------------------------------------------------------
 

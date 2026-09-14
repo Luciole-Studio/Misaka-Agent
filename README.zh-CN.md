@@ -97,6 +97,9 @@ Sisters，询问是否装 PDF 组件，有 key 的话固定一个网络搜索后
 每一节都可以单独重跑，比如 `misaka setup model`。没配凭据时直接运行 `misaka`，
 它自己会把向导叫起来。
 
+`misaka update` 告诉你这份安装是否落后于仓库的 `main` 分支，`--apply` 把它快进上去。
+它跟分支而不是 release tag，遇到快进不了的 checkout 就报出原因而不替你解决。
+
 反过来的一端是 `misaka uninstall`：它会先列出 `~/.misaka` 下每一项装了什么、占多少，
 再删掉全部（凭据、看板、上下文引擎的记忆、各种缓存）。你的项目文件夹一个都不碰，
 而且会把它们列出来说明这一点。卸载包本身是安装器的事，命令会打印给你。
@@ -125,7 +128,7 @@ misaka web status      # 当前搜索后端与凭据
 ```
 
 其余的用 `misaka --help` 看：`task`、`tell`、`dm`、`net`、`skills`、`bundles`、
-`moa`、`lcm`、`auth`、`remove`、`uninstall`。
+`moa`、`lcm`、`auth`、`remove`、`uninstall`、`update`。
 
 ## 面板
 

@@ -119,6 +119,10 @@ web-search backend if you have a key, and initializes a project folder. Each sec
 can be re-run alone, for example `misaka setup model`. Running a bare `misaka` with
 no credential configured starts the wizard by itself.
 
+`misaka update` says whether this install is behind the repository's `main`
+branch, and `--apply` fast-forwards it. It follows the branch rather than release
+tags, and refuses rather than resolves a checkout it cannot fast-forward.
+
 `misaka uninstall` is the other end of it: it removes everything under `~/.misaka`
 (credentials, the board, the context engine's memory, caches) after showing you what
 goes and what it costs. Your project folders are never touched, and it lists them to
@@ -150,7 +154,7 @@ misaka web status      # active search backend and credentials
 ```
 
 `misaka --help` lists the rest: `task`, `tell`, `dm`, `net`, `skills`, `bundles`,
-`moa`, `lcm`, `auth`, `remove`, `uninstall`.
+`moa`, `lcm`, `auth`, `remove`, `uninstall`, `update`.
 
 ## The panel
 
