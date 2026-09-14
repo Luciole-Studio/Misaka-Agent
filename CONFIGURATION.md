@@ -109,6 +109,8 @@ Each is a directory or file MISAKA owns.
 | `LCM_SUMMARY_MODEL` / `LCM_SUMMARY_FALLBACK_MODELS` | upstream LCM defaults | summary model overrides; provider routing lives in global `settings.json` under `auxiliary.compression` |
 | `LCM_SUMMARY_TIMEOUT_MS` | upstream task timeout | milliseconds per summary; `auxiliary.<task>.timeout` uses seconds |
 | `LCM_EMBEDDINGS_ENABLED` / `LCM_EMBEDDING_PROVIDER` / `LCM_EMBEDDING_MODEL` | upstream LCM defaults | semantic retrieval is explicit; install `lcm-semantic` for fastembed, then run `misaka lcm embed warmup` |
+| `LCM_PROACTIVE_RECALL_ENABLED` | off | at context assembly, inject one budget-capped block of cross-session memories; needs `LCM_EMBEDDINGS_ENABLED` as well, and does nothing without it |
+| `LCM_PREANSWER_EVIDENCE_ENABLED` | off | validate evidence at the `pre_llm_call` seam before the model answers |
 
 LCM algorithm settings use the upstream `LCM_*` names, with no product aliases. Native
 paths, authentication and `auxiliary` task settings belong to MISAKA. Provider routing
@@ -117,10 +119,24 @@ for summaries lives in the global `settings.json` under `auxiliary.compression`.
 ### Optional features
 
 Each is configured the upstream way: `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED`,
-`LCM_TEMPORAL_ROLLUPS_ENABLED`, `LCM_EMBEDDINGS_ENABLED`, and `LCM_ASSERTIONS_ENABLED`
-with `LCM_ASSERTION_EXTRACTION_ENABLED`. Retrieval, preanswer, extraction and rollups
-keep their individual upstream defaults and budgets. Semantic retrieval is explicit:
-install the extra with `uv sync --extra lcm-semantic`, then run `misaka lcm embed warmup`.
+`LCM_TEMPORAL_ROLLUPS_ENABLED`, `LCM_EMBEDDINGS_ENABLED`, `LCM_PROACTIVE_RECALL_ENABLED`,
+`LCM_PREANSWER_EVIDENCE_ENABLED`, and `LCM_ASSERTIONS_ENABLED` with
+`LCM_ASSERTION_EXTRACTION_ENABLED`. Retrieval, preanswer, extraction and rollups keep
+their individual upstream defaults and budgets. Semantic retrieval is explicit: install
+the extra with `uv sync --extra lcm-semantic`, then run `misaka lcm embed warmup`.
+
+Every one of them is off until you set it, and MISAKA overrides none of them. A fresh
+install and one that has been running for months therefore read the same values; a `false`
+in `misaka lcm status` is the shipped default, not something that turned itself off.
+
+Proactive recall is gated twice. With embeddings off it returns before doing any work, so
+setting `LCM_PROACTIVE_RECALL_ENABLED` on its own changes nothing and reports no error.
+Configure an embedding provider and enable embeddings first.
+
+`LCM_*` is the only way in. An `lcm` section in the global `settings.json` is read for
+`context_threshold` alone (`compression.threshold` is the fallback); every other key under
+it is ignored, and `misaka lcm status` lists what it ignored as
+`ignored_config_yaml_lcm_keys`.
 
 These features do not add an independent user-profile or long-term memory service.
 
