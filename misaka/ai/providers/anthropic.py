@@ -236,6 +236,13 @@ def get_anthropic_compat(model: Model) -> dict[str, bool]:
             else not is_fireworks
         ),
         "supportsStrictTools": bool(getattr(compat, "supportsStrictTools", None)),
+        # Default true. False on every Claude Opus 4.7 and later across six providers, which
+        # reject the parameter outright; sending it there is a 400, not a silent ignore.
+        "supportsTemperature": (
+            getattr(compat, "supportsTemperature", None)
+            if getattr(compat, "supportsTemperature", None) is not None
+            else True
+        ),
         "supportsToolReferences": (
             getattr(compat, "supportsToolReferences", None)
             if getattr(compat, "supportsToolReferences", None) is not None
@@ -497,11 +504,11 @@ def build_params(
         ]
 
     # Temperature is incompatible with extended thinking, and a managed-effort model always
-    # thinks, so it is never sent for one however the caller asked. Upstream also gates this
-    # on `compat.supportsTemperature`; this port's compat table has never carried that key,
-    # and adding it here would change what every other Anthropic model sends.
+    # thinks, so it is never sent for one however the caller asked. `supportsTemperature` is
+    # the catalog's own statement about the rest: false on Opus 4.7 and later, which reject
+    # the parameter rather than ignore it.
     if (_option(options, "temperature") is not None and not _option(options, "thinkingEnabled")
-            and not managed_effort):
+            and not managed_effort and compat["supportsTemperature"]):
         params["temperature"] = _option(options, "temperature")
 
     if immediate_tools or deferred_tools:
