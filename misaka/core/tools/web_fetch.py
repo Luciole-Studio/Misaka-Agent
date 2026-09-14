@@ -29,6 +29,7 @@ from misaka.agent.types import AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.documents.htmltext import clip as _clip
 from misaka.core.documents.htmltext import readable as _readable
+from misaka.core.documents.prompt import WEB_EVIDENCE_GUIDELINE
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.tools._common import run_with_abort
@@ -366,8 +367,8 @@ async def _fetch(target: _Target, cwd: str | None = None, signal: Any | None = N
     extra = []
     if saved:
         extra.append(
-            f"The complete text is saved as {saved}; the card records that path automatically "
-            "so it can be cited as evidence."
+            f"The captured text is saved as {saved}; the card records that path automatically. "
+            "Inspect its content and provenance before using it as evidence."
         )
     if truncated:
         extra.append(
@@ -493,14 +494,10 @@ def create_web_fetch_tool_definition(
         ),
         promptSnippet="Read a web page's text by URL.",
         promptGuidelines=[
-            ("The page's complete text is saved under downloads/pages/ with its provenance, for you and for "
-             "other researchers; the result names it as saved_path. A saved file is not a guarantee of the "
-             "site's complete text: check route and final_url in the result (and the source_url / final_url "
-             "header of the saved file), and read the saved file before citing it. Neither web_fetch nor "
-             "web_extract gets past a paywall."),
-            ("Never curl a web page: a page fetched with curl leaves no saved file to cite. Binary documents "
-             "(PDF, dataset, archive) go through download_file; the one exception is a raw JSON or CSV data "
-             "endpoint, which may be read with curl when it is available."),
+            WEB_EVIDENCE_GUIDELINE,
+            ("Prefer available web and download tools that preserve source metadata and workspace artifacts. "
+             "When using another suitable reader or a raw JSON/CSV endpoint, retain equivalent source "
+             "references and the relevant material needed to check the result."),
         ],
         parameters=WebFetchToolInput,
         execute=execute,

@@ -39,6 +39,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from misaka.agent.types import AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.documents import index as corpus
+from misaka.core.documents.prompt import (
+    MATERIAL_REUSE_GUIDELINE,
+    QUOTATION_LOCATOR_GUIDELINE,
+)
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.tools._common import run_with_abort
@@ -500,20 +504,20 @@ def create_download_file_tool_definition(
         description=(
             "Download one file (PDF, dataset, document, image, or archive) from a public URL into "
             f"the workspace {DOWNLOAD_DIR_NAME}/ directory, and report where it landed with its "
-            "sha256. A PDF, Markdown, or text file is indexed into the document store on arrival "
-            "and comes back with its document ID. Size-capped, type-checked, and refused for "
-            "private addresses. Use it instead of curl; use web_fetch for web pages you want to read."
+            "sha256. A PDF, Markdown, or text file is submitted for indexing on arrival; the "
+            "receipt reports its document ID or an indexing failure without discarding the download. "
+            "Size-capped, type-checked, and refused for private addresses. Prefer it for retained "
+            "files; use an available page reader for web pages."
         ),
         promptSnippet="Download a paper, dataset, or document to the workspace.",
         promptGuidelines=[
             ("Use download_file for files worth keeping (papers, datasets); it saves them without "
              "putting the content in your context. A downloaded PDF, Markdown, or text file is "
-             "indexed on arrival: read it through doc_outline / doc_read; doc_verify is an optional "
-             "passage locator, not a citation requirement. The read tool understands text and images, so it "
-             "cannot open a PDF; use it for the other downloaded types."),
-            ("Before downloading, check doc_list / doc_find and the downloads/ folder: a file another Sister "
-             "already downloaded is indexed and readable now, and the same bytes index to the same document ID, "
-             "so re-downloading it buys nothing."),
+             "submitted for indexing on arrival; check the receipt for a document ID or indexing failure. "
+             "Read indexed documents with doc_outline/doc_read when available. The read tool handles text, "
+             "images and Office files, not PDFs; use an available PDF reader for an unindexed PDF."),
+            MATERIAL_REUSE_GUIDELINE,
+            QUOTATION_LOCATOR_GUIDELINE,
         ],
         parameters=DownloadFileToolInput,
         execute=execute,

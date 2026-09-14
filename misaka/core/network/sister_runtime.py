@@ -236,6 +236,7 @@ class _SisterManager(SubagentManager):
         )
         self.records_usage = True
         self.beast = False
+        self.research = dict(row).get("_research")
         model = row["model"]
         if not model:
             try:
@@ -301,6 +302,20 @@ class _SisterManager(SubagentManager):
             model="inherit",
             permission_mode="acceptEdits",
         )
+
+    async def _child_flags(self, task: AgentTask) -> list[str]:
+        # A Board Sister is a role session, not a custom-prompt generic child.
+        # Keep the saved personality but use the normal builder for active tools'
+        # guidance, just like a pane/headless card. The generic runtime is unchanged.
+        flags = await super()._child_flags(task)
+        flags[flags.index("--system-prompt")] = "--append-system-prompt"
+        from misaka.config.identity import COMMON_CHARTER, SISTER_ROLE
+        # Older persisted definitions predate the independent duty sections.
+        # Add current duties at launch without rewriting their saved personality.
+        for section in (COMMON_CHARTER, SISTER_ROLE):
+            if section not in task.definition.prompt:
+                flags += ["--append-system-prompt", section]
+        return flags + worker.research_addendum_flags({"_research": self.research})
 
     def child_env_extra(self, _task: AgentTask) -> dict[str, str]:
         # The child indexes the read-only copies this manager made, never the live trees.
@@ -509,6 +524,7 @@ class SisterRuntime:
         base = row["workspace"] or self._workspace(row["id"])
         task["_attachments"] = cards.attachment_list(base, row["id"], workspace=row["workspace"])
         task["_handoffs"] = worker.card_handoffs(self.con, row)
+        task.update(worker.card_extras(self.con, row, self.cfg, include_colleagues=False))
         reading = budget.status(self.con, self.cfg.get("token_cap"))
         if reading["mode"] == "stop":
             if db.back_to_ready(
@@ -617,6 +633,7 @@ class SisterRuntime:
                         if not manager or not agent:
                             raise RuntimeError("The Sister session is incomplete.")
                         manager.beast = bool(prepared.get("beast"))
+                        manager.research = prepared.get("_research")
                         await manager.send_message(
                             agent.id,
                             prompt,
@@ -1392,7 +1409,10 @@ class SisterRuntime:
             return current
         if not row["agent_id"] or not row["workspace"]:
             raise ValueError(f"Card {task_id} has no resumable Sister session.")
-        manager = _SisterManager(self.session, self.cfg, row, row["workspace"])
+        prepared = dict(row)
+        prepared.update(worker.card_extras(
+            self.con, row, self.cfg, include_colleagues=False, include_materials=False))
+        manager = _SisterManager(self.session, self.cfg, prepared, row["workspace"])
         manager._semaphore = self._sister_semaphore
         manager._session_dir(context)
         agent = await manager._find_task_async(row["agent_id"], context)

@@ -34,11 +34,11 @@ from misaka.core.skills.layers import (
 
 _CACHE = {}                 # root manifests -> raw documents and category metadata
 _CACHE_MAX = 32
-SNAPSHOT_VERSION = 6
+SNAPSHOT_VERSION = 7
 
 # Cap on description length in the system-prompt skill index (hermes SKILL_PROMPT_DESC_LIMIT).
 # The index lives in every session, so longer descriptions are truncated; learn_prompt's hard
-# "<= 60 characters" rule comes from this limit.
+# description-length rule comes from this limit.
 from .vendor.metadata import SKILL_PROMPT_DESC_LIMIT
 
 SKILL_LIST_DESC_LIMIT = 1024
@@ -212,6 +212,7 @@ def _layer(layer, root):
             for entry in manifest["entries"]:
                 (prompt, _), (runtime, _) = _documents(entry["path"])
                 entry["prompt_frontmatter"], entry["frontmatter"] = prompt, runtime
+                entry["description"] = truncate_skill_description(str(prompt.get("description") or ""))
             return {"skills": manifest["entries"], "categories": manifest.get("categories", {})}
     if layer == "project":
         return _scan_root(root, iter_project_skill_files(root))
@@ -444,24 +445,11 @@ def render_prompt(entries, category_descriptions=None, compact=(), *, can_manage
         if entry["layer"] == "project":
             desc = f"[project] {desc}".strip()
         grouped.setdefault(entry["category"], []).append((name, desc))
-    result = _render_skills_index(grouped, category_descriptions or {}, compact, available_tools)
-    if not can_manage:
-        # Only remove the native write guidance, never text supplied by a skill.
-        head, marker, tail = result.partition("<available_skills>")
-        start = head.find("If a skill has issues, fix it with skill_manage")
-        if start >= 0:
-            head = head[:start] + "\n"
-        result = head + marker + tail
+    result = _render_skills_index(grouped, category_descriptions or {}, compact, available_tools,
+                                 can_manage=can_manage)
     if result and any(e.get("source") for e in entries):
         result = result.replace("## Skills\n", "## Skills\nFor entries marked source=..., pass that path as source to skill_view to resolve the name.\n", 1)
-    # The native prose names terminal; only its static pre-index prose is mapped.
-    head, marker, tail = result.partition("<available_skills>")
-    if available_tools is not None:
-        shell = "bash" if "bash" in available_tools else "powershell" if "powershell" in available_tools else None
-        basic = " or ".join(t for t in ("web_search" if "web_search" in available_tools else None, shell) if t)
-        head = head.replace("basic tools like web_search or terminal", "basic tools" + (" like " + basic if basic else ""))
-        head = head.replace("basic tools like terminal", "basic tools" + (" like " + basic if basic else ""))
-    return head + marker + tail
+    return result
 
 
 __all__ = ["SKILL_PROMPT_DESC_LIMIT", "build", "candidates", "categories", "find", "index_lines", "invalidate",

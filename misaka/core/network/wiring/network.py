@@ -196,7 +196,7 @@ def _install(harn, runtime):
             for s in _sisters())
         header = (
             f"Sister roster: {named or '(empty)'}"
-            f"{' (use misaka_sister_view for full profiles)' if named else ''}\n"
+            f"{' (use misaka_sister_view for introduction excerpts)' if named else ''}\n"
             f"Budget used: {b['used']:,} tokens ({b['mode']} mode)\n\n"
         )
         return _text(header + ("\n".join(lines) if lines else "(no task cards)"))
@@ -434,7 +434,7 @@ def _install(harn, runtime):
         name="misaka_sister", label="Start Sister task",
         description="Start one ready task card and return its durable task ID. This is separate from generic subagents.",
         snippet="Start one Sister task after explicit user approval",
-        guidelines=[COORDINATOR_APPROVAL, "Manage Sister tasks with `misaka_sister_output`, `misaka_sister_message`, and `misaka_sister_stop`."],
+        guidelines=[COORDINATOR_APPROVAL],
         parameters=SisterParams)
     async def misaka_sister(tool_call_id, params, signal, on_update, ctx):
         if not params.confirmed:
@@ -476,7 +476,7 @@ def _install(harn, runtime):
         name="misaka_sister_output", label="Get Sister result",
         description="Inspect a Sister task or wait for its accepted, failed, or stopped result.",
         snippet="Inspect or wait for a Sister task",
-        guidelines=[COORDINATOR_RECEIPTS, "Read a result with misaka_sister_output after the notification or when the user asks; misaka_sister_peek is for diagnosing a stuck task, not for progress checks."],
+        guidelines=[COORDINATOR_RECEIPTS, "Read a result with misaka_sister_output after the notification or when the user asks."],
         parameters=SisterOutputParams)
     async def misaka_sister_output(tool_call_id, params, signal, on_update, ctx):
         result = await runtime.output(
@@ -849,10 +849,10 @@ def _install(harn, runtime):
 
     @_register(
         harn,
-        name="misaka_sister_view", label="View Sister profile",
-        description="Read a Sister's capabilities, model, profile, and current task counts before assigning work.",
-        snippet="View a Sister's full profile and workload",
-        guidelines=["When assignment is uncertain, inspect relevant Sister profiles instead of guessing from an ID."],
+        name="misaka_sister_view", label="View Sister summary",
+        description="Read a Sister's ID, summary, and the first 200 characters of her introduction before assigning work.",
+        snippet="View a Sister's routing summary and introduction excerpt",
+        guidelines=["When assignment is uncertain, inspect relevant Sister summaries instead of guessing from an ID."],
         parameters=SisterViewParams)
     async def misaka_sister_view(tool_call_id, params, signal, on_update, ctx):
         from misaka.core.network import roster as roster_mod
@@ -861,27 +861,8 @@ def _install(harn, runtime):
             return _text(f"Sister {sid} is not in the roster ({', '.join(_sisters())}).")
         root = _cfg()["profiles_root"]
         desc, body = roster_mod.describe(sid, root=root)
-        model = None
-        try:
-            with open(os.path.join(root, sid, "config.json"), encoding="utf-8") as f:  # noqa: ASYNC230 - one small config.json per Sister
-                model = json.load(f).get("model")
-        except (OSError, ValueError):
-            pass
-        counts = {r[0]: r[1] for r in _con().execute(
-            "SELECT status, COUNT(*) FROM tasks WHERE assignee=? AND workspace=? GROUP BY status",
-            (sid, _workspace(ctx)),
-        )}
-        cards = ','.join(f"{k}×{v}" for k, v in sorted(counts.items())) or 'none'
-        head = (
-            f"Sister {sid}\n"
-            f"Summary: {desc or 'not written'}\n"
-            f"Model: {model or 'global default'}\n"
-            f"Task cards: {cards}"
-        )
-        return _text(
-            head + ("\n" + body if body else
-                    f"\nNo capability profile is available. Add one to profiles/sisters/{sid}/DESCRIBE.md.")
-        )
+        profile = roster_mod.coordinator_profile({"id": sid, "description": desc, "profile": body})
+        return _text(untrusted("sister-profile", json.dumps(profile, ensure_ascii=False)))
 
 
 class NetworkPart:

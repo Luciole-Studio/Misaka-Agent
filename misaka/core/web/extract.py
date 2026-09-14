@@ -7,11 +7,9 @@ char-budget pipeline (``_get_extract_char_limit`` 649-660,
 block (1678-1723). The provider layer below answers "which backend, and what did it say";
 this file answers "what does the model see".
 
-The schema dict is a verbatim copy of Hermes', with host-specific tool names and a material-kind note: ``read_file`` is ``read`` here, and the closing advice points
-at ``web_fetch`` where Hermes points at its browser tool. Kept as a literal rather than
-generated from a pydantic model for the same reason ``web_search``'s is: a model would
-reword the description, and that wording -- "no LLM summarization", the PDF sentence, the
-head+tail explanation -- is the part a model actually reads.
+The parameter schema follows Hermes and remains a literal rather than a generated
+pydantic model. Model-facing descriptions are adapted to MISAKA's readers, provider
+capabilities and storage cap: captured material is not necessarily a complete page.
 
 **Two deliberate divergences from Hermes, both in the same direction.**
 
@@ -43,6 +41,7 @@ import logging
 import re
 from typing import Any
 
+from misaka.core.documents.prompt import WEB_EVIDENCE_GUIDELINE
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.tools._common import run_with_abort
@@ -69,7 +68,7 @@ logger = logging.getLogger(__name__)
 # are adapted; input parameters and truncation behavior keep the upstream contract.
 WEB_EXTRACT_SCHEMA = {
     "name": "web_extract",
-    "description": "Extract content from web page URLs. Returns clean page content in markdown/text (no LLM summarization — fast). Also works with PDF URLs (arxiv papers, documents) — pass the PDF link directly. Pages within the char budget (default 15000) return whole; larger pages return a head+tail window with a footer telling you the full text's saved file path and the read call to page through the omitted middle. Inline images appear as [IMAGE: alt] placeholders; real image URLs are kept as links. Check content_kind: some providers return excerpts rather than full-page text. Saved files contain the returned material, not a guarantee of the site's complete text. If a URL fails or times out, use web_fetch instead.",
+    "description": "Extract content from up to five web page URLs. Returns captured content in markdown/text without local LLM summarization. JavaScript rendering, PDF extraction and whole-page coverage depend on the provider; some providers, including Perplexity, return excerpts. Captured content within the char budget (default 15000) is shown inline; larger results use a head+tail window with a footer pointing to the saved material and a read call for the omitted middle. Stored material is also size-capped and marks truncation. Inline images appear as [IMAGE: alt] placeholders; real image URLs are kept as links. Check content_kind and final_url. Each saved_path identifies captured material, not a guarantee of the site's complete text. If extraction fails, try another available reader appropriate to the material.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -81,7 +80,7 @@ WEB_EXTRACT_SCHEMA = {
             },
             "char_limit": {
                 "type": "integer",
-                "description": "Optional per-page character budget sent back (default 15000). Pages larger than this are head+tail truncated with the full text stored to disk. Raise it when you need more of a long page inline.",
+                "description": "Optional per-page character budget sent back (default 15000). Larger results use a head+tail preview; captured text is saved separately, subject to the storage cap. Raise it when more inline text is useful.",
                 "minimum": 2000,
             },
         },
@@ -649,10 +648,7 @@ def register(harn, workspace: str | None = None) -> None:
             execute=execute,
             promptSnippet="Extract the clean text of up to five web pages at once",
             promptGuidelines=[
-                ("Up to five URLs per call. JavaScript rendering and whole-page extraction depend on the selected "
-                 "provider; Perplexity returns snippets, not full pages. Each page's text is saved under "
-                 "downloads/pages/ (saved_paths in the result): read the saved file before citing it, and check "
-                 "content_kind and final_url. No provider gets past a paywall."),
+                WEB_EVIDENCE_GUIDELINE,
             ],
         )
     )

@@ -372,11 +372,8 @@ class SubagentPart:
             execute=launch_agent,
             renderResult=_render_result,
             promptSnippet="Delegate one task to an autonomous agent",
-            # Usage lives in the source-derived tool description, not a second
-            # stale copy in the system prompt (especially for fork/disabled BG).
-            promptGuidelines=[
-                "Findings a delegate brings back need the same source verification as your own before you cite them.",
-            ],
+            # Definitions and detailed usage stay here; the native collaboration
+            # section explains the currently active delegation surface once.
         )
         self.tools = [
             self.agent_tool,

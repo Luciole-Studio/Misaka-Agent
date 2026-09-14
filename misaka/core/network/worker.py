@@ -216,10 +216,6 @@ COMPLETION_INSTRUCTIONS = """
 - Put deliverables in the requested location. Successful `write`, `edit`, and `office` operations are recorded
   automatically.
 - On a research card, record final evidence-backed findings and concrete uncertainties with `misaka_card_note`.
-- Ordinary `SendMessage` updates never change card state; continue working without waiting for a reply.
-- If a premise collapses, external input is indispensable, or a decision is needed, use `SendMessage` to
-  `last-order` with `request_input=true`, explain exactly what is needed, and stop after successful parking.
-  The card waits for Last Order's reply.
 """
 
 
@@ -293,7 +289,11 @@ def materials_on_hand(workspace):
         relative = os.path.relpath(path, workspace)
         line = f"- `{relative}`"
         if path.endswith(".md"):
-            provenance = read_provenance(path)
+            try:
+                provenance = read_provenance(path)
+            except (OSError, UnicodeError):
+                # Optional metadata must not hide the path or prevent card startup.
+                provenance = {}
             url = (provenance.get("source_url") or provenance.get("requested_url")
                    or provenance.get("final_url") or provenance.get("url"))
             if url:
@@ -306,8 +306,8 @@ def materials_on_hand(workspace):
         lines.append(line)
     if len(files) > _MATERIALS_LIMIT:
         lines.append(f"- … and {len(files) - _MATERIALS_LIMIT} more under `{_download_dir_name()}/`")
-    lines.append("Read these before fetching anything. Before any new fetch or download, look at "
-                 f"`{_download_dir_name()}/` and `doc_list` again: a Sister working in parallel may have added more.")
+    lines.append("This material list is a snapshot. Reuse relevant items; check the current workspace "
+                 "or an available document index when you need to discover additional or newer material.")
     return "\n".join(lines)
 
 
@@ -329,9 +329,13 @@ def colleague_lines(assignee, cfg=None):
     return lines
 
 
-def card_extras(con, task, cfg=None):
-    """Context every card gets beyond its own body: its research link (if any), who else is on
-    the roster, and what is already downloaded into its workspace."""
+def card_extras(con, task, cfg=None, *, include_colleagues=True, include_materials=True):
+    """Research/material context shared by every card entry point.
+
+    Legacy callers may also request colleague lines; engine sessions use the single
+    system-prompt routing catalog instead of duplicating it in the task body. Restore
+    paths can skip materials they will not publish, avoiding unrelated filesystem reads.
+    """
     extras = {"_research": None, "_colleagues": [], "_materials": ""}
     with contextlib.suppress(Exception):   # a board without the research schema is an ordinary board
         if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_run_tasks'").fetchone():
@@ -339,8 +343,10 @@ def card_extras(con, task, cfg=None):
                               (task["id"],)).fetchone()
             if row is not None:
                 extras["_research"] = dict(row)
-    extras["_colleagues"] = colleague_lines(task["assignee"], cfg)
-    extras["_materials"] = materials_on_hand(task["workspace"])
+    if include_colleagues:
+        extras["_colleagues"] = colleague_lines(task["assignee"], cfg)
+    if include_materials:
+        extras["_materials"] = materials_on_hand(task["workspace"])
     return extras
 
 
@@ -377,9 +383,6 @@ def card_prompt(task):
             target = item.get("path") or item.get("source") or item.get("name")
             lines.append(f"- Attachment: `{target}`")
         body += "\n\n## Task attachments\n" + "\n".join(lines)
-    if colleagues := task.get("_colleagues"):
-        body += ("\n\n## Colleagues\n" + "\n".join(colleagues)
-                 + "\n`SendMessage` reaches any of them by name; `misaka_ally_list` shows the allies.")
     if materials := task.get("_materials"):
         body += "\n\n## Materials already in this workspace\n" + materials
     if output_dir := task.get("output_dir"):
@@ -579,7 +582,7 @@ def build_submission(con, task, summary):
 def bare_session_setup(profile_dir, provider, default_model, *, cwd=None, tools=None, model=None,
                        soul=True, session_dir=None, continue_session=False, thinking="low",
                        extra_tools=(), session_file=None, sister_catalog=None, research_context=False):
-    """The same restricted LO assembly for one-shot calls and resident research nodes."""
+    """Restricted LO assembly; Research shares MISAKA.md independently of role SOUL.md."""
     _soul_path, cfg = _load_profile(profile_dir)
     model = os.environ.get("MISAKA_FORCE_MODEL") or model or cfg.get("model") or default_model
     flags = ["--provider", provider, "--model", model, "--thinking", thinking]
@@ -607,6 +610,8 @@ def bare_session_setup(profile_dir, provider, default_model, *, cwd=None, tools=
         research_context=research_context,
     ), extra_tools=tuple(extra_tools))
     flags += ["-t", ",".join(dict.fromkeys(allowed))] if allowed else ["-nt"]
+    if research_context:
+        flags += ["--append-system-prompt", profiles.shared_soul()]
     if soul:
         from misaka.config import identity
         for section in identity.prompt_sections(profile_dir, role):

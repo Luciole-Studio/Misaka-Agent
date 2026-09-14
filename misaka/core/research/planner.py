@@ -22,15 +22,17 @@ Do not answer the user's question at this stage. Your only deliverable is a rese
 Do not assume that textbooks, mass media, the mainstream view, or the contrarian view is correct.
 
 Start by working out what the user is actually asking, what else the question could mean, and which of its
-premises are untested. Then map the relevant objects, processes, interactions, prior knowledge, time horizons,
-consequences, feedback effects, and disciplines. Pick the methods, theories, analytical frameworks, and source
-strategies that fit the problem, and state each method's blind spots and the competing approaches. Available method
-Skills are a menu, not a requirement: combine, reject, or add methods as the problem demands. Before dividing the
-work, check the design for dimensions it forgot: load `coverage-maps` with `skill_view` (its references are maps of
-fields, facets, kinds of question, and traditions) and perform the `coverage_scan` check. Then divide the work into
-tasks. Read relevant Sister profiles from the system catalog, choose by fit rather than roster order, and explain
-each choice. `plan_markdown` must end with a section "Coverage maps used": which maps and scans
-you consulted, which you did not and why, and which dimensions they surfaced.
+premises are untested. Identify the relevant objects, processes, interactions, prior knowledge, time horizons
+and disciplines without expanding beyond the agreed question and limits. Specify evidence needs, deliverables,
+dependencies and acceptance criteria. Offer suitable methods, theories and source strategies with their blind
+spots and competing approaches; Sisters choose and refine the specialist implementation.
+Method Skills are a menu, not a mandatory research template: combine, reject or add methods as the problem demands.
+Check for important missing dimensions. Consult available coverage maps or `coverage_scan` when they would improve
+the design, not a fixed number of times on every node. Index counts are discovery signals, not proof of relevance
+or completeness, particularly across languages, archives and interpretive traditions. Delegate substantial material
+gathering to Sisters instead of doing their assignments during planning.
+Choose Sisters by fit from the system catalog and explain each choice. End `plan_markdown` with "Coverage maps used":
+record what informed the coverage check (or why no scan was needed or available), useful dimensions and remaining gaps.
 
 Call `misaka_research_assign` with your plan and assignments.
 This tool records your dispatch command; research cards are created only from an accepted call, never from
@@ -58,8 +60,9 @@ You are one researcher on a research tree that Last Order coordinates. How to wo
 - Back every empirical claim with a traceable source and an exact quotation or precise location; read the saved
   material before citing it.
 - Keep facts, inferences, interpretations and normative judgements apart, and say which is which.
-- Record counterevidence, competing explanations and unresolved questions as you meet them. Before you search, write
-  one line naming the evidence that would overturn the working premise, and look for that evidence on purpose.
+- Record counterevidence, competing explanations and unresolved questions as you meet them. At the start of a
+  substantive investigation, identify evidence that could overturn the working premise and seek it deliberately;
+  revise that check when the premise changes rather than repeating a ritual before every search.
 - Note whether your sources are independent of one another: three retellings of one source are one source.
 - Authority, mainstream or contrarian opinion, and the task's own premise are not evidence.
 - When material cannot be obtained you may still conclude, with reservations: name what is missing and what it
@@ -68,8 +71,8 @@ You are one researcher on a research tree that Last Order coordinates. How to wo
   (fact | inference | interpretation | normative), `source_file` or `doc_id` + `page`, optional `quote`.
   Notes accumulate; a correction says which earlier declaration it revises. The ledger records without judging;
   the red team and Last Order weigh it later.
-- `SendMessage` reaches Last Order and any Sister named on your card; `request_input=true` to last-order parks this
-  card until she answers.
+- Use the available colleague directory and communication tools for advice or missing material. Follow the
+  communication tool's input-request protocol only when an external decision or input is indispensable.
 - This run's conversations -- Last Order's with the user, every Sister's -- are listed under Conversations in
   `misaka_research_view(view="workspace", run_id=...)`; `lcm_grep(session_scope="session", session_id=...)`
   searches one and `lcm_load_session` opens it. Sessions not listed there belong to other work; leave them alone.
@@ -135,8 +138,9 @@ Read full sources in context; summaries and the ledger are researchers' declarat
 
 Separate shared findings, competing findings, key evidence, counterevidence,
 methodological limits, value premises, and unresolved questions. Give traceable source paths, document locations or URLs.
-Do not vote or hide competing interpretations or insufficient evidence. You may read documents and fetch supplementary
-material: preserve it in the workspace and cite its location so the red team can examine it with the rest of the sources.
+Do not vote or hide competing interpretations or insufficient evidence. Source checks and limited supplementary
+retrieval needed to assess returned evidence are part of synthesis; preserve and cite any new material for the red team.
+Use the available follow-up assignment for substantive new research; when none remains, state the unresolved gap.
 State what new evidence could change the judgement.
 This run's conversations -- yours with the user, every Sister's -- are listed under Conversations in
 `misaka_research_view(view="workspace", run_id=...)`; `lcm_grep(session_scope="session", session_id=...)` searches
@@ -156,13 +160,13 @@ This returns the review to that Last Order; it does not start investigations on 
 {own_cards}{deliberation}{evidence}
 ## what to inspect
 Facts and quotations, inference and causation, concepts and scope, methods and sampling, standpoint and bias, omitted actors or
-processes, interactions, time horizons, consequences, and normative claims disguised as facts. For omissions, use the
-`coverage-maps` skill (maps of fields, facets, kinds of question, traditions) and `coverage_scan` (where the literature discusses
-this question): a dimension the conclusion never touches is an issue. Different frameworks can yield different interpretations
+processes, interactions, time horizons, consequences, and normative claims disguised as facts. Use available coverage maps
+or literature scans when useful to assess a suspected omission; an unmentioned dimension is not automatically a defect.
+Explain how an omission materially affects this question within its agreed scope. Different frameworks can yield different interpretations
 without either side being automatically wrong. A false objection does as much damage as a false claim.
 
 ## acceptance criteria
-- `critique.md` exists and every criticism names a concrete next research step.
+- `critique.md` exists and every criticism explains its significance and the evidence, correction or concrete check needed to resolve it.
 - Call `misaka_card_note` with the complete `issues` list: kind, question, rationale, priority, material.
   Use issues=[] explicitly if there are no issues. Only material=true issues require investigation.
 - Write the review under the card's deliverable directory. Do not create a machine-readable submission file.
@@ -353,6 +357,18 @@ talking to. If the question itself seems wrong, propose the reframing in `plan_m
 wording in `reframed_question`: it takes effect only once the user agrees.
 """
 
+PLAN_AUTOMATIC = """
+# Plan execution
+This phase has no additional plan-approval wait. After an accepted ready plan, the driver proceeds within the
+run's approved scope and configured limits. Report the handoff; do not request a redundant go-ahead or claim the
+research is complete. A genuine clarification, pause or change of scope still needs the appropriate decision.
+"""
+
+
+def plan_approval_prompt(cfg, worker):
+    """Describe the same gate the driver applies, including follow-up plans."""
+    return PLAN_WAITS if plan_waits_for_user(cfg, worker) else PLAN_AUTOMATIC
+
 
 def plan(run, cfg, worker, node, *, con, context_path=None):
     """Open or continue the node's Last Order session and return its research plan."""
@@ -392,8 +408,7 @@ This is a targeted research node. Investigate the red-team issue against the par
     prompt += navigation(run["id"]) + """
 Read the live workspace view before planning.
 """
-    if plan_waits_for_user(cfg, worker):
-        prompt += PLAN_WAITS
+    prompt += plan_approval_prompt(cfg, worker)
     action, raw = _command(
         con, run, cfg, worker, node, prompt, key="plan", name="misaka_research_assign",
         description="Last Order: assign the research plan and choose its red-team Sister",
@@ -527,7 +542,9 @@ def synthesize(con, run, cfg, worker, node, task_rows, *, followup=None, round=1
     still ask for; a node that could never ask (or is on its first and only round) hears nothing
     about rounds."""
     if followup is not None:
-        rounds = SYNTHESIS_FOLLOWUP.format(round=round, left=left)
+        rounds = (SYNTHESIS_FOLLOWUP.format(round=round, left=left)
+                  + "\nThe following approval policy applies only if you submit a follow-up plan; "
+                  "it does not block writing the current conclusion.\n" + plan_approval_prompt(cfg, worker))
     elif round > 1:
         rounds = SYNTHESIS_LAST_ROUND.format(round=round)
     else:
@@ -644,8 +661,7 @@ def task_body(task, *, run_id=None, node=None, siblings=(), previous=()):
     that node, so she knows whom she can ask; ``previous`` are the node's cards from earlier rounds
     (rows with title and output_dir), whose outputs this round builds on."""
     approach = """## Execution approach
-Before substantial work, write one line naming the evidence that would overturn the working premise, then briefly
-outline your approach in ordinary prose: sources and methods, risks and counterevidence to check, and when to stop.
+Briefly outline your approach in ordinary prose: sources and methods, important risks, and when to stop.
 Then use your tools and carry out the task in this same session; do not stop after the outline. Revise the approach
 when evidence warrants it and explain why. No separate planning submission, file, or approval is required.
 """

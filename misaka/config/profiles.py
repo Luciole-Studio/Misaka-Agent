@@ -82,7 +82,7 @@ def persist_role_default_model(profile_dir, model_id):
 
 SHARED_SOUL_TEMPLATE = """# MISAKA Network · Shared identity
 
-- Files are the truth: conclusions go to disk as artifacts, not into the conversation.
+- Keep research deliverables accessible as project artifacts, following the current task's output and saving contract.
 - When something cannot be found, write "could not be verified". Never invent a source.
 """
 
@@ -91,9 +91,9 @@ def shared_soul():
     """Return the path of the shared soul, ~/.misaka/profiles/MISAKA.md, seeding it on first use.
 
     Last Order, the Sisters, and their sub-agents all load it before their own
-    SOUL.md. An existing file is never overwritten. One-shot roles (planner,
-    reviewing Sister, judge) do not read it, so their audit stance is unaffected by the
-    shared personality.
+    SOUL.md. An existing file is never overwritten. Research also loads this shared
+    file when its bare entry point omits the role-specific SOUL.md; shared user
+    conventions and role personality are separate inputs.
     """
     from misaka.config import CFG
     path = os.path.join(os.path.expanduser(CFG["roles_root"]), "MISAKA.md")

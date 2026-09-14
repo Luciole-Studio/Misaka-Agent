@@ -116,6 +116,7 @@ PART_MODULES: tuple[str, ...] = (
     "misaka.core.network.wiring.panel",
     "misaka.core.network.wiring.roster_admin",
     "misaka.core.network.wiring.capabilities",
+    "misaka.core.network.wiring.collaboration",
     "misaka.core.skills.wiring.skills",
     "misaka.core.research.wiring.research",
     "misaka.core.research.wiring.node",

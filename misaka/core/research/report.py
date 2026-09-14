@@ -25,8 +25,9 @@ Give a direct answer, the strongest competing accounts, evidentiary limits, unre
 the answer. Depth limits describe execution, not whether an objection is correct.
 
 Use traceable citations in a format suited to the material: author/title, URLs, document/page or saved source paths.
-Include the references the reader needs. You may search and fetch supplementary material; preserve it in the workspace
-and identify its source and path in the draft so the red team can read it. Do not force interpretation or normative
+Include the references the reader needs. You may retrieve material needed to verify or compare the submitted evidence;
+preserve it in the workspace and identify its source and path so the red team can read it. Do not turn this draft into
+an undisclosed new research assignment; identify substantial unfilled evidence needs as limits. Do not force interpretation or normative
 reasoning into a verbatim quotation. Do not hide corrections or unsupported leaps behind reference markers.
 A separate red team will review this saved draft before you adjudicate its objections.
 """ + planner.SOURCES_FOOTER + planner.MARKDOWN_OUTPUT

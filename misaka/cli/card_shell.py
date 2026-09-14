@@ -56,10 +56,13 @@ def launch(task_id, resume_only=False, say=None):
     with contextlib.closing(db.connect(CFG["db"])) as con:
         row = db.get(con, task_id)
         handoffs = worker.card_handoffs(con, row) if row is not None else []
+        extras = (worker.card_extras(con, row, include_colleagues=False)
+                  if row is not None else {})
     if row is None:
         sys.exit(f"Card not found: {task_id}")
     task = dict(row)
     task["_handoffs"] = handoffs
+    task.update(extras)
     lock = os.environ.get("MISAKA_USAGE_CLAIM_LOCK")
     generation = os.environ.get("MISAKA_USAGE_GENERATION")
     if lock and generation:

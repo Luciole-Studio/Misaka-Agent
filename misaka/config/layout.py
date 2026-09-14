@@ -18,9 +18,8 @@ with less, not a reason not to start.
 
 What is deliberately NOT created:
 
-* ``SOUL.md`` for any role. It is an override slot -- present and non-blank, it *replaces*
-  the built-in identity (``config.identity``). Seeding one would silently retire Last
-  Order's coordinator identity, so the README says how to write one instead.
+* ``SOUL.md`` for any role. It is an optional personality slot. Shared and role duties
+  are assembled separately (``config.identity``); the README explains customisation.
 * ``agent/models.json``. pi does not create it either, and an empty ``providers`` map is
   not more useful than its absence; the README says what it is for.
 """
@@ -34,7 +33,7 @@ live here, never in the source tree.
 
     MISAKA.md          identity every role loads before its own SOUL.md
     last_order/        Last Order, the coordinator
-      SOUL.md          her voice -- OPTIONAL, and it REPLACES her built-in identity
+      SOUL.md          her voice -- OPTIONAL; shared duties and role charter are kept
       config.json      {"model": "..."} the model she starts on; /model Ctrl+S writes it
       config.yaml      her MCP servers (a commented skeleton is there to edit)
       skills/          skills only she sees

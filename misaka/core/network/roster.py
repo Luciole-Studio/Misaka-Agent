@@ -173,6 +173,26 @@ def describe_line(sid, root=None):
     return truncate_skill_description(desc) if desc else None
 
 
+def coordinator_profile(entry):
+    """LO's routing summary, without mutating the internal capability catalog."""
+    return {
+        "id": entry["id"],
+        "description": entry.get("description") or "",
+        "profile_preview": (entry.get("profile") or "").strip()[:200],
+    }
+
+
+def routing_catalog(root=None):
+    """Public routing summaries, without inspecting peers' tools, skills or settings."""
+    root = os.path.expanduser(root or CFG["profiles_root"])
+    out = []
+    for sid in roster_names(root):
+        if _valid(sid):
+            description, body = describe(sid, root)
+            out.append(coordinator_profile({"id": sid, "description": description, "profile": body}))
+    return out
+
+
 def capability_catalog(root=None, *, workspace=None, platform="cli"):
     """The coordinator's catalog, using the same layered Skill index as a Sister.
 

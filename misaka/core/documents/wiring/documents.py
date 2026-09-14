@@ -7,6 +7,10 @@ from pydantic import BaseModel, Field
 
 from misaka.ai.types import ImageContent
 from misaka.core.documents import index as corpus
+from misaka.core.documents.prompt import (
+    MATERIAL_REUSE_GUIDELINE,
+    QUOTATION_LOCATOR_GUIDELINE,
+)
 from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.platform.toolkit import register_tool as _register
 
@@ -174,7 +178,7 @@ def register(harn):
         harn, name="doc_list", label="List documents",
         description="List documents already indexed in the workspace and return their document IDs.",
         snippet="List indexed documents and document IDs",
-        guidelines=["Check doc_list before fetching or re-reading material: indexed sources and other cards' artifacts are already there."],
+        guidelines=[MATERIAL_REUSE_GUIDELINE],
         parameters=ListParams)
     async def doc_list(tool_call_id, params, signal, on_update, ctx):
         rows = await _off_loop(_docs, ctx)
@@ -349,7 +353,7 @@ def register(harn):
         harn, name="doc_add", label="Index materials",
         description="Index a file or a folder of materials into the document store so the doc_* tools can navigate, search, and cite them.",
         snippet="Index a file or folder of materials for doc_* tools",
-        guidelines=["Use doc_add for new material you fetched or wrote; doc_list shows what is already indexed."],
+        guidelines=["Use doc_add for material that needs shared navigation and is not already indexed; a returned document ID indicates it is indexed."],
         parameters=AddParams)
     async def doc_add(tool_call_id, params, signal, on_update, ctx):
         ws = _workspace(ctx)
@@ -383,9 +387,7 @@ def register(harn):
         harn, name="doc_verify", label="Locate quotation",
         description="Locate literal text in an indexed document and return its page, character offset, and locator hash. This does not assess support for a claim.",
         snippet="Locate a quotation in indexed text",
-        guidelines=[
-            "Use doc_verify as an optional locator, not a citation gate. A missing literal match may reflect extraction or typography; read the source in context to assess the quotation and argument.",
-        ],
+        guidelines=[QUOTATION_LOCATOR_GUIDELINE],
         parameters=VerifyParams)
     async def doc_verify(tool_call_id, params, signal, on_update, ctx):
         root = await _off_loop(_owning_root, params.doc_id, ctx)

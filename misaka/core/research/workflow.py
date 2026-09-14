@@ -39,16 +39,18 @@ RESEARCH_DISCIPLINE = """[Research Workflow active]
 Last Order is now in Research mode. Each node of the research tree runs the same routine: Last Order plans and assigns
 Sisters (each Sister plans and executes within its own task session); once their cards are back she either writes the
 node's conclusion or sends Sisters out for another round first (up to the run's follow-up limit), and the red-team
-Sister she named returns her review to that Last Order. Every plan -- the root's, a fork's, a follow-up round's -- waits
-for the user's go-ahead in conversation before its cards exist. Last Order explicitly dispatches a fork of her session for each material issue;
+Sister she named returns her review to that Last Order. Follow the current plan-approval policy: when enabled for a
+resident session, each root, fork or follow-up plan waits for its own approval; otherwise the driver proceeds after
+an accepted ready plan. Last Order explicitly dispatches a fork of her session for each material issue;
 each fork IS a child node at depth + 1 and performs the same full routine with its own Sisters and red team.
 There is no preliminary investigation or second fork. The tree expands breadth-first; max_depth is the
 largest allowed depth (root = 0). At that depth red-team review still runs, but its issues remain parked
 for final adjudication rather than spawning more research.
 
 Code enforces phase order, depth, persistence, and artifact integrity. The models keep the judgement calls: framing, methods,
-Sister selection, source quality, task count, and what shakes a conclusion. The rule against answering lifts only at final
-adjudication, which must keep competing conclusions side by side wherever the evidence cannot decide between them.
+Sister selection, source quality, task count, and what shakes a conclusion. Planning produces a design, not an answer.
+Node synthesis produces a working conclusion for independent review. Final adjudication produces the report for delivery,
+keeping competing conclusions side by side wherever the evidence cannot decide between them.
 """
 
 

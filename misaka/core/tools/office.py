@@ -76,41 +76,33 @@ office_tool_system_prompt_contribution = {
     "snippet": "Create or edit .docx/.xlsx/.pptx and text deliverables through structured ops",
     "guidelines": [
         (
-            "Use office for every deliverable file — .docx/.xlsx/.pptx and "
-            ".txt/.md/.csv/.tsv/.json/.jsonl/.html. Fall back to python-docx/openpyxl/"
-            "python-pptx through bash ONLY after office has returned an unsupported-operation "
-            "error for what the task needs. Never hand-build deliverables with "
-            "echo/cat/heredoc/redirection."
+            "Use office when its structured operations fit the deliverable. Choose a better-suited "
+            "available tool or skill when appropriate; ordinary text files may use file tools. "
+            "A failed office call is not a prerequisite for choosing another suitable method."
         ),
         (
-            "Pass ops as a JSON array of single-key objects applied in order to one file; do "
-            "many operations in ONE call. For a whole text file pass content (or rows/data) "
-            "and omit ops."
+            "Preserve existing content when editing; use overwrite=true only for an intentional "
+            "complete rebuild."
         ),
         (
-            "create refuses an existing path; use insert_*/set_cell/add_slide/replace_text to "
-            "add to a file, or pass overwrite=true only to rebuild it."
+            "For calculations derived from spreadsheet cells, prefer formulas over hard-coded "
+            "results. Source data and externally computed results may be numeric values with "
+            "their provenance and method recorded. Check the receipt: uncached formulas are "
+            "not verified calculated results."
         ),
         (
-            "xlsx: write FORMULAS ({\"set_cell\": {\"value\": \"=SUM(B2:B9)\", "
-            "\"type\": \"formula\"}}), never a number you computed yourself. openpyxl stores "
-            "the formula but not its result, so the receipt tells you when the cached values "
-            "are still empty."
+            "In Office rich-text formats, use structured formatting rather than Markdown "
+            "markers. In .md and .html files, markup is the intended literal content."
         ),
         (
-            "Text is literal: formatting goes through structured parameters (runs with "
-            "bold/italic/underline/strike/color/size/font/link), never Markdown syntax inside "
-            "text."
+            "Follow the document's template and choose available fonts that cover its characters, "
+            "including CJK. Do not assume a font is installed merely because it can be named."
         ),
         (
-            "Fonts: name only Arial / Times New Roman / Courier New / Calibri / Cambria; "
-            "Chinese SimSun / SimHei / Microsoft YaHei; Japanese MS Gothic / MS Mincho / "
-            "Meiryo / Yu Gothic; Korean Malgun Gothic / Batang. When text contains CJK, name a "
-            "CJK family. One family per document."
-        ),
-        (
-            "After producing a document, read it back (read <path>) to confirm labels, layout, "
-            "numbers and non-ASCII text — a missing font shows as boxes."
+            "Validate the output's content, structure and numbers by reading it back. Office "
+            "text extraction does not verify layout or rendered glyphs: inspect rendered pages "
+            "when visual fidelity matters and rendering is available; otherwise report that "
+            "visual verification was not performed."
         ),
     ],
 }
@@ -258,9 +250,10 @@ def create_office_tool_definition(
             "(.docx), Excel (.xlsx), PowerPoint (.pptx) and text formats (.txt, .md, "
             ".csv, .tsv, .json, .jsonl, .html). Pass path plus ops, a JSON array of "
             "single-key objects applied in order to that one file — do many edits in one "
-            "call. For a whole text file pass content (or rows/data) instead of ops. Text "
-            "is written literally: formatting comes from structured parameters, not "
-            "Markdown syntax. docx ops: create, replace_text, insert_paragraph, "
+            "call. For a whole text file pass content (or rows/data) instead of ops. create "
+            "rejects an existing path unless overwrite=true; use editing operations to preserve "
+            "other content. Text is literal: Office rich-text formatting uses structured "
+            "parameters, while .md/.html retain their markup. docx ops: create, replace_text, insert_paragraph, "
             "insert_heading, insert_table, format_text, format_paragraph, add_hyperlink, "
             "add_image, set_page_number, set_page_margins, set_page_orientation, "
             "set_header_footer. xlsx ops: create, set_cell, set_range, add_sheet, "

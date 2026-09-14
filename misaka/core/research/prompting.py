@@ -1,8 +1,9 @@
 """Small Research-only additions to the existing system-prompt assembly."""
 from misaka.config.identity import (
+    COMMON_CHARTER,
     COORDINATOR_APPROVAL,
     COORDINATOR_RECEIPTS,
-    ROLE_CHARTER,
+    COORDINATOR_ROLE,
 )
 from misaka.core.system_prompt import CURRENT_TOOLS_GUIDELINE
 
@@ -15,9 +16,8 @@ def system_context(session, names, system_prompt):
     and coverage rules from their actual tool definitions in the coordinator's
     system-prompt publisher.
     """
-    sections = [CURRENT_TOOLS_GUIDELINE, COORDINATOR_APPROVAL, COORDINATOR_RECEIPTS]
-    if ROLE_CHARTER["last_order"] not in system_prompt:
-        sections.append("Coordinator role: Last Order.")
+    sections = [COMMON_CHARTER, COORDINATOR_ROLE, CURRENT_TOOLS_GUIDELINE,
+                COORDINATOR_APPROVAL, COORDINATOR_RECEIPTS]
     for name in dict.fromkeys(names):
         if name not in {"misaka_research_view", "coverage_scan"}:
             continue

@@ -81,7 +81,6 @@ def register(harn):
                     "(the user can step in and take over at any time). For a one-off job use misaka_ally_card "
                     "and misaka_ally_dispatch instead.",
         snippet="Start an interactive third-party agent pane",
-        guidelines=["misaka_ally_start spends external quota; do not call it unless the user explicitly asked."],
         parameters=StartParams)
     async def misaka_ally_start(tool_call_id, params, signal, on_update, ctx):
         if not params.confirmed:
@@ -138,8 +137,6 @@ def register(harn):
                     "immediately; when the ally exits successfully, the daemon records its output and deliverables. "
                     "Do not poll while waiting.",
         snippet="Dispatch an ally card",
-        guidelines=[("misaka_ally_dispatch spends the external agent's own quota; do not call it unless the user "
-                    "explicitly said to start.")],
         parameters=DispatchParams)
     async def misaka_ally_dispatch(tool_call_id, params, signal, on_update, ctx):
         if not params.confirmed:
@@ -198,7 +195,6 @@ def register(harn):
         name="misaka_ally_stop", label="Stop ally card",
         description="Stop a running ally card: close its pane and mark the card stopped.",
         snippet="Stop an ally card",
-        guidelines=["misaka_ally_stop kills the process; do not call it unless the user explicitly asked."],
         parameters=PeerStopParams)
     async def misaka_ally_stop(tool_call_id, params, signal, on_update, ctx):
         if not params.confirmed:
@@ -218,7 +214,6 @@ def register(harn):
         description="Close a pane, killing the process inside it. Only for ally and shell panes; "
                     "a Sister's card pane must be stopped with misaka_sister_stop.",
         snippet="Close an ally pane",
-        guidelines=["misaka_ally_close kills the process; do not call it unless the user explicitly asked."],
         parameters=CloseParams)
     async def misaka_ally_close(tool_call_id, params, signal, on_update, ctx):
         if not params.confirmed:

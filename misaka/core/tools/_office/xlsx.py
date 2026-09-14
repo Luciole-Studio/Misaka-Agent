@@ -97,6 +97,8 @@ def _typed(value, kind):
     if wanted == "text":
         return "" if value is None else str(value)
     if wanted == "number":
+        if isinstance(value, float):
+            return value  # int(float) would silently discard the fractional part.
         for cast in (int, float):
             try:
                 return cast(value)

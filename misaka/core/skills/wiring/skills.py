@@ -363,7 +363,7 @@ class SkillsPart:
                 execute=manage_execute,
                 promptSnippet="Create or update a reusable skill",
                 promptGuidelines=[
-                    "New skill descriptions must be one sentence of at most 60 characters; put detail in the body.",
+                    f"New skill descriptions must be one sentence of at most {skill_index.SKILL_PROMPT_DESC_LIMIT} characters; put detail in the body.",
                     "Use `skill_manage`, never generic file tools, for every skill mutation.",
                     "When the user-controlled gate blocks a write, report it and do not seek a bypass.",
                 ]))
@@ -422,7 +422,7 @@ class SkillsPart:
             prompt += (
                 "\n\n---\n[Write path] Use `skill_manage` for every skill change; never write the skill tree with generic file tools. "
                 "Create a skill with `skill_manage(action='create', name=..., content=<complete SKILL.md>)` and add support files "
-                "with `action='write_file'`. New descriptions must be one sentence of at most 60 characters; put detail in the body."
+                f"with `action='write_file'`. New descriptions must be one sentence of at most {skill_index.SKILL_PROMPT_DESC_LIMIT} characters; put detail in the body."
             )
             if decision == "stage":
                 prompt += (

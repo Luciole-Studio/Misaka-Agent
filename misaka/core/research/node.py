@@ -399,8 +399,8 @@ def run_interactive(run_id, node_id, *, runner_key):
         "MISAKA_RESEARCH_NODE": f"{run_id} {node_id} {runner_key}",
         "MISAKA_APP_TITLE": f"MISAKA · Last Order · node {node_id}",
         "MISAKA_TAGLINE": (f"Last Order of research node {node_id} (depth {node['depth']}, run {run_id}). "
-                           "Her plan for this node waits for your go-ahead here: talk it over with her and she "
-                           "starts it once you agree. Her Sisters open beside this window."),
+                           "When plan approval is enabled, discuss this node's plan here and approve it before "
+                           "execution. Her Sisters open beside this window."),
         "MISAKA_WHO": "last-order",
         "MISAKA_MCP_ROLE": "last-order",
         "MISAKA_PROFILE_DIR": profile,

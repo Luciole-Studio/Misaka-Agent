@@ -48,15 +48,7 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
     tools_list = "\n".join(f"- {name}: {tool_snippets[name]}" for name in visible_tools) if visible_tools else "(none)"
 
     guidelines: list[str] = []
-    from misaka.config.identity import (
-        COORDINATOR_APPROVAL,
-        COORDINATOR_RECEIPTS,
-        ROLE_CHARTER,
-    )
-    # Only our exact, assembled charter covers these shared rules. An arbitrary
-    # custom identity never suppresses independently enabled tools' instructions.
-    seen_guidelines = ({COORDINATOR_APPROVAL, COORDINATOR_RECEIPTS}
-                       if ROLE_CHARTER["last_order"] in (append_system_prompt or "") else set())
+    seen_guidelines: set[str] = set()
 
     def add_guideline(guideline: str) -> None:
         if guideline in seen_guidelines:
@@ -81,17 +73,6 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
             )
         else:
             add_guideline("Use bash for file operations like ls, rg, find")
-    elif has_bash or has_powershell:
-        if has_bash and has_powershell:
-            shell_names = "bash or PowerShell"
-        elif has_powershell:
-            shell_names = "PowerShell"
-        else:
-            shell_names = "bash"
-        add_guideline(
-            f"Prefer grep/find/ls tools over {shell_names} for file exploration "
-            "(faster, respects .gitignore)"
-        )
 
     for guideline in prompt_guidelines or []:
         normalized = guideline.strip()
@@ -106,7 +87,10 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
     # MISAKA fork: the harn original called itself a coding assistant and appended a harn
     # docs section. Here the role stack (shared soul, identity, charter) comes first, via
     # the append slot, so the model reads who it is before what it can do.
-    prompt = "You are an agent of MISAKA, a multi-agent research system for the humanities and social sciences."
+    prompt = (
+        "You are an agent of MISAKA, a collaborative multi-agent research system for the humanities and social sciences. "
+        "Last Order coordinates research and user requirements; Sisters are domain specialists who plan and execute their assignments."
+    )
     if append_section:
         prompt += append_section
     prompt += f"""

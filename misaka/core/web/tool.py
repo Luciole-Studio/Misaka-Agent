@@ -248,8 +248,8 @@ def register(harn) -> None:
         execute=execute,
         promptSnippet="Search the web for current information",
         promptGuidelines=[
-            ("Results are snippets and links, not pages: read a page with web_fetch or web_extract before citing "
-             "it. Identical queries are served from a short-lived memo inside this process, so re-asking the same "
-             "thing costs nothing; a different Sister's identical search is paid again."),
+            ("Search results are snippets and links, not full pages. Read the relevant source content before "
+             "citing it, using an available page reader. Reuse results when they meet the task's freshness "
+             "needs; repeated searches are not guaranteed to be free or fresh."),
         ],
     ))

@@ -79,14 +79,14 @@ def register(harn):
 
     harn.registerTool(ToolDefinition(
         name="coverage_scan", label="Scan literature coverage",
-        description="Show which subfields and topics of the literature actually discuss a question (OpenAlex counts), "
-                    "so a research design can be checked for fields it forgot.",
+        description="Show OpenAlex counts of title/abstract matches grouped by subfield and topic, "
+                    "plus matching topic descriptions, to help check a research design for overlooked fields.",
         parameters=ScanParams.model_json_schema(), execute=execute,
         promptSnippet="See which fields of the literature discuss a question",
-        promptGuidelines=[("Scan a question in two or three phrasings before dividing it into tasks; a neighbouring "
-                          "field with many works is a dimension the plan may be missing.")]))
+        promptGuidelines=[("Use coverage_scan when checking a research design for overlooked fields. Rephrase weak "
+                          "queries when useful. Counts are discovery signals, not measures of relevance, quality, "
+                          "or completeness; sparse coverage or a failed scan does not establish a research gap.")]))
 
 
 def activate(spec):
     return register
-
