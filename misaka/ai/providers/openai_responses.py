@@ -88,18 +88,50 @@ def _detect_session_affinity_format(model: Model) -> str:
     return "openrouter" if model.provider == "openrouter" or "openrouter.ai" in base_url else "openai"
 
 
+# The Responses API's own floor for `max_output_tokens`; a smaller value is rejected.
+MIN_OUTPUT_TOKENS = 16
+
+
 def get_compat(model: Model) -> dict[str, Any]:
+    """The Responses compat block with upstream's defaults, all of it in one place.
+
+    Only two of these were resolved here before; the rest were read inline at their use
+    sites or not at all, which is how `supportsExplicitPromptCacheMode` came to be declared
+    in the catalog, set on four models, and never reach a request.
+    """
     compat = model.compat if getattr(model, "compat", None) is not None else None
     return {
+        "supportsDeveloperRole": read_field(compat, "supportsDeveloperRole", True),
         "sessionAffinityFormat": read_field(
             compat, "sessionAffinityFormat", _detect_session_affinity_format(model)
         ),
         "supportsLongCacheRetention": read_field(compat, "supportsLongCacheRetention", True),
+        "supportsStrictMode": read_field(compat, "supportsStrictMode", False),
+        "supportsOpenAIGrammarTools": read_field(compat, "supportsOpenAIGrammarTools", False),
+        "supportsAdditionalTools": read_field(compat, "supportsAdditionalTools", False),
+        "supportsToolSearch": read_field(compat, "supportsToolSearch", False),
+        "supportsExplicitPromptCacheMode": read_field(compat, "supportsExplicitPromptCacheMode", False),
+        "supportsMaxOutputTokens": read_field(compat, "supportsMaxOutputTokens", True),
     }
 
 
 def get_prompt_cache_retention(compat: dict[str, bool], cache_retention: CacheRetention) -> str | None:
-    return "24h" if cache_retention == "long" and compat["supportsLongCacheRetention"] else None
+    """The two cache controls are exclusive: a model on explicit mode is configured through
+    ``prompt_cache_options`` instead, and sending the retention alongside it contradicts it."""
+    return ("24h" if cache_retention == "long" and compat["supportsLongCacheRetention"]
+            and not compat["supportsExplicitPromptCacheMode"] else None)
+
+
+def get_prompt_cache_options(compat: dict[str, bool], cache_retention: CacheRetention) -> dict[str, str] | None:
+    """Explicit prompt-cache mode, for the models that declare it. ``none`` asks the server
+    to cache only what the client marks; ``long`` asks for a half-hour time to live."""
+    if not compat["supportsExplicitPromptCacheMode"]:
+        return None
+    if cache_retention == "none":
+        return {"mode": "explicit"}
+    if cache_retention == "long" and compat["supportsLongCacheRetention"]:
+        return {"ttl": "30m"}
+    return None
 
 
 def _error_message(error: Exception) -> str:
@@ -196,15 +228,20 @@ def build_params(model: Model, context: Context, options: Any = None) -> dict[st
             None if cache_retention == "none" else clamp_openai_prompt_cache_key(_option(options, "sessionId"))
         ),
         "prompt_cache_retention": get_prompt_cache_retention(compat, cache_retention),
+        "prompt_cache_options": get_prompt_cache_options(compat, cache_retention),
         "store": False,
     }
 
-    if _option(options, "maxTokens"):
-        params["max_output_tokens"] = _option(options, "maxTokens")
+    # The floor is the API's: a smaller ceiling is rejected, and a caller asking for one
+    # means "as little as possible" rather than "fail".
+    if _option(options, "maxTokens") and compat["supportsMaxOutputTokens"]:
+        params["max_output_tokens"] = max(_option(options, "maxTokens"), MIN_OUTPUT_TOKENS)
     if _option(options, "temperature") is not None:
         params["temperature"] = _option(options, "temperature")
     if _option(options, "serviceTier") is not None:
         params["service_tier"] = _option(options, "serviceTier")
+    if _option(options, "toolChoice") is not None:
+        params["tool_choice"] = _option(options, "toolChoice")
     if context.tools:
         params["tools"] = convert_responses_tools(
             context.tools,

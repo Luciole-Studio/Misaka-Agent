@@ -26,6 +26,7 @@ from misaka.ai.providers.constrained_sampling import (
     create_grammar_tool_input_properties,
 )
 from misaka.ai.providers.openai_prompt_cache import clamp_openai_prompt_cache_key
+from misaka.ai.providers.openai_responses import MIN_OUTPUT_TOKENS
 from misaka.ai.providers.openai_responses_shared import (
     convert_responses_messages,
     convert_responses_tools,
@@ -194,10 +195,13 @@ def build_params(model: Model, context: Context, options: Any, deployment_name: 
         "input": messages,
         "stream": True,
         "prompt_cache_key": clamp_openai_prompt_cache_key(_option(options, "sessionId")),
+        "store": False,
     }
 
+    # Unconditional here, unlike the OpenAI Responses provider: Azure declares no
+    # `supportsMaxOutputTokens`, and upstream gates only the OpenAI one on it.
     if _option(options, "maxTokens"):
-        params["max_output_tokens"] = _option(options, "maxTokens")
+        params["max_output_tokens"] = max(_option(options, "maxTokens"), MIN_OUTPUT_TOKENS)
     if _option(options, "temperature") is not None:
         params["temperature"] = _option(options, "temperature")
     if context.tools:
@@ -206,6 +210,9 @@ def build_params(model: Model, context: Context, options: Any, deployment_name: 
             {"supportsStrictMode": bool(getattr(getattr(model, "compat", None), "supportsStrictMode", None) if getattr(getattr(model, "compat", None), "supportsStrictMode", None) is not None else True),
              "supportsOpenAIGrammarTools": bool(getattr(getattr(model, "compat", None), "supportsOpenAIGrammarTools", None))},
         )
+
+    if _option(options, "toolChoice") is not None:
+        params["tool_choice"] = _option(options, "toolChoice")
 
     reasoning_effort = _option(options, "reasoningEffort")
     reasoning_summary = _option(options, "reasoningSummary")

@@ -500,6 +500,8 @@ class OpenAICompletionsCompat(SchemaModel):
 
 class OpenAIResponsesCompat(SchemaModel):
     supportsLongCacheRetention: bool | None = None
+    # Default true upstream: a model that sets it false takes no `max_output_tokens` at all.
+    supportsMaxOutputTokens: bool | None = None
     supportsDeveloperRole: bool | None = None
     sessionAffinityFormat: SessionAffinityFormat | None = None
     supportsStrictMode: bool | None = None
