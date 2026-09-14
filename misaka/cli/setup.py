@@ -34,6 +34,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 from misaka.cli import setup_ui as ui
@@ -49,7 +50,14 @@ SECTIONS = ("environment", "model", "sisters", "skills", "documents", "web", "re
 
 # The providers a fresh install is most likely to want, in the order they are offered; every
 # other provider the registry knows is one menu entry further ("Another provider...").
-FEATURED_PROVIDERS = ("anthropic", "openai", "google", "mistral", "amazon-bedrock", "openrouter", "ollama")
+#
+# Ordered so the ones that sign in through a browser come first. A subscription is the path
+# that needs no API key at all, and it used to be the buried one: `openai` was featured and
+# takes only a key, while ChatGPT Plus/Pro lives under a different provider id
+# (`openai-codex`) that only the second menu reached -- so the person with a subscription had
+# further to walk than the person with a credit card.
+FEATURED_PROVIDERS = ("anthropic", "openai-codex", "github-copilot", "xai", "openrouter",
+                      "openai", "google", "mistral", "amazon-bedrock", "ollama")
 
 # Web search backends that take a key, and the variable the backend reads it from.
 WEB_BACKENDS = (
@@ -73,6 +81,28 @@ REPO_URL = "git+https://github.com/Luciole-Studio/Misaka-Agent.git"
 def _requirement(package: str) -> str:
     """``misaka[anthropic]`` as something pip can actually resolve; anything else unchanged."""
     return f"{package} @ {REPO_URL}" if package == "misaka" or package.startswith("misaka[") else package
+
+
+def _open_browser(url: str) -> bool:
+    """Hand the URL to the desktop, the way the chat's login dialog does.
+
+    Printing it and waiting is what made the browser logins look like a hang: the flow says
+    "a browser window should open" because whoever drives it is expected to open one.
+    """
+    if sys.platform == "darwin":
+        command = ["open", url]
+    elif sys.platform == "win32":
+        # Never `cmd /c start`: cmd re-parses &, | and ^ before `start` runs, so a
+        # provider-supplied URL could execute. rundll32 takes the target unparsed.
+        command = ["rundll32", "url.dll,FileProtocolHandler", url]
+    else:
+        command = ["xdg-open", url]
+    try:
+        with open(os.devnull, "wb") as sink:
+            subprocess.Popen(command, stdout=sink, stderr=sink, start_new_session=True)
+    except OSError:
+        return False
+    return True
 
 
 def _install_command(binary: str) -> str:
@@ -145,12 +175,14 @@ class Wizard:
         featured = [p for p in FEATURED_PROVIDERS if p in known]
         if current and current not in featured:
             featured.insert(0, current)
-        labels = [self._provider_label(registry, p) for p in featured] + ["Another provider..."]
+        oauth_ids = {p.id for p in registry.getOAuthProviders()}
+        labels = [*self._provider_labels(registry, featured, oauth_ids), "Another provider..."]
         default = featured.index(current) if current in featured else 0
-        picked = prompt_choice("Which provider should Last Order and the Sisters use by default?", labels, default)
+        picked = prompt_choice("Which provider should Last Order and the Sisters use by default?", labels, default,
+                               "A browser sign-in uses a subscription you already pay for; an API key is billed per token.")
         if picked == len(featured):
             others = [p for p in known if p not in featured]
-            provider = others[prompt_choice("Provider", [self._provider_label(registry, p) for p in others])]
+            provider = others[prompt_choice("Provider", self._provider_labels(registry, others, oauth_ids))]
         else:
             provider = featured[picked]
         # The SDK is installed per provider; a missing one is the most common first-run failure.
@@ -168,11 +200,23 @@ class Wizard:
         self._verify(registry, provider, model_id)
 
     @staticmethod
-    def _provider_label(registry, provider: str) -> str:
-        status = registry.getProviderAuthStatus(provider)
-        name = registry.getProviderDisplayName(provider)
-        where = status.source or ("configured" if status.configured else "")
-        return f"{name}" + (f"  ({where})" if where else "  (no credential yet)")
+    def _provider_labels(registry, providers: list[str], oauth_ids: set[str]) -> list[str]:
+        """The menu rows: who they are, how you sign in, and whether you already have.
+
+        The name column is measured, not guessed: "ChatGPT Plus/Pro (Codex Subscription)" is
+        half again as long as "OpenAI", and a fixed width either wraps it or wastes a third
+        of the row on everything else.
+        """
+        names = {p: registry.getProviderDisplayName(p) for p in providers}
+        width = max((len(name) for name in names.values()), default=0)
+        rows = []
+        for provider in providers:
+            status = registry.getProviderAuthStatus(provider)
+            how = "browser sign-in" if provider in oauth_ids else "API key"
+            where = status.source or ("configured" if status.configured else "")
+            rows.append(f"{names[provider]:<{width}}  {how:<16}"
+                        + (f"({where})" if where else "(not set up yet)"))
+        return rows
 
     def _credential(self, registry, storage, provider: str) -> None:
         status = registry.getProviderAuthStatus(provider)
@@ -203,21 +247,41 @@ class Wizard:
         ui.print_success(f"Key stored in {storage.authPath if hasattr(storage, 'authPath') else '~/.misaka/agent/auth.json'}")
 
     def _oauth(self, registry, provider: str) -> None:
-        """The same login the chat's /login runs, with the browser steps printed instead of drawn."""
+        """The same login the chat's /login runs, drawn as terminal lines.
+
+        Every prompt runs on a worker thread. Browser logins (Anthropic, ChatGPT Codex,
+        OpenRouter) start a local callback server and race it against a paste-the-code
+        prompt, both on the event loop; a prompt that reads the terminal directly blocks that
+        loop, so the redirect the browser sends can never be accepted and the login hangs
+        with the URL on screen. The chat does not hit this because its dialogs are already
+        asynchronous.
+
+        When the server wins, the paste prompt is still waiting on a keystroke, so it has to
+        be cancellable -- otherwise the thread holds stdin and answers the wizard's next
+        question.
+        """
+        import threading
+        cancel = threading.Event()
+
         async def ask(request) -> str:
             kind = getattr(request, "type", "text")
+            message = str(getattr(request, "message", ""))
             if kind == "select":
                 options = list(getattr(request, "options", []) or [])
-                chosen = prompt_choice(str(getattr(request, "message", "")), [o.label for o in options])
+                chosen = await asyncio.to_thread(prompt_choice, message, [o.label for o in options])
                 return options[chosen].id
-            return prompt(str(getattr(request, "message", "")), password=(kind == "secret"))
+            if kind == "manual_code":
+                return await asyncio.to_thread(ui.prompt_cancellable, message, cancel)
+            return await asyncio.to_thread(prompt, message, None, password=(kind == "secret"))
 
         def notify(event) -> None:
             kind = getattr(event, "type", "")
             if kind == "auth_url":
-                ui.print_info(f"Open this URL in your browser: {event.url}")
+                ui.print_info(f"Opening your browser: {event.url}")
                 if getattr(event, "instructions", None):
                     ui.print_info(str(event.instructions))
+                if not _open_browser(str(event.url)):
+                    ui.print_warning("The browser could not be opened; copy the URL above.")
             elif kind == "device_code":
                 ui.print_info(f"Go to {event.verificationUri} and enter the code {event.userCode}")
             else:
@@ -230,6 +294,11 @@ class Wizard:
             raise
         except Exception as error:  # noqa: BLE001 - a failed login is reported, the wizard goes on
             ui.print_error(f"Login failed: {error}")
+        finally:
+            # Release a paste prompt the callback server beat, and give its thread the moment
+            # it needs to restore the terminal before the next question is asked.
+            cancel.set()
+            time.sleep(0.25)
 
     def _pick_model(self, registry, provider: str, cfg: dict) -> str:
         models = self._model_choices([m for m in registry.getAll() if m.provider == provider],

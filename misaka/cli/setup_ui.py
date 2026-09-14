@@ -24,6 +24,7 @@ import select
 import shutil
 import sys
 import textwrap
+import threading
 from collections.abc import Callable
 from functools import cache
 
@@ -325,6 +326,52 @@ def prompt(question: str, default: str | None = None, *, password: bool = False)
         raise SetupCancelled from None
     value = value.strip()
     return value or (default or "")
+
+
+def prompt_cancellable(question: str, cancel: threading.Event) -> str:
+    """A line prompt that gives up when ``cancel`` is set, instead of holding stdin forever.
+
+    OAuth's browser login races a local callback server against a paste-the-code prompt: when
+    the browser wins, the prompt has to stop reading, or the next thing the wizard asks will
+    be answered by a thread still sitting in ``input()``. A plain ``input()`` cannot be
+    interrupted, so this polls instead.
+    """
+    import termios
+    import tty
+    fd = sys.stdin.fileno()
+    sys.stdout.write(f"  {question}: ")
+    sys.stdout.flush()
+    try:
+        old_attrs = termios.tcgetattr(fd)
+    except (termios.error, OSError):
+        return input()
+    typed = ""
+    try:
+        tty.setcbreak(fd)
+        while not cancel.is_set():
+            if not select.select([fd], [], [], 0.1)[0]:
+                continue
+            char = os.read(fd, 1)
+            if not char or char in (b"\r", b"\n"):
+                break
+            if char == b"\x03":
+                raise SetupCancelled
+            if char in (b"\x7f", b"\b"):
+                if typed:
+                    typed = typed[:-1]
+                    sys.stdout.write("\b \b")
+                    sys.stdout.flush()
+                continue
+            # Echoed, not masked: this is an authorization code being pasted back, and a
+            # row of stars makes a mistyped one impossible to spot.
+            decoded = char.decode("utf-8", "replace")
+            typed += decoded
+            sys.stdout.write(decoded)
+            sys.stdout.flush()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+        print()
+    return "" if cancel.is_set() else typed.strip()
 
 
 def prompt_choice(question: str, choices: list[str], default: int = 0, description: str | None = None) -> int:
