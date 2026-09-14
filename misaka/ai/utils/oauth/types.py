@@ -55,7 +55,11 @@ class OAuthLoginCallbacks(Protocol):
     onDeviceCode: Callable[[OAuthDeviceCodeInfo], None]
     onPrompt: Callable[[OAuthPrompt], Awaitable[str]]
     onProgress: Callable[[str], None] | None
-    onManualCodeInput: Callable[[], Awaitable[str]] | None
+    # Takes the prompt, as upstream's `prompt({type: "manual_code", message,
+    # placeholder, signal})` does: the wording belongs to the flow that asks, not to
+    # whichever surface happens to draw the box, and the three flows do not word it
+    # alike (`openrouter.py` signs in, the other two log in).
+    onManualCodeInput: Callable[[OAuthPrompt], Awaitable[str]] | None
     onSelect: Callable[[OAuthSelectPrompt], Awaitable[str | None]]
     signal: Any | None
 

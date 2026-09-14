@@ -102,9 +102,12 @@ class _InteractionCallbacks:
             )
         )
 
-    async def onManualCodeInput(self) -> str:
+    async def onManualCodeInput(self, prompt: Any) -> str:
         return await self._interaction.prompt(
-            ManualCodePrompt(message="Paste the authorization code")
+            ManualCodePrompt(
+                message=read_field(prompt, "message", ""),
+                placeholder=read_field(prompt, "placeholder"),
+            )
         )
 
     async def onSelect(self, prompt: Any) -> str | None:
@@ -121,6 +124,22 @@ class _InteractionCallbacks:
                 ],
             )
         )
+
+
+def callbacks_for_interaction(interaction: Any) -> Any:
+    """The callbacks record one of misaka's own OAuth flows expects, over pi's interaction.
+
+    Two doors lead to the same login. A provider the registry owns -- a models.json
+    ``oauth:`` block, or a native one an extension registered -- goes through
+    ``ModelRegistry.login``, which speaks pi's ``prompt``/``notify`` interaction.
+    A built-in provider is owned by neither, so ``ModelRegistry.login`` refuses it by
+    design ("does not use native authentication") and the credential store's own
+    ``login`` runs the flow directly -- and that one takes the callbacks record.
+    Surfaces that hold an interaction and need the second door translate it here rather
+    than each writing the six callbacks out again; ``interactive_mode.py`` builds the
+    same record by hand for its own dialog.
+    """
+    return _InteractionCallbacks(interaction)
 
 
 def oauth_auth_from_flow(
@@ -193,4 +212,4 @@ def oauth_auth_for_provider(
     )
 
 
-__all__ = ["oauth_auth_for_provider", "oauth_auth_from_flow"]
+__all__ = ["callbacks_for_interaction", "oauth_auth_for_provider", "oauth_auth_from_flow"]

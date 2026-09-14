@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import os
 import secrets
@@ -15,9 +16,16 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 
+from misaka.ai.utils.abort import wait_for_abort
 from misaka.ai.utils.oauth.oauth_page import oauth_error_html, oauth_success_html
 from misaka.ai.utils.oauth.pkce import generate_pkce
-from misaka.ai.utils.oauth.types import OAuthCredentials, OAuthLoginCallbacks
+from misaka.ai.utils.oauth.types import (
+    OAuthAuthInfo,
+    OAuthCredentials,
+    OAuthLoginCallbacks,
+    OAuthPrompt,
+)
+from misaka.utils.values import signal_aborted
 
 CLIENT_ID = base64.b64decode("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl").decode("utf-8")
 AUTHORIZE_URL = "https://claude.ai/oauth/authorize"
@@ -30,6 +38,12 @@ SCOPES = (
     "org:create_api_key user:profile user:inference user:sessions:claude_code "
     "user:mcp_servers user:file_upload"
 )
+# Upstream's own wording for the paste box (auth/oauth/anthropic.ts): the box is the
+# browser flow's second answer, not a fallback, so it says so.
+MANUAL_PROMPT_MESSAGE = (
+    "Complete login in your browser, or paste the authorization code / redirect URL here:"
+)
+CANCEL_MESSAGE = "Login cancelled"
 
 
 @dataclass(slots=True)
@@ -37,6 +51,22 @@ class _CallbackServerInfo:
     server: asyncio.base_events.Server
     redirect_uri: str
     future: asyncio.Future[dict[str, str] | None]
+    # Upstream registers `interaction.signal.addEventListener("abort", () =>
+    # server.cancelWait())` before it starts waiting (auth/oauth/anthropic.ts:192-195).
+    # Without it, a caller that offers no paste box -- `ai/cli.py` passes
+    # `onManualCodeInput = None` -- has nothing that can end `wait_for_code`, and a
+    # cancelled login keeps waiting for a redirect nobody will send. Watched on a task
+    # rather than a listener, as `openrouter.py` and `radius.py` already do, because
+    # misaka's signals are duck-typed rather than DOM events.
+    aborting: asyncio.Task[None] | None = None
+
+    def watch_abort(self, signal: Any) -> None:
+        if signal is not None and self.aborting is None:
+            self.aborting = asyncio.ensure_future(self._watch_abort(signal))
+
+    async def _watch_abort(self, signal: Any) -> None:
+        await wait_for_abort(signal)
+        self.cancel_wait()
 
     def cancel_wait(self) -> None:
         if not self.future.done():
@@ -46,6 +76,10 @@ class _CallbackServerInfo:
         return await self.future
 
     async def close(self) -> None:
+        if self.aborting is not None and not self.aborting.done():
+            self.aborting.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.aborting
         self.server.close()
         await self.server.wait_closed()
 
@@ -104,7 +138,7 @@ def _format_error_details(error: Any) -> str:
     return str(error)
 
 
-async def _start_callback_server(expected_state: str) -> _CallbackServerInfo:
+async def _start_callback_server(expected_state: str, signal: Any = None) -> _CallbackServerInfo:
     """The local page the browser is redirected back to.
 
     MISAKA fork of pi 0.84.4 ``auth/oauth/anthropic.js``: there, a callback carrying
@@ -187,7 +221,9 @@ async def _start_callback_server(expected_state: str) -> _CallbackServerInfo:
             await writer.wait_closed()
 
     server = await asyncio.start_server(handler, CALLBACK_HOST, CALLBACK_PORT)
-    return _CallbackServerInfo(server=server, redirect_uri=REDIRECT_URI, future=future)
+    info = _CallbackServerInfo(server=server, redirect_uri=REDIRECT_URI, future=future)
+    info.watch_abort(signal)
+    return info
 
 
 async def _post_json(url: str, body: dict[str, str | int]) -> str:
@@ -236,7 +272,8 @@ async def login_anthropic(options: dict[str, Any]) -> OAuthCredentials:
     verifier = pkce.verifier
     challenge = pkce.challenge
     expected_state = secrets.token_hex(16)
-    server = await _start_callback_server(expected_state)
+    signal = options.get("signal")
+    server = await _start_callback_server(expected_state, signal)
 
     code: str | None = None
     state: str | None = None
@@ -258,14 +295,18 @@ async def login_anthropic(options: dict[str, Any]) -> OAuthCredentials:
                 "state": expected_state,
             }
         )
+        # The declared payload, not a bare dict: `types.py` says `Callable[[OAuthAuthInfo],
+        # None]`, and a caller that reads it by attribute -- `ai/cli.py` prints `info.url` --
+        # got an AttributeError before the login had drawn anything. `openrouter.py` and
+        # `radius.py` already pass the object.
         options["onAuth"](
-            {
-                "url": f"{AUTHORIZE_URL}?{auth_params}",
-                "instructions": (
+            OAuthAuthInfo(
+                url=f"{AUTHORIZE_URL}?{auth_params}",
+                instructions=(
                     "Complete login in your browser. If the browser is on another machine, "
                     "paste the final redirect URL here."
                 ),
-            }
+            )
         )
 
         if options.get("onManualCodeInput") is not None:
@@ -275,7 +316,11 @@ async def login_anthropic(options: dict[str, Any]) -> OAuthCredentials:
             async def manual_worker() -> None:
                 nonlocal manual_input, manual_error
                 try:
-                    manual_input = await options["onManualCodeInput"]()
+                    manual_input = await options["onManualCodeInput"](
+                        OAuthPrompt(message=MANUAL_PROMPT_MESSAGE, placeholder=REDIRECT_URI)
+                    )
+                except asyncio.CancelledError:
+                    raise
                 except Exception as error:  # noqa: BLE001 - captured and re-raised on the main path
                     manual_error = error
                 finally:
@@ -286,6 +331,14 @@ async def login_anthropic(options: dict[str, Any]) -> OAuthCredentials:
 
             if manual_error is not None:
                 raise manual_error
+
+            # The wait can end three ways: the browser answered, the paste box answered,
+            # or the login was cancelled. Only the first two have anything left to do.
+            # Without this, a cancel that releases the callback wait falls through to
+            # `await manual_task` and waits on a box the person has already dismissed --
+            # the hang the release is supposed to end. `radius.py` guards the same spot.
+            if signal_aborted(signal):
+                raise RuntimeError(CANCEL_MESSAGE)
 
             if result and result.get("code"):
                 code = result["code"]
@@ -312,14 +365,22 @@ async def login_anthropic(options: dict[str, Any]) -> OAuthCredentials:
             if result and result.get("code"):
                 code = result["code"]
                 state = result["state"]
-
-        if not code:
-            input_text = await options["onPrompt"]({"message": "Paste the authorization code or full redirect URL:", "placeholder": REDIRECT_URI})
-            parsed = _parse_authorization_input(input_text)
-            if parsed["state"] and parsed["state"] != expected_state:
-                raise RuntimeError("OAuth state mismatch")
-            code = parsed["code"]
-            state = parsed["state"] if parsed["state"] is not None else expected_state
+            if not code and signal_aborted(signal):
+                raise RuntimeError(CANCEL_MESSAGE)
+            if not code:
+                # Only on this branch. The paste box the caller already put on screen is the
+                # one upstream asks through, and asking a second time stacks a second box
+                # under the first -- both live, the first still holding the cursor. Upstream
+                # raises here instead (auth/oauth/anthropic.ts), and so does `openrouter.py`;
+                # `onPrompt` stays for the caller that offered no box at all.
+                input_text = await options["onPrompt"](
+                    OAuthPrompt(message=MANUAL_PROMPT_MESSAGE, placeholder=REDIRECT_URI)
+                )
+                parsed = _parse_authorization_input(input_text)
+                if parsed["state"] and parsed["state"] != expected_state:
+                    raise RuntimeError("OAuth state mismatch")
+                code = parsed["code"]
+                state = parsed["state"] if parsed["state"] is not None else expected_state
 
         if not code:
             raise RuntimeError("Missing authorization code")
@@ -330,8 +391,14 @@ async def login_anthropic(options: dict[str, Any]) -> OAuthCredentials:
             options["onProgress"]("Exchanging authorization code for tokens...")
         return await _exchange_authorization_code(code, state, verifier, redirect_uri_for_exchange)
     finally:
+        # Upstream aborts a second controller to retire the paste box once the callback has
+        # answered; cancelling the task that awaits it is the same handoff for a callbacks
+        # record that takes no signal. Awaited, so the worker's own `finally` has run before
+        # the server closes underneath it.
         if manual_task is not None and not manual_task.done():
             manual_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await manual_task
         await server.close()
 
 
@@ -374,6 +441,7 @@ class _AnthropicOAuthProvider:
                 "onPrompt": callbacks.onPrompt,
                 "onProgress": callbacks.onProgress,
                 "onManualCodeInput": callbacks.onManualCodeInput,
+                "signal": getattr(callbacks, "signal", None),
             }
         )
 

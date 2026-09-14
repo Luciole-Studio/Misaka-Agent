@@ -258,7 +258,11 @@ class Wizard:
 
         When the server wins, the paste prompt is still waiting on a keystroke, so it has to
         be cancellable -- otherwise the thread holds stdin and answers the wizard's next
-        question.
+        question. Releasing it has to happen *inside* the coroutine: ``asyncio.run`` joins
+        the default executor on the way out, and a worker still polling stdin is never
+        joined, so releasing it after the call is a release that never arrives. Cancelling
+        the task does not help -- ``to_thread`` cannot interrupt the thread it started.
+        The login then finished, the credential was stored, and the wizard froze anyway.
         """
         import threading
         cancel = threading.Event()
@@ -287,16 +291,42 @@ class Wizard:
             else:
                 ui.print_info(str(getattr(event, "message", "")))
 
+        # Two doors, as in the chat's own login dialog: the registry owns a provider that
+        # came from a models.json `oauth:` block or from an extension, and refuses every
+        # other one by design. A built-in -- Anthropic, ChatGPT Codex, OpenRouter, the three
+        # this wizard actually offers -- is owned by neither, so calling the registry gave
+        # "Provider anthropic does not use native authentication" and the browser never
+        # opened. Those go through the credential store, which runs the flow directly.
+        from misaka.ai.auth.oauth_bridge import callbacks_for_interaction
+        interaction = SimpleNamespace(signal=None, prompt=ask, notify=notify)
+        registry_owned = (
+            registry.getRegisteredProviderConfig(provider) is not None
+            or registry.getRegisteredNativeProvider(provider) is not None
+        )
+
+        async def run_login() -> None:
+            try:
+                if registry_owned:
+                    await registry.login(provider, "oauth", interaction)
+                else:
+                    await registry.authStorage.login(
+                        provider, callbacks_for_interaction(interaction)
+                    )
+            finally:
+                # Inside the coroutine, so the paste worker is already on its way out when
+                # the runner goes to join the executor. See the docstring.
+                cancel.set()
+
         try:
-            asyncio.run(registry.login(provider, "oauth", SimpleNamespace(signal=None, prompt=ask, notify=notify)))
+            asyncio.run(run_login())
             ui.print_success(f"{provider}: signed in")
         except (SetupCancelled, SetupGoBack):
             raise
         except Exception as error:  # noqa: BLE001 - a failed login is reported, the wizard goes on
             ui.print_error(f"Login failed: {error}")
         finally:
-            # Release a paste prompt the callback server beat, and give its thread the moment
-            # it needs to restore the terminal before the next question is asked.
+            # Give the released worker the moment it needs to restore the terminal before
+            # the next question is asked.
             cancel.set()
             time.sleep(0.25)
 

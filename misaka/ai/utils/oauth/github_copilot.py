@@ -14,7 +14,12 @@ import httpx
 
 from misaka.ai.models import get_models
 from misaka.ai.utils.oauth.device_code import poll_oauth_device_code_flow
-from misaka.ai.utils.oauth.types import OAuthCredentials, OAuthLoginCallbacks
+from misaka.ai.utils.oauth.types import (
+    OAuthCredentials,
+    OAuthDeviceCodeInfo,
+    OAuthLoginCallbacks,
+    OAuthPrompt,
+)
 from misaka.utils.values import signal_aborted
 
 CLIENT_ID = base64.b64decode("SXYxLmI1MDdhMDhjODdlY2ZlOTg=").decode("utf-8")
@@ -370,12 +375,15 @@ async def _enable_github_copilot_models(
 
 
 async def login_github_copilot(options: dict[str, Any]) -> OAuthCredentials:
+    # The declared payload, not a bare dict: `types.py` says `Callable[[OAuthPrompt],
+    # Awaitable[str]]`, and a caller that reads it by attribute -- `ai/cli.py` prints
+    # `prompt.message` -- got an AttributeError before the login had asked anything.
     input_text = await options["onPrompt"](
-        {
-            "message": "GitHub Enterprise URL/domain (blank for github.com)",
-            "placeholder": "company.ghe.com",
-            "allowEmpty": True,
-        }
+        OAuthPrompt(
+            message="GitHub Enterprise URL/domain (blank for github.com)",
+            placeholder="company.ghe.com",
+            allowEmpty=True,
+        )
     )
 
     signal = options.get("signal")
@@ -389,13 +397,17 @@ async def login_github_copilot(options: dict[str, Any]) -> OAuthCredentials:
     domain = enterprise_domain or "github.com"
 
     device = await _start_device_flow(domain)
+    # The declared payload, not a bare dict: `types.py` says `Callable[[OAuthDeviceCodeInfo],
+    # None]`, and a caller that reads it by attribute -- `ai/cli.py` prints `info.verificationUri` --
+    # got an AttributeError before the login had drawn anything. `openrouter.py` and
+    # `radius.py` already pass the object.
     options["onDeviceCode"](
-        {
-            "userCode": device["user_code"],
-            "verificationUri": device["verification_uri"],
-            "intervalSeconds": device.get("interval"),
-            "expiresInSeconds": device["expires_in"],
-        }
+        OAuthDeviceCodeInfo(
+            userCode=device["user_code"],
+            verificationUri=device["verification_uri"],
+            intervalSeconds=device.get("interval"),
+            expiresInSeconds=device["expires_in"],
+        )
     )
 
     github_access_token = await _poll_for_github_access_token(domain, device, signal)

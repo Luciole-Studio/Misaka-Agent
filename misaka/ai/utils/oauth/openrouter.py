@@ -521,7 +521,9 @@ async def login_openrouter(
         async def manual_worker() -> None:
             nonlocal manual_input, manual_error
             try:
-                manual_input = await manual()
+                manual_input = await manual(
+                    OAuthPrompt(message=MANUAL_PROMPT_MESSAGE, placeholder=server.callbackUrl)
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001 - re-raised on the main path

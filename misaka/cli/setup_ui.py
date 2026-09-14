@@ -339,7 +339,10 @@ def prompt_cancellable(question: str, cancel: threading.Event) -> str:
     import termios
     import tty
     fd = sys.stdin.fileno()
-    sys.stdout.write(f"  {question}: ")
+    # The flows word their own prompts and some end in a colon already ("...paste the
+    # authorization code / redirect URL here:"); appending a second one reads as a typo.
+    label = question.rstrip().rstrip(":")
+    sys.stdout.write(f"  {label}: ")
     sys.stdout.flush()
     try:
         old_attrs = termios.tcgetattr(fd)

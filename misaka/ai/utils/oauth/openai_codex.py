@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import math
 import secrets
@@ -13,13 +14,16 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 
+from misaka.ai.utils.abort import wait_for_abort
 from misaka.ai.utils.oauth.device_code import poll_oauth_device_code_flow
 from misaka.ai.utils.oauth.oauth_page import oauth_error_html, oauth_success_html
 from misaka.ai.utils.oauth.pkce import generate_pkce
 from misaka.ai.utils.oauth.types import (
+    OAuthAuthInfo,
     OAuthCredentials,
     OAuthDeviceCodeInfo,
     OAuthLoginCallbacks,
+    OAuthPrompt,
     OAuthSelectOption,
     OAuthSelectPrompt,
 )
@@ -42,6 +46,12 @@ DEVICE_CODE_TIMEOUT_SECONDS = 15 * 60
 LOGIN_METHOD_BROWSER = "browser"
 LOGIN_METHOD_DEVICE_CODE = "device_code"
 SCOPE = "openid profile email offline_access"
+# Upstream's own wording for the paste box (auth/oauth/openai-codex.ts): the box is the
+# browser flow's second answer, not a fallback, so it says so.
+MANUAL_PROMPT_MESSAGE = (
+    "Complete login in your browser, or paste the authorization code / redirect URL here:"
+)
+CANCEL_MESSAGE = "Login cancelled"
 _JWT_CLAIM_PATH = "https://api.openai.com/auth"
 
 
@@ -329,9 +339,24 @@ class _OAuthServerInfo:
         self,
         server: asyncio.base_events.Server | None,
         future: asyncio.Future[dict[str, str] | None],
+        signal: Any = None,
     ) -> None:
         self._server = server
         self._future = future
+        # Upstream registers `interaction.signal.addEventListener("abort", () =>
+        # server.cancelWait())` before it starts waiting (auth/oauth/openai-codex.ts). Without
+        # it, a caller that offers no paste box -- `ai/cli.py` passes `onManualCodeInput =
+        # None` -- has nothing at all that can end `waitForCode`, and cancelling the login
+        # leaves it waiting for a redirect nobody is going to send. This repo watches the
+        # signal on a task instead of a listener, the way `openrouter.py` and `radius.py`
+        # already do, because misaka's signals are duck-typed rather than DOM events.
+        self._aborting: asyncio.Task[None] | None = None
+        if signal is not None:
+            self._aborting = asyncio.ensure_future(self._watch_abort(signal))
+
+    async def _watch_abort(self, signal: Any) -> None:
+        await wait_for_abort(signal)
+        self.cancelWait()
 
     def cancelWait(self) -> None:
         if not self._future.done():
@@ -341,13 +366,17 @@ class _OAuthServerInfo:
         return await self._future
 
     async def close(self) -> None:
+        if self._aborting is not None and not self._aborting.done():
+            self._aborting.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._aborting
         if self._server is None:
             return
         self._server.close()
         await self._server.wait_closed()
 
 
-async def _start_local_oauth_server(state: str) -> _OAuthServerInfo:
+async def _start_local_oauth_server(state: str, signal: Any = None) -> _OAuthServerInfo:
     loop = asyncio.get_running_loop()
     future: asyncio.Future[dict[str, str] | None] = loop.create_future()
 
@@ -426,7 +455,7 @@ async def _start_local_oauth_server(state: str) -> _OAuthServerInfo:
     except OSError:
         future.set_result(None)
         return _OAuthServerInfo(None, future)
-    return _OAuthServerInfo(server, future)
+    return _OAuthServerInfo(server, future, signal)
 
 
 def _get_account_id(access_token: str) -> str | None:
@@ -441,10 +470,18 @@ async def login_openai_codex(options: dict[str, Any]) -> OAuthCredentials:
     verifier = auth_flow["verifier"]
     state = auth_flow["state"]
     url = auth_flow["url"]
-    server = await _start_local_oauth_server(state)
-    options["onAuth"]({"url": url, "instructions": "A browser window should open. Complete login to finish."})
+    signal = options.get("signal")
+    server = await _start_local_oauth_server(state, signal)
+    # The declared payload, not a bare dict: `types.py` says `Callable[[OAuthAuthInfo],
+    # None]`, and a caller that reads it by attribute -- `ai/cli.py` prints `info.url` --
+    # got an AttributeError before the login had drawn anything. `openrouter.py` and
+    # `radius.py` already pass the object.
+    options["onAuth"](
+        OAuthAuthInfo(url=url, instructions="A browser window should open. Complete login to finish.")
+    )
 
     code: str | None = None
+    manual_task: asyncio.Task[None] | None = None
     try:
         if options.get("onManualCodeInput") is not None:
             manual_code: str | None = None
@@ -453,7 +490,11 @@ async def login_openai_codex(options: dict[str, Any]) -> OAuthCredentials:
             async def manual_worker() -> None:
                 nonlocal manual_code, manual_error
                 try:
-                    manual_code = await options["onManualCodeInput"]()
+                    manual_code = await options["onManualCodeInput"](
+                        OAuthPrompt(message=MANUAL_PROMPT_MESSAGE, placeholder=REDIRECT_URI)
+                    )
+                except asyncio.CancelledError:
+                    raise
                 except BaseException as error:  # noqa: BLE001
                     manual_error = error if isinstance(error, Exception) else RuntimeError(str(error))
                 finally:
@@ -463,6 +504,13 @@ async def login_openai_codex(options: dict[str, Any]) -> OAuthCredentials:
             result = await server.waitForCode()
             if manual_error is not None:
                 raise manual_error
+            # The wait can end three ways: the browser answered, the paste box answered,
+            # or the login was cancelled. Only the first two have anything left to do.
+            # Without this, a cancel that releases the callback wait falls through to
+            # `await manual_task` and waits on a box the person has already dismissed --
+            # the hang the release is supposed to end. `radius.py` guards the same spot.
+            if signal_aborted(signal):
+                raise RuntimeError(CANCEL_MESSAGE)
             if result and result.get("code"):
                 code = result["code"]
             elif manual_code:
@@ -484,13 +532,21 @@ async def login_openai_codex(options: dict[str, Any]) -> OAuthCredentials:
             result = await server.waitForCode()
             if result and result.get("code"):
                 code = result["code"]
-
-        if not code:
-            input_text = await options["onPrompt"]({"message": "Paste the authorization code (or full redirect URL):"})
-            parsed = _parse_authorization_input(input_text)
-            if parsed["state"] and parsed["state"] != state:
-                raise RuntimeError("State mismatch")
-            code = parsed["code"]
+            if not code and signal_aborted(signal):
+                raise RuntimeError(CANCEL_MESSAGE)
+            if not code:
+                # Only on this branch. The paste box the caller already put on screen is the
+                # one upstream asks through, and asking a second time stacks a second box
+                # under the first -- both live, the first still holding the cursor. Upstream
+                # raises here instead (auth/oauth/openai-codex.ts), and so does
+                # `openrouter.py`; `onPrompt` stays for the caller that offered no box at all.
+                input_text = await options["onPrompt"](
+                    OAuthPrompt(message=MANUAL_PROMPT_MESSAGE, placeholder=REDIRECT_URI)
+                )
+                parsed = _parse_authorization_input(input_text)
+                if parsed["state"] and parsed["state"] != state:
+                    raise RuntimeError("State mismatch")
+                code = parsed["code"]
 
         if not code:
             raise RuntimeError("Missing authorization code")
@@ -510,6 +566,14 @@ async def login_openai_codex(options: dict[str, Any]) -> OAuthCredentials:
             accountId=account_id,
         )
     finally:
+        # Upstream aborts a second controller to retire the paste box once the callback has
+        # answered; cancelling the task that awaits it is the same handoff for a callbacks
+        # record that takes no signal, and `openrouter.py` retires its worker the same way.
+        # Left running, it holds the dialog and its input alive for the life of the process.
+        if manual_task is not None and not manual_task.done():
+            manual_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await manual_task
         await server.close()
 
 
@@ -561,6 +625,7 @@ class _OpenAICodexOAuthProvider:
                 "onPrompt": callbacks.onPrompt,
                 "onProgress": callbacks.onProgress,
                 "onManualCodeInput": callbacks.onManualCodeInput,
+                "signal": getattr(callbacks, "signal", None),
             }
         )
 

@@ -4025,16 +4025,7 @@ class InteractiveMode(Conversation):
         return future
 
     async def showLoginDialog(self, providerId: str, providerName: str, *, account: str | None = None) -> None:
-        provider_info = next(
-            (
-                provider
-                for provider in self.session.modelRegistry.getOAuthProviders()
-                if provider.id == providerId
-            ),
-            None,
-        )
         previous_model = getattr(self.session, "model", None)
-        uses_callback_server = bool(read_field(provider_info, "usesCallbackServer", False))
         dialog = LoginDialogComponent(self.ui, providerId, lambda _success, _message: None, providerName)
         self.editorContainer.clear()
         self.editorContainer.addChild(dialog)
@@ -4042,8 +4033,6 @@ class InteractiveMode(Conversation):
         if set_focus is not None:
             set_focus(dialog)
         self._request_render()
-
-        manual_code_future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
         def restore_editor() -> None:
             self.editorContainer.clear()
@@ -4053,29 +4042,17 @@ class InteractiveMode(Conversation):
             self._request_render()
 
         try:
+            # The paste box belongs to the flow that asks for it, not to this handler:
+            # upstream draws it when the provider sends its `manual_code` prompt
+            # (`showAuthPrompt` in pi's interactive mode), which is also what lets the flow
+            # word it and retire it. Drawing it here off the `auth_url` event instead meant
+            # the box outlived the login it belonged to, and its wording was this file's
+            # rather than the provider's.
             def _handle_auth(info: Any) -> None:
                 dialog.showAuth(
                     str(read_field(info, "url", "")),
                     read_field(info, "instructions"),
                 )
-
-                if not uses_callback_server:
-                    return
-
-                async def _collect_manual_code() -> None:
-                    try:
-                        value = await dialog.showManualInput(
-                            "Paste redirect URL below, or complete login in browser:"
-                        )
-                        if not manual_code_future.done():
-                            manual_code_future.set_result(value)
-                    except Exception as error:  # noqa: BLE001
-                        if not manual_code_future.done():
-                            manual_code_future.set_exception(
-                                error if isinstance(error, Exception) else RuntimeError(str(error))
-                            )
-
-                self._schedule_task(_collect_manual_code())
 
             def _handle_device_code(info: Any) -> None:
                 dialog.showDeviceCode(info)
@@ -4096,8 +4073,6 @@ class InteractiveMode(Conversation):
                             raise RuntimeError("Login cancelled")
                         return selected
                     if prompt_type == "manual_code":
-                        if uses_callback_server:
-                            return await manual_code_future
                         return str(
                             await dialog.showManualInput(
                                 str(read_field(prompt, "message", ""))
@@ -4143,7 +4118,9 @@ class InteractiveMode(Conversation):
                         ),
                         onProgress=dialog.showProgress,
                         onSelect=lambda prompt: self.showOAuthLoginSelect(dialog, prompt),
-                        onManualCodeInput=lambda: manual_code_future,
+                        onManualCodeInput=lambda prompt: dialog.showManualInput(
+                            str(read_field(prompt, "message", ""))
+                        ),
                         signal=dialog.signal,
                     ),
                     account=account,
