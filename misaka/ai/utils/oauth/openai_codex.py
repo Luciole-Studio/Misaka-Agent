@@ -35,7 +35,8 @@ CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 AUTH_BASE_URL = "https://auth.openai.com"
 AUTHORIZE_URL = f"{AUTH_BASE_URL}/oauth/authorize"
 TOKEN_URL = f"{AUTH_BASE_URL}/oauth/token"
-REDIRECT_URI = "http://localhost:1455/auth/callback"
+CALLBACK_PORT = 1455
+REDIRECT_URI = f"http://localhost:{CALLBACK_PORT}/auth/callback"
 DEVICE_USER_CODE_URL = f"{AUTH_BASE_URL}/api/accounts/deviceauth/usercode"
 DEVICE_TOKEN_URL = f"{AUTH_BASE_URL}/api/accounts/deviceauth/token"
 DEVICE_VERIFICATION_URI = f"{AUTH_BASE_URL}/codex/device"
@@ -52,6 +53,18 @@ MANUAL_PROMPT_MESSAGE = (
     "Complete login in your browser, or paste the authorization code / redirect URL here:"
 )
 CANCEL_MESSAGE = "Login cancelled"
+BROWSER_INSTRUCTIONS = "A browser window should open. Complete login to finish."
+# Upstream says the browser sentence unconditionally (auth/oauth/openai-codex.ts), which
+# is a promise it cannot keep: OpenAI fixes the redirect at a single well-known port, so
+# any other program holding it -- OpenAI's own `codex` CLI uses the same one, as does a
+# misaka login that has not let go yet -- makes `start_server` raise EADDRINUSE. The flow
+# then degrades to paste-only while the screen still promises a browser window will
+# finish the login, so the person waits on a redirect nothing is listening for. The
+# Anthropic flow rarely shows it only because 53692 collides with nothing.
+PORT_BUSY_INSTRUCTIONS = (
+    f"Port {CALLBACK_PORT} is already in use, so the browser cannot hand the code back. "
+    "Finish the login in your browser, then paste the URL it lands on into the box below."
+)
 _JWT_CLAIM_PATH = "https://api.openai.com/auth"
 
 
@@ -362,6 +375,11 @@ class _OAuthServerInfo:
         if not self._future.done():
             self._future.set_result(None)
 
+    @property
+    def listening(self) -> bool:
+        """False when the port was taken, so the caller can stop promising a browser leg."""
+        return self._server is not None
+
     async def waitForCode(self) -> dict[str, str] | None:
         return await self._future
 
@@ -451,7 +469,7 @@ async def _start_local_oauth_server(state: str, signal: Any = None) -> _OAuthSer
             await writer.wait_closed()
 
     try:
-        server = await asyncio.start_server(handler, get_callback_host(), 1455)
+        server = await asyncio.start_server(handler, get_callback_host(), CALLBACK_PORT)
     except OSError:
         future.set_result(None)
         return _OAuthServerInfo(None, future)
@@ -477,7 +495,10 @@ async def login_openai_codex(options: dict[str, Any]) -> OAuthCredentials:
     # got an AttributeError before the login had drawn anything. `openrouter.py` and
     # `radius.py` already pass the object.
     options["onAuth"](
-        OAuthAuthInfo(url=url, instructions="A browser window should open. Complete login to finish.")
+        OAuthAuthInfo(
+            url=url,
+            instructions=BROWSER_INSTRUCTIONS if server.listening else PORT_BUSY_INSTRUCTIONS,
+        )
     )
 
     code: str | None = None

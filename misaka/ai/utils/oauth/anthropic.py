@@ -220,7 +220,18 @@ async def _start_callback_server(expected_state: str, signal: Any = None) -> _Ca
             writer.close()
             await writer.wait_closed()
 
-    server = await asyncio.start_server(handler, CALLBACK_HOST, CALLBACK_PORT)
+    # Upstream rejects on a listen error rather than degrading to paste-only
+    # (auth/oauth/anthropic.ts `server.on("error", reject)`), and so does this. Only the
+    # wording is ours: `[Errno 48] Address already in use` names neither the port nor
+    # anything the person can act on. `openai_codex.py` has to degrade instead, because
+    # OpenAI pins its redirect to one well-known port that other programs also want.
+    try:
+        server = await asyncio.start_server(handler, CALLBACK_HOST, CALLBACK_PORT)
+    except OSError as error:
+        raise RuntimeError(
+            f"Port {CALLBACK_PORT} is already in use, so the browser cannot hand the code "
+            f"back. Close whatever is holding it and sign in again ({error})."
+        ) from error
     info = _CallbackServerInfo(server=server, redirect_uri=REDIRECT_URI, future=future)
     info.watch_abort(signal)
     return info
