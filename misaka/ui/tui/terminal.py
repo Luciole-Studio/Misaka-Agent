@@ -48,7 +48,10 @@ DESIRED_KITTY_KEYBOARD_PROTOCOL_FLAGS = 7
 KEYBOARD_PROTOCOL_RESPONSE_FRAGMENT_TIMEOUT_MS = 150
 KITTY_KEYBOARD_PROTOCOL_QUERY = f"\x1b[>{DESIRED_KITTY_KEYBOARD_PROTOCOL_FLAGS}u\x1b[?u\x1b[c"
 DEFAULT_ESCAPE_TIMEOUT_MS = 10
-DEFAULT_SSH_ESCAPE_TIMEOUT_MS = 100
+# The window a relayed transport needs to reassemble an escape sequence. ssh has always
+# had it; a panel pane needs it for the same reason and did not have it.
+DEFAULT_RELAYED_ESCAPE_TIMEOUT_MS = 100
+DEFAULT_SSH_ESCAPE_TIMEOUT_MS = DEFAULT_RELAYED_ESCAPE_TIMEOUT_MS   # the name the port arrived under
 
 _KITTY_FLAGS_RE = re.compile(r"^\x1b\[\?(\d+)u$")
 _DEVICE_ATTRS_RE = re.compile(r"^\x1b\[\?[\d;]*c$")
@@ -61,6 +64,16 @@ def resolve_escape_timeout_ms(env: Any = None) -> float:
     Legacy Alt+key input is ESC plus another byte, so a high-latency transport needs a
     longer reassembly window; ssh gets 100ms unless the variable names something else.
     Only ESC uses this: every other partial sequence waits the full sequence timeout.
+
+    A pane inside misaka's panel is the same transport and was getting the bare 10ms. Its
+    keystrokes travel host terminal -> panel -> unix socket -> daemon -> pty, which splits
+    reads and adds a round trip, so a bracketed paste whose opener arrives as a lone ESC
+    (`stdin_buffer`'s documented residual) shattered into per-character key events. The
+    leading ESC then landed as the Escape key: pasting a redirect URL into the OAuth login
+    box cancelled the login, and the box stopped answering anything. Only OpenAI Codex
+    showed it, because it is the one provider whose browser callback often does not come
+    back and so the one that asks for a paste at all. Upstream pi has no panel -- its TUI
+    owns the host terminal, the paste arrives in one read, and the residual never fires.
     """
     environ = os.environ if env is None else env
     try:
@@ -69,8 +82,12 @@ def resolve_escape_timeout_ms(env: Any = None) -> float:
         configured = 0.0
     if math.isfinite(configured) and configured > 0:
         return configured
-    if environ.get("SSH_CONNECTION") or environ.get("SSH_TTY"):
-        return DEFAULT_SSH_ESCAPE_TIMEOUT_MS
+    if (
+        environ.get("SSH_CONNECTION")
+        or environ.get("SSH_TTY")
+        or environ.get("MISAKA_NET_PANE")   # the daemon stamps this on every pane it spawns
+    ):
+        return DEFAULT_RELAYED_ESCAPE_TIMEOUT_MS
     return DEFAULT_ESCAPE_TIMEOUT_MS
 
 
