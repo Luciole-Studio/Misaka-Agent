@@ -105,6 +105,11 @@ class AnthropicOptions(TypedDict, total=False):
 CLAUDE_CODE_VERSION = "2.1.75"
 FINE_GRAINED_TOOL_STREAMING_BETA = "fine-grained-tool-streaming-2025-05-14"
 INTERLEAVED_THINKING_BETA = "interleaved-thinking-2025-05-14"
+# Managed-effort models (`compat.supportsMidConvoEffort`): the request carries the effort of
+# every past turn as an effort-only system message, and binds thinking blocks so a prefix
+# that no longer matches is dropped instead of returning 400.
+MID_CONVERSATION_OUTPUT_CONFIG_BETA = "mid-conversation-output-config-2026-07-01"
+THINKING_BINDING_CONTROLS_BETA = "thinking-binding-controls-2026-08-01"
 ANTHROPIC_MESSAGE_EVENTS = frozenset(
     {
         "message_start",
@@ -166,6 +171,19 @@ def _merge_headers(*header_sources: Mapping[str, Any] | None) -> dict[str, Any]:
                 del merged[existing]
             merged[name] = value
     return merged
+
+
+def supports_mid_convo_effort(model: Model) -> bool:
+    """Whether this model's transport takes effort-only system messages and binding controls.
+
+    Set in the catalog on Anthropic's managed-effort models. Everything the flag turns on is
+    request shape, so reading it in one place keeps the six call sites from drifting apart.
+    """
+    return getattr(model.compat, "supportsMidConvoEffort", None) is True
+
+
+def _is_anthropic_effort(value: Any) -> bool:
+    return value in ("low", "medium", "high", "xhigh", "max")
 
 
 def _force_adaptive_thinking(model: Model) -> bool | None:
@@ -309,6 +327,8 @@ def create_client(
         beta_features.append(FINE_GRAINED_TOOL_STREAMING_BETA)
     if needs_interleaved_beta:
         beta_features.append(INTERLEAVED_THINKING_BETA)
+    if supports_mid_convo_effort(model):
+        beta_features.extend((MID_CONVERSATION_OUTPUT_CONFIG_BETA, THINKING_BINDING_CONTROLS_BETA))
 
     if model.provider == "cloudflare-ai-gateway":
         client = require(AsyncAnthropic, "anthropic")(
@@ -434,11 +454,18 @@ def build_params(
         immediate_tools, deferred_tools = deferred_tools, []
     deferred_tool_names = {normalize_tool_name(tool.name) for tool in deferred_tools}
 
+    managed_effort = supports_mid_convo_effort(model)
+    assistant_levels: dict[int, str] = {}
+    converted = convert_messages(
+        context.messages, model, is_oauth, cache_control, deferred_tool_names,
+        model.provider if managed_effort else None,
+        assistant_levels if managed_effort else None,
+    )
+    active_effort = _option(options, "effort") or "high"
     params: dict[str, Any] = {
         "model": model.id,
-        "messages": convert_messages(
-            context.messages, model, is_oauth, cache_control, deferred_tool_names
-        ),
+        "messages": (_insert_thinking_level_messages(converted, assistant_levels, active_effort)
+                     if managed_effort else converted),
         "max_tokens": _option(options, "maxTokens", model.maxTokens),
         "stream": True,
     }
@@ -469,7 +496,12 @@ def build_params(
             }
         ]
 
-    if _option(options, "temperature") is not None and not _option(options, "thinkingEnabled"):
+    # Temperature is incompatible with extended thinking, and a managed-effort model always
+    # thinks, so it is never sent for one however the caller asked. Upstream also gates this
+    # on `compat.supportsTemperature`; this port's compat table has never carried that key,
+    # and adding it here would change what every other Anthropic model sends.
+    if (_option(options, "temperature") is not None and not _option(options, "thinkingEnabled")
+            and not managed_effort):
         params["temperature"] = _option(options, "temperature")
 
     if immediate_tools or deferred_tools:
@@ -491,7 +523,17 @@ def build_params(
             ),
         ]
 
-    if model.reasoning:
+    if managed_effort:
+        # Always adaptive: the binding control lets the server drop a thinking block whose
+        # prefix no longer matches, instead of failing the whole request with a 400 that
+        # would repeat on every retry.
+        params["thinking"] = {
+            "type": "adaptive",
+            "display": _option(options, "thinkingDisplay", "summarized"),
+            "block_binding": {"prefix_mismatch_behavior": "drop_block"},
+        }
+        params["output_config"] = {"effort": "high"}
+    elif model.reasoning:
         thinking_enabled = _option(options, "thinkingEnabled")
         if thinking_enabled:
             display = _option(options, "thinkingDisplay", "summarized")
@@ -575,7 +617,14 @@ def convert_messages(
     is_oauth: bool,
     cache_control: dict[str, Any] | None = None,
     deferred_tool_names: AbstractSet[str] | None = None,
+    managed_provider: str | None = None,
+    assistant_levels: dict[int, str] | None = None,
 ) -> list[dict[str, Any]]:
+    """Anthropic wire messages. With ``managed_provider`` set, ``assistant_levels`` is filled
+    with the effort each converted assistant turn ran at, keyed by its index in the result --
+    what ``_insert_thinking_level_messages`` needs to replay the timeline. Only turns this
+    same provider produced count: an effort level from another provider's transcript means
+    nothing to this one."""
     params: list[dict[str, Any]] = []
     transformed_messages = transform_messages(messages, model, normalize_tool_call_id)
     deferred_names: AbstractSet[str] = deferred_tool_names or frozenset()
@@ -650,6 +699,11 @@ def convert_messages(
                     )
 
             if blocks:
+                if (managed_provider is not None and assistant_levels is not None
+                        and getattr(message, "api", None) == "anthropic-messages"
+                        and getattr(message, "provider", None) == managed_provider
+                        and _is_anthropic_effort(getattr(message, "providerThinkingLevel", None))):
+                    assistant_levels[len(params)] = message.providerThinkingLevel
                 params.append({"role": "assistant", "content": blocks})
             index += 1
             continue
@@ -696,6 +750,28 @@ def convert_messages(
                 _apply_cache_marker(last_message, cache_control, native_anthropic=True)
 
     return params
+
+
+def _insert_thinking_level_messages(
+    messages: list[dict[str, Any]],
+    assistant_levels: dict[int, str],
+    active_effort: str,
+) -> list[dict[str, Any]]:
+    """Put each past turn's effort back in front of it, and the current one at the end.
+
+    A managed-effort model is told what it was thinking at when it produced each earlier
+    answer, because the effort is part of what those answers mean; the trailing message is
+    the level for the turn about to be generated. The carrier is a system message with no
+    content, which is what the mid-conversation-output-config beta defines.
+    """
+    out: list[dict[str, Any]] = []
+    for index, message in enumerate(messages):
+        historical = assistant_levels.get(index)
+        if historical is not None:
+            out.append({"role": "system", "content": [], "output_config": {"effort": historical}})
+        out.append(message)
+    out.append({"role": "system", "content": [], "output_config": {"effort": active_effort}})
+    return out
 
 
 def should_use_fine_grained_tool_streaming_beta(model: Model, context: Context) -> bool:
@@ -1053,6 +1129,10 @@ def stream_anthropic(
             usage=_empty_usage(),
             stopReason="stop",
             timestamp=time.time_ns() // 1_000_000,
+            # Recorded only for managed-effort models, and only because the next request
+            # replays it: an unmanaged response has no provider-native level to state.
+            providerThinkingLevel=((_option(options, "effort") or "high")
+                                   if supports_mid_convo_effort(model) else None),
         )
         raw_response: Any = None
         owned_client: Any = None       # a client made here is closed here

@@ -248,6 +248,10 @@ class AssistantMessage(SchemaModel):
     model: str
     responseModel: str | None = None
     responseId: str | None = None
+    # The exact provider-native effort this response was produced at. Absent for legacy or
+    # unmanaged responses. Anthropic's managed-effort models read it back off the transcript
+    # to rebuild the effort timeline, so it has to survive a session round trip.
+    providerThinkingLevel: str | None = None
     diagnostics: list[AssistantMessageDiagnostic] | None = None
     usage: Usage
     stopReason: StopReason
