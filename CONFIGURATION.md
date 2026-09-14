@@ -77,6 +77,11 @@ commits `main` does not, or a detached HEAD is refused with the reason rather th
 How the install was made is read from PEP 610 metadata, not guessed, so the command it offers
 matches the tool that made it. Nothing polls: the check runs only when you ask.
 
+A checkout asks git for the branch head and needs no token. Any other install shape asks the
+GitHub API, which sees a private repository only with a credential: `GITHUB_TOKEN`, `GH_TOKEN`,
+or whatever `gh` is signed in as, in that order. None is prompted for or stored, and without
+one the check reports why it could not compare instead of failing the command.
+
 `misaka uninstall` removes every path in this section, after listing what each holds and
 what it costs. It refuses any path that resolves to your home directory or a filesystem
 root, never touches a project folder, and prints the command for removing the package

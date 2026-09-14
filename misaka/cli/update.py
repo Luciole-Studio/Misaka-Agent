@@ -17,6 +17,7 @@ dist-info, and ``INSTALLER`` records which tool did it.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -87,29 +88,72 @@ def _remote_head_via_git(path: Path) -> str | None:
     return line.split()[0] if line else None
 
 
-def _api(path: str) -> dict | None:
+def github_token() -> tuple[str | None, str]:
+    """A token for the API and where it came from, or ``(None, "")``.
+
+    Two sources, in the order every GitHub tool uses them: the standard environment
+    variables, then whatever ``gh`` is already signed in as. Both are credentials the user
+    has already arranged for their own reasons, so nothing is prompted for or stored here.
+
+    The skills hub has a richer resolver, but it reads secrets through a Skill role scope and
+    cannot run outside that subsystem; duplicating two tiers is cheaper than lending this
+    command a scope it has no other use for.
+    """
+    for name in ("GITHUB_TOKEN", "GH_TOKEN"):
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            return value, name
+    try:
+        found = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True,
+                               timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None, ""
+    token = found.stdout.strip()
+    return (token, "gh auth token") if found.returncode == 0 and token else (None, "")
+
+
+def _api(path: str) -> tuple[dict | None, str | None]:
+    """``(payload, failure)``. A private repository answers 404 to an anonymous caller, which
+    is worth telling apart from being offline: one is fixable with a token, the other is not."""
     import urllib.error
     import urllib.request
 
     from misaka.ai.utils.user_agent import get_misaka_user_agent
-    request = urllib.request.Request(f"{API}{path}", headers={
-        "User-Agent": get_misaka_user_agent(), "Accept": "application/vnd.github+json"})
+    token, _source = github_token()
+    headers = {"User-Agent": get_misaka_user_agent(), "Accept": "application/vnd.github+json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(f"{API}{path}", headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-            return json.load(response)
+            return json.load(response), None
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            # GitHub answers 404 for a repository it will not show and for a commit it does
+            # not have, without saying which; the message has to hold either way.
+            return None, ("the repository is private or gone, and no token was found"
+                          if not token else "the repository or that commit is not visible to this token")
+        if error.code in (401, 403):
+            remaining = error.headers.get("x-ratelimit-remaining") if error.headers else None
+            if remaining == "0":
+                return None, "GitHub's rate limit is used up; set GITHUB_TOKEN to raise it"
+            return None, f"GitHub refused the request ({error.code})"
+        return None, f"GitHub answered {error.code}"
     except (urllib.error.URLError, OSError, ValueError, TimeoutError):
-        # Offline, rate-limited, or the repository moved. An update check is never a reason
-        # to fail the command that asked for it.
-        return None
+        # Offline or the host is unreachable. An update check is never a reason to fail the
+        # command that asked for it.
+        return None, "the network is unreachable"
 
 
-def _behind(base: str) -> int | None:
-    """How many commits the branch is ahead of ``base``, via one compare call."""
-    data = _api(f"/compare/{base}...{BRANCH}")
-    if not isinstance(data, dict) or data.get("status") not in {"ahead", "identical"}:
-        return None
+def _behind(base: str) -> tuple[int | None, str | None]:
+    """``(commits ahead of base, why not)``, via one compare call."""
+    data, failure = _api(f"/compare/{base}...{BRANCH}")
+    if data is None:
+        return None, failure
+    if data.get("status") not in {"ahead", "identical"}:
+        return None, f"this install's commit is not an ancestor of {BRANCH}"
     ahead = data.get("ahead_by")
-    return ahead if isinstance(ahead, int) else None
+    return (ahead, None) if isinstance(ahead, int) else (None, "GitHub did not report a distance")
 
 
 def _checkout_state(install: Install) -> dict:
@@ -179,6 +223,11 @@ def _report(install: Install, state: dict | None, behind: int | None) -> None:
         ui.print_check(True, "pinned commit", install.commit[:12])
     if state and state.get("head"):
         ui.print_check(True, "checkout head", state["head"][:12] + ("   (uncommitted changes)" if state.get("dirty") else ""))
+    if install.kind != "checkout":
+        # Only the API path needs one; a checkout asks git, which brings its own credentials.
+        _token, source = github_token()
+        ui.print_check(bool(_token) or None, "github token",
+                       f"from {source}" if source else "none found; only a public repository can be checked")
     if behind is None:
         ui.print_check(None, BRANCH, "could not be compared" + (f": {state['reason']}" if state and state.get("reason") else ""))
     elif behind == 0:
@@ -197,7 +246,9 @@ def run(*, apply: bool = False) -> int:
     if state is not None:
         behind = state.get("behind")
     elif install.commit:
-        behind = _behind(install.commit)
+        behind, failure = _behind(install.commit)
+        if failure:
+            state = {"reason": failure}
     else:
         behind = None
     _report(install, state, behind)
