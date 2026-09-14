@@ -70,12 +70,6 @@ PAGEINDEX_PACKAGES = ("PyPDF2==3.0.1", "pypdfium2==4.30.0", "regex>=2024.0.0", "
 REPO_URL = "git+https://github.com/Luciole-Studio/Misaka-Agent.git"
 
 
-def _tilde(path: str) -> str:
-    """``~/.misaka/...`` rather than the absolute path: these are lines to read, not to copy."""
-    home = os.path.expanduser("~")
-    return "~" + path[len(home):] if path == home or path.startswith(home + os.sep) else path
-
-
 def _requirement(package: str) -> str:
     """``misaka[anthropic]`` as something pip can actually resolve; anything else unchanged."""
     return f"{package} @ {REPO_URL}" if package == "misaka" or package.startswith("misaka[") else package
@@ -303,11 +297,11 @@ class Wizard:
         # The identity files shape every run and are seeded silently on first start, so a
         # wizard that never names them leaves the most useful edit undiscoverable.
         ui.print_info("Two roles do the work, and both read plain files you can edit:",
-                      f"  {_tilde(profiles.shared_soul())}",
+                      f"  {ui.tilde(profiles.shared_soul())}",
                       "      the shared identity every role loads first",
-                      f"  {_tilde(os.path.join(roles_root, 'last_order'))}/",
+                      f"  {ui.tilde(os.path.join(roles_root, 'last_order'))}/",
                       "      Last Order, the coordinator: config.yaml for MCP servers, skills/ for her skills",
-                      f"  {_tilde(os.path.join(roles_root, 'sisters'))}/<id>/",
+                      f"  {ui.tilde(os.path.join(roles_root, 'sisters'))}/<id>/",
                       "      one folder per Sister: DESCRIBE.md routes work to her, SOUL.md is her voice", "")
         existing = roster.roster_names()
         if existing:
@@ -365,8 +359,8 @@ class Wizard:
         ui.print_header("Skills")
         roles_root = os.path.expanduser(CFG["roles_root"])
         shared = os.path.join(roles_root, "skills")
-        shown = ((f"{_tilde(roles_root)}/<role>/skills/", "that role alone"),
-                 (_tilde(shared), "every role; the wizard installs here"),
+        shown = ((f"{ui.tilde(roles_root)}/<role>/skills/", "that role alone"),
+                 (ui.tilde(shared), "every role; the wizard installs here"),
                  ("~/.agents/skills", "shared with your other agent tools, read-only"))
         column = max(len(path) for path, _purpose in shown)
         ui.print_info("A skill is a folder with a SKILL.md a role reads when the work calls for it.",
@@ -447,7 +441,7 @@ class Wizard:
         verdict = (applied.get("scan") or {}).get("verdict")
         ui.print_success(f"{name} installed into the shared layer"
                          + (f" (scanned: {verdict})" if verdict else "")
-                         + f" -- {_tilde(str(applied.get('path') or ''))}")
+                         + f" -- {ui.tilde(str(applied.get('path') or ''))}")
         self.state.setdefault("skills", []).append(name)
 
     # -- 5. documents -------------------------------------------------------------------------

@@ -119,6 +119,11 @@ misaka setup
 （たとえば `misaka setup model`）。認証情報が未設定のまま `misaka` を実行すると、
 ウィザードが自分から立ち上がります。
 
+その反対側が `misaka uninstall` です。`~/.misaka` の下に何がどれだけ入っているかを先に
+示したうえで、認証情報・ボード・コンテキストエンジンの記憶・各種キャッシュをまとめて
+削除します。プロジェクトフォルダには一切触れず、触れないことを示すために一覧を出します。
+パッケージ自体の削除はインストーラの仕事なので、そのコマンドを表示するだけにとどめます。
+
 入れたばかりの状態では `anthropic` / `claude-sonnet-4-5` に接続します。認証情報を手で
 渡す場合:
 
@@ -144,7 +149,7 @@ misaka web status      # 現在の検索バックエンドと認証情報
 ```
 
 残りは `misaka --help` にあります: `task`、`tell`、`dm`、`net`、`skills`、`bundles`、
-`moa`、`lcm`、`auth`、`remove`。
+`moa`、`lcm`、`auth`、`remove`、`uninstall`。
 
 ## パネル
 

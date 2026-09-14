@@ -168,6 +168,12 @@ def ink(role: str) -> str:
     return _sgr(_rgb(_palette()[1][role]))
 
 
+def tilde(path: str) -> str:
+    """``~/.misaka/...`` rather than the absolute path: these are lines to read, not to copy."""
+    home = os.path.expanduser("~")
+    return "~" + path[len(home):] if path == home or path.startswith(home + os.sep) else path
+
+
 def color(text: str, code: str) -> str:
     return f"{code}{text}{RESET}" if code and _palette()[0] != "mono" else text
 

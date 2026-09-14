@@ -70,6 +70,12 @@ Each is a directory or file MISAKA owns.
 | `MISAKA_MCP_CONFIG` | the profile's `mcp/` | MCP server configuration |
 | `MISAKA_MCP_CACHE` | `~/.misaka/cache/mcp_schema_cache.json` | cached MCP tool schemas |
 
+`misaka uninstall` removes every path in this section, after listing what each holds and
+what it costs. It refuses any path that resolves to your home directory or a filesystem
+root, never touches a project folder, and prints the command for removing the package
+itself rather than trying to remove the code it is running from. `--dry-run` lists and
+stops; `--yes` skips the confirmation.
+
 ## Budget, concurrency and limits
 
 | Variable | Default | Meaning |

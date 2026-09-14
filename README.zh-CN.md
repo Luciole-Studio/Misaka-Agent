@@ -108,6 +108,10 @@ Sisters，询问是否装 PDF 组件，有 key 的话固定一个网络搜索后
 每一节都可以单独重跑，比如 `misaka setup model`。没配凭据时直接运行 `misaka`，
 它自己会把向导叫起来。
 
+反过来的一端是 `misaka uninstall`：它会先列出 `~/.misaka` 下每一项装了什么、占多少，
+再删掉全部（凭据、看板、上下文引擎的记忆、各种缓存）。你的项目文件夹一个都不碰，
+而且会把它们列出来说明这一点。卸载包本身是安装器的事，命令会打印给你。
+
 全新安装默认走 `anthropic` / `claude-sonnet-4-5`。想手动给凭据：
 
 ```sh
@@ -132,7 +136,7 @@ misaka web status      # 当前搜索后端与凭据
 ```
 
 其余的用 `misaka --help` 看：`task`、`tell`、`dm`、`net`、`skills`、`bundles`、
-`moa`、`lcm`、`auth`、`remove`。
+`moa`、`lcm`、`auth`、`remove`、`uninstall`。
 
 ## 面板
 

@@ -50,6 +50,9 @@ def _parser():
     dmp.add_argument("--wait-message", type=int, help=argparse.SUPPRESS)
 
     st = sub.add_parser("setup", help="First-run wizard: environment, model & provider, Sisters, documents, web search, project")
+    un = sub.add_parser("uninstall", help="Remove this machine's MISAKA data (~/.misaka); project folders are never touched")
+    un.add_argument("--yes", action="store_true", help="Skip the confirmation")
+    un.add_argument("--dry-run", action="store_true", help="List what would be removed and stop")
     st.add_argument("section", nargs="?", help="Run one section only: environment | model | sisters | documents | web | project")
 
     ini = sub.add_parser("init", help="Make this folder a MISAKA project (git repo + PROJECT.md + cards/) and initialize the database")
@@ -699,8 +702,14 @@ def _cmd_setup(args):
     sys.exit(setup.run(args.section))
 
 
+def _cmd_uninstall(args):
+    from misaka.cli import uninstall
+    sys.exit(uninstall.run(assume_yes=args.yes, dry_run=args.dry_run))
+
+
 COMMANDS = {
     "setup": _cmd_setup,
+    "uninstall": _cmd_uninstall,
     "chat": _cmd_chat,
     "panel": _cmd_panel,
     "net-daemon": _cmd_net_daemon,
