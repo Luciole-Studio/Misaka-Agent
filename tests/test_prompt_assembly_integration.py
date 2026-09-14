@@ -302,3 +302,42 @@ async def test_durable_sister_real_child_flags_retain_persona_and_current_tool_g
 
     generic_flags = await SubagentManager._child_flags(manager, task)
     assert "--system-prompt" in generic_flags and "--append-system-prompt" not in generic_flags
+
+
+@pytest.mark.parametrize("tools", ["planning", "materials"])
+async def test_research_scope_keeps_enabled_user_questions(prompt_home, tools):
+    from types import SimpleNamespace
+
+    from misaka.core.research import planner
+
+    async with assembled(prompt_home, "last_order", "foreground", research=True) as session:
+        question = session.getToolDefinition("AskUserQuestion")
+        assert question is not None and question.parameters["properties"]["questions"]
+        assert "AskUserQuestion" in session.getActiveToolNames()
+        allowed = planner.RESEARCH_TOOLS if tools == "planning" else planner.MATERIAL_TOOLS
+        names = planner.session_tools(SimpleNamespace(session=session), allowed)
+        assert "AskUserQuestion" in names
+        assert "misaka_card" not in names  # retaining questions must not reopen Board mutation
+        with session.toolScope(list(names)):
+            assert "AskUserQuestion" in session.getActiveToolNames()
+            assert "- AskUserQuestion:" in await final_prompt(session)
+            assert "Ask only when the answer materially changes" in session.state.systemPrompt
+        session.setActiveToolsByName(["read"])
+        assert "AskUserQuestion" not in planner.session_tools(SimpleNamespace(session=session), allowed)
+
+
+async def test_research_questions_do_not_enable_headless_or_child_prompts(prompt_home, monkeypatch):
+    from misaka.core import ask_user
+    from misaka.core.wiring import SessionSpec, ToolCollector
+
+    for role, kind in (("last_order", "bare"), ("sisters/10032", "card")):
+        async with assembled(prompt_home, role, kind, research=True) as session:
+            assert "AskUserQuestion" not in session.getActiveToolNames()
+    monkeypatch.setenv("MISAKA_NET_PANE", "fixture")
+    spec = SessionSpec(str(prompt_home / "profiles/sisters/10032"), "sisters/10032",
+                       str(prompt_home / "workspace"), "card", research_context=True)
+    collector = ToolCollector()
+    ask_user.activate(spec)(collector)
+    assert [tool.name for tool in collector.tools] == ["AskUserQuestion"]
+    monkeypatch.setenv("MISAKA_SUBAGENT_ID", "fixture-child")
+    assert ask_user.activate(spec) is None

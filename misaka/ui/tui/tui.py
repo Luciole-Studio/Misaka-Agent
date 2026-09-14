@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -286,7 +288,10 @@ class TUI(Container):
         self.terminalColorSchemeNotificationsEnabled = False
         self.renderRequested = False
         self.immediateRenderScheduled = False
-        self.renderTimer: threading.Timer | None = None
+        self.renderTimer: asyncio.TimerHandle | threading.Timer | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._loop_thread: int | None = None
+        self._capture_loop()
         self.lastRenderAt = 0.0
         self._renderLock = threading.Lock()
         self.cursorRow = 0
@@ -395,6 +400,7 @@ class TUI(Container):
                 invalidate()
 
     def start(self) -> None:
+        self._capture_loop()
         self.stopped = False
         self.terminal.start(lambda data: self.handleInput(data), lambda: self.requestRender())
         self.terminal.hideCursor()
@@ -473,6 +479,8 @@ class TUI(Container):
         self.terminal.write("\x1b[16t")
 
     def stop(self) -> None:
+        if self._queue_to_owner(self.stop):
+            return
         self.stopped = True
         self._cancel_render_timer()
         if self.terminalColorSchemeNotificationsEnabled:
@@ -489,6 +497,11 @@ class TUI(Container):
         self.terminal.stop()
 
     def requestRender(self, force: bool = False) -> None:
+        self._capture_loop()
+        if self.stopped or (self._loop is not None and self._loop.is_closed()):
+            return
+        if self._queue_to_owner(lambda: self.requestRender(force)):
+            return
         if force:
             self.previousLines = []
             self.previousWidth = -1
@@ -504,8 +517,42 @@ class TUI(Container):
         self.renderRequested = True
         self._schedule_next_tick(self._scheduleRender)
 
+    def _capture_loop(self) -> None:
+        if self._loop is not None:
+            return
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # synchronous embedders can still render without an event loop
+        self._loop_thread = threading.get_ident()
+
+    def _queue_to_owner(self, callback: Callable[[], None]) -> bool:
+        loop = self._loop
+        if loop is None or threading.get_ident() == self._loop_thread:
+            return False
+        if not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(self._run_callback, callback)
+            except RuntimeError:
+                pass  # the owning loop closed while an animation was queuing its last tick
+        return True
+
+    def _run_callback(self, callback: Callable[[], None]) -> None:
+        if self._queue_to_owner(callback):
+            return
+        try:
+            callback()
+        except Exception:  # noqa: BLE001 - forward the original exception to the installed crash handler
+            # Preserve InteractiveMode's uncaught-crash reporting/cleanup. asyncio would
+            # otherwise only log the callback error and leave a stopped terminal waiting.
+            sys.excepthook(*sys.exc_info())
+
     def _schedule_next_tick(self, callback: Callable[[], None]) -> None:
-        timer = threading.Timer(0, callback)
+        if self._loop is not None:
+            if not self._loop.is_closed():
+                self._loop.call_soon_threadsafe(self._run_callback, callback)
+            return
+        timer = threading.Timer(0, lambda: self._run_callback(callback))
         timer.daemon = True
         timer.start()
 
@@ -535,7 +582,7 @@ class TUI(Container):
         self.renderTimer.cancel()
         self.renderTimer = None
 
-    def _run_scheduled_render(self, timer: threading.Timer) -> None:
+    def _run_scheduled_render(self, timer: asyncio.TimerHandle | threading.Timer) -> None:
         if self.renderTimer is not timer:
             return
         self.renderTimer = None
@@ -552,10 +599,17 @@ class TUI(Container):
             return
         elapsed = (time.perf_counter() * 1000) - self.lastRenderAt
         delay_ms = max(0.0, self.MIN_RENDER_INTERVAL_MS - elapsed)
-        timer = threading.Timer(delay_ms / 1000.0, lambda: self._run_scheduled_render(timer))
-        timer.daemon = True
+        callback = lambda: self._run_scheduled_render(timer)
+        if self._loop is not None:
+            if self._loop.is_closed():
+                return
+            timer = self._loop.call_later(delay_ms / 1000.0, self._run_callback, callback)
+        else:
+            timer = threading.Timer(delay_ms / 1000.0, lambda: self._run_callback(callback))
+            timer.daemon = True
         self.renderTimer = timer
-        timer.start()
+        if isinstance(timer, threading.Timer):
+            timer.start()
 
     def handleInput(self, data: str) -> None:
         if self.consumeOsc11BackgroundResponse(data):
@@ -951,12 +1005,13 @@ class TUI(Container):
         return True
 
     def doRender(self) -> None:
+        if self._queue_to_owner(self.doRender):
+            return
         if self.stopped:
             return
 
-        # Prevent concurrent renders from overlapping.  doRender() can be
-        # called from different threading.Timer threads (e.g. the Loader's
-        # 80ms animation timer and the streaming-event render timer).
+        # Production renders run on the owning event loop. Synchronous embedders
+        # without a loop can still call doRender() from different timer threads.
         # Without this lock, two renders can interleave their reads of
         # previousLines/hardwareCursorRow and their writes to the terminal,
         # producing duplicated lines, mispositioned footers, and scattered

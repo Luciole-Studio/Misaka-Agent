@@ -93,7 +93,7 @@ def session_tools(worker, tools=RESEARCH_TOOLS):
         active = set(session.getActiveToolNames())
         for tool in session.getAllTools():
             if tool.name in active and (
-                tool.name in {"bash", "powershell", "office", "browser_exec"}
+                tool.name in {"bash", "powershell", "office", "browser_exec", "AskUserQuestion"}
                 or tool.name.startswith("mcp__")
                 or tool.sourceInfo.source not in {"builtin", "sdk"}
             ):

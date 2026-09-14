@@ -1490,6 +1490,16 @@ class SubagentManager:
             if task.forked:
                 from misaka.core.subagent.fork import capture
                 await asyncio.to_thread(capture, task, self.session, seed=True)
+            else:
+                from misaka.core.session_manager import SessionManager
+
+                # CCB 77a7934e runAgent creates fresh sidechain state; only
+                # resumeAgent reads history. Our process host must persist the
+                # empty session before --session opens it. Send the prompt after ready.
+                writer = await run_in_thread(
+                    SessionManager, task.cwd, str(task.transcript.parent), str(task.transcript)
+                )
+                await run_in_thread(writer.rewrite_file)
             await task.persist()
             async with self._lock:
                 if self._closed:
@@ -2043,6 +2053,7 @@ class SubagentManager:
             task.start_time_ms = int(time.time() * 1000)
             task.end_time_ms = 0
             task.messages = []
+            task.stderr.clear()
             task._budget_usage = None
         await task.persist()
 
@@ -2425,10 +2436,6 @@ class SubagentManager:
                         task.error = str(event["error"])
                     turn_done = True
                     break
-            if not ready:
-                raise RuntimeError("sub-agent child exited before becoming ready")
-            if not accepted:
-                raise RuntimeError("sub-agent child did not accept the prompt")
         finally:
             captured_tree = await asyncio.to_thread(process_tree.snapshot, process.pid)
             if process.returncode is None:
@@ -2460,8 +2467,16 @@ class SubagentManager:
                 task.steer_waiters.clear()
 
         if not turn_done:
+            # Cleanup has reaped the child and drained stderr. Preserve startup
+            # tracebacks in task.error (and its metadata), not just a generic EOF.
             stderr = "\n".join(task.stderr[-20:]).strip()
-            raise RuntimeError(stderr or f"sub-agent child exited with code {process.returncode}")
+            if not ready:
+                reason = f"sub-agent child exited before becoming ready (exit code {process.returncode})"
+            elif not accepted:
+                reason = f"sub-agent child did not accept the prompt (exit code {process.returncode})"
+            else:
+                reason = f"sub-agent child exited with code {process.returncode}"
+            raise RuntimeError(f"{reason}\n{stderr}".strip())
         task.turn_count += 1
         task.result = finalize_messages(
             task.messages,

@@ -676,10 +676,19 @@ class AskUserQuestionComponent:
         return lines
 
     def render(self, width: int) -> list[str]:
+        if width <= 0:
+            return []
         inner = max(1, width - 2)
         border = theme.fg("border", "─" * max(1, width))
         body = self._submit_lines(inner) if self.current == len(self.questions) else self._question_lines(inner)
-        return [border, "", " " + self._nav_line(inner), "", *(" " + line for line in body), "", border]
+        # Every body field can contain long or multiline text, including user answers.
+        # Fit once at the component boundary, retaining ANSI styles and all wrapped text.
+        # Clipping is only a final guard for a glyph wider than a one-column terminal.
+        prefix = " " if width > 1 else ""
+        fitted = [truncateToWidth(prefix + part, width, "")
+                  for line in body for part in wrapTextWithAnsi(line, inner)]
+        return [border, "", truncateToWidth(prefix + self._nav_line(inner), width, ""),
+                "", *fitted, "", border]
 
     def invalidate(self) -> None:
         return None

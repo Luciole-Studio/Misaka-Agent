@@ -76,6 +76,10 @@ class NodePart:
             if owner["runner_key"] != self.runner_key or runs.get(con, self.run_id)["driver_lock"] != run["driver_lock"]:
                 raise RuntimeError("Research node or driver changed owners.")
 
+        def describe():
+            branch = runs.node(con, self.node_id)
+            return {"node": self.node_id, "depth": branch["depth"], "phase": branch["status"]}
+
         def progress(event):
             branch = runs.node(con, self.node_id)
             payload = {**event, "node_id": branch["id"], "depth": branch["depth"], "issue_id": None}
@@ -90,14 +94,15 @@ class NodePart:
                         (text, self.node_id, self.runner_key))
 
         window = None
+        control = None
         try:
             window = WindowLO(self.session, check_active)
             runs.set_node(con, self.node_id, session_file=window.session_file)
             control = for_session(self.session)
             if control is not None:         # a chat attached from elsewhere sees the node, not just a session
+                previous_check, previous_describe = control.check_active, control.describe
                 control.check_active = check_active
-                control.describe = lambda: {"node": self.node_id, "depth": run and runs.node(con, self.node_id)["depth"],
-                                            "phase": runs.node(con, self.node_id)["status"]}
+                control.describe = describe
             runner = PaneRunner(con, cfg, label, os.environ.get("MISAKA_NET_PANE"))
             result = await workflow.expand_node(con, cfg, runner, window, run_id=self.run_id, node_id=self.node_id,
                                                 progress=progress, session=self.session)
@@ -115,10 +120,21 @@ class NodePart:
             failed(text)
             self.show(f"{label} failed: {text}. Resume the run to retry it.")
         finally:
-            if window is not None:
-                await window.close()
-            runs.release_runner(con, "research_branches", self.node_id, self.runner_key)
-            con.close()
+            try:
+                if window is not None:
+                    await window.close()
+            finally:
+                # The conversation outlives this runner and its connection. Do not
+                # detach callbacks installed by a subsequent owner during cleanup.
+                if control is not None:
+                    if control.check_active is check_active:
+                        control.check_active = previous_check
+                    if control.describe is describe:
+                        control.describe = previous_describe
+                try:
+                    runs.release_runner(con, "research_branches", self.node_id, self.runner_key)
+                finally:
+                    con.close()
 
 
 def part(_spec):

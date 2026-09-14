@@ -5538,11 +5538,21 @@ class InteractiveMode(Conversation):
         self.signalCleanupHandlers.append(lambda: setattr(sys, "excepthook", previous_excepthook))
 
         previous_threading_excepthook = getattr(threading, "excepthook", None)
+        try:
+            owner_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            owner_loop = None
         if previous_threading_excepthook is not None:
             def _threading_excepthook(args: Any) -> None:
                 exc_value = getattr(args, "exc_value", None)
-                if isinstance(exc_value, BaseException):
-                    self.uncaughtCrash(exc_value)
+                # Signal restoration and terminal teardown belong to the UI thread,
+                # not the animation/helper thread whose exception is being reported.
+                if isinstance(exc_value, BaseException) and owner_loop is not None and not owner_loop.is_closed():
+                    try:
+                        owner_loop.call_soon_threadsafe(self.uncaughtCrash, exc_value)
+                        return
+                    except RuntimeError:
+                        pass
                 previous_threading_excepthook(args)
 
             threading.excepthook = _threading_excepthook

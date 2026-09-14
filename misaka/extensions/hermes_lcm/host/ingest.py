@@ -212,6 +212,17 @@ class Replay:
                 self.originals.append(copy.deepcopy(message))
                 self.messages.append({**to_upstream(converted_message), SOURCE: index})
 
+    def unchanged(self, messages):
+        """Receipt-time jitter is lost on restore; all other fields must match.
+
+        Keep source ordinals and native compression flags in this comparison:
+        equal prose alone does not prove an unchanged checkpoint.
+        """
+        return len(messages) == len(self.messages) and all(
+            {key: value for key, value in after.items() if key != 'timestamp'}
+            == {key: value for key, value in before.items() if key != 'timestamp'}
+            for before, after in zip(self.messages, messages))
+
     def restore(self, messages, model=None):
         import copy
 

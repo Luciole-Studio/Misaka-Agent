@@ -550,7 +550,7 @@ def prepare(event, ctx, *, transcript=None):
                     # not another summarizer pass after every parallel tool batch.
                     messages = built._ingest_messages(messages)
             built._misaka_preflight_turn = key
-    if not wants and messages == replay.messages and not replay_changed:
+    if not wants and replay.unchanged(messages) and not replay_changed:
         return None
     return Prepared(built, transcript, replay, messages, read_field(ctx, 'model'), int(tokens),
                     reason, read_field(event, 'customInstructions'), wants, replay_changed)
@@ -569,7 +569,7 @@ def compact(prepared):
                           if prepared.compress else prepared.messages)
         except AuxiliaryExplicitCancellation as error:
             raise asyncio.CancelledError('Native context compression cancelled') from error
-        if compressed == prepared.replay.messages and not prepared.replay_changed:
+        if prepared.replay.unchanged(compressed) and not prepared.replay_changed:
             return None
         frontier = built._summary_frontier_nodes()
         _, stored = _archive_map(built, prepared.transcript)

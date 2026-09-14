@@ -143,15 +143,13 @@ class SessionControl:
     async def _execute(self, command):
         operation = command.get("operation")
         if operation == "snapshot":
-            from misaka.core.session_manager import build_context_entries
-
             manager = self.session.sessionManager
             cursor = [manager.getLeafId(), len(manager.getEntries())]
             return {"id": self.session.sessionId, "cwd": manager.getCwd(),
                     "state": "idle" if self.session.isIdle else "working", "paused": self.paused,
                     "error": self.error, "workflow": self.describe(), "cursor": cursor,
                     "steering": self.session.getSteeringMessages(), "follow_up": self.session.getFollowUpMessages(),
-                    "entries": build_context_entries(manager.getEntries()) if command.get("cursor") != cursor else None}
+                    "entries": manager.buildContextEntries() if command.get("cursor") != cursor else None}
         if not self.accepting:
             raise ValueError("The original owner is finishing; no further input is accepted.")
         self._check_input_owner()
