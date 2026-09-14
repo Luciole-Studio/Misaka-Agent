@@ -54,6 +54,7 @@ from misaka.ai.types import (
     StartEvent,
     StreamOptions,
 )
+from misaka.ai.utils.deferred_tools import split_deferred_tools
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import (
     apply_provider_headers,
@@ -208,18 +209,33 @@ def create_client(
 
 
 def build_params(model: Model, context: Context, options: Any = None) -> dict[str, Any]:
+    cache_retention = resolve_cache_retention(_option(options, "cacheRetention"), _option(options, "env"))
+    compat = get_compat(model)
+    tool_options: dict[str, Any] = {
+        "supportsStrictMode": compat["supportsStrictMode"],
+        "supportsOpenAIGrammarTools": compat["supportsOpenAIGrammarTools"],
+    }
+    # Two ways of handing over a tool the prefix does not declare, and the endpoint takes
+    # one or the other. Without either, every tool goes in the prefix as before.
+    deferred_tools_mode = (
+        "additional-tools" if compat["supportsAdditionalTools"]
+        else "tool-search" if compat["supportsToolSearch"]
+        else None
+    )
+    placement = split_deferred_tools(context, deferred_tools_mode is not None)
     messages = convert_responses_messages(
         model,
         context,
         OPENAI_TOOL_CALL_PROVIDERS,
-        {"grammarToolInputProperties": create_grammar_tool_input_properties(
-        context.tools,
-        bool(getattr(getattr(model, "compat", None), "supportsOpenAIGrammarTools", None)),
-    )},
+        {
+            "grammarToolInputProperties": create_grammar_tool_input_properties(
+                context.tools, compat["supportsOpenAIGrammarTools"],
+            ),
+            "deferredTools": placement.deferred,
+            "deferredToolsMode": deferred_tools_mode,
+            "toolOptions": tool_options,
+        },
     )
-
-    cache_retention = resolve_cache_retention(_option(options, "cacheRetention"), _option(options, "env"))
-    compat = get_compat(model)
     params: dict[str, Any] = {
         "model": model.id,
         "input": messages,
@@ -242,12 +258,10 @@ def build_params(model: Model, context: Context, options: Any = None) -> dict[st
         params["service_tier"] = _option(options, "serviceTier")
     if _option(options, "toolChoice") is not None:
         params["tool_choice"] = _option(options, "toolChoice")
-    if context.tools:
-        params["tools"] = convert_responses_tools(
-            context.tools,
-            {"supportsStrictMode": bool(getattr(getattr(model, "compat", None), "supportsStrictMode", None) if getattr(getattr(model, "compat", None), "supportsStrictMode", None) is not None else True),
-             "supportsOpenAIGrammarTools": bool(getattr(getattr(model, "compat", None), "supportsOpenAIGrammarTools", None))},
-        )
+    # Only the immediate half: the deferred definitions arrive in the transcript, at the
+    # tool result that made them reachable.
+    if placement.immediate:
+        params["tools"] = convert_responses_tools(placement.immediate, tool_options)
 
     reasoning_effort = _option(options, "reasoningEffort")
     reasoning_summary = _option(options, "reasoningSummary")

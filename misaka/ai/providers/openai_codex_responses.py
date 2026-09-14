@@ -47,6 +47,7 @@ from misaka.ai.types import (
     StartEvent,
     StreamOptions,
 )
+from misaka.ai.utils.deferred_tools import split_deferred_tools
 from misaka.ai.utils.diagnostics import (
     append_assistant_message_diagnostic,
     create_assistant_message_diagnostic,
@@ -349,6 +350,22 @@ def build_request_body(
     options: StreamOptions | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     text_verbosity = _option(options, "textVerbosity") or "low"
+    compat = getattr(model, "compat", None)
+    supports_grammar_tools = bool(getattr(compat, "supportsOpenAIGrammarTools", None))
+    strict_mode = getattr(compat, "supportsStrictMode", None)
+    tool_options: dict[str, Any] = {
+        "strict": None,
+        "supportsStrictMode": True if strict_mode is None else bool(strict_mode),
+        "supportsOpenAIGrammarTools": supports_grammar_tools,
+    }
+    # Codex takes the same two hand-over shapes as the Responses endpoint; the three
+    # tool-search models in the catalog are all on this provider.
+    deferred_tools_mode = (
+        "additional-tools" if getattr(compat, "supportsAdditionalTools", None)
+        else "tool-search" if getattr(compat, "supportsToolSearch", None)
+        else None
+    )
+    placement = split_deferred_tools(context, deferred_tools_mode is not None)
     messages = convert_responses_messages(
         model,
         context,
@@ -356,9 +373,11 @@ def build_request_body(
         {
             "includeSystemPrompt": False,
             "grammarToolInputProperties": create_grammar_tool_input_properties(
-        context.tools,
-        bool(getattr(getattr(model, "compat", None), "supportsOpenAIGrammarTools", None)),
-    ),
+                context.tools, supports_grammar_tools,
+            ),
+            "deferredTools": placement.deferred,
+            "deferredToolsMode": deferred_tools_mode,
+            "toolOptions": tool_options,
         },
     )
     body: dict[str, Any] = {
@@ -379,12 +398,7 @@ def build_request_body(
     if _option(options, "serviceTier") is not None:
         body["service_tier"] = _option(options, "serviceTier")
     if context.tools:
-        body["tools"] = convert_responses_tools(
-            context.tools,
-            {"strict": None,
-             "supportsStrictMode": bool(getattr(getattr(model, "compat", None), "supportsStrictMode", None) if getattr(getattr(model, "compat", None), "supportsStrictMode", None) is not None else True),
-             "supportsOpenAIGrammarTools": bool(getattr(getattr(model, "compat", None), "supportsOpenAIGrammarTools", None))},
-        )
+        body["tools"] = convert_responses_tools(placement.immediate, tool_options)
 
     reasoning_effort = _option(options, "reasoningEffort")
     if reasoning_effort is not None:

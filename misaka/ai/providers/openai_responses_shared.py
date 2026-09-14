@@ -63,6 +63,15 @@ class ConvertResponsesMessagesOptions(TypedDict, total=False):
     # a grammar tool: it is replayed as a `custom_tool_call` carrying free text rather
     # than a `function_call` carrying JSON arguments.
     grammarToolInputProperties: Mapping[str, str]
+    # Tools the prefix does not declare, keyed by name. They enter the transcript at the
+    # tool result that made them available, so the model sees them appear where they
+    # actually appeared rather than all at once up front.
+    deferredTools: Mapping[str, Tool]
+    # How this endpoint takes them: a developer `additional_tools` item, or a pair of
+    # `tool_search_call` / `tool_search_output` items. None means the prefix carries
+    # everything and no tool is deferred.
+    deferredToolsMode: str | None
+    toolOptions: ConvertResponsesToolsOptions
 
 
 class ConvertResponsesToolsOptions(TypedDict, total=False):
@@ -135,6 +144,12 @@ def convert_responses_messages(
     options: ConvertResponsesMessagesOptions | None = None,
 ) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
+    opts = options or {}
+    deferred_tools: Mapping[str, Tool] = opts.get("deferredTools") or {}
+    deferred_mode: str | None = opts.get("deferredToolsMode")
+    tool_options: ConvertResponsesToolsOptions = opts.get("toolOptions") or {}
+    # One transcript, one delivery per tool: the set spans the whole conversion.
+    loaded_tool_names: set[str] = set()
     transformed_messages = transform_messages(
         context.messages,
         model,
@@ -219,6 +234,16 @@ def convert_responses_messages(
                         custom_input_property is None and not (item_id or "").startswith("fc_")
                     ):
                         item_id = None
+                    # A namespace only means something to the endpoint that issued it, or to
+                    # one that is about to be handed the same tool again as a deferred
+                    # definition. Replaying it anywhere else names a namespace the request
+                    # never declares.
+                    can_replay_namespace = (not is_different_model) or block.name in deferred_tools
+                    namespace = (
+                        {"namespace": block.namespace}
+                        if can_replay_namespace and block.namespace is not None
+                        else {}
+                    )
                     if custom_input_property is not None:
                         output.append(
                             {
@@ -231,6 +256,7 @@ def convert_responses_messages(
                                         block.name, block.arguments, custom_input_property
                                     )
                                 ),
+                                **namespace,
                             }
                         )
                     else:
@@ -241,6 +267,7 @@ def convert_responses_messages(
                                 "call_id": call_id,
                                 "name": block.name,
                                 "arguments": json.dumps(block.arguments),
+                                **namespace,
                             }
                         )
             if output:
@@ -280,8 +307,54 @@ def convert_responses_messages(
                     "output": output_value,
                 }
             )
+            messages.extend(
+                _deferred_tool_items(message, deferred_tools, deferred_mode, tool_options, loaded_tool_names)
+            )
 
     return messages
+
+
+def _deferred_tool_items(
+    message: Any,
+    deferred_tools: Mapping[str, Tool],
+    mode: str | None,
+    tool_options: ConvertResponsesToolsOptions,
+    loaded: set[str],
+) -> list[dict[str, Any]]:
+    """The items that hand this tool result's newly available tools to the model.
+
+    ``addedToolNames`` is the tool runtime's record of what a call made reachable. Each name
+    is delivered once: a transcript replays the same result on every turn, and repeating the
+    definition would grow the prefix without adding anything.
+    """
+    if not mode or not deferred_tools:
+        return []
+    fresh: list[Tool] = []
+    for name in getattr(message, "addedToolNames", None) or []:
+        tool = deferred_tools.get(name)
+        if tool is None or name in loaded:
+            continue
+        loaded.add(name)
+        fresh.append(tool)
+    if not fresh:
+        return []
+    if mode == "additional-tools":
+        return [{"type": "additional_tools", "role": "developer",
+                 "tools": convert_responses_tools(fresh, tool_options)}]
+    if mode == "tool-search":
+        names = [tool.name for tool in fresh]
+        # The id ties the two items together and has to be the same on every replay of this
+        # transcript, so it is derived from the call and the names rather than generated.
+        call_id = f"pi_tool_load_{short_hash(message.toolCallId + ':' + ','.join(names))}"
+        return [
+            {"type": "tool_search_call", "call_id": call_id, "execution": "client",
+             "status": "completed",
+             "arguments": {"query": " ".join(names), "limit": len(names)}},
+            {"type": "tool_search_output", "call_id": call_id, "execution": "client",
+             "status": "completed",
+             "tools": convert_responses_tools(fresh, {**tool_options, "deferLoading": True})},
+        ]
+    return []
 
 
 def convert_responses_tools(
