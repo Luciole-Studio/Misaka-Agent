@@ -572,6 +572,14 @@ async def login_openai_codex(options: dict[str, Any]) -> OAuthCredentials:
         if not code:
             raise RuntimeError("Missing authorization code")
 
+        # Say that something is happening. Between the submitted code and the stored
+        # credential sits one HTTPS round trip to OpenAI with no timeout, and the dialog
+        # draws nothing while it runs -- press Enter, watch a frozen screen, conclude the
+        # login is wedged. `anthropic.py` and `openrouter.py` both announce this step;
+        # upstream's codex flow is the one that does not (auth/oauth/openai-codex.ts),
+        # so this line is a deliberate divergence rather than a missing port.
+        if options.get("onProgress") is not None:
+            options["onProgress"]("Exchanging authorization code for tokens...")
         token_result = await _exchange_authorization_code(code, verifier)
         if token_result["type"] != "success":
             raise RuntimeError(token_result["message"])
