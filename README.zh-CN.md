@@ -9,17 +9,6 @@
 
 拥有规划总控智能体与常驻子智能体，基于树形数据结构治理思维过程的多智能体人文社科研究工具。
 
-它为"结论必须站得住"的场合而造：每一份结论都附带一个 `SOURCES.md`，以及一个装着
-它所引用的原始文件的文件夹。
-
-```sh
-misaka init                              # 把当前文件夹变成一个项目
-misaka doc add sources/                  # 索引你手头已有的 PDF
-misaka research "日本的公共图书馆运动在 1920 到 1950 年间发生了怎样的变化？"
-```
-
-最后那条命令打开的是一场对话，不是进度条。原因见下。
-
 <p align="center">
   <img src="assets/setup.png" alt="misaka setup — 环境自检与模型配置" width="820">
 </p>
