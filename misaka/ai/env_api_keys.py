@@ -34,6 +34,16 @@ _ENV_MAP: dict[str, str] = {
     "xiaomi-token-plan-cn": "XIAOMI_TOKEN_PLAN_CN_API_KEY",
     "xiaomi-token-plan-ams": "XIAOMI_TOKEN_PLAN_AMS_API_KEY",
     "xiaomi-token-plan-sgp": "XIAOMI_TOKEN_PLAN_SGP_API_KEY",
+    # These six were absent while their models shipped in the catalog, so a key in the
+    # environment did not register and the provider read as unconfigured. Names taken from
+    # each provider's own module upstream, where they are written literally.
+    "ant-ling": "ANT_LING_API_KEY",
+    "baseten": "BASETEN_API_KEY",
+    "qwen-token-plan": "QWEN_TOKEN_PLAN_API_KEY",
+    "qwen-token-plan-cn": "QWEN_TOKEN_PLAN_CN_API_KEY",
+    # Upstream reads the same variable as the plain plan; the two are one credential.
+    "qwen-token-plan-individual": "QWEN_TOKEN_PLAN_API_KEY",
+    "zai-coding-cn": "ZAI_CODING_CN_API_KEY",
 }
 
 _proc_env_cache: dict[str, str] | None = None
