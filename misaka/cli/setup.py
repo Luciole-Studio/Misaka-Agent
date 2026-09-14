@@ -15,6 +15,8 @@ What each section touches, and nothing else:
   otherwise shows up an hour later inside a research run.
 - sisters: ``~/.misaka/profiles/sisters/<id>/`` through ``roster.create_sister``. Without at
   least one Sister a research run has nobody to hand cards to.
+- skills: installs ``DEFAULT_SKILLS`` from the optional catalog that ships in the package,
+  into the shared layer every role reads. Nothing else is installed by default.
 - documents: the optional PDF outline extra and the office libraries, checked by import.
 - web: ``~/.misaka/web.json`` -- a pinned search backend and its key, or the keyless ring.
 - research: nothing; it explains the shape of a run and the approval gate, which is the one
@@ -43,7 +45,7 @@ from misaka.cli.setup_ui import (
     prompt_yes_no,
 )
 
-SECTIONS = ("environment", "model", "sisters", "documents", "web", "research", "project")
+SECTIONS = ("environment", "model", "sisters", "skills", "documents", "web", "research", "project")
 
 # The providers a fresh install is most likely to want, in the order they are offered; every
 # other provider the registry knows is one menu entry further ("Another provider...").
@@ -55,6 +57,11 @@ WEB_BACKENDS = (
     ("firecrawl", "FIRECRAWL_API_KEY"), ("perplexity", "PERPLEXITY_API_KEY"), ("parallel", "PARALLEL_API_KEY"),
     ("keenable", "KEENABLE_API_KEY"), ("xai", "XAI_API_KEY"), ("searxng", "SEARXNG_URL"),
 )
+
+# The skills a research install wants out of the box, from the optional catalog under
+# ``core/skills/assets/optional/``. Everything else in that catalog (140 skills across 24
+# categories) ships too and stays uninstalled until somebody asks for it by name.
+DEFAULT_SKILLS = ("coverage-maps",)
 
 PAGEINDEX_PACKAGES = ("PyPDF2==3.0.1", "pypdfium2==4.30.0", "regex>=2024.0.0", "sortedcontainers==2.4.0")
 
@@ -350,7 +357,100 @@ class Wizard:
         labels = [m.id + (f"  — {m.name}" if m.name and m.name != m.id else "") for m in models]
         return models[prompt_choice(f"Model for the Sisters ({cfg['provider']})", labels, 0)].id
 
-    # -- 4. documents -------------------------------------------------------------------------
+    # -- 4. skills ----------------------------------------------------------------------------
+
+    def skills(self) -> None:
+        from misaka.config import CFG
+        from misaka.core.skills import layers as skill_layers
+        ui.print_header("Skills")
+        roles_root = os.path.expanduser(CFG["roles_root"])
+        shared = os.path.join(roles_root, "skills")
+        shown = ((f"{_tilde(roles_root)}/<role>/skills/", "that role alone"),
+                 (_tilde(shared), "every role; the wizard installs here"),
+                 ("~/.agents/skills", "shared with your other agent tools, read-only"))
+        column = max(len(path) for path, _purpose in shown)
+        ui.print_info("A skill is a folder with a SKILL.md a role reads when the work calls for it.",
+                      "Three layers, in the order a role sees them:",
+                      *[f"  {path:<{column}}   {purpose}" for path, purpose in shown], "")
+        external = os.path.expanduser("~/.agents/skills")
+        if os.path.isdir(external):
+            names = sorted(entry.name for entry in os.scandir(external)
+                           if entry.is_dir() and not entry.name.startswith("."))
+            ui.print_success(f"~/.agents/skills is mounted: {', '.join(names) if names else 'empty'}")
+        else:
+            ui.print_info(ui.color("  ~/.agents/skills is absent; it appears by itself once another "
+                                   "agent tool creates it.", ui.DIM))
+        installed = self._installed_skills(skill_layers, shared)
+        wanted = [name for name in DEFAULT_SKILLS if name not in installed]
+        if not wanted:
+            ui.print_success(f"Already installed: {', '.join(DEFAULT_SKILLS)}")
+        elif prompt_yes_no(f"Install {', '.join(wanted)}? (maps of a field, scanned before planning "
+                           f"and again when red-teaming)", True):
+            for name in wanted:
+                self._install_skill(name)
+        ui.print_info("", "The package also carries an optional catalog nothing installs by itself:",
+                      "  misaka skills optional-list                 what ships, by category",
+                      "  misaka skills hub-install <name>            install one",
+                      "  misaka skills pending / approve <id>        the review step each install goes through")
+
+    @staticmethod
+    def _installed_skills(skill_layers, shared: str) -> set[str]:
+        """The skill names already present in the shared layer, category folders included."""
+        try:
+            return {path.parent.name for path in skill_layers.iter_skill_files(shared)}
+        except (OSError, ValueError):
+            return set()
+
+    def _install_skill(self, name: str) -> None:
+        """Install one catalog skill into the shared layer, then approve it.
+
+        Two calls because that is the design: a distribution write is scanned and staged, and
+        a person approves it (``misaka skills pending`` / ``approve``). The person is standing
+        at this prompt and just said yes, so the wizard completes the round trip instead of
+        leaving a pending item behind -- and only ever for a skill that ships inside the
+        package, never something fetched from a hub.
+
+        The shared layer is addressed by passing the roles root as the profile: a scope's skill
+        directory is ``<profile>/skills``, which for the roles root is the shared layer itself.
+        """
+        from misaka.config import CFG
+        from misaka.core.skills import manage as skill_manage
+        from misaka.core.skills import write as skill_write
+        from misaka.core.skills.operations import execute
+        roles_root = os.path.expanduser(CFG["roles_root"])
+        try:
+            result = execute("hub-install", name, profile_dir=roles_root, workspace=os.getcwd(),
+                             source="official", category="", force=False, restore=False, repo="",
+                             dry_run=False, bundled_root=None, optional_root=None, expected_digest=None)
+        except Exception as error:  # noqa: BLE001 - one skill is not worth failing the wizard for
+            ui.print_error(f"{name}: {error}")
+            return
+        pending = result.get("pending_id")
+        if result.get("success") and not pending:
+            ui.print_success(f"{name} installed.")
+            return
+        if not pending:
+            ui.print_error(f"{name}: {result.get('error') or 'the install did not complete'}")
+            if "skill_write_mode" in str(result.get("error") or ""):
+                ui.print_info("Skill writing is off; `misaka skills mode ask` turns the review queue back on.")
+            return
+        record = skill_write.get_pending(pending)
+        if record is None:
+            ui.print_error(f"{name}: the staged write could not be read back.")
+            return
+        applied = skill_manage.apply_pending(record)
+        if not applied.get("success"):
+            ui.print_error(f"{name}: approval failed: {applied.get('error')}")
+            ui.print_info(f"It is still queued: `misaka skills pending` and `misaka skills approve {pending}`.")
+            return
+        skill_write.discard_pending(record.get("_pending_file_id") or record["id"])
+        verdict = (applied.get("scan") or {}).get("verdict")
+        ui.print_success(f"{name} installed into the shared layer"
+                         + (f" (scanned: {verdict})" if verdict else "")
+                         + f" -- {_tilde(str(applied.get('path') or ''))}")
+        self.state.setdefault("skills", []).append(name)
+
+    # -- 5. documents -------------------------------------------------------------------------
 
     def documents(self) -> None:
         from misaka.core.documents.pageindex import available as pageindex_available
@@ -369,7 +469,7 @@ class Wizard:
                        f"scanned PDFs need ocrmypdf: {_install_command('ocrmypdf')}")
         self.state["office"], self.state["pageindex"] = office, has_outline
 
-    # -- 5. web -------------------------------------------------------------------------------
+    # -- 6. web -------------------------------------------------------------------------------
 
     def web(self) -> None:
         from misaka.core.web import config
@@ -410,7 +510,7 @@ class Wizard:
         ui.print_success(f"{name} saved in {path}")
         self.state["web"] = name
 
-    # -- 6. research --------------------------------------------------------------------------
+    # -- 7. research --------------------------------------------------------------------------
 
     def research(self) -> None:
         """Nothing to configure, everything to say. A run's limits are per-run flags with
@@ -437,7 +537,7 @@ class Wizard:
                           "Set MISAKA_RESEARCH_PLAN_APPROVAL=0 for unattended runs.")
         self.state["approval"] = gate
 
-    # -- 7. project ---------------------------------------------------------------------------
+    # -- 8. project ---------------------------------------------------------------------------
 
     def project(self) -> None:
         from misaka.core.platform import cards
@@ -508,7 +608,12 @@ class Wizard:
         for binary in ("git", "rg", "fd", "pdftotext"):
             ui.print_check(shutil.which(binary) is not None, binary, "" if shutil.which(binary) else _install_command(binary))
         ui.print_check(state.get("pageindex", None), "PDF outlines", "" if state.get("pageindex") else "optional")
-        ui.print_check(state.get("web") is not None, "web search", str(state.get("web") or "keyless ring"))
+        # Web search works with no configuration at all, so this row is never a failure: the
+        # only question is whether a backend got pinned on top of the keyless ring.
+        ui.print_check(True, "web search", str(state.get("web") or "keyless ring"))
+        skills = state.get("skills")
+        ui.print_check(bool(skills) if skills is not None else None, "skills",
+                       ", ".join(skills) if skills else "none added: `misaka skills optional-list`")
         indexed = state.get("documents")
         ui.print_check(bool(indexed) if indexed is not None else None, "documents",
                        f"{indexed} indexed" if indexed else "none indexed yet: `misaka doc scan <folder>`")
@@ -590,8 +695,8 @@ def run(section: str | None = None) -> int:
         return 1
     wizard = Wizard()
     steps = [("Environment", wizard.environment), ("Model & Provider", wizard.model), ("Roles", wizard.sisters),
-             ("Documents", wizard.documents), ("Web search", wizard.web), ("Research", wizard.research),
-             ("Project", wizard.project)]
+             ("Skills", wizard.skills), ("Documents", wizard.documents), ("Web search", wizard.web),
+             ("Research", wizard.research), ("Project", wizard.project)]
     by_key = dict(zip(SECTIONS, steps, strict=True))
     try:
         if section:
