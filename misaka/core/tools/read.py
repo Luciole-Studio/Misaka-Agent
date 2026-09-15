@@ -240,7 +240,8 @@ def _office_format(absolute_path: str) -> str | None:
     every session whether or not one ever opens a workbook.
     """
     from misaka.core.documents import office
-    return office.format_of(absolute_path)
+    return (office.format_of(absolute_path)
+            or office.soffice.LEGACY.get(os.path.splitext(absolute_path)[1].lower()))
 
 
 async def _render_office(absolute_path: str, cell_range: str | None, workspace: str) -> str:

@@ -40,15 +40,19 @@ def archive(path, ops, *, workspace=None):
     try:
         directory = _bucket(path, workspace)
         os.makedirs(directory, exist_ok=True)
-        existing = sorted(name for name in os.listdir(directory) if name.endswith(".json"))
-        while len(existing) >= MAX_PER_PATH:
-            os.remove(os.path.join(directory, existing.pop(0)))
-        sequence = 1 + max((int(name[:3]) for name in existing if name[:3].isdigit()), default=0)
+        numbered = [(int(name.split("_", 1)[0]), name) for name in os.listdir(directory)
+                    if name.endswith(".json") and name.split("_", 1)[0].isdigit()]
+        numbered.sort()
+        sequence = 1 + max((number for number, _name in numbered), default=0)
         first = next(iter(ops[0]), "ops") if ops and isinstance(ops[0], dict) else "ops"
+        # Op names are untrusted; they must never become directory components.
+        first = "".join(char if char.isalnum() or char in "_-" else "_" for char in str(first))[:80]
         target = os.path.join(directory, f"{sequence:03d}_{first}.json")
         record = {"seq": sequence, "path": os.path.realpath(str(path)), "ops": ops}
-        with open(target, "w", encoding="utf-8") as handle:
+        with open(target, "x", encoding="utf-8") as handle:
             json.dump(record, handle, ensure_ascii=False, indent=1)
+        for _number, name in numbered[:max(0, len(numbered) + 1 - MAX_PER_PATH)]:
+            os.remove(os.path.join(directory, name))
         return target
     except (OSError, TypeError, ValueError):
         return ""

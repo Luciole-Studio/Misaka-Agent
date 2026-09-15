@@ -72,7 +72,7 @@
 pi 意义上的**捆绑扩展**——自包含、只靠扩展 API、拔了无残留——按 misaka 原有的三层放：
 
 ```
-extensions/<module>             每个角色：llama/（pi 自带的 provider）、hermes_lcm/（LCM 上下文引擎：vendor/ 是 hermes-lcm 上游原样，host/ 是对 pi 事件的适配；拔掉它 pi 原生压缩照常）、coverage（coverage_scan 工具）
+extensions/<module>             每个角色：llama/（pi 自带的 provider）、misaka_lcm/（LCM 上下文引擎：vendor/ 是 hermes-lcm 上游原样，host/ 是对 pi 事件的适配；拔掉它 pi 原生压缩照常）、coverage（coverage_scan 工具）
 extensions/last_order/<module>  只有 Last Order 的槽位（现在是空的）
 extensions/sisters/             其他角色的槽位（subagent 是 C 类，在 core/subagent，仅对 Sisters 暴露）
 ```
@@ -105,7 +105,7 @@ misaka/observability/board.py          → misaka/core/network/board.py
 misaka/app/composition.py              → misaka/core/wiring.py
 misaka/extensions/__init__.py:discover  留在原地（捆绑扩展的发现）；core 由 misaka/core/wiring.py 的 TOOL_MODULES / PART_MODULES 点名
 misaka/extensions/web/                 → misaka/core/web/
-misaka/extensions/hermes_lcm/          留在原地：2026-09-03 用户决定 LCM 只是一个扩展（曾短暂迁入 core/lcm，同日迁回）
+misaka/extensions/misaka_lcm/          留在原地：2026-09-03 用户决定 LCM 只是一个扩展（曾短暂迁入 core/lcm，同日迁回）
 misaka/extensions/sisters/subagent/    → misaka/core/subagent/
 misaka/extensions/last_order/ally/     → misaka/core/network/ally/
 misaka/extensions/ask_user/            → misaka/core/ask_user/

@@ -25,8 +25,13 @@ def write_bytes(path, data, *, mode=None):
             if stat.S_ISREG(target_stat.st_mode):
                 resolved_mode = stat.S_IMODE(target_stat.st_mode)
     tmp = f"{path}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    created = False
     try:
-        with open(tmp, "wb") as f:
+        # Private from creation, not only after writing sensitive bytes; never follow a
+        # pre-existing temporary path. The requested final mode is applied below.
+        with open(tmp, "xb", opener=lambda name, flags: os.open(
+                name, flags, 0o600 if resolved_mode is not None else 0o666)) as f:
+            created = True
             f.write(data)
             f.flush()
             if resolved_mode is not None:
@@ -48,10 +53,11 @@ def write_bytes(path, data, *, mode=None):
             except OSError:
                 pass
     except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+        if created:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
         raise
 
 

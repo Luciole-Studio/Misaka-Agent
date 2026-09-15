@@ -335,60 +335,63 @@ def connect(path: str) -> sqlite3.Connection:
         check_same_thread=False,
         factory=SerializedConnection,
     )
-    con.row_factory = sqlite3.Row
-    # journal_mode=WAL is a request, not a promise: a filesystem without the shared-memory and
-    # locking primitives WAL needs (NFS, SMB, some container overlays) leaves SQLite in
-    # rollback-journal mode, and the pragma answers with the mode it kept. Read that row back --
-    # what synchronous may safely be depends on which mode actually took.
-    row = con.execute("PRAGMA journal_mode=WAL").fetchone()
-    journal = str(row[0]).lower() if row else ""
-    if journal == "wal":
-        # WAL's canonical pairing. FULL fsyncs the WAL on every autocommit statement, and this
-        # board is written a statement at a time (one UPDATE per reconciled card, one row per
-        # event). Under WAL, NORMAL cannot corrupt the database; it risks only the last commits
-        # before a power cut, and every durable decision here is a lease or a CAS that re-runs
-        # when it is not observed: an un-fsynced claim is simply claimed again. The card file,
-        # not this index, is the contract.
-        con.execute("PRAGMA synchronous=NORMAL")
-    else:
-        # That whole tolerance argument was made *for* WAL. In rollback-journal mode NORMAL
-        # risks the database file itself, not just the newest commits, and nothing in the
-        # lease/CAS design compensates for a board that will not open. Keep SQLite's FULL.
-        global _WARNED_ROLLBACK_JOURNAL
-        if not _WARNED_ROLLBACK_JOURNAL:
-            # Said once per process, through logging rather than a flag: nothing in this build
-            # reports on the board's storage, so a flag would have no reader but its own test,
-            # while a warning reaches whoever is running MISAKA on that filesystem. Silence is
-            # the one option ruled out -- the durability the design assumes is not there.
-            _WARNED_ROLLBACK_JOURNAL = True
-            logger.warning(
-                "Task board %s could not use WAL (journal_mode=%s): this filesystem does not "
-                "support it. Keeping synchronous=FULL, which is slower but is the only safe "
-                "setting for a rollback journal. A local disk is the supported home for it.",
-                path, journal or "unknown",
-            )
-    con.executescript(SCHEMA)
-    from misaka.core.platform import notifications
-    newest = con.execute("SELECT MAX(version) FROM schema_migrations WHERE component='tasks'").fetchone()[0]
-    if newest is not None and int(newest) > TASK_SCHEMA_VERSION:
+    try:
+        con.row_factory = sqlite3.Row
+        # journal_mode=WAL is a request, not a promise: a filesystem without the shared-memory and
+        # locking primitives WAL needs (NFS, SMB, some container overlays) leaves SQLite in
+        # rollback-journal mode, and the pragma answers with the mode it kept. Read that row back --
+        # what synchronous may safely be depends on which mode actually took.
+        row = con.execute("PRAGMA journal_mode=WAL").fetchone()
+        journal = str(row[0]).lower() if row else ""
+        if journal == "wal":
+            # WAL's canonical pairing. FULL fsyncs the WAL on every autocommit statement, and this
+            # board is written a statement at a time (one UPDATE per reconciled card, one row per
+            # event). Under WAL, NORMAL cannot corrupt the database; it risks only the last commits
+            # before a power cut, and every durable decision here is a lease or a CAS that re-runs
+            # when it is not observed: an un-fsynced claim is simply claimed again. The card file,
+            # not this index, is the contract.
+            con.execute("PRAGMA synchronous=NORMAL")
+        else:
+            # That whole tolerance argument was made *for* WAL. In rollback-journal mode NORMAL
+            # risks the database file itself, not just the newest commits, and nothing in the
+            # lease/CAS design compensates for a board that will not open. Keep SQLite's FULL.
+            global _WARNED_ROLLBACK_JOURNAL
+            if not _WARNED_ROLLBACK_JOURNAL:
+                # Said once per process, through logging rather than a flag: nothing in this build
+                # reports on the board's storage, so a flag would have no reader but its own test,
+                # while a warning reaches whoever is running MISAKA on that filesystem. Silence is
+                # the one option ruled out -- the durability the design assumes is not there.
+                _WARNED_ROLLBACK_JOURNAL = True
+                logger.warning(
+                    "Task board %s could not use WAL (journal_mode=%s): this filesystem does not "
+                    "support it. Keeping synchronous=FULL, which is slower but is the only safe "
+                    "setting for a rollback journal. A local disk is the supported home for it.",
+                    path, journal or "unknown",
+                )
+        con.executescript(SCHEMA)
+        from misaka.core.platform import notifications
+        newest = con.execute("SELECT MAX(version) FROM schema_migrations WHERE component='tasks'").fetchone()[0]
+        if newest is not None and int(newest) > TASK_SCHEMA_VERSION:
+            raise RuntimeError(f"This board was written by a newer MISAKA (task schema v{newest}; this build knows "
+                               f"v{TASK_SCHEMA_VERSION}). Upgrade MISAKA rather than downgrading the data.")
+        if newest != TASK_SCHEMA_VERSION:
+            # Once per upgrade, not on every connection -- and once per *board*, not per process.
+            # _migrate reads the column set and then ALTERs; two processes that both connect to the
+            # same stale board right after an upgrade each read the pre-migration metadata, and the
+            # loser's ALTER raises "duplicate column name" (or its DROP raises "no such table")
+            # straight out of connect(), killing that process at startup. busy_timeout does not help:
+            # it is stale metadata, not a lock conflict. BEGIN IMMEDIATE makes the loser queue, and
+            # re-reading the version inside the transaction makes it skip work the winner committed.
+            with _write_txn(con):
+                newest = con.execute(
+                    "SELECT MAX(version) FROM schema_migrations WHERE component='tasks'"
+                ).fetchone()[0]
+                if newest != TASK_SCHEMA_VERSION:
+                    _migrate(con)
+        notifications.init(con)
+    except BaseException:
         con.close()
-        raise RuntimeError(f"This board was written by a newer MISAKA (task schema v{newest}; this build knows "
-                           f"v{TASK_SCHEMA_VERSION}). Upgrade MISAKA rather than downgrading the data.")
-    if newest != TASK_SCHEMA_VERSION:
-        # Once per upgrade, not on every connection -- and once per *board*, not per process.
-        # _migrate reads the column set and then ALTERs; two processes that both connect to the
-        # same stale board right after an upgrade each read the pre-migration metadata, and the
-        # loser's ALTER raises "duplicate column name" (or its DROP raises "no such table")
-        # straight out of connect(), killing that process at startup. busy_timeout does not help:
-        # it is stale metadata, not a lock conflict. BEGIN IMMEDIATE makes the loser queue, and
-        # re-reading the version inside the transaction makes it skip work the winner committed.
-        with _write_txn(con):
-            newest = con.execute(
-                "SELECT MAX(version) FROM schema_migrations WHERE component='tasks'"
-            ).fetchone()[0]
-            if newest != TASK_SCHEMA_VERSION:
-                _migrate(con)
-    notifications.init(con)
+        raise
     return con
 
 

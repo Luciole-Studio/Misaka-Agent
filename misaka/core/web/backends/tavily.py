@@ -44,6 +44,7 @@ from misaka.core.web.network import api_network_options
 from misaka.core.web.provider import (
     WebSearchProvider,
     align_documents,
+    check_response,
     extraction_error,
 )
 from misaka.core.web.timeouts import http_timeout
@@ -109,7 +110,7 @@ async def tavily_request(
         body = (response.text or "").strip()
         detail = body or f"HTTP {response.status_code}"
         raise ValueError(detail)
-    return response.json()
+    return check_response(response.json())
 
 
 
@@ -128,6 +129,7 @@ def normalize_extract_documents(
     Preserve canonical response URLs and unassociated material; the shared association
     helper gives requested slots their exact URL/ID match or an explicit error.
     """
+    check_response(response)
     fallback = urls[0] if len(urls) == 1 else ""
     documents: list[dict[str, Any]] = []
 
@@ -160,6 +162,7 @@ def normalize_extract_documents(
 
 def normalize_search_results(response: dict[str, Any]) -> dict[str, Any]:
     """Map a Tavily ``/search`` response to ``{success, data: {web: [...]}}``."""
+    check_response(response)
     web_results = []
     for i, result in enumerate(response.get("results", [])):
         web_results.append(

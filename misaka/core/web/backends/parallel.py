@@ -28,6 +28,7 @@ from misaka.core.web.keyless import extract_with_failover, search_with_failover
 from misaka.core.web.provider import (
     WebSearchProvider,
     align_documents,
+    check_response,
     extraction_error,
 )
 from misaka.core.web.runtime import api_client
@@ -88,7 +89,7 @@ async def _post(api_key: str, operation: str, payload: dict[str, Any]) -> dict[s
             else:
                 if not response.is_error or attempt == 2 or not _should_retry(response):
                     response.raise_for_status()
-                    return response.json()
+                    return check_response(response.json())
                 retry_headers = response.headers
                 await response.aclose()
             await asyncio.sleep(_retry_delay(attempt, retry_headers))

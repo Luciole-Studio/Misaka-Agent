@@ -197,16 +197,20 @@ misaka web set env.TAVILY_API_KEY tvly-...   # ~/.misaka/web.json に 0600 で�
 
 ## コンテキストエンジン
 
-長いセッションはバージョン固定の [hermes-lcm](https://github.com/stephenschoettler/hermes-lcm)
-のポリシーを使います。発動条件、残す直近部分の選択、チャンク分割、要約の組み立ては LCM が
-受け持ちます。MISAKA は採用されたリプレイを通常のセッションチェックポイントに保存し、元の
-セッション項目は追記のみのまま保たれます。派生履歴は `~/.misaka/lcm.db` にあります。
+長いセッションは **MISAKA LCM** を使用します。固定版
+[hermes-lcm](https://github.com/stephenschoettler/hermes-lcm) のプロジェクト単位の fork です。
+圧縮・検索アルゴリズムは維持し、キャッシュを `<project>/.misaka/lcm/` に分離します。
+同じプロジェクトのエージェントは共有し、最後の利用プロセスの終了時に削除します。
+異常終了で残ったキャッシュは次の起動時に清掃します。
+
+セッション原文とチェックポイントは保存され、再開時に LCM を再構築します。
+引き継ぎ元のセッションも保持してください。履歴、Board、成果物は削除対象ではありません。
 
 LCM に設定された秘匿化・除外・保持・GC の各ポリシーはそのまま効きます。生データが無条件に
 永久保持されると約束するものではありません。アルゴリズム設定は上流の `LCM_*` の名前をその
 まま使い、製品独自の別名は設けていません。`misaka lcm --help` が上流本来の操作文法を
 公開します。ソースを移植したことは、上流ホストの挙動がすべて再現されていることの保証では
-ありません。差分は `misaka/extensions/hermes_lcm/PORT_NOTES.md` に記録しています。
+ありません。差分は `misaka/extensions/misaka_lcm/PORT_NOTES.md` に記録しています。
 
 ## 設定
 

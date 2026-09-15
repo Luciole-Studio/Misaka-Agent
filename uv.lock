@@ -990,6 +990,7 @@ bedrock = [
     { name = "boto3" },
 ]
 browser = [
+    { name = "cryptography" },
     { name = "websockets" },
 ]
 google = [
@@ -1030,6 +1031,7 @@ dev = [
 requires-dist = [
     { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.45" },
     { name = "boto3", marker = "extra == 'bedrock'", specifier = ">=1.35" },
+    { name = "cryptography", marker = "extra == 'browser'", specifier = ">=43" },
     { name = "fastembed", marker = "extra == 'lcm-semantic'" },
     { name = "filelock", specifier = ">=3.32.3" },
     { name = "google-genai", marker = "extra == 'google'", specifier = ">=1.0" },

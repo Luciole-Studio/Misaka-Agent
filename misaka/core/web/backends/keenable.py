@@ -34,7 +34,7 @@ from misaka.core.web.keyless import (
     extract_with_failover,
     search_with_failover,
 )
-from misaka.core.web.provider import WebSearchProvider
+from misaka.core.web.provider import WebSearchProvider, check_response
 from misaka.core.web.runtime import api_client
 
 logger = logging.getLogger(__name__)
@@ -103,7 +103,7 @@ class KeenableWebSearchProvider(WebSearchProvider):
             if response.status_code >= 400:
                 detail = (response.text or "").strip() or f"HTTP {response.status_code}"
                 return {"success": False, "error": f"Keenable search failed: {detail}"}
-            data = response.json()
+            data = check_response(response.json())
 
             web_results = []
             for i, result in enumerate(data.get("results") or []):
@@ -163,7 +163,7 @@ class KeenableWebSearchProvider(WebSearchProvider):
                     raise ValueError(
                         (response.text or "").strip() or f"HTTP {response.status_code}"
                     )
-                data = response.json()
+                data = check_response(response.json())
                 if not isinstance(data, dict):
                     raise TypeError(f"expected a JSON object, got {type(data).__name__}")
                 title = str(data.get("title") or "")

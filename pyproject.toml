@@ -64,7 +64,7 @@ google = ["google-genai>=1.0"]
 bedrock = ["boto3>=1.35"]
 mistral = ["mistralai>=1.5"]
 providers = ["misaka[anthropic,openai,google,bedrock,mistral]"]
-browser = ["websockets>=15,<17"]
+browser = ["websockets>=15,<17", "cryptography>=43"]
 lcm-semantic = ["fastembed"]
 pageindex = [
     "PyPDF2==3.0.1",
@@ -83,13 +83,17 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = ["misaka[providers,pageindex]", "pytest>=8", "pytest-asyncio>=1", "ruff>=0.5"]
 
+[tool.hatch.build]
+# Do not follow ignored build-tree symlinks before visiting the real package.
+skip-excluded-dirs = true
+
 [tool.hatch.build.targets.wheel]
 # Every importable package at the repo root (exposed by the editable install; replaces a hand-written .pth)
 packages = ["misaka"]
 
 [tool.ruff]
 # Vendored verbatim from upstream hermes-lcm: linting it would be a diff against the pin.
-extend-exclude = ["misaka/core/skills/assets", "misaka/core/skills/vendor", "tests/skills_hermes_native", "misaka/extensions/hermes_lcm/vendor", "misaka/extensions/hermes_lcm/native", "tests/hermes_lcm_native"]
+extend-exclude = ["misaka/core/skills/assets", "misaka/core/skills/vendor", "tests/skills_hermes_native", "misaka/extensions/misaka_lcm/vendor", "misaka/extensions/misaka_lcm/native", "tests/hermes_lcm_native", "tests/web/fixtures"]
 
 [tool.ruff.lint]
 # 默认集（E4/E7/E9/F）之外，只加"今天就是零命中"的阻塞调用棘轮：它挡不住我们自己的

@@ -122,7 +122,9 @@ def register(harn, cwd):
                 if runtime.browser is None:
                     from misaka.core.web.browser import BrowserManager
                     runtime.browser = BrowserManager(cwd)
-                result, _ = await run_with_abort(runtime.browser.perform(name, args, tool_call_id), signal)
+                result, aborted = await run_with_abort(runtime.browser.perform(name, args, tool_call_id), signal)
+                if aborted:
+                    raise RuntimeError('Operation aborted')
                 body = result.pop('image_bytes', None)
                 extra, saved_paths = [], []
                 if body is not None:
@@ -147,9 +149,22 @@ def register(harn, cwd):
                     if len(rendered) > 15_000:
                         storage = ({'saved_path': path, 'read': {'path': path, 'offset': 1}} if path else
                                    {'storage_error': 'Full browser result could not be saved; omitted content is unavailable.'})
-                        rendered = json.dumps({'success': result.get('success', True), 'preview': rendered[:10_000],
+                        # Rebuild only from the already redacted (including typed text)
+                        # document. Raw dialog fields would undo the boundary above.
+                        safe = json.loads(rendered)
+                        dialogs = safe.get('pending_dialogs', [])
+                        dialogs = dialogs if isinstance(dialogs, list) else []
+                        pending = [{key: str(row[key])[:2048] for key in
+                                    ('id', 'type', 'message', 'default_prompt') if row.get(key) is not None}
+                                   for row in dialogs[:8] if isinstance(row, dict)]
+                        envelope = {'success': safe.get('success') is not False, 'preview': rendered[:10_000],
                                                'truncated': True, **storage,
-                                               'pending_dialogs': result.get('pending_dialogs', [])}, ensure_ascii=False)
+                                               'pending_dialogs': pending, 'dialogs_truncated': bool(dialogs)}
+                        rendered = json.dumps(envelope, ensure_ascii=False)
+                        # Escaped control characters also spend the serialized budget.
+                        while len(rendered) > 90_000 and envelope['pending_dialogs']:
+                            envelope['pending_dialogs'].pop()
+                            rendered = json.dumps(envelope, ensure_ascii=False)
                 return {'content': [{'type': 'text', 'text': untrusted('browser', rendered)}, *extra],
                         'details': {'saved_paths': saved_paths}, 'isError': result.get('success') is False}
             except Exception as error:  # noqa: BLE001 - tool or transport boundary reports the failure

@@ -119,7 +119,9 @@ async def search(args):
 def register(harn, cwd):
     async def execute(tool_call_id, raw, signal, on_update, ctx):
         try:
-            result, _ = await run_with_abort(search(raw), signal)
+            result, aborted = await run_with_abort(search(raw), signal)
+            if aborted:
+                raise RuntimeError("Operation aborted")
             rendered = redact_secrets(json.dumps(result, ensure_ascii=False))
             saved = await run_in_thread(save_page, cwd, {"provider": "xai", "content_kind": "search_answer"}, rendered)
             if len(rendered) > 95_000:

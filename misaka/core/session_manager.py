@@ -1084,7 +1084,7 @@ class SessionManager:
             raise RuntimeError(f"Cannot fork: source session has no header: {resolved_source_path}")
 
         directory = normalize_path(sessionDir) if sessionDir else get_default_session_dir(resolved_target_cwd)
-        os.makedirs(directory, exist_ok=True)
+        os.makedirs(directory, mode=0o700, exist_ok=True)
         new_session_id = options.id if options and options.id else create_session_id()
         timestamp = _iso_now()
         file_timestamp = timestamp.replace(":", "-").replace(".", "-")
@@ -1102,7 +1102,7 @@ class SessionManager:
         # interrupted halfway (Ctrl-C, crash, disk full) leaves a truncated JSONL under the
         # real name that loads as a valid session next time. Write a temp file in the same
         # directory, then os.replace, which is atomic on one filesystem.
-        atomic.write_text(new_session_file, _dump_jsonl([header, *copied_entries]))
+        atomic.write_text(new_session_file, _dump_jsonl([header, *copied_entries]), mode=0o600)
         return cls(resolved_target_cwd, directory, new_session_file, True)
 
     @classmethod

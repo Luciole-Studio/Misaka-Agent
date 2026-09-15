@@ -14,6 +14,18 @@ from misaka.core.system_prompt import build_system_prompt
 
 
 class PromptGovernanceTests(unittest.TestCase):
+    def test_shared_research_guidance_stays_concise_and_conditional(self):
+        heading = "## Research and reasoning"
+        self.assertEqual(identity.COMMON_CHARTER.count(heading), 1)
+        guidance = identity.COMMON_CHARTER.split(heading, 1)[1]
+        self.assertTrue(guidance.isascii())
+        self.assertLessEqual(len(guidance.split()), 250)
+        self.assertIn("For substantive research and analysis", guidance)
+        self.assertIn("not as a checklist", guidance)
+        for scope in ("Before relying on them", "in this task", "when useful"):
+            with self.subTest(scope=scope):
+                self.assertIn(scope, guidance)
+
     def test_personality_never_removes_or_duplicates_duties(self):
         with tempfile.TemporaryDirectory() as directory:
             profile = Path(directory)
@@ -127,6 +139,70 @@ class PromptGovernanceTests(unittest.TestCase):
             self.assertIn(planner.MARKDOWN_OUTPUT, text)
         self.assertIn("without replanning the whole project", __import__("inspect").getsource(planner.plan))
         self.assertNotIn("one line naming", planner.task_body({"instructions": "Task"}))
+
+    def test_method_guidance_uses_existing_skills_without_repeating_common_charter(self):
+        for tools in (planner.RESEARCH_TOOLS, report.SURVEY_TOOLS, report.FINAL_TOOLS):
+            self.assertIn("skills_list", tools)
+            self.assertIn("skill_view", tools)
+        for contract in (planner.ROOT_CONTRACT, planner.RESEARCH_SISTER_DISCIPLINE,
+                         planner.SYNTHESIS_CONTRACT, planner.RED_TEAM_CONTRACT,
+                         report.DRAFT_CONTRACT, report.SURVEY_CONTRACT, report.FINAL_CONTRACT):
+            with self.subTest(phase=contract.splitlines()[0]):
+                self.assertNotIn("## Research and reasoning", contract)
+                self.assertNotRegex(contract, r"[\u3400-\u9fff]")
+        for field in ("method", "source_strategy", "falsifiers"):
+            self.assertIn(f"`{field}`", planner.ROOT_CONTRACT)
+
+    def test_synthesis_followup_keeps_the_existing_assignment_window(self):
+        run = {"id": "run", "root_session": "/fixture/session.jsonl", "workspace": "/fixture"}
+        node = {"id": "node", "parent_id": None, "trigger_text": "Question"}
+        followup = object()
+        for tool, round_number, left in ((followup, 1, 1), (None, 2, 0), (None, 1, 0)):
+            with self.subTest(round=round_number, left=left), \
+                    patch.object(planner, "_lo_session", return_value="/fixture"), \
+                    patch.object(planner, "task_sources", return_value={}), \
+                    patch.object(planner, "find_most_recent_session", return_value=None), \
+                    patch.object(planner.runs, "plan_round", return_value=round_number), \
+                    patch.object(planner, "_call", return_value=(None, "Conclusion", None)) as call:
+                result = planner.synthesize(object(), run, {"research_plan_approval": False},
+                                            SimpleNamespace(session=None), node, [],
+                                            followup=tool, round=round_number, left=left)
+                prompt = call.call_args.args[2]
+                self.assertEqual(result, "Conclusion\n")
+                self.assertEqual(call.call_args.kwargs["extra_tools"], (tool,) if tool is not None else ())
+                self.assertIn(planner.SOURCES_FOOTER, prompt)
+                self.assertIn(planner.MARKDOWN_OUTPUT, prompt)
+                if tool is not None:
+                    self.assertIn("same question", prompt)
+                    self.assertIn("conceptual distinctions or reasoning", prompt)
+                    self.assertIn("do not use follow-up rounds to review yourself", prompt)
+                    self.assertIn("1 more round(s)", prompt)
+                    self.assertIn("only if you submit a follow-up plan", prompt)
+                elif round_number > 1:
+                    self.assertIn("No further cards can be assigned", prompt)
+                    self.assertNotIn("request follow-up research", prompt)
+                else:
+                    self.assertNotIn("# Round", prompt)
+
+    def test_review_prompts_preserve_independence_and_terminal_boundaries(self):
+        node = {"trigger_text": "Question"}
+        node_review = planner.red_team_body(node, synthesis_path="node/conclusion.md", plan_path="node/plan.md")
+        self.assertIn("do not extend the report", node_review)
+        self.assertIn("does not start investigations on your behalf", node_review)
+        self.assertIn("Only material=true issues require investigation", node_review)
+        draft = {"path": "draft.md", "id": "draft-id", "sha256": "draft-hash"}
+        with patch.object(report, "materials", return_value="Full material map"):
+            final_review = report.review_body(object(), {"question": "Question"}, draft)
+        self.assertIn("artifact `draft-id`, sha256 `draft-hash`", final_review)
+        self.assertIn("node critiques and full sources", final_review)
+        self.assertIn("Do not edit the draft", final_review)
+        self.assertIn("no new research branches\nare created", final_review)
+        self.assertTrue(final_review.endswith("Full material map"))
+        for review in (node_review, final_review):
+            self.assertIn("critique.md", review)
+            self.assertIn("Use issues=[] explicitly", review)
+        self.assertIn("not another research-tree expansion", report.FINAL_CONTRACT)
+        self.assertIn("Do not vote, rank nodes or adjudicate", report.SURVEY_CONTRACT)
 
     def test_skill_policy_has_one_owner_and_respects_read_only_sessions(self):
         entries = [{"name": "test", "description": "x" * 200, "category": "general", "layer": "role"}]

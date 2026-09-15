@@ -26,11 +26,12 @@ premises are untested. Identify the relevant objects, processes, interactions, p
 and disciplines without expanding beyond the agreed question and limits. Specify evidence needs, deliverables,
 dependencies and acceptance criteria. Offer suitable methods, theories and source strategies with their blind
 spots and competing approaches; Sisters choose and refine the specialist implementation.
-Method Skills are a menu, not a mandatory research template: combine, reject or add methods as the problem demands.
+Use relevant available method Skills as a menu, not a mandatory template. Specify `method`, `source_strategy`
+and `falsifiers` where useful; assign conceptual analysis or explanation testing as well as material gathering.
 Check for important missing dimensions. Consult available coverage maps or `coverage_scan` when they would improve
 the design, not a fixed number of times on every node. Index counts are discovery signals, not proof of relevance
-or completeness, particularly across languages, archives and interpretive traditions. Delegate substantial material
-gathering to Sisters instead of doing their assignments during planning.
+or completeness, particularly across languages, archives and interpretive traditions. Delegate substantive
+investigation to Sisters instead of doing their assignments during planning.
 Choose Sisters by fit from the system catalog and explain each choice. End `plan_markdown` with "Coverage maps used":
 record what informed the coverage check (or why no scan was needed or available), useful dimensions and remaining gaps.
 
@@ -57,11 +58,12 @@ RESEARCH_TOOLS = (*MATERIAL_TOOLS, "coverage_scan", "skills_list", "skill_view")
 # rather than repeated in every card. The card body keeps only what is specific to that task.
 RESEARCH_SISTER_DISCIPLINE = """[Research card]
 You are one researcher on a research tree that Last Order coordinates. How to work:
+- Read relevant available method Skills as needed to generate, compare or revise explanations for this assignment.
 - Back every empirical claim with a traceable source and an exact quotation or precise location; read the saved
   material before citing it.
 - Keep facts, inferences, interpretations and normative judgements apart, and say which is which.
 - Record counterevidence, competing explanations and unresolved questions as you meet them. At the start of a
-  substantive investigation, identify evidence that could overturn the working premise and seek it deliberately;
+  substantive investigation, identify evidence or reasoning that could overturn the working premise and test it deliberately;
   revise that check when the premise changes rather than repeating a ritual before every search.
 - Note whether your sources are independent of one another: three retellings of one source are one source.
 - Authority, mainstream or contrarian opinion, and the task's own premise are not evidence.
@@ -118,30 +120,31 @@ Current workspace lookup: misaka_research_view(view="workspace", run_id="{run_id
 
 
 SYNTHESIS_FOLLOWUP = """
-# Round {round}: conclude, or ask for more material ({left} more round(s) may still be asked for)
-Do not write a conclusion the material cannot carry. If what the cards brought back leaves the question
-unanswerable, call `misaka_research_assign` with a follow-up round of cards: say in `plan_markdown` what this
-round left open and why each new card closes it, and end this turn with a short note; the conclusion is written
-after those cards return, from all rounds together. A follow-up round is for the same question with missing
-material; a doubt about the conclusion itself belongs to the red team, which reviews what you write next, and
-issues it raises open child nodes -- do not use follow-up rounds to review yourself.
+# Round {round}: conclude, or request follow-up research ({left} more round(s) may still be asked for)
+If returned work leaves the same question unanswerable, use `misaka_research_assign` for missing evidence,
+conceptual distinctions or reasoning, including developing competing explanations. In `plan_markdown`, identify
+the gap and why each new card addresses it; end this turn with a short note. Conclude after those cards return,
+using all rounds together. Follow-ups complete this question's research; they do not replace independent review.
+The red team reviews the conclusion next and its issues open child nodes; do not use follow-up rounds to review yourself.
 """
 
 SYNTHESIS_LAST_ROUND = """
 # Round {round}: the last round
 No further cards can be assigned on this node. Write the conclusion from what there is, and name what remains
-unsupported and what evidence would settle it.
+unsupported and what evidence or reasoning would settle it.
 """
 
 SYNTHESIS_CONTRACT = """# Node conclusion — synthesize the submitted research output
 Read full sources in context; summaries and the ledger are researchers' declarations, not certified evidence.
 
+Check links between cards: align concepts, test shared premises and distinguish independent grounds from repeated
+support. Read relevant available Skills for these checks when useful.
 Separate shared findings, competing findings, key evidence, counterevidence,
 methodological limits, value premises, and unresolved questions. Give traceable source paths, document locations or URLs.
 Do not vote or hide competing interpretations or insufficient evidence. Source checks and limited supplementary
 retrieval needed to assess returned evidence are part of synthesis; preserve and cite any new material for the red team.
 Use the available follow-up assignment for substantive new research; when none remains, state the unresolved gap.
-State what new evidence could change the judgement.
+State what new evidence or reasoning could change the judgement.
 This run's conversations -- yours with the user, every Sister's -- are listed under Conversations in
 `misaka_research_view(view="workspace", run_id=...)`; `lcm_grep(session_scope="session", session_id=...)` searches
 one and `lcm_load_session` opens it. Sessions not listed there belong to other work; leave them alone.
@@ -159,6 +162,8 @@ This returns the review to that Last Order; it does not start investigations on 
 - Source-task artifacts: read whichever the conclusion cites.
 {own_cards}{deliberation}{evidence}
 ## what to inspect
+Test the premises carrying key conclusions and the strongest competing explanation. Separate a local repair from
+a flaw that overturns the conclusion; read relevant available review Skills as needed.
 Facts and quotations, inference and causation, concepts and scope, methods and sampling, standpoint and bias, omitted actors or
 processes, interactions, time horizons, consequences, and normative claims disguised as facts. Use available coverage maps
 or literature scans when useful to assess a suspected omission; an unmentioned dimension is not automatically a defect.
@@ -669,6 +674,11 @@ when evidence warrants it and explain why. No separate planning submission, file
         approach += navigation(run_id)
     if "instructions" in task:
         return task["instructions"].rstrip() + "\n\n" + approach
+    methods = ""
+    for key, label in (("method", "method"), ("source_strategy", "source strategy"), ("falsifiers", "falsifiers")):
+        value = task.get(key)
+        if isinstance(value, str) and value.strip():
+            methods += f"\n## {label}\n{value.strip()}\n"
     larger = ""
     trigger = node["trigger_text"] if node is not None else None
     if trigger:
@@ -681,7 +691,7 @@ when evidence warrants it and explain why. No separate planning submission, file
                     "before doing anything they already did:\n"
                     + "\n".join(f"- [{row['id']}] {row['title']} → `{row['output_dir']}`" for row in previous) + "\n")
     if others:
-        company = ("\n## sibling cards\nOther cards on the same node, in parallel with yours "
+        company += ("\n## sibling cards\nOther cards on the same node, in parallel with yours "
                    "(reach their Sisters with `SendMessage`):\n"
                    + "\n".join(f"- {spec.get('local_id')} · {spec.get('title')} → Sister {spec.get('assignee')}"
                                for spec in others) + "\n")
@@ -690,7 +700,7 @@ when evidence warrants it and explain why. No separate planning submission, file
 
 ## rationale
 {task['rationale']}
-{larger}{company}
+{methods}{larger}{company}
 {approach}
 ## deliverable
 {task['deliverable']}

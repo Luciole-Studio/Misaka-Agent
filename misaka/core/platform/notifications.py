@@ -98,8 +98,8 @@ def prune(con, *, now=None):
     )
     floor = con.execute("SELECT MIN(cursor) FROM notification_subscriptions").fetchone()[0]
     con.execute(
-        "DELETE FROM notification_events WHERE created_at < ? AND id <= ?",
-        (now - EVENT_RETENTION_SECONDS, int(floor) if floor is not None else 0),
+        "DELETE FROM notification_events WHERE created_at < ? AND (? IS NULL OR id <= ?)",
+        (now - EVENT_RETENTION_SECONDS, floor, floor),
     )
 
 
@@ -129,6 +129,7 @@ def init(con):
             "SELECT 1 FROM schema_migrations WHERE component='notifications' AND version=?",
             (NOTIFICATION_SCHEMA_VERSION,),
         ).fetchone():
+            prune(con)
             return
         con.execute(
             "INSERT OR IGNORE INTO notification_events"

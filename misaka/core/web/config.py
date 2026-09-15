@@ -226,7 +226,11 @@ def _configured_secrets() -> list[str]:
     """Every credential value currently readable, longest first."""
     names = provider_variables()
     endpoints = {name for name in names if name in _ENDPOINT_VARS or name.endswith("_URL")}
-    values = [provider_env(name) for name in names - endpoints - set(_PUBLIC_VARS)] + list(current_scope().runtime_secrets)
+    scope = current_scope()
+    with scope.lock:
+        vault_values = set(scope.vault_secrets)
+        remembered = list(scope.runtime_secrets)
+    values = [provider_env(name) for name in names - endpoints - set(_PUBLIC_VARS)] + remembered
     for name in endpoints:
         raw = provider_env(name)
         if "@" not in raw:
@@ -241,7 +245,9 @@ def _configured_secrets() -> list[str]:
     except ValueError:
         pass  # A malformed non-string proxy setting has no credential to put on the wire.
     # Longest first so a key that contains a shorter value cannot leave a fragment behind.
-    return sorted({v for v in values if len(v) >= _MIN_SECRET_CHARS}, key=len, reverse=True)
+    # Vault values (including short PINs) must survive API-key ring eviction:
+    # later page readback can still contain a password filled earlier in this session.
+    return sorted({v for v in values if len(v) >= _MIN_SECRET_CHARS} | vault_values, key=len, reverse=True)
 
 
 def redact_secrets(text: str) -> str:
@@ -319,10 +325,10 @@ def use_keyless(name: str, api_key: str) -> bool:
 _BOOL_KEYS = frozenset(
     {"keyless_fallback", "keyless_rescue", "cache_enabled", "allow_private_urls", "debug_enabled", "proxy_dns"}
 )
-_NESTED_KEYS = frozenset({"env", "provider_tier", "xai", "x_search", "browser", "website_blocklist",
+_NESTED_KEYS = frozenset({"env", "provider_tier", "xai", "x_search", "browser", "vault", "website_blocklist",
                           "http_timeout", "operation_timeout"})
 _SCALAR_KEYS = frozenset(
-    {"backend", "search_backend", "extract_backend", "cache_ttl_minutes", "extract_char_limit"}
+    {"backend", "search_backend", "extract_backend", "cache_ttl_minutes", "extract_char_limit", "extract_timeout"}
 )
 # Written from the CLI as one comma-separated argument, stored as a JSON list. A host
 # pattern cannot contain a comma, so splitting on it costs nothing and spares the user a
@@ -371,6 +377,15 @@ def _coerce(key: str, value: str) -> bool | str | list[str]:
 
 
 def _coerce_nested(section: str, key: str, value: str) -> Any:
+    if section == "vault":
+        if key == "enabled":
+            return _as_bool("vault.enabled", value)
+        if key not in {"onepassword", "bitwarden"}:
+            raise ValueError("vault takes enabled, onepassword or bitwarden")
+        parsed = json.loads(value)
+        if not isinstance(parsed, dict):
+            raise ValueError(f"vault.{key} requires a JSON object")
+        return parsed
     if (section == "x_search" and key in {"timeout_seconds", "retries"}) or (section == "browser" and key in {"command_timeout", "open_timeout", "recording_retention"}):
         parsed = json.loads(value)
         from misaka.core.web.timeouts import _seconds
@@ -542,7 +557,8 @@ def redact_values(value: Any) -> Any:
     if isinstance(value, str):
         return redact_secrets(value)
     if isinstance(value, dict):
-        return {key: redact_values(item) for key, item in value.items()}
+        return {redact_secrets(key) if isinstance(key, str) else key: redact_values(item)
+                for key, item in value.items()}
     if isinstance(value, list):
         return [redact_values(item) for item in value]
     return value

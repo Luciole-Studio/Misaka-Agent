@@ -42,6 +42,7 @@ from misaka.core.web.keyless import (
 from misaka.core.web.provider import (
     WebSearchProvider,
     align_documents,
+    check_response,
     extraction_error,
 )
 from misaka.core.web.runtime import api_client
@@ -125,7 +126,7 @@ class ExaWebSearchProvider(WebSearchProvider):
             if response.status_code >= 400:
                 detail = (response.text or "").strip() or f"HTTP {response.status_code}"
                 return {"success": False, "error": f"Exa search failed: {detail}"}
-            payload = response.json()
+            payload = check_response(response.json())
 
             web_results = []
             for i, result in enumerate(payload.get("results") or []):
@@ -203,7 +204,7 @@ class ExaWebSearchProvider(WebSearchProvider):
             raise ValueError(f"Exa extract failed: {detail}")
 
         documents: list[dict[str, Any]] = []
-        for result in response.json().get("results") or []:
+        for result in check_response(response.json()).get("results") or []:
             if not isinstance(result, dict):
                 continue
             url = str(result.get("url") or "")

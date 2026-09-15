@@ -16,9 +16,9 @@ from __future__ import annotations
 import os
 
 from misaka.core.tools._office._receipt import result
-from misaka.core.tools._office._runs import norm_runs
+from misaka.core.tools._office._runs import norm_runs, splice_runs
 
-SUFFIXES = frozenset({".docx", ".docm"})
+SUFFIXES = frozenset({".docx"})
 
 _ALIGN = {"left": "LEFT", "center": "CENTER", "centre": "CENTER",
           "right": "RIGHT", "justify": "JUSTIFY"}
@@ -72,6 +72,7 @@ def _hyperlink(paragraph, url, text, *, bold=None, italic=None, color=None, unde
     run.append(text_node)
     link.append(run)
     paragraph._p.append(link)
+    return link
 
 
 def _apply_runs(paragraph, text):
@@ -82,7 +83,7 @@ def _apply_runs(paragraph, text):
         if spec.get("link"):
             _hyperlink(paragraph, spec["link"], spec.get("text", ""),
                        bold=spec.get("bold"), italic=spec.get("italic"),
-                       color=spec.get("color"))
+                       color=spec.get("color"), underline=spec.get("underline", True))
             continue
         run = paragraph.add_run(spec.get("text", ""))
         for field, attribute in (("bold", "bold"), ("italic", "italic"),
@@ -222,11 +223,11 @@ def _paragraphs(document):
     Find-and-replace has to reach the tables: a figure quoted in a table is exactly the
     kind of thing that needs correcting, and a walk over ``doc.paragraphs`` never sees it.
     """
-    yield from document.paragraphs
-    for table in document.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                yield from cell.paragraphs
+    from docx.oxml.ns import qn
+    from docx.text.paragraph import Paragraph
+    # XML order visits merged cells once and includes nested tables/content controls.
+    for element in document.element.body.iter(qn("w:p")):
+        yield Paragraph(element, document)
 
 
 def _splice(paragraph, find, replace, budget):
@@ -237,44 +238,9 @@ def _splice(paragraph, find, replace, budget):
     not overlap the match are never rewritten, so the paragraph's formatting survives a
     correction -- which is the whole difference from rewriting the paragraph into run 0.
     """
-    runs = paragraph.runs
-    if not runs or budget[0] == 0:
-        return 0
-    text = "".join(run.text or "" for run in runs)
-    if find not in text:
-        return 0
-
-    spans, offset = [], 0
-    for run in runs:
-        length = len(run.text or "")
-        spans.append((offset, offset + length))
-        offset += length
-
-    positions, cursor = [], 0
-    while True:
-        found = text.find(find, cursor)
-        if found < 0 or (budget[0] > 0 and len(positions) >= budget[0]):
-            break
-        positions.append(found)
-        cursor = found + len(find)
-    if not positions:
-        return 0
-
-    # Right to left: an earlier replacement would shift every later offset.
-    for start in reversed(positions):
-        end = start + len(find)
-        written = False
-        for index, (run_start, run_end) in enumerate(spans):
-            if run_end <= start or run_start >= end:
-                continue
-            current = runs[index].text or ""
-            head = current[: max(0, start - run_start)]
-            tail = current[max(0, end - run_start):] if run_end > end else ""
-            runs[index].text = head + ("" if written else replace) + tail
-            written = True
-    if budget[0] > 0:
-        budget[0] -= len(positions)
-    return len(positions)
+    from docx.text.run import Run
+    runs = [Run(node, paragraph) for node in paragraph._p.xpath("./w:r|./w:hyperlink/w:r")]
+    return splice_runs(runs, find, replace, budget)
 
 
 def _anchor(document, text):
@@ -471,8 +437,10 @@ def write(path, op, args, *, overwrite=False):
         find = args.get("find")
         if not find:
             return "[error] replace_text needs 'find'."
-        limit = int(args.get("count", 0) or 0)
-        budget = [limit if limit > 0 else -1]
+        limit = args.get("count")
+        budget = [int(limit) if limit is not None else -1]
+        if budget[0] == 0:
+            return result("replace_text: 0 replacements requested; file unchanged")
         done = 0
         for paragraph in _paragraphs(document):
             if budget[0] == 0:
@@ -584,16 +552,37 @@ def write(path, op, args, *, overwrite=False):
         for paragraph in _paragraphs(document):
             if find not in paragraph.text:
                 continue
-            whole = paragraph.text
+            from copy import deepcopy
+
+            from docx.text.run import Run
+            runs = [Run(node, paragraph) for node in paragraph._p.xpath("./w:r|./w:hyperlink/w:r")]
+            whole = "".join(run.text for run in runs)
             at = whole.find(find)
-            before, after = whole[:at], whole[at + len(find):]
-            for run in list(paragraph.runs):
-                run.text = ""
-            if before:
-                paragraph.add_run(before)
-            _hyperlink(paragraph, url, find)
-            if after:
-                paragraph.add_run(after)
+            if at < 0:
+                continue
+            end, offset, matches = at + len(find), 0, []
+            for run in runs:
+                length = len(run.text)
+                if offset < end and offset + length > at:
+                    matches.append((run, offset))
+                offset += length
+            if any(run._r.getparent() is not paragraph._p for run, _ in matches):
+                return "[error] add_hyperlink overlaps an existing hyperlink; existing content left unchanged"
+            # Unlike the upstream whole-paragraph rewrite, leave every unrelated
+            # run and hyperlink intact. Only the selected text becomes a new link.
+            link = _hyperlink(paragraph, url, find)
+            for index, (run, offset) in enumerate(matches):
+                text = run.text
+                tail = text[max(0, end - offset):]
+                if index == 0:
+                    run.text = text[:max(0, at - offset)]
+                    run._r.addnext(link)
+                    if tail:
+                        node = deepcopy(run._r)
+                        Run(node, paragraph).text = tail
+                        link.addnext(node)
+                else:
+                    run.text = tail
             document.save(path)
             return f"added hyperlink on {find!r} → {url}"
         return result("add_hyperlink skipped", warn=f"text not found: {find!r}")

@@ -268,3 +268,21 @@ async def test_abrupt_exit_reports_stage_and_code(isolated, monkeypatch, ready):
         assert ("did not accept the prompt" if ready else "before becoming ready") in task.error
     finally:
         await manager.close()
+
+
+async def test_lcm_child_inherits_resumed_project_not_launcher(isolated, endpoint):
+    from misaka.core.session_manager import SessionManager
+    manager, parent = host(isolated)
+    project = isolated / 'original-project'
+    project.mkdir()
+    parent.sessionManager.appendCustomEntry('lcm-project', {'workspace': str(project.resolve())})
+    try:
+        task = await create(manager, parent)
+        async with asyncio.timeout(20):
+            await manager._drive(task, 'PROJECT_OWNER_MARKER', notify=False)
+        assert task.status == 'completed', (task.error, task.stderr)
+        child = SessionManager.openInMemory(str(task.transcript))
+        marker = next(e for e in child.getEntries() if e.get('customType') == 'lcm-project')
+        assert marker['data']['workspace'] == str(project.resolve())
+    finally:
+        await manager.close()

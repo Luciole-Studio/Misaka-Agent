@@ -10,6 +10,8 @@ source tree. Built-in subagent types ship with the package
 import json
 import os
 
+from misaka.utils import atomic
+
 
 def role_of(profile_dir):
     """Return the role name (path relative to profiles/), or the basename when not under profiles/."""
@@ -64,16 +66,17 @@ def persist_role_default_model(profile_dir, model_id):
         with open(path, encoding="utf-8") as handle:
             data = json.load(handle)
         if not isinstance(data, dict):
-            data = {}
-    except (OSError, ValueError):
+            return False
+    except FileNotFoundError:
         data = {}
+    except (OSError, ValueError):
+        return False
     if data.get("model") == model_id:
         return False
     data["model"] = model_id
     try:
         os.makedirs(profile_dir, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as handle:
-            json.dump(data, handle, ensure_ascii=False, indent=2)
+        atomic.write_text(path, json.dumps(data, ensure_ascii=False, indent=2))
     except OSError:
         # The pin is a convenience, not the record: settings.json already has the default.
         return False

@@ -32,7 +32,8 @@ from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.experimental import get_experimental_tool_sampling
 from misaka.core.extensions.types import ToolDefinition
-from misaka.core.tools._common import _ignore_background_task_result, abort_race
+from misaka.core.tools._common import abort_race
+from misaka.core.tools._office.schema import OPERATION_CONTRACT
 from misaka.core.tools.file_mutation_queue import with_file_mutation_queue
 from misaka.core.tools.path_utils import resolve_to_cwd
 from misaka.core.tools.render_utils import render_tool_path, str_value
@@ -198,6 +199,9 @@ def create_office_tool_definition(
         if problem:
             raise RuntimeError(problem)
 
+        from misaka.core.tools._office.paths import output_paths, resolve_ops
+        ops = resolve_ops(ops, cwd)
+
         async def mutate() -> AgentToolResult:
             async def worker() -> AgentToolResult:
                 # Parsing and saving an OOXML package is CPU-bound and unbounded in the
@@ -206,22 +210,45 @@ def create_office_tool_definition(
                     _office.run_ops, absolute_path, ops, overwrite=parsed.overwrite)
                 from misaka.core.tools._office._intent import archive
                 await asyncio.to_thread(archive, absolute_path, ops, workspace=cwd)
-                if str(receipt).startswith("[error]"):
-                    raise RuntimeError(str(receipt)[len("[error] "):])
+                if str(receipt).startswith(("[error]", "✗")):
+                    raise RuntimeError(str(receipt))
                 return AgentToolResult(content=[TextContent(text=receipt)], details=None)
 
             worker_task = asyncio.create_task(worker())
-            async with abort_race(signal) as abort_task:
-                if abort_task is None:
-                    return await worker_task
-                done, _pending = await asyncio.wait(
-                    {worker_task, abort_task}, return_when=asyncio.FIRST_COMPLETED)
-                if abort_task in done and worker_task not in done:
-                    _ignore_background_task_result(worker_task)
-                    raise RuntimeError("Operation aborted")
-                return await worker_task
+            try:
+                async with abort_race(signal) as abort_task:
+                    if abort_task is None:
+                        return await asyncio.shield(worker_task)
+                    done, _pending = await asyncio.wait(
+                        {worker_task, abort_task}, return_when=asyncio.FIRST_COMPLETED)
+                    if abort_task in done and worker_task not in done:
+                        raise RuntimeError("Operation aborted")
+                    return await asyncio.shield(worker_task)
+            finally:
+                # to_thread cannot stop an in-flight save. Hold every destination lock
+                # through completion even when the caller aborts or cancels this task.
+                while not worker_task.done():
+                    try:
+                        await asyncio.shield(worker_task)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:  # noqa: BLE001 - preserve the caller cancellation
+                        break
+                if not worker_task.cancelled():
+                    worker_task.exception()  # retrieve failures when cancellation won
 
-        return await with_file_mutation_queue(absolute_path, mutate)
+        # Exports mutate a second path. Canonical, sorted lock order prevents both
+        # cross-document export races and deadlocks when two calls share destinations.
+        paths = sorted({os.path.realpath(p) for p in output_paths(absolute_path, ops)})
+
+        async def locked(index=0):
+            if index == len(paths):
+                if signal_aborted(signal):
+                    raise RuntimeError("Operation aborted")
+                return await mutate()
+            return await with_file_mutation_queue(paths[index], lambda: locked(index + 1))
+
+        return await locked()
 
     def render_call(args: Any, theme_obj: Any, context: Any) -> Text:
         text = context.lastComponent if isinstance(context.lastComponent, Text) else Text("", 0, 0)
@@ -265,7 +292,7 @@ def create_office_tool_definition(
             "set_text, add_textbox, add_table, add_image, set_notes, replace_text, "
             "add_shape, add_chart, format_text, duplicate_slide, delete_slide, "
             "set_slide_size. Text ops: create, append, replace_text."
-        ),
+        ) + "\n\n" + OPERATION_CONTRACT,
         promptSnippet=office_tool_system_prompt_contribution["snippet"],
         promptGuidelines=list(office_tool_system_prompt_contribution["guidelines"]),
         parameters=OfficeToolInput,

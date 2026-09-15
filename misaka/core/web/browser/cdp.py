@@ -50,6 +50,7 @@ class Supervisor:
         self.dialog_ready = asyncio.Event()
         self.children = set()
         self.root = None
+        self.pages = set()
         self.error = None
         self.dialog_lock = asyncio.Lock()
         self.relay = None
@@ -76,6 +77,7 @@ class Supervisor:
         if not target_id:
             raise RuntimeError('CDP has no page target')
         self.root = target_id
+        self.pages.add(target_id)
         await self.attach(target_id)
         return target_id
 
@@ -180,9 +182,10 @@ class Supervisor:
                     fid = params['frameId']
                     self.frames[fid] = self.frames.get(fid, {}) | {'id': fid, 'parentId': params['parentFrameId']}
                 elif method == 'Page.frameDetached':
-                    # Process promotion is not removal; a live OOPIF still owns this frame.
+                    # A process swap keeps the frame; an explicit DOM removal does
+                    # not, even while its child session is still detaching.
                     fid = params.get('frameId')
-                    if params.get('reason') != 'swap' and fid not in self.sessions:
+                    if params.get('reason') != 'swap':
                         self._detach_frame(fid)
                 elif method == 'Target.attachedToTarget':
                     info = params.get('targetInfo', {})
@@ -211,7 +214,8 @@ class Supervisor:
             await self.call('Target.setAutoAttach', {'autoAttach': True, 'waitForDebuggerOnStart': False,
                                                    'flatten': True}, session=sid)
             tree = await self.call('Page.getFrameTree', session=sid)
-            self._frame_tree(tree.get('frameTree', {}))
+            if sid in self.sessions.values():
+                self._frame_tree(tree.get('frameTree', {}))
         except Exception:  # noqa: BLE001, S110 - a child that detached during setup is not an error
             pass
 
@@ -234,7 +238,7 @@ class Supervisor:
         def build(fid, ancestors):
             nonlocal remaining
             remaining -= 1
-            return {**self.frames[fid], 'is_oopif': fid in self.sessions and fid != self.root,
+            return {**self.frames[fid], 'is_oopif': fid in self.sessions and fid != self.root and fid not in self.pages,
                     'childFrames': [build(child, ancestors | {fid}) for child, row in self.frames.items()
                                     if remaining > 0 and len(ancestors) < 8 and row.get('parentId') == fid and child not in ancestors | {fid}]}
         return [build(fid, set()) for fid, row in self.frames.items() if remaining > 0 and row.get('parentId') not in self.frames]
@@ -276,6 +280,43 @@ class Supervisor:
             if not self.dialogs:
                 self.dialog_ready.clear()
             return {'success': True, 'action': action, 'dialog_id': dialog_id}
+
+    async def focus_page(self, origin, *, accept=None, owned_browser=False):
+        """Hermes focus_page, constrained to the tab/lease this session owns.
+
+        An external CDP endpoint is shared: never discover/adopt other user tabs.
+        Isolated local browsers and dedicated cloud leases may focus their pages.
+        """
+        from misaka.core.web.browser.vault.store import VaultError, normalize_origin
+        targets = (await self.call('Target.getTargets', timeout=10)).get('targetInfos', [])
+        for target in targets:
+            tid, url = target.get('targetId'), target.get('url', '')
+            if target.get('type') != 'page' or (not owned_browser and tid != self.root):
+                continue
+            try:
+                if urlsplit(url).scheme not in {'http', 'https'}:
+                    continue
+                if origin and normalize_origin(url) != origin:
+                    continue
+                normalize_origin(url)
+                if self.check_url:
+                    await self.check_url(url)
+            except (ValueError, OSError, VaultError):
+                continue
+            existed = tid in self.sessions
+            sid = await self.attach(tid)
+            if accept:
+                probe = await self.call('Runtime.evaluate', {'expression': accept, 'returnByValue': True},
+                                        session=sid, timeout=10)
+                if not probe.get('result', {}).get('value'):
+                    if not existed:
+                        await self.call('Target.detachFromTarget', {'sessionId': sid}, timeout=10)
+                        self._detach_frame(tid)
+                    continue
+            self.root = tid
+            self.pages.add(tid)
+            return {'ok': True, 'url': url}
+        return {'ok': False, 'error': 'No owned page matches the requested origin and form'}
 
     async def share(self):
         """One Lightpanda context lives on one upstream connection. Share that

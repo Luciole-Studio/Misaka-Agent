@@ -79,3 +79,44 @@ def md_hint(args):
         return ""
     return ("hint: the text contains Markdown (" + "; ".join(hits)
             + "). This tool writes literally and does not parse it — use the parameters instead.")
+
+
+def splice_runs(runs, find, replace, budget):
+    """Replace literal spans across styled runs without rewriting unrelated runs."""
+    if not runs or budget[0] == 0:
+        return 0
+    text = "".join(run.text or "" for run in runs)
+    if find not in text:
+        return 0
+
+    spans, offset = [], 0
+    for run in runs:
+        length = len(run.text or "")
+        spans.append((offset, offset + length))
+        offset += length
+
+    positions, cursor = [], 0
+    while True:
+        found = text.find(find, cursor)
+        if found < 0 or (budget[0] > 0 and len(positions) >= budget[0]):
+            break
+        positions.append(found)
+        cursor = found + len(find)
+    if not positions:
+        return 0
+
+    # Right to left: an earlier replacement would shift every later offset.
+    for start in reversed(positions):
+        end = start + len(find)
+        written = False
+        for index, (run_start, run_end) in enumerate(spans):
+            if run_end <= start or run_start >= end:
+                continue
+            current = runs[index].text or ""
+            head = current[: max(0, start - run_start)]
+            tail = current[max(0, end - run_start):] if run_end > end else ""
+            runs[index].text = head + ("" if written else replace) + tail
+            written = True
+    if budget[0] > 0:
+        budget[0] -= len(positions)
+    return len(positions)

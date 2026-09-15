@@ -32,6 +32,7 @@ class WebScope:
     negative_bans: dict = field(default_factory=dict, repr=False)
     rejected_credentials: dict = field(default_factory=dict, repr=False)
     runtime_secrets: dict = field(default_factory=dict, repr=False)
+    vault_secrets: set[str] = field(default_factory=set, repr=False)
     gateway_accounts: dict = field(default_factory=dict, repr=False)
     lock: object = field(default_factory=threading.RLock, repr=False)
     config: dict | None = field(default=None, repr=False)
@@ -109,7 +110,7 @@ def cache_namespace() -> str:
     # become a measured source of cache misses, rather than maintaining two key builders.
     routing = {key: value for key, value in web_config().items() if key not in {
         "website_blocklist", "allow_private_urls", "cache_enabled", "cache_ttl_minutes", "cache_exempt_hosts",
-        "http_timeout", "operation_timeout", "debug_enabled", "proxy_dns", "trusted_private_hosts",
+        "http_timeout", "operation_timeout", "extract_timeout", "debug_enabled", "proxy_dns", "trusted_private_hosts",
     }}
     if isinstance(routing.get('env'), dict):
         from misaka.core.web.network import PROXY_VARIABLES, TLS_VARIABLES

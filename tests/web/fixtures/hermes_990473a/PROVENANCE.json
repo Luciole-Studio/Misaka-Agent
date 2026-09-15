@@ -1,0 +1,10 @@
+{
+  "repository": "https://github.com/nousresearch/hermes-agent",
+  "commit": "990473a79c6b0396b0a648fdd85ee8f7a5c267d3",
+  "license": "LICENSE",
+  "files": {
+    "tools/web_tools.py": "6bdac4d9e0bfb8734c748b1aae5c788cd5bf988686818fe3fe395ee0a17ec131",
+    "agent/web_search_registry.py": "a520c7c64772f1b16ea20ac9b9dccba2d17f2c7b00304fa0a243a0a9728cd009",
+    "plugins/web/firecrawl/provider.py": "f9de41a9278044231bc0fa9c39475a93bedcd37968714f2698419cbe557e8410"
+  }
+}

@@ -30,9 +30,8 @@ import zipfile
 MEMBER_BYTES = 16 * 1024 * 1024
 PACKAGE_BYTES = 64 * 1024 * 1024
 
-# How much of each markup member is read looking for a declaration. A DOCTYPE is legal XML
-# only before the root element, so it is always in the head of the file; the bound is what
-# keeps the scan from inflating a whole package to prove a negative.
+# Streaming scan chunk size, not a prolog length limit. Whitespace before a DOCTYPE
+# is unbounded; all markup is checked within the package size limits above.
 ENTITY_SCAN_BYTES = 64 * 1024
 
 # Every OOXML package carries this at its root. Its absence means the zip is something
@@ -82,15 +81,17 @@ def precheck(path):
             for name in markup:
                 try:
                     with archive.open(name) as member:
-                        head = member.read(ENTITY_SCAN_BYTES)
-                except (OSError, zipfile.BadZipFile, RuntimeError, EOFError):
-                    # A member that will not decompress is the parser's to report: it can say
-                    # which part of the package is broken, and this scan cannot.
-                    continue
-                if b"<!ENTITY" in head:
-                    raise _refuse(path, f"{name} declares XML entities. Expat expands them, "
-                                        "so a document that does this is not one this corpus "
-                                        "will parse.")
+                        tail = b""
+                        while chunk := member.read(ENTITY_SCAN_BYTES):
+                            # UTF-16/32 also encode XML declarations. Strip NUL padding
+                            # for this ASCII token scan and retain chunk-boundary overlap.
+                            scanned = tail + chunk.replace(b"\x00", b"")
+                            if b"<!ENTITY" in scanned:
+                                raise _refuse(path, f"{name} declares XML entities; "
+                                                    "entity expansion is not permitted.")
+                            tail = scanned[-16:]
+                except (OSError, zipfile.BadZipFile, RuntimeError, EOFError) as error:
+                    raise _refuse(path, f"{name} could not be checked: {error}") from error
     except zipfile.BadZipFile as error:
         raise _refuse(path, f"the file is not a zip archive ({error}). An .docx/.xlsx/.pptx "
                             "is a zip; a legacy .doc/.xls/.ppt is not, and needs LibreOffice "

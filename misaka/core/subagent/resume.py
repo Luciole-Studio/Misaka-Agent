@@ -3,7 +3,7 @@
 Port filterUnresolvedToolUses, filterOrphanedThinkingOnlyMessages, and the
 whitespace filter plus mergeUserMessages from src/utils/messages.ts. Native tool
 results stay separate for Pi provider conversion. Merge only the request view
-after Hermes LCM has validated the original message objects against its archive.
+after MISAKA LCM has validated the original message objects against its archive.
 Never rewrite the transcript: other branches and signed thinking stay intact.
 """
 from __future__ import annotations
@@ -102,7 +102,7 @@ def filter_resume_messages(messages: list[Any]) -> list[Any]:
 def install_resume_filter(session: Any) -> None:
     """Select at Pi's request boundary AFTER native engine/source validation.
 
-    Archive and active messages remain the same source of truth for Hermes LCM.
+    Archive and active messages remain the same source of truth for MISAKA LCM.
     Its existing preflight may publish a checkpoint before this view is built.
     No weakened archive validation, parallel replay cache, or duplicate JSONL IDs.
     """

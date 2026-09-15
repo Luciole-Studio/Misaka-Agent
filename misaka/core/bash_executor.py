@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import codecs
-import os
-import secrets
 import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -54,8 +52,9 @@ async def execute_bash_with_operations(
         nonlocal temp_file_path, temp_file_handle
         if temp_file_path is not None:
             return
-        temp_file_path = os.path.join(tempfile.gettempdir(), f"misaka-bash-{secrets.token_hex(8)}.log")
-        temp_file_handle = open(temp_file_path, "w", encoding="utf-8")  # noqa: SIM115 - kept open for streaming, closed by the caller
+        temp_file_handle = tempfile.NamedTemporaryFile(  # noqa: SIM115 - closed after streaming
+            mode="w", encoding="utf-8", prefix="misaka-bash-", suffix=".log", delete=False)
+        temp_file_path = temp_file_handle.name
         temp_file_handle.writelines(output_chunks)
 
     def append_text(text: str) -> None:

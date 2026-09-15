@@ -636,7 +636,7 @@ def _office_pages(p, chars=3000, meta=None):
     """
     from misaka.core.documents import office
 
-    fmt = office.format_of(p)
+    fmt = office.format_of(p) or office.soffice.LEGACY.get(os.path.splitext(p)[1].lower())
     rendered = office.render(p, meta=meta)
     _note(meta, "office_format", fmt)
     pages = []
@@ -650,35 +650,8 @@ def _office_pages(p, chars=3000, meta=None):
 
 
 def _legacy_office_pages(p, chars=3000, meta=None):
-    """A .doc, .xls or .ppt, converted to its modern format first.
-
-    These are OLE compound files, not zip packages: nothing in the Office stack reads them
-    and there is no pure-Python option worth the name. LibreOffice converts them, and when
-    it is absent the refusal says so with the command that fixes it -- a model told only
-    "cannot index .doc" hands the same file back.
-
-    ``.xls`` has one fallback that the other two do not: ``xlrd`` still reads the old
-    BIFF format, giving values without formulas or styling. Worse than a conversion, much
-    better than a refusal.
-    """
-    from misaka.core.documents.office import soffice
-
-    suffix = os.path.splitext(p)[1].lower()
-    if soffice.binary() is not None:
-        with tempfile.TemporaryDirectory(prefix=".convert-", dir=os.path.dirname(os.path.abspath(p))) as staging:
-            converted = soffice.convert(p, soffice.LEGACY[suffix], into=staging, meta=meta)
-            if converted is not None:
-                _note(meta, "converted_from", suffix)
-                return _office_pages(converted, chars, meta)
-    if suffix == ".xls":
-        pages = _xls_pages(p, chars, meta)
-        if pages is not None:
-            return pages
-    detail = meta.get("soffice_error") if meta else None
-    raise ValueError(
-        f"Cannot index {suffix}: {soffice.INSTALL_HINT} to convert legacy Office files, "
-        f"or save it as .{soffice.LEGACY[suffix]}."
-        + (f" (LibreOffice failed: {detail})" if detail else ""))
+    """Legacy files share the read tool's renderer and the corpus' normal pagination."""
+    return _office_pages(p, chars, meta)
 
 
 def _xls_pages(p, chars, meta):
@@ -1205,6 +1178,8 @@ def ingest(p, title=None, with_tree=True, task_id=None, workspace=None):
     formats it does read.
     """
     p = os.path.abspath(os.path.expanduser(p))
+    from misaka.core.tools._web.evidence import check_material_read
+    check_material_read(p)
     if workspace is not None and not under(p, workspace):
         raise ValueError("Document source resolves outside the workspace.")
     _extractor(p)          # refuse an unreadable format before hashing, and before extracting

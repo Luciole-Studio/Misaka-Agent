@@ -10,6 +10,16 @@ from misaka.core.web.scope import current_scope
 BASE_TOOLS = ('browser_navigate', 'browser_snapshot', 'browser_click', 'browser_type', 'browser_scroll',
               'browser_back', 'browser_press', 'browser_get_images', 'browser_vision', 'browser_console')
 CDP_TOOLS = ('browser_cdp', 'browser_dialog')
+VAULT_TOOLS = ('browser_vault_list', 'browser_vault_unlock', 'browser_vault_fill',
+               'browser_vault_save_login', 'browser_vault_enter_code')
+
+
+def vault_tools():
+    import importlib.util
+    cfg = web_config(strict=True).get('vault', {})
+    if not isinstance(cfg, dict):
+        raise ValueError('vault configuration must be an object')  # noqa: TRY004 - configuration document
+    return set(VAULT_TOOLS) if cfg.get('enabled', True) and importlib.util.find_spec('cryptography') else set()
 
 
 def config():
@@ -89,7 +99,8 @@ def available_tools(*, include_fallback=False):
         return set()
     kind = route()
     if kind == 'controller':
-        return set(cfg.get('controller_capabilities', BASE_TOOLS)) & {*BASE_TOOLS, *CDP_TOOLS, 'browser_exec'}
+        tools = set(cfg.get('controller_capabilities', BASE_TOOLS)) & {*BASE_TOOLS, *CDP_TOOLS, 'browser_exec'}
+        return tools | (vault_tools() if 'browser_cdp' in tools else set())
     if kind == 'camofox':
         return set(BASE_TOOLS) if provider_env('CAMOFOX_URL') else set()
     from misaka.core.web.browser.providers import providers
@@ -107,11 +118,12 @@ def available_tools(*, include_fallback=False):
         return set()
     tools = set(BASE_TOOLS)
     tools.update(CDP_TOOLS)
+    tools.update(vault_tools())
     backend = cfg.get('backend', 'auto')
     if backend not in {'auto', 'off', 'browser-use', 'agent-browser'}:
         raise ValueError('browser.backend takes auto, off, agent-browser or browser-use')
     if backend in {'browser-use', 'auto'} and executable('browser-use'):
-        return {'browser_exec', *(tools if include_fallback else CDP_TOOLS)}
+        return {'browser_exec', *(tools if include_fallback else {*CDP_TOOLS, *vault_tools()})}
     return tools
 
 

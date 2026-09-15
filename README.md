@@ -198,16 +198,21 @@ Agents also get the ordinary working tools: `bash`, `read`, `write`, `edit`, `gr
 
 ## The context engine
 
-Long sessions use the pinned [hermes-lcm](https://github.com/stephenschoettler/hermes-lcm)
-policy. LCM owns triggering, fresh-tail selection, chunking and summary assembly;
-MISAKA stores the adopted replay in its ordinary session checkpoint and original
-session entries stay append-only. Derived history lives in `~/.misaka/lcm.db`.
+Long sessions use **MISAKA LCM**, the project-scoped fork of pinned
+[hermes-lcm](https://github.com/stephenschoettler/hermes-lcm). Compression and retrieval
+algorithms remain unchanged. Each project's agents share `<project>/.misaka/lcm/`;
+other projects use separate caches. The last owner removes the cache on exit, and the
+next startup clears any abandoned cache after an interrupted run.
+
+Native session entries and adopted checkpoints remain durable. Reopening a session
+rebuilds its LCM context; carry-over source sessions must remain available. Cleanup
+never removes native session history, Board state or project deliverables.
 
 LCM's configured redaction, ignore, retention and GC policies still apply. This is not
 a promise of unconditional permanent raw retention. Algorithm settings keep the
 upstream `LCM_*` names with no product aliases, and `misaka lcm --help` exposes the
 original operator grammars. Source coverage is not a claim that every upstream host
-behaviour has been reproduced; `misaka/extensions/hermes_lcm/PORT_NOTES.md` records
+behaviour has been reproduced; `misaka/extensions/misaka_lcm/PORT_NOTES.md` records
 what differs.
 
 ## Configuration

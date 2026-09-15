@@ -166,18 +166,21 @@ misaka web set env.TAVILY_API_KEY tvly-...   # 以 0600 写入 ~/.misaka/web.jso
 
 ## 上下文引擎
 
-长会话使用固定版本的 [hermes-lcm](https://github.com/stephenschoettler/hermes-lcm)
-策略。触发时机、保留哪段新鲜尾巴、分块与摘要装配都归 LCM 管；MISAKA 把采纳后的回放
-存进自己常规的会话检查点，原始会话条目保持只追加。派生历史放在 `~/.misaka/lcm.db`。
+长会话使用 **MISAKA LCM**：基于固定版本
+[hermes-lcm](https://github.com/stephenschoettler/hermes-lcm) 的项目级 fork。
+压缩、摘要和检索算法保持原实现；应用层将缓存放在 `<项目>/.misaka/lcm/`，
+同项目的代理共用，其他项目隔离。最后一个使用者退出后清理缓存；异常退出的残留在下次启动时清理。
 
+原始 session 与采纳后的压缩检查点继续保存，恢复会话时重建 LCM；接续引用的源 session 也应保留。
+这里清理的是 LCM 缓存，不是会话历史、Board 或项目成果。
 LCM 自己配置的脱敏、忽略、保留与 GC 策略依然生效——这里不承诺原始数据被无条件永久保留。
 算法参数沿用上游的 `LCM_*` 原名，不设产品别名，`misaka lcm --help` 暴露的是原始的操作
 语法。移植了源码不等于上游宿主的每一处行为都被复现，差异记录在
-`misaka/extensions/hermes_lcm/PORT_NOTES.md`。
+`misaka/extensions/misaka_lcm/PORT_NOTES.md`。
 
 ## 配置
 
-一切都在 `~/.misaka/` 下，环境变量压过配置文件。
+全局配置主要在 `~/.misaka/` 下，LCM 临时缓存位于项目工作目录。算法参数的环境变量压过配置文件。
 
 | 位置 | 内容 |
 |---|---|

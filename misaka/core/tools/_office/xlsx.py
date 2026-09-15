@@ -21,12 +21,11 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
-import re
 import zipfile
 
 from misaka.core.tools._office._receipt import result
 
-SUFFIXES = frozenset({".xlsx", ".xlsm"})
+SUFFIXES = frozenset({".xlsx"})
 
 # The named number formats, so a model does not have to know Excel's format language. A raw
 # format string is accepted too and passes through untouched.
@@ -128,6 +127,14 @@ def _is_formula(value):
     return isinstance(value, str) and value.startswith("=")
 
 
+def _assign(cell, value, kind):
+    cell.value = _typed(value, kind)
+    if (kind or "auto").lower() == "text":
+        # openpyxl otherwise re-infers formulas and error codes from the string.
+        cell.data_type = "s"
+    return cell.data_type == "f"
+
+
 def _autofit(sheet):
     """Column widths from the content: the longest cell plus two, clamped."""
     widths = {}
@@ -170,7 +177,7 @@ def _fill(sheet, headers, rows):
 def cache_empty(path):
     """Whether any cell holds a formula with no cached result.
 
-    A byte-level scan of the sheet XML inside the package, not the openpyxl object model:
+    A namespace-aware scan of sheet XML, not the openpyxl object model:
     a formula cell is ``<c><f>…</f><v>cache</v></c>`` and all three empty shapes have to be
     caught -- no ``<v>`` at all, the empty ``<v></v>`` openpyxl actually writes, and a
     self-closing ``<v/>``. A shared-formula dependent is a self-closing ``<f t="shared"/>``.
@@ -179,16 +186,23 @@ def cache_empty(path):
     empty string, which is a real cached result. Without it every workbook with a
     ``=IF(...,"")`` would be reported as uncalculated forever.
     """
-    pattern = re.compile(
-        rb'<c(?![^>]*\bt="str")[^>]*>\s*(?:<f\b[^>]*/>|<f\b[^>]*>[^<]*</f>)'
-        rb'\s*(?:<v\s*/>|<v>\s*</v>)?\s*</c>')
+    import xml.etree.ElementTree as ET
+    namespace = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
     try:
         with zipfile.ZipFile(path) as archive:
-            return any(name.startswith("xl/worksheets/sheet") and name.endswith(".xml")
-                       and pattern.search(archive.read(name))
-                       for name in archive.namelist())
-    except (OSError, zipfile.BadZipFile):
+            for name in archive.namelist():
+                if not (name.startswith("xl/worksheets/") and name.endswith(".xml")):
+                    continue
+                root = ET.fromstring(archive.read(name))
+                for cell in root.iter(namespace + "c"):
+                    if cell.find(namespace + "f") is None or cell.get("t") == "str":
+                        continue
+                    value = cell.find(namespace + "v")
+                    if value is None or not (value.text or "").strip():
+                        return True
+    except (OSError, zipfile.BadZipFile, ET.ParseError):
         return False
+    return False
 
 
 def _cells(sheet, reference):
@@ -222,7 +236,9 @@ def _font_edit(cell, changes):
 
 
 def _format_cells(sheet, args):
-    from openpyxl.styles import Alignment, Border, PatternFill, Side
+    from copy import copy
+
+    from openpyxl.styles import PatternFill, Side
     cells = _cells(sheet, args["cell_range"])
     font = {}
     for key, name in (("bold", "bold"), ("italic", "italic")):
@@ -257,7 +273,7 @@ def _format_cells(sheet, args):
                 edges |= {"top", "bottom", "left", "right"}
             else:
                 edges.add(str(name).lower())
-        border = Border(**dict.fromkeys(edges, side))
+        border = dict.fromkeys(edges, side)
     for cell in cells:
         if font:
             _font_edit(cell, font)
@@ -266,9 +282,15 @@ def _format_cells(sheet, args):
         if args.get("number_format"):
             cell.number_format = _number_format(args["number_format"])
         if alignment:
-            cell.alignment = Alignment(**alignment)
+            updated = copy(cell.alignment)
+            for name, value in alignment.items():
+                setattr(updated, name, value)
+            cell.alignment = updated
         if border is not None:
-            cell.border = border
+            updated = copy(cell.border)
+            for name, value in border.items():
+                setattr(updated, name, value)
+            cell.border = updated
     return f"formatted {len(cells)} cell(s) in {args['cell_range']}"
 
 
@@ -291,12 +313,12 @@ def _add_chart(sheet, args):
         category_column = column_index_from_string(categories.upper())
     else:
         category_column = int(categories)
-    first_data = left if category_column < left or category_column > right else category_column + 1
-    if first_data > right:
-        first_data = left
-    chart.add_data(Reference(sheet, min_col=first_data, min_row=top,
-                             max_col=right, max_row=bottom),
-                   titles_from_data=header)
+    for column in range(left, right + 1):
+        if column != category_column:
+            chart.add_data(Reference(sheet, min_col=column, min_row=top,
+                                     max_col=column, max_row=bottom), titles_from_data=header)
+    if not chart.series:
+        raise ValueError("add_chart needs at least one data column besides categories")
     chart.set_categories(Reference(sheet, min_col=category_column,
                                    min_row=(top + 1 if header else top), max_row=bottom))
     if args.get("width"):
@@ -449,13 +471,12 @@ def write(path, op, args, *, overwrite=False):
         return result(summary, **extra) if extra else summary
 
     if op == "set_cell":
-        value = _typed(args.get("value"), args.get("type"))
         cell = sheet[args["cell"]]
-        cell.value = value
+        wrote_formula = _assign(cell, args.get("value"), args.get("type"))
         if args.get("number_format"):
             cell.number_format = _number_format(args["number_format"])
         return saved(f"set {sheet.title}!{args['cell']} = {args.get('value')!r}",
-                     wrote_formula=_is_formula(value))
+                     wrote_formula=wrote_formula)
 
     if op == "set_range":
         from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter
@@ -468,9 +489,8 @@ def write(path, op, args, *, overwrite=False):
                             and c < len(types[r]) else None)
                 else:
                     kind = types
-                typed = _typed(value, kind)
-                sheet[f"{get_column_letter(left + c)}{top + r}"] = typed
-                wrote_formula = wrote_formula or _is_formula(typed)
+                cell = sheet[f"{get_column_letter(left + c)}{top + r}"]
+                wrote_formula = _assign(cell, value, kind) or wrote_formula
                 written += 1
         return saved(f"set {written} cell(s) from {args['start_cell']}",
                      wrote_formula=wrote_formula)
@@ -609,3 +629,19 @@ def write(path, op, args, *, overwrite=False):
         return saved(f"added table {name!r} over {reference} (ListObject)")
 
     return f"[error] unknown xlsx op {op!r}: this writes {', '.join(OPS)}."
+
+
+def formula_errors(path):
+    """FrontierAgent _xlsx_recalc's post-save error scan (no silent scan failures)."""
+    import openpyxl
+    errors = []
+    workbook = openpyxl.load_workbook(path, data_only=True)
+    try:
+        for sheet in workbook.worksheets:
+            for coordinate in sorted(sheet._cells):
+                cell = sheet._cells[coordinate]
+                if cell.data_type == "e":
+                    errors.append(f"{sheet.title}!{cell.coordinate} {cell.value}")
+    finally:
+        workbook.close()
+    return errors

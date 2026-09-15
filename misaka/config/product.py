@@ -92,7 +92,6 @@ CFG = {
     # conversation) before any card is created. Off for unattended runs and tests.
     "research_plan_approval": os.environ.get("MISAKA_RESEARCH_PLAN_APPROVAL", "1").strip().lower()
     not in {"0", "false", "no", "off", ""},
-    "lcm_db": os.environ.get("MISAKA_LCM_DB", "~/.misaka/lcm.db"),
 }
 
 

@@ -55,7 +55,7 @@ from misaka.core.tools._web.negative_cache import (
 from misaka.core.tools._web.screening import screen_url
 from misaka.core.tools._web.single_flight import single_flight
 from misaka.core.web import debug
-from misaka.core.web.config import web_config
+from misaka.core.web.config import redact_secrets, redact_values, web_config
 from misaka.core.web.network import policy_key
 from misaka.core.web.scope import cache_namespace
 from misaka.core.web.timeouts import operation_seconds
@@ -217,6 +217,8 @@ def _extract(
         },
         full,
     )
+    full, title = redact_secrets(full), redact_secrets(title)
+    text_sha = hashlib.sha256(full.encode()).hexdigest()
     return _Extracted(
         has_text=True,
         title=title,
@@ -234,10 +236,12 @@ class _Outcome:
 
     text: str
     details: dict[str, Any] = field(default_factory=dict)
+    is_error: bool = False
 
 
 def _result(outcome: _Outcome) -> AgentToolResult:
-    return AgentToolResult(content=[TextContent(text=outcome.text)], details=outcome.details)
+    return AgentToolResult(content=[TextContent(text=redact_secrets(outcome.text))],
+                           details={**redact_values(outcome.details), "isError": outcome.is_error})
 
 
 def _status_advice(status: int) -> str:
@@ -284,7 +288,7 @@ async def _fetch(target: _Target, cwd: str | None = None, signal: Any | None = N
         # several of those notes exist precisely to say what to try when the *rewritten*
         # URL is the thing that 404s, and a model that never asked for that URL cannot
         # work that out alone.
-        return _Outcome(f"{text} {target.note}" if target.note else text, {**base, **details})
+        return _Outcome(f"{text} {target.note}" if target.note else text, {**base, **details}, is_error=True)
 
     try:
         async with open_checked_stream(
@@ -360,7 +364,7 @@ async def _fetch(target: _Target, cwd: str | None = None, signal: Any | None = N
 
     notes = [f"Fetched {url}"]
     if final_url != url:
-        notes.append(f"redirected to {_clip(final_url, _MAX_URL_CHARS)}")
+        notes.append(f"redirected to {_clip(citable_url(final_url), _MAX_URL_CHARS)}")
     notes.append(f"{len(body)} bytes")
     header = "; ".join(notes) + "."
     page = got.full
@@ -391,7 +395,7 @@ async def _fetch(target: _Target, cwd: str | None = None, signal: Any | None = N
         header + "\n\n" + untrusted(url, page),
         {
             **base,
-            "final_url": final_url,
+            "final_url": citable_url(final_url),
             "status": status,
             "content_type": content_type,
             "sha256": got.body_sha,
@@ -403,6 +407,7 @@ async def _fetch(target: _Target, cwd: str | None = None, signal: Any | None = N
             "title": got.title,
             "saved_path": saved,
         },
+        is_error=False,
     )
 
 
@@ -430,7 +435,7 @@ def create_web_fetch_tool_definition(
         )
         url = parsed.url.strip()
         if not url:
-            return _result(_Outcome("web_fetch needs a URL. Call it again with the page to read."))
+            return _result(_Outcome("web_fetch needs a URL. Call it again with the page to read.", is_error=True))
         if "://" not in url:
             # A bare host from a search snippet is the common shape; assuming https is
             # what the browser does, and vet_public_url still judges the result.
@@ -442,7 +447,7 @@ def create_web_fetch_tool_definition(
         # the one dialled from here on.
         screened = screen_url(url)
         if not screened.allowed:
-            return _result(_Outcome(screened.refusal, {"url": url, "refused": True}))
+            return _result(_Outcome(screened.refusal, {"url": url, "refused": True}, is_error=True))
         url = screened.url
 
         # Routing comes first, before the negative cache and before single flight, so
@@ -467,7 +472,7 @@ def create_web_fetch_tool_definition(
                 skip = f"{target.requested} is fetched as {target.url}. {skip}"
             if target.note:
                 skip = f"{skip} {target.note}"
-            return _result(_Outcome(skip, {**target.provenance(), "skipped": True}))
+            return _result(_Outcome(skip, {**target.provenance(), "skipped": True}, is_error=True))
 
         # The shared outcome contains a caller URL and a workspace-relative artifact.
         # Only callers with the same inputs may share that complete outcome.

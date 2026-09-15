@@ -48,7 +48,7 @@ from misaka.core.web.keyless import (
     search_with_failover,
 )
 from misaka.core.web.network import proxy_for_url
-from misaka.core.web.provider import WebSearchProvider
+from misaka.core.web.provider import WebSearchProvider, check_response
 from misaka.core.web.runtime import api_client
 
 logger = logging.getLogger(__name__)
@@ -78,6 +78,7 @@ def normalize_search_results(response: Any) -> list[dict[str, Any]]:
     keyless paths share this function: a self-hosted Firecrawl is a different build from
     the cloud one, and the summary key is the field most likely to differ between them.
     """
+    check_response(response)
     entries: list[dict[str, Any]] = []
     if isinstance(response, dict):
         data = response.get("data")
@@ -181,7 +182,7 @@ async def _post(endpoint, headers, operation, payload, *, sdk):
                         detail = (response.text or "").strip() or f"HTTP {response.status_code}"
                         raise ValueError(f"Firecrawl {operation} failed (HTTP {response.status_code}): {detail}")
                     response.raise_for_status()
-                    data = response.json()
+                    data = check_response(response.json())
                     if sdk and not isinstance(data, dict):
                         raise ValueError("Firecrawl returned a non-object response")
                     if isinstance(data, dict) and (not data.get("success") if sdk else data.get("success") is False):

@@ -747,7 +747,7 @@ def main(argv=None):
     if argv[:1] == ["lcm"]:
         # Read-only/dry-run operators must not bootstrap user directories or open
         # a board/engine before their original parser decides what to do.
-        from misaka.extensions.hermes_lcm.host.operators import main as lcm_main
+        from misaka.extensions.misaka_lcm.host.operators import main as lcm_main
         return lcm_main(argv[1:])
     # Attaching/reading uses the existing owner's configuration. Other commands,
     # including first-run help/version, retain the normal CLI bootstrap contract.

@@ -141,8 +141,8 @@ class _Refused(Exception):
     """A download stopped on purpose; the message is what the model is told."""
 
 
-def _result(text: str, details: dict[str, Any] | None = None) -> AgentToolResult:
-    return AgentToolResult(content=[TextContent(text=text)], details=details)
+def _result(text: str, details: dict[str, Any] | None = None, *, is_error: bool = True) -> AgentToolResult:
+    return AgentToolResult(content=[TextContent(text=text)], details={**(details or {}), "isError": is_error})
 
 
 def _sanitize_name(candidate: str) -> str:
@@ -429,7 +429,7 @@ async def _download(url: str, requested: str, directory: str, signal: Any, works
         lines.append("The file is on disk, not in this result — use the read tool to open it.")
     # The URL, the server's filename, and the declared type are all written by the far
     # end, so the block goes to the model fenced as data like every other tool's.
-    return _result(untrusted("download", "\n".join(lines)), details)
+    return _result(untrusted("download", "\n".join(lines)), details, is_error=False)
 
 
 def create_download_file_tool_definition(

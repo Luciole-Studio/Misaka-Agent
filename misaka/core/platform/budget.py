@@ -39,21 +39,16 @@ def _locked(con):
 
 
 def spent(con):
-    """Total token usage in the event ledger, counted incrementally.
+    """Total token usage in the current transaction's event ledger.
 
-    The ledger only grows, so re-reading and re-parsing every historical usage event on each
-    call -- and the research loop checks the budget on every tick -- is work already done.
-    Only rows past the last seen id are parsed. The running total rides on the connection
-    object, so it dies with the connection; a plain ``sqlite3.Connection`` cannot carry an
-    attribute and simply recounts.
+    Task deletion and transaction rollback can remove already-seen rows, including writes
+    from other connections. An append-only connection cache is therefore not authoritative.
     """
-    last_id, total = getattr(con, "_misaka_spent", (0, 0))
-    highest = last_id
-    for event_id, kind, payload in con.execute(
-            "SELECT id,kind,payload FROM events "
-            "WHERE id>? AND kind IN ('harn_event','budget_usage') AND payload LIKE '%totalTokens%'",
-            (last_id,)):
-        highest = max(highest, int(event_id))
+    # ponytail: recount usage rows; add transaction-aware storage only if this is measured hot.
+    total = 0
+    for kind, payload in con.execute(
+            "SELECT kind,payload FROM events "
+            "WHERE kind IN ('harn_event','budget_usage') AND payload LIKE '%totalTokens%'"):
         try:
             d = json.loads(payload)
         except (ValueError, TypeError):
@@ -68,10 +63,6 @@ def spent(con):
             u = m.get("usage") if isinstance(m, dict) else None
             if isinstance(u, dict) and isinstance(u.get("totalTokens"), int):
                 total += u["totalTokens"]
-    try:
-        con._misaka_spent = (highest, total)
-    except AttributeError:                   # a bare sqlite3.Connection: recount next time
-        pass
     return total
 
 

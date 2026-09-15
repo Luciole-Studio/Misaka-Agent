@@ -372,6 +372,12 @@ class BrowserSession:
             return await self._wait_action(asyncio.create_task(self._action(name, args)))
 
     async def _action(self, name, args):
+        if name == '_vault_focus':
+            result = await self.supervisor.focus_page(args['origin'], accept=args.get('accept'),
+                                                       owned_browser=not self.external_tab)
+            if result.get('ok'):
+                self.url = await check_url(result['url'])
+            return result
         if name == 'browser_cdp':
             method, params = args['method'], args.get('params') or {}
             if not isinstance(params, dict):

@@ -28,7 +28,7 @@ class BrowserManager:
         if cfg.get('enabled', True) is False:
             raise ValueError('Browser tools are disabled by browser.enabled')
         kind = settings.route()
-        session_name = args.get('session', '') if name in {'browser_exec', 'browser_cdp', 'browser_dialog'} else ''
+        session_name = args.get('session', '') if name in {'browser_exec', 'browser_cdp', 'browser_dialog', '_vault_focus'} else ''
         if not isinstance(session_name, str) or (session_name and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', session_name)):
             raise ValueError('Browser session names take up to 64 letters, digits, underscores or hyphens')
         if args.get('local'):

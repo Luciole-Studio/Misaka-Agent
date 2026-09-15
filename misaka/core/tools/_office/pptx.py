@@ -21,9 +21,9 @@ from __future__ import annotations
 import os
 
 from misaka.core.tools._office._receipt import result
-from misaka.core.tools._office._runs import norm_runs
+from misaka.core.tools._office._runs import norm_runs, splice_runs
 
-SUFFIXES = frozenset({".pptx", ".pptm"})
+SUFFIXES = frozenset({".pptx"})
 
 LAYOUTS = {"title": 0, "title_and_content": 1, "section_header": 2,
            "two_content": 3, "title_only": 5, "blank": 6}
@@ -102,6 +102,8 @@ def _apply_runs(paragraph, text):
         for field in ("bold", "italic", "underline"):
             if spec.get(field) is not None:
                 setattr(font, field, bool(spec[field]))
+        if spec.get("strike") is not None:
+            run._r.get_or_add_rPr().set("strike", "sngStrike" if spec["strike"] else "noStrike")
         if spec.get("size"):
             font.size = Pt(float(spec["size"]))
         if spec.get("color"):
@@ -246,56 +248,118 @@ def _build(presentation, spec):
 def _duplicate(presentation, source):
     """A deep copy of one slide, appended to the deck, with its relationships rebuilt."""
     import copy
+    import re
+    from pathlib import PurePosixPath
+
+    from pptx.parts.chart import ChartPart
+    from pptx.parts.embeddedpackage import EmbeddedPackagePart
+
+    def copy_content(old, new):
+        # Keep the spTree object: python-pptx caches the shapes collection around it.
+        new.shapes._spTree[:] = copy.deepcopy(list(old.shapes._spTree))
+        new._element.attrib.update(old._element.attrib)
+        new._element.cSld.attrib.update(old._element.cSld.attrib)
+        for child in list(new._element.cSld):
+            if child is not new.shapes._spTree:
+                new._element.cSld.remove(child)
+        for index, child in enumerate(old._element.cSld):
+            if child is not old.shapes._spTree:
+                new._element.cSld.insert(index, copy.deepcopy(child))
+        for child in list(new._element):
+            if child is not new._element.cSld:
+                new._element.remove(child)
+        for child in old._element:
+            if child is not old._element.cSld:
+                new._element.append(copy.deepcopy(child))
+
     new = presentation.slides.add_slide(source.slide_layout)
-    for shape in list(new.shapes):
-        shape._element.getparent().remove(shape._element)
-    for shape in source.shapes:
-        new.shapes._spTree.append(copy.deepcopy(shape._element))
+    copy_content(source, new)
     # Copying shape XML alone leaves every ``r:embed`` pointing at a relationship the new
     # slide does not have: the images vanish and PowerPoint reports the file as corrupt.
-    mapping = {}
-    for relation_id, relation in list(source.part.rels.items()):
-        if relation.reltype.endswith(("/slideLayout", "/notesSlide")):
-            continue
-        fresh = (new.part.rels.get_or_add_ext_rel(relation.reltype, relation.target_ref)
-                 if relation.is_external
-                 else new.part.relate_to(relation.target_part, relation.reltype))
-        if fresh != relation_id:
-            mapping[relation_id] = fresh
-    if mapping:
-        for element in new.shapes._spTree.iter():
+    cloned = {}
+
+    def copy_links(old_part, new_part, root, skip):
+        mapping = {}
+        for relation_id, relation in old_part.rels.items():
+            if relation.reltype.endswith(skip):
+                continue
+            if relation.is_external:
+                mapping[relation_id] = new_part.rels.get_or_add_ext_rel(relation.reltype, relation.target_ref)
+                continue
+            target = relation.target_part
+            fresh_chart = False
+            if isinstance(target, (ChartPart, EmbeddedPackagePart)) or relation.reltype.endswith(("/package", "/oleObject")):
+                if target not in cloned:
+                    package = new_part.package
+                    if isinstance(target, ChartPart):
+                        cloned[target] = ChartPart.load(package.next_partname(ChartPart.partname_template),
+                                                        target.content_type, package, target.blob)
+                        fresh_chart = True
+                    else:
+                        # Reloaded embedded workbooks are generic Part instances.
+                        path = PurePosixPath(str(target.partname))
+                        template = str(path.with_name(re.sub(r"\d+$", "", path.stem) + "%d" + path.suffix))
+                        cloned[target] = type(target).load(package.next_partname(template),
+                                                          target.content_type, package, target.blob)
+                copied = cloned[target]
+            else:
+                copied = target  # Layouts, media and styles are immutable shared resources.
+            mapping[relation_id] = new_part.relate_to(copied, relation.reltype)
+            if fresh_chart:
+                # Attach first, so package.next_partname sees every newly allocated part.
+                copy_links(target, copied, copied._element, ())
+        for element in root.iter():
             for name, value in list(element.attrib.items()):
                 if name.startswith("{" + _RELATIONSHIPS + "}") and value in mapping:
                     element.set(name, mapping[value])
+
+    copy_links(source.part, new.part, new._element, ("/slideLayout", "/notesSlide"))
+    if source.has_notes_slide:
+        old_notes, new_notes = source.notes_slide, new.notes_slide
+        copy_content(old_notes, new_notes)
+        for rid, relation in list(new_notes.part.rels.items()):
+            if relation.reltype.endswith("/notesMaster"):
+                new_notes.part.drop_rel(rid)
+        copy_links(old_notes.part, new_notes.part, new_notes._element, ("/slide",))
     return new
+
+
+def _paragraphs(shapes):
+    for shape in shapes:
+        if shape.has_text_frame:
+            yield from shape.text_frame.paragraphs
+        if shape.has_table:
+            for row in shape.table.rows:
+                for cell in row.cells:
+                    if not cell.is_spanned:
+                        yield from cell.text_frame.paragraphs
+        if hasattr(shape, "shapes"):
+            yield from _paragraphs(shape.shapes)
 
 
 def _format_text(slide, args):
     from pptx.util import Pt
     find = args["find"]
     hits = 0
-    for shape in slide.shapes:
-        if not shape.has_text_frame:
-            continue
-        for paragraph in shape.text_frame.paragraphs:
-            for run in paragraph.runs:
-                if not run.text or find not in run.text:
-                    continue
-                font = run.font
-                for field in ("bold", "italic", "underline"):
-                    if args.get(field) is not None:
-                        setattr(font, field, bool(args[field]))
-                if args.get("strike") is not None:
-                    # python-pptx has no font.strike; the attribute lives on rPr.
-                    run._r.get_or_add_rPr().set(
-                        "strike", "sngStrike" if args["strike"] else "noStrike")
-                size = args.get("font_size") or args.get("size")
-                if size:
-                    font.size = Pt(float(size))
-                colour = args.get("font_color") or args.get("color")
-                if colour:
-                    font.color.rgb = _rgb(colour)
-                hits += 1
+    for paragraph in _paragraphs(slide.shapes):
+        for run in paragraph.runs:
+            if not run.text or find not in run.text:
+                continue
+            font = run.font
+            for field in ("bold", "italic", "underline"):
+                if args.get(field) is not None:
+                    setattr(font, field, bool(args[field]))
+            if args.get("strike") is not None:
+                # python-pptx has no font.strike; the attribute lives on rPr.
+                run._r.get_or_add_rPr().set(
+                    "strike", "sngStrike" if args["strike"] else "noStrike")
+            size = args.get("font_size") or args.get("size")
+            if size:
+                font.size = Pt(float(size))
+            colour = args.get("font_color") or args.get("color")
+            if colour:
+                font.color.rgb = _rgb(colour)
+            hits += 1
     return result(f"formatted {hits} run(s) matching {find!r} on slide {args['slide']}",
                   warn=(f"0 runs matched {find!r}" if hits == 0 else None))
 
@@ -347,22 +411,23 @@ def write(path, op, args, *, overwrite=False):
         if not find:
             return "[error] replace_text needs 'find'."
         try:
-            targets = ([_slide(presentation, args["slide"])] if args.get("slide")
+            targets = ([_slide(presentation, args["slide"])] if args.get("slide") is not None
                        else list(presentation.slides))
         except ValueError as error:
             return f"[error] {error}"
         done = 0
         for slide in targets:
-            for shape in slide.shapes:
-                if not shape.has_text_frame:
-                    continue
-                for paragraph in shape.text_frame.paragraphs:
-                    for run in paragraph.runs:
-                        if run.text and find in run.text:
-                            run.text = run.text.replace(find, args.get("replace", ""))
-                            done += 1
+            for paragraph in _paragraphs(slide.shapes):
+                runs = []
+                for run in paragraph.runs:
+                    # A soft break or field is a boundary, not an invisible join.
+                    if runs and runs[-1]._r.getnext() is not run._r:
+                        done += splice_runs(runs, find, args.get("replace", ""), [-1])
+                        runs = []
+                    runs.append(run)
+                done += splice_runs(runs, find, args.get("replace", ""), [-1])
         presentation.save(path)
-        return result(f"replaced {done} run(s) containing {find!r}",
+        return result(f"replaced {done} occurrence(s) of {find!r}",
                       warn=(f"0 matches for {find!r}" if done == 0 else None))
 
     if op == "set_slide_size":
@@ -382,6 +447,7 @@ def write(path, op, args, *, overwrite=False):
         index = int(args["slide"]) - 1
         if index < 0 or index >= len(identifiers):
             return f"[error] slide {args['slide']} out of range."
+        presentation.part.drop_rel(identifiers[index].rId)
         order.remove(identifiers[index])
         return saved(f"deleted slide {args['slide']}")
 

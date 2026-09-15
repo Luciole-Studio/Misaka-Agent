@@ -1,0 +1,56 @@
+{
+  "repository": "https://github.com/nousresearch/hermes-agent",
+  "commit": "62e5f466565ee56351e4483ead8e62f9e782f8b3",
+  "license": "LICENSE",
+  "files": {
+    "store.py": {
+      "source": "agent/vault_store.py",
+      "source_sha256": "a7ee11dfee209755d66bba48960ab8529df5f4a4ccdf6b6fc967ded83babf7c8"
+    },
+    "classifier.py": {
+      "source": "agent/vault_login_classifier.py",
+      "source_sha256": "11c7acbd0b1e98d2f253ddd32485fd15e9c31d69d574a2b52110de7d20825537"
+    },
+    "tools.py": {
+      "source": "tools/browser_vault_tool.py",
+      "source_sha256": "f373dc730db4bb9dac62ff42f2f87d7bc0e78f804c5f619970eeb4ab41c01c53"
+    },
+    "backends/unlock.py": {
+      "source": "agent/vault_backends/unlock.py",
+      "source_sha256": "9b625d829992b8608208594fb71f64960af1338a1679986707bc6a51ec6449fe"
+    },
+    "backends/local.py": {
+      "source": "agent/vault_backends/local.py",
+      "source_sha256": "10c21451dc65805baec427b499cfbe4956d1e3991d6ad155973e9565ec75ac96"
+    },
+    "backends/__init__.py": {
+      "source": "agent/vault_backends/__init__.py",
+      "source_sha256": "06b7755bb20ba07f25d2b94a3ef6af4e6cb9460192e729cfcd605ab88a448ef5"
+    },
+    "backends/onepassword.py": {
+      "source": "agent/vault_backends/onepassword.py",
+      "source_sha256": "d1b854f5a8eaacb2fc675342bca24a05b7ca0ec56219ab5f3cdd03cc30406e20"
+    },
+    "backends/base.py": {
+      "source": "agent/vault_backends/base.py",
+      "source_sha256": "94520d5531053354f39ef144c11e688492a9e62c57d815e3acb833e582537327"
+    },
+    "backends/bitwarden.py": {
+      "source": "agent/vault_backends/bitwarden.py",
+      "source_sha256": "f613e9cbc11c8590fb2c39a450b14839ad78a47a8c0082180158d607b2743e77"
+    }
+  },
+  "native_files": [
+    "host.py",
+    "prompt.py",
+    "register.py",
+    "__init__.py"
+  ],
+  "adaptations": [
+    "MISAKA namespace and profile/config resolution; Python typing/import modernization.",
+    "Owned CDP and subprocess bridge; cancellation joins the worker and drains loop cleanup.",
+    "Masked TUI input, payment confirmation, session-owned tokens and scope-owned secret redaction.",
+    "Origin validation, OTP handle binding, no secret CLI-argument fallback.",
+    "Standard-library atomic write and lifecycle helpers; no global Hermes module injection."
+  ]
+}

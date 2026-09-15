@@ -1,83 +1,71 @@
 # Analogy and Blending
 
-Three traditions of "import structure from a remote frame":
-- **Synectics** — William J. J. Gordon, 1961. Practical training in operative analogy.
-- **Bisociation** — Arthur Koestler, *The Act of Creation*, 1964. Creativity as collision of two unrelated frames.
-- **Conceptual Blending** — Fauconnier & Turner, 1998. Formal cognitive theory: meaning emerges from selective integration of multiple input spaces.
+Use a different frame to suggest a relation, distinction, or hypothesis that is hard to see in the original problem. This is a prose-only thinking method, not an instruction to implement an idea or run code.
 
 ## When to use
 
 - Stuck inside one frame; all candidate ideas come from the same neighborhood
 - The problem has a "shape" but no obvious solution in its native domain
-- A long-established field has run out of native ideas
+- Existing candidates keep repeating the same assumptions
 - Producing work that depends on metaphor (writing, marketing, theoretical work)
 
-## Don't use when
+## Limits
 
-- You need disciplined development inside a single frame
-- The remote frame shares no generic-space structure with your home frame (no overlap → no blend, just noise)
-- You're using analogy as decoration on shallow understanding
+- Prefer direct analysis when the difficulty is already clear within the original frame.
+- If no meaningful shared structure survives comparison, leave the frames separate. A connection is not required.
+- An analogy can generate a hypothesis or clarify an argument; it does not establish the source facts, prove the target claim, or transfer causal validity between domains.
 
-## Synectics: four kinds of analogy
+## Possible starting moves
 
-**Direct analogy.** Find an organism or system that solves an analogous problem. *How does a tree handle wind? Flexibility distributed across many small members.*
+**Direct analogy.** Compare a specific mechanism, relationship, or constraint in another setting. Identify what is known about that setting and what is only assumed.
 
-**Personal analogy.** Imagine being a component. *I am the molecule in this reactor; what is happening to me?* (Counter-intuitive but unusually generative.)
+**Perspective shift.** Imagine the situation from a component's or participant's position. Treat the result as a thought experiment, not evidence about its actual experience.
 
-**Symbolic analogy.** Describe in metaphorical / compressed terms. *"The problem is a shy bridegroom"* (a problem that needs to be approached but resists approach).
+**Symbolic analogy.** Compress the tension into a metaphor, then unpack which relations it captures and which it obscures.
 
-**Fantasy analogy.** What would the ideal magical solution look like, if all constraints were lifted? (Compare TRIZ's IFR.)
+**Idealized analogy.** Temporarily relax a constraint to imagine a different arrangement. Label the relaxation and restore the relevant constraints before judging the proposal.
 
-Usually applied in sequence: symbolic / fantasy as starting points → direct as concrete grounding.
+Choose or combine these moves when useful; there is no required sequence.
 
-## Bisociation: the two-frame frame
+## Hold both frames apart
 
-Koestler: creativity is the simultaneous holding of two normally-incompatible frames of reference. A joke = a sentence completed in one frame and abruptly reframed in another. A scientific discovery = a phenomenon in domain A seen as instance of structure from domain B (Kekulé's snake-biting-tail → benzene ring).
+Keep the original problem and the comparison frame distinct while exploring their interaction. Do not rename the whole target in the source's vocabulary or force the source to fit. A useful mismatch may expose a hidden premise even when no combined proposal survives.
 
-Operative move: when stuck, find a remote frame and force the mapping. Hold both frames at once; resist collapsing the remote into the home.
+## Selective integration
 
-## Conceptual blending: four-space architecture
+- **Home space** — the original problem and its conditions.
+- **Comparison space** — the other setting, with its own conditions and evidence status.
+- **Shared structure** — the relation the settings plausibly have in common, if any.
+- **Blended space** — selected elements brought together as a new proposal, not a wholesale merger of the settings.
 
-For careful work, F&T's structure:
-1. **Input space 1** — the home problem.
-2. **Input space 2** — the remote domain you're importing from.
-3. **Generic space** — what they share at an abstract level. (If nothing, the blend won't work.)
-4. **Blended space** — selective projection from each input. *Not all* of input 1, *not all* of input 2.
-
-The interesting properties live in the **emergent structure** of the blend — properties that aren't in either input.
+Look for a resulting idea that differs from merely placing the inputs side by side. Treat any claimed new property as something to examine, not something guaranteed by combining them.
 
 ## Procedure
 
-1. State the home problem in one sentence.
-2. Pick a remote domain you actually know something about. Effective: biology, geology, theology, medicine, military strategy, dance, agriculture, archaeology, cooking, etymology, monastic life, mountaineering. *Avoid* "AI" and "the brain" — slop magnets.
-3. Find one specific structure in the remote domain. Not the whole domain — one mechanism, relationship, or constraint.
-4. Force the mapping. Be explicit about which elements project and which don't.
-5. Look for emergent structure — properties of the blend that weren't in either input.
-6. Hold the doubleness for a few minutes. Don't immediately collapse the remote into home-frame terms.
-7. State the resulting idea in home-frame terms only at the end.
+1. State the home question and the difficulty the analogy should help with.
+2. Choose a comparison you understand well enough to describe accurately, from any relevant domain. Mark gaps in that understanding.
+3. Identify the specific relation to compare. Record what maps, what does not, and which conditions would have to hold for a transfer to make sense.
+4. Explore the selective combination or use the mismatch to revise the question. Keep a direct, non-analogical account available for comparison.
+5. Express the useful result in the home problem's terms. Separate illustrative possibilities from factual claims and reasoned conclusions.
+6. Check what would support or undermine the result in its own domain: evidence for empirical claims, argument or countermodel for conceptual claims, and task-specific criteria for proposals. Revise or drop the analogy if it adds no explanatory value.
 
 ## Worked example
 
-**Home space**: how should a small open-source project handle contributor onboarding?
+This is an illustrative proposal, not an empirical claim about either setting.
 
-**Remote space**: monastic novitiate (medieval Christian process for admitting new members).
+**Home question:** How could a reading group help newcomers contribute without expecting immediate expertise?
 
-**Generic space**: a community admits new members through a graduated process designed to test commitment and transmit values.
+**Comparison space:** An imagined apprenticeship with progressively harder tasks and feedback.
 
-**Selective projection**:
-- From novitiate: defined trial period, explicit "rule," senior mentor, public moment of full membership.
-- From open source: technical work, contribution flow, maintainer relationship.
+**Shared structure:** Participation can develop through supported practice.
 
-**Blended space**: a contributor passes through a defined "novitiate" — a public 3–6 month period with a maintainer mentor, a documented "rule" of project values, and a recognized moment of becoming a "professed" contributor.
+**Selective projection:** Offer progressively demanding discussion roles and feedback. Do not import employment hierarchy, compulsory training, or the assumption that there is a single correct reading.
 
-**Emergent structure**: monastic novitiate is *not transactional*. Novice doesn't earn membership through volume of work; they earn it through demonstrated commitment to the rule. Very different from open-source default (volume of merged PRs). The blend produces *commitment to values, not work output, as the criterion*. Not in either input alone.
+**Candidate result:** Optional supported roles might make participation easier. Whether they help or instead burden newcomers remains a separate question; the analogy does not settle it.
 
-## Anti-slop notes
+## Quality check
 
-- "X is like Y" without specificity = cliché, not analogy. Real analogies have *specific* mapped structure.
-- Avoid analogies to currently-trendy frames ("like AI", "like a network", "like a marketplace") — overused, low transfer.
-- Test: can you name three specific things that map and three that don't? If not, the analogy is decorative.
-- Resist mixed-metaphor accumulation. One careful analogy beats five sloppy ones.
-- Don't pick "the brain" or "AI" as remote frame. Pre-cooked.
-
-Sources: Gordon, *Synectics* (Harper, 1961); Koestler, *The Act of Creation* (Hutchinson, 1964); Fauconnier & Turner, *The Way We Think* (Basic Books, 2002).
+- Does the mapping reveal a useful relation or just substitute vocabulary?
+- Are non-mapping elements and disputed assumptions still visible?
+- Does the conclusion have support beyond resemblance where support is needed?
+- Would the idea remain useful if the metaphor were removed?

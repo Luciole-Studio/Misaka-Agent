@@ -1,0 +1,984 @@
+{
+  "upstream": "9e533db6f6c34d16037ee5ec964c479d0eb51cde",
+  "operations": [
+    {
+      "format": "docx",
+      "op": "create",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "docx",
+      "op": "insert_paragraph",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "docx",
+      "op": "insert_heading",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "docx",
+      "op": "insert_table",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "docx",
+      "op": "replace_text",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "docx",
+      "op": "format_text",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "docx",
+      "op": "format_paragraph",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "docx",
+      "op": "add_hyperlink",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "docx",
+      "op": "add_image",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "docx",
+      "op": "set_page_margins",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "docx",
+      "op": "set_page_orientation",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "docx",
+      "op": "set_header_footer",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "docx",
+      "op": "set_page_number",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "xlsx",
+      "op": "create",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "xlsx",
+      "op": "set_cell",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "xlsx",
+      "op": "set_range",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "xlsx",
+      "op": "set_cell_format",
+      "both_ok": true,
+      "different_package_parts": [
+        "xl/styles.xml"
+      ]
+    },
+    {
+      "format": "xlsx",
+      "op": "format_cells",
+      "both_ok": true,
+      "different_package_parts": [
+        "xl/styles.xml"
+      ]
+    },
+    {
+      "format": "xlsx",
+      "op": "add_table",
+      "both_ok": true,
+      "different_package_parts": [
+        "xl/styles.xml"
+      ]
+    },
+    {
+      "format": "xlsx",
+      "op": "add_chart",
+      "both_ok": true,
+      "different_package_parts": [
+        "xl/styles.xml"
+      ]
+    },
+    {
+      "format": "xlsx",
+      "op": "clear_charts",
+      "both_ok": true,
+      "different_package_parts": [
+        "xl/styles.xml"
+      ]
+    },
+    {
+      "format": "xlsx",
+      "op": "merge_cells",
+      "both_ok": true,
+      "different_package_parts": [
+        "xl/styles.xml"
+      ]
+    },
+    {
+      "format": "xlsx",
+      "op": "unmerge_cells",
+      "both_ok": true,
+      "different_package_parts": [
+        "xl/styles.xml"
+      ]
+    },
+    {
+      "format": "xlsx",
+      "op": "freeze_panes",
+      "both_ok": true,
+      "different_package_parts": [
+        "xl/styles.xml"
+      ]
+    },
+    {
+      "format": "xlsx",
+      "op": "set_column_width",
+      "both_ok": true,
+      "different_package_parts": [
+        "xl/styles.xml"
+      ]
+    },
+    {
+      "format": "xlsx",
+      "op": "set_row_height",
+      "both_ok": true,
+      "different_package_parts": [
+        "xl/styles.xml"
+      ]
+    },
+    {
+      "format": "xlsx",
+      "op": "set_page_setup",
+      "both_ok": true,
+      "different_package_parts": [
+        "xl/styles.xml"
+      ]
+    },
+    {
+      "format": "xlsx",
+      "op": "add_sheet",
+      "both_ok": true,
+      "different_package_parts": [
+        "xl/styles.xml"
+      ]
+    },
+    {
+      "format": "xlsx",
+      "op": "hide_sheet",
+      "both_ok": true,
+      "different_package_parts": [
+        "xl/styles.xml"
+      ]
+    },
+    {
+      "format": "xlsx",
+      "op": "show_sheet",
+      "both_ok": true,
+      "different_package_parts": [
+        "xl/styles.xml"
+      ]
+    },
+    {
+      "format": "xlsx",
+      "op": "set_sheet_visibility",
+      "both_ok": true,
+      "different_package_parts": [
+        "xl/styles.xml"
+      ]
+    },
+    {
+      "format": "xlsx",
+      "op": "rename_sheet",
+      "both_ok": true,
+      "different_package_parts": [
+        "xl/styles.xml"
+      ]
+    },
+    {
+      "format": "xlsx",
+      "op": "delete_sheet",
+      "both_ok": true,
+      "different_package_parts": [
+        "xl/styles.xml"
+      ]
+    },
+    {
+      "format": "xlsx",
+      "op": "add_named_range",
+      "both_ok": true,
+      "different_package_parts": [
+        "xl/styles.xml"
+      ]
+    },
+    {
+      "format": "xlsx",
+      "op": "delete_named_range",
+      "both_ok": true,
+      "different_package_parts": [
+        "xl/styles.xml"
+      ]
+    },
+    {
+      "format": "xlsx",
+      "op": "add_data_validation",
+      "both_ok": true,
+      "different_package_parts": [
+        "xl/styles.xml"
+      ]
+    },
+    {
+      "format": "xlsx",
+      "op": "add_conditional_formatting",
+      "both_ok": true,
+      "different_package_parts": [
+        "xl/styles.xml"
+      ]
+    },
+    {
+      "format": "xlsx",
+      "op": "set_auto_filter",
+      "both_ok": true,
+      "different_package_parts": [
+        "xl/styles.xml"
+      ]
+    },
+    {
+      "format": "xlsx",
+      "op": "set_number_format",
+      "both_ok": true,
+      "different_package_parts": [
+        "xl/styles.xml"
+      ]
+    },
+    {
+      "format": "xlsx",
+      "op": "add_image",
+      "both_ok": true,
+      "different_package_parts": [
+        "xl/styles.xml"
+      ]
+    },
+    {
+      "format": "pptx",
+      "op": "create",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "pptx",
+      "op": "add_slide",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "pptx",
+      "op": "set_text",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "pptx",
+      "op": "add_textbox",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "pptx",
+      "op": "add_table",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "pptx",
+      "op": "add_image",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "pptx",
+      "op": "set_notes",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "pptx",
+      "op": "replace_text",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "pptx",
+      "op": "add_shape",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "pptx",
+      "op": "add_chart",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "pptx",
+      "op": "format_text",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "pptx",
+      "op": "duplicate_slide",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "pptx",
+      "op": "delete_slide",
+      "both_ok": true,
+      "different_package_parts": [
+        "[Content_Types].xml",
+        "ppt/_rels/presentation.xml.rels",
+        "ppt/notesSlides/_rels/notesSlide1.xml.rels",
+        "ppt/notesSlides/notesSlide1.xml",
+        "ppt/slides/_rels/slide2.xml.rels",
+        "ppt/slides/slide2.xml"
+      ]
+    },
+    {
+      "format": "pptx",
+      "op": "set_slide_size",
+      "both_ok": true,
+      "different_package_parts": [
+        "[Content_Types].xml",
+        "ppt/_rels/presentation.xml.rels",
+        "ppt/notesSlides/_rels/notesSlide1.xml.rels",
+        "ppt/notesSlides/notesSlide1.xml",
+        "ppt/slides/_rels/slide2.xml.rels",
+        "ppt/slides/slide2.xml"
+      ]
+    },
+    {
+      "format": "txt",
+      "op": "create",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "txt",
+      "op": "append",
+      "both_ok": true,
+      "different_package_parts": []
+    },
+    {
+      "format": "txt",
+      "op": "replace_text",
+      "both_ok": true,
+      "different_package_parts": []
+    }
+  ],
+  "sources": {
+    "_doc_reader.py": {
+      "sha256": "e6c526ac0c3ee4eed343a28741b386fdbe502f76d696cd645e0c6a9ae04b625d",
+      "functions": [
+        "reader_src"
+      ]
+    },
+    "_reader_core.py": {
+      "sha256": "3224e75256d9337199661e4e51e20c5d6e25829a1247da8b9bb8fd75bd434def",
+      "functions": [
+        "_trace",
+        "_dump_trace",
+        "_ensure",
+        "_vision_read",
+        "_ext",
+        "_is_text",
+        "_magic_mime",
+        "_decode_bytes",
+        "_text_to_md",
+        "_classify_read",
+        "_split_blocks",
+        "_weak_cut",
+        "_resume_ctx",
+        "_paginate",
+        "_render_cached",
+        "_legacy_to_ooxml",
+        "_resolve_image_batch",
+        "_batch_concurrency",
+        "_batch_limit",
+        "_batch_image_read",
+        "_batch_cache_key",
+        "main"
+      ]
+    },
+    "_reader_docx.py": {
+      "sha256": "37c4839fe8eae2f345edfc59884dd521fe291996bc534d74131b93ca8411a392",
+      "functions": [
+        "_doc_to_docx",
+        "_docx_to_md"
+      ]
+    },
+    "_reader_pdf.py": {
+      "sha256": "70eb948bf61d5feb1503f389472deb91f174fd05e8d29cd0e425db24e6ac329b",
+      "functions": [
+        "_pdf_parse_pages",
+        "_pdf_page_count",
+        "_pdf_page_text",
+        "_pinfo",
+        "_page_size",
+        "_fonts_on_page",
+        "_is_math_page",
+        "_garble_ratio",
+        "_image_cover",
+        "_vector_ops",
+        "_word_boxes",
+        "_detect_columns",
+        "_reorder_columns",
+        "_ocr_base",
+        "_one_page_pdf",
+        "_ocr_page",
+        "_ocr_has_real_figure",
+        "_attachments",
+        "_acroform_fields",
+        "_ocg_layers",
+        "_tagged_outline",
+        "_norm_line",
+        "_dedup_headers",
+        "_pdf_to_images",
+        "_ocr_workdir",
+        "_pdf_route_decide",
+        "_text_body",
+        "_overview_page",
+        "_deep_page",
+        "_map_pages",
+        "_pdf_doc_head",
+        "_pdf_to_md"
+      ]
+    },
+    "_reader_pptx.py": {
+      "sha256": "7c6b12e68d4fe7ee916fbf747890a8168b4b25270f54489447a7898064bdf22b",
+      "functions": [
+        "_emu_in",
+        "_run_color",
+        "_run_spc",
+        "_fmt_num",
+        "_run_md",
+        "_shape_base_fmt",
+        "_para_list_kind",
+        "_ph_type",
+        "_shape_fill",
+        "_shape_bits",
+        "_text_vert",
+        "_pptx_text_md",
+        "_pptx_table_md",
+        "_chart_custom_labels",
+        "_pptx_chart_md",
+        "_pptx_pic_alt",
+        "_tag",
+        "_bbox",
+        "_shape_text",
+        "_is_line",
+        "_is_box",
+        "_pair_label_boxes",
+        "_label_at_edge",
+        "_arrow_info",
+        "_order_flow",
+        "_pptx_slide_lines",
+        "_pptx_to_md"
+      ]
+    },
+    "_reader_xlsx.py": {
+      "sha256": "d832af4b4697131a874b03c202fc1d0e3e6a541c053cf402e419c326e298e37e",
+      "functions": [
+        "_x_col",
+        "_x_esc",
+        "_x_ref",
+        "_x_render",
+        "_x_numfmt_lines",
+        "_x_recalc_copy",
+        "_x_islands",
+        "_x_compress",
+        "_x_has_formula",
+        "_x_grid",
+        "_x_r1c1",
+        "_x_formula_lines",
+        "_x_merged_lines",
+        "_x_color",
+        "_x_style_lines",
+        "_x_cond_lines",
+        "_x_extra_lines",
+        "_x_to_num",
+        "_x_table_md",
+        "_x_table_regions",
+        "_csv_to_md",
+        "_x_pivot_regions",
+        "_x_chart_lines",
+        "_xlsx_to_md"
+      ]
+    },
+    "_writer_core.py": {
+      "sha256": "7caf25a9c97bbd11852b677ae5b4d5b84f5052074cb909c4e14d5e58a722de4c",
+      "functions": [
+        "_ensure",
+        "_ext",
+        "_norm_runs",
+        "_collect_strings",
+        "_md_hint",
+        "_archive_intent",
+        "_export_pdf",
+        "_read_at",
+        "_res",
+        "_norm_result",
+        "_fmt_counts",
+        "_breakdown",
+        "_format_receipt",
+        "_xlsx_recalc",
+        "_xlsx_cache_empty",
+        "_escapes_write_roots",
+        "_spill_roots",
+        "_is_spill_path",
+        "_write_root_error",
+        "_run_op",
+        "_abort",
+        "main"
+      ]
+    },
+    "_writer_docx.py": {
+      "sha256": "011ba5663724a0368c25aeb91833cb0ca0483584f5712f10ed98bbfa1a15ec55",
+      "functions": [
+        "_docx_mod",
+        "_set_align",
+        "_add_hyperlink",
+        "_apply_runs",
+        "_set_list",
+        "_set_para_flow",
+        "_set_para_spacing",
+        "_cell_fill",
+        "_docx_cell",
+        "_header_row",
+        "_apply_col_widths",
+        "_iter_paras",
+        "_replace_in_paragraph",
+        "_find_anchor_para",
+        "_insert_para_after",
+        "_add_block",
+        "_docx_write"
+      ]
+    },
+    "_writer_pptx.py": {
+      "sha256": "560589c85d117edfa8c9d10b95bbfbc053cfc8d095fef58011b8e85c6726adf9",
+      "functions": [
+        "_rgb",
+        "_pp",
+        "_slide",
+        "_align_pptx",
+        "_set_pptx_ea",
+        "_rt_para",
+        "_no_bullet",
+        "_set_autofit",
+        "_find_ph",
+        "_set_ph",
+        "_add_body",
+        "_add_table",
+        "_build_slide",
+        "_pptx_write"
+      ]
+    },
+    "_writer_text.py": {
+      "sha256": "6c914f6b2b1be366694868355624edc68e07a1ae21bf2b98233b738362127e16",
+      "functions": [
+        "_text_encode",
+        "_text_write"
+      ]
+    },
+    "_writer_xlsx.py": {
+      "sha256": "bdffbdc9ac00d67b3e8094e2639cc60255044e22ca1ac8182d9f378b13647673",
+      "functions": [
+        "_xl_hex",
+        "_xl",
+        "_coerce",
+        "_numfmt",
+        "_typed_value",
+        "_autofit_columns",
+        "_save_ret",
+        "_get_ws",
+        "_fill_sheet",
+        "_xlsx_write"
+      ]
+    }
+  },
+  "reader_checks": [
+    {
+      "format": "xlsx",
+      "function": "_x_col",
+      "equal": true
+    },
+    {
+      "format": "xlsx",
+      "function": "_x_ref",
+      "equal": true
+    },
+    {
+      "format": "xlsx",
+      "function": "_x_islands",
+      "equal": true
+    },
+    {
+      "format": "xlsx",
+      "function": "_x_compress",
+      "equal": true
+    },
+    {
+      "format": "xlsx",
+      "function": "_x_r1c1",
+      "equal": true
+    },
+    {
+      "format": "xlsx",
+      "function": "_x_formula_lines",
+      "equal": true
+    },
+    {
+      "format": "xlsx",
+      "function": "_x_numfmt_lines",
+      "equal": true
+    },
+    {
+      "format": "xlsx",
+      "function": "_x_merged_lines",
+      "equal": true
+    },
+    {
+      "format": "xlsx",
+      "function": "_x_style_lines",
+      "equal": true
+    },
+    {
+      "format": "xlsx",
+      "function": "_x_cond_lines",
+      "equal": true
+    },
+    {
+      "format": "xlsx",
+      "function": "_x_extra_lines",
+      "equal": true
+    },
+    {
+      "format": "xlsx",
+      "function": "_x_pivot_regions",
+      "equal": false,
+      "difference": "MISAKA appends the explicit sheet/range to the re-read hint",
+      "misaka": "[((1, 13), 'at M1:N3 source=S!A1:C3 rows=[] cols=[] values=[] \u2014 values not expanded; re-read with cell_range=\"S!M1:N3\"')]",
+      "upstream": "[((1, 13), 'at M1:N3 source=S!A1:C3 rows=[] cols=[] values=[] \u2014 values not expanded; re-read with cell_range')]"
+    },
+    {
+      "format": "xlsx",
+      "function": "_x_chart_lines",
+      "equal": true
+    },
+    {
+      "format": "xlsx",
+      "function": "_x_to_num",
+      "equal": true
+    },
+    {
+      "format": "xlsx",
+      "function": "_x_to_num",
+      "equal": true
+    },
+    {
+      "format": "xlsx",
+      "function": "_x_to_num",
+      "equal": true
+    },
+    {
+      "format": "xlsx",
+      "function": "_x_to_num",
+      "equal": true
+    },
+    {
+      "format": "xlsx",
+      "function": "_x_to_num",
+      "equal": true
+    },
+    {
+      "format": "xlsx",
+      "function": "_x_to_num",
+      "equal": true
+    },
+    {
+      "format": "xlsx",
+      "function": "_x_to_num",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_ph_type",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_shape_fill",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_shape_bits",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_bbox",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_is_line",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_is_box",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_ph_type",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_shape_fill",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_shape_bits",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_bbox",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_is_line",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_is_box",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_ph_type",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_shape_fill",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_shape_bits",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_bbox",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_is_line",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_is_box",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_ph_type",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_shape_fill",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_shape_bits",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_bbox",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_is_line",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_is_box",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_ph_type",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_shape_fill",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_shape_bits",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_bbox",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_is_line",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_is_box",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_ph_type",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_shape_fill",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_shape_bits",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_bbox",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_is_line",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_is_box",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_ph_type",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_shape_fill",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_shape_bits",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_bbox",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_is_line",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_is_box",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_ph_type",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_shape_fill",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_shape_bits",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_bbox",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_is_line",
+      "equal": true
+    },
+    {
+      "format": "pptx",
+      "function": "_is_box",
+      "equal": true
+    }
+  ]
+}

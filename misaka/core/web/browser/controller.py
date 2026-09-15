@@ -179,7 +179,7 @@ async def serve():
                         view.config = copy.deepcopy(view.config)
                         view.config.setdefault('browser', {}).pop('controller_command', None)
                         return await manager.perform(request['action'], request.get('arguments', {}), request['id'])
-                    result = await owner.run(call)
+                    result = await owner.run(call, _tool_name=request['action'])
                     if 'image_bytes' in result:
                         result['image_base64'] = base64.b64encode(result.pop('image_bytes')).decode()
                     response['result'] = result

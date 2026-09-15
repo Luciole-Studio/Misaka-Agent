@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 from pathlib import Path
 
 from misaka.config import expand_tilde_path
@@ -33,6 +34,9 @@ from misaka.utils import atomic
 # file per document ever read. Eviction is oldest-first by mtime, which for this store is
 # also least-recently-rendered.
 MAX_ENTRIES = 256
+
+# Bump when rendering semantics change: unchanged files must not retain old parse bugs.
+RENDER_VERSION = 3
 
 
 def _directory(workspace=None):
@@ -54,18 +58,20 @@ def _directory(workspace=None):
 
 
 def _key(path):
-    """``(realpath, size, mtime_ns)`` digested, or ``None`` when the file cannot be stat'd.
+    """Renderer version plus file identity/change metadata, or ``None`` on stat failure.
 
     Size is in the key as well as the timestamp because a same-second edit that changes a
     document's length is otherwise served the previous rendering -- ``mtime`` has one-second
     resolution on filesystems that still exist, and an ``os.utime`` restore has none at all.
+    Inode and ctime also distinguish replacement or same-size writes whose mtime was restored.
     """
     try:
         real = os.path.realpath(path)
         stat = os.stat(real)
     except OSError:
         return None
-    material = f"{real}\0{stat.st_size}\0{stat.st_mtime_ns}"
+    material = (f"{RENDER_VERSION}\0{real}\0{stat.st_dev}\0{stat.st_ino}\0"
+                f"{stat.st_size}\0{stat.st_mtime_ns}\0{stat.st_ctime_ns}")
     return hashlib.sha256(material.encode("utf-8", "surrogatepass")).hexdigest()[:32]
 
 
@@ -86,7 +92,7 @@ def render_cached(path, render, *, workspace=None):
     """``render()``'s text for ``path``, from the store when it is there.
 
     ``render`` takes no arguments and returns the whole rendering as one string. It is
-    called at most once per (path, size, mtime); anything it raises reaches the caller
+    called at most once per (render version, file fingerprint); exceptions reach the caller
     unchanged and is not stored.
     """
     directory, key = _directory(workspace), _key(path)
@@ -94,7 +100,21 @@ def render_cached(path, render, *, workspace=None):
         return render()
     entry = directory / f"{key}.md"
     try:
-        return entry.read_text(encoding="utf-8")
+        # Pin the directory and reject links/special files before reading any bytes.
+        # Platforms without no-follow dir_fd opens simply re-render (a cache miss).
+        if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+            raise OSError("No guarded cache reads on this platform")
+        directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            fd = os.open(entry.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         dir_fd=directory_fd)
+            with os.fdopen(fd, encoding="utf-8") as handle:
+                info = os.fstat(handle.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    raise ValueError("Cache entry must be a single-link regular file")
+                return handle.read()
+        finally:
+            os.close(directory_fd)
     except (OSError, ValueError, UnicodeDecodeError):
         # Absent, unreadable, or not the text it was written as: render, and let the write
         # below replace whatever was there.

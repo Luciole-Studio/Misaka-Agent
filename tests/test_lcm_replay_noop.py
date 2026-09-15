@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from misaka.core.session_manager import SessionManager
-from misaka.extensions.hermes_lcm.host import context_engine, ingest
+from misaka.extensions.misaka_lcm.host import context_engine, ingest
 
 
 @pytest.fixture
@@ -17,7 +17,7 @@ def prepared(monkeypatch):
     built = SimpleNamespace(_summary_frontier_nodes=list, current_session_id="fixture")
     monkeypatch.setattr(context_engine, "_summary_scope", lambda *_, **__: nullcontext())
     monkeypatch.setattr(context_engine, "_archive_map", lambda *_: ({}, {}))
-    from misaka.extensions.hermes_lcm.host import carry
+    from misaka.extensions.misaka_lcm.host import carry
     monkeypatch.setattr(carry, "sources", lambda *_: {})
     return context_engine.Prepared(built, context_engine.Transcript([], []), replay, messages,
                                    None, 10, "auto", None, False, False)
@@ -85,13 +85,13 @@ def test_unchanged_replay_preserves_originals_and_metadata(prepared):
 
 def test_real_ingest_cache_jitter_then_reopen_and_fork(tmp_path, monkeypatch):
     """Use the host's actual NativeLCMEngine, SQLite store and replay cache."""
-    from misaka.extensions.hermes_lcm.vendor.config import LCMConfig
+    from misaka.extensions.misaka_lcm.vendor.config import LCMConfig
 
-    config = LCMConfig(database_path=str(tmp_path / "lcm.db"))
+    config = LCMConfig(database_path=context_engine.config_bridge.database_path(SimpleNamespace(cwd=str(tmp_path))))
     monkeypatch.setenv("LCM_DATABASE_PATH", config.database_path)
     monkeypatch.setenv("MISAKA_CODING_AGENT_DIR", str(tmp_path))
     monkeypatch.delenv("MISAKA_SUBAGENT_PARENT_SESSION_ID", raising=False)
-    monkeypatch.setattr(context_engine.config_bridge, "load_config", lambda: config)
+    monkeypatch.setattr(context_engine.config_bridge, "load_config", lambda **_: config)
     manager = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
     manager.appendCustomMessageEntry("todo-reminder", "remember", True)
     ctx = SimpleNamespace(sessionManager=manager, model=None, cwd=str(tmp_path))

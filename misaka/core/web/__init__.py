@@ -36,6 +36,8 @@ class WebPart:
         register_x_search(self, spec.workspace)
         from misaka.core.web.browser.tools import register as register_browser
         register_browser(self, spec.workspace)
+        from misaka.core.web.browser.vault.register import register as register_vault
+        register_vault(self, spec.workspace)
         self.registerTool(create_web_fetch_tool_definition(spec.workspace))
         self.registerTool(create_download_file_tool_definition(spec.workspace))
         self._definitions = tuple(self.tools)
@@ -91,12 +93,14 @@ class WebPart:
     def registerTool(self, definition):
         from dataclasses import replace
 
+        from misaka.utils.values import read_field
+
         async def execute(*args, **kwargs):
             result = await self.runtime.run(definition.execute, *args, _tool_name=definition.name, _tool_call=True, **kwargs)
             # Pi marks thrown errors, not an isError field on a normal tool return.
-            if isinstance(result, dict) and result.get("isError"):
-                raise RuntimeError("\n".join(block["text"] for block in result.get("content", [])
-                                             if block.get("type") == "text") or "Web tool failed")
+            if read_field(result, "isError", False) or read_field(read_field(result, "details"), "isError", False):
+                raise RuntimeError("\n".join(read_field(block, "text", "") for block in read_field(result, "content", [])
+                                             if read_field(block, "type") == "text") or "Web tool failed")
             return result
 
         self.tools.append(replace(definition, execute=execute))

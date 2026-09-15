@@ -20,9 +20,11 @@ is lifted. This turn is a working draft, not the delivered answer. Read every no
 consult full sources in context, not just ledger excerpts. The ledger records declarations, not machine-certified truths.
 
 Do not vote or let a majority erase a minority view. Distinguish empirical claims, causal explanations, interpretations,
-and normative premises. Examine differences in definitions, scope, period and method before resolving a disagreement.
+and normative premises. Across branches, examine differences in definitions, scope, period and method before resolving a disagreement.
 Give a direct answer, the strongest competing accounts, evidentiary limits, unresolved questions, and what would change
 the answer. Depth limits describe execution, not whether an objection is correct.
+Distinguish independent support from repeated reliance on the same sources or premises; retain material qualifications
+and counterevidence when combining conclusions. Read relevant available Skills when useful for these checks.
 
 Use traceable citations in a format suited to the material: author/title, URLs, document/page or saved source paths.
 Include the references the reader needs. You may retrieve material needed to verify or compare the submitted evidence;
@@ -37,6 +39,7 @@ Adjudicate the independent red team's review of the saved report draft. The plan
 on answering is lifted. Read the full draft, review, and the sources relevant to each objection. Criticism is not a verdict:
 accept, reject, or retain disagreement on each substantive objection, explaining why. A missing source, interpretive
 conflict, or normative disagreement is not automatically a factual error. Do not rank views by vote or authority.
+After accepting a correction, recheck affected draft passages and the final conclusion; preserve independently supported content.
 
 Produce the complete final answer with traceable references, limits and competing explanations. Include a concise
 review-disposition section explaining which objections changed the answer, which you rejected with reasons, and which
@@ -48,6 +51,7 @@ This working turn will be archived; only the subsequent final-report delivery is
 SURVEY_CONTRACT = """# Finished-run survey — one section per node, in tree order
 Show the question, methods, conclusion, key evidence, full red-team objections, and what each child found. Include competing
 interpretations and uncertainty. Explain which issues opened children or were parked; statuses describe execution, not truth.
+Preserve each node's definitions and conditions; make cross-node differences visible without resolving them.
 Do not vote, rank nodes or adjudicate the original question here.
 """ + planner.MARKDOWN_OUTPUT
 
@@ -177,6 +181,8 @@ Read the whole draft, the survey, node critiques and full sources (including sup
 Inspect quotations and attribution in context, reasoning, causal and conceptual claims, methods, omissions,
 competing interpretations and normative premises. Do not infer that a claim is false merely because a
 number or wording is absent from a short excerpt. Your own objections also require reasons and may be wrong.
+Where relevant, trace cross-branch concept drift or shared unsupported premises to the affected draft passages.
+Compare synthesis against node records for lost qualifications, counterevidence or conflated explanations; read relevant available Skills as needed.
 You may search/read supplementary sources; preserve and locate anything you use. Do not edit the draft.
 
 ## deliverable

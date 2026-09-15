@@ -107,7 +107,7 @@ def write(path, op, args, *, overwrite=False):
         # test here would fall through and replace every occurrence.
         updated = (existing.replace(find, args.get("replace", ""), int(limit))
                    if limit is not None else existing.replace(find, args.get("replace", "")))
-        done = min(available, int(limit)) if limit is not None else available
+        done = min(available, int(limit)) if limit is not None and int(limit) >= 0 else available
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(updated)
         if done == 0:

@@ -22,6 +22,8 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
+from urllib.request import url2pathname
 
 from misaka.cli import setup_ui as ui
 from misaka.cli.setup_ui import SetupCancelled, prompt_choice
@@ -63,8 +65,11 @@ def describe() -> Install:
     if vcs.get("vcs") == "git":
         return Install("git", False, installer, None, vcs.get("commit_id"), dist.version)
     if url.startswith("file://"):
-        path = Path(url[len("file://"):])
+        parsed = urlsplit(url)
         editable = bool((direct.get("dir_info") or {}).get("editable"))
+        if parsed.netloc not in ("", "localhost"):
+            return Install("wheel", editable, installer, None, None, dist.version)
+        path = Path(url2pathname(parsed.path))
         if (path / ".git").exists():
             return Install("checkout", editable, installer, path, None, dist.version)
         return Install("wheel", editable, installer, path, None, dist.version)

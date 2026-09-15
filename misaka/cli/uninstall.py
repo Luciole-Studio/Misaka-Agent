@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import os
 import shutil
+from contextlib import closing
+from pathlib import Path
 
 from misaka.cli import setup_ui as ui
 from misaka.cli.setup_ui import SetupCancelled, prompt_choice
@@ -27,8 +29,6 @@ CONTENTS = (
     ("agent", "credentials, settings.json, the model catalog and custom themes"),
     ("profiles", "Last Order, the Sisters, their skills, and saved conversations"),
     ("board.db", "the task board: every card and every research run's record"),
-    ("lcm.db", "the context engine's memory of past sessions"),
-    ("lcm-large-outputs", "tool results the context engine moved out of the transcript"),
     ("messages.db", "the message queue between roles"),
     ("pageindex", "extracted text and outlines of the documents you indexed"),
     ("cache", "web and office caches; rebuilt on demand"),
@@ -47,7 +47,7 @@ def _known_paths() -> dict[str, str]:
         if value:
             paths[os.path.realpath(os.path.expanduser(str(value)))] = str(value)
 
-    for key in ("db", "messages_db", "lcm_db", "allies", "web_config", "web_cache",
+    for key in ("db", "messages_db", "allies", "web_config", "web_cache",
                 "office_cache", "office_intent", "net_sock", "net_snapshot",
                 "roles_root", "profiles_root", "tasks_root"):
         add(CFG.get(key))
@@ -95,7 +95,7 @@ def _projects(db_path: str) -> list[str]:
     if not os.path.isfile(db_path):
         return []
     try:
-        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as con:
+        with closing(sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True)) as con:
             rows = con.execute(
                 "SELECT DISTINCT workspace FROM tasks WHERE workspace IS NOT NULL").fetchall()
     except sqlite3.Error:

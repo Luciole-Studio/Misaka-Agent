@@ -44,11 +44,11 @@ MISAKA 的部分文件移植自其它项目。移植代码所附带的许可证�
 - 上游：https://github.com/stephenschoettler/hermes-lcm
 - 许可证：MIT
 - 版权：Copyright (c) 2026 Stephen Schoettler
-- 本仓库位置：`misaka/extensions/hermes_lcm/vendor/`（完整 MIT 文本在该目录的 `LICENSE.hermes-lcm`）
-- pin：`10cbb78347ec86f3004153b24767324ded9e37b4`（v0.21.0-rc2），见
-  `misaka/extensions/hermes_lcm/UPSTREAM_COMMIT`
-- 说明：61 个模块原样收录（审计核对为 60 个逐字节相同、1 个有登记的修改），
-  上游自己的测试套件收在 `tests/hermes_lcm_vendor/`。胶水代码在 `host/` 下，是本仓库自有。
+- 本仓库位置：`misaka/extensions/misaka_lcm/vendor/`（完整 MIT 文本在该目录的 `LICENSE.hermes-lcm`）
+- pin：`8d1b1e6d3d63f5fc7b209e8d7ec1dc9b814f2e54`（1.0.0-rc.1），见
+  `misaka/extensions/misaka_lcm/UPSTREAM_COMMIT`
+- 本地 fork 名为 **MISAKA LCM**；上游测试在 `vendor/tests/`，MISAKA 适配层在 `host/`。
+  固定源码与已登记的宿主接缝见 `PORT_NOTES.md`；本轮核心字节校验见 `CORE_INTEGRITY.json`。
 
 ## PageIndex
 
@@ -96,7 +96,7 @@ MISAKA 的部分文件移植自其它项目。移植代码所附带的许可证�
 
 `misaka/ai/**`、`misaka/core/**`、`misaka/agent/**`、`misaka/ui/tui/**` 的大部分是
 Pi（coding agent）的 Python 移植；`misaka/ui/panel/**` 是 herdr 的移植。
-`misaka/extensions/hermes_lcm/vendor/**` 原样收录自 hermes-lcm，
+`misaka/extensions/misaka_lcm/vendor/**` 原样收录自 hermes-lcm，
 `misaka/core/documents/pageindex/**` 原样收录自 PageIndex，两者各自保留上游的许可证文件。
 
 > 维护提示：新增一处从外部项目移植的代码时，把上游的许可证头随代码一起搬进来，
@@ -109,6 +109,9 @@ Pi（coding agent）的 Python 移植；`misaka/ui/panel/**` 是 herdr 的移植
 - Hermes 源码：https://github.com/nousresearch/hermes-agent ，MIT，Copyright (c) 2025 Nous Research。
 - 位置：`misaka/core/web/`、`misaka/core/tools/_web/`；许可证文本：`misaka/core/web/LICENSE.hermes-agent`。
 - 对照基准：`990473a79c6b0396b0a648fdd85ee8f7a5c267d3`（本批所用源码与审计 f03 快照一致）。
+- Web 增量对照：`62e5f466565ee56351e4483ead8e62f9e782f8b3`。本批移植 provider 提取时限语义及五个 browser vault 工具；不表示整个 Hermes 产品已完整移植。
+- Vault：`misaka/core/web/browser/vault/`，来自该增量提交的 `agent/vault_store.py`、`agent/vault_login_classifier.py`、`agent/vault_backends/` 与 `tools/browser_vault_tool.py`。许可证为同目录 `LICENSE`；逐文件来源及 SHA256 见 `PROVENANCE.json`。宿主桥接、masked TUI、权限、资源清理及额外边界修复是 MISAKA 原生适配。
+- Web 回归：`tests/web/` 保留本地历史回归及选取的 Hermes vault 测试；`tests/web/fixtures/hermes_990473a/` 为固定基准源码夹具，保留原文及同目录 MIT 许可证，见 `tests/web/README.md`。
 - Parallel `parallel-web==0.4.2`：重试协议适配，MIT，Copyright 2026 Parallel；文本：`misaka/core/web/LICENSE.parallel-web`。
 - Firecrawl `firecrawl-py==4.17.0`：重试、错误信封及 scrape 默认参数适配，MIT，Copyright (c) 2024 Sideguide Technologies Inc.；文本：`misaka/core/web/LICENSE.firecrawl-py`。
 - SDK wheel 仅用于离线源码/差分核查，未作为新增运行依赖或整包 vendoring；版本与 SHA 见 `docs/audits/web-tools-vs-hermes-2026-09-09/provider-parity-evidence/sdk-manifest.json`。
@@ -161,3 +164,12 @@ are not represented as verbatim upstream code.
   MISAKA's existing ruamel YAML host, with private lexical adapters. This is not
   a vendored JS parser or an added runtime dependency. Pi/Hermes YAML is untouched.
 - ISC text: `misaka/core/subagent/LICENSE.yaml`.
+
+## FrontierAgent（Office）
+
+- 上游：https://github.com/ApodexAI/FrontierAgent ，Apache License 2.0。
+- 本轮源码对照固定于 `9e533db6f6c34d16037ee5ec964c479d0eb51cde`；这不是原样 vendoring 或全产品一比一移植声明。
+- 位置：`misaka/core/tools/_office/`、`misaka/core/documents/office/`，以及 `tools/office.py`、`tools/read.py` 的 Office 接入。
+- 许可证全文、源文件 SHA256 和改动边界：`misaka/core/tools/_office/LICENSE.frontier-agent`、`PROVENANCE.json`、`ORIGIN.md`。
+- 来源：上游 `_writer_*`、`_reader_*`、`create_file.py`、`read_file.py`；其自身注明功能设计参考 Mercor-Intelligence/archipelago（Apache-2.0），寻址和参数设计由 FrontierAgent 实现。
+- 本地改动包含引用友好的文本渲染、工作区归属、权限和错误信封、线程／写入队列、暂存回滚、独立转换配置、缺陷修正；不包含上游 PDF OCR、视觉模型网关和沙箱基础设施。

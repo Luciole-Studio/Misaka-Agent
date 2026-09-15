@@ -246,8 +246,8 @@ def _inline(container, notes, rels, state, *, plain=False):
                 # Autolink form, after the line: ``[text](url)`` would put "](" inside the
                 # sentence. A link whose text already is the URL needs nothing.
                 trailing.append(f"<{target}>")
-        elif name in ("ins", "smartTag", "sdtContent", "bdo", "dir"):
-            # Tracked insertions and content controls wrap runs without changing them.
+        elif name in ("ins", "smartTag", "sdt", "sdtContent", "bdo", "dir", "fldSimple"):
+            # Preserve stored field results too; reading does not evaluate field instructions.
             inner, inner_trailing = _inline(child, notes, rels, state, plain=True)
             if inner:
                 pieces.append([_PLAIN, inner])
@@ -479,11 +479,11 @@ def _styles(archive):
     return out
 
 
-def _rels(archive):
-    """``{rId: target}`` for the external links in ``word/document.xml``."""
+def _rels(archive, part="document"):
+    """External links for one Word part; relationship IDs are local to that part."""
     import xml.etree.ElementTree as ET
     try:
-        root = ET.fromstring(archive.read("word/_rels/document.xml.rels"))
+        root = ET.fromstring(archive.read(f"word/_rels/{part}.xml.rels"))
     except (KeyError, ET.ParseError):
         return {}
     package = "{http://schemas.openxmlformats.org/package/2006/relationships}"
@@ -517,7 +517,7 @@ def _note_bodies(archive):
     return out
 
 
-def _note_lines(notes, rels, state, styles):
+def _note_lines(notes, note_rels, state, styles):
     """The footnote and endnote sections, in the order the body referred to them.
 
     They go in the same page flow as the body rather than into a sidecar, so ``verify_quote``
@@ -528,6 +528,7 @@ def _note_lines(notes, rels, state, styles):
         used = notes.used[kind]
         if not used:
             continue
+        rels = note_rels[kind]
         lines.extend(["", heading, ""])
         for raw_id in used:
             ordinal = notes.order[kind][raw_id]
@@ -564,23 +565,27 @@ def render(path):
     Raises ``ValueError`` naming the file when python-docx cannot open it -- that string is
     what ``doc_add`` hands the model.
     """
+    import xml.etree.ElementTree as ET
     try:
-        import docx as _docx
-    except ImportError as error:                                    # pragma: no cover
-        raise ValueError(
-            f"Cannot read {os.path.basename(str(path))}: python-docx is not installed."
-        ) from error
-    try:
-        document = _docx.Document(str(path))
-    except Exception as error:
+        with zipfile.ZipFile(str(path)) as archive:
+            body = ET.fromstring(archive.read("word/document.xml")).find(f"{W}body")
+            if body is None:
+                raise ValueError("word/document.xml has no body")
+            styles = _styles(archive)
+            rels = _rels(archive)
+            notes = _Notes(_note_bodies(archive))
+            note_rels = {kind: _rels(archive, kind + "s") for kind in _MARKER}
+    except (OSError, KeyError, ValueError, ET.ParseError, zipfile.BadZipFile) as error:
         raise ValueError(
             f"Cannot read {os.path.basename(str(path))}: {type(error).__name__}: {error}"
         ) from error
 
-    with zipfile.ZipFile(str(path)) as archive:
-        styles = _styles(archive)
-        rels = _rels(archive)
-        notes = _Notes(_note_bodies(archive))
+    def body_blocks(container):
+        for child in container:
+            if _local(child) in ("sdt", "sdtContent", "ins"):
+                yield from body_blocks(child)
+            else:
+                yield child
 
     state = _State()
     lines = [
@@ -590,7 +595,7 @@ def render(path):
          "Headers and footers are not rendered: they repeat on every page. -->"),
     ]
     previous = None
-    for child in document.element.body:
+    for child in body_blocks(body):
         name = _local(child)
         if name == "p":
             rendered = _paragraph_line(child, notes, rels, state, styles)
@@ -607,7 +612,7 @@ def render(path):
                 lines.append("")
                 lines.extend(table)
                 previous = "block"
-    lines.extend(_note_lines(notes, rels, state, styles))
+    lines.extend(_note_lines(notes, note_rels, state, styles))
     while lines and not lines[-1].strip():
         lines.pop()
     return "\n".join(lines) + "\n"

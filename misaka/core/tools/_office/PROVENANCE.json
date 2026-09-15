@@ -1,0 +1,20 @@
+{
+  "repository": "https://github.com/ApodexAI/FrontierAgent",
+  "comparison_commit": "9e533db6f6c34d16037ee5ec964c479d0eb51cde",
+  "license": "Apache-2.0",
+  "date": "2026-09-15",
+  "mode": "adapted capability port, not verbatim vendoring",
+  "upstream_files": {
+    "_writer_core.py": "7caf25a9c97bbd11852b677ae5b4d5b84f5052074cb909c4e14d5e58a722de4c",
+    "_writer_docx.py": "011ba5663724a0368c25aeb91833cb0ca0483584f5712f10ed98bbfa1a15ec55",
+    "_writer_xlsx.py": "bdffbdc9ac00d67b3e8094e2639cc60255044e22ca1ac8182d9f378b13647673",
+    "_writer_pptx.py": "560589c85d117edfa8c9d10b95bbfbc053cfc8d095fef58011b8e85c6726adf9",
+    "_writer_text.py": "6c914f6b2b1be366694868355624edc68e07a1ae21bf2b98233b738362127e16",
+    "_reader_core.py": "3224e75256d9337199661e4e51e20c5d6e25829a1247da8b9bb8fd75bd434def",
+    "_reader_docx.py": "37c4839fe8eae2f345edfc59884dd521fe291996bc534d74131b93ca8411a392",
+    "_reader_xlsx.py": "d832af4b4697131a874b03c202fc1d0e3e6a541c053cf402e419c326e298e37e",
+    "_reader_pptx.py": "7c6b12e68d4fe7ee916fbf747890a8168b4b25270f54489447a7898064bdf22b",
+    "create_file.py": "203626801e58d5c98d8594efa5bf9ae1ca0cdb7c76d13283b96fbd137ccda1b3",
+    "read_file.py": "61904dbc9647d52f8cf44da9c409fdd84f04b28379531f1669c3babf25d9e096"
+  }
+}

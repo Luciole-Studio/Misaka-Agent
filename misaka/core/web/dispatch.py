@@ -19,7 +19,10 @@ Hermes' structured Web debug trace is still tracked separately in the transplant
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
+import math
 from typing import Any
 
 from misaka.core.tools._web.website_policy import policy_blocked
@@ -27,6 +30,7 @@ from misaka.core.web import debug
 from misaka.core.web.config import (
     keyless_rescue_enabled,
     provider_disabled,
+    web_config,
 )
 from misaka.core.web.keyless import (
     extract_with_failover,
@@ -42,8 +46,18 @@ from misaka.core.web.registry import (
     search_backend_name,
     selection_stored,
 )
+from misaka.utils.async_lifecycle import run_in_thread
 
 logger = logging.getLogger(__name__)
+
+
+def extract_timeout_seconds() -> float:
+    """Hermes 62e5f46 provider-dispatch cap; <= 0 disables this inner cap only."""
+    try:
+        value = float(web_config().get("extract_timeout", 120.0))
+        return value if math.isfinite(value) else 120.0
+    except (TypeError, ValueError):
+        return 120.0
 
 def serves_keyless(provider: WebSearchProvider | None) -> bool:
     """Whether a call on *provider* will be dispatched through the keyless ring.
@@ -311,8 +325,22 @@ async def web_extract(
     reports every page as failed is the same event described differently, and Hermes
     rescues both.
     """
+    timeout = extract_timeout_seconds()
+    deadline = asyncio.timeout(timeout if timeout > 0 else None)
     try:
-        results = await provider.extract(list(urls), format=format)
+        async with deadline:
+            if inspect.iscoroutinefunction(provider.extract):
+                results = await provider.extract(list(urls), format=format)
+            else:
+                results = await run_in_thread(provider.extract, list(urls), format=format)
+        if deadline.expired():
+            raise TimeoutError  # A provider that swallowed cancellation still timed out.
+    except TimeoutError:
+        failed = [{"url": url, "title": "", "content": "",
+                   "error": f"Extract timed out after {timeout:g}s via {provider.name}"} for url in urls]
+        if not rescue_eligible(provider):
+            return failed, False
+        return await rescue_extract(provider.name, list(urls), failed), True
     except Exception as exc:  # a backend that raises: rescue it, or let it out
         if not rescue_eligible(provider):
             raise

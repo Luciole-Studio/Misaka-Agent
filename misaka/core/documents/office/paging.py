@@ -35,7 +35,7 @@ _BOUNDARY = {
 
 # A fenced block in a rendering is content -- a cell holding "## Sheet: totals", a code
 # sample in a Word document -- and a boundary found inside one is not a boundary.
-_FENCE = re.compile(r"^(?:```|~~~)", re.MULTILINE)
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})([^\r\n]*)", re.MULTILINE)
 
 # The header row a tabular block opens with. Repeating it is what makes a continuation
 # page of 400 numbers readable at all; borrowed from FrontierAgent
@@ -56,11 +56,17 @@ def _fenced_spans(text):
     An unclosed fence runs to the end of the text: the safe direction is to treat the tail
     as content rather than to find boundaries inside what a writer meant as one block.
     """
-    marks = [m.start() for m in _FENCE.finditer(text)]
-    spans = []
-    for i in range(0, len(marks), 2):
-        end = marks[i + 1] if i + 1 < len(marks) else len(text)
-        spans.append((marks[i], end))
+    spans, opening = [], None
+    for match in _FENCE.finditer(text):
+        fence, rest = match.groups()
+        if opening is None:
+            if fence[0] != "`" or "`" not in rest:
+                opening = (match.start(), fence)
+        elif fence[0] == opening[1][0] and len(fence) >= len(opening[1]) and not rest.strip():
+            spans.append((opening[0], match.end()))
+            opening = None
+    if opening is not None:
+        spans.append((opening[0], len(text)))
     return spans
 
 
@@ -98,12 +104,15 @@ def resume_context(block, fmt):
     -- for a spreadsheet -- the column-letter row, without which the page is a wall of
     values in unnamed columns.
     """
-    lines = block.splitlines()
-    if not lines:
-        return ""
     pattern = _BOUNDARY.get(fmt)
-    if pattern is None or not pattern.match(lines[0]):
+    if pattern is None:
         return ""
+    spans = _fenced_spans(block)
+    title = next((match for match in pattern.finditer(block)
+                  if not any(lo <= match.start() < hi for lo, hi in spans)), None)
+    if title is None:
+        return ""
+    lines = block[title.start():].splitlines()
     out = lines[0].rstrip() + CONTINUED + "\n"
     header = _header_row(lines[1:], fmt)
     if header is not None:

@@ -187,10 +187,19 @@ def _islands(coords):
     return sorted(boxes)
 
 
+def _stored_cells(sheet):
+    """Only serialized cells, in row order; iter_rows densifies sparse worksheets."""
+    return [sheet._cells[key] for key in sorted(sheet._cells)]
+
+
 def _has_formula(cell):
-    value = cell.value
-    return (isinstance(value, str) and value.startswith("=")) \
-        or value.__class__.__name__ == "ArrayFormula"
+    return cell.data_type == "f" or cell.value.__class__.__name__ == "ArrayFormula"
+
+
+def _missing_cache(formula_cell, value_cell):
+    # t="str" with an empty <v> is a calculated empty string, not a missing result.
+    return (_has_formula(formula_cell) and value_cell.value is None
+            and value_cell.data_type not in ("s", "str", "inlineStr"))
 
 
 def _grid(values_sheet, formula_sheet, bbox, mark_uncached):
@@ -207,7 +216,7 @@ def _grid(values_sheet, formula_sheet, bbox, mark_uncached):
         cells, seen = [], False
         for c in range(c1, c2 + 1):
             cell = values_sheet.cell(row=r, column=c)
-            if cell.value is None and mark_uncached and _has_formula(formula_sheet.cell(row=r, column=c)):
+            if mark_uncached and _missing_cache(formula_sheet.cell(row=r, column=c), cell):
                 cells.append("`uncached`")
                 seen = True
                 continue
@@ -237,19 +246,36 @@ def _r1c1(formula, anchor_row, anchor_col):
         col_part = f"C{col}" if col_abs else ("C" if col == anchor_col else f"C[{col - anchor_col}]")
         return row_part + col_part
 
-    return _REF_RE.sub(convert, formula)
+    from openpyxl.formula import Tokenizer
+    from openpyxl.formula.tokenizer import TokenizerError
+    try:
+        tokens = Tokenizer(formula)
+    except TokenizerError:
+        return formula  # Unsupported syntax remains verbatim, never guessed.
+    for token in tokens.items:
+        if token.type != "OPERAND" or token.subtype != "RANGE":
+            continue
+        prefix, separator, reference = token.value.rpartition("!")
+        endpoints = reference.split(":")
+        if len(endpoints) > 2 or not all(_REF_RE.fullmatch(part) for part in endpoints):
+            continue  # Names, structured references and whole-column ranges stay literal.
+        matches = [_REF_RE.fullmatch(part) for part in endpoints]
+        if any(not 1 <= int(match[4]) <= 1048576
+               or column_index_from_string(match[2].upper()) > 16384 for match in matches):
+            continue  # e.g. ZZZ1 can be a defined name, not an Excel cell reference.
+        token.value = prefix + separator + _REF_RE.sub(convert, reference)
+    return tokens.render()
 
 
 def _formula_lines(formula_sheet):
     cells = {}
-    for row in formula_sheet.iter_rows():
-        for cell in row:
-            value = cell.value
-            if isinstance(value, str) and value.startswith("="):
-                cells[(cell.row, cell.column)] = value
-            elif value.__class__.__name__ == "ArrayFormula":
-                text = getattr(value, "text", "") or ""
-                cells[(cell.row, cell.column)] = text if text.startswith("=") else "=" + text
+    for cell in _stored_cells(formula_sheet):
+        value = cell.value
+        if cell.data_type == "f" and isinstance(value, str):
+            cells[(cell.row, cell.column)] = value
+        elif value.__class__.__name__ == "ArrayFormula":
+            text = getattr(value, "text", "") or ""
+            cells[(cell.row, cell.column)] = text if text.startswith("=") else "=" + text
     if not cells:
         return ("formulas", [])
     done, items = set(), []
@@ -381,16 +407,15 @@ def _extra_lines(formula_sheet):
     """The handles whose meaning is not in the value layer: where a cell links to, what a
     reviewer wrote about it, what a column is allowed to contain."""
     items = []
-    for row in formula_sheet.iter_rows():
-        for cell in row:
-            try:
-                if cell.hyperlink is not None and getattr(cell.hyperlink, "target", None):
-                    items.append(f"link {cell.coordinate}→{cell.hyperlink.target}")
-                if cell.comment is not None and cell.comment.text:
-                    text = cell.comment.text.strip().replace("\n", " ")[:60]
-                    items.append(f'comment {cell.coordinate}:"{text}"')
-            except (AttributeError, TypeError, ValueError):
-                pass
+    for cell in _stored_cells(formula_sheet):
+        try:
+            if cell.hyperlink is not None and getattr(cell.hyperlink, "target", None):
+                items.append(f"link {cell.coordinate}→{cell.hyperlink.target}")
+            if cell.comment is not None and cell.comment.text:
+                text = cell.comment.text.strip().replace("\n", " ")[:60]
+                items.append(f'comment {cell.coordinate}:"{text}"')
+        except (AttributeError, TypeError, ValueError):
+            pass
     try:
         for validation in formula_sheet.data_validations.dataValidation:
             if validation.type == "list" and validation.formula1:
@@ -476,9 +501,15 @@ def _table_md(header, rows, name=None, ref=None, preview=PREVIEW, delimiter="\t"
 def _table_cell(values_sheet, formula_sheet, r, c, mark_uncached):
     """``(raw value, display text)`` for one table cell, uncached formulas marked."""
     cell = values_sheet.cell(row=r, column=c)
-    if cell.value is None and mark_uncached and _has_formula(formula_sheet.cell(row=r, column=c)):
+    if mark_uncached and _missing_cache(formula_sheet.cell(row=r, column=c), cell):
         return (None, "`uncached`")
     return (cell.value, _render(cell))
+
+
+def _region_mask(sheet, r1, c1, r2, c2):
+    if (r2 - r1 + 1) * (c2 - c1 + 1) > MAX_GRID_CELLS:
+        return {(r, c) for r, c in sheet._cells if r1 <= r <= r2 and c1 <= c <= c2}
+    return {(r, c) for r in range(r1, r2 + 1) for c in range(c1, c2 + 1)}
 
 
 def _table_regions(values_sheet, formula_sheet, mark_uncached=False):
@@ -498,9 +529,11 @@ def _table_regions(values_sheet, formula_sheet, mark_uncached=False):
             c1, r1, c2, r2 = range_boundaries(ref)
         except (ValueError, TypeError):
             continue
-        mask.update((r, c) for r in range(r1, r2 + 1) for c in range(c1, c2 + 1))
-        header = [str(values_sheet.cell(row=r1, column=c).value or "")
-                  for c in range(c1, c2 + 1)]
+        mask.update(_region_mask(formula_sheet, r1, c1, r2, c2))
+        if (r2 - r1 + 1) * (c2 - c1 + 1) > MAX_GRID_CELLS:
+            regions.append(((r1, c1), [f'`table "{name}": {ref} is too large; read a smaller cell_range`']))
+            continue
+        header = [_render(values_sheet.cell(row=r1, column=c)) for c in range(c1, c2 + 1)]
         rows = [[_table_cell(values_sheet, formula_sheet, r, c, mark_uncached)
                  for c in range(c1, c2 + 1)]
                 for r in range(r1 + 1, r2 + 1)]
@@ -520,7 +553,7 @@ def _pivot_regions(formula_sheet):
             where = pivot.location.ref
             c1, r1, c2, r2 = range_boundaries(where)
             anchor = (r1, c1)
-            mask.update((r, c) for r in range(r1, r2 + 1) for c in range(c1, c2 + 1))
+            mask.update(_region_mask(formula_sheet, r1, c1, r2, c2))
         except (AttributeError, ValueError, TypeError):
             pass
         source = "?"
@@ -539,7 +572,7 @@ def _pivot_regions(formula_sheet):
             pass
         regions.append((anchor, (f"at {where} source={source} rows={rows} cols={cols} "
                                  f"values={values} — values not expanded; "
-                                 f're-read with cell_range="…!{where}"')))
+                                 f're-read with cell_range="{formula_sheet.title}!{where}"')))
     return regions, mask
 
 
@@ -629,22 +662,16 @@ def _uncached_anywhere(formula_book, value_book, scope=None):
     cheap. Without it, asking for two cells walks every cell of every sheet twice --
     FrontierAgent does exactly that, and risks a 90-second LibreOffice subprocess for it.
     """
-    if scope is not None:
-        name, (r1, c1, r2, c2) = scope
-        formula_sheet, value_sheet = formula_book[name], value_book[name]
-        for r in range(r1, r2 + 1):
-            for c in range(c1, c2 + 1):
-                if _has_formula(formula_sheet.cell(row=r, column=c)) \
-                        and value_sheet.cell(row=r, column=c).value is None:
-                    return True
-        return False
-    for formula_sheet in formula_book.worksheets:
-        value_sheet = value_book[formula_sheet.title]
-        for row in formula_sheet.iter_rows():
-            for cell in row:
-                if _has_formula(cell) and value_sheet.cell(
-                        row=cell.row, column=cell.column).value is None:
-                    return True
+    sheets = ([formula_book[scope[0]]] if scope is not None else formula_book.worksheets)
+    for sheet in sheets:
+        values = value_book[sheet.title]
+        for cell in _stored_cells(sheet):
+            if scope is not None:
+                r1, c1, r2, c2 = scope[1]
+                if not (r1 <= cell.row <= r2 and c1 <= cell.column <= c2):
+                    continue
+            if _missing_cache(cell, values.cell(row=cell.row, column=cell.column)):
+                return True
     return False
 
 
@@ -652,22 +679,47 @@ def _load(path):
     """``(formula workbook, value workbook)``.
 
     Two loads, because openpyxl gives either the formula or its cached result and the
-    reader needs both. Pivot caches are stubbed out first: their contents are never read
-    (the pivot's definition carries everything this reports) and a large or malformed one
-    can stall the load for minutes -- FrontierAgent measured 120s against 0.09s on one
-    dashboard. The guard is a try/except so that an openpyxl that has moved on simply
-    reverts to the slow path.
+    reader needs both. Keep pivot cache definitions but skip large cache record lists.
+    The proxy is local to each reader, not a global openpyxl monkeypatch; parser failures
+    propagate rather than silently reporting missing pivot data as a successful read.
     """
-    from openpyxl import load_workbook
-    try:
-        import collections
+    from collections import defaultdict
 
-        from openpyxl.reader.workbook import WorkbookParser
-        WorkbookParser.pivot_caches = property(
-            lambda self: collections.defaultdict(lambda: None))
-    except (ImportError, AttributeError, TypeError):
-        pass
-    return load_workbook(path, data_only=False), load_workbook(path, data_only=True)
+    from openpyxl.reader.excel import ExcelReader
+
+    class MetadataParser:
+        # The upstream optimization used to replace WorkbookParser.pivot_caches
+        # globally. That leaked into later writes and lost actual pivot caches.
+        # Delegate everything except cache loading, on this reader instance only.
+        def __init__(self, parser):
+            self.parser = parser
+            from openpyxl.packaging.relationship import get_rel
+            from openpyxl.pivot.cache import CacheDefinition
+            self.pivot_caches = defaultdict(lambda: None)
+            # Keep cache *definitions* (source and field names); only large cache
+            # records are unnecessary. Follow WorkbookParser's get_rel lookup but
+            # never fetch RecordList, and never change another reader or writer.
+            for cache in parser.caches:
+                self.pivot_caches[cache.cacheId] = get_rel(
+                    parser.archive, parser.rels, id=cache.id, cls=CacheDefinition)
+
+        def __getattr__(self, name):
+            return getattr(self.parser, name)
+
+    class MetadataReader(ExcelReader):
+        def read_workbook(self):
+            super().read_workbook()
+            self.parser = MetadataParser(self.parser)
+
+    def load(data_only):
+        reader = MetadataReader(path, data_only=data_only)
+        try:
+            reader.read()
+            return reader.wb
+        finally:
+            reader.archive.close()
+
+    return load(False), load(True)
 
 
 def _range(cell_range, value_book):
@@ -686,8 +738,9 @@ def _range(cell_range, value_book):
     """
     from openpyxl.utils import range_boundaries
     if "!" in cell_range:
-        name, rest = cell_range.split("!", 1)
-        name = name.strip("'")
+        name, rest = cell_range.rsplit("!", 1)
+        if name.startswith("'") and name.endswith("'"):
+            name = name[1:-1].replace("''", "'")
     else:
         name, rest = value_book.sheetnames[0], cell_range
     if name not in value_book.sheetnames:
@@ -709,6 +762,8 @@ def _range(cell_range, value_book):
     r2 = sheet.max_row if r2 is None else r2
     c1 = sheet.min_column if c1 is None else c1
     c2 = sheet.max_column if c2 is None else c2
+    if not (1 <= r1 <= r2 <= 1048576 and 1 <= c1 <= c2 <= 16384):
+        raise ValueError(f"{cell_range!r} is outside Excel bounds or has reversed endpoints")
     return name, (r1, c1, r2, c2)
 
 
@@ -776,7 +831,7 @@ def render(path, *, cell_range=None, meta=None):
 
     from misaka.core.tools._office.xlsx import cache_empty
     if cache_empty(path):
-        with tempfile.TemporaryDirectory(prefix=".recalc-", dir=os.path.dirname(os.path.abspath(path))) as staging:
+        with tempfile.TemporaryDirectory(prefix="misaka-office-recalc-") as staging:
             fresh = _recalculated(path, staging, meta)
             if fresh != path:
                 return _render_book(fresh, path, cell_range=cell_range)
@@ -812,8 +867,8 @@ def _render_book(path, chart_source, *, cell_range=None):
     out, any_content = list(head), False
     for formula_sheet in formula_book.worksheets:
         value_sheet = value_book[formula_sheet.title]
-        coords = {(cell.row, cell.column) for row in formula_sheet.iter_rows()
-                  for cell in row if cell.value is not None}
+        coords = {(cell.row, cell.column) for cell in _stored_cells(formula_sheet)
+                  if cell.value is not None}
         sheet_charts = charts.get(formula_sheet.title, [])
         if not coords and not sheet_charts:
             continue                      # an empty sheet is not a page
@@ -849,7 +904,7 @@ def render_rows(name, rows):
     if not rows:
         return ""
     header = [str(cell) for cell in rows[0]]
-    data = [[((cell if cell != "" else None), _esc(_render(cell, None)))
+    data = [[((cell if cell != "" else None), _esc(cell))
              for cell in row] for row in rows[1:]]
     return "\n".join([f"## Sheet: {name}", "",
                        *_table_md(header, data, name=name, preview=None)])
@@ -874,6 +929,10 @@ def render_csv(path):
         raise ValueError(f"No text found in {os.path.basename(path)}: the file has no rows.")
     header = [str(cell) for cell in rows[0]]
     data = [[((cell if cell != "" else None), _esc(cell)) for cell in row] for row in rows[1:]]
+    summary = _table_md(header, data, name=os.path.basename(path), preview=0, delimiter=delimiter)
+    summary = summary[:summary.index("```") + 1]
+    # The preview marker is for truncated XLSX tables, not the full CSV below.
+    summary = [line for line in summary if not line.startswith("▸ preview:")]
     return "\n".join([
         ("<!-- csv readout: the file's own rows, with a ```meta column summary added above "
          "them (parser-added, not file content). The rows are the file's, separator and "
@@ -881,6 +940,5 @@ def render_csv(path):
         "",
         f"## Sheet: {os.path.basename(path)}",
         "",
-        *_table_md(header, data, name=os.path.basename(path), preview=None,
-                   delimiter=delimiter),
+        *summary, text.rstrip("\r\n"),
     ])

@@ -2081,12 +2081,17 @@ class SubagentManager:
         for key in durable_keys:
             env.pop(key, None)
         env.update(self._durable_child_environment(task))
+        from misaka.extensions.misaka_lcm.host import storage as lcm_storage
+
+        lcm_project = lcm_storage.project(lcm_storage.context(
+            self.session, os.environ.get("MISAKA_LCM_PROJECT") or self.role_context.workspace))
         env.update(
             {
                 "PYTHONUNBUFFERED": "1",
                 "MISAKA_WHO": self._who(task),
                 "MISAKA_MCP_ROLE": self.role_context.mcp_role,
                 "MISAKA_WORKSPACE": task.cwd,
+                "MISAKA_LCM_PROJECT": str(lcm_project),
                 "MISAKA_SUBAGENT_ID": task.id,
                 "MISAKA_SUBAGENT_BACKGROUND": "1" if task.background else "0",
                 "MISAKA_SUBAGENT_PARENT_SESSION_ID": task.parent_session_id,

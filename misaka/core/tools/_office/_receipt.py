@@ -32,7 +32,7 @@ def normalise(op, raw):
         base["op"] = op
         return base
     text = str(raw)
-    base["ok"] = not text.startswith("[error")
+    base["ok"] = not text.startswith(("[error", "[office_writer error"))
     base["summary"] = text
     base["op"] = op
     return base
@@ -73,8 +73,8 @@ def format_receipt(path, results, total, stopped_at, extra_line=""):
         lines = [f"✗ {path} — STOPPED at op {stopped_at}/{total}",
                  f"  [{failure['idx']}] {failure['op']}: {failure['summary']}"]
         if stopped_at < total:
-            tail = f"; file unchanged, ops 1-{stopped_at - 1} discarded" if stopped_at > 1 else ""
-            lines.append(f"  ops {stopped_at + 1}-{total} not executed{tail}")
+            lines.append(f"  ops {stopped_at + 1}-{total} not executed")
+        lines.append("  file unchanged; staged edits and exports not published")
         if extra_line:
             lines.append("  " + extra_line)
         return "\n".join(lines)

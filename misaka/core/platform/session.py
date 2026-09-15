@@ -45,7 +45,7 @@ def run_coro(coro):
     one synchronous call to nest a session inside a window that is already open. The
     helper-thread branch is the obvious one; the no-loop branch matters whenever the
     caller is *already* off the loop in a worker thread that inherited the window owner
-    -- ``asyncio.to_thread`` copies the context, so ``hermes_lcm``'s handlers reach
+    -- ``asyncio.to_thread`` copies the context, so ``misaka_lcm``'s handlers reach
     ``host/llm.py`` -> here with ``_ENV_WINDOW_OWNER`` set and no loop running. Without
     the token there, ``_env_window`` fails its re-entry test by one term and the nested
     session waits forever on the ``_ENV_LOCK`` its own caller is holding.

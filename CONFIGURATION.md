@@ -52,7 +52,7 @@ Each is a directory or file MISAKA owns.
 | Variable | Default | Meaning |
 |---|---|---|
 | `MISAKA_CODING_AGENT_DIR` | `~/.misaka/agent` | the engine directory: settings, auth and models (an explicit SDK engine home may also own sessions) |
-| `MISAKA_DB` / `MISAKA_MESSAGES` / `MISAKA_LCM_DB` | `~/.misaka/{board,messages,lcm}.db` | task board, message queue, compaction store |
+| `MISAKA_DB` / `MISAKA_MESSAGES` | `~/.misaka/{board,messages}.db` | task board and message queue |
 | `MISAKA_TASKS` | `~/.misaka/tasks` | per-card locks and read-only skill copies; no transcripts or research reports |
 | `MISAKA_PROFILES` | `~/.misaka/profiles` | roles: personalities, skills, MCP config (created on first run) |
 | `MISAKA_SESSIONS` | `~/.misaka/sessions` | every conversation: `<role>/<folder bucket>/`, with a card's under `cards/<id>/`, research conversations under `research/<run>--<scope>/`, nested agents beside their parent, or under `subagents/<parent>/` for in-memory parents |
@@ -133,6 +133,33 @@ stops; `--yes` skips the confirmation.
 LCM algorithm settings use the upstream `LCM_*` names, with no product aliases. Native
 paths, authentication and `auxiliary` task settings belong to MISAKA. Provider routing
 for summaries lives in the global `settings.json` under `auxiliary.compression`.
+
+### Project cache lifetime
+
+MISAKA LCM is the project-scoped fork of hermes-lcm. Its database and content sidecars
+live in `<project>/.misaka/lcm/`. The session's project is fixed at startup and inherited
+by its workers; changing a tool's directory does not change its LCM project. A native
+`lcm-project` session metadata entry retains the owner project for resumed worktrees.
+
+Each process holds a project storage lease. Closing/reloading one session keeps the
+cache available to the project's other sessions. Once the last project runtime exits,
+the host closes SQLite and background maintenance before removing the cache directory.
+A killed process can leave an abandoned cache: the next owner clears it before reuse.
+The sibling gate/lease files contain coordination metadata, not conversation content.
+Do not synchronize, commit or back up the disposable `.misaka/lcm/` directory.
+
+Native session JSONL, adopted checkpoints, Board state and project outputs are not
+removed. Reopening a saved session ingests its originals and reconstructs its summary
+frontier. Carry-over checkpoints reference source session entries and verify their
+identity on reconstruction; source files must remain available. No global history is
+automatically imported. Old global LCM caches and database-row-only carry receipts
+have no compatibility fallback.
+
+Storage is host-owned: `MISAKA_LCM_DB`, `LCM_DATABASE_PATH`,
+`LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH` and `LCM_EXTRACTION_OUTPUT_PATH` do not redirect
+MISAKA's runtime. All algorithm options retain their upstream meanings. `misaka lcm`
+uses the current project; import/backfill target paths must match that project's cache.
+No permanent user-memory service is created by this cache.
 
 ### Optional features
 

@@ -45,17 +45,21 @@ import hashlib
 import ipaddress
 import json
 import logging
+import os
 import re
 import threading
 import time
+from itertools import islice
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from filelock import FileLock
+
 from misaka.config import expand_tilde_path
 from misaka.config.product import CFG
 from misaka.core.tools._web.evidence import citable_url
-from misaka.core.web.config import web_config
+from misaka.core.web.config import redact_values, web_config
 from misaka.core.web.scope import cache_namespace
 from misaka.utils import atomic
 
@@ -196,7 +200,8 @@ MAX_STORED_TEXT_CHARS = 2_000_000
 # loop on a page write -- which puts two concurrent extractions on two real threads. The
 # atomic replace in :func:`_save_index` already rules out a torn file; this rules out the
 # lost insert, where two threads each load the same index and the second write drops the
-# first one's entry. It says nothing about other processes: see :func:`_save_index`.
+# first one's entry. Writers additionally hold the directory's interprocess lock
+# from body publication through index update and eviction.
 _index_lock = threading.Lock()
 
 
@@ -268,24 +273,39 @@ def _load_index() -> dict:
 
 
 def _save_index(index: dict) -> None:
-    """Write the index back, evicting the oldest entries past the cap.
+    """Publish the capped index, then remove evicted/expired cache bodies.
 
-    ``atomic.write_text`` writes a temp file whose name carries this process's pid and a
-    random suffix and then ``os.replace``s it, which is the property Hermes spells out by
-    hand: MISAKA runs several sessions against one home directory, and a shared fixed temp
-    name would let two of them truncate each other mid-write. Each writer's replace is
-    atomic, so the worst cross-process outcome is one writer's entry winning -- a lost
-    cache insert, never a half-written index.
+    Caller holds the writer lock through body publication and this update. Never
+    delete a body before publishing the index, or while another writer publishes it.
     """
     path = _index_path()
     if path is None:
         return
     try:
+        previous = index
+        now, ttl = time.time(), ttl_seconds()
+        index = {key: entry for key, entry in index.items() if now - _fetched_at(entry) < ttl}
         if len(index) > _INDEX_MAX_ENTRIES:
             newest = sorted(index.items(), key=lambda kv: _fetched_at(kv[1]), reverse=True)
             index = dict(newest[:_INDEX_MAX_ENTRIES])
         # A configured provider/extension can return account-private material and URLs.
         atomic.write_text(path, json.dumps(index), mode=0o600)
+        retained = {str(entry.get("file")) for entry in index.values() if isinstance(entry, dict)}
+        for key, entry in previous.items():
+            if key in index or not isinstance(entry, dict):
+                continue
+            body = Path(str(entry.get("file", "")))
+            if (str(body) not in retained and body.parent.resolve() == path.parent.resolve()
+                    and re.fullmatch(r"[A-Za-z0-9._-]+-[0-9a-f]{16}\.cache\.json", body.name)
+                    and not body.is_symlink()):
+                body.unlink(missing_ok=True)
+        # Bounded cleanup of bodies orphaned by pre-lock writers or older versions.
+        # A TTL grace protects files an older, still-running process is publishing.
+        with os.scandir(path.parent) as files:
+            for entry in islice(files, _INDEX_MAX_ENTRIES + 128):
+                if (entry.path not in retained and re.fullmatch(r"[A-Za-z0-9._-]+-[0-9a-f]{16}\.cache\.json", entry.name)
+                        and entry.is_file(follow_symlinks=False) and now - entry.stat().st_mtime >= ttl):
+                    Path(entry.path).unlink(missing_ok=True)
     except Exception:  # noqa: BLE001, S110 - a cache write never breaks the caller
         pass
 
@@ -441,7 +461,7 @@ def extract_cache_get(
     return {
         "url": url,
         "title": str(page.get("title", "") or ""),
-        "content": page["content"],
+        "content": redact_values(page["content"]),
         "error": None,
         "cached": True,
         "metadata": page["metadata"],
@@ -483,8 +503,8 @@ def extract_cache_put(
                 **({"content_kind": metadata["content_kind"]} if metadata and "content_kind" in metadata else {}),
             },
         }
-        atomic.write_text(file_path, json.dumps(page), mode=0o600)
-        with _index_lock:
+        with _index_lock, FileLock(str(file_path.parent / ".extract.lock"), timeout=5):
+            atomic.write_text(file_path, json.dumps(redact_values(page)), mode=0o600)
             index = _load_index()
             index[_url_digest(url, format, provider)] = {
                 "url": url,

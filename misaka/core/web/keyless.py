@@ -42,7 +42,7 @@ import httpx
 from misaka.core.tools._web.website_policy import policy_blocked
 from misaka.core.web.accounting import account_call
 from misaka.core.web.config import config_name, provider_tier
-from misaka.core.web.provider import align_documents
+from misaka.core.web.provider import align_documents, check_response
 from misaka.core.web.runtime import api_client
 from misaka.core.web.scope import current_scope
 from misaka.core.web.timeouts import http_timeout
@@ -107,7 +107,7 @@ def _parse_mcp_body(body: str) -> str:
         data = json.loads(payload)
         err = data.get("error")
         if err:
-            raise KeylessError(str(err.get("message") or err))
+            raise KeylessError(str(err.get("message") or err) if isinstance(err, dict) else str(err))
         result = data.get("result") or {}
         content = result.get("content") or []
         if result.get("isError"):
@@ -239,7 +239,7 @@ async def parallel_search_keyless(query: str, limit: int = 5) -> dict[str, Any]:
                 "session_id": _SESSION_ID,
             },
         )
-        data = json.loads(text)
+        data = check_response(json.loads(text))
         web_results = []
         for i, result in enumerate(data.get("results") or []):
             if limit and i >= limit:
@@ -263,7 +263,7 @@ async def parallel_search_keyless(query: str, limit: int = 5) -> dict[str, Any]:
                 "backend via `~/.misaka/web.json` for reliable service."
             ),
         }
-    except (json.JSONDecodeError, TypeError, KeyError, AttributeError) as exc:
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
         return {
             "success": False,
             "error": f"Keyless Parallel search returned an unexpected payload: {exc}",
@@ -282,10 +282,10 @@ async def parallel_extract_keyless(urls: list[str]) -> list[dict[str, Any]]:
                 "session_id": _SESSION_ID,
             },
         )
-        data = json.loads(text)
+        data = check_response(json.loads(text))
         if not isinstance(data, dict):
             raise TypeError(f"expected a JSON object, got {type(data).__name__}")
-    except (KeylessError, json.JSONDecodeError, TypeError) as exc:
+    except (KeylessError, ValueError, TypeError) as exc:
         message = (
             f"Keyless Parallel extract failed: {exc}. "
             "Set PARALLEL_API_KEY (https://parallel.ai) or another web "
@@ -498,7 +498,7 @@ async def keenable_search_keyless(query: str, limit: int = 5) -> dict[str, Any]:
             raise KeylessError(
                 (response.text or "").strip() or f"HTTP {response.status_code}"
             )
-        data = response.json()
+        data = check_response(response.json())
     except KeylessError as exc:
         return {
             "success": False,
@@ -550,7 +550,7 @@ async def keenable_extract_keyless(urls: list[str]) -> list[dict[str, Any]]:
                 raise KeylessError(
                     (response.text or "").strip() or f"HTTP {response.status_code}"
                 )
-            data = response.json()
+            data = check_response(response.json())
             if not isinstance(data, dict):
                 raise TypeError(f"expected a JSON object, got {type(data).__name__}")
             entry = _extract_entry(url, str(data.get("title") or ""), str(data.get("content") or ""))

@@ -6,10 +6,9 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, TypedDict
 
-from misaka.utils.child_process import ChildProcess, spawn_child_process
+from misaka.core.platform.processes import terminate
+from misaka.utils.child_process import spawn_child_process
 from misaka.utils.values import signal_aborted
-
-_FORCE_KILL_DELAY_SECONDS = 5.0
 
 
 class ExecOptions(TypedDict, total=False):
@@ -61,12 +60,6 @@ def _resolve_timeout_seconds(options: ExecOptions) -> float | None:
     return float(timeout) / 1000
 
 
-async def _force_kill_after_delay(process: ChildProcess) -> None:
-    await asyncio.sleep(_FORCE_KILL_DELAY_SECONDS)
-    if process.returncode is None:
-        process.kill()
-
-
 def _normalize_exit_code(code: int | None, *, killed: bool, failed: bool) -> int:
     if failed:
         return 1
@@ -111,20 +104,23 @@ async def exec_command(
         if timeout is not None and timeout > 0
         else None
     )
-    force_kill_task: asyncio.Task[None] | None = None
+    termination_task: asyncio.Task[None] | None = None
     killed = False
     wait_failed = False
 
     def kill_process() -> None:
-        nonlocal force_kill_task, killed
+        nonlocal termination_task, killed
         if killed:
             return
         killed = True
-        try:
-            process.terminate()
-        except ProcessLookupError:
-            pass
-        force_kill_task = asyncio.create_task(_force_kill_after_delay(process))
+        async def terminate_owned_tree() -> None:
+            try:
+                if process.pid is not None:
+                    await asyncio.to_thread(terminate, process.pid)
+            finally:
+                process.close()
+
+        termination_task = asyncio.create_task(terminate_owned_tree())
 
     try:
         if signal_aborted(signal):
@@ -157,15 +153,15 @@ async def exec_command(
             killed=killed,
         )
     except asyncio.CancelledError:
-        try:
-            kill_process()
-        finally:
-            process.close()
+        kill_process()
         raise
     finally:
         async def cleanup() -> None:
             tasks: list[asyncio.Task[Any]] = [wait_task]
-            for task in (abort_task, timeout_task, force_kill_task):
+            # Tree teardown owns its thread until completion, even after caller cancellation.
+            if termination_task is not None:
+                await termination_task
+            for task in (abort_task, timeout_task):
                 if task is None:
                     continue
                 if not task.done():

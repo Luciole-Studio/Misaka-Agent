@@ -49,10 +49,11 @@ from misaka.core.tools._web.bounded import UnsafeUrlError, vet_public_url
 from misaka.core.tools._web.evidence import (
     citable_url,
     frontmatter_line_count,
+    read_provenance,
     save_page,
 )
 from misaka.core.tools._web.screening import screen_url
-from misaka.core.tools._web.website_policy import check_website_access
+from misaka.core.tools.path_utils import resolve_to_cwd
 from misaka.core.web import cache, debug
 from misaka.core.web.config import redact_secrets, redact_values, web_config
 from misaka.core.web.dispatch import resolve_extractor
@@ -255,6 +256,29 @@ def _final_url(entry: dict[str, Any]) -> str:
         return ""
 
 
+async def _check_final_source(entry: dict[str, Any]) -> None:
+    """The same post-fetch gate for cached, fresh and unassociated material.
+
+    Inspect the original address, not its query-stripped display form. A vendor's
+    remote fetch is outside our network boundary; this gates accepting its material.
+    """
+    metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+    source = metadata.get("sourceURL") or entry.get("url")
+    if not source or entry.get("error"):
+        return
+    screened = screen_url(str(source))
+    error = screened.refusal
+    if not error:
+        try:
+            await vet_public_url(screened.url, proxy=proxy_for_url(screened.url))
+        except UnsafeUrlError as exc:
+            error = f"Blocked source: {exc}."
+    if error:
+        entry.update(content="", raw_content="", error=error)
+        if screened.policy:
+            entry["blocked_by_policy"] = screened.policy
+
+
 def _store_page(
     cwd: str | None, entry: dict[str, Any], clean: str, backend: str
 ) -> tuple[str | None, int]:
@@ -290,6 +314,9 @@ def _store_page(
     if url is None:
         provenance["association"] = "unresolved"
     saved = save_page(cwd, provenance, clean)
+    if saved:
+        # The writer can add redaction provenance; offsets describe the actual file.
+        provenance = read_provenance(resolve_to_cwd(saved, cwd)) or provenance
     return saved, frontmatter_line_count(provenance)
 
 
@@ -386,17 +413,7 @@ async def _extract_pages(urls, format, char_limit, *, signal, cwd) -> str:
             )
             if hit is not None:
                 debug.event("cache_hit", cache="extract", backend=provider.name, subject=url, input_index=index)
-                # A cached redirect still belongs to its final source. Apply today's
-                # website rule without fetching or saving that blocked page again.
-                source_url = hit["metadata"].get("sourceURL") or url
-                blocked = check_website_access(source_url)
-                if blocked:
-                    hit.update(content="", error=blocked["message"], blocked_by_policy=blocked)
-                elif source_url != url:
-                    try:
-                        await vet_public_url(source_url, proxy=proxy_for_url(source_url))
-                    except UnsafeUrlError as error:
-                        hit.update(content="", error=f"Blocked cached source: {error}.")
+                await _check_final_source(hit)
                 entries[index] = hit
             else:
                 to_fetch.append((index, url))
@@ -408,9 +425,7 @@ async def _extract_pages(urls, format, char_limit, *, signal, cwd) -> str:
             fetch_urls = [url for _, url in to_fetch]
             results, rescued = await dispatch_extract(provider, fetch_urls, format=format)
             for entry in results:
-                blocked = check_website_access(_final_url(entry))
-                if blocked:
-                    entry.update(content="", raw_content="", error=blocked["message"], blocked_by_policy=blocked)
+                await _check_final_source(entry)
             # A batch provider can preserve material whose canonical URL no longer
             # identifies an input. Keep it, without an invented input or cache key.
             extra = results[len(to_fetch):]

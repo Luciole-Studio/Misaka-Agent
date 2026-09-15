@@ -55,8 +55,8 @@ _LEGACY_PREFERENCE = (
     "firecrawl",
     "parallel",
     "tavily",
-    "exa",
     "perplexity",
+    "exa",
     "searxng",
     "brave-free",
     "ddgs",
@@ -316,10 +316,10 @@ def backend_name() -> str:
 
     for candidate, available in (
         ("tavily", has_env("TAVILY_API_KEY")),
+        ("perplexity", has_env("PERPLEXITY_API_KEY")),
         ("exa", has_env("EXA_API_KEY")),
         ("parallel", has_env("PARALLEL_API_KEY")),
         ("keenable", has_env("KEENABLE_API_KEY")),
-        ("perplexity", has_env("PERPLEXITY_API_KEY")),
         ("firecrawl", has_env("FIRECRAWL_API_KEY") or has_env("FIRECRAWL_API_URL")),
         ("nous", gateway_available()),
         ("searxng", has_env("SEARXNG_URL")),

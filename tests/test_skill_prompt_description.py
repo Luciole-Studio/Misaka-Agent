@@ -31,7 +31,7 @@ class SkillPromptDescriptionTests(unittest.TestCase):
                     expected = raw if length <= 200 else raw[:197] + "..."
                     self.assertEqual(extract_skill_description(metadata), expected)
                     self.assertEqual(is_skill_description_truncated_for_prompt(metadata), length > 200)
-        name = "<inline:hermes_lcm>:hermes_lcm"
+        name = "<inline:misaka_lcm>:misaka_lcm"
         entry = {"name": name, "description": "x" * 200, "layer": "extension", "category": "general"}
         self.assertIn(f"- {name}: {'x' * 200}\n", index.render_prompt([entry]))
 

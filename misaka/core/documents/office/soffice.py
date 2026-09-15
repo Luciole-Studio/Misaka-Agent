@@ -21,7 +21,9 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
+from pathlib import Path
 
 BINARY = "soffice"
 
@@ -68,8 +70,12 @@ def _run(arguments, *, timeout, meta, directory):
         try:
             completed = subprocess.run(
                 [executable, "--headless", "--norestore",
-                 f"-env:UserInstallation=file://{profile}/profile", *arguments],
-                capture_output=True, text=True, timeout=timeout, check=False)
+                 f"-env:UserInstallation={Path(profile, 'profile').as_uri()}", *arguments],
+                capture_output=True, text=True, timeout=timeout, check=False,
+                # macOS headless defaults can miss system CJK fonts under svp.
+                # Its native plugin still honours --headless and private profiles.
+                env={**os.environ, "SAL_USE_VCLPLUGIN": os.environ.get("SAL_USE_VCLPLUGIN")
+                     or ("osx" if sys.platform == "darwin" else "svp")})
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             _note(meta, "soffice_error", str(error)[:_ERROR_CHARS])
             return False
@@ -98,18 +104,26 @@ def convert(source, target_suffix, *, into, timeout=TIMEOUT, meta=None):
         return None
     try:
         os.makedirs(into, exist_ok=True)
+        target = _converted(source, target_suffix, str(into))
+        if os.path.realpath(target) == os.path.realpath(source):
+            _note(meta, "soffice_error", "conversion needs an output distinct from the source")
+            return None
+        # Every conversion must prove new output, even when the caller reuses a directory.
+        with tempfile.TemporaryDirectory(prefix=".convert-", dir=into,
+                                         ignore_cleanup_errors=True) as staging:
+            if not _run(["--convert-to", target_suffix, "--outdir", staging,
+                         os.path.abspath(str(source))], timeout=timeout, meta=meta, directory=staging):
+                return None
+            produced = _converted(source, target_suffix, staging)
+            if not os.path.isfile(produced) or os.path.getsize(produced) == 0:
+                _note(meta, "soffice_error", f"no {target_suffix} produced from "
+                                           f"{os.path.basename(str(source))}")
+                return None
+            os.replace(produced, target)
+            return target
     except OSError as error:
         _note(meta, "soffice_error", str(error)[:_ERROR_CHARS])
         return None
-    if not _run(["--convert-to", target_suffix, "--outdir", str(into),
-                 os.path.abspath(str(source))], timeout=timeout, meta=meta, directory=into):
-        return None
-    produced = _converted(source, target_suffix, str(into))
-    if os.path.exists(produced):
-        return produced
-    _note(meta, "soffice_error", f"no {target_suffix} produced from "
-                                 f"{os.path.basename(str(source))}")
-    return None
 
 
 def recalc(path, *, into, timeout=TIMEOUT, meta=None):
@@ -126,19 +140,21 @@ def recalc(path, *, into, timeout=TIMEOUT, meta=None):
     """
     if binary() is None:
         return None
-    staging = os.path.join(str(into), os.path.basename(str(path)))
-    if os.path.abspath(staging) != os.path.abspath(str(path)):
-        try:
-            shutil.copy2(str(path), staging)
-        except OSError as error:
-            _note(meta, "soffice_error", str(error)[:_ERROR_CHARS])
+    # A distinct output directory is essential: converting a workbook over its input
+    # can exit zero without writing anything. The old pre-copied input then looked
+    # like a successful recalculation. convert() now verifies a genuinely new file.
+    os.makedirs(into, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".recalc-output-", dir=into) as output:
+        produced = convert(path, "xlsx", into=output, timeout=timeout, meta=meta)
+        if produced is None:
             return None
-    # Converting a .xlsx to .xlsx re-saves it, and LibreOffice recalculates on the way.
-    # FrontierAgent drives a Basic macro (``calculateAll`` then ``store``) and falls back
-    # to this when the macro silently does nothing; the fallback is the whole mechanism
-    # here, because it needs no macro framework, no writable HOME and no first-run profile
-    # -- three things that fail differently on every machine.
-    return convert(staging, "xlsx", into=into, timeout=timeout, meta=meta)
+        target = _converted(path, "xlsx", str(into))
+        if os.path.realpath(target) == os.path.realpath(path):
+            # Even a caller supplying the source directory gets a separate copy.
+            handle, target = tempfile.mkstemp(prefix="recalculated-", suffix=".xlsx", dir=into)
+            os.close(handle)
+        os.replace(produced, target)
+        return target
 
 
 def export_pdf(source, out, *, timeout=TIMEOUT, meta=None):

@@ -1,7 +1,8 @@
-"""Save complete extracted pages with source provenance and content-addressed names.
+"""Save extracted pages with source provenance and content-addressed names.
 
-Tool previews are bounded; the saved original remains available for readers and red
-teams. Different versions never overwrite the material another researcher cited.
+Model-facing copies redact configured credentials. If that changes the material,
+the original is retained privately in the profile, outside the workspace corpus.
+Different versions never overwrite the material another researcher cited.
 Digests identify files, not the truth or adequacy of their content.
 """
 
@@ -11,6 +12,7 @@ import hashlib
 import json
 import os
 import tempfile
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -100,6 +102,20 @@ def frontmatter_line_count(provenance: dict[str, Any]) -> int:
     return _frontmatter(provenance).count("\n")
 
 
+def check_material_read(path: str) -> None:
+    """Keep vault key/ciphertext and restricted originals out of ordinary readers.
+
+    Resolved paths also cover symlinks. This is a tool/corpus boundary, not an OS
+    sandbox for an independently approved terminal command.
+    """
+    resolved = Path(path).resolve()
+    for directory in (resolved, *resolved.parents):
+        if (directory.name == "originals" and directory.parent.name == "web-evidence") or (
+                directory.name == "vault" and any((directory / name).exists()
+                    for name in ("vault.key", "vault.json.enc"))):
+            raise ValueError("Private Web material is not available through file readers; use the vault tools or the redacted saved_path.")
+
+
 def _discard(path: str) -> None:
     try:
         os.unlink(path)
@@ -116,7 +132,29 @@ def save_page(cwd: str | None, provenance: dict[str, Any], text: str) -> str | N
     """
     if not cwd:
         return None
-    document = f"{_frontmatter(provenance)}{text}\n"
+    from misaka.config import get_agent_dir
+    from misaka.core.web.config import redact_secrets, redact_values
+    from misaka.core.web.scope import current_scope
+
+    original = f"{_frontmatter(provenance)}{text}\n"
+    public = redact_values(provenance)
+    clean = redact_secrets(text)
+    if clean != text or public != provenance:
+        try:
+            digest = hashlib.sha256(original.encode("utf-8")).hexdigest()
+            root = Path(current_scope().profile_dir or get_agent_dir()).resolve()
+            directory = root / "web-evidence" / "originals"
+            if not directory.resolve().is_relative_to(root):
+                return None
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            directory.chmod(0o700)
+            if not _write_document(str(directory / f"{digest}.md"), original, mode=0o600):
+                return None  # Keep the original before publishing a changed copy.
+        except (OSError, UnicodeError):
+            return None
+        public = {**public, "redacted": True, "original_sha256": digest,
+                  "text_sha256": hashlib.sha256(clean.encode("utf-8")).hexdigest()}
+    document = f"{_frontmatter(public)}{clean}\n"
     try:
         stem = hashlib.sha256(document.encode("utf-8")).hexdigest()[:_PAGE_STEM_CHARS]
     except UnicodeError:
@@ -125,18 +163,21 @@ def save_page(cwd: str | None, provenance: dict[str, Any], text: str) -> str | N
     path = resolve_to_cwd(relative, cwd)
     if not under(path, cwd):
         return None
+    return relative if _write_document(path, document, mode=0o644) else None
+
+
+def _write_document(path: str, document: str, *, mode: int) -> bool:
+    """Stage privately, then publish atomically; never expose a partial original."""
     directory = os.path.dirname(path)
     try:
         os.makedirs(directory, exist_ok=True)
         handle, staging = tempfile.mkstemp(dir=directory, suffix=".part")
     except OSError:
-        return None
+        return False
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as out:
             out.write(document)
-        # mkstemp creates 0600; an evidence file is an ordinary workspace file, and the
-        # mode came from the staging file rather than from any decision about it.
-        os.chmod(staging, 0o644)
+        os.chmod(staging, mode)
         # Renamed into place rather than written in place: the name is a digest of the
         # bytes being written, so two fetches can legitimately target it at once, and a
         # reader must never meet a half-written provenance header.
@@ -147,8 +188,8 @@ def save_page(cwd: str | None, provenance: dict[str, Any], text: str) -> str | N
         # UnicodeEncodeError, which is not an OSError. Losing the evidence file is the
         # documented cost of a failed write; losing the whole extraction is not.
         _discard(staging)
-        return None
-    return relative
+        return False
+    return True
 
 
 __all__ = ["citable_url", "frontmatter_line_count", "read_provenance", "save_page"]

@@ -37,7 +37,8 @@ READ_ONLY_TOOLS = frozenset({"find", "grep", "glob", "ls", "read"})
 # ``_permission_action``.  Inheriting one of these names from the parent
 # session must never short-circuit that classification.
 CLASSIFIED_TOOLS = frozenset({"bash", "powershell", "edit", "write", "office", "browser_exec",
-    "browser_click", "browser_type", "browser_press", "browser_console", "browser_cdp", "browser_dialog", "browser_navigate", "browser_back"})
+    "browser_click", "browser_type", "browser_press", "browser_console", "browser_cdp", "browser_dialog", "browser_navigate", "browser_back",
+    "browser_vault_unlock", "browser_vault_fill", "browser_vault_save_login", "browser_vault_enter_code"})
 # The tools whose whole purpose is to put bytes at a path. They share plan-mode denial, the
 # workspace path guard and the acceptEdits allowance -- ``office`` writes a .docx exactly
 # the way ``write`` writes a .txt, and a guard that named only the older two would have let
@@ -233,6 +234,8 @@ def _has_shell_expansion(command: str) -> bool:
 
 def _plan_denial(tool_name: str, tool_input: Mapping[str, Any]) -> str | None:
     name = _tool_name(tool_name)
+    if name in {"browser_vault_unlock", "browser_vault_fill", "browser_vault_save_login", "browser_vault_enter_code"}:
+        return f"permissionMode=plan denied mutating tool {tool_name}"
     if name in MUTATING_PATH_TOOLS:
         return f"permissionMode=plan denied mutating tool {tool_name}"
     # PowerShell has different tokenization, aliases and pipelines.  Until its
@@ -915,6 +918,39 @@ def _permission_restriction(
             return f"protected path requires approval: {raw}"
         if not _path_in_working_directories(raw, workspace, additional_dirs):
             return f"path is outside the agent workspace: {raw}"
+    if name == "office":
+        # Like FrontierAgent's secondary-output guard: the outer path does not
+        # describe images read or PDFs written by an ops batch (including @files).
+        from misaka.core.tools import _office
+        from misaka.core.tools._office.paths import (
+            input_paths,
+            output_paths,
+            resolve_ops,
+        )
+        from misaka.core.tools.office import _load_ops
+        ops, problem = _load_ops(tool_input.get("ops"), workspace)
+        if problem:
+            return problem
+        if ops is not None:
+            problem = _office.validate_ops(ops)
+            if problem:
+                return problem
+            try:
+                resolved = resolve_ops(ops, workspace)
+            except (TypeError, ValueError):
+                return "invalid Office operation paths"
+            for target in output_paths(str(_resolved_path(raw, workspace)), resolved)[1:]:
+                if _sensitive_path(target, workspace):
+                    return f"protected path requires approval: {target}"
+                if not _path_in_working_directories(target, workspace, additional_dirs):
+                    return f"path is outside the agent workspace: {target}"
+            for source in input_paths(resolved):
+                if _sensitive_path(source, workspace):
+                    return f"protected path requires approval: {source}"
+                if not _path_in_working_directories(source, workspace, additional_dirs) and not _path_rule_allows(
+                    layers, "read", source, workspace
+                ):
+                    return f"path is outside the agent workspace: {source}"
     if name == "bash":
         command = str(tool_input.get("command") or "")
         if _bash_has_restricted_path(command, workspace, layers, additional_dirs):
@@ -1025,6 +1061,20 @@ async def hook_tool_permission(session, context, name, tool_input, workspace, *,
                                                            additional_dirs=directories):
         return "allow", None
     return action, reason
+
+
+def _snapshot_office_input(name, tool_input, workspace):
+    """Authorize and execute the same @ops bytes, including hook-provided rewrites."""
+    raw = tool_input.get("ops")
+    if _tool_name(name) != "office" or not isinstance(raw, str) or not raw.strip().startswith("@"):
+        return tool_input
+    from misaka.core.tools import _office
+    from misaka.core.tools.office import _load_ops
+    ops, problem = _load_ops(raw, workspace)
+    problem = problem or _office.validate_ops(ops)
+    if problem:
+        raise ValueError(problem)
+    return {**tool_input, "ops": ops}
 
 
 class AgentPolicy:
@@ -1443,6 +1493,13 @@ class AgentPolicy:
                 hook_decision = "allow"
 
         try:
+            snapshot = _snapshot_office_input(name, tool_input, workspace)
+        except (TypeError, ValueError) as error:
+            return {"block": True, "reason": f"Invalid Office input: {error}"}
+        if snapshot is not tool_input:
+            updated_input = tool_input = snapshot
+
+        try:
             self.inherited_permissions = await refresh_inherited_permissions()
             from misaka.core.subagent.configuration import current_permission_mode
 
@@ -1518,7 +1575,11 @@ class AgentPolicy:
             await self._publish_hook_context(permission_results)
             for result in permission_results:
                 if "updated_input" in result:
-                    updated_input = tool_input = result["updated_input"]
+                    try:
+                        updated_input = tool_input = _snapshot_office_input(
+                            name, result["updated_input"], workspace)
+                    except (TypeError, ValueError) as error:
+                        return {"block": True, "reason": f"Invalid Office input: {error}"}
                     restriction = _permission_restriction(
                         self.layers, name, tool_input, workspace, self.vocabulary, self.memory_dir, additional_dirs
                     )

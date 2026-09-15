@@ -846,6 +846,7 @@ def render(path):
          "shape default, arrow/connects is a connector, vlm marks a purely visual element. "
          "Table and chart rows are tab-separated. -->"),
     ]
+    visual_slides = []
     for number, slide in enumerate(presentation.slides, 1):
         shapes = list(slide.shapes)
         heading, title_index = _slide_title(shapes)
@@ -854,8 +855,10 @@ def render(path):
         boxes = [_bbox(shape) for shape in shapes]
         pairs, used = _pair_label_boxes(shapes, boxes)
         skip = {title_index} if title_index is not None else set()
-        lines, _needs_vlm = _slide_lines(shapes, boxes, pairs, used, skip)
+        lines, needs_vlm = _slide_lines(shapes, boxes, pairs, used, skip)
         out.extend(lines)
+        if needs_vlm:
+            visual_slides.append(number)
         if slide.has_notes_slide:
             note = slide.notes_slide.notes_text_frame.text.strip()
             if note:
@@ -863,6 +866,11 @@ def render(path):
                 # between the slide's title and the slide's own words.
                 out.append("")
                 out.append("> **notes:** " + note.replace("\n", "\n> "))
+    if visual_slides:
+        out.extend(["", "<!-- needs VLM -->",
+                    "Slides: " + ", ".join(map(str, visual_slides)),
+                    ("These slides contain visual elements the text layer does not capture. "
+                     "Inspect rendered slides when visual fidelity matters.")])
     while out and not out[-1].strip():
         out.pop()
     return "\n".join(out) + "\n"

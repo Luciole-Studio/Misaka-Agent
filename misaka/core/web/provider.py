@@ -63,6 +63,21 @@ import abc
 from typing import Any
 
 
+def check_response(payload: Any) -> Any:
+    """Reject explicit protocol failure before a normalizer can erase it.
+
+    No content matching: empty result lists and prose mentioning errors are valid.
+    This only inspects the enclosing API/MCP status and error fields.
+    """
+    if isinstance(payload, dict) and (payload.get("success") is False or
+            payload.get("isError") is True or payload.get("error")):
+        error = payload.get("error") or "Backend response reported failure"
+        if isinstance(error, dict):
+            error = error.get("message") or error
+        raise ValueError(str(error))
+    return payload
+
+
 def keyless_setup_schema(name: str, key: str, url: str, tag: str) -> dict[str, Any]:
     """Hermes' separate free/paid picker rows, backed by the same provider."""
     return {"name": f"{name} - Free (keyless)", "badge": "free - no key", "tag": tag,

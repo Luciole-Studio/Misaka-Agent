@@ -13,9 +13,8 @@ What is dispatched here, and what is not:
 * the formats in ``_FORMATS``, each to its own module. The table grows with its renderers
   and never ahead of them -- a suffix listed before its module exists is a file routed here
   and then crashed on, which is worse than the refusal that names what this reads;
-* legacy ``.doc`` / ``.xls`` / ``.ppt`` are NOT here. They are OLE, not zip, and reading
-  them needs LibreOffice; ``index.py`` routes them through ``office.soffice`` first (the
-  plan's W22-I) and what arrives here is the converted package;
+* legacy ``.doc`` / ``.xls`` / ``.ppt`` use the same conversion bridge for read and
+  corpus ingestion. They remain excluded from automatic directory scans;
 * ``.pdf`` stays with pageindex and images stay with the image stack -- neither is this
   package's, and both are owner-excluded.
 
@@ -24,8 +23,9 @@ Everything that is a zip is prechecked before its parser is called; see ``_zip``
 from __future__ import annotations
 
 import os
+import tempfile
 
-from misaka.core.documents.office import _zip
+from misaka.core.documents.office import _zip, soffice
 from misaka.core.documents.office import docx as _docx
 from misaka.core.documents.office import pptx as _pptx
 from misaka.core.documents.office import xlsx as _xlsx
@@ -105,6 +105,9 @@ def render(path, *, cell_range=None, meta=None):
     ``meta`` collects what the renderer learned on the way -- why a recalculation did not
     happen, which conversion produced the file -- so a caller's refusal can quote it.
     """
+    suffix = os.path.splitext(str(path))[1].lower()
+    if suffix in soffice.LEGACY:
+        return _render_legacy(path, cell_range=cell_range, meta=meta)
     fmt = format_of(path)
     if fmt is None:
         name = os.path.basename(str(path))
@@ -121,3 +124,25 @@ def render(path, *, cell_range=None, meta=None):
     if fmt in _PACKAGED:
         _zip.precheck(path)
     return _RENDER[fmt](path, cell_range, meta)
+
+
+def _render_legacy(path, *, cell_range=None, meta=None):
+    suffix = os.path.splitext(str(path))[1].lower()
+    if soffice.binary() is not None:
+        with tempfile.TemporaryDirectory(prefix="misaka-office-convert-") as staging:
+            converted = soffice.convert(path, soffice.LEGACY[suffix], into=staging, meta=meta)
+            if converted is not None:
+                if meta is not None:
+                    meta["converted_from"] = suffix
+                return (f"`converted from {suffix} via LibreOffice; fidelity best-effort`\n\n"
+                        + render(converted, cell_range=cell_range, meta=meta))
+    if suffix == ".xls" and not cell_range:
+        from misaka.core.documents.index import _xls_pages
+        pages = _xls_pages(str(path), chars=2**63 - 1, meta=meta)
+        if pages is not None:
+            return "\n\n".join(pages)
+    detail = meta.get("soffice_error") if meta else None
+    raise ValueError(
+        f"Cannot read {suffix}: {soffice.INSTALL_HINT} to convert legacy Office files, "
+        f"or save it as .{soffice.LEGACY[suffix]}."
+        + (f" (LibreOffice failed: {detail})" if detail else ""))

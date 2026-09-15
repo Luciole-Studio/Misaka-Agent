@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+from contextlib import ExitStack
 
 from misaka.core.documents.office import soffice
 from misaka.core.tools._office import docx as _docx
@@ -24,6 +25,7 @@ from misaka.core.tools._office import text as _text
 from misaka.core.tools._office import xlsx as _xlsx
 from misaka.core.tools._office._receipt import format_receipt, normalise
 from misaka.core.tools._office._runs import md_hint
+from misaka.core.tools._office.paths import pdf_path
 
 # Suffix to writer. Each module owns its op set and its own refusal for an unknown op.
 _WRITERS = {}
@@ -55,7 +57,7 @@ def _export_pdf(source, args, meta):
     """
     if soffice.binary() is None:
         return f"[error] export_pdf needs LibreOffice: {soffice.INSTALL_HINT}."
-    out = args.get("out") or args.get("path") or os.path.splitext(source)[0] + ".pdf"
+    out = pdf_path(source, args)
     if not soffice.export_pdf(source, out, meta=meta):
         return f"[error] export_pdf failed: {meta.get('soffice_error', 'no pdf produced')}"
     return f"exported pdf: {out}"
@@ -96,12 +98,52 @@ def validate_ops(ops):
     return ""
 
 
-def run_ops(path, ops, *, overwrite=False):
-    """Apply every op in order to one file and return the receipt.
+def _cleanup(action, path, warnings):
+    """Cleanup faults must not turn a committed write into a retryable failure."""
+    try:
+        action()
+    except OSError as error:
+        warnings.append(f"cleanup failed; check retained path {path}: {type(error).__name__}: {error}")
 
-    The whole batch runs against a temp copy: on success it replaces the target in one
-    move, and on failure the target is untouched.
+
+def _publish(staged, cleanup_warnings):
+    """Replace each destination, restoring earlier ones on ordinary publish failures.
+
+    Rename is atomic per file, not across files or power loss. Recovery copies survive
+    a failed rollback and their paths are reported rather than silently deleted.
     """
+    backups, published, recovery = {}, [], set()
+    try:
+        for target in staged:
+            if os.path.exists(target):
+                handle, backup = tempfile.mkstemp(prefix=".office-backup-", dir=os.path.dirname(target))
+                os.close(handle)
+                backups[target] = backup
+                shutil.copy2(target, backup)
+        for target, source in staged.items():
+            os.replace(source, target)
+            published.append(target)
+    except Exception as error:
+        for target in reversed(published):
+            try:
+                if target in backups:
+                    os.replace(backups[target], target)
+                else:
+                    os.unlink(target)
+            except OSError:
+                recovery.add(target)
+        if recovery:
+            locations = {target: backups.get(target, "new file; remove manually") for target in recovery}
+            raise OSError(f"{error}; rollback incomplete; recovery copies: {locations}") from error
+        raise
+    finally:
+        for target, backup in backups.items():
+            if target not in recovery and os.path.exists(backup):
+                _cleanup(lambda backup=backup: os.unlink(backup), backup, cleanup_warnings)
+
+
+def run_ops(path, ops, *, overwrite=False):
+    """Stage ordered operations and exports; publish only after the batch succeeds."""
     writer = format_of(path)
     if writer is None:
         suffix = os.path.splitext(str(path))[1].lower() or "a file with no suffix"
@@ -111,59 +153,81 @@ def run_ops(path, ops, *, overwrite=False):
     if problem:
         return f"[error] {problem}"
 
-    target = os.path.abspath(str(path))
-    directory = os.path.dirname(target) or "."
-    os.makedirs(directory, exist_ok=True)
-    handle, staging = tempfile.mkstemp(dir=directory, prefix=".office-",
-                                       suffix=os.path.splitext(target)[1])
-    os.close(handle)
-    os.remove(staging)                     # the writers decide whether the file exists yet
-    if os.path.exists(target):
-        shutil.copy2(target, staging)      # so ``create`` sees the file it must refuse
+    target = os.path.realpath(str(path))
+    results, stopped_at, meta, tail = [], None, {}, ""
+    cleanup_warnings = []
+    with ExitStack() as stack:
+        staged = {}
 
-    results, stopped_at, meta = [], None, {}
-    try:
-        for index, item in enumerate(ops, 1):
-            op = next(iter(item))
-            raw = (_export_pdf(staging, item[op], meta) if op == "export_pdf"
-                   else writer.write(staging, op, item[op], overwrite=overwrite))
-            outcome = normalise(op, raw)
-            outcome["idx"] = index
-            # The writers work on the staging copy and name it in their summaries; the
-            # model asked about the file it can actually open.
-            outcome["summary"] = str(outcome["summary"]).replace(staging, target)
-            if outcome.get("warn"):
-                outcome["warn"] = str(outcome["warn"]).replace(staging, target)
-            results.append(outcome)
-            if not outcome["ok"]:
-                stopped_at = index
-                break
-        if stopped_at is None:
-            os.replace(staging, target)
-    except Exception as error:             # noqa: BLE001 - any writer fault is one op's
-        stopped_at = len(results) + 1
-        results.append({"op": next(iter(ops[stopped_at - 1])), "idx": stopped_at,
-                        "ok": False, "warn": None, "wrote_formula": False, "counts": {},
-                        "summary": f"[error] {type(error).__name__}: {error}"})
-    finally:
-        if os.path.exists(staging):
-            os.remove(staging)
+        def stage(destination):
+            destination = os.path.realpath(destination)
+            if destination not in staged:
+                directory = os.path.dirname(destination)
+                os.makedirs(directory, exist_ok=True)
+                temporary = tempfile.TemporaryDirectory(prefix=".office-", dir=directory)
+                stack.callback(_cleanup, temporary.cleanup, temporary.name, cleanup_warnings)
+                staged[destination] = os.path.join(temporary.name, os.path.basename(destination))
+            return staged[destination]
 
-    # openpyxl writes the formula but not its result, so the numbers are not in the file
-    # until something computes them. LibreOffice fills them in when it is installed; when
-    # it is not, saying so beats a model quoting an empty cell. The package scan runs only
-    # when an op reported a formula: it reads every sheet.
-    tail = ""
-    wrote_formula = stopped_at is None and any(
-        outcome.get("wrote_formula") for outcome in results)
-    if wrote_formula and _xlsx.cache_empty(target):
-        if _recalculate(target, meta):
-            tail = "formulas recalculated with LibreOffice"
-        else:
-            failure = meta.get("soffice_error")
-            tail = ("formulas written; their cached values are empty until the file is "
-                    "opened in Excel or LibreOffice, so read shows them as `uncached`"
-                    + (f" ({failure})" if failure else f" — {soffice.INSTALL_HINT}"))
+        index, op = 1, next(iter(ops[0]))
+        try:
+            source = stage(target)
+            if os.path.exists(target):
+                shutil.copy2(target, source)
+                rebuilding = "create" in ops[0] and (overwrite or ops[0]["create"].get("overwrite"))
+                if writer in (_docx, _xlsx, _pptx) and not rebuilding:
+                    from misaka.core.documents.office import precheck
+                    precheck(source)
+            for index, item in enumerate(ops, 1):
+                op, args = next(iter(item.items()))
+                if op == "export_pdf":
+                    out = os.path.realpath(pdf_path(target, args))
+                    if out == target or not out.lower().endswith(".pdf"):
+                        raise ValueError("export_pdf needs a distinct .pdf output path")
+                    if writer not in (_docx, _xlsx, _pptx):
+                        raise ValueError("export_pdf reads .docx/.xlsx/.pptx; build an Office file first")
+                    raw = _export_pdf(source, {"out": stage(out)}, meta)
+                else:
+                    raw = writer.write(source, op, args, overwrite=overwrite)
+                outcome = normalise(op, raw)
+                outcome["idx"] = index
+                for destination, temporary in staged.items():
+                    outcome["summary"] = str(outcome["summary"]).replace(temporary, destination)
+                    if outcome.get("warn"):
+                        outcome["warn"] = str(outcome["warn"]).replace(temporary, destination)
+                results.append(outcome)
+                if not outcome["ok"]:
+                    stopped_at = index
+                    break
+            if stopped_at is None:
+                # Recalculation is part of staging, never a post-commit mutation.
+                edited_workbook = writer is _xlsx and any(r["op"] != "export_pdf" for r in results)
+                if edited_workbook and _xlsx.cache_empty(source):
+                    if _recalculate(source, meta):
+                        errors = _xlsx.formula_errors(source)
+                        tail = ("formulas recalculated with LibreOffice; "
+                                f"{len(errors)} error(s)"
+                                + (": " + "  ".join(errors[:10]) + (" …" if len(errors) > 10 else "")
+                                   if errors else "")
+                                + " (workbook re-saved; chart/validation fidelity best-effort)")
+                        if _xlsx.cache_empty(source):
+                            tail += "; some formula results are still uncached; recalculation is incomplete"
+                    else:
+                        failure = meta.get("soffice_error")
+                        tail = ("formulas written; their cached values are empty until the file is "
+                                "opened in Excel or LibreOffice, so read shows them as `uncached`"
+                                + (f" ({failure})" if failure else f" — {soffice.INSTALL_HINT}"))
+                _publish(staged, cleanup_warnings)
+        except Exception as error:  # noqa: BLE001 - faults become structured batch failures
+            stopped_at = index
+            failure = normalise(op, f"[error] {type(error).__name__}: {error}")
+            failure["idx"] = index
+            results.append(failure)
+            if "rollback incomplete" in str(error):
+                # A filesystem that also rejects restoration breaks the usual rollback promise.
+                return f"[error] {error}"
     hint = md_hint(ops) if os.path.splitext(target)[1].lower() in _HINT_FORMATS else ""
+    if cleanup_warnings:
+        tail = "\n  ".join(filter(None, [tail, *(f"⚠ {warning}" for warning in cleanup_warnings)]))
     receipt = format_receipt(os.path.basename(target), results, len(ops), stopped_at, tail)
     return receipt + ("\n  " + hint if hint else "")

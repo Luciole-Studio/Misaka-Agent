@@ -61,23 +61,29 @@ def resolve_to_cwd(file_path: str, cwd: str) -> str:
 
 def resolve_read_path(file_path: str, cwd: str) -> str:
     resolved = resolve_to_cwd(file_path, cwd)
+    from misaka.core.tools._web.evidence import check_material_read
+    check_material_read(resolved)
     if file_exists(resolved):
         return resolved
 
     am_pm_variant = try_macos_screenshot_path(resolved)
     if am_pm_variant != resolved and file_exists(am_pm_variant):
+        check_material_read(am_pm_variant)
         return am_pm_variant
 
     nfd_variant = try_nfd_variant(resolved)
     if nfd_variant != resolved and file_exists(nfd_variant):
+        check_material_read(nfd_variant)
         return nfd_variant
 
     curly_variant = try_curly_quote_variant(resolved)
     if curly_variant != resolved and file_exists(curly_variant):
+        check_material_read(curly_variant)
         return curly_variant
 
     nfd_curly_variant = try_curly_quote_variant(nfd_variant)
     if nfd_curly_variant != resolved and file_exists(nfd_curly_variant):
+        check_material_read(nfd_curly_variant)
         return nfd_curly_variant
 
     return resolved

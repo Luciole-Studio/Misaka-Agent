@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -48,6 +49,7 @@ class WebRuntime:
         self.closed = False
         self.debug_id = None
         self.browser = None
+        self.vault_id = uuid.uuid4().hex
 
     def _check(self):
         if self.closed:
@@ -105,6 +107,8 @@ class WebRuntime:
             for task in calls:
                 task.cancel()
             await asyncio.gather(*calls, return_exceptions=True)
+            from misaka.core.web.browser.vault.backends.unlock import release_session
+            release_session(self.vault_id)
             browser_error = None
             if self.browser is not None:
                 try:

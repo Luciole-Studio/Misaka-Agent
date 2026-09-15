@@ -606,8 +606,12 @@ async def amain() -> int:
             call_input = read_field(call, "args", {}) or {}
             if call_name == "StructuredOutput":
                 return None
+            try:
+                snapshot = subagent_policy._snapshot_office_input(call_name, call_input, workspace)
+            except (TypeError, ValueError) as error:
+                return BeforeToolCallResult(block=True, reason=f"Invalid Office input: {error}")
             action, reason = await subagent_policy.hook_tool_permission(
-                session, role_context, call_name, call_input, workspace,
+                session, role_context, call_name, snapshot, workspace,
                 transcript_read=_agent_hook_can_read_transcript(
                     kind, transcript_path, call_name, call_input,
                 ),
@@ -617,7 +621,7 @@ async def amain() -> int:
                     block=True,
                     reason=reason or "Agent hook permission denied",
                 )
-            return None
+            return BeforeToolCallResult(updatedInput=snapshot) if snapshot is not call_input else None
 
         async def should_stop(_turn: Any, _signal: Any = None) -> bool:
             nonlocal turns
