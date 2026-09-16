@@ -168,7 +168,8 @@ def prepare(con, run, cfg, worker, *, check_active=None):
                           extra="\n# Material catalog\n" + materials(con, run), check_active=check_active)
             if check_active:
                 check_active()
-            runs.write_text(con, run["id"], kind, kind.title(), runs.run_path(run, f"{kind}.md"), text)
+            with runs.owned_txn(con, run):
+                runs.write_text(con, run["id"], kind, kind.title(), runs.run_path(run, f"{kind}.md"), text)
     return _checkpoint(con, run, "draft")
 
 
@@ -243,8 +244,9 @@ def finalize(con, run, cfg, worker, *, review_task_id, check_active=None):
                       extra=extra, check_active=check_active)
         if check_active:
             check_active()
-        aid, _path = runs.write_text(con, run["id"], "final", "Final report",
-                                    runs.run_path(run, "final.md"), text, metadata=metadata)
+        with runs.owned_txn(con, run):
+            aid, _path = runs.write_text(con, run["id"], "final", "Final report",
+                                        runs.run_path(run, "final.md"), text, metadata=metadata)
         final = runs.artifact(con, aid)
     return {"artifact": final["id"], "path": final["path"], "content": runs.artifact_text(final),
             "survey_path": survey["path"], "draft_path": draft["path"], "review_task_id": review_task_id}

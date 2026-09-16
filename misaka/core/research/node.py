@@ -139,12 +139,22 @@ class PaneRunner:
                         self._said[tid] = str(error)
                         print(f"card {tid}: {error}", flush=True)
 
-    async def stop(self, task_id, **_kwargs):
+    async def stop(self, task_id, *, expected_generation=None, expected_claim_lock=None, research_owner=None, **_kwargs):
         from misaka.ui.panel import client as net
-        try:
-            await asyncio.to_thread(net.request, "card.stop", {"task_id": task_id})
-        except (RuntimeError, OSError):
-            pass
+        params = {"task_id": task_id}
+        if research_owner is not None:
+            params["research_owner"] = research_owner
+        if expected_generation is not None:
+            params.update(expected_generation=expected_generation, expected_claim_lock=expected_claim_lock)
+        receipt = await asyncio.to_thread(net.request, "card.stop", params)
+        if receipt.get("stopped") and receipt.get("pid") and receipt.get("identity"):
+            def wait_stopped():
+                deadline = time.monotonic() + 10
+                while processes.identity_is_alive(receipt["pid"], receipt["identity"]):
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError(f"Card {task_id}'s process did not stop")
+                    time.sleep(.05)
+            await asyncio.to_thread(wait_stopped)
 
     async def pending(self, task_ids):
         """A card's TUI stays open after completion; wait for its settled idle report."""

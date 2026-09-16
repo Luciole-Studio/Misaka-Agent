@@ -42,7 +42,7 @@ from misaka.ai.types import (
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream
 from misaka.ai.utils.hash import short_hash
-from misaka.ai.utils.json_parse import StreamingArgs, parse_streaming_json
+from misaka.ai.utils.json_parse import StreamingArgs
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
 
 _TOOL_CALL_ID_PART_PATTERN = re.compile(r"[^a-zA-Z0-9_-]")
@@ -587,7 +587,7 @@ async def process_responses_stream(
                 previous_partial_json = current_tool_args.raw
                 # The arguments are complete here: replace the buffer and parse it whole.
                 current_tool_args = StreamingArgs(event.get("arguments", ""))
-                current_block.arguments = current_tool_args.finish()
+                current_tool_args.finish_into(current_block)
                 if current_tool_args.raw.startswith(previous_partial_json):
                     delta = current_tool_args.raw[len(previous_partial_json) :]
                     if delta:
@@ -643,22 +643,20 @@ async def process_responses_stream(
                 stream.push(TextEndEvent(contentIndex=block_index(), content=current_block.text, partial=output))
                 current_block = None
             elif item_type == "function_call":
-                if isinstance(current_block, ToolCall):
-                    current_block.arguments = (
-                        current_tool_args.finish()
-                        if current_tool_args.raw
-                        else parse_streaming_json(item.get("arguments") or "{}")
-                    )
-                    tool_call = current_block
-                else:
-                    tool_call = ToolCall(
-                        id=f"{item.get('call_id', '')}|{item.get('id', '')}",
-                        name=item.get("name", ""),
-                        arguments=parse_streaming_json(item.get("arguments") or "{}"),
-                    )
-                current_tool_args = StreamingArgs()
-                current_block = None
-                stream.push(ToolCallEndEvent(contentIndex=block_index(), toolCall=tool_call, partial=output))
+                call_id = f"{item.get('call_id', '')}|{item.get('id', '')}"
+                tool_call = next((block for block in output.content
+                                  if isinstance(block, ToolCall) and block.id == call_id), None)
+                if tool_call is None:
+                    tool_call = ToolCall(id=call_id, name=item.get("name", ""), arguments={})
+                    output.content.append(tool_call)
+                final_args = (current_tool_args if tool_call is current_block and current_tool_args.raw
+                              else StreamingArgs(item.get("arguments") or "{}"))
+                final_args.finish_into(tool_call)
+                if tool_call is current_block:
+                    current_tool_args = StreamingArgs()
+                    current_block = None
+                stream.push(ToolCallEndEvent(contentIndex=output.content.index(tool_call),
+                                            toolCall=tool_call, partial=output))
             elif item_type == "custom_tool_call" and isinstance(current_block, ToolCall):
                 final_input = item.get("input")
                 if final_input is None:

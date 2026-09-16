@@ -1561,9 +1561,33 @@ class Daemon:
             pane = next((p for p in self.panes.values()
                          if p.card == params["task_id"]), None)
             if pane is None:
+                if "expected_generation" in params:
+                    return {"stopped": False, "missing": True}
                 raise ValueError(f"Card {params['task_id']} is not running in a pane.")
-            self.close(pane.id)
-            return {"stopped": True}
+            from misaka.core.platform import tasks as db
+            with db.write_txn(self._board()):
+                expected_owner = params.get("research_owner")
+                if expected_owner is not None:
+                    from misaka.core.research import runs
+                    run = runs.get(self._board(), expected_owner["run_id"])
+                    node = (runs.node(self._board(), expected_owner["node_id"])
+                            if expected_owner.get("node_id") is not None else None)
+                    if (run is None or run["driver_lock"] != expected_owner["driver_lock"]
+                            or (expected_owner.get("node_id") is not None
+                                and (node is None or node["runner_key"] != expected_owner["runner_key"]))):
+                        return {"stopped": False, "stale": True}
+                if "expected_generation" in params:
+                    row = db.get(self._board(), pane.card)
+                    expected = params["expected_generation"]
+                    lock = params.get("expected_claim_lock")
+                    if (row is None or row["generation"] != expected or pane.generation != expected
+                            or row["claim_lock"] != lock or pane.claim_lock != lock):
+                        return {"stopped": False, "stale": True}
+                from misaka.core.platform import processes
+                pid = pane.proc.pid
+                identity = processes.identity(pid)
+                self.close(pane.id, expected_generation=params.get("expected_generation"))
+                return {"stopped": True, "pid": pid, "identity": identity}
         if method == "layout.get":       # the daemon owns the layout (herdr server model)
             return {"spaces": self.spaces, "revision": self.layout_revision}
         if method == "layout.set":       # client-side edits: a dragged divider, a renamed tab or space

@@ -163,6 +163,36 @@ def _desugar(parsed):
     return None, ""
 
 
+def prepare_office_input(params, cwd):
+    """Resolve once for authorization and execution, including shorthand and @ops files."""
+    parsed = OfficeToolInput.model_validate(params)
+    absolute_path = resolve_to_cwd(parsed.path, cwd)
+
+    ops, problem = _desugar(parsed)
+    if problem:
+        raise RuntimeError(problem)
+    if ops is None:
+        ops, problem = _load_ops(parsed.ops, cwd)
+        if problem:
+            raise RuntimeError(problem)
+    if not ops:
+        raise RuntimeError(
+            "office needs ops (a JSON array of single-key objects) or, for a whole "
+            "text file, content/rows/data."
+        )
+
+    from misaka.core.tools import _office
+
+    problem = _office.validate_ops(ops)
+    if problem:
+        raise RuntimeError(problem)
+
+    from misaka.core.tools._office.paths import resolve_ops
+    ops = resolve_ops(ops, cwd)
+
+    return parsed, absolute_path, ops
+
+
 def create_office_tool_definition(
     cwd: str,
     _options: Mapping[str, Any] | None = None,
@@ -177,30 +207,10 @@ def create_office_tool_definition(
         if signal_aborted(signal):
             raise RuntimeError("Operation aborted")
 
-        parsed = OfficeToolInput.model_validate(params)
-        absolute_path = resolve_to_cwd(parsed.path, cwd)
-
-        ops, problem = _desugar(parsed)
-        if problem:
-            raise RuntimeError(problem)
-        if ops is None:
-            ops, problem = _load_ops(parsed.ops, cwd)
-            if problem:
-                raise RuntimeError(problem)
-        if not ops:
-            raise RuntimeError(
-                "office needs ops (a JSON array of single-key objects) or, for a whole "
-                "text file, content/rows/data."
-            )
-
         from misaka.core.tools import _office
+        from misaka.core.tools._office.paths import output_paths
 
-        problem = _office.validate_ops(ops)
-        if problem:
-            raise RuntimeError(problem)
-
-        from misaka.core.tools._office.paths import output_paths, resolve_ops
-        ops = resolve_ops(ops, cwd)
+        parsed, absolute_path, ops = prepare_office_input(params, cwd)
 
         async def mutate() -> AgentToolResult:
             async def worker() -> AgentToolResult:

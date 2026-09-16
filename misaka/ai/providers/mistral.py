@@ -695,7 +695,7 @@ async def consume_chat_stream(
         # that actually received something may overwrite what the tool call was born with.
         accumulated = partial_args_by_index.get(index)
         if accumulated is not None and accumulated.raw:
-            block.arguments = accumulated.finish()
+            accumulated.finish_into(block)
         stream.push(ToolCallEndEvent(contentIndex=index, toolCall=block, partial=output))
 
     return saw_finish_reason

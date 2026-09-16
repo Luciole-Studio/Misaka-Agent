@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from misaka.agent.guards import install_guards
 from misaka.agent.request_budget import install_turn_budget
 from misaka.core.platform.vocabulary import BOOKKEEPING_MANAGEMENT_TOOLS
+from misaka.utils.async_lifecycle import settle
 
 # ``NoProgressGuard``'s vocabulary: the tools a session can call all day without the world
 # changing or one new fact arriving. Assembled here because it is a fact about how this
@@ -299,9 +300,13 @@ async def _run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
             "budget_usage": limiter.accounted if limiter is not None else None,
         }
     finally:
-        await dispose(runtime)
-        for k, v in old_env.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
+        try:
+            _result, cancelled = await settle(asyncio.create_task(dispose(runtime)))
+        finally:
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        if cancelled is not None:
+            raise cancelled

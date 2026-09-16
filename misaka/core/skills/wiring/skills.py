@@ -52,11 +52,18 @@ def _runtime_name(entry):
     return entry.get("runtime_name", entry["name"])
 
 
+def _command_name(entry):
+    # Provider-qualified identities already name a command. Hermes' Telegram slugger
+    # strips their namespace delimiters and rewrites underscores; the TUI accepts both.
+    name = _runtime_name(entry)
+    return name if entry.get("namespace") else skill_index.slug(name)
+
+
 def _slash_entries(entries):
     """Hermes auto-command view: normalized handles are first-wins."""
     out, seen = [], set()
     for entry in entries:
-        handle = skill_index.slug(_runtime_name(entry))
+        handle = _command_name(entry)
         if handle and handle not in seen:
             seen.add(handle)
             out.append(entry)
@@ -230,19 +237,32 @@ class SkillsPart:
                 target = os.path.realpath(os.path.join(workspace, os.path.expanduser(str(args.get("path") or ""))))
                 return any(target == root or target.startswith(root + os.sep) for root in live_roots)
             if tool in {"bash", "powershell"}:
-                return _command_touches(str(args.get("command") or ""), workspace, live_roots)
+                return _command_touches(str(args.get("command") or ""), workspace, live_roots, shell=tool)
             return False
 
         async def guard_live_skills(event, _ctx):
             args = event.get("input") if isinstance(event, dict) else getattr(event, "input", None)
             tool = event.get("toolName") if isinstance(event, dict) else getattr(event, "toolName", "")
-            if _touches_live_skills(str(tool or ""), args if isinstance(args, dict) else {}):
+            args = args if isinstance(args, dict) else {}
+            prepared = None
+            if tool == "office":
+                from misaka.core.tools._office.paths import output_paths
+                from misaka.core.tools.office import prepare_office_input
+                parsed, path, ops = prepare_office_input(args, workspace)
+                # Pass the very ops we checked onward; re-reading @ops could change destinations.
+                prepared = {"path": path, "ops": ops, "overwrite": parsed.overwrite}
+                protected = any(_touches_live_skills("write", {"path": path})
+                                for path in output_paths(path, ops))
+            else:
+                protected = _touches_live_skills(str(tool or ""), args)
+            if protected:
                 return {"block": True, "reason": (
                     "Live skill trees change only through skill_manage (approval, scan, ledger). "
-                    "write and edit are refused on paths inside them; bash and powershell are refused "
-                    "whenever the command mentions one at all, reads included -- use skill_view to read a skill."
+                    "write, edit and office are refused on output paths inside them; bash and powershell are refused "
+                    "when they mention one or contain dynamic syntax whose target this guard cannot verify. "
+                    "Use skill_view for skill reads; use literal paths for unrelated commands."
                 )}
-            return None
+            return {"updatedInput": prepared} if prepared is not None else None
 
         self._guard = guard_live_skills
 
@@ -385,13 +405,12 @@ class SkillsPart:
             async with self._read_lock:
                 entry, error = skill_index.resolve(roots, name, platform=self._platform)
                 if error:
-                    ctx.ui.notify(error, "error")
-                    return
+                    raise ValueError(error)
                 message = await self._run_activation(self._single_message, entry, instruction.strip(), self._session_id(ctx), _ctx=ctx)
-                await ctx.sendUserMessage(message)
+                return message
 
         self._commands.append(CoreCommand(
-            "skill", "List skills, or invoke one with `/skill <name> [instruction]` in the current session.", skill_cmd))
+            "skill", "List skills, or invoke one with `/skill <name> [instruction]` in the current session.", skill_cmd, is_prompt=True))
 
         async def reload_cmd(args, ctx):
             before = dict(self._command_snapshot)
@@ -406,8 +425,7 @@ class SkillsPart:
 
         async def learn_cmd(args, ctx):
             if profile_dir is None:
-                ctx.ui.notify("Skill writing requires a role profile; select a role before using /learn.", "error")
-                return
+                raise ValueError("Skill writing requires a role profile; select a role before using /learn.")
             from misaka.core.skills import write as skill_write
             from misaka.core.skills.learn_prompt import build_learn_prompt
             target = os.path.join(profile_dir, "skills")
@@ -417,8 +435,7 @@ class SkillsPart:
             # Every write goes through the skill gate, validation, scan, and ledger.
             decision, note = skill_write.evaluate_gate()
             if decision == "off":
-                ctx.ui.notify("Skill writing is disabled globally. Change the write mode before using /learn.", "error")
-                return
+                raise ValueError("Skill writing is disabled globally. Change the write mode before using /learn.")
             prompt += (
                 "\n\n---\n[Write path] Use `skill_manage` for every skill change; never write the skill tree with generic file tools. "
                 "Create a skill with `skill_manage(action='create', name=..., content=<complete SKILL.md>)` and add support files "
@@ -429,7 +446,7 @@ class SkillsPart:
                     f"\n{note}\nThe tool will return a pending ID. Report the skill name and summary, then tell the user "
                     "to inspect it with `misaka skills pending` and approve it with `misaka skills approve <id>`."
                 )
-            await ctx.sendUserMessage(prompt)
+            return prompt
 
         async def skill_mode_cmd(args, ctx):
             # Slash commands originate from user input, so this is the user-only write-mode entry point.
@@ -466,7 +483,7 @@ class SkillsPart:
                 skill_mode_cmd))
         if kind not in ("card", "child"):
             self._commands.append(CoreCommand(
-                "learn", "Create or improve a reusable skill from files, links, notes, or the workflow just completed.", learn_cmd))
+                "learn", "Create or improve a reusable skill from files, links, notes, or the workflow just completed.", learn_cmd, is_prompt=True))
 
         if kind in ("foreground", "dm"):
             async def refine(args, ctx):
@@ -521,32 +538,33 @@ class SkillsPart:
                 reserved.update(p.name for p in loader.getPrompts().get("prompts", []))
         entries = _slash_entries(self._entries())
         bundle_table = {k: v for k, v in self._bundles().items() if k[1:] not in reserved}
-        table = {"/" + skill_index.slug(_runtime_name(e)): e for e in entries
-                 if skill_index.slug(_runtime_name(e)) not in reserved
-                 and "/" + skill_index.slug(_runtime_name(e)) not in bundle_table}
+        table = {"/" + _command_name(e): e for e in entries
+                 if _command_name(e) not in reserved
+                 and "/" + _command_name(e) not in bundle_table}
         for key, entry in table.items():
             async def invoke(args, ctx, key=key):
                 async with self._read_lock:
                     self._refresh_roots()
                     extras, instruction = hermes_commands.split_stacked_skill_commands(
-                        args, lambda name: hermes_commands.resolve_slash_key(name, table))
+                        args, lambda name: ("/" + name if "/" + name in table else
+                                            hermes_commands.resolve_slash_key(name, table)))
                     keys = list(dict.fromkeys([key, *extras]))
                     message = await self._run_activation(self._stack_message, table, keys, instruction, self._session_id(ctx))
                     if message:
-                        await ctx.sendUserMessage(message)
+                        return message
                     else:
-                        ctx.ui.notify("Requested skills are no longer available.", "error")
-            commands.append(CoreCommand(key[1:], entry.get("list_description") or f"Invoke {_runtime_name(entry)}", invoke))
+                        raise ValueError("Requested skills are no longer available.")
+            commands.append(CoreCommand(key[1:], entry.get("list_description") or f"Invoke {_runtime_name(entry)}", invoke, is_prompt=True))
         for key, info in bundle_table.items():
             async def invoke_bundle(args, ctx, key=key):
                 async with self._read_lock:
                     self._refresh_roots()
                     result = await self._run_activation(self._bundle_message, key, args or "", self._session_id(ctx))
                     if result:
-                        await ctx.sendUserMessage(result[0])
+                        return result[0]
                     else:
-                        ctx.ui.notify("Bundle has no available skills or no longer exists.", "error")
-            commands.append(CoreCommand(key[1:], info["description"], invoke_bundle))
+                        raise ValueError("Bundle has no available skills or no longer exists.")
+            commands.append(CoreCommand(key[1:], info["description"], invoke_bundle, is_prompt=True))
         return commands
 
     def _update_command_snapshot(self):
@@ -977,7 +995,47 @@ class SkillsPart:
 SESSION_KINDS = {"foreground", "dm", "card", "child", "bare"}
 
 
-def _command_touches(command, workspace, live_roots):
+def _has_dynamic_shell_syntax(command, shell):
+    # PowerShell has different quoting/escape rules. Keep its conservative policy;
+    # this Bash-only literal recognition is not a cross-shell permission parser.
+    if shell != "bash":
+        return any(token in command for token in ("$(", "`", "${"))
+    if not any(token in command for token in ("$(", "`", "${")):
+        return False
+    quote = None
+    i = 0
+    while i < len(command):
+        char = command[i]
+        if quote == "'":
+            if char == "'":
+                quote = None
+        elif char == "\\":
+            if quote is None or command[i + 1:i + 2] in ('$', '`', '"', "\\", "\n"):
+                i += 1
+        elif char == '"' and quote == '"':
+            quote = None
+        elif quote is None and char in ("'", '"'):
+            quote = char
+        elif char == "`" or command[i:i + 2] in ("$(", "${"):
+            return True
+        i += 1
+    if quote is not None:
+        return True
+    # A quoted string may itself be code (bash -c, eval, python -c, ...). Only
+    # exempt simple literal display commands, not every shell-quoted program.
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        argv = list(lexer)
+    except ValueError:
+        return True
+    return (not argv or argv[0] not in {"printf", "echo"}
+            or "\n" in command
+            or any(token and all(c in ";&|()<>" for c in token) for token in argv))
+
+
+def _command_touches(command, workspace, live_roots, *, shell="bash"):
     """True when a shell command names a path inside a live skill tree.
 
     The literal substring test this replaces read the command as text, so only the
@@ -995,7 +1053,7 @@ def _command_touches(command, workspace, live_roots):
     """
     if not command.strip():
         return False
-    if any(token in command for token in ("$(", "`", "${")):
+    if _has_dynamic_shell_syntax(command, shell):
         return True
     if any(root in command for root in live_roots):
         return True

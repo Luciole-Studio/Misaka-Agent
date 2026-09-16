@@ -659,6 +659,10 @@ async def prepare_tool_call(
     config: AgentLoopConfig,
     signal: Any | None,
 ) -> PreparedToolCall | ImmediateToolCallOutcome:
+    if tool_call.argumentsError is not None:
+        return ImmediateToolCallOutcome(
+            kind="immediate", result=create_error_tool_result(tool_call.argumentsError), isError=True,
+        )
     tool = next((candidate for candidate in current_context.tools or [] if candidate.name == tool_call.name), None)
     if tool is None:
         tool = next((candidate for candidate in current_context.tools or []

@@ -1,8 +1,11 @@
 """Run cards headlessly and settle their board-owned submissions."""
+import hashlib
 import json
 import os
 import secrets
 import socket
+from dataclasses import dataclass
+from pathlib import Path
 
 from misaka.core.documents import workspace as ws_index
 from misaka.core.network import worker
@@ -316,10 +319,11 @@ def run_task(con, t, cfg):
     return True
 
 
-def _submitted(submission):
+def _submitted(submission, *, artifact_digests=None):
     return {"summary": submission["summary"], "artifacts": submission.get("artifacts", []),
             "notes": submission.get("notes", ""), "uncertain": submission.get("uncertain", []),
             "findings": submission.get("findings", []),
+            "artifact_digests": artifact_digests or {},
             **({"issues": submission["issues"]} if "issues" in submission else {})}
 
 
@@ -359,14 +363,41 @@ def index_after_review(con, task_id, generation):
     index_artifacts(con, task_id, artifacts, generation)
 
 
+@dataclass(frozen=True)
+class _PreparedSubmission:
+    owner: tuple
+    payload: dict
+
+
+def prepare_submission(t, submission):
+    """Freeze attachment bytes before acceptance; async hosts call this off their loop."""
+    # Hash outside the short ownership transaction. Caller-provided digests are never trusted.
+    root = Path(t["workspace"]).resolve()
+    digests = {}
+    for name in submission.get("artifacts") or []:
+        path = (root / str(name)).resolve()
+        try:
+            path.relative_to(root)
+            with path.open("rb") as source:
+                digests[str(name)] = hashlib.file_digest(source, "sha256").hexdigest()
+        except (OSError, ValueError):
+            # Record absence too: a file appearing later is not an accepted attachment.
+            digests[str(name)] = None
+    return _PreparedSubmission((t["id"], t["generation"], t["claim_lock"], t["workspace"]),
+                               _submitted(submission, artifact_digests=digests))
+
+
 def accept_state(con, t, submission, *, generation, claim_lock):
     """Land the ownership CAS and its immutable payload without yielding to another turn."""
+    prepared = submission if isinstance(submission, _PreparedSubmission) else prepare_submission(t, submission)
+    if prepared.owner != (t["id"], generation, claim_lock, t["workspace"]):
+        raise ValueError("Prepared submission belongs to a different card attempt")
     with db.write_txn(con):                                # done and its submitted payload land together
         if not db.submit_task(
             con, t["id"], generation=generation, claim_lock=claim_lock, commit=False
         ):
             return False
-        db.add_event(con, t["id"], "submitted", _submitted(submission), generation=generation)
+        db.add_event(con, t["id"], "submitted", prepared.payload, generation=generation)
     return True
 
 
@@ -388,6 +419,7 @@ def accept_side_effects(con, t, submission, *, generation, workspace):
     from misaka.core.platform import cards, repo
 
     committed = True
+    research_linked = _research_linked(con, t["id"])
     # Generation changes publish through this same card lock. Read the file fence,
     # not SQLite, while holding it: transitions acquire DB -> card, never card -> DB.
     # Git can wait on its own repository lock without occupying the board's writer.
@@ -398,7 +430,7 @@ def accept_side_effects(con, t, submission, *, generation, workspace):
                        and fields.get("status") in {"done", "review"})
         except (OSError, ValueError, TypeError):
             current = False
-        if current and repo.enabled(workspace) and not _research_linked(con, t["id"]):
+        if current and repo.enabled(workspace) and not research_linked:
             committed = repo.commit_card(
                 workspace, t["id"], submission, f"card {t['id']}: submit"
             )

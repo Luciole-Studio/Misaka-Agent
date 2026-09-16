@@ -11,6 +11,7 @@ from misaka.core.platform import budget
 from misaka.core.platform.session import event_line
 from misaka.core.research.report import DRAFT_CONTRACT, FINAL_CONTRACT
 from misaka.core.session_control import for_session, wait_for_session
+from misaka.utils.async_lifecycle import settle
 from misaka.utils.values import read_field
 
 
@@ -98,7 +99,7 @@ class WindowLO:
             if read_field(message, "role") != "assistant":
                 return
             stop = read_field(message, "stopReason")
-            if stop in {"error", "aborted", "length"}:
+            if stop in {"error", "aborted", "length"} and answer is None:
                 error = read_field(message, "errorMessage") or f"request {stop}"
             elif stop == "stop" and answer is None:
                 # A queued user/notification follow-up belongs to the same window, but
@@ -268,11 +269,19 @@ async def node_session(con, cfg, run, node):
             await asyncio.gather(*control.inputs)
             await session.waitForIdle()
         finally:
-            if bridge is not None:
-                await bridge.close()
-            await dispose(runtime)
-            for key, value in previous.items():
-                if value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = value
+            async def cleanup():
+                try:
+                    if bridge is not None:
+                        await bridge.close()
+                finally:
+                    await dispose(runtime)
+            try:
+                _result, cancelled = await settle(asyncio.create_task(cleanup()))
+            finally:
+                for key, value in previous.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+            if cancelled is not None:
+                raise cancelled

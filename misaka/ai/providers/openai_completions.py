@@ -301,7 +301,7 @@ def stream_openai_completions(
                 else:
                     partial_args = tool_call_partial_args.get(index)
                     if partial_args is not None and partial_args.raw:
-                        block.arguments = partial_args.finish()
+                        partial_args.finish_into(block)
                     stream.push(ToolCallEndEvent(contentIndex=index, toolCall=block, partial=output))
 
             def ensure_text_block() -> TextContent:

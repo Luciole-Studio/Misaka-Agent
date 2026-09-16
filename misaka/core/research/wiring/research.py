@@ -125,7 +125,8 @@ def _status(con, target, workspace):
         return "No matching research run was found."
     value = runs.summary(con, run["id"])
     reading = budget.status(con, _cfg().get("token_cap"))
-    token_text = f" | tokens added by this run {max(0, reading['used'] - int(run['token_start'])):,}"
+    scope = {run["id"], *(t["id"] for t in runs.tasks(con, run["id"]))}
+    token_text = f" | tokens added by this run {budget.spent(con, task_ids=scope):,}"
     if reading["cap"]:
         token_text += f" | global tokens {reading['used']:,}/{reading['cap']:,}"
     return (

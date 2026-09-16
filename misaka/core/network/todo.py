@@ -396,10 +396,13 @@ class TodoPart:
 
         try:
             submission = worker.build_submission(self.con(), row, summary)
+            prepared = await asyncio.to_thread(dispatch.prepare_submission, row, submission)
+            if self._summary_token is not token:
+                return
             accepted = dispatch.accept_state(
                 self.con(),
                 row,
-                submission,
+                prepared,
                 generation=row["generation"],
                 claim_lock=row["claim_lock"],
             )

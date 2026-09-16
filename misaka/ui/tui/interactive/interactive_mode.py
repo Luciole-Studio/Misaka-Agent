@@ -1074,6 +1074,8 @@ class InteractiveMode(Conversation):
     def isExtensionCommand(self, text: str) -> bool:
         if not text.startswith("/"):
             return False
+        if self.isCorePromptCommand(text):
+            return False
         extension_runner = getattr(self.session, "extensionRunner", None)
         get_command = _callable_attr(extension_runner, "getCommand") or _callable_attr(extension_runner, "get_command")
         if get_command is None:
@@ -1084,6 +1086,10 @@ class InteractiveMode(Conversation):
             return True
         moments = getattr(self.session, "moments", None)  # MISAKA fork: a part's command runs the same way
         return moments is not None and moments.command(command_name) is not None
+
+    def isCorePromptCommand(self, text: str) -> bool:
+        get_command = _callable_attr(self.session, "getCorePromptCommand")
+        return get_command is not None and get_command(text) is not None
 
     def isPromptTemplate(self, text: str) -> bool:
         """Whether this names a prompt template, which the menu offers and prompt() expands."""
@@ -1098,37 +1104,56 @@ class InteractiveMode(Conversation):
             return
 
         queued_messages = list(self.compactionQueuedMessages)
+        pending = list(queued_messages)
         self.compactionQueuedMessages = []
         self.updatePendingMessagesDisplay()
         restored = False
+        task: asyncio.Task[Any] | None = None
+
+        def accepted(message: Any) -> None:
+            pending[:] = [item for item in pending if item is not message]
+            if restored:
+                self.compactionQueuedMessages = [item for item in self.compactionQueuedMessages if item is not message]
+                self.updatePendingMessagesDisplay()
 
         def restore_queue(error: Exception | str) -> None:
             nonlocal restored
             if restored:
                 return
             restored = True
-            clear_queue = _callable_attr(self.session, "clearQueue")
-            if clear_queue is not None:
-                clear_queue()
-            self.compactionQueuedMessages = queued_messages
+            # Never clear already accepted steer/follow-up messages, or retry a
+            # prompt which has reached its preflight acceptance point.
+            self.compactionQueuedMessages = [*pending, *self.compactionQueuedMessages]
             self.updatePendingMessagesDisplay()
             error_message = error if isinstance(error, str) else str(error)
-            suffix = "s" if len(queued_messages) > 1 else ""
+            suffix = "s" if len(pending) != 1 else ""
             self.showError(f"Failed to send queued message{suffix}: {error_message}")
 
-        async def dispatch_message(message: Any) -> None:
+        async def dispatch_message(message: Any, *, force_queue: bool = False) -> None:
+            if restored:
+                return
             text = str(read_field(message, "text", ""))
             if self.isExtensionCommand(text):
                 await self.session.prompt(text)
+            elif self.isCorePromptCommand(text) or (
+                not force_queue and not bool(getattr(self.session, "isStreaming", False))
+            ):
+                # Skill preparation can outlast even a compaction retry. prompt()
+                # rechecks whether to queue or start after preparation finishes.
+                await self.session.prompt(text, {
+                    "streamingBehavior": read_field(message, "mode"),
+                    "preflightResult": lambda success: accepted(message) if success else None,
+                })
             elif read_field(message, "mode") == "followUp":
                 await self.session.followUp(text)
             else:
                 await self.session.steer(text)
+            accepted(message)
 
         try:
             if bool(read_field(options, "willRetry", False)):
                 for message in queued_messages:
-                    await dispatch_message(message)
+                    await dispatch_message(message, force_queue=True)
                 self.updatePendingMessagesDisplay()
                 return
 
@@ -1138,41 +1163,60 @@ class InteractiveMode(Conversation):
             )
             if first_prompt_index == -1:
                 for message in queued_messages:
-                    await self.session.prompt(str(read_field(message, "text", "")))
+                    await dispatch_message(message)
                 return
 
-            pre_commands = queued_messages[:first_prompt_index]
+            for message in queued_messages[:first_prompt_index]:
+                await dispatch_message(message)
+
             first_prompt = queued_messages[first_prompt_index]
-            rest = queued_messages[first_prompt_index + 1 :]
+            preflight = asyncio.get_running_loop().create_future()
 
-            for message in pre_commands:
-                await self.session.prompt(str(read_field(message, "text", "")))
+            def report_preflight(success: bool) -> None:
+                if success:
+                    accepted(first_prompt)
+                if not preflight.done():
+                    preflight.set_result(success)
 
-            first_prompt_text = str(read_field(first_prompt, "text", ""))
             task = asyncio.Task(
-                self.session.prompt(
-                    first_prompt_text,
-                    {"streamingBehavior": read_field(first_prompt, "mode")},
-                ),
+                self.session.prompt(str(read_field(first_prompt, "text", "")), {
+                    "streamingBehavior": read_field(first_prompt, "mode"),
+                    "preflightResult": report_preflight,
+                }),
                 loop=asyncio.get_running_loop(),
                 eager_start=True,
             )
             self._backgroundTasks.add(task)
 
-            def _finish_prompt(prompt_task: asyncio.Task[Any]) -> None:
+            def finish_prompt(prompt_task: asyncio.Task[Any]) -> None:
                 self._backgroundTasks.discard(prompt_task)
                 try:
                     prompt_task.result()
                 except asyncio.CancelledError:
-                    return
+                    if any(item is first_prompt for item in pending):
+                        restore_queue("Queued prompt cancelled before submission")
                 except Exception as error:  # noqa: BLE001
                     restore_queue(error)
+                else:
+                    report_preflight(True)
+                finally:
+                    if not preflight.done():
+                        preflight.set_result(False)
 
-            task.add_done_callback(_finish_prompt)
-
-            for message in rest:
+            task.add_done_callback(finish_prompt)
+            # Do not dispatch later messages while the first is still preparing:
+            # otherwise its failure could restore messages already sent by them.
+            if not await asyncio.shield(preflight):
+                return
+            for message in queued_messages[first_prompt_index + 1:]:
                 await dispatch_message(message)
             self.updatePendingMessagesDisplay()
+        except asyncio.CancelledError:
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            restore_queue("Queued submission cancelled")
+            raise
         except Exception as error:  # noqa: BLE001
             restore_queue(error)
 
@@ -3336,7 +3380,8 @@ class InteractiveMode(Conversation):
         # command had taken effect. A prompt template is not unknown -- the menu offers it
         # and AgentSession.prompt expands it -- so it passes through to the model path.
         if (text.startswith("/") and not text.startswith("//")
-                and not self.isExtensionCommand(text) and not self.isPromptTemplate(text)):
+                and not self.isExtensionCommand(text) and not self.isCorePromptCommand(text)
+                and not self.isPromptTemplate(text)):
             name = text[1:].split(" ", 1)[0]
             if name and not name[0].isdigit():
                 self._set_editor_text("")

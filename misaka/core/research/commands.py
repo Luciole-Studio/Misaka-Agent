@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -25,7 +26,7 @@ class Task(Params):
     method: str = ""
     source_strategy: str = ""
     falsifiers: str = ""
-    dependencies: list[str] = Field(default_factory=list)
+    dependencies: list[str] = Field(default_factory=list, description="local_id values from this same plan only; not prior rounds or Board task IDs.")
     capabilities: list[str] = Field(default_factory=list)
     priority: int = Field(default=0, strict=True)
 
@@ -42,7 +43,7 @@ class Plan(Params):
         "Only when the question itself should change: the question as it should now read. It takes "
         "effect once the user agrees to this plan; until then it is a proposal in plan_markdown."))
     tasks: list[Task] = Field(default_factory=list)
-    red_team: RedTeam | None = None
+    red_team: RedTeam | None = Field(None, description="Required when status is ready: name one roster Sister as the independent red team.")
     clarifying_questions: list[str] = Field(default_factory=list)
     methods: list[dict[str, Any]] = Field(default_factory=list)
     extensions: dict[str, Any] = Field(default_factory=dict)
@@ -106,21 +107,25 @@ def review_tools(con, run, node, *, validate, session_file, round=1):
     agreed in conversation), withdraw a follow-up round, or -- a fork's first plan only -- skip
     the node at the user's decision (it closes unresearched, its issue parked). All belong to
     the node's own conversation and to this waiting state only; the driver decides nothing from prose."""
+    @contextmanager
     def owner(ctx):
         manager = getattr(ctx, "sessionManager", None)
         path = getattr(manager, "sessionFile", None)
         if not path or os.path.realpath(path) != os.path.realpath(session_file):
             raise ValueError("Research command must come from the owning Last Order conversation.")
-        current = runs.node(con, node["id"])
-        if current is None or current["status"] != "awaiting_approval":
-            raise ValueError("No plan of this node is waiting for the user's go-ahead right now.")
-        return current, path
+        with runs.task_store.write_txn(con):
+            runs._owned(con, run, node)  # The captured epoch, never the replacement owner's row.
+            current = runs.node(con, node["id"])
+            if current["status"] != "awaiting_approval":
+                raise ValueError("No plan of this node is waiting for the user's go-ahead right now.")
+            yield path
+
 
     async def revise(call_id, raw, _signal, _on_update, ctx):
         payload = validate(Plan.model_validate(raw).model_dump())
-        current, path = owner(ctx)
-        runs.replace_action(con, run, current, runs.plan_key(round), payload, session_file=path, tool_call_id=call_id)
-        runs.delete_action(con, run["id"], node["id"], runs.start_key(round))
+        with owner(ctx) as path:
+            runs.replace_action(con, run, node, runs.plan_key(round), payload, session_file=path, tool_call_id=call_id)
+            runs.delete_action(con, run["id"], node["id"], runs.start_key(round))
         return {"content": [{"type": "text", "text": (
             "Revised plan recorded; it replaces the earlier one and the run keeps waiting. "
             "Call misaka_research_start once the user has agreed to it.")}],
@@ -128,29 +133,29 @@ def review_tools(con, run, node, *, validate, session_file, round=1):
 
     async def start(call_id, raw, _signal, _on_update, ctx):
         payload = Start.model_validate(raw).model_dump()
-        current, path = owner(ctx)
-        plan = runs.action(con, run["id"], node["id"], runs.plan_key(round))
-        if plan is None:
-            raise ValueError("There is no recorded plan to start; record one with misaka_research_assign first.")
-        runs.replace_action(con, run, current, runs.start_key(round),
-                            {"plan_tool_call_id": plan["tool_call_id"], "summary": payload["summary"]},
-                            session_file=path, tool_call_id=call_id)
+        with owner(ctx) as path:
+            plan = runs.action(con, run["id"], node["id"], runs.plan_key(round))
+            if plan is None:
+                raise ValueError("There is no recorded plan to start; record one with misaka_research_assign first.")
+            runs.replace_action(con, run, node, runs.start_key(round),
+                                {"plan_tool_call_id": plan["tool_call_id"], "summary": payload["summary"]},
+                                session_file=path, tool_call_id=call_id)
         return {"content": [{"type": "text", "text": "Started: the plan's research cards are being created now."}],
                 "details": {"run_id": run["id"], "node_id": node["id"], "action_key": runs.start_key(round)}}
 
     async def withdraw(call_id, raw, _signal, _on_update, ctx):
         Withdraw.model_validate(raw)
-        owner(ctx)                                    # the same ownership and waiting-state checks
-        runs.delete_action(con, run["id"], node["id"], runs.start_key(round))
-        runs.delete_action(con, run["id"], node["id"], runs.plan_key(round))
+        with owner(ctx):
+            runs.delete_action(con, run["id"], node["id"], runs.start_key(round))
+            runs.delete_action(con, run["id"], node["id"], runs.plan_key(round))
         return {"content": [{"type": "text", "text": (
             "Follow-up round withdrawn: no more cards; the node concludes from the material it already has.")}],
             "details": {"run_id": run["id"], "node_id": node["id"], "action_key": runs.plan_key(round)}}
 
     async def skip(call_id, raw, _signal, _on_update, ctx):
         payload = Skip.model_validate(raw).model_dump()
-        current, path = owner(ctx)
-        runs.replace_action(con, run, current, runs.SKIP_KEY, payload, session_file=path, tool_call_id=call_id)
+        with owner(ctx) as path:
+            runs.replace_action(con, run, node, runs.SKIP_KEY, payload, session_file=path, tool_call_id=call_id)
         return {"content": [{"type": "text", "text": (
             "Skipped: this node closes without research. No cards and no conclusion; its issue stays parked "
             "for final adjudication with the reason on record.")}],

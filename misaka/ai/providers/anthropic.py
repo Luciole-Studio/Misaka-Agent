@@ -1365,7 +1365,7 @@ def stream_anthropic(
                         # openai-completions and openai-responses adapters.
                         accumulated = tool_partial_json.get(provider_index)
                         if accumulated is not None and accumulated.raw:
-                            block.arguments = accumulated.finish()
+                            accumulated.finish_into(block)
                         _note_empty_tool_arguments(output, block, accumulated, dropped_deltas)
                         stream.push(ToolCallEndEvent(contentIndex=content_index, toolCall=block, partial=output))
                     continue
@@ -1378,6 +1378,14 @@ def stream_anthropic(
                     if isinstance(usage, Mapping):
                         _update_usage_from_anthropic_usage(output, usage, usage_model)
 
+            # A compatible endpoint may omit a block-stop event. Finalize every raw
+            # buffer before dispatch; a streaming preview alone is never executable.
+            for provider_index, accumulated in tool_partial_json.items():
+                content_index = provider_indexes.get(provider_index)
+                if content_index is not None and accumulated.raw:
+                    block = output.content[content_index]
+                    if isinstance(block, ToolCall):
+                        accumulated.finish_into(block)
             if signal_aborted(_option(options, "signal")):
                 raise RuntimeError("Request was aborted")
             if output.stopReason in {"aborted", "error"}:

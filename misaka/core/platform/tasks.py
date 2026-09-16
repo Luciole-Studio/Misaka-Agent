@@ -11,6 +11,7 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from functools import wraps
 from pathlib import Path
 
@@ -209,6 +210,7 @@ class SerializedConnection(sqlite3.Connection):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._misaka_lock = threading.RLock()
+        self._transaction_callbacks = []
 
     @contextmanager
     def serialized(self):
@@ -221,7 +223,27 @@ class SerializedConnection(sqlite3.Connection):
 
     def execute(self, sql, parameters=()):
         with self._misaka_lock:
-            return self.cursor().execute(sql, parameters)
+            result = self.cursor().execute(sql, parameters)
+            if not self.in_transaction:
+                self._finish_transaction()
+            return result
+
+    def on_transaction_end(self, callback):
+        """Finish a recoverable filesystem projection after the *outer* transaction ends."""
+        with self._misaka_lock:
+            if not self.in_transaction:
+                raise RuntimeError("A transaction callback requires an active transaction")
+            self._transaction_callbacks.append(callback)
+
+    def _finish_transaction(self):
+        callbacks, self._transaction_callbacks = self._transaction_callbacks, []
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception:
+                # DB commit/rollback has already happened. The durable projection journal
+                # remains for retry; a cleanup error must not misreport the DB outcome.
+                logger.exception("Deferred filesystem publication needs recovery")
 
     def executemany(self, sql, seq_of_parameters):
         with self._misaka_lock:
@@ -229,18 +251,39 @@ class SerializedConnection(sqlite3.Connection):
 
     def executescript(self, sql_script):
         with self._misaka_lock:
-            return self.cursor().executescript(sql_script)
+            try:
+                return self.cursor().executescript(sql_script)
+            finally:
+                if not self.in_transaction:
+                    self._finish_transaction()
+
+    def __exit__(self, *exc):
+        with self._misaka_lock:
+            try:
+                return super().__exit__(*exc)
+            finally:
+                if not self.in_transaction:
+                    self._finish_transaction()
 
     def commit(self):
         with self._misaka_lock:
-            return super().commit()
+            result = super().commit()
+            self._finish_transaction()
+            return result
 
     def rollback(self):
         with self._misaka_lock:
-            return super().rollback()
+            result = super().rollback()
+            self._finish_transaction()
+            return result
 
     def close(self):
         with self._misaka_lock:
+            if self._transaction_callbacks:
+                if self.in_transaction:
+                    self.rollback()
+                else:
+                    self._finish_transaction()
             return super().close()
 
 
@@ -524,6 +567,22 @@ def add_event(
     return cur.rowcount == 1
 
 
+_plain_transaction_callbacks = ContextVar("board_plain_transaction_callbacks", default=())
+
+
+def on_transaction_end(con, callback):
+    """Register a filesystem finalizer without requiring callers to use our connection subclass."""
+    native = getattr(con, "on_transaction_end", None)
+    if native is not None:
+        native(callback)
+        return
+    for owner, callbacks in reversed(_plain_transaction_callbacks.get()):
+        if owner is con:
+            callbacks.append(callback)
+            return
+    raise RuntimeError("Publication needs a Board write_txn for a caller-owned connection")
+
+
 @contextmanager
 def _write_txn(con):
     """Commit task-row and task-run changes as one crash-safe unit.
@@ -539,6 +598,11 @@ def _write_txn(con):
         owner = not con.in_transaction
         if owner:
             con.execute("BEGIN IMMEDIATE")
+        stack = _plain_transaction_callbacks.get()
+        callbacks = []
+        token = None
+        if owner and not hasattr(con, "on_transaction_end"):
+            token = _plain_transaction_callbacks.set((*stack, (con, callbacks)))
         try:
             yield
             if owner:
@@ -547,6 +611,14 @@ def _write_txn(con):
             if owner:
                 con.rollback()
             raise
+        finally:
+            if token is not None:
+                _plain_transaction_callbacks.reset(token)
+                for callback in callbacks:
+                    try:
+                        callback()
+                    except Exception:  # Durable journal remains for recovery.
+                        logger.exception("Deferred filesystem publication needs recovery")
 
 
 write_txn = _write_txn     # callers outside this module that must make several card writes one unit

@@ -774,7 +774,7 @@ def finish_open_tool_arguments(
             continue
         block = output.content[content_index]
         if block.type == "toolCall":
-            block.arguments = accumulated.finish()
+            accumulated.finish_into(block)
     partial_json.clear()
     # A stream can settle without stopping every block, so sweep the redacted buffers too:
     # what is left here belongs to blocks the stream never closed.
@@ -927,7 +927,7 @@ def handle_content_block_stop(
         # only ever preserves ``{}`` -- but the shape has to match, not the luck.
         accumulated = partial_json.pop(content_index, None)
         if accumulated is not None and accumulated.raw:
-            block.arguments = accumulated.finish()
+            accumulated.finish_into(block)
         stream.push(ToolCallEndEvent(contentIndex=content_index, toolCall=block, partial=output))
 
 

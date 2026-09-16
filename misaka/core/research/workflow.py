@@ -28,6 +28,7 @@ from misaka.core.platform import cards as card_files
 from misaka.core.platform import tasks as task_store
 from misaka.core.research import bundle, commands, ledger, planner, report, runs
 from misaka.core.research import context as context_packet
+from misaka.utils.async_lifecycle import settle, settle_thread_call
 
 POLL_SECONDS = 2.0
 _LOG = logging.getLogger(__name__)
@@ -75,8 +76,9 @@ def _scope(node):
 
 
 def _write(con, run, node, kind, title, name, content, **metadata):
-    return runs.write_text(con, run["id"], kind, title, runs.generated_path(run, name, branch_id=_bid(node)), content,
-                           branch_id=_bid(node), metadata=metadata or None)
+    with runs.owned_txn(con, run, node):
+        return runs.write_text(con, run["id"], kind, title, runs.generated_path(run, name, branch_id=_bid(node)), content,
+                               branch_id=_bid(node), metadata=metadata or None)
 
 
 def _bundle(con, run, *, task=None, node=None):
@@ -127,12 +129,13 @@ def _forget_plan(con, run, node, round):
     final report read every plan of a node). Only rounds after the first can be withdrawn."""
     if round <= 1:
         return
-    names = {f"plan-{round}.md", f"plan-{round}.json"}
-    for row in runs.artifacts(con, run["id"], **_scope(node)):
-        if row["kind"] in ("plan", "plan_json") and os.path.basename(row["path"]) in names:
-            con.execute("DELETE FROM research_artifacts WHERE id=?", (row["id"],))
-            with contextlib.suppress(OSError):
-                os.unlink(row["path"])
+    with runs.owned_txn(con, run, node):
+        names = {f"plan-{round}.md", f"plan-{round}.json"}
+        for row in runs.artifacts(con, run["id"], **_scope(node)):
+            if row["kind"] in ("plan", "plan_json") and os.path.basename(row["path"]) in names:
+                con.execute("DELETE FROM research_artifacts WHERE id=?", (row["id"],))
+                with contextlib.suppress(OSError):
+                    os.unlink(row["path"])
 
 
 def _followup_recorded(con, run, node, round):
@@ -144,7 +147,7 @@ def _followup_tool(con, cfg, run, node, round):
     read by the driver as the node's decision to research more before concluding."""
     current = runs.node(con, node["id"])
     return commands.tool(
-        con, run, current, key=runs.plan_key(round + 1), name="misaka_research_assign",
+        con, run, node, key=runs.plan_key(round + 1), name="misaka_research_assign",
         description=f"Last Order: assign a follow-up round of research cards (round {round + 1}) on this node",
         model=commands.Plan,
         validate=lambda value: planner.validate_plan(value, planner._roster({**cfg, "workspace": run["workspace"]})),
@@ -169,6 +172,15 @@ def _refresh_workspace_index(con, run):
         f'For current state, call misaka_research_view(view="workspace", run_id="{run["id"]}").\n\n```text\n'
         + workspace_index.render(tree) + "\n```\n",
     )
+
+
+def _try_refresh_workspace_index(con, run):
+    try:
+        return _refresh_workspace_index(con, run)
+    except InterruptedError:
+        raise
+    except OSError:
+        _LOG.warning("Research %s: derived workspace index could not be written", run["id"], exc_info=True)
 
 
 def _node_argv(run, node, key):
@@ -211,16 +223,16 @@ async def _submit_tasks(con, run, node, specs, *, kind, progress=None, round=1, 
     for spec in ordered:
         if runs.stop_requested(con, run["id"]):
             break
-        existing = con.execute(
-            "SELECT task_id FROM research_run_tasks WHERE run_id=? AND branch_id=? AND local_id=?",
-            (run["id"], node["id"], spec["local_id"]),
-        ).fetchone()
-        if existing and task_store.get(con, existing["task_id"]) is not None:
-            local_to_task[spec["local_id"]] = existing["task_id"]   # a resume after a crash: the card already exists
-            continue
-        if existing:                                   # the card was deleted: drop the stale link and rebuild it
-            con.execute("DELETE FROM research_run_tasks WHERE task_id=?", (existing["task_id"],))
-        with task_store.write_txn(con):                # card, link and output dir land together or not at all
+        with runs.owned_txn(con, run, node):
+            existing = con.execute(
+                "SELECT task_id FROM research_run_tasks WHERE run_id=? AND branch_id=? AND local_id=?",
+                (run["id"], node["id"], spec["local_id"]),
+            ).fetchone()
+            if existing and task_store.get(con, existing["task_id"]) is not None:
+                local_to_task[spec["local_id"]] = existing["task_id"]   # a resume after a crash: the card already exists
+                continue
+            if existing:                                   # the card was deleted: drop the stale link and rebuild it
+                con.execute("DELETE FROM research_run_tasks WHERE task_id=?", (existing["task_id"],))
             tid = card_files.create(
                 con, root, spec["title"],
                 planner.task_body(spec, run_id=run["id"], node=node, siblings=specs, previous=previous),
@@ -256,12 +268,13 @@ async def _submit_tasks(con, run, node, specs, *, kind, progress=None, round=1, 
         # short-circuits inside `link_tasks` before any status check, so a plain replay is quiet.)
         if child is None or child["status"] in _EDGES_ARE_HISTORY:
             continue
-        task_store.link_dependencies(
-            con, [local_to_task[dep] for dep in dependencies], child["id"])
+        with runs.owned_txn(con, run, node):
+            task_store.link_dependencies(
+                con, [local_to_task[dep] for dep in dependencies], child["id"])
     return local_to_task
 
 
-def _release_dependencies(con, run_id):
+def _release_dependencies(con, run_id, *, owner=None):
     """Promote every waiting card whose dependencies are settled. Blocking, and called from a
     worker thread for it: ``dependency_state`` reaches ``task_store.parent_ids``, which reads and
     parses the card *file* of every todo card -- the frontmatter ``needs`` is the executable
@@ -270,14 +283,20 @@ def _release_dependencies(con, run_id):
         if row["status"] != "todo":
             continue
         state, parents = task_store.dependency_state(con, row["id"])
-        if state == "failed":
-            task_store.mark_stopped(con, row["id"])
-            task_store.add_event(con, row["id"], "dependency_failed", {"parents": parents})
-        else:
-            task_store.promote_task(con, row["id"])
+        with task_store.write_txn(con):
+            if owner is not None:
+                runs.check_owner(con, *owner)
+            current = task_store.get(con, row["id"])
+            if current is None or current["generation"] != row["generation"] or current["status"] != "todo":
+                continue
+            if state == "failed":
+                task_store.mark_stopped(con, row["id"])
+                task_store.add_event(con, row["id"], "dependency_failed", {"parents": parents})
+            else:
+                task_store.promote_task(con, row["id"])
 
 
-def _stop_pending(con, linked):
+def _stop_pending(con, linked, *, owner=None):
     """Hold back every card of a halted scope that had not started yet.
 
     Off the loop thread as one hop rather than one per card: ``mark_stopped`` mirrors the card file
@@ -288,17 +307,43 @@ def _stop_pending(con, linked):
     """
     for row in linked:
         if row["status"] in {"ready", "todo"}:
-            task_store.mark_stopped(con, row["id"])
+            with task_store.write_txn(con):
+                if owner is not None:
+                    runs.check_owner(con, *owner, allow_stop=True)
+                current = task_store.get(con, row["id"])
+                if (current is not None and current["generation"] == row["generation"]
+                        and current["status"] in {"ready", "todo"}):
+                    task_store.mark_stopped(con, row["id"], generation=row["generation"])
 
 
-async def _stop_active(runner, task_ids, context):
+async def _stop_active(runner, task_ids, context, *, captured=None, owner=None):
     stop = getattr(runner, "stop", None)
     if not callable(stop):
         return
-    await asyncio.gather(
-        *(stop(task_id, confirmed=True, context=context) for task_id in task_ids),
+    outcomes = await asyncio.gather(
+        *(stop(task_id, confirmed=True, context=context,
+               **({"research_owner": {"run_id": owner[0]["id"], "driver_lock": owner[0]["driver_lock"],
+                                      "node_id": owner[1]["id"] if owner[1] is not None else None,
+                                      "runner_key": owner[1]["runner_key"] if owner[1] is not None else None}}
+                  if owner is not None else {}),
+               **({"expected_generation": captured[task_id]["generation"],
+                   "expected_claim_lock": captured[task_id]["claim_lock"]}
+                  if captured is not None and task_id in captured else {})) for task_id in task_ids),
         return_exceptions=True,
     )
+    errors = [outcome for outcome in outcomes if isinstance(outcome, Exception)]
+    if errors:
+        raise ExceptionGroup("Research card stop failed", errors)
+
+
+async def _halt_scope(con, cfg, runner, captured, context, *, owner=None):
+    from misaka.core.network import dispatch
+    active = {tid for tid, row in captured.items() if row["status"] in ACTIVE_TASKS}
+    try:
+        await _stop_active(runner, active, context, captured=captured, owner=owner)
+    finally:
+        await asyncio.to_thread(dispatch.reconcile, con, cfg)
+        await asyncio.to_thread(_stop_pending, con, list(captured.values()), owner=owner)
 
 
 def _help_waiting(con, row):
@@ -330,7 +375,28 @@ async def _wait_unpaused(con, run_id, session):
 
 
 async def _drive_tasks(con, cfg, runner, run_id, *, scope, context=None,
-                       tool_call_id="research", poll_seconds=POLL_SECONDS, progress=None, check_active=None, session=None):
+                       tool_call_id="research", poll_seconds=POLL_SECONDS, progress=None, check_active=None, session=None, owner=None):
+    """Drive the cards in ``scope`` (task ids) until none is open; tasks waiting on dependencies stay in ``todo``."""
+    captured = {row["id"]: row for row in runs.tasks(con, run_id) if row["id"] in scope}
+    try:
+        return await _drive_tasks_inner(con, cfg, runner, run_id, scope=scope, context=context,
+                                       tool_call_id=tool_call_id, poll_seconds=poll_seconds,
+                                       progress=progress, check_active=check_active, session=session,
+                                       captured=captured, owner=owner)
+    except BaseException:
+        # The same unwind serves root/fork and normal error/cancellation. Drain it
+        # through repeated cancellation, before the caller releases its driver/node.
+        try:
+            if check_active:
+                check_active()
+            await settle(asyncio.create_task(_halt_scope(con, cfg, runner, captured, context, owner=owner)))
+        except Exception:  # noqa: BLE001 - retain the original failure after cleanup
+            _LOG.exception("Research card cleanup did not complete (or owner was superseded)")
+        raise
+
+
+async def _drive_tasks_inner(con, cfg, runner, run_id, *, scope, context=None,
+                       tool_call_id="research", poll_seconds=POLL_SECONDS, progress=None, check_active=None, session=None, captured=None, owner=None):
     """Drive the cards in ``scope`` (task ids) until none is open; tasks waiting on dependencies stay in ``todo``."""
     last_snapshot = None
     while True:
@@ -339,6 +405,11 @@ async def _drive_tasks(con, cfg, runner, run_id, *, scope, context=None,
             check_active()
         run = runs.get(con, run_id)
         linked = [row for row in runs.tasks(con, run_id) if row["id"] in scope]
+        for row in linked:
+            previous = captured.get(row["id"])
+            if previous is not None and previous["generation"] != row["generation"]:
+                raise ValueError(f"Research card {row['id']} changed generation")
+            captured[row["id"]] = row
         snapshot = tuple((row["id"], row["status"]) for row in linked)
         if snapshot != last_snapshot:
             counts = {}
@@ -354,22 +425,11 @@ async def _drive_tasks(con, cfg, runner, run_id, *, scope, context=None,
         halt = ("stopped" if runs.stop_requested(con, run_id) else
                 "budget" if budget.exhausted(con, cfg.get("token_cap")) else None)
         if halt:
-            await _stop_active(runner, set(active) | flying, context)
-            if active or flying:
-                # Those cards were just killed mid-turn, so every one of their rows still reads
-                # ``running`` with its claim on it and half an hour left on the lease -- and
-                # ``db.claim``'s admission counter counts a claimed running row with no expiry
-                # filter at all, host-wide. Left standing they refuse every claim on the machine,
-                # in every project, until a human clears them. ``dispatch.reconcile`` is the one
-                # path that settles a card whose worker is gone -- each under that card's exact
-                # ownership fence -- and it can rewrite card/Git state, so it goes off the loop
-                # thread.
-                from misaka.core.network import dispatch
-                await asyncio.to_thread(dispatch.reconcile, con, cfg)
-                linked = [row for row in runs.tasks(con, run_id) if row["id"] in scope]
-            await asyncio.to_thread(_stop_pending, con, linked)
+            await _halt_scope(con, cfg, runner, captured, context, owner=owner)
             return halt
-        await asyncio.to_thread(_release_dependencies, con, run_id)
+        if check_active:
+            check_active()
+        await asyncio.to_thread(_release_dependencies, con, run_id, owner=owner)
         linked = [row for row in runs.tasks(con, run_id) if row["id"] in scope]
         waiting = [row["id"] for row in linked if _help_waiting(con, row)]
         # Per-node Sister slots are independent of the run's LO-node parallelism.
@@ -379,12 +439,20 @@ async def _drive_tasks(con, cfg, runner, run_id, *, scope, context=None,
         ready = [row["id"] for row in linked if row["status"] == "ready"][:free]
         active = [row["id"] for row in linked if row["status"] in ACTIVE_TASKS]
         if ready or active or waiting or flying:
-            await runner.launch_ready(context=context, tool_call_id=tool_call_id,
-                                      task_ids=[*ready, *active, *waiting])
+            if check_active:
+                check_active()
+            _result, cancelled = await settle(asyncio.create_task(runner.launch_ready(
+                context=context, tool_call_id=tool_call_id, task_ids=[*ready, *active, *waiting])))
+            for tid in [*ready, *active, *waiting]:
+                row = task_store.get(con, tid)
+                if row is not None and row["generation"] == captured[tid]["generation"]:
+                    captured[tid] = row
+            if cancelled is not None:
+                raise cancelled
             await asyncio.sleep(poll_seconds)
             continue
         if any(row["status"] == "todo" for row in linked):
-            await asyncio.to_thread(_release_dependencies, con, run_id)
+            await asyncio.to_thread(_release_dependencies, con, run_id, owner=owner)
             if any(row["status"] == "todo" and row["id"] in scope for row in runs.tasks(con, run_id)):
                 raise RuntimeError("Research task dependencies cannot advance; the graph may contain a cycle.")
             continue
@@ -420,9 +488,9 @@ def _register_task_artifacts(con, run, task, submitted):
         source = Path(task["workspace"], str(rel)).resolve()
         try:
             inside = source.relative_to(Path(run["workspace"]).resolve())
-        except ValueError:
-            continue
-        if not source.is_file():
+        except ValueError as error:
+            if (submitted.get("artifact_digests") or {}).get(str(rel)) is not None:
+                raise ValueError(f"Accepted artifact moved outside the workspace: {rel}") from error
             continue
         if inside.parts[:1] not in {(root,) for root in ARTIFACT_ROOTS}:
             task_store.add_event(con, task["id"], "artifact_outside_layout", {"path": str(rel)},
@@ -430,8 +498,13 @@ def _register_task_artifacts(con, run, task, submitted):
             continue
         try:
             raw = source.read_bytes()
-        except OSError:
+        except OSError as error:
+            if "artifact_digests" in submitted:
+                raise ValueError(f"Accepted artifact is missing: {rel}") from error
             continue
+        digest = hashlib.sha256(raw).hexdigest()
+        if "artifact_digests" in submitted and submitted["artifact_digests"].get(str(rel)) != digest:
+            raise ValueError(f"Accepted artifact changed before Research registration: {rel}")
         try:
             raw.decode("utf-8")
             binary = False
@@ -441,9 +514,10 @@ def _register_task_artifacts(con, run, task, submitted):
             binary = True
         kind = {"red_team": "critique", "final_review": "final_critique"}.get(link["kind"], "task_output")
         runs.register_file(con, run["id"], kind, f"[{task['id']}] {source.name}",
-                           str(source), sha256=hashlib.sha256(raw).hexdigest(),
+                           str(source), sha256=digest,
                            branch_id=_bid(node), task_id=task["id"],
                            metadata={"source_file": str(rel),
+                                     "submission_digest_verified": "artifact_digests" in submitted,
                                      **({"binary": True} if binary else {})})
 
 
@@ -506,7 +580,7 @@ def _receive_critique(con, run, node, task):
     submitted = _submitted_payload(con, task)
     if "issues" not in submitted:
         return f"Red-team card {task['id']} has not recorded issues through misaka_card_note."
-    with task_store.write_txn(con):
+    with runs.owned_txn(con, run, node):
         for item in submitted["issues"]:
             if item["material"]:
                 runs.add_issue(con, run["id"], node=node, kind=item["kind"], question=item["question"],
@@ -571,14 +645,16 @@ def _dispatch_children(con, run, node):
     for assignment in command["payload"]["assignments"]:
         if runs.stop_requested(con, run["id"]):
             return children
-        child = runs.assign_child(con, run["id"], node, assignment["issue_id"])
+        with runs.owned_txn(con, run, node):
+            child = runs.assign_child(con, run["id"], node, assignment["issue_id"])
         if not child["session_file"]:
             directory = planner._lo_session(run, child)
             session = (find_most_recent_session(directory)
                        or planner.fork_session(command["session_file"], directory))
             if not session:
                 raise RuntimeError(f"Node {child['id']}: parent Last Order session has no forkable history.")
-            child = runs.set_node(con, child["id"], session_file=session)
+            with runs.owned_txn(con, run, node):
+                child = runs.set_node(con, child["id"], session_file=session)
         children.append(child)
     return children
 
@@ -589,6 +665,7 @@ def _children_settled(con, run, node):
 
 def _close(con, run, node, status):
     """Close after child completion. Artifacts are already in the project; nothing moves."""
+    runs.check_owner(con, run, node)
     if status == "failed" and not runs.node(con, node["id"])["last_error"]:
         details = []
         for card in runs.tasks(con, run["id"], node_id=node["id"]):
@@ -597,13 +674,15 @@ def _close(con, run, node, status):
             payload = task_store.latest_payload(con, card["id"], "failed", generation=card["generation"])
             details.append(f"{card['id']} ({card['status']}): {payload or 'no failure detail recorded'}")
         reason = f"{node['status']}: " + ("; ".join(details) or "node did not complete this phase")
-        con.execute("UPDATE research_branches SET last_error=? WHERE id=?", (reason, node["id"]))
-        runs.set_state(con, run["id"], error=f"node {node['id']}: {reason}")
+        with runs.owned_txn(con, run, node):
+            con.execute("UPDATE research_branches SET last_error=? WHERE id=?", (reason, node["id"]))
+            runs.set_state(con, run["id"], error=f"node {node['id']}: {reason}")
     if status == "closed" and not _children_settled(con, run, node):
-        runs.set_node(con, node["id"], status="closing")
+        with runs.owned_txn(con, run, node):
+            runs.set_node(con, node["id"], status="closing")
         return "closing"
     _bundle(con, run, node=node)                      # the node's folder is complete: gather what it rests on
-    runs.set_node(con, node["id"], status=status)
+    runs.set_node(con, node["id"], status=status, owner=(run, node))
     return status
 
 
@@ -620,22 +699,52 @@ def _settle_closing(con, run):
 async def _expand(con, cfg, runner, worker, run, node, *, context, tool_call_id, poll_seconds, progress, session=None):
     """Advance one node through its routine. Returns the node's terminal status, a halt
     ("stopped" / "budget"), or a waiting_input result dict."""
+    try:
+        return await _expand_owned(con, cfg, runner, worker, run, node, context=context,
+                                   tool_call_id=tool_call_id, poll_seconds=poll_seconds,
+                                   progress=progress, session=session)
+    except BaseException:
+        async def cleanup():
+            # Covers cancellation between card creation and entering the drive loop too.
+            with runs.owned_txn(con, run, node, allow_stop=True):
+                captured = {row["id"]: row for row in runs.tasks(con, run["id"], node_id=node["id"])}
+            if captured:
+                await _halt_scope(con, cfg, runner, captured, context, owner=(run, node))
+        try:
+            await settle(asyncio.create_task(cleanup()))
+        except Exception:  # noqa: BLE001 - preserve the phase's original failure
+            _LOG.exception("Research node cleanup did not complete (or owner was superseded)")
+        raise
+
+
+async def _expand_owned(con, cfg, runner, worker, run, node, *, context, tool_call_id, poll_seconds, progress, session=None):
+    """Advance one node through its routine. Returns the node's terminal status, a halt
+    ("stopped" / "budget"), or a waiting_input result dict."""
     nid = node["id"]
+    owner_run, owner_node = run, node
+
+    def check(*, allow_stop=False):
+        runs.check_owner(con, owner_run, owner_node, allow_stop=allow_stop)
+
+    def set_node(**fields):
+        return runs.set_node(con, nid, owner=(owner_run, owner_node), **fields)
 
     def drive(kind):
         scope = {row["id"] for row in runs.tasks(con, run["id"], kind=kind, node_id=nid)}
         return _drive_tasks(con, cfg, runner, run["id"], scope=scope, context=context,
-                            tool_call_id=tool_call_id, poll_seconds=poll_seconds, progress=progress, session=session)
+                            tool_call_id=tool_call_id, poll_seconds=poll_seconds, progress=progress, session=session,
+                            check_active=lambda: check(allow_stop=True), owner=(owner_run, owner_node))
     while True:
         await _wait_unpaused(con, run["id"], session)
-        node = runs.node(con, nid)
+        with runs.owned_txn(con, owner_run, owner_node, allow_stop=True):
+            node = runs.node(con, nid)
         if runs.stop_requested(con, run["id"]):
             scope = {row["id"] for row in runs.tasks(con, run["id"], node_id=nid)}
             return await _drive_tasks(con, cfg, runner, run["id"], scope=scope, context=context,
-                                      poll_seconds=poll_seconds)
+                                      poll_seconds=poll_seconds, owner=(owner_run, owner_node))
         status = node["status"]
         if status == "queued":
-            runs.set_node(con, nid, status="planning")
+            set_node(status="planning")
 
         elif status in ("planning", "waiting_input", "awaiting_approval"):
             round, command = runs.current_plan(con, run["id"], nid)
@@ -657,12 +766,12 @@ async def _expand(con, cfg, runner, worker, run, node, *, context, tool_call_id,
             _write_plan(con, run, node, plan, round)
             if node["parent_id"] is None:
                 session_file = run["root_session"] or session_file
-            runs.set_node(con, nid, session_file=session_file)
+            set_node(session_file=session_file)
             if node["parent_id"] is None:
-                runs.set_state(con, run["id"], root_session=session_file)
+                with runs.owned_txn(con, owner_run, owner_node):
+                    runs.set_state(con, run["id"], root_session=session_file)
             if plan["status"] == "clarify":
-                runs.set_node(con, nid, status="waiting_input")
-                runs.set_state(con, run["id"], phase="waiting_input", status="waiting_input")
+                set_node(status="waiting_input")
                 return {"reason": "waiting_input", "questions": plan["clarifying_questions"],
                         "run": runs.summary(con, run["id"])}
             if planner.plan_waits_for_user(cfg, worker) and not runs.plan_started(con, run["id"], nid):
@@ -674,10 +783,12 @@ async def _expand(con, cfg, runner, worker, run, node, *, context, tool_call_id,
                     return halted
                 continue                                  # the plan as it now stands has the user's go-ahead
             if plan.get("reframed_question"):
-                runs.reframe(con, run["id"], node, plan["reframed_question"])
-                run, node = runs.get(con, run["id"]), runs.node(con, nid)
+                with runs.owned_txn(con, owner_run, owner_node):
+                    runs.reframe(con, run["id"], node, plan["reframed_question"])
+                    run, node = runs.get(con, run["id"]), runs.node(con, nid)
             if node["parent_id"] is None:
-                planner.publish_project_brief(run["workspace"], plan, round=round)
+                with runs.owned_txn(con, owner_run, owner_node):
+                    planner.publish_project_brief(run["workspace"], plan, round=round)
             await _progress(progress, "plan_ready",
                             f"Planning produced {len(plan['tasks'])} research tasks for {_label(node)}"
                             + (f" (round {round})." if round > 1 else "."), run,
@@ -688,7 +799,7 @@ async def _expand(con, cfg, runner, worker, run, node, *, context, tool_call_id,
                         if row["status"] == "done" and int(row["wave"] or 1) < round]
             await _submit_tasks(con, run, node, plan["tasks"], kind="research", progress=progress,
                                 round=round, previous=previous)
-            runs.set_node(con, nid, status="executing")
+            set_node(status="executing")
 
         elif status == "executing":
             outcome = await drive("research")
@@ -696,10 +807,11 @@ async def _expand(con, cfg, runner, worker, run, node, *, context, tool_call_id,
                 return _close(con, run, node, "failed")
             if outcome != "done":
                 return outcome
+            check()
             settle_done_tasks(con, run_id=run["id"])
             if not _done(con, run, node, "research"):
                 return _close(con, run, node, "failed")
-            runs.set_node(con, nid, status="synthesizing")
+            set_node(status="synthesizing")
 
         elif status == "synthesizing":
             done = _done(con, run, node, "research")
@@ -708,10 +820,10 @@ async def _expand(con, cfg, runner, worker, run, node, *, context, tool_call_id,
             round = max((int(row["wave"] or 1) for row in done), default=1)
             left = runs.limits(run)["max_followups"] - (round - 1)    # follow-ups still allowed on this node
             if _artifact_path(con, run, node, "synthesis"):
-                runs.set_node(con, nid, status="critiquing")
+                set_node(status="critiquing")
                 continue
             if _followup_recorded(con, run, node, round):   # a crash after she asked for more cards
-                runs.set_node(con, nid, status="planning")
+                set_node(status="planning")
                 continue
             await _progress(progress, "synthesizing",
                             f"Last Order is reading the cards of {_label(node)}"
@@ -726,10 +838,10 @@ async def _expand(con, cfg, runner, worker, run, node, *, context, tool_call_id,
                 await _progress(progress, "followup_planned",
                                 f"Last Order asked for round {new_round} on {_label(node)}: "
                                 f"{len(command['payload']['tasks'])} more card(s).", run, node=nid, round=new_round)
-                runs.set_node(con, nid, status="planning")
+                set_node(status="planning")
                 continue
             _write(con, run, node, "synthesis", f"Conclusion · {_label(node)}", "synthesis.md", text)
-            runs.set_node(con, nid, status="critiquing")
+            set_node(status="critiquing")
 
         elif status == "critiquing":
             if not runs.tasks(con, run["id"], kind="red_team", node_id=nid):
@@ -764,6 +876,7 @@ async def _expand(con, cfg, runner, worker, run, node, *, context, tool_call_id,
                 return _close(con, run, node, "failed")
             if outcome != "done":
                 return outcome
+            check()
             settle_done_tasks(con, run_id=run["id"])
             red = _done(con, run, node, "red_team")
             if not red:
@@ -771,10 +884,11 @@ async def _expand(con, cfg, runner, worker, run, node, *, context, tool_call_id,
             unusable = _receive_critique(con, run, node, red[-1])
             if unusable:
                 task_store.add_event(con, red[-1]["id"], "research_review_missing", {"reason": unusable})
-                con.execute("UPDATE research_branches SET last_error=? WHERE id=?", (unusable, nid))
-                runs.set_state(con, run["id"], error=f"node {nid}: {unusable}")
+                with runs.owned_txn(con, owner_run, owner_node):
+                    con.execute("UPDATE research_branches SET last_error=? WHERE id=?", (unusable, nid))
+                    runs.set_state(con, run["id"], error=f"node {nid}: {unusable}")
                 return _close(con, run, node, "failed")
-            runs.set_node(con, nid, status="reviewing")
+            set_node(status="reviewing")
 
         elif status == "reviewing":
             red = _done(con, run, node, "red_team")
@@ -792,8 +906,9 @@ async def _expand(con, cfg, runner, worker, run, node, *, context, tool_call_id,
                 if runs.stop_requested(con, run["id"]):
                     return "stopped"
                 if at_limit:
-                    con.execute("UPDATE research_issues SET status='parked',reason=? WHERE run_id=? AND branch_id=?",
-                                (reason, run["id"], nid))
+                    with runs.owned_txn(con, owner_run, owner_node):
+                        con.execute("UPDATE research_issues SET status='parked',reason=? WHERE run_id=? AND branch_id=?",
+                                    (reason, run["id"], nid))
                 outcome = await asyncio.to_thread(_close, con, run, node, "closed")
                 await _progress(progress, "review_returned", reason, run)
                 return outcome
@@ -822,8 +937,10 @@ async def _await_approval(con, cfg, runner, worker, run, node, *, poll_seconds, 
     "stopped" if the run was stopped meanwhile, "skipped" if the user chose to close the node unresearched
     (a fork's first plan), else None once the go-ahead is recorded."""
     nid = node["id"]
-    runs.set_node(con, nid, status="awaiting_approval")
-    current = runs.node(con, nid)
+    with task_store.write_txn(con):
+        runs._owned(con, run, node)
+        runs.set_node(con, nid, status="awaiting_approval")
+        current = runs.node(con, nid)
     session_file = current["session_file"] or run["root_session"]   # the conversation that recorded the plan
     roster = planner._roster({**cfg, "workspace": run["workspace"]})
     tools = commands.review_tools(con, run, current, validate=lambda value: planner.validate_plan(value, roster),
@@ -835,21 +952,25 @@ async def _await_approval(con, cfg, runner, worker, run, node, *, poll_seconds, 
         where = "in its own tab"
     else:
         where = f"with `misaka chat --attach --session {session_file}`"
-    await _progress(progress, "plan_review",
-                    f"{_label(node)}: the plan{f' (round {round})' if round > 1 else ''} is written and waits for "
-                    f"your go-ahead. Talk it over with its Last Order {where}; she records the start once you agree.",
-                    run, node=nid, plan_path=_artifact_path(con, run, node, "plan"), session_file=session_file,
-                    round=round)
     session = getattr(worker, "session", None)
     control = _session_control(session)
-    if session is not None:
-        session.registerCustomTools(tools)               # the window's own turns see them
-    if control is not None:
-        control.review_tools = tools                     # an attached chat's turns see them too
     try:
+        await _progress(progress, "plan_review",
+                        f"{_label(node)}: the plan{f' (round {round})' if round > 1 else ''} is written and waits for "
+                        f"your go-ahead. Talk it over with its Last Order {where}; she records the start once you agree.",
+                        run, node=nid, plan_path=_artifact_path(con, run, node, "plan"), session_file=session_file,
+                        round=round)
+        if runs.stop_requested(con, run["id"]):
+            return "stopped"
+        runs._owned(con, run, node)
+        if session is not None:
+            session.registerCustomTools(tools)           # the window's own turns see them
+        if control is not None:
+            control.review_tools = tools                 # an attached chat's turns see them too
         while True:
             if runs.stop_requested(con, run["id"]):
                 return "stopped"
+            runs._owned(con, run, node)
             latest = runs.action(con, run["id"], nid, runs.plan_key(round))
             if latest is None:                          # withdrawn: the round never ran, so its plan goes too
                 _forget_plan(con, run, node, round)
@@ -867,9 +988,12 @@ async def _await_approval(con, cfg, runner, worker, run, node, *, poll_seconds, 
     finally:
         if session is not None:
             session.unregisterCustomTools(tools)
-        if control is not None:
+        if control is not None and control.review_tools is tools:
             control.review_tools = ()
-        runs.set_node(con, nid, status="planning")
+        con.execute("UPDATE research_branches SET status='planning' WHERE id=? "
+                    "AND runner_key IS ? AND status='awaiting_approval' AND EXISTS "
+                    "(SELECT 1 FROM research_runs WHERE id=? AND driver_lock IS ?)",
+                    (nid, node["runner_key"], run["id"], run["driver_lock"]))
 
 
 async def _skip_node(con, run, node, progress):
@@ -879,8 +1003,9 @@ async def _skip_node(con, run, node, progress):
     nid = node["id"]
     decision = runs.skipped(con, run["id"], nid)
     reason = "Skipped by the user before any research: " + ((decision or {}).get("payload") or {}).get("reason", "")
-    con.execute("UPDATE research_issues SET status='parked', reason=? WHERE run_id=? AND child_branch_id=?",
-                (reason, run["id"], nid))
+    with runs.owned_txn(con, run, node):
+        con.execute("UPDATE research_issues SET status='parked', reason=? WHERE run_id=? AND child_branch_id=?",
+                    (reason, run["id"], nid))
     outcome = await asyncio.to_thread(_close, con, run, node, "parked")
     await _progress(progress, "node_skipped",
                     f"{_label(node)}: skipped by the user; no research was done, and its issue stays parked "
@@ -1042,9 +1167,11 @@ def _partial_result(con, run, reason, *, status="stopped", driver_lock=None):
     lines.extend(f"- [{row['kind']}] {row['title']} — `{row['path']}`"
                  for row in runs.artifacts(con, run["id"]))
     lines += [""]
-    aid, path = runs.write_text(con, run["id"], "partial", 'Incomplete research run', runs.run_path(run, "partial.md"), "\n".join(lines))
-    runs.set_state(con, run["id"], status=status, final_artifact=aid, driver_lock=driver_lock)
-    _refresh_workspace_index(con, runs.get(con, run["id"]))
+    expected = {**dict(run), "driver_lock": driver_lock} if driver_lock is not None else run
+    with runs.owned_txn(con, expected, allow_stop=True):
+        aid, path = runs.write_text(con, run["id"], "partial", 'Incomplete research run', runs.run_path(run, "partial.md"), "\n".join(lines))
+        runs.set_state(con, run["id"], status=status, final_artifact=aid, driver_lock=driver_lock)
+    _try_refresh_workspace_index(con, runs.get(con, run["id"]))
     _bundle(con, run)
     runs._commit(con, run, f"research {run['id']}: {status}")
     return {"reason": status, "final": {"artifact": aid, "path": path,
@@ -1071,17 +1198,14 @@ async def _stop_all_off_loop(spawner, handles):
     not the research driver's own -- ``last_order.research`` starts ``workflow.run`` as a task on
     Last Order's loop, so this cleanup ran in the middle of her streaming and her inbox.
 
-    Shielded, because the commonest way to arrive here is that very driver being cancelled when
-    her session shuts down: an unshielded await would be cancelled before the executor picked the
-    job up, and the processes would simply be left running. The thread cannot be cancelled once it
-    starts, so a cancelled caller stops waiting while the kill still finishes.
+    Drained through cancellation: the owner waits until the process cleanup has finished before
+    propagating cancellation, including repeated cancellation while shutdown is in progress.
     """
     if not handles:
         return
-    try:
-        await asyncio.shield(asyncio.to_thread(_stop_all, spawner, handles))
-    except asyncio.CancelledError:      # the kill is running in its thread; the caller re-raises
-        pass
+    _result, cancelled = await settle_thread_call(_stop_all, spawner, handles)
+    if cancelled is not None:
+        raise cancelled
 
 
 async def expand_node(con, cfg, runner, worker, *, run_id, node_id, progress=None, session=None):
@@ -1151,10 +1275,14 @@ async def _expand_level(con, cfg, spawner, run, level, *, poll_seconds, progress
 
     async def start(node):                          # registered one by one: a failed spawn stops the started ones
         await asyncio.to_thread(_reap_orphan_runner, con, "research_branches", node)
-        key = runs.prepare_runner(con, "research_branches", node["id"])
-        handle = spawner.spawn(_node_argv(run, node, key), cwd=run["workspace"])
+        with runs.owned_txn(con, run):
+            key = runs.prepare_runner(con, "research_branches", node["id"])
+        handle, cancelled = await settle_thread_call(
+            spawner.spawn, _node_argv(run, node, key), cwd=run["workspace"])
         handles[node["id"]] = handle
         _record_runner(con, "research_branches", node["id"], handle, key=key)
+        if cancelled is not None:
+            raise cancelled
         return key
     try:
         return await _wait_level(con, cfg, spawner, run, handles, poll_seconds=poll_seconds, progress=progress,
@@ -1170,12 +1298,19 @@ async def _wait_level(con, cfg, spawner, run, handles, *, poll_seconds, progress
     """Watch the running nodes until none is left, starting the next of ``pending`` (through
     ``start``, which returns the node's runner key) whenever fewer than ``width`` run -- unless
     the run halted or a node stopped to wait for the user's input, after which nothing more starts."""
-    last, held = {}, set()
+    last = {}
     keys = {nid: runs.node(con, nid)["runner_key"] for nid in handles}
     pending, hold = list(pending), False
 
     async def top_up():
+        nonlocal hold
         while pending and not hold and (width is None or len(handles) < width):
+            if (runs.stop_requested(con, run["id"]) or budget.exhausted(con, cfg.get("token_cap"))
+                    or any(n["status"] == "waiting_input" for n in runs.nodes(con, run["id"]))):
+                hold = True
+                break
+            if driver_lock and runs.get(con, run["id"])["driver_lock"] != driver_lock:
+                raise RuntimeError(f"Research run {run['id']}: the driver lease was taken over by another process.")
             node = pending.pop(0)
             keys[node["id"]] = await start(node)
 
@@ -1192,16 +1327,16 @@ async def _wait_level(con, cfg, spawner, run, handles, *, poll_seconds, progress
             await _settle_stopped_tasks(con, cfg, run["id"])
         for nid, handle in list(handles.items()):
             node = runs.node(con, nid)
+            if node["runner_key"] is not None and node["runner_key"] != keys[nid]:
+                raise RuntimeError(f"Research node {nid} changed owners.")
+            hold = hold or node["status"] == "waiting_input"
             if node["status"] != last.get(nid):
                 last[nid] = node["status"]
                 await _progress(progress, "node", f"{_label(node)}: {node['status']}.", run, node=nid)
             # A node is settled when its process has exited (headless) or when it released the
             # runner it held while staying alive (an interactive node keeps its window open after
-            # its routine). Either way the row already carries the terminal state. A runner that
-            # never recorded a pid (an in-process stand-in) is only ever settled by its exit.
-            if node["runner_pid"] is not None:
-                held.add(nid)
-            if not spawner.alive(handle) or (nid in held and node["runner_pid"] is None):
+            # its routine). Release consumes the key; an unclaimed non-null key is not done.
+            if not spawner.alive(handle) or (node["runner_key"] is None and node["runner_pid"] is None):
                 node = runs.node(con, nid)
                 if halted or (not node["last_error"] and node["status"] in (
                         "closing", "waiting_input", *runs.NODE_TERMINAL)):
@@ -1287,6 +1422,9 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
                     subscription = notifications.subscribe(con, run_id, "research-chat")
                     con.execute("UPDATE notification_subscriptions SET lease_token=NULL,leased_event_id=NULL,"
                                 "lease_expires=NULL WHERE id=?", (subscription,))
+        run = runs.get(con, run_id)
+        check_active(allow_stop=True)
+        await asyncio.to_thread(runs.recover_publications, con, run)
         if resume:
             run = runs.resume(con, run_id, driver_lock=driver_lock, clarification=clarification)
         elif run["status"] == "done":
@@ -1306,8 +1444,9 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
             root = next(n for n in runs.nodes(con, run_id) if n["parent_id"] is None)
             # A window is not a killable node subprocess. The driver epoch fences its
             # commands without storing this foreground process as a child runner.
-            runs.prepare_runner(con, "research_branches", root["id"])
-            runs.set_node(con, root["id"], session_file=window.session_file)
+            with runs.owned_txn(con, run):
+                runs.prepare_runner(con, "research_branches", root["id"])
+                runs.set_node(con, root["id"], session_file=window.session_file)
             pane = os.environ.get("MISAKA_NET_PANE")
             root_runner = PaneRunner(con, cfg, run_id, pane) if pane else HeadlessRunner(con, cfg)
         run = runs.get(con, run_id)
@@ -1331,6 +1470,9 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
                 result = await _expand_level(con, cfg, spawner, run, level, poll_seconds=poll_seconds, progress=progress,
                                              driver_lock=driver_lock)
             if isinstance(result, dict):
+                if result.get("reason") == "waiting_input":
+                    runs.set_state(con, run_id, phase="waiting_input", status="waiting_input", driver_lock=driver_lock)
+                    result["run"] = runs.summary(con, run_id)
                 return result
             if result in halts:
                 settle_done_tasks(con, run_id=run_id)
@@ -1366,7 +1508,8 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
                         task_id=review_id, draft_path=draft["path"])
         outcome = await _drive_tasks(con, cfg, root_runner, run_id, scope={review_id},
                                      tool_call_id=f"research:{run_id}:final-review", poll_seconds=poll_seconds,
-                                     progress=progress, check_active=lambda: check_active(allow_stop=True), session=session)
+                                     progress=progress, check_active=lambda: check_active(allow_stop=True), session=session,
+                                     owner=(run, None))
         check_active(allow_stop=True)
         settle_done_tasks(con, run_id=run_id)
         if outcome in halts:
@@ -1385,7 +1528,7 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
         check_active()
         runs.set_state(con, run_id, phase="done", status="done", final_artifact=result["artifact"],
                        driver_lock=driver_lock)
-        _refresh_workspace_index(con, runs.get(con, run_id))
+        _try_refresh_workspace_index(con, runs.get(con, run_id))
         _bundle(con, run)
         runs._commit(con, run, f"research {run_id}: complete artifacts")
         return {"reason": "done", "final": result, "run": runs.summary(con, run_id)}
@@ -1399,9 +1542,10 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
     except InterruptedError:
         return partial(halts["stopped"])
     except Exception as error:
-        if run["status"] == "done":
+        current = runs.get(con, run_id)
+        if current["status"] == "done":
             raise
-        if runs.get(con, run_id)["driver_lock"] == driver_lock:
+        if current["driver_lock"] == driver_lock:
             runs.set_state(con, run_id, status="failed", error=f"{type(error).__name__}: {error}"[:500],
                            driver_lock=driver_lock)
         raise

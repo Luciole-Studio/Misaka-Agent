@@ -355,10 +355,26 @@ class StreamingArgs:
         return self._value
 
     def finish(self) -> Any:
-        """Parse the complete buffer. What a tool is handed has to be exact."""
-        if self._parsed_length != len(self._raw):
-            self._parse()
+        """MISAKA fork: final arguments require a complete object, never prefix recovery.
+
+        Keep the existing complete-string escape repair and empty/no-argument convention.
+        Incremental UI previews still use the permissive parser in arguments.
+        """
+        value = parse_json_with_repair(self._raw) if self._raw.strip() else {}
+        if not isinstance(value, dict):
+            raise ValueError("Final tool arguments must be a JSON object")  # noqa: TRY004 - malformed wire value, same contract as JSONDecodeError
+        self._value = value
+        self._parsed_length = len(self._raw)
         return self._value
+
+    def finish_into(self, tool_call) -> None:
+        """Keep malformed calls in the batch, but return an error receipt instead of executing."""
+        try:
+            tool_call.arguments = self.finish()
+            tool_call.argumentsError = None
+        except (ValueError, RecursionError):
+            tool_call.arguments = {}
+            tool_call.argumentsError = "Invalid final tool arguments; resend a complete JSON object."
 
     def _is_stale(self) -> bool:
         total = len(self._raw)

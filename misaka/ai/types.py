@@ -178,6 +178,9 @@ class ToolCall(SchemaModel):
     id: str
     name: str
     arguments: dict[str, Any]
+    # MISAKA fork: a lossy streaming preview is not an executable final argument set.
+    # Persist the failure with the call so replay and provider bridges retain the fence.
+    argumentsError: str | None = None
     thoughtSignature: str | None = None
     # OpenAI Responses namespace for dynamically loaded or namespaced tools.
     namespace: str | None = None

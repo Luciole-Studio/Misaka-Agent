@@ -97,7 +97,7 @@ from misaka.core.extensions.types import (
 from misaka.core.extensions.wrapper import wrap_registered_tool
 from misaka.core.messages import BashExecutionMessage
 from misaka.core.model_registry import ModelRegistry
-from misaka.core.moments import Moments
+from misaka.core.moments import CoreCommand, Moments
 from misaka.core.prompt_templates import PromptTemplate, expand_prompt_template
 from misaka.core.resource_loader import ResourceLoaderLike
 from misaka.core.session_export import export_session_to_jsonl
@@ -562,9 +562,20 @@ class AgentSession:
             preflight_reported = True
             resolved.preflightResult(success)
 
+        def assert_not_compacting() -> None:
+            if self._compactionAbortController is not None:
+                raise RuntimeError(
+                    "Cannot submit a prompt while compaction is in progress. "
+                    "Wait for compaction to finish and retry."
+                )
+
         try:
+            # MISAKA fork: skill commands prepare text for this same submission.
+            # Keep its images, delivery mode, preflight and cancellation ownership.
+            prompt_command = self.getCorePromptCommand(text) if resolved.expandPromptTemplates else None
             if (
                 resolved.expandPromptTemplates
+                and prompt_command is None
                 and text.startswith("/")
                 and (
                     await self._try_execute_core_command(text)  # MISAKA fork: a part's command first
@@ -578,19 +589,23 @@ class AgentSession:
             # it runs would append into a list that is about to be thrown away.  pi refuses
             # instead of racing (agent-session.ts:1155-1159).  The extension-command branch
             # above stays reachable, exactly as in pi.
-            if self._compactionAbortController is not None:
-                raise RuntimeError(
-                    "Cannot submit a prompt while compaction is in progress. "
-                    "Wait for compaction to finish and retry."
-                )
+            assert_not_compacting()
 
-            current_text = text
+            current_text = await self._expand_core_prompt_command(prompt_command, text) if prompt_command else text
+            if current_text is None:
+                report_preflight(True)
+                return
+            if prompt_command is not None:
+                assert_not_compacting()
+            # Generated command messages retain sendUserMessage's input origin:
+            # /research's pending-question capture must not consume a skill scaffold.
+            input_source = "extension" if prompt_command else resolved.source
             current_images = None if resolved.images is None else list(resolved.images)
             # MISAKA fork: the parts see the input first; an extension sees what they left.
             input_result = await self.moments.input(
                 current_text,
                 current_images,
-                resolved.source,
+                input_source,
                 resolved.streamingBehavior if self.isStreaming else None,
             )
             action = _event_field(input_result, "action", "continue")
@@ -606,7 +621,7 @@ class AgentSession:
                 input_result = await self._extensionRunner.emit_input(
                     current_text,
                     current_images,
-                    resolved.source,
+                    input_source,
                     resolved.streamingBehavior if self.isStreaming else None,
                 )
                 action = _event_field(input_result, "action", "continue")
@@ -619,7 +634,7 @@ class AgentSession:
                     if transformed_images is not None:
                         current_images = list(transformed_images)
 
-            if resolved.expandPromptTemplates:
+            if resolved.expandPromptTemplates and prompt_command is None:
                 current_text = expand_prompt_template(current_text, self.promptTemplates)
 
             if self.isStreaming:
@@ -663,9 +678,18 @@ class AgentSession:
 
             messages: list[Any] = []
             messages.append(self._build_user_message(current_text, current_images))
-            messages.extend(self._pendingNextTurnMessages)
+            pending_next_turn = self._pendingNextTurnMessages
+            messages.extend(pending_next_turn)
             self._pendingNextTurnMessages = []
-            messages = await self._prepare_agent_start(messages, current_text, current_images)
+            try:
+                messages = await self._prepare_agent_start(messages, current_text, current_images)
+                if prompt_command is not None:
+                    assert_not_compacting()
+            except BaseException:
+                # Preflight did not accept this turn; preserve its notifications,
+                # including any which arrived while the hooks were running.
+                self._pendingNextTurnMessages = [*pending_next_turn, *self._pendingNextTurnMessages]
+                raise
             report_preflight(True)
             await self._run_agent_prompt(messages)
         except Exception:
@@ -730,12 +754,24 @@ class AgentSession:
         return messages
 
     async def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
+        command = self.getCorePromptCommand(text)
+        if command is not None:
+            text = await self._expand_core_prompt_command(command, text)
+            if text is not None:
+                await self._queue_steer(text, images)
+            return
         if text.startswith("/"):
             self._throw_if_extension_command(text)
         expanded_text = expand_prompt_template(text, self.promptTemplates)
         await self._queue_steer(expanded_text, images)
 
     async def followUp(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
+        command = self.getCorePromptCommand(text)
+        if command is not None:
+            text = await self._expand_core_prompt_command(command, text)
+            if text is not None:
+                await self._queue_follow_up(text, images)
+            return
         if text.startswith("/"):
             self._throw_if_extension_command(text)
         expanded_text = expand_prompt_template(text, self.promptTemplates)
@@ -2076,13 +2112,27 @@ class AgentSession:
         for listener in self._eventListeners:
             listener(event)
 
+    def getCorePromptCommand(self, text: str) -> CoreCommand | None:
+        if not text.startswith("/"):
+            return None
+        command = self.moments.command(text[1:].partition(" ")[0])
+        return command if command is not None and command.is_prompt else None
+
+    async def _expand_core_prompt_command(self, command: CoreCommand, text: str) -> str | None:
+        result = command.handler(text[1:].partition(" ")[2], self._extensionRunner.create_command_context())
+        if inspect.isawaitable(result):
+            result = await result
+        if result is not None and not isinstance(result, str):
+            raise TypeError(f"Prompt command /{command.name} must return text or None")
+        return result
+
     async def _try_execute_core_command(self, text: str) -> bool:
         # MISAKA fork: a part's command runs like an extension command, without the runner.
         if not text.startswith("/"):
             return False
         command_name, _, raw_args = text[1:].partition(" ")
         resolved = self.moments.command(command_name)
-        if resolved is None:
+        if resolved is None or resolved.is_prompt:
             return False
         try:
             result = resolved.handler(raw_args, self._extensionRunner.create_command_context())

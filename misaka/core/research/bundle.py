@@ -17,6 +17,7 @@ alone.
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import json
 import os
@@ -30,7 +31,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from misaka.core.documents import index as corpus
 from misaka.core.research import ledger, runs
-from misaka.core.tools._web.evidence import read_provenance
+from misaka.core.tools._web.evidence import check_material_read, read_provenance
 from misaka.core.tools.path_utils import DOWNLOAD_DIR_NAME
 
 MANIFEST = "SOURCES.md"
@@ -49,7 +50,8 @@ _LOCATOR = re.compile(
 )
 _NOTE = ("Written by misaka when the products here were settled and rebuilt from scratch each time, so edit "
          "nothing in this file or under the sources folder. Each file there is a hard link to where it already "
-         "lives in the project (a copy only where a hard link was not possible); the originals never move.")
+         "lives in the project (a copy only where a hard link was not possible); the originals never move. "
+         "Cite original project files, not this bundle's disposable sources paths.")
 
 
 def locators_in(text):
@@ -71,9 +73,20 @@ def place(src, dst):
     try:
         os.link(src, dst)
         return False
-    except OSError:
-        shutil.copy2(src, dst)
-        return True
+    except OSError as error:
+        if error.errno not in {errno.EXDEV, errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP}:
+            raise
+    # Never open an existing destination for writing: it may link to another original.
+    out = open(dst, "xb")  # noqa: SIM115 - an existing target must stay outside failure cleanup
+    try:
+        with out, open(src, "rb") as source:
+            shutil.copyfileobj(source, out)
+        shutil.copystat(src, dst)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(dst)
+        raise
+    return True
 
 
 def _url_key(url, *, query=True):
@@ -107,8 +120,8 @@ class _Index:
             for key in ("source_url", "final_url", "url", "requested_url"):
                 value = meta.get(key)
                 if isinstance(value, str) and value.startswith(("http://", "https://")):
-                    self.pages.setdefault(_url_key(value), real)
-                    self.pages.setdefault(_url_key(value, query=False), real)
+                    key_ = _url_key(value)
+                    self.pages[key_] = real if key_ not in self.pages or self.pages[key_] == real else None
             url = meta.get("source_url") or meta.get("final_url") or ""
             self.titles[real] = (str(meta.get("title") or ""), str(url))
         try:
@@ -139,7 +152,20 @@ class _Index:
         real = os.path.realpath(path)
         if not corpus.under(real, self.workspace) or os.path.relpath(real, self.workspace).split(os.sep)[0] == ".git":
             return None
+        try:
+            check_material_read(real)
+        except ValueError:
+            return None
         return real
+
+    def checked_digest(self, real):
+        if self.file_inside(real) != real:
+            raise ValueError("source is missing or outside the readable project material")
+        actual = corpus.sha256_file(real)
+        expected = self.digests.get(real)
+        if expected and actual != expected:
+            raise ValueError("source changed since its registered sha256; original evidence is unresolved")
+        return actual
 
     def dir_inside(self, path):
         real = os.path.realpath(path)
@@ -153,6 +179,7 @@ class Source:
     cited: list[str] = field(default_factory=list)  # how and by whom
     placed: str | None = None                       # where its link went, relative to the bundle folder
     copied: bool = False
+    digest: str | None = None
 
 
 class _Collector:
@@ -195,7 +222,7 @@ class _Collector:
             real = self.index.docs.get(locator[4:].split("#", 1)[0])
             return real, "" if real else "not in this project's corpus"
         if locator.startswith(("http://", "https://")):
-            real = self.index.pages.get(_url_key(locator)) or self.index.pages.get(_url_key(locator, query=False))
+            real = self.index.pages.get(_url_key(locator))
             return real, "" if real else f"no saved copy under {DOWNLOAD_DIR_NAME}/"
         for base in ([""] if os.path.isabs(locator) else bases):
             candidate = os.path.join(base, locator)
@@ -224,11 +251,13 @@ class _Collector:
         if not real or not real.lower().endswith(_SCAN_SUFFIXES):
             return
         try:
+            self.index.checked_digest(real)
             if os.path.getsize(real) > _SCAN_LIMIT:
                 return
             with open(real, encoding="utf-8", errors="replace") as handle:
                 text = handle.read()
-        except OSError:
+        except (OSError, ValueError) as error:
+            self.unresolved.append((os.path.relpath(real, self.index.workspace), str(error), by))
             return
         for locator in locators_in(text):
             self.cite(locator, by, [*bases, os.path.dirname(real)], origin=real)
@@ -359,7 +388,12 @@ def _placed_name(relative, taken):
     name = "/".join(parts[-2:])
     if name in taken:
         stem, ext = os.path.splitext(name)
-        name = f"{stem}-{hashlib.sha256(relative.encode()).hexdigest()[:8]}{ext}"
+        stem = f"{stem}-{hashlib.sha256(relative.encode()).hexdigest()[:8]}"
+        name = f"{stem}{ext}"
+        suffix = 1
+        while name in taken:
+            name = f"{stem}-{suffix}{ext}"
+            suffix += 1
     return name
 
 
@@ -384,8 +418,17 @@ def _build(collector, *, folder, manifest, sources_dir, title, products, cards=(
     if not corpus.under(folder, index.workspace) or not sources_dir.startswith(folder + os.sep):
         raise ValueError("A bundle is written only inside the research project.")
     inside = lambda real: real.startswith(folder + os.sep)
-    to_place = sorted((s for s in collector.sources.values() if not inside(s.real)), key=lambda s: s.relative)
-    in_folder = sorted((s for s in collector.sources.values() if inside(s.real)), key=lambda s: s.relative)
+    valid = []
+    for source in collector.sources.values():
+        try:
+            if corpus.under(source.real, sources_dir):
+                raise ValueError("disposable bundle source; cite the original project file instead")
+            source.digest = index.checked_digest(source.real)
+            valid.append(source)
+        except (OSError, ValueError) as error:
+            collector.unresolved.append((source.relative, str(error), ""))
+    to_place = sorted((s for s in valid if not inside(s.real)), key=lambda s: s.relative)
+    in_folder = sorted((s for s in valid if inside(s.real)), key=lambda s: s.relative)
     _reset(sources_dir, keep=bool(to_place))
     taken = set()
     for source in to_place:
@@ -394,8 +437,11 @@ def _build(collector, *, folder, manifest, sources_dir, title, products, cards=(
         dest = os.path.join(sources_dir, name)
         try:
             source.copied = place(source.real, dest)
+            if corpus.sha256_file(dest) != source.digest:
+                os.unlink(dest)
+                raise ValueError("source changed during placement; original evidence is unresolved")
             source.placed = os.path.relpath(dest, folder)
-        except OSError as error:
+        except (OSError, ValueError) as error:
             collector.unresolved.append((source.relative, f"could not be placed: {error}", ""))
 
     def rel(path):
@@ -420,7 +466,7 @@ def _build(collector, *, folder, manifest, sources_dir, title, products, cards=(
                      + (" (copied: a hard link was not possible)" if source.copied else ""))
         if provenance(source.real):
             lines.append(f"  - {provenance(source.real)}")
-        lines.append(f"  - sha256 {index.digests.get(source.real) or corpus.sha256_file(source.real)}")
+        lines.append(f"  - sha256 {source.digest}")
         lines += [f"  - cited {how}" for how in source.cited]
     if not any(s.placed for s in to_place):
         lines.append("- (none)")

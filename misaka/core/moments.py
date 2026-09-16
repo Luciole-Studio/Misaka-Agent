@@ -49,12 +49,15 @@ class BeforeAgentStart:
 
 @dataclass(slots=True, frozen=True)
 class CoreCommand:
-    """A slash command a part offers; ``handler(args, ctx)`` runs like an extension command."""
+    """A part's slash command; prompt handlers return text, other handlers execute actions."""
 
     name: str
     description: str
     handler: Callable[..., Any]
     argument_hint: str | None = None
+    # Return prompt text (or None for a handled/no-op command) to the owning
+    # submission, rather than starting a second turn from a command context.
+    is_prompt: bool = False
 
 
 class Moments:

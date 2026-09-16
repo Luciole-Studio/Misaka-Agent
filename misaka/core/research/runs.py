@@ -358,12 +358,20 @@ def acquire_driver(con, run_id, lock, ttl_seconds=DRIVER_TTL_SECONDS):
     """Take the run's driver lease: one process advances a run at a time. False when another
     live lease holds it."""
     now = int(time.time())
-    cur = con.execute(
-        "UPDATE research_runs SET driver_lock=?, driver_expires=? WHERE id=? "
-        "AND (driver_lock IS NULL OR driver_expires IS NULL OR driver_expires < ? OR driver_lock=?)",
-        (lock, now + int(ttl_seconds), run_id, now, lock),
-    )
-    return cur.rowcount == 1
+    with task_store.write_txn(con):
+        previous = get(con, run_id)
+        cur = con.execute(
+            "UPDATE research_runs SET driver_lock=?, driver_expires=? WHERE id=? "
+            "AND (driver_lock IS NULL OR driver_expires IS NULL OR driver_expires < ? OR driver_lock=?)",
+            (lock, now + int(ttl_seconds), run_id, now, lock),
+        )
+        if cur.rowcount != 1:
+            return False
+        if previous["driver_lock"] != lock:
+            # Invalidate delayed child spawns in the same transaction as takeover.
+            # Keep PID/identity for the successor's existing orphan-reaping path.
+            con.execute("UPDATE research_branches SET runner_key=NULL WHERE run_id=?", (run_id,))
+    return True
 
 
 def heartbeat_driver(con, run_id, lock, ttl_seconds=DRIVER_TTL_SECONDS):
@@ -448,8 +456,11 @@ def node_dir(run, branch_id=None):
 
 def normalize_limits(raw=None):
     raw = raw or {}
+    value = raw.get("max_depth", DEFAULT_LIMITS["max_depth"])
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError("max_depth must be an integer")  # noqa: TRY004
     try:
-        depth = int(raw.get("max_depth", DEFAULT_LIMITS["max_depth"]))
+        depth = int(value)
     except (TypeError, ValueError) as error:
         raise ValueError("max_depth must be an integer") from error
     if not 0 <= depth <= 12:
@@ -502,9 +513,9 @@ def claim_runner(con, table, row_id, key):
 
 def release_runner(con, table, row_id, key):
     """The runner's routine is over but its process stays alive (an interactive node keeps its
-    window open for the user): clear the pid and identity so the parent settles the row, and
-    keep the key so the parent's own bookkeeping still matches when it clears the rest."""
-    con.execute(f'UPDATE "{table}" SET runner_pid=NULL, runner_identity=NULL WHERE id=? AND runner_key=?',
+    window open for the user). Consume the key too: release is durable even before the first
+    parent poll, and a late spawn reply must never resurrect this execution."""
+    con.execute(f'UPDATE "{table}" SET runner_pid=NULL, runner_identity=NULL, runner_key=NULL WHERE id=? AND runner_key=?',
                 (row_id, key))
 
 
@@ -878,7 +889,7 @@ def next_level(con, run_id):
     return [n for n in rows if n["depth"] == rows[0]["depth"]] if rows else []
 
 
-def set_node(con, node_id, *, status=None, session_file=None, context_artifact=None):
+def set_node(con, node_id, *, status=None, session_file=None, context_artifact=None, owner=None):
     fields, values = [], []
     for name, value in (("status", status), ("session_file", session_file),
                         ("context_artifact", context_artifact)):
@@ -888,6 +899,8 @@ def set_node(con, node_id, *, status=None, session_file=None, context_artifact=N
     fields.append("updated_at=?")
     values.extend([int(time.time()), node_id])
     with task_store.write_txn(con):
+        if owner is not None:
+            check_owner(con, *owner)
         con.execute(f"UPDATE research_branches SET {','.join(fields)} WHERE id=?", values)
         if status is not None:
             # Lifecycle only, never a scientific verdict.
@@ -947,11 +960,30 @@ def action(con, run_id, node_id, key):
     return {**dict(row), "payload": json.loads(row["payload_json"])} if row else None
 
 
+def check_owner(con, run, branch=None, *, allow_stop=False):
+    """Identity is independent of phase: closing/final review and cleanup retain an owner."""
+    current = get(con, run["id"])
+    owner = node(con, branch["id"]) if branch is not None else None
+    if (not current or current["driver_lock"] != run["driver_lock"]
+            or (branch is not None and (not owner or owner["run_id"] != run["id"]
+                                        or owner["runner_key"] != branch["runner_key"]))):
+        raise ValueError("Research execution belongs to a superseded owner.")
+    if not allow_stop and current["stop_requested"]:
+        raise InterruptedError("Research stopped.")
+
+
+@contextmanager
+def owned_txn(con, run, branch=None, *, allow_stop=False):
+    """Check the captured identity under the same writer lock as its state transition."""
+    with task_store.write_txn(con):
+        check_owner(con, run, branch, allow_stop=allow_stop)
+        yield
+
+
 def _owned(con, run, branch):
+    check_owner(con, run, branch, allow_stop=True)
     current, owner = get(con, run["id"]), node(con, branch["id"])
-    if (not current or current["stop_requested"] or current["status"] != "active"
-            or not owner or owner["run_id"] != run["id"]
-            or owner["runner_key"] != branch["runner_key"]
+    if (current["stop_requested"] or current["status"] != "active"
             or owner["status"] in (*NODE_TERMINAL, "closing")):
         raise ValueError("Research command belongs to a stopped or superseded node.")
 
@@ -1069,29 +1101,49 @@ def write_text(con, run_id, kind, title, relative_path, content, *,
         path.relative_to(root)
     except ValueError as error:
         raise ValueError("Research artifact path is outside the project workspace.") from error
-    _atomic_write(path, str(content))
-    sha = hashlib.sha256(path.read_bytes()).hexdigest()
-    metadata = dict(metadata or {})
-    old = con.execute(
-        "SELECT id FROM research_artifacts WHERE run_id=? AND path=? AND task_id IS ?",
-        (run_id, str(path), task_id),
-    ).fetchone()
-    if old:
-        con.execute(
-            "UPDATE research_artifacts SET sha256=?,title=?,kind=?,metadata_json=?,created_at=? "
-            "WHERE id=?",
-            (sha, str(title), str(kind), json.dumps(metadata, ensure_ascii=False),
-             int(time.time()), old["id"]),
-        )
-        return old["id"], str(path)
-    aid = "a_" + secrets.token_hex(5)
-    con.execute(
-        "INSERT INTO research_artifacts "
-        "(id,run_id,branch_id,task_id,kind,title,path,sha256,metadata_json,created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (aid, run_id, branch_id, task_id, str(kind), str(title), str(path), sha,
-         json.dumps(metadata, ensure_ascii=False), int(time.time())),
-    )
+    from misaka.core.research import publication
+
+    content = str(content)
+    sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    # Recover a previous process before entering our own transaction. An in-flight
+    # journal of this connection belongs to its outer transaction, not a dead writer.
+    if not con.in_transaction:
+        publication.recover(con, path)
+    try:
+        with task_store.write_txn(con):
+            old = con.execute(
+                "SELECT id FROM research_artifacts WHERE run_id=? AND path=? AND task_id IS ?",
+                (run_id, str(path), task_id),
+            ).fetchone()
+            aid = old["id"] if old else "a_" + secrets.token_hex(5)
+            # Register before touching files: an unmanaged outer raw-SQL transaction
+            # has no completion hook; its caller should use task_store.write_txn.
+            task_store.on_transaction_end(con, lambda: publication.recover(con, path))
+            checkpoint = publication.prepare(con, path, aid, sha)
+            # Savepoint also restores metadata if a caller catches our I/O error in
+            # a larger transaction and decides to commit its other work.
+            try:
+                with _savepoint(con):
+                    if old:
+                        con.execute(
+                            "UPDATE research_artifacts SET sha256=?,title=?,kind=?,metadata_json=?,created_at=? WHERE id=?",
+                            (sha, str(title), str(kind), json.dumps(metadata or {}, ensure_ascii=False), int(time.time()), aid))
+                    else:
+                        con.execute(
+                            "INSERT INTO research_artifacts "
+                            "(id,run_id,branch_id,task_id,kind,title,path,sha256,metadata_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            (aid, run_id, branch_id, task_id, str(kind), str(title), str(path), sha,
+                             json.dumps(metadata or {}, ensure_ascii=False), int(time.time())))
+                    _atomic_write(path, content)
+            except BaseException:
+                publication.restore_attempt(path, checkpoint)
+                raise
+    except BaseException:
+        if not con.in_transaction:
+            publication.recover(con, path)
+        raise
+    if not con.in_transaction:
+        publication.recover(con, path)
     return aid, str(path)
 
 
@@ -1153,6 +1205,27 @@ def artifacts(con, run_id, *, branch_id=None, kind=None, task_id=None, root_only
 
 def artifact(con, artifact_id):
     return con.execute("SELECT * FROM research_artifacts WHERE id=?", (artifact_id,)).fetchone()
+
+
+def recover_publications(con, run):
+    """Resume-only recovery; ordinary artifact/viewer reads never mutate the workspace."""
+    from misaka.core.research import publication
+
+    root = Path(run["workspace"])
+    paths = {Path(row["path"]) for row in artifacts(con, run["id"])}
+    # Include an interrupted first write whose registration rolled back completely.
+    for branch in nodes(con, run["id"]):
+        sample = root / generated_path(run, "checkpoint", branch_id=branch["id"] if branch["parent_id"] else None)
+        prefix = "" if _by_node(run) else f"{branch['id'] if branch['parent_id'] else run['id']}-"
+        for journal in sample.parent.glob(f".{prefix}*.research-publish.json"):
+            paths.add(journal.with_name(journal.name[1:-len(".research-publish.json")]))
+    sample = root / run_path(run, "checkpoint")
+    for journal in sample.parent.glob(f".{run['id']}-*.research-publish.json"):
+        paths.add(journal.with_name(journal.name[1:-len(".research-publish.json")]))
+    for path in paths:
+        path.resolve().relative_to(root.resolve())
+        with owned_txn(con, run, allow_stop=True):
+            publication.recover(con, path)
 
 
 def read_artifact(con, artifact_id):

@@ -72,7 +72,7 @@ from misaka.ai.utils.diagnostics import (
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
-from misaka.ai.utils.json_parse import parse_streaming_json
+from misaka.ai.utils.json_parse import StreamingArgs, parse_streaming_json
 from misaka.ai.utils.provider_env import get_provider_env_value
 from misaka.core.http_dispatcher import createHttpxIdleTimeout
 from misaka.utils.values import maybe_await, signal_aborted
@@ -294,7 +294,11 @@ def _serialize_context(context: Context | Mapping[str, Any]) -> Any:
     """
     if not isinstance(context, BaseModel):
         return context
-    payload = context.model_dump(mode="json", exclude_none=True, exclude={"tools"})
+    # Keep native parse diagnostics in history, not in the upstream wire protocol.
+    payload = context.model_dump(mode="json", exclude_none=True, exclude={
+        "tools": True,
+        "messages": {"__all__": {"content": {"__all__": {"argumentsError"}}}},
+    })
     tools = getattr(context, "tools", None)
     # ``is not None``, not truthiness: upstream hands the whole context to JSON.stringify,
     # which writes ``"tools":[]`` for an empty list and omits the key only for undefined.
@@ -382,6 +386,10 @@ class _EventConverter:
         event_type = event.get("type")
 
         if event_type == "done":
+            for index, raw in self._tool_json.items():
+                if raw:
+                    StreamingArgs(raw).finish_into(self._content_at(index))
+            self._tool_json.clear()
             self._apply_terminal(event)
             return DoneEvent(reason=event["reason"], message=self.partial)
         if event_type == "error":
@@ -436,7 +444,9 @@ class _EventConverter:
             for key, value in dict(event["toolCall"]).items():
                 if key in ToolCall.model_fields:
                     setattr(block, key, value)
-            self._tool_json.pop(index, None)
+            raw = self._tool_json.pop(index, None)
+            if raw and block.argumentsError is None:
+                StreamingArgs(raw).finish_into(block)
             return ToolCallEndEvent(contentIndex=index, toolCall=block, partial=self.partial)
 
         # Upstream's union is closed, so an unknown type is a protocol violation. TS still

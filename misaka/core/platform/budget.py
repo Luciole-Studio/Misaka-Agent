@@ -38,7 +38,7 @@ def _locked(con):
     return serialized() if serialized else nullcontext()
 
 
-def spent(con):
+def spent(con, *, task_ids=None):
     """Total token usage in the current transaction's event ledger.
 
     Task deletion and transaction rollback can remove already-seen rows, including writes
@@ -46,9 +46,12 @@ def spent(con):
     """
     # ponytail: recount usage rows; add transaction-aware storage only if this is measured hot.
     total = 0
-    for kind, payload in con.execute(
-            "SELECT kind,payload FROM events "
+    scope = None if task_ids is None else set(task_ids)
+    for task_id, kind, payload in con.execute(
+            "SELECT task_id,kind,payload FROM events "
             "WHERE kind IN ('harn_event','budget_usage') AND payload LIKE '%totalTokens%'"):
+        if scope is not None and task_id not in scope:
+            continue
         try:
             d = json.loads(payload)
         except (ValueError, TypeError):

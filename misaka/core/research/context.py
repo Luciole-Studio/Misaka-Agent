@@ -94,10 +94,11 @@ def render(packet):
 
 def create(con, run, *, issue, node, parent=None):
     packet = build(con, run, issue=issue, node=node, parent=parent)
-    aid, path = runs.write_text(
-        con, run["id"], "context", f"Node {node['id']} context",
-        runs.generated_path(run, "context.md", branch_id=node["id"]), render(packet), branch_id=node["id"],
-        metadata={"issue_id": issue["id"], "parent": node["parent_id"]},
-    )
-    runs.set_node(con, node["id"], context_artifact=aid)
+    with runs.owned_txn(con, run, node):
+        aid, path = runs.write_text(
+            con, run["id"], "context", f"Node {node['id']} context",
+            runs.generated_path(run, "context.md", branch_id=node["id"]), render(packet), branch_id=node["id"],
+            metadata={"issue_id": issue["id"], "parent": node["parent_id"]},
+        )
+        runs.set_node(con, node["id"], context_artifact=aid)
     return aid, path, packet

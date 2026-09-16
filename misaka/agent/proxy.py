@@ -53,7 +53,7 @@ from misaka.ai.types import (
     Usage,
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
-from misaka.ai.utils.json_parse import parse_streaming_json
+from misaka.ai.utils.json_parse import StreamingArgs, parse_streaming_json
 from misaka.utils.values import signal_aborted
 
 logger = logging.getLogger(__name__)
@@ -209,7 +209,11 @@ def _as_context(context: Context | Mapping[str, Any] | Any) -> Context:
 
 
 def _serialize_context(context: Context) -> dict[str, Any]:
-    payload = context.model_dump(mode="json", exclude_none=True, exclude={"tools"})
+    # Keep native parse diagnostics in history, not in the upstream wire protocol.
+    payload = context.model_dump(mode="json", exclude_none=True, exclude={
+        "tools": True,
+        "messages": {"__all__": {"content": {"__all__": {"argumentsError"}}}},
+    })
     if context.tools is not None:
         payload["tools"] = []
         for tool in context.tools:
@@ -461,10 +465,16 @@ def _process_proxy_event(
         for key in raw_keys:
             if key in ToolCall.model_fields:
                 setattr(content, key, getattr(finalized, key))
-        tool_call_buffers.pop(index, None)
+        raw = tool_call_buffers.pop(index, None)
+        if raw and content.argumentsError is None:
+            StreamingArgs(raw).finish_into(content)
         return ToolCallEndEvent(contentIndex=index, toolCall=content, partial=partial)
 
     if event_type == "done":
+        for index, raw in tool_call_buffers.items():
+            if raw:
+                StreamingArgs(raw).finish_into(_require_content(partial, index, "toolCall", "done"))
+        tool_call_buffers.clear()
         reason = proxy_event["reason"]
         partial.stopReason = reason
         partial.usage = Usage.model_validate(proxy_event["usage"])
