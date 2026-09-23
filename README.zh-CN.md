@@ -3,235 +3,207 @@
   MISAKA
 </h1>
 
-<p align="center"><strong>面向人文与社会科学的多智能体研究系统。</strong></p>
+<p align="center"><strong>为人文社科研究组建的 AI 研究团队。</strong></p>
+
+<p align="center"><em>每个结论都要过红队，出处就摆在它旁边，御坂如此报告。</em></p>
 
 <p align="center"><a href="README.md">English</a> · 简体中文 · <a href="README.ja.md">日本語</a></p>
 
-拥有规划总控智能体与常驻子智能体，基于树形数据结构治理思维过程的多智能体人文社科研究工具。
+MISAKA 的角色取自《魔法禁书目录》（[名字的由来](#名字的由来)）。**Last Order**（最后之作）是你与之对话的协调者；**Sisters**（妹妹们）是她派出去的专家：历史学者、计量经济学者、专挑毛病的批评者，都由你来定义。每位 Sister 有自己的编号、技能、工具和模型。和御坂网络一样，她们共享所学：同一个项目里，任何一个 agent 都能检索其他 agent 的对话。
+
+你提出一个问题，Last Order 先和你一起定下研究计划；Sisters 并行开展研究，红队再来攻击得出的结论。每一条实质性的异议都会长成一个新的研究分支，有自己的团队，也有自己的红队。所有分支收束之后，Last Order 起草报告，由独立红队审查，她再对每一条异议逐一裁决。最终报告写进你的项目文件夹，旁边就是它引用的每一份原文件。
 
 <p align="center">
-  <img src="assets/setup.png" alt="misaka setup — 环境自检与模型配置" width="820">
+  <img src="assets/tui.png" alt="MISAKA 面板：左侧是空间、会话和 agent，右侧是 Last Order 的窗口" width="820">
 </p>
 
-## 一次运行是怎么走的
+## 有什么不同
 
-干活的是两个角色。
+- **团队由你组建。** 每位 Sister 有自己的专长（Last Order 据此分派任务）、自己的技能和 MCP 服务器，还有自己的模型：一位跑 Claude、另一位跑 GPT 也没问题。
+- **研究会反驳自己。** 最适合挑刺的那位 Sister 负责审查结论；每一条实质性异议都会开出一个子节点，把整套流程重走一遍，直到你选定的深度。
+- **论断分门别类。** 事实、推断、诠释和价值判断各自申明。证据分不出高下时，相互竞争的结论并列保留，不靠投票定案。
+- **一路追溯到文件。** 每个节点的文件夹里有计划、每位 Sister 的工作、结论和红队意见，还有一份 `SOURCES.md` 和指向每个被引文件的硬链接。
+- **始终由你做主。** 计划要等你点头，而点头就是正常聊天。每个分支都有自己的标签页，可以直接对话；不需要的分支可以跳过；研究可以停下，之后再接着跑。
+- **你的资料库与网络。** 可以索引 PDF、EPUB、DjVu、Office 文件和笔记。agent 按目录或页码阅读，能看页面图像，能查到一段引文在第几页。网页搜索不配密钥也能用。
+- **记忆不会断。** 长对话会被压缩而不是截断，完整的历史始终可以检索。
 
-| 角色 | 职责 |
-|---|---|
-| **Last Order** | 协调者。把问题变成计划，再变成任务卡，最后写结论。 |
-| **Sisters** | 执行者。每人领一张卡，在自己的进程里用自己的工具完成它。 |
+## 一次研究怎么进行
 
-一次运行分五步。
+> *计划写好啦！只要你点头，御坂御坂马上开工！御坂御坂双手捧着计划书说道。*
 
-1. **起草计划。** Last Order 拟出思路，拿给你看。
-2. **计划审批。** 直接输入 `/research`，在深度、LO 并发、每个 LO 的 Sister 卡片数、
-   追加轮次之后选择 **Require approval（需批准）** 或 **Automatic（自动）**。
-   需批准时，和 Last Order 像平常聊天那样讨论，认可计划后再开工；自动模式接受计划后
-   直接推进，但必要的澄清仍会询问你。选择随本次研究保存，根节点、分支、追加轮次与恢复共用。
-   settings.json 的 `research.plan_approval` 提供默认值（true；false 为自动）；直接 `/research 问题`
-   和命令行 `misaka research` 使用该默认值。命令行需要审批时，会显示接入根节点对话的方法。
-3. **发卡。** 计划变成任务卡，Sisters 领走并行开工，受每个 LO 的 Sister 卡片上限（`--sister-parallel`，默认 4）约束。
-   每位 Sister 先用普通散文说清自己打算怎么做，然后就在同一个会话里做完。没有另起的
-   计划文件，也没有要填的 JSON 交接格式。
-4. **按需追加轮次。** Last Order 可以不急着收尾，再派 Sisters 出去一轮。
-   `--followups N` 限定第一批卡回来之后她还能追加几轮，默认 2。和你讨论计划从不计入
-   这个额度。每一轮沿用本次研究选择的计划审批模式。
-5. **结论与红队。** 结论综合所有轮次写成，然后红队上来攻击它。若审查没发现实质问题，
-   或者已经触到深度上限，就直接记录，不花一次模型调用。
-   
-你不想深究的分支可以由你决定跳过。该节点不做研究直接关闭，理由留档，等最终裁定时一并考虑。
+```mermaid
+flowchart TD
+    Q(["你的问题"]) --> P["Last Order 起草计划"]
+    P -->|"你同意"| C["Sisters 并行处理任务卡"]
+    C --> S{"够下结论了吗？"}
+    S -->|"还不够：再派一轮"| C
+    S -->|"够了"| N["Last Order 写出节点结论"]
+    N --> R["红队 Sister 攻击这个结论"]
+    R -->|"每一条实质性异议"| K["子节点<br/>Last Order 的分身<br/>把同一套流程再走一遍"]
+    R -->|"没有实质异议<br/>或已到深度上限"| X["节点关闭"]
+    K -.->|"依次关闭"| X
+    X -->|"所有节点都已关闭"| F["报告草稿<br/>→ 独立红队审查<br/>→ 裁决"]
+    F --> O(["最终报告、SOURCES.md<br/>和被引文件"])
+```
 
-研究有两项独立的并发设置：`--parallel N` 限制同时运行的 LO 节点数（默认 4），
-`--sister-parallel N` 限制每个 LO 的活动 Sister 卡片数（默认 4），同一 Sister 的多个
-会话也分别占槽。两项设置随研究记录保存，恢复和分支节点共用；旧研究缺少新字段时仍按 4。
-实际并发还受全局／单个 Sister 准入额度和任务依赖约束；这不是所有窗口或嵌套子代理的数量。
-例如 `/research --parallel 4 --sister-parallel 8 问题`，或
-`misaka research --parallel 4 --sister-parallel 8 "问题"`。直接输入 `/research` 也可分别选择。
+1. **计划。** Last Order 先弄清这个问题到底在问什么，把每一部分交给专长对口的 Sister，并指定一位红队 Sister。计划会等你点头：和她商量就行，你同意之后她才开工。
+2. **任务卡。** 每项任务变成一张卡。Sisters 各自在自己的会话里并行处理，一边做一边申明发现及其出处。
+3. **追加轮次。** 如果结果还有缺口，Last Order 会在下结论之前再派 Sisters 出去（默认最多追加两轮，你可以放宽）。
+4. **红队。** Last Order 写出本节点的结论，红队 Sister 拿着计划、证据和 Last Order 自己的推理过程来攻击它。
+5. **分支。** 每一条实质性异议都会成为一个子节点：从 Last Order 的对话分叉出来的分身，带着自己的 Sisters 和红队，把同一套流程再走一遍。研究树一层一层展开，直到你选定的深度（不选的话，是问题以下三层）。
+6. **最终报告。** 所有节点关闭后，Last Order 起草报告，独立红队审查草稿，她对每一条异议作出接受、驳回或保留分歧的裁决，连同理由一起写进最终报告。
 
-## 产出物长什么样
+研究过程随时保存，`/research resume` 会从停下的地方接着跑。自动运行、深度与并发、跳过分支、从命令行运行，见[研究指南](docs/guide/research.md)（英文）。
 
-成果写进你选定的项目里，一个节点一个文件夹。
+## 你会得到什么
+
+> *引用的每一份材料都已归档，随时可以核查，御坂如此报告。*
+
+所有产出都写进你的项目文件夹，一个节点一个文件夹：
 
 ```
 your-project/
-├── nodes/<node>/              计划、结论、审查
-│   ├── cards/<card>/          每位 Sister 的产出
-│   ├── SOURCES.md             结论所依据的材料清单
-│   └── sources/               被引用的文件本身
-└── final/<run>-<file>         问题、综述、草稿、最终报告
+├── PROJECT.md                  Last Order 随时更新的项目简报
+├── nodes/<node>/
+│   ├── plan.md                 她的计划，以及为什么选这几位 Sister
+│   ├── cards/<card>/           每位 Sister 的工作成果，以及红队的 critique.md
+│   ├── synthesis.md            本节点的结论
+│   ├── deliberation.md         Last Order 的推理过程（交给红队看的那一份）
+│   ├── SOURCES.md              结论引用的每一个文件……
+│   └── sources/                ……都硬链接在这里
+└── final/<run>-final.md        裁决后的最终报告，旁边是研究问题、综述和草稿
 ```
 
-`sources/` 里是硬链接，所以不占额外空间，原件也绝不会被移动。只有在无法建立链接时
-才改为复制。这些包是派生物：不登记、不索引、不提交。
+对每一个被引文件，`SOURCES.md` 都记下它的校验和、在哪里被引用，以及 Sisters 申明的哪些发现以它为依据：
 
-Git 历史是可选的，而且很轻：节点关闭时一次提交，运行结束时一次。交付不需要 worktree，
-也不需要 merge。
+```markdown
+- `sources/t_3f8cc0/notes.md` ← `nodes/b_ebf11de142/cards/t_3f8cc0/notes.md`
+  - sha256 46559fecec176cae…
+  - cited in `nodes/b_ebf11de142/synthesis.md`
+  - cited by [t_3f8cc0] "…" (inference)
+```
+
+硬链接不占额外空间，原文件也从不移动。如果项目是 git 仓库（`misaka init` 会把它变成一个），每个节点关闭时、整次研究结束时都会各提交一次。
 
 ## 安装
 
-MISAKA 不在 PyPI 上，那边的 `misaka` 是个不相干的包。请从本仓库安装。
+需要 Python 3.12 或更新版本、git、[ripgrep](https://github.com/BurntSushi/ripgrep) 和 [fd](https://github.com/sharkdp/fd)，运行在 macOS 或 Linux 上。
 
 ```sh
-# 按你实际要用的供应商挑 SDK
-pip install "misaka[anthropic] @ git+https://github.com/Luciole-Studio/Misaka-Agent.git"
-
-# 或者从检出目录装
-git clone https://github.com/Luciole-Studio/Misaka-Agent.git
-cd Misaka-Agent && pip install ".[anthropic]"
-
-# 开发环境
-uv venv .venv --python 3.13 && uv sync
+uv tool install "misaka[providers] @ git+https://github.com/Luciole-Studio/Misaka-Agent.git"
 ```
 
-可选组件：`anthropic`、`openai`、`google`、`bedrock`、`mistral`，或用 `providers`
-一次装齐五个。`pageindex` 增加 PDF 大纲提取，`browser` 增加浏览器工具。
+`pip install` 和 `pipx install` 用同样的写法。`providers` 会装上所有模型 SDK；如果只用一家，换成对应的 extra 即可（`anthropic`、`openai`、`google`、`bedrock` 或 `mistral`；OpenRouter 及其他兼容 OpenAI 接口的服务用 `openai`）。`pageindex` 为长 PDF 提取目录，`browser` 提供浏览器工具。请从本仓库安装：PyPI 上的 `misaka` 是另一个无关的项目。
 
-有两样 MISAKA 不会替你装：
+## 快速开始
 
-- **git** 是必需的。`misaka init` 会创建项目仓库，被采纳的结果会提交进去。
-  用 `xcode-select --install` 或 `apt install git` 装上。
-- **ripgrep** 和 **fd** 是 `grep` 与 `find` 两个工具的后端。用
-  `brew install ripgrep fd` 或 `apt install ripgrep fd-find` 装，也可以把二进制
-  直接放进 `~/.misaka/cache/bin`。
-
-## 第一次运行
+> *第一个问题就是那枚硬币。弹出去吧。* ⚡
 
 ```sh
-misaka setup
+mkdir my-research && cd my-research
+misaka setup     # 登录、选模型、创建最初的几位 Sister、把这个文件夹设为项目
+misaka           # 打开面板，输入 /research
 ```
-
-向导会检查环境，保存一份供应商凭据和默认模型并发一次测试请求，创建你的第一批
-Sisters，询问是否装 PDF 组件，有 key 的话固定一个网络搜索后端，最后初始化项目文件夹。
-每一节都可以单独重跑，比如 `misaka setup model`。没配凭据时直接运行 `misaka`，
-它自己会把向导叫起来。
-
-`misaka update` 告诉你这份安装是否落后于仓库的 `main` 分支，`--apply` 把它快进上去。
-它跟分支而不是 release tag，遇到快进不了的 checkout 就报出原因而不替你解决。
-
-反过来的一端是 `misaka uninstall`：它会先列出 `~/.misaka` 下每一项装了什么、占多少，
-再删掉全部（凭据、看板、上下文引擎的记忆、各种缓存）。你的项目文件夹一个都不碰，
-而且会把它们列出来说明这一点。卸载包本身是安装器的事，命令会打印给你。
-
-全新安装默认走 `anthropic` / `claude-sonnet-4-5`。想手动给凭据：
-
-```sh
-export ANTHROPIC_API_KEY=sk-ant-...   # 所有内置供应商都认环境变量
-misaka auth check                     # 逐个供应商检查，走的是会话用的同一套解析
-```
-
-在聊天里，`/login` 会把 OAuth token 或 API key 存进 `~/.misaka/credentials/auth.json`，
-权限 0600。`/model` 打开模型选择器，从里面选会存成所有 Sister 的默认值；
-`/model <名字>` 只切换你眼前这一个会话。
-
-## 命令
-
-```sh
-misaka                 # 面板；被管道接走时退化为纯聊天
-misaka chat            # 和 Last Order 对话
-misaka research "..."  # 开一次研究运行
-misaka board           # 任务板
-misaka doc add x.pdf   # 索引一份文档
-misaka create          # 新增一位 Sister
-misaka web status      # 当前搜索后端与凭据
-```
-
-其余的用 `misaka --help` 看：`task`、`tell`、`dm`、`net`、`skills`、`bundles`、
-`moa`、`lcm`、`auth`、`remove`、`uninstall`、`update`。
-
-## 面板
 
 <p align="center">
-  <img src="assets/tui.png" alt="misaka 面板 — 空间、会话与 Sisters 名册，旁边是可交互的 Last Order" width="820">
+  <img src="assets/setup.png" alt="misaka setup：先做环境自检，再配置模型和服务商" width="820">
 </p>
 
-在终端里直接跑 `misaka` 会打开一个多窗格面板。研究分支 fork 出去后会拿到自己的标签页：
-节点进程把它的 Last Order 作为交互窗口跑在那里，她的 Sisters 在旁边分格排开。你在那个
-标签页里输入的每一句，都是那位 Last Order 的一轮对话。节点关闭后窗口不会消失，你可以
-继续问她都查到了什么。运行中途关掉它等于结束该节点，`/research resume` 可以重试。
+手头已经有 PDF、EPUB 或笔记？运行 setup 之前先放进这个文件夹（比如 `sources/`），setup 会帮你建索引；也可以之后再运行 `misaka doc scan sources/`。直接输入 `/research`，它会依次问你：研究多深、同时跑多少、每个节点最多追加几轮、计划要不要等你批准；你的下一条消息就是研究问题。想从命令行启动，用 `misaka research "问题"`。
 
-命令行运行没有面板，节点是后台进程。用 `misaka chat --attach --session PATH` 接进去，
-你的输入直达原主人，中间不隔第二个模型。回车可以给忙碌的会话补充指示，也可以在空闲的
-会话上起一轮。`/pause` 让会话停在下一个请求、工具或工作流边界上，`/resume` 放行。
-已经在跑的工具和智能体不会被中断，关掉附着的窗口也只是断开而已。
+## 你的团队
 
-## 文档与网络
+> *御坂 10032 号，前来报到，御坂如此说道。*
 
-`doc_add`、`doc_find`、`doc_read`、`doc_outline`、`doc_page_image`、`doc_verify`
-让智能体拥有一个可以引用、并能回头核对原文的语料库。`misaka doc` 是同一套东西的命令行入口。
-
-网络搜索开箱即用，不需要任何配置，由一组免密钥供应商轮转支撑。要固定后端或加 key：
+Last Order 随 MISAKA 自带；Sisters 由你创建。两位就够起步，一位可以给另一位当红队：
 
 ```sh
-misaka web set backend tavily
-misaka web set env.TAVILY_API_KEY tvly-...   # 以 0600 写入 ~/.misaka/.env
+misaka create 10032 --desc "历史与社会研究：档案、报刊、口述史"
+misaka create 10043 --desc "独立审查：提出异议、复现、找出别人漏掉的东西"
 ```
 
-导出的环境变量始终压过配置文件。`misaka web setup` 提供供应商与档位选择器，
-凭据输入是隐藏的。发现、启用/停用、重载和当前限额见 `misaka web --help`。
+每位 Sister 是 `~/.misaka/profiles/sisters/<id>/` 下的一个文件夹：
 
-智能体还有一套常规工具：`bash`、`read`、`write`、`edit`、`grep`、`find`、
-`web_fetch`、`download_file`，以及读写 `.docx` / `.xlsx` / `.pptx` 的 `office`。
-
-## 上下文引擎
-
-长会话使用 **MISAKA LCM**：基于固定版本
-[hermes-lcm](https://github.com/stephenschoettler/hermes-lcm) 的项目级 fork。
-压缩、摘要和检索算法保持原实现；应用层将缓存放在 `<项目>/.misaka/lcm/`，
-同项目的代理共用，其他项目隔离。最后一个使用者退出后清理缓存；异常退出的残留在下次启动时清理。
-
-原始 session 与采纳后的压缩检查点继续保存，恢复会话时重建 LCM；接续引用的源 session 也应保留。
-这里清理的是 LCM 缓存，不是会话历史、Board 或项目成果。
-LCM 自己配置的脱敏、忽略、保留与 GC 策略依然生效——这里不承诺原始数据被无条件永久保留。
-算法参数沿用上游的 `LCM_*` 原名，不设产品别名，`misaka lcm --help` 暴露的是原始的操作
-语法。移植了源码不等于上游宿主的每一处行为都被复现，差异记录在
-`misaka/extensions/misaka_lcm/PORT_NOTES.md`。
-
-## 配置
-
-全局配置都在唯一的根目录 `~/.misaka/` 下（用 `MISAKA_HOME` 可整体挪走），LCM 临时缓存位于项目工作目录。算法参数的环境变量压过配置文件。
-
-| 位置 | 内容 |
+| 文件 | 内容 |
 |---|---|
-| `settings.json` | 所有设置，按节存放：pi 自己的键（`defaultProvider`、`defaultModel`…）、`allies`、`skills`、`moa`、`web` |
-| `credentials/auth.json` | 保存的凭据，权限 0600 |
-| `models.json` | 自定义供应商与模型，例如 OpenAI 兼容网关 |
-| `MISAKA.md`、`skills/`、`subagents/` | 所有角色共享的身份、技能、子代理类型 |
-| `profiles/last_order/` | Last Order 的人格、技能与 MCP 配置 |
-| `profiles/sisters/<id>/` | 每位 Sister 一个目录 |
+| `DESCRIBE.md` | 她的专长；Last Order 据此决定派什么任务给她 |
+| `SOUL.md` | 她的性格和说话方式 |
+| `settings.json` | 她自己的模型和 MCP 服务器 |
+| `skills/` | 只有她能看到的技能 |
 
-最常用的几个设置：
+一份实际在用的名单，供参考：
 
-| 设置 | 默认值 | 含义 |
-|---|---|---|
-| `defaultProvider` / `defaultModel` | `anthropic` / `claude-sonnet-4-5` | 没有自己钉模型的角色所用的供应商和模型 |
-| `network.max_concurrent_sisters` | 空闲内存 / 256 MiB，取 4–12 | 本机同时运行的卡数 |
-| `research.token_cap` | `0`，关闭 | 任务板上显示并强制执行的 token 预算 |
-| `research.plan_approval` | `true` | 计划是否要等你点头 |
-| `lcm.context_threshold` | `0.35` | 上下文用到多少比例时 LCM 开始压缩 |
+| Sister | 专长 |
+|---|---|
+| 10032 | 历史与社会研究 |
+| 10036 | 实证计量与因果识别 |
+| 10037 | 宏观经济与公共政策 |
+| 10043 | 独立审查与复现 |
 
-**全部设置记在 [CONFIGURATION.md](CONFIGURATION.md)**，按控制对象分组。值不合法时命令会停下，
-并报出设置名和它的值。环境里的 `MISAKA_*` 名字都是 MISAKA 设给自己子进程用的，不是设置；
-只有 `MISAKA_HOME` 归你。供应商密钥、插件旋钮这类"别的代码从环境里读"的东西放 `~/.misaka/.env`。
+所有 agent 共用的设定、提示词如何拼装、怎样单独和某位 Sister 对话，见[团队指南](docs/guide/team.md)（英文）。
 
-## 排查
+## 常用命令
 
-聊天里的 `/debug` 会把渲染出的屏幕和整段对话写进
-`~/.misaka/logs/misaka-debug.log`，权限 0600，并打印路径。这是唯一的诊断开关，
-没有任何 debug 环境变量。
+| 想要 | 运行 |
+|---|---|
+| 打开面板（管道输入时为普通对话） | `misaka` |
+| 单独和一位 Sister 对话 | 对话里输入 `/sister 10032`，或 `misaka chat --as 10032` |
+| 开始一次研究 | 对话里输入 `/research`，或 `misaka research "问题"` |
+| 查看、停止或恢复研究 | `/research status`、`/research stop`、`/research resume` |
+| 查看任务看板 | `/board` 或 `misaka board` |
+| 添加或移除 Sister | `misaka create ID`、`misaka remove ID` |
+| 索引文档 | `misaka doc add 文件`、`misaka doc scan 文件夹` |
+| 选模型、登录 | `/model`、`/login` |
+| 配置网页搜索 | `misaka web` |
+| 管理技能 | `misaka skills` |
+| 报告问题 | `/debug` 把屏幕内容和整段对话写进日志，并打印路径 |
+| 更新、卸载 | `misaka update --apply`、`misaka uninstall` |
 
-## 建立在什么之上
+其余命令见 `misaka --help`。
 
-MISAKA 的内核是 [pi](https://github.com/earendil-works/pi) 的 Python 移植，面板是
-[herdr](https://github.com/herdrdev/herdr) 的移植。它收录了
-[hermes-lcm](https://github.com/stephenschoettler/hermes-lcm) 做上下文管理、
-[PageIndex](https://github.com/VectifyAI/PageIndex) 做 PDF 结构提取，以及
-[ghostty](https://github.com/ghostty-org/ghostty) 的 VT 库作为每个窗格背后的终端仿真器。
+## 模型
 
-完整索引在 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)：什么来自哪里、
-锁在哪个提交、改了什么。
+用 `/login` 在浏览器里登录（Anthropic、OpenAI 的 ChatGPT 订阅、GitHub Copilot、xAI、OpenRouter），或者填入目录里任何一家服务商的凭据，Google、Mistral 和 Bedrock 都在内。本地模型服务或任何兼容 OpenAI 接口的网关，写进 `~/.misaka/models.json`。`/model` 设定所有 agent 的默认模型；每位 Sister 也可以钉住自己的模型。
+
+## 你的数据与费用
+
+MISAKA 保存的一切都在你自己的机器上：设置、凭据、会话记录和看板在 `~/.misaka/`，研究产出在你的项目文件夹。提示词只发给你配置的模型服务商。搜索请求发给你配置的搜索服务；一个都没配置、或者配置的服务出错时，会轮流使用 Exa、Parallel、Firecrawl 和 Keenable 的免费公共接口（用 `misaka web set keyless_fallback false` 关闭）。MISAKA 自己不做任何遥测，只有在你运行 `misaka update` 或 `misaka setup` 时才检查更新。你另外添加的技能和 MCP 服务器可能会自行联网。`misaka uninstall` 会删除 `~/.misaka`，但从不碰项目文件夹。
+
+一次研究会铺得很开。默认最多同时跑四个节点，每个节点最多四张 Sister 任务卡，总量还受本机内存决定的上限约束，所以一次深度研究会并行发出大量模型调用。在 `~/.misaka/settings.json` 里设置 `research.token_cap`，看板就会按这个 token 预算把关。
+
+## 文档
+
+| 想要 | 阅读 |
+|---|---|
+| 运行研究：审批、深度、并发、恢复、命令行运行 | [docs/guide/research.md](docs/guide/research.md) |
+| 组建团队：角色、档案、提示词、模型、技能 | [docs/guide/team.md](docs/guide/team.md) |
+| 使用文档与网络 | [docs/guide/sources.md](docs/guide/sources.md) |
+| 修改设置 | [CONFIGURATION.md](CONFIGURATION.md) |
+| 查看各部分的来源 | [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) |
+
+以上文档目前只有英文版。
+
+## 名字的由来
+
+MISAKA 的名字取自镰池和马的《魔法禁书目录》和《某科学的超电磁炮》。在原作里，妹妹们（Sisters）是「超电磁炮」御坂美琴的克隆体，通过御坂网络共享记忆。
+
+| 原作 | MISAKA |
+|---|---|
+| **御坂美琴**，所有妹妹的本体 | `MISAKA.md`：每个 agent 在读自己的设定之前，都会先读这份共同身份 |
+| **妹妹们**，以编号相称：御坂 10032 号、10033 号…… | 你的专家们，每人有编号、专长和自己的 `SOUL.md` |
+| **最后之作**（Last Order），御坂 20001 号，御坂网络的司令塔 | 你与之对话的协调者 |
+| **御坂网络**，一位妹妹学到的，其他妹妹也能想起来 | 一个项目的共享记忆，每个 agent 都能检索 |
+
+本文里那些「御坂如此说道」只是点缀；你的 agent 怎么说话，取决于她们各自的 `SOUL.md`。想让她们也这样说话，在 `SOUL.md` 里加一句就行。
+
+MISAKA 是独立项目，与原作作者及出版方没有任何关联，也未获其认可。
+
+## 基于
+
+MISAKA 的 agent 内核是 [pi](https://github.com/earendil-works/pi) 的 Python 移植，面板移植自 [herdr](https://github.com/herdrdev/herdr)，每个窗格背后是 [ghostty](https://github.com/ghostty-org/ghostty) 的终端库。长对话管理基于 [hermes-lcm](https://github.com/stephenschoettler/hermes-lcm)，文档结构基于 [PageIndex](https://github.com/VectifyAI/PageIndex)；网页工具和技能移植自 [Hermes Agent](https://github.com/NousResearch/hermes-agent)，Office 支持移植自 [FrontierAgent](https://github.com/ApodexAI/FrontierAgent)。[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 记录了每一部分来自哪里、对应哪个提交、改了什么。
 
 ## 许可证
 
-[Apache License 2.0](LICENSE)。第三方组件各自保留原有许可证，全部登记在
-THIRD_PARTY_NOTICES.md 中。
+[Apache License 2.0](LICENSE)。第三方组件保留各自的许可证，全部记录在 THIRD_PARTY_NOTICES.md。
+
+<p align="center"><em>以上，御坂网络通信结束，御坂御坂如此说道。</em></p>

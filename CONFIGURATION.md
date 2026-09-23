@@ -103,7 +103,7 @@ there is no project scope.
 | `MISAKA_PAGEINDEX` | `<cwd>/.pageindex` | unscoped library calls only; CLI and session tools always use `<workspace>/.pageindex` |
 | `MISAKA_GHOSTTY_VT` | `misaka/ui/panel/lib/libghostty-vt.<dylib\|so>` | the terminal emulator behind every pane (libghostty-vt, herdr's; `misaka/ui/panel/lib/README.md` has the rebuild recipe) |
 | `MISAKA_INPUT_HISTORY` | none — the feature is off unless set | file for persistent chat input history |
-| `MISAKA_TELEMETRY` | unset — the `enableInstallTelemetry` setting decides (default on) | whether this install may be identified to an outside service; set at all (`0` included) and it wins over the setting |
+| `MISAKA_TELEMETRY` | unset — the `enableInstallTelemetry` setting decides (default off) | whether this install may be identified to an outside service; set at all (`0` included) and it wins over the setting |
 | `MISAKA_TIMING` | `0` | `1` prints startup timings to stderr, grouped by namespace (`main`, `extensions`) |
 | `MISAKA_MCP_CONFIG` | none | a parent's hand-off: extra MCP servers for a child |
 

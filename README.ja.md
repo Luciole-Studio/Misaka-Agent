@@ -3,262 +3,207 @@
   MISAKA
 </h1>
 
-<p align="center"><strong>人文・社会科学のためのマルチエージェント研究システム。</strong></p>
+<p align="center"><strong>人文・社会科学のための、AI エージェントの研究チーム。</strong></p>
+
+<p align="center"><em>すべての結論はレッドチームの検証を受け、根拠の資料はそのすぐ隣に置かれます、とミサカは報告します。</em></p>
 
 <p align="center"><a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · 日本語</p>
 
-調べたい問いを渡すと、MISAKA はそれを課題に分解し、エージェントのチームを並列で走らせ、
-出てきた結論をレッドチームに攻撃させたうえで、成果をプロジェクトフォルダに書き出します。
-根拠となった資料は、その隣に並べて置かれます。
+MISAKA の登場人物は『とある魔術の禁書目録』から借りています（[名前の由来](#名前の由来)）。**Last Order**（打ち止め）はあなたが話しかける取りまとめ役、**Sisters**（妹達）は彼女が送り出す専門家たちです。歴史学者、計量経済学者、批判役など、誰にするかはあなたが決めます。一人ひとりが検体番号と、自分のスキルやツール、そして自分のモデルを持っています。ミサカネットワークと同じく、彼女たちは学んだことを共有します。同じプロジェクトのエージェントなら、誰でも他のエージェントの会話を検索できます。
 
-結論が反証に耐えなければならない仕事のために作られています。どの結論にも `SOURCES.md` と、
-実際に引用したファイルそのものを収めたフォルダが必ず付きます。
-
-```sh
-misaka init                              # このフォルダをプロジェクトにする
-misaka doc add sources/                  # 手元の PDF をインデックスする
-misaka research "日本の公共図書館運動は1920年から1950年にかけてどう変わったか"
-```
-
-最後のコマンドが開くのはプログレスバーではなく、一つの対話です。理由は以下に書きます。
+問いを渡すと、Last Order はまずあなたと一緒に研究計画を立てます。Sisters が並行して調査し、出てきた結論をレッドチームが攻撃します。実質的な異議はひとつひとつが新しい研究の枝になり、その枝にもチームとレッドチームがつきます。すべての枝が閉じると、Last Order が報告書を起草し、独立したレッドチームがそれを審査し、彼女が異議の一つひとつに裁定を下します。最終報告は、引用したファイルそのものと並べて、あなたのプロジェクトフォルダに保存されます。
 
 <p align="center">
-  <img src="assets/setup.png" alt="misaka setup — 環境チェックとプロバイダ設定" width="820">
+  <img src="assets/tui.png" alt="MISAKA のパネル：スペース、セッション、エージェントの一覧と Last Order のウィンドウ" width="820">
 </p>
 
-## 実行の流れ
+## ほかと何が違うのか
 
-作業を担うのは二つの役割です。
+- **チームは自分で編成。** Sister にはそれぞれ専門分野（Last Order はこれを見て仕事を振ります）、自分のスキルと MCP サーバー、自分のモデルがあります。一人は Claude、もう一人は GPT という編成もできます。
+- **自分の結論に反論する研究。** 結論を攻撃するのにいちばん向いた Sister が審査し、実質的な異議が出れば、そのたびに子ノードが開いて同じ手順を最初からたどります。深さはあなたが決めます。
+- **主張を種類ごとに区別。** 事実・推論・解釈・価値判断は、それぞれそうと明示して申告されます。証拠で決着がつかないときは、対立する結論を並べたまま残します。多数決では決めません。
+- **ファイルまでたどれる。** 各ノードのフォルダには計画、各 Sister の成果、結論、レッドチームの批評があり、`SOURCES.md` と、引用したすべてのファイルへのハードリンクが付きます。
+- **主導権はあなたに。** 計画はあなたの了承を待ちます。了承といっても、ふつうに会話するだけです。どの枝とも専用のタブで直接話せ、不要な枝は外せ、研究は止めて後から再開できます。
+- **手元の資料とウェブ。** PDF、EPUB、DjVu、Office ファイル、メモを索引化できます。エージェントは目次やページ単位で読み、ページ画像を確認し、引用が何ページにあるかを突き止めます。ウェブ検索はキーなしでも使えます。
+- **途切れない記憶。** 長い会話は切り捨てられずに圧縮され、履歴はすべて検索できます。
 
-| 役割 | 担当 |
-|---|---|
-| **Last Order** | 調整役。問いを計画に、計画をタスクカードに変え、最後に結論を書く。 |
-| **Sisters** | 実行役。カードを一枚ずつ受け取り、各自のプロセスで自分の道具を使って片付ける。 |
+## 研究の進み方
 
-一回の実行は五段階で進みます。
+> *計画ができたよ！あなたが「いいよ」って言ったらすぐ始めるから！ってミサカはミサカは計画書を両手で差し出してみたり。*
 
-1. **計画を立てる。** Last Order が進め方を起草し、あなたに見せます。
-2. **あなたの承諾を待つ。** 計画はここで止まります。普通の会話として話し合い、彼女は
-   あなたの意見を受けて書き直し、納得がいくまで続けます。承認コマンドも合言葉もありません。
-   あなたが納得したと判断した時点で、彼女自身が開始を記録します。無人で走らせるときは
-   settings.json の `research.plan_approval` を false にします。コマンドラインの `misaka research` は
-   ルートに会話がないため、全体が無人実行になります。
-3. **カードを配る。** 計画がタスクカードになり、Sisters が受け取って並列で作業します。
-   同時実行数は上限に従います。各 Sister はまず自分のやり方を普通の散文で簡潔に述べ、
-   そのまま同じセッションの中で作業を完了します。別立ての計画ファイルや、記入すべき
-   JSON の受け渡し書式はありません。
-4. **必要なら次のラウンドへ。** Last Order は結論を書かずに、もう一度 Sisters を送り出す
-   こともできます。`--followups N` は最初のカードが戻ってきた後に追加できる回数の上限で、
-   既定値は 2 です。計画についてあなたと話し合った分は、この回数に数えません。どのラウンドの
-   計画も、最初と同じようにあなたの承諾を待ちます。
-5. **結論とレッドチーム。** 結論は全ラウンドを踏まえて書かれ、その後レッドチームが
-   それを攻撃します。実質的な問題が見つからなかった場合、または深度上限に達した場合は、
-   モデルを一度も呼ばずに記録だけが残ります。
+```mermaid
+flowchart TD
+    Q(["あなたの問い"]) --> P["Last Order が計画を起草"]
+    P -->|"あなたが了承"| C["Sisters がカードを<br/>並行して処理"]
+    C --> S{"結論を出せるか？"}
+    S -->|"まだ：もう一巡"| C
+    S -->|"出せる"| N["Last Order が<br/>ノードの結論を書く"]
+    N --> R["レッドチームの Sister が<br/>結論を攻撃"]
+    R -->|"実質的な異議ごとに"| K["子ノード<br/>Last Order の分岐が<br/>同じ手順をたどる"]
+    R -->|"実質的な異議なし<br/>または深さの上限"| X["ノードを閉じる"]
+    K -.->|"順に閉じる"| X
+    X -->|"全ノードが閉じたら"| F["報告書の草稿<br/>→ 独立レッドチーム<br/>→ 裁定"]
+    F --> O(["最終報告、SOURCES.md、<br/>引用ファイル"])
+```
 
-深追いしたくない枝は、あなたの判断で飛ばせます。そのノードは未調査のまま閉じ、理由は
-記録に残って最終判断のときに考慮されます。
+1. **計画。** Last Order は、問いが本当は何を問うているのかを見きわめ、各部分を専門の合う Sister に割り当て、レッドチーム役の Sister を指名します。計画はあなたの了承を待ちます。彼女と相談し、あなたが同意したら始まります。
+2. **カード。** 割り当てはそれぞれカードになります。Sisters は自分のセッションでカードを並行して進め、見つけたことを出典とともに申告していきます。
+3. **追加の巡回。** 結果に穴があれば、Last Order は結論を出す前にもう一度 Sisters を送り出します（既定では追加は二巡まで。増やすこともできます）。
+4. **レッドチーム。** Last Order がノードの結論を書き、レッドチームの Sister が、計画と証拠と Last Order 自身の推論を手元に置いて、それを攻撃します。
+5. **枝分かれ。** 実質的な異議はそれぞれ子ノードになります。子ノードは Last Order の会話を分岐させたもので、自分の Sisters とレッドチームを連れて同じ手順をたどります。研究の木は一段ずつ、あなたが選んだ深さまで育ちます（選ばなければ問いから三段下まで）。
+6. **最終報告。** すべてのノードが閉じると、Last Order が報告書を起草し、独立したレッドチームが草稿を審査し、彼女が各異議を受け入れるか、退けるか、未決のまま残すかを、理由とともに最終報告に書き込みます。
 
-## 成果物の置かれ方
+研究は進むそばから保存され、`/research resume` で止まったところから再開できます。自動実行、深さと並列数、枝の除外、シェルからの実行については[研究ガイド](docs/guide/research.md)（英語）を参照してください。
 
-成果は選んだプロジェクトの中に、ノードごとに一つのフォルダとして書き出されます。
+## 得られるもの
+
+> *引用した資料は、すべて確かめられる場所に綴じてあります、とミサカは報告します。*
+
+成果物はすべてプロジェクトフォルダに、ノードごとに一つのフォルダとして書き出されます。
 
 ```
 your-project/
-├── nodes/<node>/              計画・結論・レビュー
-│   ├── cards/<card>/          各 Sister の成果
-│   ├── SOURCES.md             結論が依拠している資料
-│   └── sources/               引用されたファイルそのもの
-└── final/<run>-<file>         問い・サーベイ・草稿・最終報告
+├── PROJECT.md                  Last Order が更新し続けるプロジェクト概要
+├── nodes/<node>/
+│   ├── plan.md                 計画と、その Sisters を選んだ理由
+│   ├── cards/<card>/           各 Sister の成果と、レッドチームの critique.md
+│   ├── synthesis.md            ノードの結論
+│   ├── deliberation.md         レッドチームに渡した Last Order の推論
+│   ├── SOURCES.md              結論が引用したすべてのファイル……
+│   └── sources/                ……のハードリンク
+└── final/<run>-final.md        裁定済みの最終報告（問い・概観・草稿も同じ場所に）
 ```
 
-`sources/` の中身はハードリンクなので容量を食わず、原本が動くこともありません。リンクを
-張れない場合にだけコピーになります。これらは派生物であり、登録もインデックスもコミットも
-されません。
+`SOURCES.md` には、引用されたファイルごとに、チェックサム、どこで引用されたか、Sisters が申告したどの発見がそれに依拠しているかが記録されます。
 
-Git の履歴は任意で、しかも軽量です。ノードが閉じるたびに一つ、実行の終わりに一つ。
-納品に worktree もマージも要りません。
+```markdown
+- `sources/t_3f8cc0/notes.md` ← `nodes/b_ebf11de142/cards/t_3f8cc0/notes.md`
+  - sha256 46559fecec176cae…
+  - cited in `nodes/b_ebf11de142/synthesis.md`
+  - cited by [t_3f8cc0] "…" (inference)
+```
+
+ハードリンクなので余分な容量は使わず、元のファイルも動きません。プロジェクトが git リポジトリなら（`misaka init` でそうなります）、ノードが閉じるたびと研究の完了時にコミットされます。
 
 ## インストール
 
-MISAKA は PyPI にはありません。あちらの `misaka` は無関係なパッケージです。本リポジトリから
-インストールしてください。
+Python 3.12 以上、git、[ripgrep](https://github.com/BurntSushi/ripgrep)、[fd](https://github.com/sharkdp/fd) が必要です。macOS と Linux で動きます。
 
 ```sh
-# 実際に使うプロバイダの SDK を選ぶ
-pip install "misaka[anthropic] @ git+https://github.com/Luciole-Studio/Misaka-Agent.git"
-
-# チェックアウトから入れる場合
-git clone https://github.com/Luciole-Studio/Misaka-Agent.git
-cd Misaka-Agent && pip install ".[anthropic]"
-
-# 開発環境
-uv venv .venv --python 3.13 && uv sync
+uv tool install "misaka[providers] @ git+https://github.com/Luciole-Studio/Misaka-Agent.git"
 ```
 
-追加コンポーネント: `anthropic`、`openai`、`google`、`bedrock`、`mistral`、または
-五つまとめて入れる `providers`。`pageindex` は PDF の目次抽出を、`browser` はブラウザ
-ツールを追加します。
+`pip install` や `pipx install` でも同じ指定が使えます。`providers` はすべてのモデル SDK を入れます。使うプロバイダが一つだけなら、その extra を指定してください（`anthropic`、`openai`、`google`、`bedrock`、`mistral`。OpenRouter など OpenAI 互換のエンドポイントは `openai`）。`pageindex` は長い PDF の目次抽出、`browser` はブラウザ操作ツールを追加します。インストールはこのリポジトリから行ってください。PyPI の `misaka` は無関係のパッケージです。
 
-MISAKA が代わりに入れてくれないものが二つあります。
+## クイックスタート
 
-- **git** は必須です。`misaka init` がプロジェクトのリポジトリを作り、採用された結果は
-  そこにコミットされます。`xcode-select --install` または `apt install git` で先に入れてください。
-- **ripgrep** と **fd** は `grep` と `find` ツールの実体です。`brew install ripgrep fd`
-  か `apt install ripgrep fd-find` で入れるか、バイナリを `~/.misaka/cache/bin` に
-  置いてください。
-
-## 最初の一回
+> *最初の問いがコインです。弾いてください。* ⚡
 
 ```sh
-misaka setup
+mkdir my-research && cd my-research
+misaka setup     # ログイン、モデル選択、最初の Sisters の作成、このフォルダのプロジェクト化
+misaka           # パネルを開いて /research と入力
 ```
-
-ウィザードが環境を確認し、プロバイダの認証情報と既定モデルを保存してテストリクエストを
-一度送り、最初の Sisters を作り、PDF の追加コンポーネントを勧め、キーがあれば Web 検索の
-バックエンドを固定し、プロジェクトフォルダを初期化します。各節は単独で再実行できます
-（たとえば `misaka setup model`）。認証情報が未設定のまま `misaka` を実行すると、
-ウィザードが自分から立ち上がります。
-
-`misaka update` はこのインストールがリポジトリの `main` より遅れていないかを報告し、
-`--apply` で早送りします。リリースタグではなくブランチを追い、早送りできない
-チェックアウトは解決せずに理由を出して止まります。
-
-その反対側が `misaka uninstall` です。`~/.misaka` の下に何がどれだけ入っているかを先に
-示したうえで、認証情報・ボード・コンテキストエンジンの記憶・各種キャッシュをまとめて
-削除します。プロジェクトフォルダには一切触れず、触れないことを示すために一覧を出します。
-パッケージ自体の削除はインストーラの仕事なので、そのコマンドを表示するだけにとどめます。
-
-入れたばかりの状態では `anthropic` / `claude-sonnet-4-5` に接続します。認証情報を手で
-渡す場合:
-
-```sh
-export ANTHROPIC_API_KEY=sk-ant-...   # 組み込みプロバイダはすべて環境変数を尊重します
-misaka auth check                     # プロバイダごとに、セッションと同じ解決経路で確認
-```
-
-チャットの中では `/login` が OAuth トークンか API キーを `~/.misaka/credentials/auth.json` に
-パーミッション 0600 で保存します。`/model` はモデル選択画面を開き、そこで選ぶとすべての
-Sister の既定値として保存されます。`/model <名前>` は目の前のセッションだけを切り替えます。
-
-## コマンド
-
-```sh
-misaka                 # パネル。パイプに繋がれたときは素のチャット
-misaka chat            # Last Order と話す
-misaka research "..."  # 研究を一回走らせる
-misaka board           # タスクボード
-misaka doc add x.pdf   # 文書をインデックスする
-misaka create          # Sister を追加する
-misaka web status      # 現在の検索バックエンドと認証情報
-```
-
-残りは `misaka --help` にあります: `task`、`tell`、`dm`、`net`、`skills`、`bundles`、
-`moa`、`lcm`、`auth`、`remove`、`uninstall`、`update`。
-
-## パネル
 
 <p align="center">
-  <img src="assets/tui.png" alt="misaka のパネル — スペース、セッション、Sisters の名簿と対話中の Last Order" width="820">
+  <img src="assets/setup.png" alt="misaka setup：環境チェックのあと、モデルとプロバイダを設定" width="820">
 </p>
 
-端末で `misaka` をそのまま実行すると、複数ペインのパネルが開きます。fork した研究の枝は
-自分のタブを持ちます。ノードのプロセスがそこで Last Order を対話ウィンドウとして走らせ、
-彼女の Sisters が隣にグリッドで並びます。そのタブで入力した内容は、その Last Order 自身の
-一ターンになります。ノードが閉じてもウィンドウは残るので、何を見つけたのか聞き続けられます。
-実行中に閉じるとノードは終了し、`/research resume` でやり直せます。
+手元に PDF や EPUB、メモがあるなら、setup の前にこのフォルダ（たとえば `sources/`）に入れておけば setup が索引を作ります。あとから `misaka doc scan sources/` でも構いません。`/research` とだけ入力すると、どこまで深く調べるか、同時にどれだけ動かすか、ノードごとに何巡まで追加するか、計画をあなたの了承待ちにするかを順に尋ね、次のメッセージを問いとして受け取ります。シェルから始めるなら `misaka research "問い"` です。
 
-コマンドラインでの実行にはパネルがないため、ノードはバックグラウンドプロセスになります。
-`misaka chat --attach --session PATH` で接続すると、入力は本来の持ち主に直接届き、間に
-別のモデルは入りません。Enter は動作中のセッションに指示を足し、待機中のセッションでは
-一ターンを開始します。`/pause` は次のリクエスト・ツール・ワークフローの境界で保留し、
-`/resume` が解放します。すでに走っているツールやエージェントは止まりません。接続した
-ウィンドウを閉じても、切断されるだけです。
+## チーム
 
-## 文書と Web
+> *検体番号10032号、着任しました、とミサカは敬礼します。*
 
-`doc_add`、`doc_find`、`doc_read`、`doc_outline`、`doc_page_image`、`doc_verify` により、
-エージェントは引用でき、引用元と突き合わせて検証できるコーパスを持ちます。`misaka doc` は
-同じものへのシェルからの入口です。
-
-Web 検索は設定ゼロで動きます。キー不要のベンダーリングが担います。バックエンドを固定したり
-キーを足したりするには:
+Last Order は MISAKA に最初から入っています。Sisters はあなたが作ります。一人がもう一人のレッドチームを務められるので、二人いれば始められます。
 
 ```sh
-misaka web set backend tavily
-misaka web set env.TAVILY_API_KEY tvly-...   # ~/.misaka/.env に 0600 で書かれます
+misaka create 10032 --desc "歴史・社会研究：公文書、新聞雑誌、オーラルヒストリー"
+misaka create 10043 --desc "独立審査：異論、再現、皆が見落としたもの"
 ```
 
-エクスポートされた環境変数は常にファイルより優先されます。`misaka web setup` にはプロバイダと
-ティアの選択画面があり、認証情報の入力は伏字になります。探索・有効化と無効化・再読み込み・
-現在の上限は `misaka web --help` を参照してください。
+Sister は一人につき `~/.misaka/profiles/sisters/<id>/` のフォルダ一つです。
 
-エージェントは通常の作業道具も持ちます: `bash`、`read`、`write`、`edit`、`grep`、`find`、
-`web_fetch`、`download_file`、そして `.docx` / `.xlsx` / `.pptx` を読み書きする `office`。
-
-## コンテキストエンジン
-
-長いセッションは **MISAKA LCM** を使用します。固定版
-[hermes-lcm](https://github.com/stephenschoettler/hermes-lcm) のプロジェクト単位の fork です。
-圧縮・検索アルゴリズムは維持し、キャッシュを `<project>/.misaka/lcm/` に分離します。
-同じプロジェクトのエージェントは共有し、最後の利用プロセスの終了時に削除します。
-異常終了で残ったキャッシュは次の起動時に清掃します。
-
-セッション原文とチェックポイントは保存され、再開時に LCM を再構築します。
-引き継ぎ元のセッションも保持してください。履歴、Board、成果物は削除対象ではありません。
-
-LCM に設定された秘匿化・除外・保持・GC の各ポリシーはそのまま効きます。生データが無条件に
-永久保持されると約束するものではありません。アルゴリズム設定は上流の `LCM_*` の名前をその
-まま使い、製品独自の別名は設けていません。`misaka lcm --help` が上流本来の操作文法を
-公開します。ソースを移植したことは、上流ホストの挙動がすべて再現されていることの保証では
-ありません。差分は `misaka/extensions/misaka_lcm/PORT_NOTES.md` に記録しています。
-
-## 設定
-
-すべて 1 つのホーム `~/.misaka/`(`MISAKA_HOME` で移動できます)の下にあり、環境変数がファイルより優先されます。
-
-| 場所 | 内容 |
+| ファイル | 中身 |
 |---|---|
-| `settings.json` | すべての設定をセクションで保持：pi 自身のキー（`defaultProvider`、`defaultModel`…）、`allies`、`skills`、`moa`、`web` |
-| `credentials/auth.json` | 保存された認証情報、パーミッション 0600 |
-| `models.json` | 独自プロバイダとモデル。OpenAI 互換ゲートウェイなど |
-| `MISAKA.md`、`skills/`、`subagents/` | 全ロール共有のアイデンティティ、スキル、サブエージェント種別 |
-| `profiles/last_order/` | Last Order の人格・スキル・MCP 設定 |
-| `profiles/sisters/<id>/` | Sister ごとに一つのディレクトリ |
+| `DESCRIBE.md` | 専門分野。Last Order はこれを読んで何を任せるか決めます |
+| `SOUL.md` | 性格と話し方 |
+| `settings.json` | 自分のモデルと MCP サーバー |
+| `skills/` | 彼女だけが使うスキル |
 
-よく使う設定だけ挙げると:
+実際に使っている編成の例：
 
-| 設定 | 既定値 | 意味 |
-|---|---|---|
-| `defaultProvider` / `defaultModel` | `anthropic` / `claude-sonnet-4-5` | 自分のモデルを固定していないロールが使うプロバイダとモデル |
-| `network.max_concurrent_sisters` | 空きメモリ / 256 MiB、4〜12 | このホストで同時に走るカード数 |
-| `research.token_cap` | `0`、無効 | ボードに表示され強制される token 予算 |
-| `research.plan_approval` | `true` | 計画があなたの承諾を待つかどうか |
-| `lcm.context_threshold` | `0.35` | コンテキストのどの割合で LCM が圧縮を始めるか |
+| Sister | 専門 |
+|---|---|
+| 10032 | 歴史・社会研究 |
+| 10036 | 実証計量と因果識別 |
+| 10037 | マクロ経済と公共政策 |
+| 10043 | 独立審査と再現 |
 
-**設定の全体は [CONFIGURATION.md](CONFIGURATION.md) にあります。** 制御する対象ごとに
-まとめてあります。解釈できない値が来るとコマンドは停止し、設定名とその値を示します。
-環境にある `MISAKA_*` は MISAKA が自分の子プロセス用に設定しているもので、設定ではありません。
-`MISAKA_HOME` だけがあなたのものです。ベンダーの鍵やプラグインのつまみのように「他のコードが
-環境から読む」ものは `~/.misaka/.env` に置きます。
+全エージェント共通の設定、プロンプトの組み立て方、特定の Sister と直接話す方法は[チームガイド](docs/guide/team.md)（英語）にあります。
 
-## 診断
+## よく使うコマンド
 
-チャット内の `/debug` は、描画された画面と会話全体を `~/.misaka/logs/misaka-debug.log`
-にパーミッション 0600 で書き出し、そのパスを表示します。診断スイッチはこれだけで、
-デバッグ用の環境変数は存在しません。
+| やりたいこと | コマンド |
+|---|---|
+| パネルを開く（パイプ経由ならふつうのチャット） | `misaka` |
+| 一人の Sister と話す | チャットで `/sister 10032`、または `misaka chat --as 10032` |
+| 研究を始める | チャットで `/research`、または `misaka research "問い"` |
+| 研究の確認・停止・再開 | `/research status`、`/research stop`、`/research resume` |
+| タスクボードを見る | `/board` または `misaka board` |
+| Sister の追加・削除 | `misaka create ID`、`misaka remove ID` |
+| 文書の索引化 | `misaka doc add ファイル`、`misaka doc scan フォルダ` |
+| モデル選択・ログイン | `/model`、`/login` |
+| ウェブ検索の設定 | `misaka web` |
+| スキルの管理 | `misaka skills` |
+| 不具合の報告 | `/debug` で画面と会話全体をログに書き出し、そのパスを表示 |
+| 更新・アンインストール | `misaka update --apply`、`misaka uninstall` |
+
+そのほかは `misaka --help` で確認できます。
+
+## モデル
+
+`/login` でブラウザからサインインするか（Anthropic、OpenAI の ChatGPT プラン、GitHub Copilot、xAI、OpenRouter）、カタログにある任意のプロバイダの認証情報を設定します。Google、Mistral、Bedrock も含まれます。ローカルのモデルサーバーや OpenAI 互換のゲートウェイは `~/.misaka/models.json` に書きます。`/model` は全エージェントの既定モデルを決め、Sister ごとに自分のモデルを固定することもできます。
+
+## データと費用
+
+MISAKA が保存するものはすべてあなたのマシンの中にあります。設定、認証情報、セッション、タスクボードは `~/.misaka/` に、研究の成果物はプロジェクトフォルダに置かれます。プロンプトはあなたが設定したモデルプロバイダにだけ送られます。検索は設定した検索サービスに送られ、何も設定していないときや設定したサービスが失敗したときは Exa、Parallel、Firecrawl、Keenable の無料公開枠を順番に使います（`misaka web set keyless_fallback false` で止められます）。MISAKA 自身はテレメトリを一切送らず、更新の確認も `misaka update` か `misaka setup` を実行したときだけです。あとから追加したスキルや MCP サーバーは、独自にネットワークへ接続することがあります。`misaka uninstall` は `~/.misaka` を削除しますが、プロジェクトフォルダには触れません。
+
+研究は大きく広がります。既定では最大四つのノードが同時に動き、各ノードで最大四枚の Sister のカードが並行します。全体の上限はマシンのメモリ量で決まります。深い研究ではモデルの呼び出しが大量に並行するので、`~/.misaka/settings.json` の `research.token_cap` でトークン予算を設定しておくと、タスクボードがそれを守らせます。
+
+## ドキュメント
+
+| やりたいこと | 読むもの |
+|---|---|
+| 研究を動かす：了承、深さ、並列数、再開、シェルからの実行 | [docs/guide/research.md](docs/guide/research.md) |
+| チームを作る：役割、プロフィール、プロンプト、モデル、スキル | [docs/guide/team.md](docs/guide/team.md) |
+| 文書とウェブを使う | [docs/guide/sources.md](docs/guide/sources.md) |
+| 設定を変える | [CONFIGURATION.md](CONFIGURATION.md) |
+| 各部分の出どころを知る | [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) |
+
+いずれも現在は英語のみです。
+
+## 名前の由来
+
+MISAKA の名前は、鎌池和馬『とある魔術の禁書目録』『とある科学の超電磁砲』から借りています。原作では、妹達（シスターズ）は「超電磁砲」御坂美琴のクローンで、ミサカネットワークを通じて記憶を共有しています。
+
+| 原作 | MISAKA |
+|---|---|
+| **御坂美琴**、すべての妹達のオリジナル | `MISAKA.md`：どのエージェントも自分の設定より先に読み込む、共通の人格 |
+| **妹達（シスターズ）**、検体番号で呼ばれる：ミサカ10032号、10033号…… | あなたの専門家たち。それぞれ番号と専門分野と自分の `SOUL.md` を持ちます |
+| **打ち止め（ラストオーダー）**、ミサカ20001号、ネットワークの上位個体 | あなたが話しかける取りまとめ役 |
+| **ミサカネットワーク**、一人が学んだことを他の妹達も思い出せる | プロジェクトの共有記憶。どのエージェントも検索できます |
+
+この README の「とミサカは報告します」は演出です。エージェントの話し方は、それぞれの `SOUL.md` しだいです。妹達のように話してほしければ、`SOUL.md` に一行書き足すだけです。
+
+MISAKA は独立したプロジェクトで、原作者および出版社とは一切関係がなく、公認も受けていません。
 
 ## 土台
 
-MISAKA のカーネルは [pi](https://github.com/earendil-works/pi) の Python への移植で、
-パネルは [herdr](https://github.com/herdrdev/herdr) の移植です。コンテキスト管理に
-[hermes-lcm](https://github.com/stephenschoettler/hermes-lcm)、PDF の構造抽出に
-[PageIndex](https://github.com/VectifyAI/PageIndex)、各ペインの裏側の端末エミュレータに
-[ghostty](https://github.com/ghostty-org/ghostty) の VT ライブラリを収録しています。
-
-何がどこから来て、どのコミットに固定され、何を変えたかの全索引は
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) にあります。
+MISAKA のエージェントカーネルは [pi](https://github.com/earendil-works/pi) の Python 移植で、パネルは [herdr](https://github.com/herdrdev/herdr) の移植です。各ペインの裏では [ghostty](https://github.com/ghostty-org/ghostty) の端末ライブラリが動いています。長い会話の管理は [hermes-lcm](https://github.com/stephenschoettler/hermes-lcm)、文書構造の抽出は [PageIndex](https://github.com/VectifyAI/PageIndex) を土台にし、ウェブツールとスキルは [Hermes Agent](https://github.com/NousResearch/hermes-agent) から、Office 対応は [FrontierAgent](https://github.com/ApodexAI/FrontierAgent) から移植しています。どこから何を取り込み、どのコミットを基準に何を変えたかは [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) に記録しています。
 
 ## ライセンス
 
-[Apache License 2.0](LICENSE)。第三者コンポーネントはそれぞれのライセンスを保持しており、
-すべて THIRD_PARTY_NOTICES.md に記録されています。
+[Apache License 2.0](LICENSE)。サードパーティのコンポーネントはそれぞれのライセンスに従い、すべて THIRD_PARTY_NOTICES.md に記録しています。
+
+<p align="center"><em>以上、ミサカネットワークより通信を終わります、ってミサカはミサカは締めくくってみたり。</em></p>
