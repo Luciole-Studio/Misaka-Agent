@@ -458,6 +458,13 @@ class AnthropicAllowedFallbackModel(SchemaModel):
 class OpenAICompletionsCompat(SchemaModel):
     supportsStore: bool | None = None
     supportsDeveloperRole: bool | None = None
+    # pi 0.86 (types.ts): whether the exact model accepts system or developer messages after
+    # the conversation has started, and whether such messages may add tools; misaka carries
+    # them from the catalog and folds nothing mid-conversation yet.
+    supportsMidConvoSystemMessages: bool | None = None
+    supportsMidConvoToolAdditions: bool | None = None
+    # pi 0.86: vLLM `--scheduling-policy priority` value; never set by the generated catalog.
+    vllmPriority: int | None = None
     supportsReasoningEffort: bool | None = None
     supportsUsageInStreaming: bool | None = None
     maxTokensField: Literal["max_completion_tokens", "max_tokens"] | None = None
@@ -507,6 +514,7 @@ class OpenAIResponsesCompat(SchemaModel):
     # Default true upstream: a model that sets it false takes no `max_output_tokens` at all.
     supportsMaxOutputTokens: bool | None = None
     supportsDeveloperRole: bool | None = None
+    supportsMidConvoSystemMessages: bool | None = None     # pi 0.86, carried from the catalog (see AnthropicMessagesCompat)
     sessionAffinityFormat: SessionAffinityFormat | None = None
     supportsStrictMode: bool | None = None
     supportsOpenAIGrammarTools: bool | None = None
@@ -529,6 +537,12 @@ class AnthropicMessagesCompat(SchemaModel):
     # request carries `output_config.effort` system messages, adaptive thinking with
     # `block_binding`, and two extra beta features. See `anthropic.py`.
     supportsMidConvoEffort: bool | None = None
+    # pi 0.86: transcript-backed mid-conversation system prompt and tool changes on models
+    # whose cache survives them (types.ts). Carried from the catalog; misaka does not yet
+    # rewrite a running conversation's prompt or tools, so they decide nothing here.
+    supportsMidConvoSystemMessages: bool | None = None
+    supportsMidConvoToolChanges: bool | None = None
+    sessionAffinityFormat: Literal["openrouter"] | None = None
     allowedFallbackModels: list[AnthropicAllowedFallbackModel] | None = None
     supportsToolReferences: bool | None = None
 
@@ -564,6 +578,41 @@ class ModelCost(SchemaModel):
     tiers: list[ModelCostTier] | None = None
 
 
+class ModelImageResizeOptions(SchemaModel):
+    """pi-ai 0.87 ``ModelImageResizeOptions``: the cache-safe resize profile applied before a
+    new image enters conversation history."""
+
+    maxWidth: int | None = None
+    maxHeight: int | None = None
+    maxBytes: int | None = None            # of the base64-encoded payload
+    jpegQuality: int | None = None
+
+
+class ModelImageInputLimits(SchemaModel):
+    resize: ModelImageResizeOptions | None = None
+    maxPerMessage: int | None = None
+    maxPerRequest: int | None = None
+
+
+class ModelInputLimits(SchemaModel):
+    """pi-ai 0.87 ``ModelInputLimits``: what a model accepts in one request. Carried from the
+    catalog and ``models.json``; the resize profile is not applied by misaka yet (pi applies it
+    to attachments, ``read`` and tool-result images), so a catalog entry that names one is
+    valid rather than refused."""
+
+    maxRequestBytes: int | None = None
+    images: ModelImageInputLimits | None = None
+
+
+class RadiusModelProvider(SchemaModel):
+    """One backend a Radius catalog model routes to (pi 0.86 ``providers/data/radius.json``)."""
+
+    id: str
+    name: str
+    credential: str
+    source: str
+
+
 class Model(SchemaModel):
     id: str
     name: str
@@ -573,12 +622,23 @@ class Model(SchemaModel):
     reasoning: bool
     thinkingLevelMap: ThinkingLevelMap | None = None
     input: list[InputModality]
+    inputLimits: ModelInputLimits | None = None
     cost: ModelCost
+    # pi 0.86 ``ModelPromptCache``: prompt-cache lifetime in seconds per retention tier
+    # (``short``/``long``), unset when the provider's cache behaviour is unknown. Carried from
+    # the catalog for pi's cache warming, which misaka does not run.
+    promptCache: dict[Literal["short", "long"], int] | None = None
     contextWindow: int
     maxTokens: int
     headers: dict[str, str] | None = None
     compat: ModelCompat | None = None
     samplingParams: dict[str, Any] | None = None   # sampling params configurable in models.json
+    # pi 0.86's offline Radius catalog carries gateway metadata on its entries: the lab that
+    # made the model, whether the gateway offers it now, and the backends it routes to.
+    # Transcribed as shipped; only the Radius provider reads them.
+    lab: str | None = None
+    enabled: bool | None = None
+    providers: list[RadiusModelProvider] | None = None
 
 
 class ImagesModel(SchemaModel):
