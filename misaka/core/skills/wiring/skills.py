@@ -189,7 +189,8 @@ class SkillsPart:
         self._roots = roots
         workspace = cwd or os.getcwd()
         self._profile_dir, self._workspace = profile_dir, workspace
-        self._live_roots = set()
+        self._live_roots = set()          # what the file tools may not touch (linked skills at their real place too)
+        self._shell_roots = set()         # what a shell command may not name (the roots themselves)
 
         def entries():
             return self._entries()
@@ -233,6 +234,7 @@ class SkillsPart:
         # not live trees, so reading them stays possible. Unresolvable shell substitution is refused
         # as well, but only where no one is watching the command (see `_command_touches`).
         live_roots = self._live_roots
+        shell_roots = self._shell_roots
         self._refresh_roots()
 
         # A window with a person in it is the only attended session: a card, a child, a DM turn
@@ -249,7 +251,7 @@ class SkillsPart:
                 # The one place a file tool's target is resolved, so the home's rule is asked here too.
                 return home_guard.refusal(target, workspace, kind)
             if tool in {"bash", "powershell"}:
-                return _command_touches(str(args.get("command") or ""), workspace, live_roots,
+                return _command_touches(str(args.get("command") or ""), workspace, shell_roots,
                                         shell=tool, unattended=unattended)
             return None
 
@@ -815,9 +817,13 @@ class SkillsPart:
             self._roots[:] = roots
             skill_index.invalidate()
         from misaka.core.skills.layers import protected_skill_roots
+        bundle_roots = {str(Path(root).resolve()) for _, root in bundles.bundle_roots(self._profile_dir, self._workspace)}
         self._live_roots.clear()
         self._live_roots.update(protected_skill_roots(self._profile_dir, self._workspace, extension_paths=extension_paths))
-        self._live_roots.update(str(Path(root).resolve()) for _, root in bundles.bundle_roots(self._profile_dir, self._workspace))
+        self._live_roots.update(bundle_roots)
+        self._shell_roots.clear()
+        self._shell_roots.update(protected_skill_roots(self._profile_dir, self._workspace, extension_paths=extension_paths, linked=False))
+        self._shell_roots.update(bundle_roots)
 
     def _execution_entry(self, entry):
         with self._copy_lock:

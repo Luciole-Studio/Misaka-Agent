@@ -273,8 +273,14 @@ def skill_roots(profile_dir, cwd=None, *, extension_paths=()):
     return out
 
 
-def protected_skill_roots(profile_dir, cwd=None, *, extension_paths=()):
-    """Workflow protection includes absent and other-role Skill and bundle roots."""
+def protected_skill_roots(profile_dir, cwd=None, *, extension_paths=(), linked=True):
+    """Workflow protection includes absent and other-role Skill and bundle roots.
+
+    With ``linked`` the real locations of symlinked skills are included too: the file tools
+    resolve their target and would otherwise write a live skill through its link. The shell
+    guard passes ``linked=False``: it can only refuse a command that *names* a root, reads
+    included, and a skill kept in a library is used from there (its runtime, its documented
+    entry) far more often than written."""
     roles = Path(os.path.expanduser(CFG["roles_root"]))
     roots = [Path(shared_skills_dir())]
     if profile_dir:
@@ -291,9 +297,10 @@ def protected_skill_roots(profile_dir, cwd=None, *, extension_paths=()):
     roots.extend(Path(root) for _, root in skill_roots(profile_dir, cwd, extension_paths=extension_paths))
     protected = {str(p) for root in roots for p in (root.absolute(), root.resolve())}
     # A skill kept as a symlink (a library elsewhere, linked into a root) really lives where the
-    # link points; the guards compare real paths, so that place must be protected too.
-    for root in roots:
-        protected.update(_linked_skill_targets(root))
+    # link points; the file tools compare real paths, so that place must be protected too.
+    if linked:
+        for root in roots:
+            protected.update(_linked_skill_targets(root))
     return protected
 
 

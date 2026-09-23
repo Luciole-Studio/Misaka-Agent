@@ -96,5 +96,10 @@ def test_a_skill_kept_as_a_symlink_is_guarded_at_its_real_place_too(tmp_path):
             refused = call("write", path=str(target), content="x")
             assert refused and refused["block"], target
         assert call("write", path=str(home.path("shared") / "library" / "notes.md"), content="x") is None
+        # The shell guard can only refuse a command that names a root, reads included; a skill
+        # kept in a library is run from there (its documented entry, its runtime), so the real
+        # place is not a shell root -- only the link's root is, as before.
+        assert call("bash", command=f"cd {real} && python scripts/run.py") is None
+        assert call("bash", command=f"cat {home.path('shared_skills') / 'pptx' / 'SKILL.md'}")["block"]
     finally:
         asyncio.run(part.session_shutdown({}, SimpleNamespace()))
