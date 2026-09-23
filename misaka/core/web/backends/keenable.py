@@ -4,7 +4,7 @@ Ported from Hermes' ``plugins/web/keenable/provider.py``. Keenable
 (https://keenable.ai) operates an independent web index for AI apps with public keyless
 endpoints (rate-limited free tier; keyed access via KEENABLE_API_KEY for higher limits).
 
-Config keys this provider responds to (``~/.misaka/web.json``)::
+Config keys this provider responds to (the ``web`` section of ``settings.json``)::
 
     "search_backend": "keenable"      # explicit per-capability
     "extract_backend": "keenable"     # explicit per-capability

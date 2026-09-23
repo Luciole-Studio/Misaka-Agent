@@ -168,7 +168,7 @@ def _parser():
                                            "extract_char_limit | env.<VAR> | provider_tier.<vendor> | "
                                            "website_blocklist.<enabled|domains|shared_files> | xai.<key>")
     wb.add_argument("value", nargs="?", help="The value to set (omit for unset)")
-    wb.add_argument("--profile", metavar="DIR", help="Use DIR/web.json over shared Web defaults")
+    wb.add_argument("--profile", metavar="DIR", help="Use the web section of DIR/settings.json over the shared Web defaults")
     wb.add_argument("--extension", action="append", default=[], metavar="PATH", help="Load an explicit session extension (repeatable)")
     wb.add_argument("--capability", choices=["search", "extract", "both"], help="Setup only these capabilities")
     wb.add_argument("--tier", choices=["auto", "free", "paid"], help="Setup tier from the provider's rows")
@@ -187,8 +187,8 @@ def _parser():
 
     cr = sub.add_parser("create", help="Create a new Sister")
     cr.add_argument("sid", nargs="?", help="Sister ID, such as 10033")
-    cr.add_argument("--desc", help="Personality or specialty, written to SOUL.md")
-    cr.add_argument("--model", help="Pinned model, such as claude-opus-4-5")
+    cr.add_argument("--desc", help="Specialty for Last Order's task routing, written to DESCRIBE.md")
+    cr.add_argument("--model", help="Pinned model as provider/model, such as anthropic/claude-opus-5")
     rm = sub.add_parser("remove", help="Remove a Sister along with her sessions and workspace")
     rm.add_argument("sid", help="Sister ID")
     rm.add_argument("--yes", action="store_true", help="Skip confirmation")

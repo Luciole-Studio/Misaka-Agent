@@ -11,7 +11,7 @@ operator's blocklist and the SSRF gate itself. It has to: it is the one vendor t
 follows redirects on its own servers and then tells you where it landed, so the URL the
 tool screened is not necessarily the URL that was read.
 
-Config keys this provider responds to (``~/.misaka/web.json``)::
+Config keys this provider responds to (the ``web`` section of ``settings.json``)::
 
     "search_backend": "firecrawl"     # explicit per-capability
     "extract_backend": "firecrawl"    # explicit per-capability

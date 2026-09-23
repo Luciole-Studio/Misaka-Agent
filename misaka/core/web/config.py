@@ -194,7 +194,8 @@ def config_flag(key: str, default: bool = True) -> bool:
 
 
 def provider_env(name: str) -> str:
-    """Config-aware credential lookup: the process environment, then ``web.json``'s ``env``.
+    """Config-aware credential lookup: the process environment, then the ``env`` map of the
+    ``web`` settings section.
 
     Hermes' ``get_provider_env``. Returns the stripped value, or ``""`` when unset.
     """

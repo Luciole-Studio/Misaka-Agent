@@ -3,7 +3,7 @@
 Ported from Hermes' ``plugins/web/searxng/provider.py``. Same JSON API call
 (``/search?format=json``), same result normalization.
 
-Config keys this provider responds to (``~/.misaka/web.json``)::
+Config keys this provider responds to (the ``web`` section of ``settings.json``)::
 
     "search_backend": "searxng"     # explicit per-capability
     "backend": "searxng"            # shared fallback

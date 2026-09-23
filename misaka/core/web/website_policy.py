@@ -198,7 +198,8 @@ def _load_policy_config(config_path: Path | None) -> dict[str, Any]:
     except ValueError as exc:
         raise WebsitePolicyError(str(exc)) from exc
     if not isinstance(config, dict):
-        raise WebsitePolicyError("web.json root must be a mapping")
+        raise WebsitePolicyError(
+            f"{config_path or 'the web settings section'}: the configuration root must be a mapping")
 
     website_blocklist = config.get("website_blocklist", {})
     if website_blocklist is None:
@@ -265,8 +266,8 @@ def load_website_blocklist(config_path: Path | None = None) -> dict[str, Any]:
             rules.append({"pattern": normalized, "source": "config"})
             seen.add(("config", normalized))
 
-    # A relative shared file is relative to the config directory (``~/.misaka``, the
-    # parent of web.json) -- never to the process working directory, which for an agent
+    # A relative shared file is relative to the config directory (the home or the role
+    # profile holding the settings file) -- never to the process working directory, which for an agent
     # is whatever repository it happens to have been started in.
     config_dir = config_path.parent
     for shared_file in raw_shared_files:
@@ -352,7 +353,7 @@ def check_website_access(url: str, config_path: Path | None = None) -> dict[str,
     fetch, or they cannot undo it.
 
     Policy errors fail open -- logged and treated as "allowed" -- when no explicit
-    ``config_path`` was given, so a typo in web.json cannot take every web tool offline.
+    ``config_path`` was given, so a typo in the web settings cannot take every web tool offline.
     Pass ``config_path`` (which is what tests do) and errors propagate instead: the
     asymmetry is deliberate, because a test that asserts on a malformed config must see
     the exception rather than the silence a session gets.

@@ -27,7 +27,8 @@ requests through its own endpoint, but only when the user selected it
 rotates through. That keyless path lives in :mod:`misaka.core.web.backends.tavily`
 next to the keyed one, because the two differ by one header.
 
-Disable the whole tier with ``"keyless_fallback": false`` in ``~/.misaka/web.json``.
+Disable the whole tier with ``"keyless_fallback": false`` in the ``web`` section of
+``settings.json``.
 """
 
 from __future__ import annotations

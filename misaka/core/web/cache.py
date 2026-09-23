@@ -15,7 +15,7 @@ same question): a dispatch-level memo would have to reason about approval gates 
 on a cache hit. Down here the memo sits *after* every config and safety check and
 *before* the paid vendor call, so a hit skips the network request and never a control.
 
-Disabled with ``cache_enabled: false`` in ``~/.misaka/web.json``; the TTL comes from
+Disabled with ``cache_enabled: false`` in the ``web`` settings section; the TTL comes from
 ``cache_ttl_minutes`` there. Only successful responses are ever stored, and a response
 the keyless ring rescued is never offered to :meth:`SearchMemo.store` by the tool -- see
 the note there.
@@ -73,7 +73,7 @@ DEFAULT_TTL_MINUTES = 20
 
 
 def cache_enabled() -> bool:
-    """The memo honours ``cache_enabled`` in ``~/.misaka/web.json`` (default: on)."""
+    """The memo honours ``cache_enabled`` in the ``web`` settings section (default: on)."""
     value = web_config().get("cache_enabled")
     if value is None:
         return True
@@ -361,7 +361,7 @@ def _host_matches_pattern(host: str, pattern: str) -> bool:
 
 
 def _is_cache_exempt_host(url: str) -> bool:
-    """True when the URL's host matches ``cache_exempt_hosts`` in ``~/.misaka/web.json``.
+    """True when the URL's host matches ``cache_exempt_hosts`` in the ``web`` settings section.
 
     For a site the user is developing but reaching over the public internet -- a staging
     deploy, a tunnel URL, a preview build. Public DNS, so :func:`_is_local_dev_url` cannot

@@ -3,7 +3,7 @@
 Ported from Hermes' ``agent/web_search_provider.py``. Defines the pluggable-backend
 interface for both web capabilities. Providers register instances with
 :func:`misaka.core.web.registry.register_provider`; the active search provider
-(selected via ``search_backend`` / ``backend`` in ``~/.misaka/web.json``) services every
+(selected via ``search_backend`` / ``backend`` in the ``web`` settings section) services every
 ``web_search`` call, and the active extract provider (``extract_backend`` / ``backend``)
 services every ``web_extract`` call. A provider advertises what it can do with
 :meth:`WebSearchProvider.supports_search` and :meth:`WebSearchProvider.supports_extract`,

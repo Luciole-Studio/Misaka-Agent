@@ -10,17 +10,37 @@ from misaka.core.moments import CoreCommand
 
 ROOT = CFG["profiles_root"]
 ACTIVE = ("running", "review", "ready", "todo", "blocked", "triage")   # anything a Sister still owes
+DEFAULT_CHOICE = "default (use global setting)"
+CUSTOM_CHOICE = "Custom…"
+PIN_EXAMPLE = "anthropic/claude-opus-5"
+
+
+def _registry():
+    from misaka.core.auth_storage import AuthStorage
+    from misaka.core.model_registry import ModelRegistry
+    return ModelRegistry.create(AuthStorage.create())
 
 
 def model_choices():
     """The pinning menu: the global default, then what the sessions' own registry can run on the
-    product provider (builtin catalog plus models.json), then a free-form ID."""
-    from misaka.core.auth_storage import AuthStorage
-    from misaka.core.model_registry import ModelRegistry
-    registry = ModelRegistry.create(AuthStorage.create())
+    product provider (builtin catalog plus models.json) as ``provider/id`` references -- the
+    shape a pin is stored in -- then a free-form reference."""
     provider = current_config()["provider"]
-    mine = sorted({m.id for m in registry.getAvailable() if m.provider == provider})
-    return ["default (use global setting)", *mine, "Custom…"]
+    mine = sorted({f"{m.provider}/{m.id}" for m in _registry().getAvailable() if m.provider == provider})
+    return [DEFAULT_CHOICE, *mine, CUSTOM_CHOICE]
+
+
+def resolve_pin(model):
+    """The canonical ``provider/id`` for a pin the user typed or picked.
+
+    A bare ID resolves on the product provider. A raw ID that itself contains slashes
+    (``anthropic/claude-opus-4`` on a gateway) resolves through the catalog rather than being
+    split at its first slash: the segment before the slash is usually a vendor name that is
+    also a real provider, so splitting would silently pin the model to that provider's
+    account. Raises ``ValueError`` naming the candidates when the reference is ambiguous,
+    or when it is unknown.
+    """
+    return profiles.resolve_model_reference(model, _registry(), fallback_provider=current_config()["provider"])
 
 SOUL_TEMPLATE = """# Misaka {sid}
 
@@ -79,6 +99,14 @@ def create_sister(sid, root=None, specialty=None, model=None):
     prof = os.path.join(root, sid)
     if os.path.exists(prof):
         return False, f"Sister {sid} is already registered: {prof}"
+    pin = None
+    if model:
+        # Resolve before anything is written: a bad reference must not leave a half-made
+        # profile behind that then reports the ID as already registered.
+        try:
+            pin = resolve_pin(model)
+        except ValueError as error:
+            return False, f"Sister {sid} was not created: {error}"
     os.makedirs(os.path.join(prof, "skills"))
     specialty = (specialty or "").strip()
     with open(os.path.join(prof, "SOUL.md"), "w", encoding="utf-8") as f:
@@ -87,9 +115,9 @@ def create_sister(sid, root=None, specialty=None, model=None):
         f.write(DESCRIBE_TEMPLATE.format(
             sid=sid, specialty=specialty, specialty_line=specialty or "Not specified yet."))
     pinned = ""
-    if model:
-        profiles.persist_role_default_model(prof, model, strict=True)
-        pinned = f"Pinned model: {model}. "
+    if pin:
+        profiles.persist_role_default_model(prof, pin, strict=True)
+        pinned = f"Pinned model: {pin}. "
     return True, (
         f"Sister {sid} was added to the roster. {pinned}Profile: {prof} -- "
         f"DESCRIBE.md (what Last Order routes to her), SOUL.md (her voice), "
@@ -212,14 +240,21 @@ def commands():
             ctx.ui.notify("Creation cancelled.", "info")
             return
         model = None
-        if model_pick == "Custom…":
-            model = await ctx.ui.input("Model ID", "For example: claude-opus-4-5")
+        if model_pick == CUSTOM_CHOICE:
+            model = await ctx.ui.input("Model (provider/model)", f"For example: {PIN_EXAMPLE}")
             if model is None:
                 ctx.ui.notify("Creation cancelled.", "info")
                 return
             model = model.strip() or None
-        elif not model_pick.startswith("default"):
+        elif model_pick != DEFAULT_CHOICE:
             model = model_pick
+        if model:
+            # Resolve now so the confirmation shows the provider the pin actually lands on.
+            try:
+                model = resolve_pin(model)
+            except ValueError as error:
+                ctx.ui.notify(f"Sister {sid} was not created: {error}", "error")
+                return
         summary = f"Specialty: {specialty.strip() or 'not specified'} | Model: {model or 'global default'}"
         if not await ctx.ui.confirm(f"Create Sister {sid}?", summary):
             ctx.ui.notify("Creation cancelled.", "info")
@@ -287,7 +322,7 @@ def cli_create(sid=None, desc=None, model=None, root=None):
     if desc is None and interactive:
         desc = input("Specialty for Last Order's task routing (optional): ").strip()
     if model is None and interactive:
-        model = input("Pinned model (blank uses the global default): ").strip()
+        model = input(f"Pinned model as provider/model, such as {PIN_EXAMPLE} (blank uses the global default): ").strip()
     ok, msg = create_sister(sid, root=root, specialty=desc or None, model=model or None)
     print(msg)
     return 0 if ok else 1

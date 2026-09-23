@@ -2,7 +2,7 @@
 
 Ported from Hermes' ``plugins/web/brave_free/provider.py``.
 
-Config keys this provider responds to (``~/.misaka/web.json``)::
+Config keys this provider responds to (the ``web`` section of ``settings.json``)::
 
     "search_backend": "brave-free"     # explicit per-capability
     "backend": "brave-free"            # shared fallback

