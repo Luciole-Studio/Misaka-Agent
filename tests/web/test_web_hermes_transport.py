@@ -2,15 +2,13 @@
 
 import asyncio
 import json
-from pathlib import Path
 
 import httpx
 import pytest
+from webconf import write_web
 
-from misaka.config.product import CFG
 from misaka.core.platform import budget
-from misaka.core.tools._web import bounded, website_policy
-from misaka.core.web import config, registry
+from misaka.core.web import bounded, config, registry, website_policy
 from misaka.core.web.backends import firecrawl, parallel
 
 
@@ -20,7 +18,6 @@ def isolated(monkeypatch, tmp_path):
         monkeypatch.delenv(key, raising=False)
     for key in config._CREDENTIAL_VARS + config._ENDPOINT_VARS:
         monkeypatch.delenv(key, raising=False)
-    monkeypatch.setitem(CFG, "web_config", str(tmp_path / "web.json"))
     website_policy.invalidate_cache()
     registry.reset_for_tests()
     yield
@@ -115,7 +112,7 @@ async def test_firecrawl_business_failure_preserves_error_and_is_not_empty_succe
 
 @pytest.mark.parametrize("selection", ["backend", "search_backend", "extract_backend"])
 async def test_explicit_anonymous_firecrawl_works_even_with_fallback_disabled(monkeypatch, selection):
-    Path(CFG["web_config"]).write_text(json.dumps({selection: "firecrawl", "keyless_fallback": False}))
+    write_web({selection: "firecrawl", "keyless_fallback": False})
     calls = []
 
     def handler(request):
@@ -130,7 +127,7 @@ async def test_explicit_anonymous_firecrawl_works_even_with_fallback_disabled(mo
 
 
 async def test_firecrawl_credentials_win_free_tier_for_both_capabilities(monkeypatch):
-    Path(CFG["web_config"]).write_text(json.dumps({"provider_tier": {"firecrawl": "free"}}))
+    write_web({"provider_tier": {"firecrawl": "free"}})
     monkeypatch.setenv("FIRECRAWL_API_KEY", "TOKEN")
     calls = []
 

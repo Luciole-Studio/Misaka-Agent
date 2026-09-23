@@ -25,9 +25,9 @@ import logging
 import math
 from typing import Any
 
-from misaka.core.tools._web.website_policy import policy_blocked
 from misaka.core.web import debug
 from misaka.core.web.config import (
+    config_label,
     keyless_rescue_enabled,
     provider_disabled,
     web_config,
@@ -46,6 +46,7 @@ from misaka.core.web.registry import (
     search_backend_name,
     selection_stored,
 )
+from misaka.core.web.website_policy import policy_blocked
 from misaka.utils.async_lifecycle import run_in_thread
 
 logger = logging.getLogger(__name__)
@@ -180,13 +181,13 @@ def resolve_provider() -> tuple[WebSearchProvider | None, str, str]:
         return None, backend, (
             f"Web search backend is set to '{backend}', but no registered web search "
             "provider has that name. Fix the `backend` or `search_backend` entry in "
-            "`~/.misaka/web.json`."
+            f"`{config_label()}`."
         )
     # Never-configured install: fall back to the availability-walked active provider.
     provider = active_search_provider()
     if provider is None:
         return None, backend, (
-            "No web search provider configured. Set one up in `~/.misaka/web.json`."
+            f"No web search provider configured. Set one up in `{config_label()}`."
         )
     return provider, provider.name, ""
 
@@ -292,7 +293,7 @@ def resolve_extractor() -> tuple[WebSearchProvider | None, str, str]:
     if provider is not None and not provider.supports_extract():
         return None, backend, (
             f"{provider.display_name} is a search-only backend and cannot extract URL "
-            "content. Set `extract_backend` in `~/.misaka/web.json` to firecrawl, tavily, "
+            f"content. Set `extract_backend` in `{config_label()}` to firecrawl, tavily, "
             "keenable, exa, or parallel."
         )
     if provider is not None:
@@ -301,13 +302,13 @@ def resolve_extractor() -> tuple[WebSearchProvider | None, str, str]:
         return None, backend, (
             f"Web extract backend is set to '{backend}', but no registered web extract "
             "provider has that name. Fix the `extract_backend` or `backend` entry in "
-            "`~/.misaka/web.json`."
+            f"`{config_label()}`."
         )
     provider = active_extract_provider()
     if provider is None:
         return None, backend, (
             "No web extract provider configured. Set `extract_backend` in "
-            "`~/.misaka/web.json` to firecrawl, tavily, keenable, exa, or parallel."
+            f"`{config_label()}` to firecrawl, tavily, keenable, exa, or parallel."
         )
     return provider, provider.name, ""
 

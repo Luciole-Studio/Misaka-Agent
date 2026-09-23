@@ -1,0 +1,144 @@
+{
+  "at": "2026-09-20T19:50:34.720879+09:00",
+  "run": {
+    "id": "r_b55f2c1cf5",
+    "status": "failed",
+    "phase": "active",
+    "last_error": "InvalidSessionFileError: Invalid session file (Unterminated string starting at: line 1 column 293 (char 292)): /Users/makiko/.misaka/sessions/last-order/--Users-makiko-Documents-exam-4930eb5912a06b18aea8b5c78736cd372019ae39acc2591d4dc61b11d4fa4c5e--/2026-09-20T04-10-52-766Z_01a0bd02-7fde-7c0c-aaed-0aecfa828c3d.jsonl",
+    "driver_lock": null,
+    "stop_requested": 0,
+    "updated_at": 1789900270
+  },
+  "branches": [
+    {
+      "id": "b_3d6b51e2c9",
+      "parent_id": null,
+      "status": "reviewing",
+      "depth": 0,
+      "session_file": "/Users/makiko/.misaka/sessions/last-order/--Users-makiko-Documents-exam-4930eb5912a06b18aea8b5c78736cd372019ae39acc2591d4dc61b11d4fa4c5e--/2026-09-20T04-10-52-766Z_01a0bd02-7fde-7c0c-aaed-0aecfa828c3d.jsonl"
+    },
+    {
+      "id": "b_81b30cd5c4",
+      "parent_id": "b_3d6b51e2c9",
+      "status": "queued",
+      "depth": 1,
+      "session_file": null
+    }
+  ],
+  "cards": [
+    {
+      "id": "t_3dc3c2",
+      "assignee": "10032",
+      "status": "done",
+      "generation": 1
+    },
+    {
+      "id": "t_104134",
+      "assignee": "10032",
+      "status": "done",
+      "generation": 1
+    },
+    {
+      "id": "t_c2dbca",
+      "assignee": "10032",
+      "status": "done",
+      "generation": 1
+    },
+    {
+      "id": "t_7da32d",
+      "assignee": "10032",
+      "status": "done",
+      "generation": 1
+    },
+    {
+      "id": "t_c17367",
+      "assignee": "10032",
+      "status": "done",
+      "generation": 1
+    },
+    {
+      "id": "t_b09c54",
+      "assignee": "10037",
+      "status": "done",
+      "generation": 1
+    },
+    {
+      "id": "t_bef693",
+      "assignee": "10038",
+      "status": "done",
+      "generation": 1
+    },
+    {
+      "id": "t_f3c44f",
+      "assignee": "10036",
+      "status": "done",
+      "generation": 1
+    },
+    {
+      "id": "t_2c338c",
+      "assignee": "10032",
+      "status": "done",
+      "generation": 1
+    },
+    {
+      "id": "t_26cd47",
+      "assignee": "10032",
+      "status": "done",
+      "generation": 1
+    },
+    {
+      "id": "t_75e9a5",
+      "assignee": "10037",
+      "status": "done",
+      "generation": 1
+    },
+    {
+      "id": "t_208a11",
+      "assignee": "10040",
+      "status": "done",
+      "generation": 1
+    },
+    {
+      "id": "t_f81a6f",
+      "assignee": "10038",
+      "status": "done",
+      "generation": 1
+    },
+    {
+      "id": "t_b7b7b1",
+      "assignee": "10037",
+      "status": "done",
+      "generation": 1
+    },
+    {
+      "id": "t_d604cd",
+      "assignee": "10032",
+      "status": "done",
+      "generation": 1
+    },
+    {
+      "id": "t_7ee3b0",
+      "assignee": "10040",
+      "status": "done",
+      "generation": 1
+    },
+    {
+      "id": "t_95ef51",
+      "assignee": "10037",
+      "status": "done",
+      "generation": 1
+    },
+    {
+      "id": "t_a8401d",
+      "assignee": "10040",
+      "status": "done",
+      "generation": 1
+    },
+    {
+      "id": "t_759180",
+      "assignee": "10043",
+      "status": "done",
+      "generation": 1
+    }
+  ]
+}

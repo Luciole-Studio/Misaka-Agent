@@ -10,10 +10,18 @@ store in step across a compaction.
 
 Structured content is preserved for upstream's canonical JSON storage and payload
 protection. Text extraction is reserved for identifying the human question.
+
+Reasoning is not content. Hermes keeps a model's thinking out of ``content`` (its runtime
+drops ``thinking``/``reasoning``/``redacted_thinking`` parts and carries reasoning text in
+a field of its own), so upstream never stores it, and pi's ``thinkingSignature`` -- an
+opaque provider token -- has no place in a durable archive at all: it was being
+externalized as a "large output" (2026-09-18, B5). The provider replay is built from pi's
+live messages, never from this store, so nothing the provider needs is lost here.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 
 from misaka.agent.harness.messages import convert_to_llm
@@ -23,13 +31,32 @@ from misaka.utils.values import read_field
 # turn's shape and its position without the payload.
 _OMITTED = "[{kind} omitted]"
 
+# Blocks that are not the message's content in upstream's shape: tool calls travel as
+# ``tool_calls``, and reasoning does not travel at all (see the module docstring).
+_NOT_CONTENT = frozenset({"toolCall", "thinking"})
+
 
 def is_task_message(message) -> bool:
-    """Native task ingress, before logs and summaries become provider user turns."""
+    """Native task ingress, before logs and summaries become provider user turns: a user
+    prompt, or a custom message its sender marked as opening a turn (``moments.TURN``)."""
+    from misaka.core.moments import TURN
+
     role = read_field(message, 'role')
-    return role == 'user' or (
-        (role == 'custom' or read_field(message, 'type') == 'custom_message')
-        and read_field(message, 'customType') == 'research-phase')
+    if role == 'user':
+        return True
+    if role == 'custom' or read_field(message, 'type') == 'custom_message':
+        details = read_field(message, 'details')
+        return isinstance(details, dict) and details.get(TURN) is True
+    return False
+
+
+def is_memory(message) -> bool:
+    """Whether a message belongs in the archive: everything but a custom message its sender
+    marked ``moments.MEMORY`` False (a feed entry the model is never shown again)."""
+    from misaka.core.moments import MEMORY
+
+    details = read_field(message, 'details')
+    return not (isinstance(details, dict) and details.get(MEMORY) is False)
 
 
 def _text_of(content) -> str:
@@ -84,7 +111,7 @@ def to_upstream(message) -> dict:
     if isinstance(content, list):
         content = [block.model_dump(mode="json", exclude_none=True)
                    if hasattr(block, "model_dump") else dict(block)
-                   for block in content if read_field(block, "type") != "toolCall"]
+                   for block in content if read_field(block, "type") not in _NOT_CONTENT]
         content = [
             {"type": "image_url", "image_url": {
                 "url": f"data:{block['mimeType']};base64,{block['data']}"}}
@@ -104,8 +131,10 @@ def to_upstream(message) -> dict:
 
 
 def upstream_messages(messages) -> list[dict]:
-    """A misaka active context (``build_session_context(...).messages``), converted."""
-    return [to_upstream(message) for message in convert_to_llm(messages)]
+    """A misaka active context (``build_session_context(...).messages``), converted; what its
+    sender marked as not memory is left out, here and only here, so the live view, the
+    session's originals and the replay alignment all agree on the same list."""
+    return [to_upstream(message) for message in convert_to_llm([m for m in messages if is_memory(m)])]
 
 
 
@@ -131,8 +160,14 @@ def source_messages(messages):
     return projected
 
 
-def source_indices(messages, originals):
-    """Validate the active view and retain its exact positions in the saved view.
+# Assistant rows the live context may lack while the archive keeps them: pi's retry loop
+# removes a failed or truncated tail before the next request, and an aborted turn leaves
+# an entry the live list does not always carry the same way (2026-09-18, B11).
+DROPPABLE_STOPS = frozenset({'error', 'length', 'aborted'})
+
+
+def align_sources(messages, originals):
+    """Positions of the live view's messages in the saved view, or None when they cannot be aligned.
 
     Native retries remove failed/truncated assistants only from live context. They
     may occur anywhere in the append-only archive after later turns arrive. Match
@@ -147,14 +182,38 @@ def source_indices(messages, originals):
         if pending >= 0 and incoming[pending] == row:
             indices.append(index)
             pending -= 1
-        elif row['role'] != 'assistant' or row.get('stopReason') not in {'error', 'length'}:
+        elif row['role'] != 'assistant' or row.get('stopReason') not in DROPPABLE_STOPS:
             break
     else:
         if pending == -1:
             return indices[::-1]
-    raise ValueError('LCM request messages do not belong to the transcript snapshot '
-                     f'(active={len(incoming)}, snapshot={len(saved)}, '
-                     f'first_mismatch={next((i for i, pair in enumerate(zip(incoming, saved)) if pair[0] != pair[1]), None)})')
+    return None
+
+
+def _brief(row):
+    content = row.get('content')
+    text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+    return (f"role={row.get('role')} stop={row.get('stopReason')} tool_calls={len(row.get('tool_calls') or [])} "
+            f"len={len(text)} head={text[:80]!r}")
+
+
+def describe_mismatch(messages, originals):
+    """What differs between the two views, for the log: counts, the first differing index, both sides."""
+    incoming, saved = source_messages(messages), source_messages(originals)
+    first = next((i for i, pair in enumerate(zip(incoming, saved)) if pair[0] != pair[1]), None)
+    text = f'active={len(incoming)}, snapshot={len(saved)}, first_mismatch={first}'
+    if first is not None:
+        text += f'; live: {_brief(incoming[first])}; saved: {_brief(saved[first])}'
+    return text
+
+
+def source_indices(messages, originals):
+    """``align_sources`` for callers that treat a failed alignment as an error."""
+    positions = align_sources(messages, originals)
+    if positions is None:
+        raise ValueError('LCM request messages do not belong to the transcript snapshot '
+                         f'({describe_mismatch(messages, originals)})')
+    return positions
 
 
 def session_id(ctx) -> str:
@@ -204,6 +263,8 @@ class Replay:
         self.originals = []
         self.messages = []
         for message in messages:
+            if not is_memory(message):
+                continue                    # the same rule as upstream_messages, or the source ordinals drift
             converted = convert_to_llm([message])
             if not converted:
                 continue
@@ -247,7 +308,12 @@ class Replay:
                 raise ValueError(f'Unsupported LCM replay role: {role}')
             original = self.originals[source] if before is not None else None
             if read_field(original, 'role') in {'user', 'assistant', 'toolResult', 'custom'}:
-                payload = (original.model_dump(mode='json') if hasattr(original, 'model_dump') else copy.deepcopy(original))
+                if hasattr(original, 'model_dump'):
+                    payload = original.model_dump(mode='json')
+                elif dataclasses.is_dataclass(original):     # a native CustomMessage is a slots dataclass
+                    payload = dataclasses.asdict(original)
+                else:
+                    payload = copy.deepcopy(original)
             else:
                 payload = {'role': 'toolResult' if role == 'tool' else role,
                            'timestamp': int(float(replay.get('timestamp') or 0) * 1000)}

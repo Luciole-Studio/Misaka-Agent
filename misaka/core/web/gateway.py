@@ -1,3 +1,5 @@
+import json
+
 """Nous managed Firecrawl/Browser Use: profile auth, device flow and entitlement.
 
 No Hermes auth-file migration. Use MISAKA's existing authoritative OAuth lock.
@@ -52,7 +54,9 @@ def peek_token():
     if explicit := config.provider_env('TOOL_GATEWAY_USER_TOKEN'):
         return explicit
     try:
-        data = config._read_document(_auth_path()).get('nous', {})
+        with open(_auth_path(), encoding='utf-8') as handle:
+            stored = json.load(handle)
+        data = stored.get('nous', {}) if isinstance(stored, dict) else {}
         return data.get('access', '') if isinstance(data, dict) and data.get('type') == 'oauth' else ''
     except (OSError, ValueError):
         return ''

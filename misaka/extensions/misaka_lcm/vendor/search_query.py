@@ -264,6 +264,19 @@ def escape_like(term: str) -> str:
     return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def balanced_sql_expr(parts: list[str], operator: str) -> str:
+    """Join associative SQL expressions without linear parser-tree depth."""
+    # misaka: long recall inputs overflow SQLite's 1000-level expression limit
+    # when LIKE predicates or integer scores are joined left-associatively.
+    # Keep every operand and its parameter order; only balance OR / + grouping.
+    while len(parts) > 1:
+        parts = [
+            f"({parts[i]} {operator} {parts[i + 1]})" if i + 1 < len(parts) else parts[i]
+            for i in range(0, len(parts), 2)
+        ]
+    return parts[0] if parts else "0"
+
+
 def count_term_matches(text: str, term: str) -> int:
     haystack = (text or "")
     needle = (term or "")

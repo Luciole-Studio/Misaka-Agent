@@ -1,0 +1,53 @@
+from pathlib import Path
+from types import SimpleNamespace
+import ast,hashlib,json,sqlite3,tempfile,csv,re,datetime
+D=Path(__file__).parent;ROOT=Path('/Users/makiko/Projects/misaka');WS=Path('/Users/makiko/Documents/exam');captured=[]
+# Pure production registration function, injected fake store, only isolated fixtures written.
+source=ROOT/'misaka/core/research/workflow.py';tree=ast.parse(source.read_text());fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='_register_task_artifacts')
+class RowResult:
+ def fetchone(self):return {'branch_id':'b_probe','kind':'red_team'}
+class Con:
+ def execute(self,*a):return RowResult()
+def record(*args,**kwargs):captured.append({'kind':args[2],'title':args[3],'path':args[4],**kwargs})
+ns={'Path':Path,'hashlib':hashlib,'ARTIFACT_ROOTS':('nodes','final'),'runs':SimpleNamespace(node=lambda *a:{'id':'b_probe','parent_id':None},register_file=record),'_bid':lambda n:None,'task_store':SimpleNamespace(add_event=lambda *a,**k:None)}
+exec(compile(ast.Module(body=[fn],type_ignores=[]),str(source),'exec'),ns)
+with tempfile.TemporaryDirectory(dir=D,prefix='fixture-') as tmp:
+ root=Path(tmp);relative='nodes/r_fixture/cards/t_writer/report.md';p=root/relative;p.parent.mkdir(parents=True);p.write_text('# Original research by writer\n')
+ task={'id':'t_reviewer','workspace':tmp,'generation':1,'output_dir':str(root/'nodes/r_fixture/cards/t_reviewer')};ns['_register_task_artifacts'](Con(),{'id':'r_fixture','workspace':tmp},task,{'artifacts':[relative],'artifact_digests':{relative:hashlib.sha256(p.read_bytes()).hexdigest()}})
+ assert captured[0]['kind']=='critique' and captured[0]['task_id']=='t_reviewer' and '/t_writer/' in captured[0]['path']
+# Strict registered plan check using AST-isolated pure reader; no application opened.
+readsrc=ROOT/'misaka/core/research/runs.py';fn=next(n for n in ast.parse(readsrc.read_text()).body if isinstance(n,ast.FunctionDef) and n.name=='artifact_text');ns2={'Path':Path,'hashlib':hashlib};exec(compile(ast.Module(body=[fn],type_ignores=[]),str(readsrc),'exec'),ns2)
+c=sqlite3.connect('file:/Users/makiko/.misaka/board.db?mode=ro',uri=True);c.row_factory=sqlite3.Row;c.execute('pragma query_only=ON');art=dict(c.execute('select * from research_artifacts where id=?',('a_2ea3413351',)).fetchone()); c.close()
+try:ns2['artifact_text'](art);plan_error=None
+except ValueError as e:plan_error=str(e)
+backup=Path(art['path']+'.bak-deliverable-fix');backup_matches=hashlib.sha256(backup.read_bytes()).hexdigest()==art['sha256']
+# The CSV generator used regex plus string replacement instead of decoding header values.
+rows=list(csv.DictReader((WS/'final/r_b55f2c1cf5-material-index.csv').open()));title_examples=[];title_count=0
+for r in rows:
+ if re.search(r'(?:\\u| u)[0-9a-f]{4}',r['title']):
+  title_count+=1
+  if len(title_examples)<5:
+   s=(WS/r['path']).read_text(errors='replace');raw=next((l.partition(':')[2].strip() for l in s.split('\n')[:12] if l.startswith('title:')),'')
+   try:decoded=json.loads(raw)
+   except Exception:decoded=None
+   title_examples.append({'path':r['path'],'csv_title':r['title'],'decoded_title':decoded})
+# Precisely distinguish full-document references from short URL-prefix matches.
+texts={}
+for p in list((WS/'nodes/r_b55f2c1cf5/cards').glob('*/*.md'))+list((WS/'nodes/r_b55f2c1cf5/cards').glob('*/*/*.md'))+[WS/'nodes/r_b55f2c1cf5/synthesis.md',WS/'nodes/r_b55f2c1cf5/coordination_ledger.md',WS/'PROJECT.md',WS/'nodes/r_b55f2c1cf5/plan.md']:
+ if p.exists() and 'sources/pages' not in str(p):texts[p]=p.read_text(errors='replace')
+def card(p):
+ m=re.search(r'cards/(t_[0-9a-f]+)/',str(p));return m.group(1) if m else 'node'
+heuristic=[]
+for r in rows:
+ if not r['source_url'] or r['referenced_by_cards']=='unlinked':continue
+ u=r['source_url'];prefix=u.split('//')[-1][:70];name=Path(r['path']).name;stem=Path(r['path']).stem
+ for cid in r['referenced_by_cards'].split(';'):
+  ts=[(p,s) for p,s in texts.items() if card(p)==cid]
+  direct=any(name in s or (len(stem)>8 and stem in s) or u in s or u.split('//')[-1] in s for _,s in ts)
+  if not direct:
+   hits=[{'path':str(p),'different_url':url} for p,s in ts for url in re.findall(r'https?://[^\s`<>]+',s) if prefix in url and u not in url]
+   if hits:heuristic.append({'material':r['path'],'url':u,'assigned_card':cid,'prefix_only_matches':hits[:2]})
+result={'at':datetime.datetime.now().astimezone().isoformat(),'registration_probe':captured,'plan_strict_reader_error':plan_error,'plan_backup_matches_registered_hash':backup_matches,'title_corruption_rows':title_count,'title_examples':title_examples,'prefix_only_reference_pairs':len(heuristic),'prefix_only_examples':heuristic}
+(D/'probes.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+print(json.dumps({k:v for k,v in result.items() if k!='prefix_only_examples'},ensure_ascii=False))
+for v in [x for x in heuristic if 'cambridge' in x['url']][:3]:print('HEURISTIC',json.dumps(v,ensure_ascii=False))

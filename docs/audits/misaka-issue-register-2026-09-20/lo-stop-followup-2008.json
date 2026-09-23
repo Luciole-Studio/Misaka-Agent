@@ -1,0 +1,86 @@
+{
+  "observed_at": "2026-09-20T20:09:36.537641+09:00",
+  "source": "/Users/makiko/.misaka/sessions/last-order/--Users-makiko-Documents-exam-4930eb5912a06b18aea8b5c78736cd372019ae39acc2591d4dc61b11d4fa4c5e--/2026-09-20T04-10-52-766Z_01a0bd02-7fde-7c0c-aaed-0aecfa828c3d.jsonl",
+  "events": [
+    {
+      "line": 733,
+      "type": "model_change",
+      "id": "f566cb20",
+      "timestamp": "2026-09-20T10:43:31.929Z",
+      "provider": "anthropic",
+      "modelId": "claude-opus-5"
+    },
+    {
+      "line": 734,
+      "type": "model_change",
+      "id": "4a1fd5df",
+      "timestamp": "2026-09-20T10:43:33.837Z",
+      "provider": "anthropic",
+      "modelId": "claude-opus-5"
+    },
+    {
+      "line": 735,
+      "type": "model_change",
+      "id": "00f0e6b3",
+      "timestamp": "2026-09-20T10:44:50.913Z",
+      "provider": "sub2api-claude",
+      "modelId": "claude-opus-5"
+    },
+    {
+      "line": 736,
+      "type": "model_change",
+      "id": "5b1420b5",
+      "timestamp": "2026-09-20T10:44:51.546Z",
+      "provider": "sub2api-claude",
+      "modelId": "claude-opus-5"
+    },
+    {
+      "line": 737,
+      "type": "message",
+      "id": "d5a4b355",
+      "timestamp": "2026-09-20T10:48:35.185Z",
+      "role": "assistant",
+      "stopReason": "error",
+      "rawStopReason": null,
+      "errorMessage": "Session, branch, model or settings changed during compaction",
+      "provider": "sub2api-claude",
+      "model": "claude-opus-5"
+    },
+    {
+      "line": 738,
+      "type": "compaction",
+      "id": "3e5c1141",
+      "timestamp": "2026-09-20T10:50:43.710Z"
+    },
+    {
+      "line": 739,
+      "type": "message",
+      "id": "ebfd5877",
+      "timestamp": "2026-09-20T11:07:49.008Z",
+      "role": "user"
+    },
+    {
+      "line": 740,
+      "type": "compaction",
+      "id": "44ef5ca1",
+      "timestamp": "2026-09-20T11:07:50.207Z"
+    },
+    {
+      "line": 741,
+      "type": "message",
+      "id": "4745bb4f",
+      "timestamp": "2026-09-20T11:08:16.991Z",
+      "role": "assistant",
+      "stopReason": "toolUse",
+      "rawStopReason": "tool_use",
+      "errorMessage": null,
+      "provider": "sub2api-claude",
+      "model": "claude-opus-5"
+    }
+  ],
+  "driver_last_failure_jst": "2026-09-20T19:31:10+09:00",
+  "driver_status": "failed",
+  "driver_last_error": "InvalidSessionFileError",
+  "current_lo_pid": 13464,
+  "boundary": "Read-only. Model changes precede compaction failure; original guard log does not identify exact changed field. This is a fresh F08-related occurrence, not proof that every guard failure is a false positive."
+}

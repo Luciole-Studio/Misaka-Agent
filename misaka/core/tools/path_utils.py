@@ -61,7 +61,7 @@ def resolve_to_cwd(file_path: str, cwd: str) -> str:
 
 def resolve_read_path(file_path: str, cwd: str) -> str:
     resolved = resolve_to_cwd(file_path, cwd)
-    from misaka.core.tools._web.evidence import check_material_read
+    from misaka.core.web.evidence import check_material_read
     check_material_read(resolved)
     if file_exists(resolved):
         return resolved

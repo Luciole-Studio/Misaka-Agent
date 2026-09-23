@@ -110,6 +110,7 @@ Pi（coding agent）的 Python 移植；`misaka/ui/panel/**` 是 herdr 的移植
 - 位置：`misaka/core/web/`、`misaka/core/tools/_web/`；许可证文本：`misaka/core/web/LICENSE.hermes-agent`。
 - 对照基准：`990473a79c6b0396b0a648fdd85ee8f7a5c267d3`（本批所用源码与审计 f03 快照一致）。
 - Web 增量对照：`62e5f466565ee56351e4483ead8e62f9e782f8b3`。本批移植 provider 提取时限语义及五个 browser vault 工具；不表示整个 Hermes 产品已完整移植。
+- Web 能力选择修复：移植 `010a45097e49fff00c32db954f56a2f9d6d08f17`（#113017）的共享选择判断及回归场景；仅配置 search/extract 之一时，另一能力继续原有自动检测。MISAKA 无旧 `use_gateway` 配置，保留原生 `backend: nous`；不改上游的凭证优先级或追加能力过滤。
 - Vault：`misaka/core/web/browser/vault/`，来自该增量提交的 `agent/vault_store.py`、`agent/vault_login_classifier.py`、`agent/vault_backends/` 与 `tools/browser_vault_tool.py`。许可证为同目录 `LICENSE`；逐文件来源及 SHA256 见 `PROVENANCE.json`。宿主桥接、masked TUI、权限、资源清理及额外边界修复是 MISAKA 原生适配。
 - Web 回归：`tests/web/` 保留本地历史回归及选取的 Hermes vault 测试；`tests/web/fixtures/hermes_990473a/` 为固定基准源码夹具，保留原文及同目录 MIT 许可证，见 `tests/web/README.md`。
 - Parallel `parallel-web==0.4.2`：重试协议适配，MIT，Copyright 2026 Parallel；文本：`misaka/core/web/LICENSE.parallel-web`。

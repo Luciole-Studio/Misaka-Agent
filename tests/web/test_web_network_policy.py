@@ -8,10 +8,10 @@ from pathlib import Path
 
 import httpx
 import pytest
+from webconf import write_web
 
 from misaka.config.product import CFG
-from misaka.core.tools._web import bounded
-from misaka.core.web import cache, config, registry
+from misaka.core.web import bounded, cache, config, registry
 
 PROXY_VARS = ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY')
 
@@ -23,9 +23,8 @@ def isolated(tmp_path, monkeypatch):
                  'MISAKA_USAGE_TASK_ID', 'MISAKA_USAGE_GENERATION',
                  *config._CREDENTIAL_VARS, *config._ENDPOINT_VARS):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setitem(CFG, 'web_config', str(tmp_path / 'web.json'))
     monkeypatch.setitem(CFG, 'web_cache', str(tmp_path / 'cache'))
-    monkeypatch.setenv('MISAKA_CODING_AGENT_DIR', str(tmp_path / 'agent'))
+    monkeypatch.setenv('MISAKA_HOME', str(tmp_path))
     monkeypatch.chdir(tmp_path)
     write()
     cache.search_memo.clear()
@@ -36,7 +35,7 @@ def isolated(tmp_path, monkeypatch):
 
 
 def write(**values):
-    Path(CFG['web_config']).write_text(json.dumps(values))
+    write_web(values)
 
 
 def resolve(monkeypatch, addresses=None, error=None):
@@ -125,7 +124,7 @@ async def test_redirect_rechecks_credential_prefix_before_next_request(monkeypat
 
 
 def test_new_network_route_does_not_inherit_another_routes_ban():
-    from misaka.core.tools._web import negative_cache as bans
+    from misaka.core.web import negative_cache as bans
 
     url = 'https://page.invalid/'
     bans.clear()
@@ -179,7 +178,7 @@ def test_profile_proxy_precedence_snapshot_and_no_material_cache_invalidation(tm
     profile = tmp_path / 'profile'
     profile.mkdir()
     write(proxy_dns=True, env={'http_proxy': 'http://shared.invalid:3128'})
-    (profile / 'web.json').write_text(json.dumps({'env': {'http_proxy': 'http://profile.invalid:3128'}}))
+    write_web({'env': {'http_proxy': 'http://profile.invalid:3128'}}, profile=profile)
     scope = WebScope(str(profile))
     with scope.activate(snapshot=True):
         namespace, policy = cache_namespace(), policy_key()
@@ -194,7 +193,7 @@ def test_profile_proxy_precedence_snapshot_and_no_material_cache_invalidation(tm
         assert proxy_for_url('http://page.invalid/') is None
         assert cache_namespace() == namespace
     monkeypatch.delenv('HTTP_PROXY')
-    (profile / 'web.json').write_text(json.dumps({'proxy_dns': False, 'trusted_private_hosts': ['page.invalid']}))
+    write_web({'proxy_dns': False, 'trusted_private_hosts': ['page.invalid']}, profile=profile)
     with scope.activate(snapshot=True):
         assert proxy_for_url('http://page.invalid/') is None
         assert cache_namespace() == namespace and policy_key() != policy
@@ -401,10 +400,10 @@ def test_cli_persists_and_validates_real_network_settings_without_printing_proxy
     app.main(['web', 'status', '--profile', profile])
     output = capsys.readouterr().out
     assert 'URL proxy DNS: on' in output and 'media.example' in output and 'fixture-password' not in output
-    original = (Path(profile) / 'web.json').read_bytes()
+    original = (Path(profile) / 'settings.json').read_bytes()
     with pytest.raises(SystemExit):
         app.main(['web', 'set', 'trusted_private_hosts', '*.example', '--profile', profile])
-    assert (Path(profile) / 'web.json').read_bytes() == original
+    assert (Path(profile) / 'settings.json').read_bytes() == original
     assert not (Path(profile) / 'logs').exists()
     write(proxy_dns=True, env={'HTTPS_PROXY': 'http://proxy-user:fixture-password@proxy.invalid:3128'})
     auth = 'Basic ' + base64.b64encode(b'proxy-user:fixture-password').decode()
@@ -643,10 +642,11 @@ async def test_removing_private_host_grant_rechecks_cached_canonical_source_with
         assert 'fixture private material' in first['content'][0]['text']
         saved = {p: p.read_bytes() for p in tmp_path.rglob('*.md')}
         write(**settings)
-        second = await tool.execute('second', args, None, None, None)
+        with pytest.raises(RuntimeError, match='private address') as caught:
+            await tool.execute('second', args, None, None, None)
     finally:
         await part.session_shutdown({}, None)
     assert len(calls) == 1, 'A policy change paid for already-cached material'
-    assert 'fixture private material' not in second['content'][0]['text']
-    assert 'private address' in second['content'][0]['text']
+    assert 'fixture private material' not in str(caught.value)
+    assert 'Blocked source:' in str(caught.value)
     assert saved and all(p.read_bytes() == data for p, data in saved.items())

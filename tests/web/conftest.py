@@ -1,34 +1,5 @@
-"""Shared fixtures: every test runs against a throwaway agent directory, never ~/.misaka."""
+"""Shared fixtures for the web tests. The throwaway home comes from the root conftest."""
 from __future__ import annotations
-
-import os
-import tempfile
-
-_AGENT_DIR = tempfile.mkdtemp(prefix="misaka-test-agent-")
-
-# Assigned, not `setdefault`. These names exist so a developer can point a *running* MISAKA
-# at somewhere other than ~/.misaka -- exactly what someone does while debugging, and often
-# by exporting the real path. `setdefault` honoured that export, so the suite would then run
-# against the live board: 6900 tests writing the user's cards, sessions and credentials.
-# Three cards with a test-only `claim_lock='ours'` were found on this author's real board,
-# permanently unclaimable, and nobody could say how they got there.
-#
-# A test run has no business reading the developer's state, so the environment does not get
-# a vote. `MISAKA_OFFLINE` is likewise forced: a suite that reaches the network because a
-# shell said it could is not the suite anyone reviewed.
-os.environ["MISAKA_CODING_AGENT_DIR"] = _AGENT_DIR
-os.environ["MISAKA_CODING_AGENT_SESSION_DIR"] = os.path.join(_AGENT_DIR, "sessions")
-os.environ["MISAKA_OFFLINE"] = "1"
-for _name, _file in (("MISAKA_DB", "board.db"), ("MISAKA_MESSAGES", "messages.db"),
-                     ("MISAKA_LCM_DB", "lcm.db"), ("MISAKA_TASKS", "tasks"), ("MISAKA_PAGEINDEX", "pageindex"),
-                     ("MISAKA_NET_SOCK", "net.sock"), ("MISAKA_NET_SNAPSHOT", "net.json"),
-                     # The profiles tree: personalities, skills and MCP config. Until it had an
-                     # override the suite read -- and `shared_soul` seeded -- the developer's own.
-                     ("MISAKA_PROFILES", "profiles"),
-                     ("MISAKA_WEB_CONFIG", "web.json"), ("MISAKA_WEB_CACHE", "web-cache"),
-                     # The product's session tree: chats, cards, research and nested agents.
-                     ("MISAKA_SESSIONS", "sessions-tree")):
-    os.environ[_name] = os.path.join(_AGENT_DIR, _file)
 
 import pytest
 

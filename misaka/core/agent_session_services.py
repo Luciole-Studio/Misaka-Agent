@@ -119,7 +119,12 @@ async def create_agent_session_services(
 ) -> AgentSessionServices:
     cwd = resolve_path(options["cwd"])
     agent_dir = resolve_path(options["agentDir"]) if options.get("agentDir") else get_agent_dir()
-    auth_storage = options.get("authStorage") or AuthStorage.create(os.path.join(agent_dir, "auth.json"))
+    # Credentials sit under credentials/ in the home and in any directory laid out like it,
+    # never beside settings.json (config.home.LAYOUT).
+    from misaka.config import home
+
+    auth_storage = options.get("authStorage") or AuthStorage.create(
+        str(home.path("auth", agent_dir if options.get("agentDir") else None)))
     settings_manager = options.get("settingsManager") or SettingsManager.create(cwd, agent_dir)
     applyHttpProxySettings(settings_manager.getGlobalSettings().get("httpProxy"))
     model_registry = options.get("modelRegistry") or ModelRegistry.create(

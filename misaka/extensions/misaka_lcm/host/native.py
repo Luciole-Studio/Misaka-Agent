@@ -118,10 +118,9 @@ def session_ids():
 
 
 def _cache_file(name):
-    from pathlib import Path
 
-    from misaka.config import get_agent_dir
-    return Path(get_agent_dir()) / 'cache' / name
+    from misaka.config import home
+    return home.path('engine_cache') / name
 
 
 def _load_json_dict(path):

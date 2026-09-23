@@ -1,0 +1,23 @@
+{
+  "at": "2026-09-21T13:21:15.434101+09:00",
+  "session_path": "/Users/makiko/.misaka/sessions/last-order/--Users-makiko-Documents-exam-4930eb5912a06b18aea8b5c78736cd372019ae39acc2591d4dc61b11d4fa4c5e--/2026-09-20T04-10-52-766Z_01a0bd02-7fde-7c0c-aaed-0aecfa828c3d.jsonl",
+  "session_bytes": 53665401,
+  "session_sha256": "8693d1898012e19c2f50577192e368e8348beb0a0855be53ad9e9d4e3b01cfcf",
+  "png_path": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_3dc3c2/tetlock_ocr/p16.png",
+  "png_sha256": "973cf0db73b684677f63f23b201d4d864815aa59bbf024e77f1c842577a8a616",
+  "results": {
+    "before": {
+      "error": "Unterminated string starting at: line 1 column 293 (char 292)",
+      "error_type": "JSONDecodeError",
+      "png_headings": 7,
+      "png_path_preserved": true
+    },
+    "after": {
+      "entries": 890,
+      "error": null,
+      "png_headings": 0,
+      "png_path_preserved": true
+    }
+  },
+  "scope": "Read-only bytes; AST-isolated parsing and node rendering. No application session, fork, DB connection or process control."
+}

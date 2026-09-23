@@ -13,6 +13,8 @@ from types import SimpleNamespace as NS
 
 import pytest
 
+from misaka.config import home
+
 
 @pytest.fixture
 def isolated(tmp_path, monkeypatch):
@@ -21,17 +23,18 @@ def isolated(tmp_path, monkeypatch):
             monkeypatch.delenv(key, raising=False)
     for key, leaf in (("HOME", "home"), ("XDG_CONFIG_HOME", "config"),
                       ("XDG_CACHE_HOME", "cache"), ("XDG_DATA_HOME", "data"),
-                      ("HERMES_HOME", "hermes"), ("MISAKA_CODING_AGENT_DIR", "agent"),
-                      ("MISAKA_PROFILES", "profiles")):
+                      ("HERMES_HOME", "hermes")):
         (tmp_path / leaf).mkdir()
         monkeypatch.setenv(key, str(tmp_path / leaf))
+    monkeypatch.setenv(home.ENV_HOME, str(tmp_path))
+    home.path("models").parent.mkdir(parents=True, exist_ok=True)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.chdir(workspace)
-    profile = tmp_path / "profiles/sisters/10032"
+    profile = home.path("profiles_root") / "10032"
     profile.mkdir(parents=True)
     (profile / "SOUL.md").write_text("Fixture Sister.\n")
-    (tmp_path / "profiles/MISAKA.md").write_text("Fixture shared identity.\n")
+    (home.path("roles_root") / "MISAKA.md").write_text("Fixture shared identity.\n")
     # Prevent editable installs from sending children to a different checkout.
     guard = tmp_path / "python"
     guard.mkdir()
@@ -43,15 +46,11 @@ def isolated(tmp_path, monkeypatch):
         "sys.addaudithook(audit)\n"
     )
     monkeypatch.setenv("PYTHONPATH", os.pathsep.join((str(guard), str(Path(__file__).resolve().parents[1]))))
-    from misaka.config import CFG
-
-    monkeypatch.setitem(CFG, "roles_root", str(tmp_path / "profiles"))
-    monkeypatch.setitem(CFG, "profiles_root", str(tmp_path / "profiles/sisters"))
     return tmp_path
 
 
 @pytest.fixture
-def endpoint(isolated):
+def endpoint(isolated, request):
     requests = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -72,6 +71,16 @@ def endpoint(isolated):
                  "usage": {"output_tokens": 3}},
                 {"type": "message_stop"},
             ]
+            write = getattr(request, "param", None)
+            if write and len(requests) == 1:
+                events[1:4] = [
+                    {"type": "content_block_start", "index": 0, "content_block": {
+                        "type": "tool_use", "id": "fixture-write", "name": "write", "input": {}}},
+                    {"type": "content_block_delta", "index": 0, "delta": {
+                        "type": "input_json_delta", "partial_json": json.dumps({"path": write, "content": "Written by child."})}},
+                    {"type": "content_block_stop", "index": 0},
+                ]
+                events[4]["delta"]["stop_reason"] = "tool_use"
             body = "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -82,7 +91,7 @@ def endpoint(isolated):
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    (isolated / "agent/models.json").write_text(json.dumps({"providers": {"fixture": {
+    home.path("models").write_text(json.dumps({"providers": {"fixture": {
         "baseUrl": f"http://127.0.0.1:{server.server_port}", "api": "anthropic-messages",
         "apiKey": "fixture-not-a-real-key", "models": [{"id": "fixture-model", "name": "Fixture",
         "reasoning": False, "input": ["text"], "contextWindow": 200000, "maxTokens": 1024,
@@ -101,14 +110,17 @@ def host(root):
 
     workspace = str(root / "workspace")
     model = {"provider": "fixture", "id": "fixture-model"}
-    session = NS(cwd=workspace, model=model, modelRegistry=NS(getAvailable=lambda: [model]),
+    session = NS(cwd=workspace, model=model, modelRegistry=NS(
+                 getAvailable=lambda: [model], getAll=lambda: [model],
+                 find=lambda provider, model_id: model if (provider, model_id) == ("fixture", "fixture-model") else None,
+                 hasConfiguredAuth=lambda _model: True),
                  sessionManager=SessionManager.create(workspace, str(root / "sessions")),
                  settingsManager=NS(getGlobalSettings=dict, getProjectSettings=dict),
                  getActiveToolNames=list, isProjectTrusted=lambda: True,
                  agent=NS(state=NS(messages=[], tools=[], systemPrompt="Fixture parent.")))
     manager = SubagentManager(session, RoleContext(
         role="sisters/10032", mcp_role="sisters/10032", workspace=workspace,
-        profile_dir=str(root / "profiles/sisters/10032")))
+        profile_dir=str(home.path("profiles_root") / "10032")))
     return manager, session
 
 
@@ -163,6 +175,43 @@ async def test_native_first_turn_and_resume(isolated, endpoint, kind, background
         assert len(users) == 2
     finally:
         await manager.close()
+
+
+@pytest.mark.parametrize("endpoint", ["outputs/card/report.md"], indirect=True)
+async def test_background_child_uses_live_card_output_grant(isolated, endpoint, monkeypatch):
+    import sqlite3
+
+    from misaka.core.network.todo import TodoPart
+    from misaka.core.platform import tasks
+
+    manager, session = host(isolated)
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    con.execute("CREATE TABLE tasks(id TEXT, status TEXT, generation INTEGER, claim_lock TEXT, workspace TEXT, output_dir TEXT)")
+    output = Path(session.cwd) / "outputs/card"
+    con.execute("INSERT INTO tasks VALUES ('fixture-card', 'running', 1, 'fixture-owner', ?, ?)", (session.cwd, str(output)))
+    part = TodoPart.__new__(TodoPart)
+    part.task_id, part._con, part._bdb, part.session = "fixture-card", con, tasks, session
+    session.moments = NS(parts=[part])
+    session.getActiveToolNames = lambda: ["write", "read", "edit"]
+    monkeypatch.setenv("MISAKA_SISTER_OWNER_TASK_ID", "fixture-card")
+    monkeypatch.setenv("MISAKA_SISTER_OWNER_GENERATION", "1")
+    monkeypatch.setenv("MISAKA_SISTER_OWNER_CLAIM_LOCK", "fixture-owner")
+    try:
+        task = await create(manager, session, "general", True)
+        assert manager._child_permission_mode(task) == "default"
+        assert not manager._child_can_prompt(task)
+        async with asyncio.timeout(20):
+            await manager._drive(task, "Write the assigned report.", notify=False)
+        assert task.status == "completed", (task.error, task.stderr)
+        assert (output / "report.md").read_text() == "Written by child."
+        assert len(endpoint) == 2
+        entries = [json.loads(line) for line in task.transcript.read_text().splitlines()]
+        results = [entry["message"] for entry in entries if entry.get("message", {}).get("role") == "toolResult"]
+        assert results and all(result["isError"] is False for result in results)
+    finally:
+        await manager.close()
+        con.close()
 
 
 async def test_fork_keeps_seed_history(isolated, endpoint):

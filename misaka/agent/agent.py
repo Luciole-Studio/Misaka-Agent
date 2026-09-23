@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -46,6 +47,8 @@ from misaka.ai.types import (
     validate_message,
 )
 from misaka.utils.values import call_with_optional_second_arg, maybe_await
+
+logger = logging.getLogger(__name__)
 
 
 class MutableAgentState(AgentState):
@@ -563,6 +566,10 @@ class Agent:
 
     async def _handle_run_failure(self, error: BaseException) -> None:
         aborted = self.signal.aborted if self.signal is not None else False
+        if not aborted:
+            # The message keeps only str(error); a TypeError or IndexError from a hook is
+            # otherwise a bare phrase on screen with no way back to its line (2026-09-22).
+            logger.warning("agent run failed before an answer: %s", error, exc_info=error)
         failure_message = AssistantMessage(
             content=[TextContent(text="")],
             api=self._state.model.api,

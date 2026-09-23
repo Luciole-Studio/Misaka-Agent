@@ -836,19 +836,19 @@ class AgentSession:
     async def setModel(self, model: Model[Any], persist: bool = False) -> None:
         """Switch the session model.
 
-        The switch is session-only unless ``persist`` is set; only then is the global
-        default in settings.json rewritten (pi agent-session.ts:1636-1656
-        ``if (options.persist)``).  Extensions never pass it, so a plugin that swaps the
-        model for a subtask can no longer change the user's default.
+        The switch is session-only unless ``persist`` is set. SettingsManager
+        saves to this session's role when bound, otherwise to the native global
+        default (pi agent-session.ts:1636-1656).
         """
         if not await self._modelRegistry.checkConfiguredAuth(model):
             raise RuntimeError(f"No API key for {model.provider}/{model.id}")
         current = self.model
         thinking_level = self._get_thinking_level_for_model_switch(model)
+        if persist:
+            self.settingsManager.setDefaultModelAndProvider(model.provider, model.id)
         self.agent.state.model = model
         self.sessionManager.appendModelChange(model.provider, model.id)
         if persist:
-            self.settingsManager.setDefaultModelAndProvider(model.provider, model.id)
             self._add_persisted_default_to_non_empty_scope(model)
         # Persisting the model deliberately does not rewrite the global thinking default.
         self.setThinkingLevel(thinking_level)
@@ -869,6 +869,8 @@ class AgentSession:
             return
 
         self._scopedModels = [*self._scopedModels, {"model": model}]
+        if getattr(self.settingsManager, "getModelProfile", lambda: None)():
+            return
 
         enabled_models = self.settingsManager.getEnabledModels()
         if not enabled_models:
@@ -951,10 +953,11 @@ class AgentSession:
             next_model,
             scoped_models[next_index].get("thinkingLevel"),
         )
+        if persist:
+            self.settingsManager.setDefaultModelAndProvider(next_model.provider, next_model.id)
         self.agent.state.model = next_model
         self.sessionManager.appendModelChange(next_model.provider, next_model.id)
         if persist:
-            self.settingsManager.setDefaultModelAndProvider(next_model.provider, next_model.id)
             self._add_persisted_default_to_non_empty_scope(next_model)
         # Model persistence does not implicitly rewrite the global thinking default.
         self.setThinkingLevel(thinking_level)
@@ -981,10 +984,11 @@ class AgentSession:
         next_index = (current_index + (1 if direction != "backward" else -1)) % len(available_models)
         next_model = available_models[next_index]
         thinking_level = self._get_thinking_level_for_model_switch(next_model)
+        if persist:
+            self.settingsManager.setDefaultModelAndProvider(next_model.provider, next_model.id)
         self.agent.state.model = next_model
         self.sessionManager.appendModelChange(next_model.provider, next_model.id)
         if persist:
-            self.settingsManager.setDefaultModelAndProvider(next_model.provider, next_model.id)
             self._add_persisted_default_to_non_empty_scope(next_model)
         # Model persistence does not implicitly rewrite the global thinking default.
         self.setThinkingLevel(thinking_level)
@@ -1117,11 +1121,11 @@ class AgentSession:
         return commands
 
     def setActiveToolsByName(self, toolNames: list[str]) -> None:
+        # Keep selection before scopes/projections: a temporary mode must not erase
+        # the user's ordinary tools, or revive tools the user explicitly disabled.
+        self._unscopedToolNames = list(dict.fromkeys(toolNames))
         scopes = getattr(self, "_toolScopes", ())
         if scopes:
-            # An explicit user/extension selection still changes the underlying
-            # session, but never escapes a temporary scope's ceiling.
-            self._unscopedToolNames = list(dict.fromkeys(toolNames))
             scopes[-1]["active"] = list(toolNames)
         self._applyActiveToolsByName(toolNames)
 
@@ -1133,8 +1137,6 @@ class AgentSession:
         reloads and explicit user changes survive leaving the scope. Nested scopes
         intersect; they never change the session's persistent permission settings.
         """
-        if not self._toolScopes:
-            self._unscopedToolNames = self.getActiveToolNames()
         scope = {"allowed": frozenset(toolNames), "active": list(toolNames)}
         self._toolScopes.append(scope)
         try:
@@ -1241,7 +1243,7 @@ class AgentSession:
         await self._resourceLoader.reload()
         self._build_runtime(
             {
-                "activeToolNames": (list(self._unscopedToolNames) if self._toolScopes else self.getActiveToolNames()),
+                "activeToolNames": list(self._unscopedToolNames),
                 "flagValues": previous_flag_values,
                 "includeAllExtensionTools": True,
             }
@@ -1511,13 +1513,29 @@ class AgentSession:
         return (manager, manager.getSessionId(), manager.getSessionFile(),
                 tuple(entry.get("id") for entry in manager.getBranch()),
                 len(manager.getEntries()), (self.model.model_dump(mode="json")
-                                          if isinstance(self.model, Model) else self.model),
+                                          if isinstance(self.model, Model) else copy.deepcopy(self.model)),
                 copy.deepcopy(self.settingsManager.getCompactionSettings()))
+
+    def _check_compaction_source(self, source: tuple[Any, ...]) -> None:
+        current = self._compaction_source()
+        fields = ("owner", "session", "session file", "branch", "entries", "model", "settings")
+        changed = [name for name, before, after in zip(fields, source, current, strict=True)
+                   if before != after]
+        appended = self.sessionManager.getEntries()[source[4]:]
+        # Bookkeeping may arrive while a context engine or summarizer is awaiting.
+        # Only accept a contiguous append to the original leaf, not a new branch,
+        # message (including custom_message), model/thinking change or compaction.
+        if (current[4] == source[4] + len(appended)
+                and current[3] == (*source[3], *(entry.get("id") for entry in appended))
+                and all(entry.get("type") in {"custom", "label", "session_info"} for entry in appended)):
+            changed = [name for name in changed if name not in {"branch", "entries"}]
+        if changed:
+            raise RuntimeError("Session, branch, model or settings changed during compaction "
+                               f"({', '.join(changed)})")
 
     def _publish_compaction(self, result: SessionCompactionResult, from_hook: bool,
                             source: tuple[Any, ...]) -> Any:
-        if self._compaction_source() != source:
-            raise RuntimeError("Session, branch, model or settings changed during compaction")
+        self._check_compaction_source(source)
         options = ({"contextMessages": result.contextMessages}
                    if result.contextMessages is not None else {})
         entry_id = self.sessionManager.appendCompaction(
@@ -1626,8 +1644,7 @@ class AgentSession:
                 "manual", self._compactionAbortController.signal, customInstructions)
             if operation is None:
                 raise RuntimeError("Nothing to compact")
-            if self._compaction_source() != source:
-                raise RuntimeError("Session, branch, model or settings changed during compaction")
+            self._check_compaction_source(source)
             result, from_hook = await operation()
             if result is None:
                 raise RuntimeError("Nothing to compact")
@@ -2497,8 +2514,7 @@ class AgentSession:
                 self._customTools, self._resourceLoader.getExtensions().extensions
             )
         previous_registry_names = set(self._toolRegistry)
-        previous_active_tool_names = (list(self._unscopedToolNames) if getattr(self, "_toolScopes", ())
-                                      else self.getActiveToolNames())
+        previous_active_tool_names = list(self._unscopedToolNames)
 
         def is_allowed_tool(name: str) -> bool:
             if self._toolAdmission is not None and not self._toolAdmission(name):
@@ -2586,13 +2602,14 @@ class AgentSession:
             # A scope is not permission to revive tools the underlying user
             # selection had turned off. Only genuinely new registrations join it.
             next_active_tool_names.extend(name for name in self._toolRegistry if name not in previous_registry_names)
-        elif self._allowedToolNames is not None:
+        elif self._allowedToolNames is not None and not previous_registry_names:
             for tool_name in self._toolRegistry:
                 if tool_name in self._allowedToolNames:
                     next_active_tool_names.append(tool_name)
         elif resolved_options.get("includeAllExtensionTools"):
             for definition, _source_info in all_custom_tools:
-                next_active_tool_names.append(definition.name)
+                if definition.name not in previous_registry_names:
+                    next_active_tool_names.append(definition.name)
         elif "activeToolNames" not in resolved_options:
             for tool_name in self._toolRegistry:
                 if tool_name not in previous_registry_names:
@@ -2977,7 +2994,13 @@ class AgentSession:
             self._stopHookContinuationPending = False
             return True
 
-        if self._is_retryable_error(message) and await self._prepare_retry(message):
+        # MISAKA fork: a credential the provider refused is replaced once, and the turn is retried
+        # with the replacement. pi ends the turn here -- a 401 is not retryable and auth is resolved
+        # on a clock, never on a rejection -- which is what left four cards' first request dead after
+        # another client rotated the OAuth token they shared, until a person restarted each one by
+        # hand (2026-09-18, B7).
+        if (self._is_retryable_error(message) or await self._recover_rejected_credential(message)) \
+                and await self._prepare_retry(message):
             return True
 
         if message.stopReason == "error" and self._retryAttempt > 0:
@@ -3043,6 +3066,30 @@ class AgentSession:
             maxRetries=int(settings.get("maxRetries", 0) or 0),
             baseDelayMs=int(settings.get("baseDelayMs", 0) or 0),
         )
+
+    async def _recover_rejected_credential(self, message: AssistantMessage) -> bool:
+        """MISAKA fork: replace a stored credential the provider has just refused. True when it
+        changed, so the turn is worth running again. The provider is the one that answered this
+        message, not the session's current model. One rejected token is replaced once per turn;
+        a second refusal of the same one is the account's answer and is reported as it stands."""
+        if message.stopReason != "error" or not getattr(message, "provider", None):
+            return False
+        from .model_registry import is_rejected_credential_error
+        if not is_rejected_credential_error(message.errorMessage):
+            return False
+        # Rotating a token is worth doing once per turn, and only when a retry can follow it:
+        # `_retryAttempt` is zero only on a turn's first failure.
+        settings = self.settingsManager.getRetrySettings()
+        if (self._retryAttempt != 0 or not bool(settings.get("enabled"))
+                or int(settings.get("maxRetries", 0) or 0) < 1):
+            return False
+        recover = getattr(self._modelRegistry, "recoverRejectedCredential", None)
+        if recover is None:
+            return False
+        try:
+            return bool(await recover(message.provider))
+        except Exception:  # noqa: BLE001 - the provider's own error is the one that must reach the user
+            return False
 
     def _is_retryable_error(self, message: AssistantMessage) -> bool:
         # Context overflow is handled by compaction, not retry. Everything else is the
@@ -3252,8 +3299,7 @@ class AgentSession:
                 preflight=preflight, current_tokens=current_tokens, will_retry=will_retry)
             if operation is None:
                 return False
-            if self._compaction_source() != source:
-                raise RuntimeError("Session, branch, model or settings changed during compaction")
+            self._check_compaction_source(source)
             self._emit({"type": "compaction_start", "reason": reason})
             started = True
             result, from_hook = await operation()

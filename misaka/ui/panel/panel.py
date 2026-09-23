@@ -29,6 +29,7 @@ import sys
 import termios
 import time
 
+from misaka.config import home
 from misaka.ui.panel import client as net
 from misaka.ui.panel import geometry as hui
 from misaka.ui.panel import host_input as hin
@@ -40,8 +41,10 @@ from misaka.ui.panel.selection import absolute_row as _abs_row
 
 def _prefix_key():
     """Prefix key, default ctrl+b. Inside tmux that key is taken, so set
-    MISAKA_PANEL_PREFIX=ctrl+g (or similar) to change it."""
-    name = os.environ.get("MISAKA_PANEL_PREFIX", "ctrl+b").lower().strip()
+    ``panel.prefix`` to ctrl+g (or similar) in settings.json to change it."""
+    from misaka.config.product import setting
+
+    name = str(setting("panel", "prefix", "ctrl+b", str)).lower().strip()
     if name.startswith("ctrl+") and len(name) == 6 and name[5].isalpha():
         return hin.Key(name[5], hin.CTRL)
     return hin.Key("b", hin.CTRL)
@@ -354,8 +357,8 @@ def space_key(pane):
 
 
 def _space_label(folder):
-    home = os.path.expanduser("~")
-    return "~" if folder == home else (os.path.basename(folder.rstrip(os.sep)) or folder)
+    user_home = os.path.expanduser("~")
+    return "~" if folder == user_home else (os.path.basename(folder.rstrip(os.sep)) or folder)
 
 
 def effective_space_folder(spaces, listing, focused_id, active_id):
@@ -967,8 +970,8 @@ def folder_groups(items):
     by_folder = {}
     for item in sorted(items, key=lambda item: -item.get("_t", 0)):
         by_folder.setdefault(item["folder"], []).append(item)
-    home = os.path.expanduser("~")
-    return [(folder, folder.replace(home, "~", 1) if folder.startswith(home) else folder, members)
+    user_home = os.path.expanduser("~")
+    return [(folder, folder.replace(user_home, "~", 1) if folder.startswith(user_home) else folder, members)
             for folder, members in by_folder.items()]
 
 
@@ -1401,8 +1404,7 @@ def launch():
             tail = "(output unavailable)"
         title = next((p["title"] for p in listing if p["id"] == pane_id), pane_id)
         try:
-            crash_fd = os.open(os.path.expanduser("~/.misaka/panel-crash.log"),
-                               os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+            crash_fd = os.open(home.path("panel_crash_log"), os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
             with os.fdopen(crash_fd, "a", encoding="utf-8") as f:
                 f.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} pane exited: {title} "
                         f"(exit code {exit_code}) ===\n{tail}\n")
@@ -1718,8 +1720,13 @@ def launch():
                 label += f" · {entry['run_id']} · depth {entry.get('depth', '?')}"
             if kind == "node":
                 label = f"d{entry.get('depth', '?')} {entry.get('node_status', '?')} · {label}"
+            elif kind == "child":
+                if entry.get("parent_task_status"):
+                    label = f"card {entry['parent_task_status']} · {label}"
+                if entry.get("child_status"):
+                    label = f"{entry['child_status']} · {label}"
             elif entry.get("task_status"):
-                label = f"{entry['task_status']} · {label}"
+                label = f"card {entry['task_status']} · {label}"
             if entry.get("paused"):
                 label = f"pause requested · {label}"
             row = {**entry, "kind": "item", "label": label, "when": session_stamp(stamp) if stamp else "live · unsaved",
@@ -3833,7 +3840,7 @@ def launch():
             render()
     except Exception as error:   # noqa: BLE001
         import traceback
-        log = os.path.expanduser("~/.misaka/panel-crash.log")
+        log = str(home.path("panel_crash_log"))
         try:
             crash_fd = os.open(log, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
             with os.fdopen(crash_fd, "a", encoding="utf-8") as f:
@@ -3852,7 +3859,7 @@ def launch():
         # the alternate screen, and show the cursor again.
         _write_all(b"\x1b[<u\x1b[?1000;1002;1003;1006l\x1b[?2004l\x1b[?1004l\x1b[?7h\x1b[0m\x1b[2J\x1b[?1049l\x1b[?25h")
         if exit_reason[0] == "closed_all":
-            print("All panes closed (their last lines are in ~/.misaka/panel-crash.log). "
+            print(f"All panes closed (their last lines are in {home.display(home.path('panel_crash_log'))}). "
                   "Run `misaka` to open the panel again.")
         else:
             print("Panel closed. Last Order and the Sisters shut down with it; nothing keeps running in the background.")

@@ -6,6 +6,7 @@ import os
 from contextlib import ExitStack, asynccontextmanager
 
 from misaka.agent.request_budget import install_turn_budget
+from misaka.ai.utils.overflow import output_limit_error
 from misaka.core.network import worker
 from misaka.core.platform import budget
 from misaka.core.platform.session import event_line
@@ -15,15 +16,25 @@ from misaka.utils.async_lifecycle import settle
 from misaka.utils.values import read_field
 
 
+def node_description(con, node_id):
+    """Keep run-wide progress distinct from the current node's lifecycle."""
+    from misaka.core.research import runs
+
+    node = runs.node(con, node_id)
+    run = runs.get(con, node["run_id"])
+    return {"run_id": run["id"], "node": node["id"], "depth": node["depth"],
+            "run_phase": run["phase"], "run_status": run["status"], "node_phase": node["status"]}
+
+
 class WindowLO:
     """The synchronous planner calls back onto the window's own event loop and session.
 
-    Root uses its existing window; fork LOs use their own resident session in
-    their isolated node process. Closing cancels pending callbacks too:
+    Root reuses its chat window or owns a headless session through final adjudication;
+    fork LOs own a resident session in their isolated node process. Closing cancels pending callbacks too:
     cancelling asyncio.to_thread alone does not stop its thread.
     """
 
-    def __init__(self, session, check_active, *, headless=False):
+    def __init__(self, session, check_active, *, describe, headless=False):
         self.session = session
         self.session_file = session.sessionManager.sessionFile
         self.loop = asyncio.get_running_loop()
@@ -32,6 +43,27 @@ class WindowLO:
         self.closed = False
         self.turn_lock = asyncio.Lock()
         self.headless = headless
+        from misaka.core.network.wiring.capabilities import SisterCapabilitiesPart
+
+        self.publisher = next((part for part in session.moments.parts
+                               if isinstance(part, SisterCapabilitiesPart)), None)
+        if self.publisher is None:
+            raise RuntimeError("Research requires the coordinator's system-prompt capability catalog.")
+        # The mode outlives a phase turn: approval waits and human input inherit
+        # the same filter. A phase scope only adds its temporary commands.
+        self.mode = ExitStack()
+        self.mode.enter_context(self.publisher.snapshot())
+        control = for_session(session)
+        if control is not None:
+            previous = control.describe
+
+            def restore_description():
+                # A later owner may have replaced this window's description.
+                if control.describe is describe:
+                    control.describe = previous
+
+            self.mode.callback(restore_description)
+            control.describe = describe
 
     def run_llm_json(self, _profile, prompt, _provider, _model, **options):
         return asyncio.run_coroutine_threadsafe(self._turn(prompt, options), self.loop).result()
@@ -41,7 +73,10 @@ class WindowLO:
         pending = list(self.pending)
         for task in pending:
             task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
+        try:
+            await asyncio.gather(*pending, return_exceptions=True)
+        finally:
+            self.mode.close()
 
     async def _turn(self, prompt, options):
         if self.closed:
@@ -100,7 +135,8 @@ class WindowLO:
                 return
             stop = read_field(message, "stopReason")
             if stop in {"error", "aborted", "length"} and answer is None:
-                error = read_field(message, "errorMessage") or f"request {stop}"
+                error = read_field(message, "errorMessage") or (
+                    output_limit_error(message) if stop == "length" else f"request {stop}")
             elif stop == "stop" and answer is None:
                 # A queued user/notification follow-up belongs to the same window, but
                 # must not replace the research phase's completed Markdown.
@@ -127,13 +163,12 @@ class WindowLO:
                 return
 
         try:
-            names = [*options.get("tools", ()), *(tool.name for tool in definitions)]
-            from misaka.core.network.wiring.capabilities import SisterCapabilitiesPart
+            from misaka.core.research.planner import session_tools
+            # Re-read at the actual turn boundary; a queued phase's old selection
+            # must not resurrect capabilities the user has since disabled.
+            names = [*session_tools(self), *(tool.name for tool in definitions)]
             scope.enter_context(session.toolScope(names))
-            publisher = next((part for part in session.moments.parts if isinstance(part, SisterCapabilitiesPart)), None)
-            if publisher is None:
-                raise RuntimeError("Research requires the coordinator's system-prompt capability catalog.")
-            scope.enter_context(publisher.snapshot(options.get("sister_catalog")))
+            scope.enter_context(self.publisher.snapshot(options.get("sister_catalog")))
             session.registerCustomTools(definitions)
             from misaka.core.research.planner import OPTIONAL_MATERIAL_TOOLS
             # Credentials/executables decide availability; missing mandatory tools still fail.
@@ -160,9 +195,11 @@ class WindowLO:
                 if preflight is not None:
                     await session.prompt(prompt, {"streamingBehavior": "steer", "preflightResult": preflight})
                 else:
+                    from misaka.core.moments import TURN
+
                     await session.sendCustomMessage(
                         {"customType": "research-phase", "display": True, "content": prompt,
-                         "details": {"run_id": options.get("usage_task_id"),
+                         "details": {"run_id": options.get("usage_task_id"), TURN: True,
                                      "stage": "adjudication_draft" if prompt.startswith((DRAFT_CONTRACT, FINAL_CONTRACT)) else None}},
                         {"triggerTurn": True, "prepareTurn": True})
             self.check_active()
@@ -194,31 +231,24 @@ class WindowLO:
                         await asyncio.gather(heartbeat, return_exceptions=True)
 
 
-# The tool allow-list a fork Last Order's resident session starts with. It gates every tool the
-# session can ever activate, including the ones a phase registers for one turn: a name missing
-# here is silently filtered out, and the turn that needed it fails as "missing research tools".
-# So every tool a phase or a wait can hand her must be listed.
-def node_lo_tools():
-    from misaka.core.research import planner
-    return (*planner.session_tools(None),
-            "misaka_research_assign", "misaka_research_investigate",       # phase commands
-            "misaka_research_start", "misaka_research_withdraw", "misaka_research_skip",   # the plan-approval wait
-            "lcm_grep", "lcm_load_session")                                # this run's conversations
-
-
 @asynccontextmanager
 async def node_session(con, cfg, run, node):
-    """One runtime per node execution, including waits for Sisters and red team."""
+    """One headless runtime per node; the root also owns the run-level report and review."""
     from misaka.core.platform.session import _env_window, dispose, open_session
     from misaka.core.research import planner, runs
 
     directory = planner._lo_session(run, node)
     session_file = run["root_session"] if node["parent_id"] is None else node["session_file"]
-    flags, assembly, env = worker.bare_session_setup(
-        os.path.join(cfg["roles_root"], "last_order"), cfg["provider"], cfg["default_model"],
-        cwd=run["workspace"], tools=node_lo_tools(), soul=False,
-        session_dir=directory, session_file=session_file,
-        continue_session=True, thinking="high", research_context=True)
+    from misaka.core.wiring import role_session_setup
+
+    flags, assembly, env = role_session_setup(
+        os.path.join(cfg["roles_root"], "last_order"), run["workspace"],
+        research_context=True)
+    flags += ["--session-dir", directory]
+    if session_file:
+        flags += ["--session", session_file]
+    else:
+        flags.append("--continue")
     env.update(MISAKA_USAGE_DB=str(cfg["db"]), MISAKA_USAGE_TASK_ID=run["id"],
                MISAKA_USAGE_GENERATION="1", MISAKA_USAGE_TOKEN_CAP=str(cfg.get("token_cap") or 0))
 
@@ -230,22 +260,24 @@ async def node_session(con, cfg, run, node):
             raise RuntimeError("Research node or driver changed owners.")
 
     async with _env_window():
-        previous = {key: os.environ.get(key) for key in env}
+        previous = {key: os.environ.get(key) for key in (*env, "MISAKA_NET_PANE", "MISAKA_RESEARCH_NODE")}
         os.environ.update(env)
+        # A CLI root runs in its driver, not in ProcessSpawner which clears pane identity.
+        os.environ.pop("MISAKA_NET_PANE", None)
+        # This runtime is driven here, not by an inherited pane's NodePart.
+        os.environ.pop("MISAKA_RESEARCH_NODE", None)
         runtime = bridge = None
         try:
             runtime, session, error = await open_session(flags, run["workspace"], assembly)
             if error:
                 raise RuntimeError(error)
             check_active()
-            bridge = WindowLO(session, check_active, headless=True)
+            bridge = WindowLO(session, check_active, describe=lambda: node_description(con, node["id"]), headless=True)
             runs.set_node(con, node["id"], session_file=bridge.session_file)
             if node["parent_id"] is None:
                 runs.set_state(con, run["id"], root_session=bridge.session_file, driver_lock=run["driver_lock"])
             control = for_session(session)
             control.check_active = check_active
-            control.describe = lambda: {"node": node["id"], "depth": node["depth"],
-                                        "phase": runs.node(con, node["id"])["status"]}
 
             async def human_input(text, preflight):
                 if session.isStreaming:

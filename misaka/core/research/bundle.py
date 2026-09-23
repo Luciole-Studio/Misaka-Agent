@@ -31,8 +31,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 from misaka.core.documents import index as corpus
 from misaka.core.research import ledger, runs
-from misaka.core.tools._web.evidence import check_material_read, read_provenance
 from misaka.core.tools.path_utils import DOWNLOAD_DIR_NAME
+from misaka.core.web.evidence import check_material_read, read_provenance
 
 MANIFEST = "SOURCES.md"
 SOURCES_DIR = "sources"
@@ -293,12 +293,12 @@ class _Collector:
                 real = self.index.file_inside(os.path.join(self.index.workspace, rel))
                 if real:
                     out.add(real)
-        sessions = [row[0] for row in self.con.execute(
+        sessions = [row["session_file"] for row in self.con.execute(
             "SELECT session_file FROM task_runs WHERE task_id=? AND session_file IS NOT NULL ORDER BY started_at",
             (task["id"],))]
         current = self.con.execute("SELECT session_file FROM tasks WHERE id=?", (task["id"],)).fetchone()
-        if current and current[0]:
-            sessions.append(current[0])
+        if current and current["session_file"]:
+            sessions.append(current["session_file"])
         for session_file in dict.fromkeys(sessions):
             out |= consulted_in_session(session_file, self.index)
         return out
@@ -334,7 +334,7 @@ def consulted_in_session(session_file, index):
             out.add(real)
 
     try:
-        lines = Path(session_file).read_text(encoding="utf-8").splitlines()
+        lines = Path(session_file).read_text(encoding="utf-8").split("\n")
     except (OSError, TypeError, ValueError):
         return out
     for line in lines:

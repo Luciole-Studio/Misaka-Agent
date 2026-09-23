@@ -75,6 +75,37 @@ def is_recoverable_length(message: AssistantMessage, desired_max_output: int) ->
             and message.usage.output < desired_max_output)
 
 
+OUTPUT_LIMIT_MARK = "output token limit"
+
+
+def _field(value, name, default=None):
+    if isinstance(value, dict):
+        return value.get(name, default)
+    return getattr(value, name, default)
+
+
+def output_limit_error(message) -> str:
+    """What a ``length`` stop means to the caller, in words the model can act on.
+
+    pi's own recovery covers a reply cut *below* the output cap (``is_recoverable_length``);
+    a reply that spent the whole cap -- adaptive thinking at effort max can -- is not retried
+    by pi and used to reach research callers as "request length", which Last Order read as
+    "the request was too long" and shrank her plan. Name the cause and the fact that no tool
+    call happened, so the driver can nudge one more turn and the model knows what to do.
+    """
+    usage = _field(message, "usage")
+    output = _field(usage, "output", 0) or 0
+    return (f"the reply hit the model's {OUTPUT_LIMIT_MARK} ({output} tokens) before it finished; "
+            "no tool call was made")
+
+
+def hit_output_limit(error) -> bool:
+    return bool(error) and OUTPUT_LIMIT_MARK in str(error)
+
+
 __all__ = [
+    "hit_output_limit",
     "is_context_overflow",
+    "is_recoverable_length",
+    "output_limit_error",
 ]

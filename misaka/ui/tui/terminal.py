@@ -75,11 +75,10 @@ def resolve_escape_timeout_ms(env: Any = None) -> float:
     back and so the one that asks for a paste at all. Upstream pi has no panel -- its TUI
     owns the host terminal, the paste arrives in one read, and the residual never fires.
     """
+    from misaka.config.product import setting
+
     environ = os.environ if env is None else env
-    try:
-        configured = float(environ.get("MISAKA_TUI_ESC_TIMEOUT") or 0)
-    except ValueError:
-        configured = 0.0
+    configured = float(setting("tui", "esc_timeout_ms", 0, float))
     if math.isfinite(configured) and configured > 0:
         return configured
     if (

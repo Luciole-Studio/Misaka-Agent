@@ -15,7 +15,22 @@ from contextvars import ContextVar
 from functools import wraps
 from pathlib import Path
 
+from misaka.config import home
 from misaka.utils.redact import redact, redact_payload
+
+# Columns that point into the home. They are written home-relative (``home.stored``) so a board
+# survives its home being moved or restored elsewhere, and ``Row`` hands them back as real paths.
+HOME_POINTERS = frozenset({"session_file", "session_dir", "root_session"})
+
+
+class Row(sqlite3.Row):
+    """A board row. Read pointer columns by name: positional access is the raw stored value."""
+
+    def __getitem__(self, key):
+        value = super().__getitem__(key)
+        if key in HOME_POINTERS and isinstance(value, str):
+            return str(home.from_stored(value))
+        return value
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +61,6 @@ CREATE TABLE IF NOT EXISTS tasks (
  worker_identity TEXT,
  current_run_id TEXT,
  generation INTEGER NOT NULL DEFAULT 1,
- notified_generation INTEGER NOT NULL DEFAULT 0, -- legacy cache; notification_events/subscriptions own delivery
  review_rounds INTEGER NOT NULL DEFAULT 0,
  review_feedback TEXT,
  review_lock TEXT,
@@ -136,6 +150,7 @@ CREATE INDEX IF NOT EXISTS idx_task_runs_status ON task_runs(status);
 -- unsettled done card. Every connect runs this script, so an older board gains the index on
 -- its next open -- IF NOT EXISTS is the migration.
 CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id, kind, id);
+CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id, id);
 """
 TASK_SCHEMA_VERSION = 8
 MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
@@ -300,71 +315,27 @@ def _serialized(operation):
     return call
 
 
-def _columns(con, table):
-    return {row[1] for row in con.execute(f"PRAGMA table_info({table})").fetchall()}
+def require_schema(con, component, version, *, populated):
+    """A board component is current, fresh, or another MISAKA's. Returns True when fresh.
 
-
-def _migrate(con):
-    """Additively migrate databases created by older MISAKA builds."""
-    task_columns = {
-        "reviewer": "TEXT",
-        "current_run_id": "TEXT",
-        "block_kind": "TEXT",
-        "block_reason": "TEXT",
-        "block_fingerprint": "TEXT",
-        "block_recurrence": "INTEGER NOT NULL DEFAULT 0",
-        "blocked_at": "INTEGER",
-        "heartbeat_at": "INTEGER",
-        "next_attempt_at": "INTEGER",
-        "review_rounds": "INTEGER NOT NULL DEFAULT 0",
-        "review_feedback": "TEXT",
-        "review_lock": "TEXT",
-        "review_expires": "INTEGER",
-        "review_pid": "INTEGER",
-        "review_identity": "TEXT",
-        "output_dir": "TEXT",
-        "origin_session": "TEXT",
-        "session_dir": "TEXT",
-        "consecutive_failures": "INTEGER NOT NULL DEFAULT 0",
-        "last_failure_error": "TEXT",
-    }
-    existing = _columns(con, "tasks")
-    for name, definition in task_columns.items():
-        if name not in existing:
-            con.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")
-    if "session_dir" not in existing:
-        # Preserve physical storage in place exactly once. New cards allocate by immutable
-        # card id; runtime code never searches old layouts or derives storage from a worktree.
-        from misaka.config import sessions
-        for row in con.execute("SELECT id,session_file FROM tasks"):
-            directory = (os.path.dirname(row["session_file"]) if row["session_file"] else
-                         sessions.card_session_dir(row))
-            con.execute("UPDATE tasks SET session_dir=? WHERE id=?", (directory, row["id"]))
-    # Phases 2-3 moved comments, attachments and links into the card file / repo. Nothing copies
-    # the old rows over, so a table that still holds any is renamed, not dropped: the data stays
-    # reachable until someone migrates it by hand.
-    stamp = time.strftime("%Y%m%d%H%M%S")
-    for retired in ("task_comments", "task_attachments", "task_links"):
-        if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (retired,)).fetchone():
-            continue
-        if con.execute(f"SELECT COUNT(*) FROM {retired}").fetchone()[0] == 0:
-            con.execute(f"DROP TABLE {retired}")
-        else:
-            con.execute(f"ALTER TABLE {retired} RENAME TO {retired}_bak_{stamp}")
-    # The verifier and its two statuses are gone; a card left there needs a human, not silence.
-    con.execute(
-        "UPDATE tasks SET status='triage', block_kind='needs_input', "
-        "block_reason='left in a retired verifier state (verifying/finalizing); review the card and unblock it', "
-        "blocked_at=?, claim_lock=NULL, claim_expires=NULL, worker_pid=NULL, worker_identity=NULL "
-        "WHERE status IN ('verifying','finalizing')",
-        (int(time.time()),),
-    )
-    if "run_id" not in _columns(con, "events"):
-        con.execute("ALTER TABLE events ADD COLUMN run_id TEXT")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id, id)")
-    con.execute(
-        "INSERT OR IGNORE INTO schema_migrations(component,version,applied_at) VALUES(?,?,?)",
-        ("tasks", TASK_SCHEMA_VERSION, int(time.time())),
+    No upgrade path is shipped and nothing is reshaped in place: a board written by an older or
+    a newer build is refused by version, so its data stays exactly as that build left it.
+    """
+    recorded = con.execute(
+        "SELECT MAX(version) FROM schema_migrations WHERE component=?", (component,)
+    ).fetchone()[0]
+    if recorded == version:
+        return False
+    if recorded is None and not populated:
+        con.execute(
+            "INSERT OR IGNORE INTO schema_migrations(component,version,applied_at) VALUES(?,?,?)",
+            (component, version, int(time.time())),
+        )
+        return True
+    written = f"v{recorded}" if recorded is not None else "no version marker"
+    raise RuntimeError(
+        f"This board's {component} tables were written by another MISAKA ({written}; this build "
+        f"is v{version}). No upgrade is shipped: start a new home, or convert the board by hand."
     )
 
 
@@ -379,7 +350,7 @@ def connect(path: str) -> sqlite3.Connection:
         factory=SerializedConnection,
     )
     try:
-        con.row_factory = sqlite3.Row
+        con.row_factory = Row
         # journal_mode=WAL is a request, not a promise: a filesystem without the shared-memory and
         # locking primitives WAL needs (NFS, SMB, some container overlays) leaves SQLite in
         # rollback-journal mode, and the pragma answers with the mode it kept. Read that row back --
@@ -413,24 +384,8 @@ def connect(path: str) -> sqlite3.Connection:
                 )
         con.executescript(SCHEMA)
         from misaka.core.platform import notifications
-        newest = con.execute("SELECT MAX(version) FROM schema_migrations WHERE component='tasks'").fetchone()[0]
-        if newest is not None and int(newest) > TASK_SCHEMA_VERSION:
-            raise RuntimeError(f"This board was written by a newer MISAKA (task schema v{newest}; this build knows "
-                               f"v{TASK_SCHEMA_VERSION}). Upgrade MISAKA rather than downgrading the data.")
-        if newest != TASK_SCHEMA_VERSION:
-            # Once per upgrade, not on every connection -- and once per *board*, not per process.
-            # _migrate reads the column set and then ALTERs; two processes that both connect to the
-            # same stale board right after an upgrade each read the pre-migration metadata, and the
-            # loser's ALTER raises "duplicate column name" (or its DROP raises "no such table")
-            # straight out of connect(), killing that process at startup. busy_timeout does not help:
-            # it is stale metadata, not a lock conflict. BEGIN IMMEDIATE makes the loser queue, and
-            # re-reading the version inside the transaction makes it skip work the winner committed.
-            with _write_txn(con):
-                newest = con.execute(
-                    "SELECT MAX(version) FROM schema_migrations WHERE component='tasks'"
-                ).fetchone()[0]
-                if newest != TASK_SCHEMA_VERSION:
-                    _migrate(con)
+        require_schema(con, "tasks", TASK_SCHEMA_VERSION,
+                       populated=con.execute("SELECT EXISTS(SELECT 1 FROM tasks)").fetchone()[0])
         notifications.init(con)
     except BaseException:
         con.close()
@@ -444,7 +399,7 @@ def canonical_workspace(path=None):
 
 def task_state_dir(task_id):
     from misaka.config import CFG
-    return str(Path(CFG.get("tasks_root", "~/.misaka/tasks")).expanduser() / str(task_id))
+    return str(Path(CFG["tasks_root"]) / str(task_id))
 
 
 def workspace_for(task):
@@ -642,7 +597,9 @@ def _start_run(
         "process_identity,workspace,session_file,started_at,heartbeat_at) "
         "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (run_id, task_id, int(generation), attempt, phase, assignee or row["assignee"], "running",
-         claim_lock, pid, identity, row["workspace"], row["session_file"], now, now),
+         claim_lock, pid, identity, row["workspace"],
+         home.stored(row["session_file"]) if row["session_file"] else None,   # Row decoded it; store it relative again
+         now, now),
     )
     con.execute("UPDATE tasks SET current_run_id=?,heartbeat_at=? WHERE id=?",
                 (run_id, now, task_id))
@@ -1157,7 +1114,8 @@ def set_workspace(con, task_id, workspace, generation=None, claim_lock=None):
 def set_runtime(con, task_id, agent_id, session_file, generation=None, claim_lock=None):
     """Record the Sister's agent id and session file on the card so it can be addressed later."""
     clauses = ["id=?"]
-    values = [agent_id, session_file, os.path.dirname(session_file) if session_file else None, task_id]
+    pointer = home.stored(session_file) if session_file else None
+    values = [agent_id, pointer, os.path.dirname(pointer) if pointer else None, task_id]
     if generation is not None:
         clauses.append("generation=?")
         values.append(generation)
@@ -1172,7 +1130,7 @@ def set_runtime(con, task_id, agent_id, session_file, generation=None, claim_loc
         if cur.rowcount == 1:
             con.execute(
                 "UPDATE task_runs SET session_file=? WHERE id=(SELECT current_run_id FROM tasks WHERE id=?)",
-                (session_file, task_id),
+                (pointer, task_id),
             )
         return cur.rowcount == 1
 

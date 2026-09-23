@@ -5,7 +5,7 @@ import logging
 import re
 import time
 
-from misaka.core.tools._web.bounded import vet_public_url
+from misaka.core.web.bounded import vet_public_url
 from misaka.core.web.browser import settings
 from misaka.core.web.browser.session import BrowserSession, check_url
 from misaka.core.web.network import proxy_for_url

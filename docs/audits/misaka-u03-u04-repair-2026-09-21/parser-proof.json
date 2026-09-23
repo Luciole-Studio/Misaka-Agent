@@ -1,0 +1,14 @@
+{
+  "elapsed_seconds": 0.07033462508115917,
+  "raw_chars": 40015,
+  "fragments": 2001,
+  "parse_count": 116,
+  "total_chars_parsed": 378975,
+  "source_hashes": {
+    "misaka/ai/utils/json_parse.py": "483e890de62ad8fbd71a50aa68724d95ee7b79e4b414c41e5e5c1c66dc778ff2",
+    "misaka/ai/utils/PARTIAL_JSON_LICENSE": "cd519ad3d7e012427f978dfb2e3b92ee403d189d7b859ba6bf68fd7e12ca456f",
+    "tests/test_json_parse.py": "ea4c54b3caef4086e303ac5d1831251e7968fff2b0a3aa4b78ff8b373c962b2a",
+    "tests/fixtures/pi_json_parse_c7cdb460.json": "41b9b49e17bf55a45a639420521b436fa6c78146a0952c013edfc35f083a5577"
+  },
+  "tests": "1121 passed"
+}

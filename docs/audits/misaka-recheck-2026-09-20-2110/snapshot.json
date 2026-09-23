@@ -1,0 +1,1316 @@
+{
+  "at": "2026-09-20T21:11:30.450951+09:00",
+  "run": {
+    "id": "r_b55f2c1cf5",
+    "status": "failed",
+    "phase": "active",
+    "root_session": "/Users/makiko/.misaka/sessions/last-order/--Users-makiko-Documents-exam-4930eb5912a06b18aea8b5c78736cd372019ae39acc2591d4dc61b11d4fa4c5e--/2026-09-20T04-10-52-766Z_01a0bd02-7fde-7c0c-aaed-0aecfa828c3d.jsonl",
+    "stop_requested": 0,
+    "last_error": "InvalidSessionFileError: Invalid session file (Unterminated string starting at: line 1 column 293 (char 292)): /Users/makiko/.misaka/sessions/last-order/--Users-makiko-Documents-exam-4930eb5912a06b18aea8b5c78736cd372019ae39acc2591d4dc61b11d4fa4c5e--/2026-09-20T04-10-52-766Z_01a0bd02-7fde-7c0c-aaed-0aecfa828c3d.jsonl",
+    "driver_lock": null,
+    "updated_at": 1789900270
+  },
+  "tasks": [
+    {
+      "id": "t_759180",
+      "assignee": "10043",
+      "status": "done",
+      "output_dir": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_759180",
+      "session_file": "/Users/makiko/.misaka/sessions/cards/t_759180/2026-09-20T09-19-40-484Z_01a0be1d-35c4-7b56-bc07-e4898793c860.jsonl",
+      "session_dir": "/Users/makiko/.misaka/sessions/cards/t_759180",
+      "generation": 1,
+      "local_id": "@red-team"
+    },
+    {
+      "id": "t_3dc3c2",
+      "assignee": "10032",
+      "status": "done",
+      "output_dir": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_3dc3c2",
+      "session_file": "/Users/makiko/.misaka/sessions/cards/t_3dc3c2/2026-09-20T05-06-44-294Z_01a0bd35-a3c6-7286-929d-edf90efbe3e9.jsonl",
+      "session_dir": "/Users/makiko/.misaka/sessions/cards/t_3dc3c2",
+      "generation": 1,
+      "local_id": "C1"
+    },
+    {
+      "id": "t_104134",
+      "assignee": "10032",
+      "status": "done",
+      "output_dir": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_104134",
+      "session_file": "/Users/makiko/.misaka/sessions/cards/t_104134/2026-09-20T05-06-44-294Z_01a0bd35-a3c6-76be-b1da-88f7948aeb59.jsonl",
+      "session_dir": "/Users/makiko/.misaka/sessions/cards/t_104134",
+      "generation": 1,
+      "local_id": "C2"
+    },
+    {
+      "id": "t_c2dbca",
+      "assignee": "10032",
+      "status": "done",
+      "output_dir": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_c2dbca",
+      "session_file": "/Users/makiko/.misaka/sessions/cards/t_c2dbca/2026-09-20T05-06-44-294Z_01a0bd35-a3c6-7acb-8711-0da347963e49.jsonl",
+      "session_dir": "/Users/makiko/.misaka/sessions/cards/t_c2dbca",
+      "generation": 1,
+      "local_id": "C5"
+    },
+    {
+      "id": "t_7da32d",
+      "assignee": "10032",
+      "status": "done",
+      "output_dir": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_7da32d",
+      "session_file": "/Users/makiko/.misaka/sessions/cards/t_7da32d/2026-09-20T05-06-44-317Z_01a0bd35-a3dd-7195-97a7-d1407d188d6e.jsonl",
+      "session_dir": "/Users/makiko/.misaka/sessions/cards/t_7da32d",
+      "generation": 1,
+      "local_id": "C6"
+    },
+    {
+      "id": "t_c17367",
+      "assignee": "10032",
+      "status": "done",
+      "output_dir": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_c17367",
+      "session_file": "/Users/makiko/.misaka/sessions/cards/t_c17367/2026-09-20T05-43-12-543Z_01a0bd57-079f-79df-98e6-48f169baf4e7.jsonl",
+      "session_dir": "/Users/makiko/.misaka/sessions/cards/t_c17367",
+      "generation": 1,
+      "local_id": "C7"
+    },
+    {
+      "id": "t_b09c54",
+      "assignee": "10037",
+      "status": "done",
+      "output_dir": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_b09c54",
+      "session_file": "/Users/makiko/.misaka/sessions/cards/t_b09c54/2026-09-20T05-45-47-458Z_01a0bd59-64c2-72c7-a8a9-616b13d97327.jsonl",
+      "session_dir": "/Users/makiko/.misaka/sessions/cards/t_b09c54",
+      "generation": 1,
+      "local_id": "C8"
+    },
+    {
+      "id": "t_bef693",
+      "assignee": "10038",
+      "status": "done",
+      "output_dir": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_bef693",
+      "session_file": "/Users/makiko/.misaka/sessions/cards/t_bef693/2026-09-20T05-47-20-667Z_01a0bd5a-d0db-7d80-bef1-8ad479a3afcb.jsonl",
+      "session_dir": "/Users/makiko/.misaka/sessions/cards/t_bef693",
+      "generation": 1,
+      "local_id": "C9"
+    },
+    {
+      "id": "t_f3c44f",
+      "assignee": "10036",
+      "status": "done",
+      "output_dir": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_f3c44f",
+      "session_file": "/Users/makiko/.misaka/sessions/cards/t_f3c44f/2026-09-20T06-22-50-909Z_01a0bd7b-521d-7a60-90b8-dda66989653f.jsonl",
+      "session_dir": "/Users/makiko/.misaka/sessions/cards/t_f3c44f",
+      "generation": 1,
+      "local_id": "C10"
+    },
+    {
+      "id": "t_2c338c",
+      "assignee": "10032",
+      "status": "done",
+      "output_dir": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_2c338c",
+      "session_file": "/Users/makiko/.misaka/sessions/cards/t_2c338c/2026-09-20T06-26-08-969Z_01a0bd7e-57c9-7e16-9011-37a40efc53e2.jsonl",
+      "session_dir": "/Users/makiko/.misaka/sessions/cards/t_2c338c",
+      "generation": 1,
+      "local_id": "C11"
+    },
+    {
+      "id": "t_26cd47",
+      "assignee": "10032",
+      "status": "done",
+      "output_dir": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_26cd47",
+      "session_file": "/Users/makiko/.misaka/sessions/cards/t_26cd47/2026-09-20T06-31-19-564Z_01a0bd83-150c-7b97-95bf-f723985f7937.jsonl",
+      "session_dir": "/Users/makiko/.misaka/sessions/cards/t_26cd47",
+      "generation": 1,
+      "local_id": "C12"
+    },
+    {
+      "id": "t_75e9a5",
+      "assignee": "10037",
+      "status": "done",
+      "output_dir": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_75e9a5",
+      "session_file": "/Users/makiko/.misaka/sessions/cards/t_75e9a5/2026-09-20T06-35-41-327Z_01a0bd87-138f-732e-8df7-e2dd5e7cb635.jsonl",
+      "session_dir": "/Users/makiko/.misaka/sessions/cards/t_75e9a5",
+      "generation": 1,
+      "local_id": "C13"
+    },
+    {
+      "id": "t_208a11",
+      "assignee": "10040",
+      "status": "done",
+      "output_dir": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_208a11",
+      "session_file": "/Users/makiko/.misaka/sessions/cards/t_208a11/2026-09-20T06-57-07-683Z_01a0bd9a-b463-7cc9-aa0d-f71f53494d10.jsonl",
+      "session_dir": "/Users/makiko/.misaka/sessions/cards/t_208a11",
+      "generation": 1,
+      "local_id": "C14"
+    },
+    {
+      "id": "t_f81a6f",
+      "assignee": "10038",
+      "status": "done",
+      "output_dir": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_f81a6f",
+      "session_file": "/Users/makiko/.misaka/sessions/cards/t_f81a6f/2026-09-20T07-18-40-647Z_01a0bdae-6f07-7f49-a560-21800413e577.jsonl",
+      "session_dir": "/Users/makiko/.misaka/sessions/cards/t_f81a6f",
+      "generation": 1,
+      "local_id": "C15"
+    },
+    {
+      "id": "t_b7b7b1",
+      "assignee": "10037",
+      "status": "done",
+      "output_dir": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_b7b7b1",
+      "session_file": "/Users/makiko/.misaka/sessions/cards/t_b7b7b1/2026-09-20T07-26-45-377Z_01a0bdb5-d481-7049-a3c8-ec6d378f778e.jsonl",
+      "session_dir": "/Users/makiko/.misaka/sessions/cards/t_b7b7b1",
+      "generation": 1,
+      "local_id": "C16"
+    },
+    {
+      "id": "t_d604cd",
+      "assignee": "10032",
+      "status": "done",
+      "output_dir": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_d604cd",
+      "session_file": "/Users/makiko/.misaka/sessions/cards/t_d604cd/2026-09-20T07-29-00-245Z_01a0bdb7-e355-76a6-9301-ba0c3ad1ebb3.jsonl",
+      "session_dir": "/Users/makiko/.misaka/sessions/cards/t_d604cd",
+      "generation": 1,
+      "local_id": "C18"
+    },
+    {
+      "id": "t_7ee3b0",
+      "assignee": "10040",
+      "status": "done",
+      "output_dir": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_7ee3b0",
+      "session_file": "/Users/makiko/.misaka/sessions/cards/t_7ee3b0/2026-09-20T07-30-46-953Z_01a0bdb9-8429-7313-ab0b-f8cdbc01d3e4.jsonl",
+      "session_dir": "/Users/makiko/.misaka/sessions/cards/t_7ee3b0",
+      "generation": 1,
+      "local_id": "C3"
+    },
+    {
+      "id": "t_95ef51",
+      "assignee": "10037",
+      "status": "done",
+      "output_dir": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_95ef51",
+      "session_file": "/Users/makiko/.misaka/sessions/cards/t_95ef51/2026-09-20T08-01-04-000Z_01a0bdd5-3e00-7805-a323-65bc26e4c576.jsonl",
+      "session_dir": "/Users/makiko/.misaka/sessions/cards/t_95ef51",
+      "generation": 1,
+      "local_id": "C4"
+    },
+    {
+      "id": "t_a8401d",
+      "assignee": "10040",
+      "status": "done",
+      "output_dir": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_a8401d",
+      "session_file": "/Users/makiko/.misaka/sessions/cards/t_a8401d/2026-09-20T08-11-48-158Z_01a0bddf-123e-7ddf-899d-52224b043334.jsonl",
+      "session_dir": "/Users/makiko/.misaka/sessions/cards/t_a8401d",
+      "generation": 1,
+      "local_id": "C17"
+    }
+  ],
+  "issues": [
+    {
+      "id": "i_93bc00524f",
+      "kind": "logic",
+      "priority": 1,
+      "status": "assigned",
+      "child_branch_id": "b_81b30cd5c4"
+    },
+    {
+      "id": "i_ee2a826014",
+      "kind": "concept",
+      "priority": 1,
+      "status": "open",
+      "child_branch_id": null
+    },
+    {
+      "id": "i_f2ca11ac8c",
+      "kind": "scope",
+      "priority": 1,
+      "status": "open",
+      "child_branch_id": null
+    },
+    {
+      "id": "i_6e7ff5e3b4",
+      "kind": "method",
+      "priority": 1,
+      "status": "open",
+      "child_branch_id": null
+    },
+    {
+      "id": "i_5ffe88fac4",
+      "kind": "fact",
+      "priority": 1,
+      "status": "open",
+      "child_branch_id": null
+    },
+    {
+      "id": "i_f6b7c3db45",
+      "kind": "fact",
+      "priority": 1,
+      "status": "open",
+      "child_branch_id": null
+    },
+    {
+      "id": "i_2622f3b4a0",
+      "kind": "scope",
+      "priority": 2,
+      "status": "open",
+      "child_branch_id": null
+    },
+    {
+      "id": "i_993c763dd2",
+      "kind": "causation",
+      "priority": 1,
+      "status": "open",
+      "child_branch_id": null
+    },
+    {
+      "id": "i_aba77bd7dd",
+      "kind": "scope",
+      "priority": 2,
+      "status": "open",
+      "child_branch_id": null
+    },
+    {
+      "id": "i_9c022919c7",
+      "kind": "method",
+      "priority": 2,
+      "status": "open",
+      "child_branch_id": null
+    }
+  ],
+  "scanned_sessions": [
+    {
+      "file": "/Users/makiko/.misaka/sessions/last-order/--Users-makiko-Documents-exam-4930eb5912a06b18aea8b5c78736cd372019ae39acc2591d4dc61b11d4fa4c5e--/2026-09-20T04-10-52-766Z_01a0bd02-7fde-7c0c-aaed-0aecfa828c3d.jsonl",
+      "card": "LO",
+      "entries": 806,
+      "last": "2026-09-20T11:44:40.951Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_759180/2026-09-20T09-19-40-484Z_01a0be1d-35c4-7b56-bc07-e4898793c860.jsonl",
+      "card": "@red-team",
+      "entries": 187,
+      "last": "2026-09-20T10:09:43.208Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_759180/01a0be1d-35c4-7b56-bc07-e4898793c860/subagents/agent-aaef890f767de95f4.jsonl",
+      "card": "@red-team",
+      "entries": 102,
+      "last": "2026-09-20T09:44:41.789Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_759180/01a0be1d-35c4-7b56-bc07-e4898793c860/subagents/agent-a147e072adc0f8e17.jsonl",
+      "card": "@red-team",
+      "entries": 105,
+      "last": "2026-09-20T09:44:30.929Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_759180/01a0be1d-35c4-7b56-bc07-e4898793c860/subagents/agent-a8c0d56804227fbd0.jsonl",
+      "card": "@red-team",
+      "entries": 79,
+      "last": "2026-09-20T09:36:20.348Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_759180/01a0be1d-35c4-7b56-bc07-e4898793c860/subagents/agent-a5e91174132ceea83.jsonl",
+      "card": "@red-team",
+      "entries": 94,
+      "last": "2026-09-20T09:39:07.385Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_3dc3c2/2026-09-20T05-06-44-294Z_01a0bd35-a3c6-7286-929d-edf90efbe3e9.jsonl",
+      "card": "C1",
+      "entries": 224,
+      "last": "2026-09-20T05:47:17.447Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_3dc3c2/01a0bd35-a3c6-7286-929d-edf90efbe3e9/subagents/agent-a93e19d37b167bdcb.jsonl",
+      "card": "C1",
+      "entries": 85,
+      "last": "2026-09-20T05:23:32.223Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_3dc3c2/01a0bd35-a3c6-7286-929d-edf90efbe3e9/subagents/agent-a622181b6b49d12f8.jsonl",
+      "card": "C1",
+      "entries": 97,
+      "last": "2026-09-20T05:34:54.425Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_3dc3c2/01a0bd35-a3c6-7286-929d-edf90efbe3e9/subagents/agent-a1bbf0717d7bcbf90.jsonl",
+      "card": "C1",
+      "entries": 40,
+      "last": "2026-09-20T05:21:31.421Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_104134/2026-09-20T05-06-44-294Z_01a0bd35-a3c6-76be-b1da-88f7948aeb59.jsonl",
+      "card": "C2",
+      "entries": 302,
+      "last": "2026-09-20T05:45:44.117Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_104134/01a0bd35-a3c6-76be-b1da-88f7948aeb59/subagents/agent-a498db257a1693bdc.jsonl",
+      "card": "C2",
+      "entries": 59,
+      "last": "2026-09-20T05:21:04.034Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_104134/01a0bd35-a3c6-76be-b1da-88f7948aeb59/subagents/agent-a349a6ea33174ed3b.jsonl",
+      "card": "C2",
+      "entries": 69,
+      "last": "2026-09-20T05:25:59.006Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_104134/01a0bd35-a3c6-76be-b1da-88f7948aeb59/subagents/agent-ae96eec824a680040.jsonl",
+      "card": "C2",
+      "entries": 88,
+      "last": "2026-09-20T05:22:46.005Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_c2dbca/2026-09-20T05-06-44-294Z_01a0bd35-a3c6-7acb-8711-0da347963e49.jsonl",
+      "card": "C5",
+      "entries": 159,
+      "last": "2026-09-20T05:43:08.393Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_c2dbca/01a0bd35-a3c6-7acb-8711-0da347963e49/subagents/agent-ab6b784abde2f3288.jsonl",
+      "card": "C5",
+      "entries": 69,
+      "last": "2026-09-20T05:23:48.252Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_c2dbca/01a0bd35-a3c6-7acb-8711-0da347963e49/subagents/agent-a12e7caf7703ad509.jsonl",
+      "card": "C5",
+      "entries": 68,
+      "last": "2026-09-20T05:27:06.068Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_7da32d/2026-09-20T05-06-44-317Z_01a0bd35-a3dd-7195-97a7-d1407d188d6e.jsonl",
+      "card": "C6",
+      "entries": 208,
+      "last": "2026-09-20T06:22:47.614Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_7da32d/01a0bd35-a3dd-7195-97a7-d1407d188d6e/subagents/agent-a4727f507fad3c2b4.jsonl",
+      "card": "C6",
+      "entries": 67,
+      "last": "2026-09-20T05:21:27.582Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_7da32d/01a0bd35-a3dd-7195-97a7-d1407d188d6e/subagents/agent-a80fd67c0a11bbfda.jsonl",
+      "card": "C6",
+      "entries": 46,
+      "last": "2026-09-20T05:18:36.824Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_c17367/2026-09-20T05-43-12-543Z_01a0bd57-079f-79df-98e6-48f169baf4e7.jsonl",
+      "card": "C7",
+      "entries": 210,
+      "last": "2026-09-20T06:26:04.680Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_c17367/01a0bd57-079f-79df-98e6-48f169baf4e7/subagents/agent-a1922ee6a05036bb6.jsonl",
+      "card": "C7",
+      "entries": 44,
+      "last": "2026-09-20T06:05:51.630Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_c17367/01a0bd57-079f-79df-98e6-48f169baf4e7/subagents/agent-ac7704790929ff714.jsonl",
+      "card": "C7",
+      "entries": 69,
+      "last": "2026-09-20T06:06:16.860Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_b09c54/2026-09-20T05-45-47-458Z_01a0bd59-64c2-72c7-a8a9-616b13d97327.jsonl",
+      "card": "C8",
+      "entries": 189,
+      "last": "2026-09-20T06:53:48.767Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_b09c54/01a0bd59-64c2-72c7-a8a9-616b13d97327/subagents/agent-a15d696203826f326.jsonl",
+      "card": "C8",
+      "entries": 47,
+      "last": "2026-09-20T05:51:37.187Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_bef693/2026-09-20T05-47-20-667Z_01a0bd5a-d0db-7d80-bef1-8ad479a3afcb.jsonl",
+      "card": "C9",
+      "entries": 256,
+      "last": "2026-09-20T06:53:27.509Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_bef693/01a0bd5a-d0db-7d80-bef1-8ad479a3afcb/subagents/agent-a22e87fdba5babe4d.jsonl",
+      "card": "C9",
+      "entries": 66,
+      "last": "2026-09-20T05:55:33.817Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_bef693/01a0bd5a-d0db-7d80-bef1-8ad479a3afcb/subagents/agent-a5934b27881e29a3a.jsonl",
+      "card": "C9",
+      "entries": 77,
+      "last": "2026-09-20T05:57:19.299Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_f3c44f/2026-09-20T06-22-50-909Z_01a0bd7b-521d-7a60-90b8-dda66989653f.jsonl",
+      "card": "C10",
+      "entries": 178,
+      "last": "2026-09-20T06:57:03.887Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_f3c44f/01a0bd7b-521d-7a60-90b8-dda66989653f/subagents/agent-a80340b7b02f042e9.jsonl",
+      "card": "C10",
+      "entries": 57,
+      "last": "2026-09-20T06:30:14.320Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_f3c44f/01a0bd7b-521d-7a60-90b8-dda66989653f/subagents/agent-a14a497d552def26e.jsonl",
+      "card": "C10",
+      "entries": 72,
+      "last": "2026-09-20T06:30:39.398Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_2c338c/2026-09-20T06-26-08-969Z_01a0bd7e-57c9-7e16-9011-37a40efc53e2.jsonl",
+      "card": "C11",
+      "entries": 289,
+      "last": "2026-09-20T07:30:41.934Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_2c338c/01a0bd7e-57c9-7e16-9011-37a40efc53e2/subagents/agent-a4b24b7567b2617e2.jsonl",
+      "card": "C11",
+      "entries": 91,
+      "last": "2026-09-20T06:47:32.163Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_2c338c/01a0bd7e-57c9-7e16-9011-37a40efc53e2/subagents/agent-ab642d9c008d3b3ee.jsonl",
+      "card": "C11",
+      "entries": 85,
+      "last": "2026-09-20T06:44:34.386Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_2c338c/01a0bd7e-57c9-7e16-9011-37a40efc53e2/subagents/agent-a63a09b05ed93bccb.jsonl",
+      "card": "C11",
+      "entries": 79,
+      "last": "2026-09-20T06:39:31.505Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_26cd47/2026-09-20T06-31-19-564Z_01a0bd83-150c-7b97-95bf-f723985f7937.jsonl",
+      "card": "C12",
+      "entries": 221,
+      "last": "2026-09-20T07:18:36.783Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_26cd47/01a0bd83-150c-7b97-95bf-f723985f7937/subagents/agent-ad86c630abaf056e7.jsonl",
+      "card": "C12",
+      "entries": 79,
+      "last": "2026-09-20T06:40:29.340Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_26cd47/01a0bd83-150c-7b97-95bf-f723985f7937/subagents/agent-ade425d6ea3870466.jsonl",
+      "card": "C12",
+      "entries": 97,
+      "last": "2026-09-20T06:50:48.394Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_26cd47/01a0bd83-150c-7b97-95bf-f723985f7937/subagents/agent-a1cb113489390ee3c.jsonl",
+      "card": "C12",
+      "entries": 51,
+      "last": "2026-09-20T06:42:21.602Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_75e9a5/2026-09-20T06-35-41-327Z_01a0bd87-138f-732e-8df7-e2dd5e7cb635.jsonl",
+      "card": "C13",
+      "entries": 232,
+      "last": "2026-09-20T07:26:42.010Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_75e9a5/01a0bd87-138f-732e-8df7-e2dd5e7cb635/subagents/agent-a1e80a53befbd398f.jsonl",
+      "card": "C13",
+      "entries": 45,
+      "last": "2026-09-20T06:45:34.945Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_75e9a5/01a0bd87-138f-732e-8df7-e2dd5e7cb635/subagents/agent-a823eee720dc3c8de.jsonl",
+      "card": "C13",
+      "entries": 47,
+      "last": "2026-09-20T06:42:49.429Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_208a11/2026-09-20T06-57-07-683Z_01a0bd9a-b463-7cc9-aa0d-f71f53494d10.jsonl",
+      "card": "C14",
+      "entries": 180,
+      "last": "2026-09-20T07:28:56.081Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_208a11/01a0bd9a-b463-7cc9-aa0d-f71f53494d10/subagents/agent-a1d3922dcb1b5c627.jsonl",
+      "card": "C14",
+      "entries": 87,
+      "last": "2026-09-20T07:16:55.934Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_208a11/01a0bd9a-b463-7cc9-aa0d-f71f53494d10/subagents/agent-adcbb27c8ea01a95c.jsonl",
+      "card": "C14",
+      "entries": 91,
+      "last": "2026-09-20T07:16:47.348Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_f81a6f/2026-09-20T07-18-40-647Z_01a0bdae-6f07-7f49-a560-21800413e577.jsonl",
+      "card": "C15",
+      "entries": 240,
+      "last": "2026-09-20T08:11:45.095Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_f81a6f/01a0bdae-6f07-7f49-a560-21800413e577/subagents/agent-a44492d09be8c566d.jsonl",
+      "card": "C15",
+      "entries": 82,
+      "last": "2026-09-20T07:31:39.884Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_f81a6f/01a0bdae-6f07-7f49-a560-21800413e577/subagents/agent-a9813d6b158b46a57.jsonl",
+      "card": "C15",
+      "entries": 41,
+      "last": "2026-09-20T07:22:44.298Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_b7b7b1/2026-09-20T07-26-45-377Z_01a0bdb5-d481-7049-a3c8-ec6d378f778e.jsonl",
+      "card": "C16",
+      "entries": 215,
+      "last": "2026-09-20T09:00:45.560Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_b7b7b1/01a0bdb5-d481-7049-a3c8-ec6d378f778e/subagents/agent-a57325e63077f6ab4.jsonl",
+      "card": "C16",
+      "entries": 54,
+      "last": "2026-09-20T07:31:24.227Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_b7b7b1/01a0bdb5-d481-7049-a3c8-ec6d378f778e/subagents/agent-abf4f98a151c777ef.jsonl",
+      "card": "C16",
+      "entries": 46,
+      "last": "2026-09-20T07:31:35.381Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_d604cd/2026-09-20T07-29-00-245Z_01a0bdb7-e355-76a6-9301-ba0c3ad1ebb3.jsonl",
+      "card": "C18",
+      "entries": 235,
+      "last": "2026-09-20T08:22:31.716Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_d604cd/01a0bdb7-e355-76a6-9301-ba0c3ad1ebb3/subagents/agent-a48949a72c37ed75c.jsonl",
+      "card": "C18",
+      "entries": 36,
+      "last": "2026-09-20T07:33:55.709Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_d604cd/01a0bdb7-e355-76a6-9301-ba0c3ad1ebb3/subagents/agent-a4bac1a726f9f603c.jsonl",
+      "card": "C18",
+      "entries": 44,
+      "last": "2026-09-20T07:50:06.183Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_7ee3b0/2026-09-20T07-30-46-953Z_01a0bdb9-8429-7313-ab0b-f8cdbc01d3e4.jsonl",
+      "card": "C3",
+      "entries": 181,
+      "last": "2026-09-20T08:00:59.711Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_7ee3b0/01a0bdb9-8429-7313-ab0b-f8cdbc01d3e4/subagents/agent-a0151479596d3a6d1.jsonl",
+      "card": "C3",
+      "entries": 72,
+      "last": "2026-09-20T07:38:56.395Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_7ee3b0/01a0bdb9-8429-7313-ab0b-f8cdbc01d3e4/subagents/agent-a456112ca0fea3073.jsonl",
+      "card": "C3",
+      "entries": 76,
+      "last": "2026-09-20T07:39:20.328Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_95ef51/2026-09-20T08-01-04-000Z_01a0bdd5-3e00-7805-a323-65bc26e4c576.jsonl",
+      "card": "C4",
+      "entries": 275,
+      "last": "2026-09-20T09:03:29.381Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_95ef51/01a0bdd5-3e00-7805-a323-65bc26e4c576/subagents/agent-a24612a31d9ab6c16.jsonl",
+      "card": "C4",
+      "entries": 106,
+      "last": "2026-09-20T08:19:21.576Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_95ef51/01a0bdd5-3e00-7805-a323-65bc26e4c576/subagents/agent-a67460193e2072ddf.jsonl",
+      "card": "C4",
+      "entries": 29,
+      "last": "2026-09-20T08:19:00.451Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_a8401d/2026-09-20T08-11-48-158Z_01a0bddf-123e-7ddf-899d-52224b043334.jsonl",
+      "card": "C17",
+      "entries": 238,
+      "last": "2026-09-20T09:03:35.154Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_a8401d/01a0bddf-123e-7ddf-899d-52224b043334/subagents/agent-ac464d36c44348b4d.jsonl",
+      "card": "C17",
+      "entries": 35,
+      "last": "2026-09-20T08:15:33.254Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_a8401d/01a0bddf-123e-7ddf-899d-52224b043334/subagents/agent-a884741789e8b36b0.jsonl",
+      "card": "C17",
+      "entries": 14,
+      "last": "2026-09-20T08:47:45.772Z"
+    }
+  ],
+  "tool_result_count": 3968,
+  "recent_errors": [
+    {
+      "file": "/Users/makiko/.misaka/sessions/last-order/--Users-makiko-Documents-exam-4930eb5912a06b18aea8b5c78736cd372019ae39acc2591d4dc61b11d4fa4c5e--/2026-09-20T04-10-52-766Z_01a0bd02-7fde-7c0c-aaed-0aecfa828c3d.jsonl",
+      "line": 764,
+      "card": "LO",
+      "time": "2026-09-20T11:17:18.596Z",
+      "tool": "write",
+      "text": "Tool call \"write\" was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments; split large payloads into smaller calls if necessary.",
+      "call": {
+        "tool": "write",
+        "line": 763,
+        "keys": [],
+        "path": null
+      }
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/last-order/--Users-makiko-Documents-exam-4930eb5912a06b18aea8b5c78736cd372019ae39acc2591d4dc61b11d4fa4c5e--/2026-09-20T04-10-52-766Z_01a0bd02-7fde-7c0c-aaed-0aecfa828c3d.jsonl",
+      "line": 771,
+      "card": "LO",
+      "time": "2026-09-20T11:31:38.723Z",
+      "tool": "office",
+      "text": "Tool call \"office\" was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments; split large payloads into smaller calls if necessary.",
+      "call": {
+        "tool": "office",
+        "line": 770,
+        "keys": [],
+        "path": null
+      }
+    }
+  ],
+  "recent_provider_events": [
+    {
+      "file": "/Users/makiko/.misaka/sessions/last-order/--Users-makiko-Documents-exam-4930eb5912a06b18aea8b5c78736cd372019ae39acc2591d4dc61b11d4fa4c5e--/2026-09-20T04-10-52-766Z_01a0bd02-7fde-7c0c-aaed-0aecfa828c3d.jsonl",
+      "line": 737,
+      "card": "LO",
+      "ts": "2026-09-20T10:48:35.185Z",
+      "stop": "error",
+      "raw": null,
+      "error": "Session, branch, model or settings changed during compaction",
+      "usage": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cacheWrite1h": null,
+        "reasoning": null,
+        "totalTokens": 0,
+        "cost": {
+          "input": 0.0,
+          "output": 0.0,
+          "cacheRead": 0.0,
+          "cacheWrite": 0.0,
+          "total": 0.0
+        }
+      }
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/last-order/--Users-makiko-Documents-exam-4930eb5912a06b18aea8b5c78736cd372019ae39acc2591d4dc61b11d4fa4c5e--/2026-09-20T04-10-52-766Z_01a0bd02-7fde-7c0c-aaed-0aecfa828c3d.jsonl",
+      "line": 763,
+      "card": "LO",
+      "ts": "2026-09-20T11:17:18.577Z",
+      "stop": "length",
+      "raw": "max_tokens",
+      "error": null,
+      "usage": {
+        "input": 2,
+        "output": 32000,
+        "cacheRead": 335074,
+        "cacheWrite": 2595,
+        "cacheWrite1h": null,
+        "reasoning": null,
+        "totalTokens": 369671,
+        "cost": {
+          "input": 1e-05,
+          "output": 0.8,
+          "cacheRead": 0.167537,
+          "cacheWrite": 0.01621875,
+          "total": 0.9837657499999999
+        }
+      }
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/last-order/--Users-makiko-Documents-exam-4930eb5912a06b18aea8b5c78736cd372019ae39acc2591d4dc61b11d4fa4c5e--/2026-09-20T04-10-52-766Z_01a0bd02-7fde-7c0c-aaed-0aecfa828c3d.jsonl",
+      "line": 770,
+      "card": "LO",
+      "ts": "2026-09-20T11:31:38.722Z",
+      "stop": "length",
+      "raw": "max_tokens",
+      "error": null,
+      "usage": {
+        "input": 2,
+        "output": 32000,
+        "cacheRead": 311909,
+        "cacheWrite": 28899,
+        "cacheWrite1h": null,
+        "reasoning": null,
+        "totalTokens": 372810,
+        "cost": {
+          "input": 1e-05,
+          "output": 0.8,
+          "cacheRead": 0.1559545,
+          "cacheWrite": 0.18061875,
+          "total": 1.13658325
+        }
+      }
+    }
+  ],
+  "huge_tool_results": [
+    {
+      "file": "/Users/makiko/.misaka/sessions/last-order/--Users-makiko-Documents-exam-4930eb5912a06b18aea8b5c78736cd372019ae39acc2591d4dc61b11d4fa4c5e--/2026-09-20T04-10-52-766Z_01a0bd02-7fde-7c0c-aaed-0aecfa828c3d.jsonl",
+      "line": 619,
+      "card": "LO",
+      "tool": "misaka_research_view",
+      "chars": 1049249,
+      "ts": "2026-09-20T09:31:53.829Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/last-order/--Users-makiko-Documents-exam-4930eb5912a06b18aea8b5c78736cd372019ae39acc2591d4dc61b11d4fa4c5e--/2026-09-20T04-10-52-766Z_01a0bd02-7fde-7c0c-aaed-0aecfa828c3d.jsonl",
+      "line": 708,
+      "card": "LO",
+      "tool": "misaka_research_view",
+      "chars": 1059483,
+      "ts": "2026-09-20T10:35:19.506Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_c17367/2026-09-20T05-43-12-543Z_01a0bd57-079f-79df-98e6-48f169baf4e7.jsonl",
+      "line": 97,
+      "card": "C7",
+      "tool": "misaka_research_view",
+      "chars": 168661,
+      "ts": "2026-09-20T05:57:25.587Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_b09c54/2026-09-20T05-45-47-458Z_01a0bd59-64c2-72c7-a8a9-616b13d97327.jsonl",
+      "line": 120,
+      "card": "C8",
+      "tool": "misaka_research_view",
+      "chars": 168661,
+      "ts": "2026-09-20T06:06:23.280Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_bef693/2026-09-20T05-47-20-667Z_01a0bd5a-d0db-7d80-bef1-8ad479a3afcb.jsonl",
+      "line": 73,
+      "card": "C9",
+      "tool": "misaka_research_view",
+      "chars": 168661,
+      "ts": "2026-09-20T05:53:59.614Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_bef693/2026-09-20T05-47-20-667Z_01a0bd5a-d0db-7d80-bef1-8ad479a3afcb.jsonl",
+      "line": 199,
+      "card": "C9",
+      "tool": "misaka_research_view",
+      "chars": 168661,
+      "ts": "2026-09-20T06:20:23.441Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_f3c44f/2026-09-20T06-22-50-909Z_01a0bd7b-521d-7a60-90b8-dda66989653f.jsonl",
+      "line": 10,
+      "card": "C10",
+      "tool": "skill_view",
+      "chars": 143511,
+      "ts": "2026-09-20T06:23:14.383Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_f3c44f/01a0bd7b-521d-7a60-90b8-dda66989653f/subagents/agent-a14a497d552def26e.jsonl",
+      "line": 7,
+      "card": "C10",
+      "tool": "skill_view",
+      "chars": 143511,
+      "ts": "2026-09-20T06:23:42.662Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_2c338c/2026-09-20T06-26-08-969Z_01a0bd7e-57c9-7e16-9011-37a40efc53e2.jsonl",
+      "line": 11,
+      "card": "C11",
+      "tool": "misaka_research_view",
+      "chars": 252107,
+      "ts": "2026-09-20T06:26:33.652Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_2c338c/2026-09-20T06-26-08-969Z_01a0bd7e-57c9-7e16-9011-37a40efc53e2.jsonl",
+      "line": 128,
+      "card": "C11",
+      "tool": "misaka_research_view",
+      "chars": 448992,
+      "ts": "2026-09-20T06:42:59.689Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_26cd47/2026-09-20T06-31-19-564Z_01a0bd83-150c-7b97-95bf-f723985f7937.jsonl",
+      "line": 10,
+      "card": "C12",
+      "tool": "misaka_research_view",
+      "chars": 367097,
+      "ts": "2026-09-20T06:31:43.723Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_75e9a5/2026-09-20T06-35-41-327Z_01a0bd87-138f-732e-8df7-e2dd5e7cb635.jsonl",
+      "line": 10,
+      "card": "C13",
+      "tool": "misaka_research_view",
+      "chars": 430974,
+      "ts": "2026-09-20T06:36:07.496Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_75e9a5/2026-09-20T06-35-41-327Z_01a0bd87-138f-732e-8df7-e2dd5e7cb635.jsonl",
+      "line": 72,
+      "card": "C13",
+      "tool": "misaka_research_view",
+      "chars": 448992,
+      "ts": "2026-09-20T06:43:41.439Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_208a11/2026-09-20T06-57-07-683Z_01a0bd9a-b463-7cc9-aa0d-f71f53494d10.jsonl",
+      "line": 8,
+      "card": "C14",
+      "tool": "misaka_research_view",
+      "chars": 470384,
+      "ts": "2026-09-20T06:57:35.464Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_f81a6f/2026-09-20T07-18-40-647Z_01a0bdae-6f07-7f49-a560-21800413e577.jsonl",
+      "line": 11,
+      "card": "C15",
+      "tool": "misaka_research_view",
+      "chars": 563122,
+      "ts": "2026-09-20T07:19:06.557Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_f81a6f/2026-09-20T07-18-40-647Z_01a0bdae-6f07-7f49-a560-21800413e577.jsonl",
+      "line": 104,
+      "card": "C15",
+      "tool": "misaka_research_view",
+      "chars": 678492,
+      "ts": "2026-09-20T07:35:07.221Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_b7b7b1/2026-09-20T07-26-45-377Z_01a0bdb5-d481-7049-a3c8-ec6d378f778e.jsonl",
+      "line": 8,
+      "card": "C16",
+      "tool": "misaka_research_view",
+      "chars": 630636,
+      "ts": "2026-09-20T07:27:13.173Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_b7b7b1/2026-09-20T07-26-45-377Z_01a0bdb5-d481-7049-a3c8-ec6d378f778e.jsonl",
+      "line": 90,
+      "card": "C16",
+      "tool": "misaka_research_view",
+      "chars": 678492,
+      "ts": "2026-09-20T07:42:00.566Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_b7b7b1/2026-09-20T07-26-45-377Z_01a0bdb5-d481-7049-a3c8-ec6d378f778e.jsonl",
+      "line": 150,
+      "card": "C16",
+      "tool": "misaka_research_view",
+      "chars": 678492,
+      "ts": "2026-09-20T07:56:34.012Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_d604cd/2026-09-20T07-29-00-245Z_01a0bdb7-e355-76a6-9301-ba0c3ad1ebb3.jsonl",
+      "line": 8,
+      "card": "C18",
+      "tool": "misaka_research_view",
+      "chars": 669587,
+      "ts": "2026-09-20T07:29:25.118Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_d604cd/2026-09-20T07-29-00-245Z_01a0bdb7-e355-76a6-9301-ba0c3ad1ebb3.jsonl",
+      "line": 78,
+      "card": "C18",
+      "tool": "misaka_research_view",
+      "chars": 678492,
+      "ts": "2026-09-20T07:38:50.379Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_7ee3b0/2026-09-20T07-30-46-953Z_01a0bdb9-8429-7313-ab0b-f8cdbc01d3e4.jsonl",
+      "line": 16,
+      "card": "C3",
+      "tool": "misaka_research_view",
+      "chars": 675007,
+      "ts": "2026-09-20T07:31:29.891Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_7ee3b0/2026-09-20T07-30-46-953Z_01a0bdb9-8429-7313-ab0b-f8cdbc01d3e4.jsonl",
+      "line": 105,
+      "card": "C3",
+      "tool": "misaka_research_view",
+      "chars": 678492,
+      "ts": "2026-09-20T07:41:28.833Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_95ef51/2026-09-20T08-01-04-000Z_01a0bdd5-3e00-7805-a323-65bc26e4c576.jsonl",
+      "line": 10,
+      "card": "C4",
+      "tool": "misaka_research_view",
+      "chars": 686186,
+      "ts": "2026-09-20T08:01:29.156Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_95ef51/2026-09-20T08-01-04-000Z_01a0bdd5-3e00-7805-a323-65bc26e4c576.jsonl",
+      "line": 67,
+      "card": "C4",
+      "tool": "misaka_research_view",
+      "chars": 686186,
+      "ts": "2026-09-20T08:05:39.916Z"
+    },
+    {
+      "file": "/Users/makiko/.misaka/sessions/cards/t_a8401d/2026-09-20T08-11-48-158Z_01a0bddf-123e-7ddf-899d-52224b043334.jsonl",
+      "line": 8,
+      "card": "C17",
+      "tool": "misaka_research_view",
+      "chars": 708845,
+      "ts": "2026-09-20T08:12:15.104Z"
+    }
+  ],
+  "cross_card_writes": [],
+  "bad_physical_jsonl": [],
+  "registered_artifacts": {
+    "total": 155,
+    "checked": 155,
+    "bytes_hashed": 29647095,
+    "missing": [],
+    "hash_mismatch": [
+      {
+        "id": "a_2ea3413351",
+        "task_id": null,
+        "kind": "plan_json",
+        "path": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/plan.json",
+        "expected": "067f8671f39038b4962ed684261cb144d8f34772062573081796d10556765082",
+        "actual": "11cf6f7777a1bc8b5ceca53d7499c76f7128f744ed9d5f8af842ccd0160b9c01",
+        "mtime": 1789885163.1139824
+      }
+    ],
+    "task_path_mismatch": [
+      {
+        "id": "a_02fb8b58d1",
+        "task": "t_759180",
+        "path": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_a8401d/c17_victory_paths.md"
+      },
+      {
+        "id": "a_a170600356",
+        "task": "t_7ee3b0",
+        "path": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_104134/c2_gaps.csv"
+      },
+      {
+        "id": "a_da3772551d",
+        "task": "t_a8401d",
+        "path": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_2c338c/c11_invasion_england.md"
+      },
+      {
+        "id": "a_6a1e2f626c",
+        "task": "t_a8401d",
+        "path": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_26cd47/c12_russia_problem.md"
+      },
+      {
+        "id": "a_8775e89f39",
+        "task": "t_a8401d",
+        "path": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_b7b7b1/c16_britain_under_defeat.md"
+      }
+    ]
+  },
+  "index": {
+    "rows": 478,
+    "unlinked": 80,
+    "missing": [],
+    "byte_mismatch": [],
+    "missing_from_index": [],
+    "extra_index_paths": [],
+    "duplicate_paths": [],
+    "same_basename": [],
+    "same_url_groups": 10
+  },
+  "reports": [
+    {
+      "path": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report.md",
+      "bytes": 132765,
+      "sha256": "492b6b6790169ce9c8141c4ef1c50b91e69ae31e0b5509a55c5bedae0e0f3749",
+      "lines": 1257,
+      "h2_count": 20,
+      "markdown_link_count": 0,
+      "broken_explicit_paths": [
+        {
+          "line": 1054,
+          "ref": "downloads/James_1837_v3_ETH"
+        }
+      ]
+    },
+    {
+      "path": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report-polished.md",
+      "bytes": 137372,
+      "sha256": "0a49895294be8b5b4400e0263293097118a42f7d7dfc2f1677f2dbdb5dd26b7d",
+      "lines": 1768,
+      "h2_count": 21,
+      "markdown_link_count": 0,
+      "broken_explicit_paths": [
+        {
+          "line": 1565,
+          "ref": "downloads/James_1837_v3_ETH"
+        }
+      ]
+    }
+  ],
+  "doc_refs": [
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report.md",
+      "line": 206,
+      "id": "1baaae7f3185",
+      "page": "379"
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report.md",
+      "line": 349,
+      "id": "1baaae7f3185",
+      "page": "313"
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report.md",
+      "line": 351,
+      "id": "6772f035b6ed",
+      "page": "4"
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report.md",
+      "line": 407,
+      "id": "a178739fd84c",
+      "page": "395"
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report.md",
+      "line": 421,
+      "id": "a78cfbda31e2",
+      "page": "183"
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report.md",
+      "line": 532,
+      "id": "0c6c074f6973",
+      "page": "5"
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report.md",
+      "line": 549,
+      "id": "a6f170345306",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report.md",
+      "line": 1129,
+      "id": "0c6c074f6973",
+      "page": "5"
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report.md",
+      "line": 1133,
+      "id": "a6f170345306",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report.md",
+      "line": 1173,
+      "id": "a178739fd84c",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report.md",
+      "line": 1173,
+      "id": "a78cfbda31e2",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report.md",
+      "line": 1188,
+      "id": "c17e7379cc37",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report.md",
+      "line": 1189,
+      "id": "81a9135182a0",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report.md",
+      "line": 1197,
+      "id": "c60ccb20b50e",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report.md",
+      "line": 1199,
+      "id": "1baaae7f3185",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report.md",
+      "line": 1201,
+      "id": "6772f035b6ed",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report.md",
+      "line": 1204,
+      "id": "60e75d8026ea",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report.md",
+      "line": 1205,
+      "id": "8835f54b20f5",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report.md",
+      "line": 1206,
+      "id": "40e4b5895015",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report.md",
+      "line": 1208,
+      "id": "41e0848d1333",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report.md",
+      "line": 1228,
+      "id": "3c4c39c32329",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report-polished.md",
+      "line": 281,
+      "id": "1baaae7f3185",
+      "page": "379"
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report-polished.md",
+      "line": 499,
+      "id": "1baaae7f3185",
+      "page": "313"
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report-polished.md",
+      "line": 505,
+      "id": "6772f035b6ed",
+      "page": "4"
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report-polished.md",
+      "line": 629,
+      "id": "a178739fd84c",
+      "page": "395"
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report-polished.md",
+      "line": 649,
+      "id": "a78cfbda31e2",
+      "page": "183"
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report-polished.md",
+      "line": 808,
+      "id": "0c6c074f6973",
+      "page": "5"
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report-polished.md",
+      "line": 837,
+      "id": "a6f170345306",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report-polished.md",
+      "line": 1640,
+      "id": "0c6c074f6973",
+      "page": "5"
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report-polished.md",
+      "line": 1644,
+      "id": "a6f170345306",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report-polished.md",
+      "line": 1684,
+      "id": "a178739fd84c",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report-polished.md",
+      "line": 1684,
+      "id": "a78cfbda31e2",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report-polished.md",
+      "line": 1699,
+      "id": "c17e7379cc37",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report-polished.md",
+      "line": 1700,
+      "id": "81a9135182a0",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report-polished.md",
+      "line": 1708,
+      "id": "c60ccb20b50e",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report-polished.md",
+      "line": 1710,
+      "id": "1baaae7f3185",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report-polished.md",
+      "line": 1712,
+      "id": "6772f035b6ed",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report-polished.md",
+      "line": 1715,
+      "id": "60e75d8026ea",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report-polished.md",
+      "line": 1716,
+      "id": "8835f54b20f5",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report-polished.md",
+      "line": 1717,
+      "id": "40e4b5895015",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report-polished.md",
+      "line": 1719,
+      "id": "41e0848d1333",
+      "page": ""
+    },
+    {
+      "file": "/Users/makiko/Documents/exam/final/r_b55f2c1cf5-report-polished.md",
+      "line": 1739,
+      "id": "3c4c39c32329",
+      "page": ""
+    }
+  ]
+}

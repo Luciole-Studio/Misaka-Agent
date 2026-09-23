@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from misaka.core.agent_session import parse_skill_block
-from misaka.core.session_manager import session_entry_to_context_messages
+from misaka.core.session_manager import session_entry_to_display_messages
 from misaka.ui.tui import Container, Spacer
 from misaka.utils.values import read_field
 
@@ -156,6 +156,6 @@ class TranscriptRenderer:
 
     def appendEntries(self, container: Container, entries: list[Any], pending: dict[str, ToolExecutionComponent]) -> None:
         for entry in entries:
-            items = [entry] if read_field(entry, "type") == "custom" else session_entry_to_context_messages(entry)
+            items = [entry] if read_field(entry, "type") == "custom" else session_entry_to_display_messages(entry)
             for item in items:
                 self.appendItem(container, item, pending)

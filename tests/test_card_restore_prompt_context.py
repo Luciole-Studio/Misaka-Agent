@@ -40,7 +40,7 @@ class CardRestorePromptContextTests(unittest.TestCase):
                 "run_id": "run-1", "branch_id": "node-1", "kind": "investigation",
             })
             self.assertEqual(prepared["_materials"], "")
-            self.assertEqual(prepared["_colleagues"], [])
+            assert "_colleagues" not in prepared
             self.assertNotIn("_research", row)
 
     def test_prepare_keeps_material_snapshot_despite_corrupt_markdown(self):
@@ -65,7 +65,7 @@ class CardRestorePromptContextTests(unittest.TestCase):
             self.assertIsNone(prepared["_research"])
 
     def test_material_snapshot_retains_path_if_file_disappears_during_metadata_read(self):
-        from misaka.core.tools._web import evidence
+        from misaka.core.web import evidence
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "downloads" / "removed.md"

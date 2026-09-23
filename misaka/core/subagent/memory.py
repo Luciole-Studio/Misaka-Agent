@@ -14,21 +14,25 @@ from typing import Any
 
 from filelock import ReadWriteLock, Timeout
 
-from misaka.core.subagent.background import _defined_falsy, _truthy
+from misaka.config import home
+from misaka.core.subagent.background import _truthy
 from misaka.utils import atomic
 
 
 def memory_enabled(settings: dict[str, Any] | None = None) -> bool:
-    disabled = os.environ.get("MISAKA_DISABLE_AUTO_MEMORY")
-    if _truthy(disabled):
-        return False
-    if _defined_falsy(disabled):
-        return True
-    if _truthy(os.environ.get("MISAKA_SIMPLE")):
+    from misaka.config.product import setting
+
+    if not setting("subagents", "auto_memory", True, bool) or setting("subagents", "simple", False, bool):
         return False
     if _truthy(os.environ.get("MISAKA_REMOTE")) and not os.environ.get("MISAKA_REMOTE_MEMORY_DIR"):
-        return False
+        return False                      # a remote runner's hand-off: no memory dir, no memory
     return (settings or {}).get("autoMemoryEnabled", True) is not False
+
+
+def snapshot_dir(project: Path, agent_type: str) -> Path | None:
+    """Where a project keeps the shared memory snapshot of one agent type; none outside a project."""
+    project_dir = home.project_dir(project)
+    return project_dir / "agent-memory-snapshots" / agent_type if project_dir is not None else None
 
 
 def _meta(path: Path, key: str) -> str | None:

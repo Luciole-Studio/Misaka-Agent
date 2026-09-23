@@ -26,7 +26,7 @@ import sys
 import time
 from contextlib import contextmanager
 
-from misaka.config import CFG, current_config
+from misaka.config import CFG, current_config, home
 
 DM_TITLE = "Bot Chat"   # Hermes BOT_CHAT_TITLE verbatim; the injection gate keys on it.
 WAKE_ATTEMPTS = 5          # contact turns one automatic wake-up may start before it gives up
@@ -73,7 +73,7 @@ def protocol_file():
     Rewritten only when the roster changes. Only DM sessions reference it;
     ordinary sessions never carry the protocol."""
     from misaka.config import sisters
-    path = os.path.expanduser("~/.misaka/dm-protocol.md")
+    path = str(home.path("dm_protocol"))
     text = _PROTOCOL.format(roster=','.join(sorted({"last-order"} | sisters())))
     try:
         with open(path, encoding="utf-8") as f:
@@ -98,7 +98,7 @@ def dm_session_dir(to):
 @contextmanager
 def _serial(to):
     """Serialize deliveries per recipient: a blocking flock stands in for a queue."""
-    path = os.path.expanduser(f"~/.misaka/locks/dm-{to}.lock")
+    path = str(home.path("locks") / f"dm-{to}.lock")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
@@ -205,15 +205,17 @@ def _deliver_once(to, message=None, sender=None, model=None, timeout=600,
             text = "\n\n".join(chunks)
 
             cfg = current_config()
-            prof, model_default = chat.assembly(None if to == "last-order" else to, cfg)
-            home = os.path.expanduser("~")
+            prof, _model_default = chat.assembly(None if to == "last-order" else to, cfg)
+            user_home = os.path.expanduser("~")
             sess_dir = dm_session_dir(to)
             os.makedirs(sess_dir, exist_ok=True)
             role = profiles.role_of(prof)
             from misaka.config import identity
-            flags = ["--provider", cfg["provider"], "--model", model or model_default,
-                     "--append-system-prompt", profiles.shared_soul()]
-            for section in identity.prompt_sections(prof, role):
+            flags = []
+            override = profiles.explicit_model_override(prof, model)
+            if override:
+                flags += ["--model", override]
+            for section in identity.base_prompt_sources(prof, role):
                 flags += ["--append-system-prompt", section]
             flags += ["--append-system-prompt", protocol_file(),
                       "--session-dir", sess_dir]
@@ -222,14 +224,14 @@ def _deliver_once(to, message=None, sender=None, model=None, timeout=600,
                 "MISAKA_WHO": to,
                 "MISAKA_MCP_ROLE": role,
                 "MISAKA_PROFILE_DIR": prof,
-                "MISAKA_WORKSPACE": home,
+                "MISAKA_WORKSPACE": user_home,
                 "MISAKA_DM_CARD_ALLOWLIST": json.dumps(card_allowlist, separators=(",", ":")),
             }
             from misaka.core.wiring import SessionSpec, assemble
             session_assembly = assemble(SessionSpec(
                 profile_dir=prof,
                 role=role,
-                workspace=home,
+                workspace=user_home,
                 kind="dm",
                 sender=to,
                 mcp_role=to,
@@ -242,7 +244,7 @@ def _deliver_once(to, message=None, sender=None, model=None, timeout=600,
                     flags.append("-c")
             except OSError:
                 pass
-            r = run_coro(run_session(flags, text, home, timeout=timeout,
+            r = run_coro(run_session(flags, text, user_home, timeout=timeout,
                                      assembly=session_assembly, env=env))
             if not r["error"] and not r["timed_out"]:
                 messages.ack(con, [row["id"] for row in mine], token=token)

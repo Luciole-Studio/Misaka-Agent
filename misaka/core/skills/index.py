@@ -20,12 +20,11 @@ import os
 import sys
 from pathlib import Path
 
+from misaka.config import home
 from misaka.core.skills.layers import (
     PERSONAL_LAYERS,
     disabled_skill_names,
-    home,
     iter_project_skill_files,
-    iter_skill_documents,
     iter_skill_files,
     parse_skill_name,
     project_skill_tree_fingerprint,
@@ -88,7 +87,7 @@ def skill_matches_platform(frontmatter):
 
 
 def _snapshot_dir():
-    return os.path.join(home(), "cache", "skills")
+    return str(home.path("skills_index"))
 
 
 def slug(name):
@@ -136,19 +135,16 @@ def _scan_root(root, skill_files=None):
     """Every skill under one layer root, plus the layer's category descriptions, as stored
     in a snapshot: ``{"skills": [...], "categories": {...}}``."""
     skills, categories = [], {}
-    for skill_md in iter_skill_documents(root) if skill_files is None else skill_files:
+    for skill_md in iter_skill_files(root) if skill_files is None else skill_files:
         (prompt_fm, _), (runtime_fm, runtime_body) = _documents(skill_md)
         rel = skill_md.relative_to(root).parts
-        legacy = skill_md.name != "SKILL.md"
-        fallback = skill_md.stem if legacy else skill_md.parent.name
+        fallback = skill_md.parent.name
         skills.append({"name": str(prompt_fm.get("name") or fallback).strip(),
                        "runtime_name": str(runtime_fm.get("name") or fallback).strip(),
                        "description": truncate_skill_description(str(prompt_fm.get("description") or "")),
                        "list_description": list_skill_description(runtime_fm, runtime_body),
                        "prompt_frontmatter": prompt_fm, "frontmatter": runtime_fm,
-                       "legacy": legacy,
-                       "category": ("/".join(rel[:-1]) or "general") if legacy else _category(rel),
-                       "rel": str(Path(*rel).with_suffix("")) if legacy else "/".join(rel[:-1]),
+                       "category": _category(rel), "rel": "/".join(rel[:-1]),
                        "dir": str(skill_md.parent), "path": str(skill_md)})
     for desc_md in iter_skill_files(root, "DESCRIPTION.md"):      # a category's own one-liner
         text = str(_frontmatter(desc_md).get("description") or "").strip().strip("'\"")
@@ -235,7 +231,7 @@ def _assemble(roots):
     # rather than letting a second discovery path bypass its quarantine.
     project_scans = {root: _layer(layer, root) for layer, root in roots if layer == "project"}
     project_roots = [Path(root).resolve() for root in project_scans]
-    project_documents = {str(path.resolve()) for root in project_scans for path in iter_skill_documents(root)}
+    project_documents = {str(path.resolve()) for root in project_scans for path in iter_skill_files(root)}
     project_admitted = {str(Path(e["path"]).resolve()): e for scan in project_scans.values() for e in scan["skills"]}
     for layer, root in roots:
         scanned = project_scans[root] if layer == "project" else _layer(layer, root)
@@ -309,8 +305,6 @@ def is_disabled(entry, platform="cli", *, disabled=None):
         names.update((entry["project_name"], entry["project_rel"]))
     if entry.get("namespace"):
         names.add(f"{entry['namespace']}:{entry['rel']}")
-    elif entry.get("legacy"):
-        names.update((entry["rel"], Path(entry.get("origin_path", entry["path"])).stem))
     else:
         names.update((entry["rel"], Path(entry["dir"]).name, Path(entry.get("origin_dir", entry["dir"])).name))
     return bool(names & (set(disabled_skill_names(platform)) if disabled is None else disabled))
@@ -338,7 +332,7 @@ def _offered_entries(roots, *, prompt, platform="cli", tools=None, toolsets=None
         compatible = "prompt_compatible" if prompt else "runtime_compatible"
         fm = "prompt_frontmatter" if prompt else "frontmatter"
         name = entry["name"] if prompt else entry.get("runtime_name", entry["name"])
-        if (entry.get("legacy") or not entry.get(compatible, True) or is_disabled(entry, platform, disabled=disabled)
+        if (not entry.get(compatible, True) or is_disabled(entry, platform, disabled=disabled)
                 or not offered(entry.get(fm, {}), tools=tools, toolsets=toolsets, platform=platform,
                                detect=detect, conditions=prompt) or name in seen):
             continue

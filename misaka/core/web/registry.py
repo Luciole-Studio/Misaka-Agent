@@ -62,11 +62,7 @@ _LEGACY_PREFERENCE = (
     "ddgs",
 )
 
-# The shared name when nothing decided one. Two branches of the ladder end here -- a
-# configured section whose shared key is blank, and a walk that found nothing -- and they
-# have to agree, or the answer would depend on which one ran. Firecrawl for backward
-# compatibility, as in Hermes, and it serves both capabilities, which is what a blank
-# shared key needs it to do.
+# The shared fallback when autodetect finds nothing, as in Hermes.
 _DEFAULT_BACKEND = "firecrawl"
 
 
@@ -288,29 +284,16 @@ def backend_name() -> str:
 
     A stored ``backend`` is returned as-is -- no availability probe, no fallback -- so a
     typo surfaces as the vendor path's honest error rather than silently rerouting
-    through the credential ladder. The ladder runs ONLY when nothing was ever stored:
-    explicit credentials first (a deliberate setup is not pre-empted), free tiers behind
-    them, externally-registered providers after that, and the keyless ring last of all.
+    through the credential ladder. Autodetect runs when no SHARED backend was stored:
+    per-capability keys name only their own capability, never the other one.
 
-    "Nothing was ever stored" is :func:`selection_stored`, all three keys -- Hermes'
-    ``selection_exists("web")`` branch (``tools/web_tools.py:246-250``). An install that
-    named only a per-capability backend HAS configured its web section, so the shared
-    name it left blank falls to the plain default instead of to whatever credential the
-    environment happens to hold. That branch is what keeps a split config working: a
-    ``search_backend: searxng`` install with no extract half asks this function for the
-    extract name, and the ladder would answer "searxng" off ``SEARXNG_URL`` -- a
-    search-only backend, so ``web_extract`` would refuse every call for want of exactly
-    the renderer the default names.
+    Ported from Hermes 010a45097e49 (#113017). Its remaining shared-selection guard
+    handles legacy ``use_gateway``, which MISAKA does not use; an explicit native
+    ``backend: nous`` is already handled by the configured-name return below.
     """
     configured = config_name("backend")
     if configured:
         return configured
-
-    if selection_stored():
-        # A per-capability key is set but the shared name is empty: configured, so the
-        # autodetect ladder is not this install's answer. Same value the walk below ends
-        # on, reached without consulting the environment.
-        return _DEFAULT_BACKEND
 
     from misaka.core.web.gateway import available as gateway_available
 

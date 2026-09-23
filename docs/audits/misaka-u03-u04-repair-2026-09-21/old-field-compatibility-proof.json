@@ -1,0 +1,15 @@
+{
+  "fixture": {
+    "type": "toolCall",
+    "id": "fixture",
+    "name": "probe",
+    "arguments": {},
+    "argumentsError": null
+  },
+  "new_protocol": {
+    "accepted": false,
+    "error_type": "ValidationError",
+    "reason": "1 validation error for ToolCall\nargumentsError\n  Extra inputs are not permitted [type=extra_forbidden, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/extra_forbidden"
+  },
+  "scope": "Synthetic in-memory record only; no user history accessed or modified."
+}

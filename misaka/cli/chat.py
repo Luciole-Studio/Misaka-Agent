@@ -9,25 +9,7 @@ import os
 import sys
 from pathlib import Path
 
-from misaka.config import current_config, profiles, sessions, sisters
-
-
-def _session_by_id(session_dir, session_id):
-    from misaka.core.session_manager import read_session_header
-
-    try:
-        names = os.listdir(session_dir)
-    except OSError:
-        return None
-    return next(
-        (
-            os.path.join(session_dir, name)
-            for name in names
-            if name.endswith(".jsonl")
-            and read_session_header(os.path.join(session_dir, name)).get("id") == session_id
-        ),
-        None,
-    )
+from misaka.config import current_config, home, profiles, sessions, sisters
 
 
 def assembly(who, cfg=None):
@@ -104,7 +86,6 @@ def launch(who, model=None, cont=False, pick=False, session=None, read_only=Fals
             sys.exit(str(error))
     if catalog:
         sys.exit("--catalog requires --attach or --read-only.")
-    resumed_session_id = None
     if session:
         session = resolve_session(session, who)
         # A resumed conversation goes back to the folder it worked in, whatever folder the
@@ -112,30 +93,24 @@ def launch(who, model=None, cont=False, pick=False, session=None, read_only=Fals
         # follow the session. A folder that is gone is an error, not a silent move.
         header = read_session_header(session)
         folder = header.get("cwd")
-        resumed_session_id = header.get("id")
         if not folder or not os.path.isdir(folder):
             sys.exit(f"Cannot resume {session}: its folder {folder or '(unknown)'} no longer exists.")
         os.chdir(folder)
     cfg = current_config()
-    prof, model_default = assembly(who, cfg)
+    prof, _model_default = assembly(who, cfg)
     # Sessions are bucketed per role and per folder, like pi's per-cwd sessions:
     # `-c` resumes this role's conversation about *this* project.
     sess = sessions.chat_dir(who, os.getcwd())
-    if session and not os.path.isfile(session):
-        session = _session_by_id(sess, resumed_session_id)
-        if not session:
-            sys.exit(f"Cannot resume migrated session {resumed_session_id or '(unknown)'}.")
     if who:
         title = f"MISAKA · {who}"
     else:
         title = "MISAKA · Last Order"
-    from misaka.config import identity
-    # The engine has no skill loading of its own; the skills extension is the one place that
-    # decides what this session sees (misaka.core.skills.index).
-    flags = ["--provider", cfg["provider"], "--model", model or model_default,
-             "--append-system-prompt", profiles.shared_soul()]
-    for section in identity.prompt_sections(prof, profiles.role_of(prof)):
-        flags += ["--append-system-prompt", section]
+    from misaka.core.skills.vendor.startup import _normalize_skills
+    from misaka.core.wiring import role_session_setup
+
+    flags, session_assembly, env = role_session_setup(
+        prof, os.getcwd(), model=model, receive_messages=True,
+        startup_skills=_normalize_skills(skills))
     flags += ["--session-dir", sess]
     if session:
         flags += ["--session", session]
@@ -144,9 +119,6 @@ def launch(who, model=None, cont=False, pick=False, session=None, read_only=Fals
     elif cont:
         flags.append("-c")
 
-    profile_role = profiles.role_of(prof)
-    session_role = who or "last-order"
-    workspace = os.getcwd()
     if who:
         from misaka.core.network.roster import describe_line
         blurb = (describe_line(who, root=cfg["profiles_root"])
@@ -156,25 +128,9 @@ def launch(who, model=None, cont=False, pick=False, session=None, read_only=Fals
                f"Sister {who} online: {blurb} (/sister shows the roster; /sister <id> opens a direct chat)")
     os.environ.update({
         "MISAKA_APP_TITLE": title, "MISAKA_TAGLINE": tagline,
-        "MISAKA_WHO": session_role,
-        "MISAKA_MCP_ROLE": session_role,
-        "MISAKA_PROFILE_DIR": prof,
-        "MISAKA_WORKSPACE": workspace,
-        "MISAKA_INPUT_HISTORY": os.path.expanduser(f"~/.misaka/input-history/{who or 'last-order'}.json"),
+        **env,
+        "MISAKA_INPUT_HISTORY": str(home.path("input_history") / f"{who or 'last-order'}.json"),
         "MISAKA_CODING_AGENT": "true"})
-
-    from misaka.core.skills.vendor.startup import _normalize_skills
-    from misaka.core.wiring import SessionSpec, assemble
-    session_assembly = assemble(SessionSpec(
-        profile_dir=prof,
-        role=profile_role,
-        workspace=workspace,
-        kind="foreground",
-        sender=session_role,
-        mcp_role=session_role,
-        receive_messages=True,
-        startup_skills=tuple(_normalize_skills(skills)),
-    ))
 
     from misaka.cli.engine import main as engine_main
     sys.exit(asyncio.run(engine_main(flags, session_assembly.engine_options())))
@@ -228,7 +184,7 @@ async def follow_session(screen, path, *, catalog=False, attach=False):
         "Ctrl+C/D closes window",
     ))
     screen.footer = Text("", 1, 1)
-    owner, cursor, sending = None, None, set()
+    owner, cursor, stream_cursor, sending = None, None, None, set()
     receipt = ""
     if attach:
         from misaka.core.session_catalog import _object, owner_record
@@ -282,12 +238,17 @@ async def follow_session(screen, path, *, catalog=False, attach=False):
         while not closed.is_set():
             try:
                 if owner is not None:
-                    snapshot = _display_value(await request(owner, "snapshot", cursor=cursor))
+                    snapshot = _display_value(await request(owner, "snapshot", cursor=cursor,
+                                                            stream_cursor=stream_cursor))
                     cursor = snapshot["cursor"]
                     if snapshot["entries"] is not None:
                         screen.updateEntries(snapshot["entries"])
+                    if snapshot["stream_cursor"] != stream_cursor:
+                        screen.updateStreaming(snapshot["streaming"])
+                        stream_cursor = snapshot["stream_cursor"]
                     workflow = snapshot["workflow"]
-                    phase = (f" · depth {workflow['depth']} · node {workflow['phase']}" if workflow else "")
+                    phase = (f" · research {workflow['run_phase']} ({workflow['run_status']})"
+                             f" · depth {workflow['depth']} · node {workflow['node_phase']}" if workflow else "")
                     state = "pause requested" if snapshot["paused"] else snapshot["state"]
                     header.setText(f"{owner.get('role', 'Session')} · session {state}{phase}\n{snapshot['cwd']}")
                     queued = snapshot["steering"] + snapshot["follow_up"]
@@ -332,6 +293,8 @@ async def follow_session(screen, path, *, catalog=False, attach=False):
             except (OSError, ValueError, KeyError, TimeoutError) as error:
                 stamp = None
                 changed = True
+                screen.updateStreaming(None)
+                stream_cursor = None
                 if owner is not None and not os.path.exists(str(owner.get("control") or "")):
                     # The owning process exited (a research node that finished its routine, a
                     # closed window): its input socket is gone, the conversation itself is not.
@@ -363,6 +326,7 @@ async def follow_session(screen, path, *, catalog=False, attach=False):
                 pass
     finally:
         unsubscribe()
+        screen.updateStreaming(None)
         for task in sending:
             task.cancel()
         await asyncio.gather(*sending, return_exceptions=True)

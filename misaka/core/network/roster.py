@@ -1,11 +1,10 @@
 """Create and remove durable Sister profiles."""
-import json
 import os
 import re
 import shutil
 import sys
 
-from misaka.config import profiles
+from misaka.config import home, profiles
 from misaka.config.product import CFG, current_config
 from misaka.core.moments import CoreCommand
 
@@ -43,29 +42,6 @@ Last Order reads this file to decide which tasks fit this Sister. Put personalit
 """
 
 
-# The only key `misaka/core/mcp.py:load_profile_config` reads out of a role's
-# config.yaml is `mcp_servers`, and the only keys it reads out of one server entry are
-# command/args/env/cwd/disabled -- so those are the only keys the skeleton documents.
-# It is commented out end to end on purpose: an all-comment file parses to None, `_clean`
-# turns that into no servers, and the Sister behaves exactly as she did when the file did
-# not exist. Deleting the leading '#' from the block leaves valid YAML, which is why there
-# is no live `mcp_servers: {}` line -- that would make the uncommented block a duplicate
-# key, and PyYAML resolves duplicates last-wins, silently discarding the servers.
-CONFIG_YAML_TEMPLATE = """# Misaka {sid} · MCP servers
-#
-# Every server listed here is started for this Sister, and its tools are registered as
-# mcp__<server>__<tool>. To enable one, delete the leading '#' from the block below.
-#
-# mcp_servers:
-#   camofox:                      # the <server> half of the tool name
-#     command: npx                # executable; must be on PATH, or an absolute path
-#     args: ["-y", "camofox-mcp"] # optional argument list
-#     env: {{}}                     # optional extra environment variables
-#     cwd: null                   # optional working directory
-#     disabled: false             # true keeps the entry but does not start it
-"""
-
-
 def _valid(sid):
     return bool(re.fullmatch(r"[\w][\w.-]*", sid or "")) and sid not in {"last-order", "last_order"}
 
@@ -95,28 +71,6 @@ def card_counts(sid, db_path=None):
         con.close()
 
 
-def ensure_config_yaml(profile_dir, sid):
-    """Write the commented MCP skeleton if this profile has none. Returns True if it wrote one.
-
-    Sisters made before `create` started writing this file have no config.yaml, and nothing
-    else creates one — so the instruction every Sister's creation message gives ("configure
-    MCP servers in config.yaml") pointed at a file that was not there. The skeleton is
-    commented end to end and parses to no servers, so writing one changes no behaviour: it
-    only gives the user the file the product told them to edit.
-    """
-    from misaka.config import profiles
-
-    path = profiles.config_yaml(profile_dir)
-    if os.path.exists(path):
-        return False
-    try:
-        with open(path, "x", encoding="utf-8") as f:   # x: never clobber a race's winner
-            f.write(CONFIG_YAML_TEMPLATE.format(sid=sid))
-    except OSError:
-        return False
-    return True
-
-
 def create_sister(sid, root=None, specialty=None, model=None):
     """Create a Sister profile and return ``(success, message)``."""
     root = root or ROOT
@@ -132,17 +86,14 @@ def create_sister(sid, root=None, specialty=None, model=None):
     with open(os.path.join(prof, "DESCRIBE.md"), "w", encoding="utf-8") as f:
         f.write(DESCRIBE_TEMPLATE.format(
             sid=sid, specialty=specialty, specialty_line=specialty or "Not specified yet."))
-    with open(profiles.config_yaml(prof), "w", encoding="utf-8") as f:
-        f.write(CONFIG_YAML_TEMPLATE.format(sid=sid))
     pinned = ""
     if model:
-        with open(os.path.join(prof, "config.json"), "w", encoding="utf-8") as f:
-            json.dump({"model": model}, f, ensure_ascii=False, indent=2)
+        profiles.persist_role_default_model(prof, model, strict=True)
         pinned = f"Pinned model: {model}. "
     return True, (
         f"Sister {sid} was added to the roster. {pinned}Profile: {prof} -- "
         f"DESCRIBE.md (what Last Order routes to her), SOUL.md (her voice), "
-        f"config.yaml (MCP servers; a commented skeleton is there to edit), "
+        f"settings.json (add it for a pinned model or \"mcpServers\"; /model Ctrl+S writes the pin), "
         f"skills/ (link skills here). Use /sister {sid} to switch to this Sister."
     )
 
@@ -306,7 +257,7 @@ def commands():
         ctx.ui.notify(msg, "info" if ok else "error")
 
     return [
-        CoreCommand("create", "Create a Sister profile with an ID, description, and model under ~/.misaka/profiles/sisters/.", create_cmd),
+        CoreCommand("create", f"Create a Sister profile with an ID, description, and model under {home.display(home.path('profiles_root'))}/.", create_cmd),
         CoreCommand("remove", "Remove a Sister profile; task history and workspaces remain, and active Sisters are protected.", remove_cmd),
     ]
 

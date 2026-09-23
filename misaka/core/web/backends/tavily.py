@@ -34,6 +34,7 @@ import httpx
 
 from misaka.core.web.accounting import account_call
 from misaka.core.web.config import (
+    config_label,
     keyless_tier_enabled,
     provider_env,
     provider_tier,
@@ -69,7 +70,7 @@ def _missing_key_error(action: str) -> str:
     """
     return (
         "TAVILY_API_KEY is not set. Get a key at https://app.tavily.com/home, or allow "
-        f"opt-in keyless {action} in `~/.misaka/web.json`: unpin `provider_tier.tavily` "
+        f"opt-in keyless {action} in `{config_label()}`: unpin `provider_tier.tavily` "
         "from `paid` and leave `keyless_fallback` on."
     )
 

@@ -39,13 +39,13 @@ from typing import Any
 
 import httpx
 
-from misaka.core.tools._web.website_policy import policy_blocked
 from misaka.core.web.accounting import account_call
-from misaka.core.web.config import config_name, provider_tier
+from misaka.core.web.config import config_label, config_name, provider_tier
 from misaka.core.web.provider import align_documents, check_response
 from misaka.core.web.runtime import api_client
 from misaka.core.web.scope import current_scope
 from misaka.core.web.timeouts import http_timeout
+from misaka.core.web.website_policy import policy_blocked
 
 logger = logging.getLogger(__name__)
 
@@ -260,7 +260,7 @@ async def parallel_search_keyless(query: str, limit: int = 5) -> dict[str, Any]:
             "error": (
                 f"Keyless Parallel search failed: {exc}. "
                 "Set PARALLEL_API_KEY (https://parallel.ai) or another web "
-                "backend via `~/.misaka/web.json` for reliable service."
+                f"backend via `{config_label()}` for reliable service."
             ),
         }
     except (ValueError, TypeError, KeyError, AttributeError) as exc:
@@ -289,7 +289,7 @@ async def parallel_extract_keyless(urls: list[str]) -> list[dict[str, Any]]:
         message = (
             f"Keyless Parallel extract failed: {exc}. "
             "Set PARALLEL_API_KEY (https://parallel.ai) or another web "
-            "backend via `~/.misaka/web.json` for reliable service."
+            f"backend via `{config_label()}` for reliable service."
         )
         return [_extract_error(url, message) for url in urls]
 
@@ -380,7 +380,7 @@ async def exa_search_keyless(query: str, limit: int = 5) -> dict[str, Any]:
             "error": (
                 f"Keyless Exa search failed: {exc}. "
                 "Set EXA_API_KEY (https://exa.ai) or another web backend "
-                "via `~/.misaka/web.json` for reliable service."
+                f"via `{config_label()}` for reliable service."
             ),
         }
     return {"success": True, "data": {"web": _parse_exa_search_text(text, limit)}}
@@ -419,7 +419,7 @@ async def exa_extract_keyless(urls: list[str]) -> list[dict[str, Any]]:
                     url,
                     f"Keyless Exa extract failed: {exc}. "
                     "Set EXA_API_KEY (https://exa.ai) or another web backend "
-                    "via `~/.misaka/web.json` for reliable service.",
+                    f"via `{config_label()}` for reliable service.",
                 )
             )
             continue
@@ -454,7 +454,7 @@ async def firecrawl_search_keyless(query: str, limit: int = 5) -> dict[str, Any]
             "error": (
                 f"Keyless Firecrawl search failed: {exc}. "
                 "Set FIRECRAWL_API_KEY (https://firecrawl.dev) or another web "
-                "backend via `~/.misaka/web.json` for reliable service."
+                f"backend via `{config_label()}` for reliable service."
             ),
         }
 
@@ -505,7 +505,7 @@ async def keenable_search_keyless(query: str, limit: int = 5) -> dict[str, Any]:
             "error": (
                 f"Keyless Keenable search failed: {exc}. "
                 "Set KEENABLE_API_KEY (https://keenable.ai) or another web "
-                "backend via `~/.misaka/web.json` for reliable service."
+                f"backend via `{config_label()}` for reliable service."
             ),
         }
     except Exception as exc:  # noqa: BLE001 - transport/JSON errors, as in Hermes
@@ -562,7 +562,7 @@ async def keenable_extract_keyless(urls: list[str]) -> list[dict[str, Any]]:
                     url,
                     f"Keyless Keenable extract failed: {exc}. "
                     "Set KEENABLE_API_KEY (https://keenable.ai) or another web "
-                    "backend via `~/.misaka/web.json` for reliable service.",
+                    f"backend via `{config_label()}` for reliable service.",
                 )
             )
     return results

@@ -6,7 +6,9 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from webconf import write_web
 
+from misaka.config import home
 from misaka.core.web import cache, extract, keyless, x_search
 from misaka.core.web.scope import WebScope
 
@@ -14,7 +16,6 @@ from misaka.core.web.scope import WebScope
 @pytest.fixture
 def scope(tmp_path, monkeypatch):
     from misaka.config.product import CFG
-    monkeypatch.setitem(CFG, 'web_config', str(tmp_path / 'shared.json'))
     monkeypatch.setitem(CFG, 'web_cache', str(tmp_path / 'cache'))
     with WebScope(str(tmp_path)).activate() as view:
         view.config = {'env': {'EXA_API_KEY': 'fixture-super-secret-123456'}}
@@ -90,7 +91,7 @@ async def test_extract_keeps_restricted_original_and_redacted_evidence(scope, tm
     assert secret not in row['content']
     path = tmp_path / row['saved_path']
     assert secret not in path.read_text()
-    originals = list((tmp_path / 'web-evidence' / 'originals').glob('*.md'))
+    originals = list((home.path('web_evidence', tmp_path) / 'originals').glob('*.md'))
     assert len(originals) == 1 and secret in originals[0].read_text()
     assert originals[0].stat().st_mode & 0o777 == 0o600
     assert originals[0].parent.stat().st_mode & 0o777 == 0o700
@@ -99,7 +100,7 @@ async def test_controller_uses_default_deadline_not_requested_operation(scope, t
     # serve() forwards owner.run(call) without _tool_name, demonstrated separately in source.
     from misaka.core.web.runtime import WebRuntime
     from misaka.core.web.timeouts import WebOperationTimeout
-    (tmp_path / 'web.json').write_text(json.dumps({'operation_timeout': {'default': 0.01, 'browser_exec': 1}}))
+    write_web({'operation_timeout': {'default': 0.01, 'browser_exec': 1}}, profile=tmp_path)
     owner = WebRuntime(scope)
     async def call(): await asyncio.sleep(.025); return 'done'
     try:
@@ -110,7 +111,7 @@ async def test_controller_uses_default_deadline_not_requested_operation(scope, t
         await owner.close()
 
 async def test_fresh_and_cached_sources_share_the_same_gate(scope, tmp_path, monkeypatch):
-    from misaka.core.tools._web.bounded import UnsafeUrlError
+    from misaka.core.web.bounded import UnsafeUrlError
     from misaka.core.web.provider import WebSearchProvider
     class Provider(WebSearchProvider):
         name = 'fixture'
@@ -136,14 +137,13 @@ async def test_direct_tool_http_failure_is_error_in_agent_loop(scope, tmp_path, 
 
     from misaka.agent.agent_loop import execute_prepared_tool_call
     from misaka.core.tools import download_file, web_fetch
-    from misaka.core.tools._web import bounded
-    from misaka.core.web import WebPart
+    from misaka.core.web import WebPart, bounded
     async def resolve(*args): return ['93.184.216.34']
     monkeypatch.setattr(bounded, '_resolve_host', resolve)
     transport = httpx.MockTransport(lambda req: httpx.Response(503, text='fixture unavailable'))
     module = web_fetch if name == 'web_fetch' else download_file
     monkeypatch.setattr(module, 'open_checked_stream', functools.partial(bounded.open_checked_stream, transport=transport))
-    (tmp_path / 'web.json').write_text(json.dumps({'browser': {'enabled': False}}))
+    write_web({'browser': {'enabled': False}}, profile=tmp_path)
     part = WebPart(SimpleNamespace(profile_dir=str(tmp_path), workspace=str(tmp_path)))
     prepared = SimpleNamespace(tool=next(t for t in part.tools if t.name == name),
         toolCall=SimpleNamespace(id='fixture', name=name, arguments={}), args={'url': 'https://93.184.216.34' + suffix})
@@ -158,7 +158,7 @@ async def test_web_fetch_hides_server_presigned_redirect(scope, tmp_path, monkey
     import functools
 
     from misaka.core.tools import web_fetch
-    from misaka.core.tools._web import bounded
+    from misaka.core.web import bounded
     signed = 'https://93.184.216.34/final?X-Amz-Signature=fixture-only-signature'
     def handler(request):
         if request.url.path == '/start': return httpx.Response(302, headers={'location': signed})
@@ -188,7 +188,7 @@ BrowserManager.perform = action
 asyncio.run(serve())
 ''')
     cfg = {'controller_command': [sys.executable, str(fixture)]}
-    (tmp_path / 'web.json').write_text(json.dumps({'operation_timeout': {'default': .03, 'browser_exec': 2}, 'browser': cfg}))
+    write_web({'operation_timeout': {'default': .03, 'browser_exec': 2}, 'browser': cfg}, profile=tmp_path)
     controller = Controller(str(tmp_path), cfg)
     try:
         result = await controller.perform('browser_exec', {'code': 'pass', 'timeout_s': 5}, 'fixture')

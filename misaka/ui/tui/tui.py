@@ -11,7 +11,6 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any, Literal, Protocol, TypedDict
 
 from misaka.ui.tui.keys import isKeyRelease
@@ -1253,11 +1252,10 @@ class TUI(Container):
             buffer += "\x1b[2K"
             if not is_image and visibleWidth(line) > width:
                 # Imported here, on the crash path only, so `ui/tui` keeps no import-time
-                # dependency on `config`; the hardcoded `~/.misaka/agent` used to ignore
-                # MISAKA_CODING_AGENT_DIR and then print that wrong path in the error.
-                from misaka.config import get_agent_dir
+                # dependency on `config`.
+                from misaka.config import home
 
-                crash_log_path = Path(get_agent_dir()) / "misaka-crash.log"
+                crash_log_path = home.path("crash_log")
                 crash_log_path.parent.mkdir(parents=True, exist_ok=True)
                 crash_data = [
                     f"Crash at {_utc_iso_timestamp()}",

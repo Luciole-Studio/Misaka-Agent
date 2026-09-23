@@ -1,0 +1,66 @@
+{
+  "THIRD_PARTY_NOTICES.md": {
+    "before_sha256": "0946b43122737b9ccc52bec58997401c6194846990486e907130a3d61aeb0dd8",
+    "after_sha256": "45512fd38b0f183d471950b120ca5dc250b6fcd9e24be0d639144c6c207d7810"
+  },
+  "misaka/agent/agent_loop.py": {
+    "before_sha256": "0696609d07c5f36478dc2d4cb9fa3f7e9ab62e4975fa6c95be86c6bde0a89caf",
+    "after_sha256": "568b2bb0c051e331c09aa2d2a5188cbecfe59f075c690287ad62ea76a64c8c44"
+  },
+  "misaka/agent/proxy.py": {
+    "before_sha256": "3e9c14740c7dc30eae120ffda8af865b64d285b3aa04956caed16389f1be85e8",
+    "after_sha256": "affdba27ad30ec7c1f9cb4d4779bc75e62025528d8fb62895ba11279ff148140"
+  },
+  "misaka/ai/providers/amazon_bedrock.py": {
+    "before_sha256": "b5fe041d5e6b15338e0f577013558e37c8275ffb39cf64413c09002a05926b40",
+    "after_sha256": "f1be8861e76e72a6f0572628c7753439fd40e28094cfed41f2dc1e008d1c2abf"
+  },
+  "misaka/ai/providers/anthropic.py": {
+    "before_sha256": "e62b3e6c2f6f896012a8f1daf3ecb9aed3cb7e21f84eeb72fc0fa4ad5a2c2560",
+    "after_sha256": "311f5b1bc57d27c9ce32287b3e0d867995fd49520ee0aa1bb4a21c11403f2f01"
+  },
+  "misaka/ai/providers/google_shared.py": {
+    "before_sha256": "37360b6f8d12c2efa76219260ff0f4822eafc675c443ee944fff45a75c375703",
+    "after_sha256": "4ea411029ca6c3b58afba6e8252b869e8ccc1cedb4d468ec4d2c57d413bee9c5"
+  },
+  "misaka/ai/providers/mistral.py": {
+    "before_sha256": "cf4d15df5099d68b96f1f7243562f64e988e70b3a3615b29e712654b7133ef48",
+    "after_sha256": "54a2f726b96134025e26f6ec780e8f18c35cf311d29b616448c7c5aad48e7c64"
+  },
+  "misaka/ai/providers/openai_completions.py": {
+    "before_sha256": "09f46b0fad12d2d18b2cb49aed07163e4443ae324bb2696af8c9ef7a1e8f111e",
+    "after_sha256": "f1e3b0b727040327d0d9bd042a99d48af349a021d961ed17dc8f01534d411356"
+  },
+  "misaka/ai/providers/openai_responses_shared.py": {
+    "before_sha256": "9ad5652dbdc143763b72b0afb7304637f4bf3121e7ff04127fe6a0af57ef66ec",
+    "after_sha256": "254901c31526c13e563515bcb973f6d5d0805a81e16497c4f02fc51868358d59"
+  },
+  "misaka/ai/providers/pi_messages.py": {
+    "before_sha256": "ab6b44236180f77f6bf2b8fdf9523f767a62159aeee3ad500182e4b944ac68ef",
+    "after_sha256": "980c72390af4ded99622772641476409a22eb3da7b9d7bcdca653568d44f1c8b"
+  },
+  "misaka/ai/types.py": {
+    "before_sha256": "453978c22b97847ba30bbb831a43fd5adb592470c508a79d33643c90ab3e56ba",
+    "after_sha256": "a9b62cda0e30df7ac80c81fa438c4b0445c30eabe7c507f6ea4f027ecc591e40"
+  },
+  "misaka/ai/utils/PARTIAL_JSON_LICENSE": {
+    "before_sha256": null,
+    "after_sha256": "cd519ad3d7e012427f978dfb2e3b92ee403d189d7b859ba6bf68fd7e12ca456f"
+  },
+  "misaka/ai/utils/json_parse.py": {
+    "before_sha256": "153762a307fb18968cc01b40da3263633b3ae6a6030e748848e1a6ae9646ebe8",
+    "after_sha256": "483e890de62ad8fbd71a50aa68724d95ee7b79e4b414c41e5e5c1c66dc778ff2"
+  },
+  "tests/fixtures/pi_json_parse_c7cdb460.json": {
+    "before_sha256": null,
+    "after_sha256": "41b9b49e17bf55a45a639420521b436fa6c78146a0952c013edfc35f083a5577"
+  },
+  "tests/test_json_parse.py": {
+    "before_sha256": null,
+    "after_sha256": "ea4c54b3caef4086e303ac5d1831251e7968fff2b0a3aa4b78ff8b373c962b2a"
+  },
+  "tests/test_research_repair_contracts.py": {
+    "before_sha256": "15c408d56155dde7f804654c8fe4c9ca8ee09338da493b2a4cfebaa4248e2f32",
+    "after_sha256": "150b020d6a7b2bf32cfb7682562ad0ab265d3d89c06a7cebc54abd5e5fbaa36d"
+  }
+}

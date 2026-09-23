@@ -12,6 +12,7 @@ from wcmatch import glob
 from misaka.ai.models import models_are_equal
 from misaka.ai.types import Model
 from misaka.cli.args import isValidThinkingLevel as _isValidThinkingLevel
+from misaka.config import home
 from misaka.core.defaults import DEFAULT_THINKING_LEVEL
 from misaka.utils.values import maybe_await
 
@@ -328,7 +329,7 @@ def resolveCliModel(options: dict[str, Any]) -> ResolveCliModelResult:
         return ResolveCliModelResult(
             model=None,
             warning=None,
-            error=f'Unknown provider "{cli_provider}". Use --list-models to see available providers/models; custom providers are defined in ~/.misaka/agent/models.json and the default is set by MISAKA_PROVIDER.',
+            error=f'Unknown provider "{cli_provider}". Use --list-models to see available providers/models; custom providers are defined in {home.display(home.path("models"))} and the default is defaultProvider in settings.json.',
         )
 
     pattern = cli_model

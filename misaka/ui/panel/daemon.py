@@ -26,7 +26,7 @@ import time
 
 import psutil
 
-from misaka.config import CFG
+from misaka.config import CFG, home
 from misaka.config import sessions as session_roots
 from misaka.ui.panel import (
     geometry as hui,  # layout.rs port: split_at / remove_pane / pane_ids
@@ -37,14 +37,18 @@ from misaka.utils.streams import STREAM_LIMIT
 # Wire protocol version (strict equality, as in herdr). Bump it whenever *server
 # behaviour* changes, not only method/event shapes: an unbumped behaviour change
 # once let a stale daemon slip through the version gate.
-PROTOCOL = 47   # 47: drag resizes are fire-and-forget (id=None, no reply) and the layout is persisted at drag end, so the divider never blocks on a busy daemon; 46: a drag resizes the program as fast as it repaints; 44: reflow held until repaint; 43: libghostty-vt; 42: panes.resize acknowledged first; 40: shown frame in a sync block; 38: input state, extract, kitty
+PROTOCOL = 50   # 50: one home, one layout table -- a daemon from before it serves the old paths; 49: panes.list says which pane holds a card's claim, and a card is continued in the pane it already has; 48: pane.send/pane.input drain through a per-pane write queue and wait for delivery; 47: drag resizes are fire-and-forget (id=None, no reply) and the layout is persisted at drag end, so the divider never blocks on a busy daemon; 46: a drag resizes the program as fast as it repaints; 44: reflow held until repaint; 43: libghostty-vt; 42: panes.resize acknowledged first; 40: shown frame in a sync block; 38: input state, extract, kitty
 RING_CAP = 256 * 1024          # output tail kept per pane
+SEND_TIMEOUT = 8.0             # pane.send: how long a message may take to enter the pane before it counts as undelivered (under the client's 10 s request timeout)
+INPUT_TIMEOUT = 1.0            # pane.input: keystrokes and pastes wait this long, then stay queued (typing must not block the panel)
+WRITE_QUEUE_LIMIT = 1024 * 1024  # bytes queued per pane before further input is refused outright
 FRAME_SECONDS = 0.008          # coalescing window for dirty-row broadcasts (~120 fps)
 IDLE_QUIET_SECONDS = 1.0       # screen unchanged this long = idle (a static spinner glyph does not count)
 RESIZE_HOLD_SECONDS = 1.5      # after a resize, keep the last complete frame until the program repaints (fallback ceiling)
 RESIZE_MIN_INTERVAL = 0.016    # a drag resizes the program no faster than herdr's 16 ms render pace (MIN_RENDER_INTERVAL)
 CARD_POLL_SECONDS = 5.0        # card-pane polling interval
 DEFAULT_ROWS, DEFAULT_COLS = 32, 120
+EXIT_GRACE_TRIES, EXIT_POLL_SECONDS = 40, 0.05   # 2 s for a program to save state, then SIGKILL
 CARD_SHELL = [sys.executable, "-m", "misaka", "card-shell"]   # tests may override
 SINGLETON_LOCK_TRIES = 100     # x 50 ms: how long a cold start waits for another one's probe+bind
 
@@ -53,43 +57,37 @@ def _expand(path):
     return os.path.expanduser(path)
 
 
-def _write_pty(fd, data):
-    """Write all of ``data`` to a non-blocking PTY. ``os.write`` may take only part of the
-    buffer; the remainder is retried until the queue is full. A pane whose program stops
-    reading raises instead of silently truncating the input — no waiting: the daemon's
-    single event loop serves every pane, so blocking here would freeze all of them. The
-    raise is still a *partial* delivery when the first write took some of the buffer, so
-    the message says how much landed rather than implying the whole batch bounced
-    (audit 2026-09-02, ui-panel-10; the real fix is the awaitable path described below).
+def _write_some(fd, view):
+    """One non-blocking write; 0 when the terminal's input queue is full right now."""
+    try:
+        return os.write(fd, view)
+    except BlockingIOError:
+        return 0
 
-    Known limit (audit 2026-09-02, ui-panel-01): a terminal's input queue holds ~2 KiB, so a
-    send larger than that fails even for a healthy pane that would have read it. Round 3
-    queued the remainder per pane and drained it on writability, which delivered the big
-    payload but turned *every* send into ``{"sent": true}`` the moment the bytes were queued —
-    a pane stuck not reading answered success and the two product tools built on that reply
-    lost their only failure signal. Reverted to failing loudly. Closing the size limit for
-    real needs a delivery path that can wait: an awaitable `pane.send` that drains with a
-    deadline and reports what actually landed, not a fire-and-forget queue."""
-    view = memoryview(data)
-    while view:
-        try:
-            written = os.write(fd, view)
-        except BlockingIOError:
-            written = 0
-        if not written:
-            sent = len(data) - len(view)
-            # Say which way it failed. The first `os.write` can take part of the buffer, so
-            # this is not "the batch was refused": those `sent` bytes are already in the pane's
-            # input queue and the program will read them. The caller shows this text verbatim
-            # and used to prefix it with "Input dropped" (audit 2026-09-02, ui-panel-10).
-            detail = (
-                f"{sent} of {len(data)} bytes already entered the pane and the rest could not be sent"
-                if sent else f"none of the {len(data)} bytes could be sent"
-            )
-            raise RuntimeError(
-                f"Pane input buffer is full: {detail}; the program in the pane is not reading."
-            ) from None
-        view = view[written:]
+
+class _PendingWrite:
+    """One message on a pane's write queue: what is left of it and who waits for it.
+
+    A terminal's input queue holds about 1 KiB on macOS (1022 bytes measured), so any
+    message longer than that -- a paste of 340 CJK characters, a Last Order note to a
+    Sister -- only enters the pane as fast as the program reads. herdr hands input to a
+    per-pane writer thread that blocks on the pty (``pty/actor.rs``: bounded channel,
+    ``write_all``), so nothing is ever cut; the daemon has one event loop for every pane,
+    so it drains on writability instead (``Daemon._drain_writes``). The earlier round that
+    queued and answered ``{"sent": true}`` at once lost the failure signal (audit
+    2026-09-02, ui-panel-01/10); ``Daemon._deliver`` therefore waits for the message to
+    enter the pane, with a deadline, and reports what actually landed."""
+
+    __slots__ = ("future", "total", "view")
+
+    def __init__(self, data, future):
+        self.view = memoryview(data)
+        self.total = len(data)
+        self.future = future
+
+    @property
+    def landed(self):
+        return self.total - len(self.view)
 
 
 # Synchronized output (DEC 2026): a program's repaint between `h` and `l` is one frame.
@@ -154,46 +152,23 @@ def _screen_lines(pane):
 _SPINNER_CHARS = set("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷◐◓◑◒◴◷◶◵")
 _SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "csh", "tcsh", "-zsh", "-bash"}
 # A command typed by hand in a pane's shell counts as a transient ally only if it
-# is on the allow-list; otherwise vim/htop would show up in the roster too. The
-# single source of truth is ~/.misaka/allies.json (no env knob, by user decision):
-# seeded on first use, edited in place, reloaded on mtime change without a daemon
-# restart. Allies launched by Last Order are not subject to the list.
+# is on the allow-list; otherwise vim/htop would show up in the roster too. The list is
+# ``"allies"`` in the global settings.json (no env knob, by user decision), read fresh on
+# each ask so an edit takes effect without a daemon restart. Allies launched by Last
+# Order are not subject to the list.
 ALLY_SEED = ("claude", "codex")
-_allies_cache = {"path": None, "mtime": None, "commands": frozenset(ALLY_SEED)}
 
 
 def ally_commands():
-    """Return the hand-launched ally allow-list.
-
-    Missing file: write the seed and use it. Readable file: use it as-is (an
-    empty list means nothing is recognised). Bad JSON: fall back to the seed
-    but never overwrite the user's file -- it may be mid-edit.
-    """
-    path = _expand(CFG["allies"])
+    """The hand-launched ally allow-list: ``settings.json``'s ``allies``, else the seed."""
+    from misaka.core.settings_manager import SettingsManager
     try:
-        mtime = os.stat(path).st_mtime_ns
-    except OSError:
-        try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            tmp = f"{path}.{secrets.token_hex(4)}.tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump({"commands": list(ALLY_SEED)}, f, ensure_ascii=False, indent=1)
-            os.replace(tmp, path)
-            mtime = os.stat(path).st_mtime_ns
-        except OSError:
-            return frozenset(ALLY_SEED)   # cannot write (read-only disk etc.): use the seed, do not block panes
-    if _allies_cache["path"] == path and _allies_cache["mtime"] == mtime:
-        return _allies_cache["commands"]
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        commands = frozenset(
-            c.strip() for c in (data.get("commands") or [])
-            if isinstance(c, str) and c.strip())
-    except (OSError, ValueError, AttributeError):
-        commands = frozenset(ALLY_SEED)
-    _allies_cache.update(path=path, mtime=mtime, commands=commands)
-    return commands
+        listed = SettingsManager.forRole(None).settings.get("allies")
+    except Exception:  # noqa: BLE001 - an unreadable settings file must not block panes
+        return frozenset(ALLY_SEED)
+    if not isinstance(listed, list):
+        return frozenset(ALLY_SEED)
+    return frozenset(c.strip() for c in listed if isinstance(c, str) and c.strip())
 
 
 def _looks_like_command(name):
@@ -258,7 +233,7 @@ def _ally_name(pane):
 
     Two sources: an ally launched by Last Order (``pane.ally`` is set; any
     command qualifies), or a command the user typed into a MISAKA pane's shell
-    (only names on the allies.json allow-list, see ``ally_commands()``).
+    (only names on the ``allies`` allow-list, see ``ally_commands()``).
     Excluded: Sister card panes and MISAKA's own chat/card-shell sessions.
     """
     if pane.ally:
@@ -524,6 +499,8 @@ class Pane:
         "term",
         "theme",
         "title",
+        "writer_armed",
+        "writes",
     )
 
     def __init__(self, pane_id, title, argv, cwd, card=None):
@@ -532,6 +509,8 @@ class Pane:
         self.claim_lock = self.generation = None
         self.proc = self.fd = self.exit_code = None
         self.buf = bytearray()
+        self.writes = []              # _PendingWrite queue, drained in order as the program reads (herdr's writer channel)
+        self.writer_armed = False     # loop.add_writer(fd) is registered while the queue is non-empty and the pty is full
         self.started = None           # card-hosting start time (set by _host_card; None for plain panes)
         self.started_at = int(time.time())
         self.seen_status = None       # board status seen while focused ("finished but not yet looked at")
@@ -589,6 +568,17 @@ class Pane:
         self.render.close()
         self.term.close()
 
+    def fresh_terminal(self):
+        """A clean emulator at the current size, for a program replacing another in this pane:
+        the modes, scrollback and alternate screen of the program that left are not inherited."""
+        rows, cols = self.size()
+        self.close_terminal()
+        self.term = vt.Terminal(cols, rows, on_write_pty=self.reply)
+        self.render = vt.RenderState()
+        self.set_theme(self.theme)
+        self.full_frame = True
+        self.sent_cursor = self.sent_input = self.shown = None
+
     def alive(self):
         return self.proc is not None and self.proc.poll() is None
 
@@ -598,6 +588,7 @@ class Daemon:
         self.sock_path = _expand(sock_path or CFG["net_sock"])
         self.snapshot_path = _expand(snapshot_path or CFG["net_snapshot"])
         self.panes: dict[str, Pane] = {}
+        self._card_locks: dict[str, asyncio.Lock] = {}   # one attempt at a time per card
         self._reapers = set()          # background kill-escalation tasks (close never blocks)
         self._read_limit = STREAM_LIMIT   # request-reader limit; _read_line frames against it
         self._seq = 0
@@ -630,8 +621,8 @@ class Daemon:
         # this the pty pair leaked two descriptors per failure and a long-lived daemon walked
         # into EMFILE, after which no pane opened at all (audit 2026-09-02, ui-panel-02).
         try:
-            fcntl.ioctl(slave, termios.TIOCSWINSZ,
-                        struct.pack("HHHH", DEFAULT_ROWS, DEFAULT_COLS, 0, 0))
+            rows, cols = pane.size()      # a fresh pane is still at the default size
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
             child_env = {**os.environ, **(env or {}), "TERM": "xterm-256color",
                          "COLORTERM": "truecolor", "MISAKA_NET_PANE": pane.id}
             child_env.pop("MISAKA_DM_CARD_ALLOWLIST", None)  # contact-session capability
@@ -651,6 +642,184 @@ class Daemon:
         pane.fd = master
         asyncio.get_running_loop().add_reader(master, self._pump, pane)
 
+    @staticmethod
+    def _discard_output(pane: Pane, rounds=16):
+        """Read and drop what a leaving program writes. Its pane is not listening any more, and
+        a pty nobody drains fills up and holds the program open instead of letting it leave."""
+        if pane.fd is None:
+            return
+        for _ in range(rounds):
+            try:
+                if not os.read(pane.fd, 65536):
+                    return
+            except OSError:                   # nothing to read, or the pty is gone
+                return
+
+    @staticmethod
+    def _release_fd(pane: Pane):
+        if pane.fd is not None:
+            try:
+                os.close(pane.fd)
+            except OSError:
+                pass
+            pane.fd = None
+
+    async def _stop_program(self, pane: Pane):
+        """End the program running in a pane without taking the pane down.
+
+        The reader is detached first, so the program's exit is not broadcast as the pane itself
+        exiting -- but the pty stays open until it is gone. Closing the master would hang up its
+        session (`_spawn` makes a pane's program a session leader owning that pty) and SIGHUP it
+        before it had been asked to leave, which is exactly the grace period below."""
+        loop = asyncio.get_running_loop()
+        self._fail_writes(pane, "the program in the pane was replaced")   # unregisters the writer
+        for timer in ("flush", "resize_apply"):
+            pending = getattr(pane, timer)
+            if pending is not None:
+                pending.cancel()
+                setattr(pane, timer, None)
+        if pane.fd is not None:
+            try:
+                loop.remove_reader(pane.fd)
+            except (OSError, ValueError):     # never registered, or already gone
+                pass
+        proc, pane.proc = pane.proc, None
+        try:
+            if proc is None or proc.poll() is not None:
+                return
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except OSError:                   # already gone
+                return
+            for _ in range(EXIT_GRACE_TRIES):
+                if proc.poll() is not None:
+                    return
+                self._discard_output(pane)
+                await asyncio.sleep(EXIT_POLL_SECONDS)
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            while proc.poll() is None:
+                self._discard_output(pane)
+                await asyncio.sleep(EXIT_POLL_SECONDS)
+        finally:
+            self._release_fd(pane)
+
+    async def _await_exit(self, proc):
+        """Wait for a process this daemon has already signalled (`close` escalates in its own
+        task). True when it is gone; False when it outlived even the escalation."""
+        if proc is None:
+            return True
+        for _ in range(EXIT_GRACE_TRIES * 3):
+            if proc.poll() is not None:
+                return True
+            await asyncio.sleep(EXIT_POLL_SECONDS)
+        return proc.poll() is not None
+
+    async def _replace_program(self, pane: Pane, argv, *, cwd=None, env=None, title=None):
+        """Run a different program in an existing pane. The pane keeps its id, its seat in the
+        layout and its size, so a card continued after it finished comes back in the window the
+        user already has open instead of a second one beside it (2026-09-18, B29/B14)."""
+        await self._stop_program(pane)
+        pane.argv = list(argv)
+        pane.cwd = cwd or pane.cwd
+        if title:
+            pane.title = title
+        del pane.buf[:]                  # the output tail belonged to the program that left
+        pane.exit_code = None
+        pane.reported = None             # a program that has not started has not reported
+        pane.seen_status = None
+        pane.started = pane.generation = None
+        pane.claim_lock = None
+        pane.ally = (env or {}).get("MISAKA_ALLY")   # as `create` reads it, per program
+        pane.fg_at = pane.fg_seen = None
+        pane.resize_target = pane.resize_hold = pane.sync_until = None
+        pane.started_at = int(time.time())
+        pane.fresh_terminal()
+        self._spawn(pane, env=env)
+
+    async def _deliver(self, pane: Pane, data, *, timeout, drop_on_timeout):
+        """Queue ``data`` for the pane and wait until it has entered the program, or until
+        ``timeout``. ``drop_on_timeout`` (pane.send): the unsent remainder is discarded and
+        the caller gets the failure -- a note to a Sister must not arrive minutes later,
+        after Last Order has already reacted to "not delivered". Without it (pane.input):
+        keystrokes stay queued and deliver when the program reads, as a terminal would;
+        the reply says how much is still pending."""
+        if pane.fd is None:
+            raise ValueError(f"Pane is missing or has exited: {pane.id}")
+        queued = sum(len(item.view) for item in pane.writes)
+        if queued + len(data) > WRITE_QUEUE_LIMIT:
+            raise RuntimeError(
+                f"Pane input queue is full: {queued} bytes are already waiting for the program "
+                "in the pane to read them; it is not reading.")
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        # A pane that exits while an unwaited-for keystroke is queued would otherwise log
+        # "exception was never retrieved" into the daemon log.
+        future.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+        item = _PendingWrite(bytes(data), future)
+        pane.writes.append(item)
+        self._drain_writes(pane)
+        try:
+            await asyncio.wait_for(asyncio.shield(future), timeout)
+        except TimeoutError:
+            pending = len(item.view)
+            if not drop_on_timeout:
+                return {"sent": True, "queued": pending}
+            if item in pane.writes:
+                pane.writes.remove(item)
+            if not pane.writes and pane.writer_armed and pane.fd is not None:
+                loop.remove_writer(pane.fd)
+                pane.writer_armed = False
+            future.cancel()
+            # Say which way it failed: the bytes that entered the pane are in its input
+            # queue and the program will read them; only the remainder was dropped.
+            detail = (f"{item.landed} of {item.total} bytes entered the pane within {timeout:g}s and "
+                      "the rest was dropped" if item.landed
+                      else f"none of the {item.total} bytes entered the pane within {timeout:g}s")
+            raise RuntimeError(
+                f"Pane input buffer is full: {detail}; the program in the pane is not reading.") from None
+        return {"sent": True}
+
+    def _drain_writes(self, pane: Pane):
+        """Write as much of the queue as the pty takes; arm the writer callback for the rest."""
+        loop = asyncio.get_running_loop()
+        while pane.writes and pane.fd is not None:
+            item = pane.writes[0]
+            try:
+                written = _write_some(pane.fd, item.view)
+            except OSError as error:
+                self._fail_writes(pane, f"the pane's terminal refused input ({error})")
+                return
+            if not written:
+                if not pane.writer_armed:
+                    loop.add_writer(pane.fd, self._drain_writes, pane)
+                    pane.writer_armed = True
+                return
+            item.view = item.view[written:]
+            if not item.view:
+                pane.writes.pop(0)
+                if not item.future.done():
+                    item.future.set_result(item.total)
+        if pane.writer_armed and pane.fd is not None:
+            loop.remove_writer(pane.fd)
+            pane.writer_armed = False
+
+    def _fail_writes(self, pane: Pane, reason):
+        """The pane is going away: nothing queued will ever be read."""
+        if pane.writer_armed and pane.fd is not None:
+            try:
+                asyncio.get_running_loop().remove_writer(pane.fd)
+            except RuntimeError:
+                pass
+            pane.writer_armed = False
+        pending, pane.writes = pane.writes, []
+        for item in pending:
+            if not item.future.done():
+                item.future.set_exception(RuntimeError(
+                    f"Pane input was not delivered: {item.landed} of {item.total} bytes entered the pane; {reason}."))
+
     def _pump(self, pane: Pane):
         try:
             chunk = os.read(pane.fd, 65536)
@@ -663,6 +832,7 @@ class Daemon:
             if pane.flush is not None:      # no more frames for a pane that has exited
                 pane.flush.cancel()
                 pane.flush = None
+            self._fail_writes(pane, "the pane's program exited before reading it")
             os.close(pane.fd)
             pane.fd = None
             pane.exit_code = pane.proc.poll() if pane.proc else None
@@ -932,16 +1102,28 @@ class Daemon:
     async def _reap(self, proc):
         """SIGTERM was already sent: give the process a grace period, escalate to
         SIGKILL, and reap -- polling, so the event loop never blocks."""
-        for _ in range(40):                      # 2s grace for engines to save state
+        for _ in range(EXIT_GRACE_TRIES):        # 2s grace for engines to save state
             if proc.poll() is not None:
-                return
-            await asyncio.sleep(0.05)
+                break
+            await asyncio.sleep(EXIT_POLL_SECONDS)
+        else:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            while proc.poll() is None:
+                await asyncio.sleep(EXIT_POLL_SECONDS)
+        await self._sweep_catalog()
+
+    async def _sweep_catalog(self):
+        """A session killed before it could retire itself leaves its record and its control
+        socket behind; the daemon is the one that killed it, so it clears up after it
+        (2026-09-18, B3)."""
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except OSError:
+            from misaka.core import session_catalog
+            await asyncio.to_thread(session_catalog.sweep_dead)
+        except Exception:  # noqa: BLE001, S110 - housekeeping must never take a pane close down
             pass
-        while proc.poll() is None:
-            await asyncio.sleep(0.05)
 
     @staticmethod
     def _check_generation(pane, expected_generation):
@@ -1002,6 +1184,7 @@ class Daemon:
         if pane.fd is not None:
             try:
                 asyncio.get_running_loop().remove_reader(pane.fd)
+                self._fail_writes(pane, "the pane was closed before it was read")
             except RuntimeError:  # event loop already closed
                 pass
             if pane.flush is not None:
@@ -1050,16 +1233,16 @@ class Daemon:
         return {
             "MISAKA_THEME": self._theme,    # card panes follow the session theme
             # misaka commands inside the pane (e.g. an ally's `misaka tell`) must use
-            # the daemon's databases, or messages land in a different messages.db
+            # the daemon's home, or messages land in a different messages.db
             # and Last Order never sees them.
-            "MISAKA_DB": _expand(CFG["db"]),
-            "MISAKA_MESSAGES": _expand(CFG["messages_db"]),
-            "MISAKA_TASKS": _expand(CFG["tasks_root"]),
+            home.ENV_HOME: str(home.home()),
             "MISAKA_TASK_OUTPUT_DIR": str(row["output_dir"] or db.workspace_for(row)),
         }
 
-    def _settled_card_with_session(self, task_id):
-        """A card whose session can be reopened: not live in a pane, with a saved transcript."""
+    def _settled_card_with_session(self, task_id, *, require_session=True):
+        """A card whose session can be reopened: not live in a pane, with a saved transcript.
+        Without ``require_session`` a card that never got as far as a transcript -- stopped
+        seconds after its claim (2026-09-18, B16) -- is answered with ``transcript=None``."""
         from misaka.core.network.sister_runtime import ACTIVE_BOARD_STATUSES
         from misaka.core.platform import tasks as db
         from misaka.core.session_manager import find_most_recent_session
@@ -1068,43 +1251,78 @@ class Daemon:
             raise ValueError(f"Card not found: {task_id}")
         if row["status"] in ACTIVE_BOARD_STATUSES:
             raise ValueError(f"Card {task_id} is still {row['status']}; steer its running pane instead.")
-        session = session_roots.card_session_dir(row)
-        if find_most_recent_session(session) is None:
+        transcript = find_most_recent_session(session_roots.card_session_dir(row))
+        if transcript is None and require_session:
             raise ValueError(f"Card {task_id} has no saved session to reopen.")
-        return row
+        return row, transcript
 
-    def open_card_session(self, task_id, place=None) -> Pane:
+    def _card_lock(self, task_id):
+        """Hosting a card stops the program in its window before the board's claim decides who
+        won the card, so two requests racing for the same card must not both get that far: one
+        attempt at a time per card inside this daemon, and the loser meets an owned card."""
+        lock = self._card_locks.get(task_id)
+        if lock is None:
+            lock = self._card_locks[task_id] = asyncio.Lock()
+        return lock
+
+    def _card_pane_to_reuse(self, task_id):
+        """This card's window: the pane the user last opened for it, live ones first. A card
+        has one window, whoever opened it -- the dispatcher, a continuation, or a look at its
+        saved session -- so its next program takes this one over instead of adding another."""
+        panes = [pane for pane in self.panes.values() if pane.card == task_id]
+        return max(panes, key=lambda pane: (pane.alive(), pane.started_at)) if panes else None
+
+    async def open_card_session(self, task_id, place=None) -> Pane:
         """Reopen a card's saved session to look at it: no claim, no contract, no model turn.
         The panel uses it for a click on a card session, Last Order to bring a Sister back into
-        view. A turn typed into such a pane is not an attempt: without a claim its lifecycle
-        cannot settle the card."""
-        row = self._settled_card_with_session(task_id)
-        pane = self.create([*CARD_SHELL, task_id, "--resume"], self._card_workspace(row),
-                           title=f"{row['assignee']}·{task_id}", card=task_id,
-                           env=self._card_env(row), place=place)
+        view.
+
+        It opens the panel's own follower (``misaka chat --read-only``), which renders the
+        transcript as it grows and assembles no engine, no session writer and no lifecycle at
+        all. Looking at a card can therefore neither run a turn on it nor take its catalog
+        record away from the process that owns it -- both of which a second ``card-shell
+        --resume`` could do, and did (2026-09-18, B18/B19). A card already showing in a pane is
+        answered with that pane rather than opened a second time (B14)."""
+        row, transcript = self._settled_card_with_session(task_id)
+        argv = [sys.executable, "-m", "misaka", "chat", "--read-only", "--session", transcript]
+        title, workspace = f"{row['assignee']}·{task_id}", self._card_workspace(row)
+        pane = self._card_pane_to_reuse(task_id)
+        if pane is not None and pane.alive():
+            return pane
+        if pane is not None:
+            # Its program exited; the window is still the card's, so the reader takes it over
+            # rather than opening a second one next to a dark pane.
+            await self._replace_program(pane, argv, cwd=workspace, env=self._card_env(row), title=title)
+        else:
+            pane = self.create(argv, workspace, title=title, card=task_id,
+                               env=self._card_env(row), place=place)
         pane.generation = int(row["generation"])
         self._save_snapshot()
         return pane
 
-    def _drain_blocked_run(self, con, row):
-        """Stop the exact old process group before a blocked card starts a new generation."""
+    async def _vacate_card_panes(self, con, row, *, keep=None):
+        """One card, one window, one writer. Every program still holding this card's session is
+        stopped before its next attempt starts: ``keep`` -- the pane the attempt will run in --
+        keeps its id, seat and size and only loses its program, and the card's other panes are
+        closed. It runs after the board has granted the claim, so a refused attempt never
+        empties the window it was not given."""
+        leaving = []
+        for pane in [p for p in self.panes.values() if p.card == row["id"] and p is not keep]:
+            leaving.append(pane.proc)
+            self.close(pane.id)          # SIGTERM now; `_reap` escalates off the request
+        if keep is not None:
+            await self._stop_program(keep)
+        for proc in leaving:
+            if not await self._await_exit(proc):
+                raise ValueError(f"Card {row['id']}: a pane of an earlier attempt will not exit; try again.")
+
+    def _verify_previous_dead(self, con, row):
+        """Prove the recorded process of this generation gone before a blocked card is taken
+        over, killing an orphan process group if that is what it is. It decides whether the
+        takeover may happen at all, so it runs before the claim and never touches a pane."""
         from misaka.core.platform import processes as process_tree
         from misaka.core.subagent.child import PROCESS_GROUP_IDENTITY
 
-        old_panes = [pane for pane in self.panes.values() if pane.card == row["id"]]
-        for old_pane in old_panes:
-            old_process = old_pane.proc
-            self.close(old_pane.id)
-            if old_process is None or old_process.poll() is not None:
-                continue
-            try:
-                old_process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(old_process.pid, signal.SIGKILL)
-                except OSError:
-                    pass
-                old_process.wait(timeout=2)
         previous = con.execute(
             "SELECT pid,process_identity FROM task_runs WHERE id=? AND task_id=? "
             "AND generation=?",
@@ -1127,13 +1345,18 @@ class Daemon:
                 f"Card {row['id']}'s previous process is still running; try again."
             )
 
-    def continue_card(self, task_id, say, place=None, *, expected_generation=None) -> Pane:
+    async def continue_card(self, task_id, say, place=None, *, expected_generation=None) -> Pane:
         """Continue a settled card with a new model turn: the same ``claim_resume`` as the
         in-process Sister runtime (a new generation under our lock), after which the
         session lifecycle settles the card exactly like a first run."""
         from misaka.core.platform import admission
         from misaka.core.platform import tasks as db
-        row = self._settled_card_with_session(task_id)
+        async with self._card_lock(task_id):
+            return await self._continue_card(task_id, say, place, expected_generation,
+                                             admission=admission, db=db)
+
+    async def _continue_card(self, task_id, say, place, expected_generation, *, admission, db) -> Pane:
+        row, transcript = self._settled_card_with_session(task_id, require_session=False)
         generation = int(row["generation"])
         if expected_generation is not None and generation != int(expected_generation):
             raise ValueError(
@@ -1141,8 +1364,9 @@ class Daemon:
                 f"expected generation {int(expected_generation)}."
             )
         con = self._board()
+        reuse = self._card_pane_to_reuse(task_id)
         if row["status"] in {"blocked", "triage"}:
-            self._drain_blocked_run(con, row)
+            self._verify_previous_dead(con, row)
         lock = f"net:{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(4)}"
         host_cap, assignee_cap = admission.limits()
         if not db.claim_resume(con, task_id, lock, os.getpid(),
@@ -1152,23 +1376,43 @@ class Daemon:
                              "underneath, or the host is at capacity.")
         row = db.get(con, task_id)
         generation = int(row["generation"])
-        return self._host_card(
-            con, row, lock, generation, [*CARD_SHELL, task_id, "--resume", "--say", say], place,
+        if transcript is None:
+            # Nothing to resume: this is the card's first attempt, run from its contract, and
+            # the note travels by mail so the card's own inbox hands it over at the first
+            # tool boundary (B16; the mail path is B8's card address).
+            argv = [*CARD_SHELL, task_id]
+            self._mail_card(row, say, generation)
+        else:
+            argv = [*CARD_SHELL, task_id, "--resume", "--say", say]
+        return await self._host_card(
+            con, row, lock, generation, argv, place,
             undo=lambda: db.block_task(con, task_id, "transient",
                                        "the pane could not be started; continue the card again",
                                        generation=generation, claim_lock=lock),
-            event="continued")
+            event="continued" if transcript else "started", reuse=reuse)
 
-    def run_card(self, task_id, place=None) -> Pane:
+    def _mail_card(self, row, text, generation):
+        """A note for one attempt at a card, from its Last Order, read by the card's inbox."""
+        from misaka.core.network import messages
+        messages.send(self._mailbox(), row["assignee"], text, summary=text[:80].strip() or "note",
+                      sender="last-order", to_task=row["id"], generation=generation,
+                      workspace=row["workspace"])
+
+    async def run_card(self, task_id, place=None) -> Pane:
         from misaka.core.platform import admission
         from misaka.core.platform import tasks as db
+        async with self._card_lock(task_id):
+            return await self._run_card(task_id, place, admission=admission, db=db)
 
+    async def _run_card(self, task_id, place, *, admission, db) -> Pane:
         con = self._board()
         row = db.get(con, task_id)
         if row is None:
             raise ValueError(f"Card not found: {task_id}")
         if row["status"] != "ready":
             raise ValueError(f"Card {task_id} is not ready (current status: {row['status']}).")
+        # A card requeued while its last window is still open runs in that window again.
+        reuse = self._card_pane_to_reuse(task_id)
         # Who runs the card: no executor = a Sister (card-shell), otherwise an ally's
         # third-party CLI. This is the only fork; claim, lease, submission,
         # acceptance, and audit are shared (the board is the single bus).
@@ -1200,9 +1444,11 @@ class Daemon:
         except BaseException:
             undo()
             raise
-        return self._host_card(con, row, lock, generation, argv, place, undo=undo, env=env)
+        return await self._host_card(con, row, lock, generation, argv, place,
+                                     undo=undo, env=env, reuse=reuse)
 
-    def _host_card(self, con, row, lock, generation, argv, place, *, undo, env=None, event="claimed"):
+    async def _host_card(self, con, row, lock, generation, argv, place, *, undo, env=None,
+                         event="claimed", reuse=None):
         """Host a claimed card in a pane; ``undo`` releases its claim if no pane starts."""
         from misaka.core.platform import processes as process_tree
         from misaka.core.platform import tasks as db
@@ -1214,16 +1460,29 @@ class Daemon:
         # (audit 2026-09-02, ui-panel-06). One try covers the whole hand-over; the pane the
         # caller will never hear about is closed before the claim goes back.
         try:
+            # Now that the card is ours: one window, one writer.
+            await self._vacate_card_panes(con, row, keep=reuse)
             workspace = self._card_workspace(row)
-            pane = self.create(argv, workspace, title=f"{row['assignee']}·{task_id}", card=task_id,
-                               env={**self._card_env(row),
-                                    "MISAKA_USAGE_DB": _expand(CFG["db"]),
-                                    "MISAKA_USAGE_TASK_ID": task_id,
-                                    "MISAKA_USAGE_GENERATION": str(generation),
-                                    "MISAKA_USAGE_CLAIM_LOCK": lock,
-                                    "MISAKA_USAGE_TOKEN_CAP": str(int(CFG.get("token_cap") or 0)),
-                                    **(env or {})},
-                               place=place)
+            title = f"{row['assignee']}·{task_id}"
+            hosting = {**self._card_env(row),
+                       "MISAKA_USAGE_DB": _expand(CFG["db"]),
+                       "MISAKA_USAGE_TASK_ID": task_id,
+                       "MISAKA_USAGE_GENERATION": str(generation),
+                       "MISAKA_USAGE_CLAIM_LOCK": lock,
+                       "MISAKA_USAGE_TOKEN_CAP": str(int(CFG["token_cap"] or 0)),
+                       **(env or {})}
+            if reuse is not None and self.panes.get(reuse.id) is reuse:
+                pane = reuse
+                await self._replace_program(pane, argv, cwd=workspace, env=hosting, title=title)
+                if self.panes.get(pane.id) is not pane:
+                    # Closed while its program was being replaced: the new one has nobody to
+                    # show it, so it goes the same way rather than running on unattached.
+                    await self._stop_program(pane)
+                    raise ValueError(f"Pane {pane.id} was closed while card {task_id} started in it.")
+                pane.card = task_id
+            else:
+                pane = self.create(argv, workspace, title=title, card=task_id,
+                                   env=hosting, place=place)
             pane.claim_lock, pane.generation = lock, generation
             pane.started = time.time()
             # Owner = the pane's process group: if the daemon dies, reconcile reclaims by group identity (same marker as child.py).
@@ -1267,6 +1526,7 @@ class Daemon:
         def still_ours(pane):
             return self.panes.get(pane.id) is pane and pane.claim_lock is not None
 
+        await self._sweep_catalog()   # records left behind by a previous panel (B3)
         while not self._stopping.is_set():
             if self._socket_identity is not None:
                 try:
@@ -1396,6 +1656,15 @@ class Daemon:
 
     # ── Snapshot (shape only: argv, cwd, card -- never process state) ──
 
+    @staticmethod
+    def _pane_reply(pane):
+        return {"pane_id": pane.id, "pid": pane.proc.pid if pane.proc else None, "card": pane.card}
+
+    @classmethod
+    async def _hosted(cls, hosting):
+        """The reply for a card the daemon is putting into a pane."""
+        return cls._pane_reply(await hosting)
+
     def _save_snapshot(self):
         # Shape only, for the crash trace and the pending-card notice at the next start.
         # Nothing is recreated from it: since the daemon leaves with the panel, a restore
@@ -1458,6 +1727,9 @@ class Daemon:
                         "generation": p.generation,
                         "reported": p.reported,
                         "alive": p.alive(), "exit_code": p.exit_code,
+                        # Holding the card's claim: the attempt itself, as opposed to a pane
+                        # that is only showing the card's session.
+                        "claimed": bool(p.claim_lock),
                         "status": status.get(p.card),
                         "busy": _pane_busy(p, ally_state=state),
                         "foreground": _foreground(p),   # what runs in the foreground (for Last Order)
@@ -1558,8 +1830,9 @@ class Daemon:
                 pane.seen_status = row["status"] if row else None
             return {"seen": True}
         if method == "card.stop":
-            pane = next((p for p in self.panes.values()
-                         if p.card == params["task_id"]), None)
+            # The pane holding the claim is the attempt; another one is only showing the card.
+            hosting = [p for p in self.panes.values() if p.card == params["task_id"]]
+            pane = next((p for p in hosting if p.claim_lock), hosting[0] if hosting else None)
             if pane is None:
                 if "expected_generation" in params:
                     return {"stopped": False, "missing": True}
@@ -1584,8 +1857,10 @@ class Daemon:
                             or row["claim_lock"] != lock or pane.claim_lock != lock):
                         return {"stopped": False, "stale": True}
                 from misaka.core.platform import processes
-                pid = pane.proc.pid
-                identity = processes.identity(pid)
+                # Mid-takeover a pane has no program of its own; the stop still stands, and
+                # the attempt that was starting finds its pane gone and puts the claim back.
+                pid = pane.proc.pid if pane.proc else None
+                identity = processes.identity(pid) if pid else None
                 self.close(pane.id, expected_generation=params.get("expected_generation"))
                 return {"stopped": True, "pid": pid, "identity": identity}
         if method == "layout.get":       # the daemon owns the layout (herdr server model)
@@ -1599,17 +1874,15 @@ class Daemon:
                                place=params.get("place"))
             return {"pane_id": pane.id, "pid": pane.proc.pid}
         if method == "pane.run_card":
-            pane = self.run_card(params["task_id"], place=params.get("place"))
-            return {"pane_id": pane.id, "pid": pane.proc.pid, "card": pane.card}
+            # Hosting a card waits for the pane it takes over; `_serve_client` awaits it.
+            return self._hosted(self.run_card(params["task_id"], place=params.get("place")))
         if method == "pane.open_card_session":
-            pane = self.open_card_session(params["task_id"], place=params.get("place"))
-            return {"pane_id": pane.id, "pid": pane.proc.pid, "card": pane.card}
+            return self._hosted(self.open_card_session(params["task_id"], place=params.get("place")))
         if method == "pane.continue_card":
-            pane = self.continue_card(
+            return self._hosted(self.continue_card(
                 params["task_id"], params["say"], place=params.get("place"),
                 expected_generation=params.get("expected_generation"),
-            )
-            return {"pane_id": pane.id, "pid": pane.proc.pid, "card": pane.card}
+            ))
         if method == "pane.read":
             pane = self.panes.get(params["id"])
             if pane is None:
@@ -1643,17 +1916,16 @@ class Daemon:
                         f"Pane {pane.id} no longer owns running card {pane.card} "
                         f"at expected generation {int(expected_generation)}."
                     )
-            _write_pty(pane.fd, params["text"].encode())
-            if params.get("enter"):
-                _write_pty(pane.fd, b"\r")
-            return {"sent": True}
+            # Text and its Enter are one message: a cut between them would leave the text
+            # sitting unsent in the program's editor (the 08:48 onboarding notes).
+            data = params["text"].encode() + (b"\r" if params.get("enter") else b"")
+            return self._deliver(pane, data, timeout=SEND_TIMEOUT, drop_on_timeout=True)
         if method == "pane.input":
             pane = self.panes.get(params["id"])
             if pane is None or pane.fd is None:
                 raise ValueError(f"Pane is missing or has exited: {params['id']}")
             self._leave_scrollback(pane)   # a keystroke into the app returns to the live screen, as in a terminal
-            _write_pty(pane.fd, base64.b64decode(params["data"]))
-            return {"sent": True}
+            return self._deliver(pane, base64.b64decode(params["data"]), timeout=INPUT_TIMEOUT, drop_on_timeout=False)
         if method == "pane.resize":
             pane = self.panes.get(params["id"])
             if pane is None or pane.fd is None:
@@ -1776,6 +2048,8 @@ class Daemon:
                         result = {"attached": wanted}
                     else:
                         result = self._api(method, req.get("params") or {})
+                        if asyncio.iscoroutine(result):   # delivery waits for the pane; nothing else does
+                            result = await result
                     out = {"id": request_id, "result": result}
                 except Exception as error:  # noqa: BLE001 - one failed request (or one unreadable line) must not drop the connection
                     out = {"id": request_id, "error": f"{type(error).__name__}: {error}"}
@@ -1805,12 +2079,7 @@ class Daemon:
         # between bind and chmod (audit 2026-09-02, ui-panel-05). umask covers the bind
         # itself; the directory is narrowed the way session_manager/auth_storage do it, and
         # the chmod stays as a backstop for a filesystem that ignores the mode bits.
-        directory = os.path.dirname(self.sock_path)
-        os.makedirs(directory, mode=0o700, exist_ok=True)
-        try:
-            os.chmod(directory, 0o700)
-        except OSError:
-            pass
+        home.private_dir(os.path.dirname(self.sock_path))
         # Probe -> unlink -> bind is three steps, and two panels cold-starting in two
         # terminals interleave them: the loser either crashes on a FileNotFoundError from
         # `os.unlink` or unlinks the winner's live socket and binds over it, leaving a daemon
@@ -1847,8 +2116,6 @@ class Daemon:
                     os.unlink(self.sock_path)
                 except FileNotFoundError:
                     pass
-            from misaka.ui.panel.client import check_sock_path
-            check_sock_path()   # a path over sun_path's limit binds with a bare OSError
             # A request line is one whole JSON object -- `pane.send` carries arbitrary user text,
             # `layout.set` a whole space tree -- so asyncio's 64 KiB default is far too small.
             old_umask = os.umask(0o177)
@@ -1862,7 +2129,6 @@ class Daemon:
             self._socket_identity = (info.st_dev, info.st_ino)
         finally:
             os.close(lock_fd)   # releases the flock
-        ally_commands()   # seed allies.json on first run so the user can edit it at any time
         skipped = self.restore_snapshot()
         if skipped:
             print(
@@ -1898,6 +2164,11 @@ class Daemon:
 
 
 def main():
+    from misaka.config import env as env_file
+    from misaka.config.engine import configure_logging
+    home.ensure()
+    configure_logging()      # the daemon's warnings belong in the log file, not net.sock.log (B6)
+    env_file.load()          # panes inherit it; a panel started outside a shell still has its keys
     asyncio.run(Daemon().run())
 
 

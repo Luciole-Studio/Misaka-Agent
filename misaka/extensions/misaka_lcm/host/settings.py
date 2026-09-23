@@ -8,7 +8,6 @@ from pathlib import Path
 
 from filelock import FileLock
 
-from misaka.config import get_agent_dir
 from misaka.utils.atomic import write_text
 from misaka.utils.values import read_field
 
@@ -21,7 +20,7 @@ _LOCAL_MODEL = "BAAI/bge-small-en-v1.5"
 
 
 def path() -> Path:
-    return Path(get_agent_dir()) / "plugins" / "misaka-lcm" / "settings.json"
+    return storage.plugin_home() / "settings.json"
 
 
 def read() -> dict:

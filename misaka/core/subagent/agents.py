@@ -1,9 +1,8 @@
 """Claude Code-style sub-agent definitions.
 
 Definitions are Markdown files with YAML frontmatter.  Built-ins ship with the
-package (``misaka/core/subagent/agents/``); users and projects may
-override them by ``name`` from ``~/.misaka/agent/agents`` and ``.misaka/agents``
-respectively.
+package (``misaka/core/subagent/agents/``); the home, a role and a project may each
+override them by ``name`` from their own ``subagents`` directory.
 """
 
 from __future__ import annotations
@@ -33,6 +32,7 @@ from pydantic import (
     model_validator,
 )
 
+from misaka.config import home
 from misaka.core.prompt_templates import _ECMASCRIPT_WHITESPACE
 from misaka.core.subagent._frontmatter import split_frontmatter
 
@@ -332,9 +332,9 @@ def _from_plugin_metadata(meta, prompt, file_path, base_dir, plugin, diagnostics
                     # The catalog supplies a role/root-scoped path, never a
                     # manifest-controlled path. Like source getPluginDataDir,
                     # mkdir happens only when DATA actually occurs in prose.
-                    home = Path(plugin["data_home"])
-                    current = home
-                    for part in directory.relative_to(home).parts:
+                    data_home = Path(plugin["data_home"])
+                    current = data_home
+                    for part in directory.relative_to(data_home).parts:
                         current /= part
                         if current.is_symlink():
                             raise ValueError("Plugin data directories must not be symlinks")
@@ -493,9 +493,7 @@ def _package_agent_source(base: str, settings: Mapping[str, Any], diagnostics: l
         paths = []
     configured = settings.get("pluginOptions") or {}
     options = configured.get(name, {}) if isinstance(configured, Mapping) else {}
-    from misaka.config import get_agent_dir
-
-    home = Path(getattr(context, "profile_dir", None) or get_agent_dir()).expanduser().resolve()
+    data_home = home.path("plugins", getattr(context, "profile_dir", None)).expanduser().resolve()
     role = hashlib.sha256(str(getattr(context, "role", "") or "").encode()).hexdigest()[:16]
     # Source storage identity is name@marketplace; the native enabled local
     # extension identity is its canonical root. Hash it (not the display name)
@@ -504,13 +502,12 @@ def _package_agent_source(base: str, settings: Mapping[str, Any], diagnostics: l
     return {
         "root": str(root), "name": name, "paths": paths,
         "userConfig": manifest.get("userConfig"), "options": options,
-        "data_home": str(home), "data_dir": str(home / "plugins" / "data" / role / identity),
+        "data_home": str(data_home), "data_dir": str(data_home / "data" / role / identity),
     }
 
 
 def _user_agents_dir() -> Path:
-    agent_home = os.environ.get("MISAKA_CODING_AGENT_DIR")
-    return Path(agent_home).expanduser() / "agents" if agent_home else Path.home() / ".misaka" / "agent" / "agents"
+    return home.path("subagents")
 
 
 def _project_agent_dirs(cwd: str | os.PathLike[str] | None) -> list[Path]:
@@ -520,9 +517,9 @@ def _project_agent_dirs(cwd: str | os.PathLike[str] | None) -> list[Path]:
         current = current.parent
     found: list[Path] = []
     for directory in (current, *current.parents):
-        candidate = directory / ".misaka" / "agents"
-        if candidate.is_dir():
-            found.append(candidate)
+        project_dir = home.project_dir(directory)
+        if project_dir is not None and (project_dir / home.SUBAGENTS_DIR).is_dir():
+            found.append(project_dir / home.SUBAGENTS_DIR)
         if (directory / ".git").exists() or directory == Path.home():
             break
     return list(reversed(found))
@@ -564,11 +561,12 @@ def discover_result(
 
     failed: list[dict[str, str]] = []
     all_agents = _definitions(builtin_root, "built-in", failed) if include_builtin else []
-    from misaka.core.subagent.background import _truthy
 
     # Source VERIFICATION_AGENT + tengu_hive_evidence defaults off. The native
     # opt-in replaces that product's compile/GrowthBook gate, not its algorithm.
-    if not _truthy(os.environ.get("MISAKA_VERIFICATION_AGENT")):
+    from misaka.config.product import setting
+
+    if not setting("subagents", "verification_agent", False, bool):
         all_agents = [agent for agent in all_agents if agent.name != "verification"]
     for directory in plugin_roots:
         all_agents.extend(_plugin_definitions(directory, failed) if isinstance(directory, Mapping)
@@ -886,17 +884,18 @@ def session_catalog(session: Any, context: Any, *, cwd: str, include_project: bo
     if flag_agents is not None:
         providers.extend(parse_agents_json(flag_agents, diagnostics=diagnostics))
     profile = getattr(context, "profile_dir", "")
-    from misaka.core.subagent.background import _truthy
 
     # CCB getBuiltInAgents: SDK blank slate does not disable custom agents,
     # and has no effect on interactive sessions. Use native run mode, not
     # hasUI (a JSON/RPC client can supply an interactive prompt callback).
     mode = read_field(getattr(session, "extensionRunner", None), "mode", "print")
-    include_builtin = not (_truthy(os.environ.get("MISAKA_AGENT_SDK_DISABLE_BUILTIN_AGENTS")) and mode != "tui")
+    from misaka.config.product import setting
+
+    include_builtin = setting("subagents", "builtin_agents", True, bool) or mode == "tui"
     result = discover_result(cwd=cwd, include_project=include_project, include_builtin=include_builtin,
                              plugin_roots=plugin_roots, providers=providers,
-                             role_root=Path(profile) / "agents" if profile else None,
-                             policy_root=os.environ.get("MISAKA_MANAGED_AGENTS_DIR"))
+                             role_root=home.path("subagents", profile) if profile else None,
+                             policy_root=setting("subagents", "managed_agents_dir", None, str))
     result.failed_files.extend(diagnostics)
     result.diagnostics.extend(diagnostics)
     return result

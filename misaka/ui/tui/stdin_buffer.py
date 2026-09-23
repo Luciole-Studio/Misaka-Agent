@@ -17,7 +17,7 @@ split right after the lone ESC (`b"\\x1b"` then `b"[200~..."`, the shape ssh/tmu
 when read(2) returns a single byte) still only gets the escape window, and a gap wider
 than `escapeTimeoutMs` shatters it into per-character key events with the literal
 `\\x1b[201~` closer landing in the text. Every other split point of the same opener is
-covered by the 50ms sequence window. Raising `MISAKA_TUI_ESC_TIMEOUT` (ssh already gets
+covered by the 50ms sequence window. Raising `tui.esc_timeout_ms` in settings.json (ssh already gets
 100ms, see terminal.resolve_escape_timeout_ms) reassembles it. Deliberately not diverged
 from upstream here; tests/test_stdin_buffer_timeouts.py pins the residual so a future
 change to it is a visible decision rather than a silent one.

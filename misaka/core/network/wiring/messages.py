@@ -19,6 +19,6 @@ def part(spec):
         # project: the one session that can read the card and reply through
         # misaka_sister_message. Any other project's help waits for the contact turn, which
         # carries an allowlist for exactly those cards.
-        task_help_consumer=spec.kind == "foreground" and sender == "last-order",
+        task_help_consumer=spec.receive_messages and spec.kind == "foreground" and sender == "last-order",
         workspace=spec.workspace,
     )

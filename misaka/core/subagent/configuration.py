@@ -10,11 +10,13 @@ from typing import Any
 
 def project_settings(cwd: str) -> Mapping[str, Any]:
     """Read only the explicitly trusted target project's native settings file."""
-    from misaka.config import CONFIG_DIR_NAME
+    from misaka.config import home
 
-    path = Path(cwd) / CONFIG_DIR_NAME / "settings.json"
+    project_dir = home.project_dir(cwd)
+    if project_dir is None:
+        return {}
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads((project_dir / "settings.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return value if isinstance(value, Mapping) else {}
@@ -108,6 +110,12 @@ def permission_settings(session: Any, *, cwd: str | None = None, include_project
         if 'additionalDirectories' in value:
             value['additionalDirectories'] = [str((root / Path(path).expanduser()).resolve()) for path in directories]
         result.append(value)
+    trusted = getattr(getattr(session, "settingsManager", None), "isProjectTrusted", lambda: include_project)()
+    if include_project and trusted and (cwd is None or root == Path(getattr(session, "cwd", None) or root).resolve()):
+        for part in getattr(getattr(session, "moments", None), "parts", ()):
+            getter = getattr(part, "get_permission_settings", None)
+            if callable(getter) and (grant := getter()):
+                result.append(grant)
     return result
 
 
@@ -119,20 +127,49 @@ def inherited_permissions() -> list[dict[str, Any]]:
         for key in ('allow', 'ask', 'deny', 'additionalDirectories'):
             if key in layer and (not isinstance(layer[key], list) or any(not isinstance(item, str) for item in layer[key])):
                 raise ValueError(f'Inherited permission {key} must be a list of strings')
+        scopes = layer.get("writeDirectories", {})
+        if (not isinstance(scopes, dict) or any(
+            tool not in {"write", "edit"} or not isinstance(paths, list)
+            or any(not isinstance(path, str) or not Path(path).is_absolute() for path in paths)
+            for tool, paths in scopes.items()
+        )):
+            raise ValueError("Inherited writeDirectories must map write/edit to absolute directory lists")
     return value
 
 
-def permission_decision(permissions: list[dict[str, Any]], name: str, tool_input: Mapping[str, Any]) -> str | None:
+def permission_decision(
+    permissions: list[dict[str, Any]], name: str, tool_input: Mapping[str, Any], *, workspace: str | None = None,
+) -> str | None:
     """Source rule ordering, shared by workers and model-based hook verifiers."""
-    from misaka.core.subagent.policy import rule_matches
+    from misaka.core.subagent.policy import _resolved_path, rule_matches
+
+    candidate = None
+    inputs = [tool_input]
+    if workspace and name in {"write", "edit"}:
+        raw = tool_input.get("path") or tool_input.get("file_path")
+        candidate = _resolved_path(raw, workspace) if isinstance(raw, str) and raw.strip() else None
+        if candidate is not None:
+            # A configured deny/ask applies to either spelling of the same file.
+            inputs.append({**tool_input, "path": str(candidate)})
+            root = Path(workspace).resolve()
+            if candidate.is_relative_to(root):
+                inputs.append({**tool_input, "path": str(candidate.relative_to(root))})
 
     for behavior in ('deny', 'ask', 'allow'):
         for layer in permissions:
             entries = layer.get(behavior, ())
             if isinstance(entries, (list, tuple)) and any(
-                isinstance(rule, str) and rule_matches(rule, name, tool_input) for rule in entries
+                isinstance(rule, str) and any(rule_matches(rule, name, value) for value in inputs)
+                for rule in entries
             ):
                 return behavior
+    # Card output grants use resolved paths, not globs over raw model arguments:
+    # ../ and symlinks must not turn a subtree grant into a whole-project grant.
+    if candidate is not None and any(
+        candidate.is_relative_to(Path(directory))
+        for layer in permissions for directory in layer.get("writeDirectories", {}).get(name, ())
+    ):
+        return "allow"
     return None
 
 

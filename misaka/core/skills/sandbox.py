@@ -11,7 +11,13 @@ import stat
 import tempfile
 from pathlib import Path
 
-SIZE_CAP_MB = int(os.environ.get("MISAKA_SKILL_COPY_CAP_MB", "200"))
+
+def size_cap_mb() -> int:
+    """How many MB of skill copies one session may hold: settings.json ``skills.copy_cap_mb``."""
+    from misaka.config.product import setting
+
+    return setting("skills", "copy_cap_mb", 200, int)
+
 
 
 def _tree_size(path):
@@ -105,10 +111,10 @@ def readonly_copies(skill_dirs, dest_root, *, bundle_records=None, category_desc
                             "description": truncate_skill_description(prompt.get("description")),
                             "list_description": list_skill_description(fm, body)})
     total = sum(_entry_size(e) for e in entries)
-    if total > SIZE_CAP_MB * 1024 * 1024:
+    if total > size_cap_mb() * 1024 * 1024:
         raise RuntimeError(
-            f"Skill copies total {total / 1_000_000:.0f} MB, exceeding the {SIZE_CAP_MB} MB limit. "
-            "Reduce the skill set or raise MISAKA_SKILL_COPY_CAP_MB."
+            f"Skill copies total {total / 1_000_000:.0f} MB, exceeding the {size_cap_mb()} MB limit. "
+            "Reduce the skill set or raise skills.copy_cap_mb in settings.json."
         )
     parent = os.path.dirname(dest_root)
     stage = tempfile.mkdtemp(prefix=f".{os.path.basename(dest_root)}.new-", dir=parent)
@@ -120,7 +126,7 @@ def readonly_copies(skill_dirs, dest_root, *, bundle_records=None, category_desc
         manifest_entries = []
         for entry in entries:
             d = entry["dir"]
-            base = Path(entry["path"]).stem if entry.get("legacy") else os.path.basename(d.rstrip("/")) or "skill"
+            base = os.path.basename(d.rstrip("/")) or "skill"
             name, n = base, 2
             while name.casefold() in used:   # two sources, one basename (macOS folds case): keep both
                 name, n = f"{base}-{n}", n + 1
@@ -131,13 +137,7 @@ def readonly_copies(skill_dirs, dest_root, *, bundle_records=None, category_desc
                 return set(skip(src, names)) | {
                     item for item in names if os.path.islink(os.path.join(src, item))}
 
-            if entry.get("legacy"):
-                if Path(entry["path"]).is_symlink():
-                    raise ValueError("Legacy Skill document cannot be a symlink.")
-                Path(stage, name).mkdir()
-                shutil.copy2(entry["path"], Path(stage, name, Path(entry["path"]).name))
-            else:
-                shutil.copytree(d, os.path.join(stage, name), symlinks=False, ignore=_ignore)
+            shutil.copytree(d, os.path.join(stage, name), symlinks=False, ignore=_ignore)
             copies.append(os.path.join(dest_root, name))
             copied_file = str(Path(entry["path"]).relative_to(d))
             if not Path(stage, name, copied_file).is_file():
@@ -282,17 +282,13 @@ def execution_entry(entry, root):
     follow transcript retention so resumed children can still use advertised paths.
     """
     from .layers import project_skill_tree_fingerprint
-    if entry.get("legacy"):
-        with Path(entry["path"]).open("rb") as stream:
-            fingerprint = hashlib.file_digest(stream, "sha256").hexdigest()
-    else:
-        fingerprint = project_skill_tree_fingerprint(entry["dir"])
+    fingerprint = project_skill_tree_fingerprint(entry["dir"])
     key = hashlib.sha256((entry["path"] + fingerprint).encode()).hexdigest()
     root = Path(root).absolute()
     destination = root / key
     if not destination.exists():
-        if _tree_size(root) + _entry_size(entry) > SIZE_CAP_MB * 1024 * 1024:
-            raise ValueError(f"Skill execution copies exceed the {SIZE_CAP_MB} MB owner limit.")
+        if _tree_size(root) + _entry_size(entry) > size_cap_mb() * 1024 * 1024:
+            raise ValueError(f"Skill execution copies exceed the {size_cap_mb()} MB owner limit.")
         readonly_copies([entry], destination)
     manifest = read_manifest(destination)
     if not manifest or len(manifest["entries"]) != 1:
@@ -301,7 +297,7 @@ def execution_entry(entry, root):
 
 
 def _entry_size(entry):
-    return Path(entry["path"]).stat().st_size if entry.get("legacy") else _tree_size(entry["dir"])
+    return _tree_size(entry["dir"])
 
 
 def snapshot_stack(profile_dir, workspace, destination):

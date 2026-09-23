@@ -1,5 +1,5 @@
 {
-  "description": "Pre-fork core bytes. Only the MISAKA package namespace relocation is normalized; algorithms, schemas and upstream notices remain unchanged.",
+  "description": "Pre-fork core bytes, normalized only for the MISAKA namespace relocation. Explicit local repairs are recorded separately in documented_fixes; files retains the original hashes.",
   "files": {
     "native/LICENSE.hermes-agent": "821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6",
     "native/__init__.py": "74bbf9851e792e907a4468605cd4d399253134b952c6267d6a2623ff08c74255",
@@ -343,5 +343,19 @@
     "vendor/trajectory_store.py": "6a1ecf62a6abc3314e407994ce9b4557de68cbbecc2fc5e631ed8a10d19e81db",
     "vendor/uv.lock": "96599229fba386c9268987794da072036c3f16443f7b828004fc56c8d9b00b27",
     "vendor/vector_store.py": "37414a3395571d68f92ae06558578c770e938a46a673c361bc48aae5f852bf66"
+  },
+  "documented_fixes": {
+    "vendor/search_query.py": {
+      "sha256": "47280992e6e9ec9b2d18ba6bf488e2bb609ee2e78238b96cc8002899cb950eda",
+      "reason": "2026-09-20: balance LIKE and score SQL expressions to avoid SQLite expression-depth failures without dropping query terms; see PORT_NOTES.md."
+    },
+    "vendor/store.py": {
+      "sha256": "e1d14060ecda958f444db3367ed8593142c247bad0c930517617a3ce56d831dd",
+      "reason": "2026-09-20: balance LIKE and score SQL expressions to avoid SQLite expression-depth failures without dropping query terms; see PORT_NOTES.md."
+    },
+    "vendor/dag.py": {
+      "sha256": "99cb26f290b209cd2c822e566704f9e366d29f29dc67620a84ee2ca6a49761b7",
+      "reason": "2026-09-20: balance LIKE and score SQL expressions to avoid SQLite expression-depth failures without dropping query terms; see PORT_NOTES.md."
+    }
   }
 }

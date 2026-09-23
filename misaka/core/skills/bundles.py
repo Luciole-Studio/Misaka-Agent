@@ -7,7 +7,9 @@ Pinned collections carry parsed bundles in their digested manifest instead.
 import logging
 from pathlib import Path
 
-from .layers import CFG, shared_skills_dir
+from misaka.config import home
+
+from .layers import CFG
 from .vendor import bundles as native
 
 logger = logging.getLogger(__name__)
@@ -21,7 +23,7 @@ def bundle_roots(profile_dir, workspace):
         roots.append(("project", project / "skill-bundles"))
     if profile_dir:
         roots.append(("role", Path(profile_dir) / "skill-bundles"))
-    roots.append(("shared", Path(shared_skills_dir()).parent / "skill-bundles"))
+    roots.append(("shared", home.path("skill_bundles")))
     return list(dict.fromkeys((layer, str(root)) for layer, root in roots))
 
 

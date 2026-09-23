@@ -26,7 +26,7 @@ BOOKKEEPING_TOOLS = frozenset({
     # Builtins that only look (misaka.core.tools).
     "read", "grep", "find", "ls",
     # The card's own paperwork (misaka.core.network.todo.tools_for).
-    "misaka_todo", "misaka_todo_list", "misaka_my_card", "misaka_card_note",
+    "misaka_todo", "misaka_todo_list", "misaka_my_card", "misaka_card_note", "misaka_card_complete",
     # Corpus and skill inspection (misaka.core.documents.wiring.documents, .skills).
     "doc_list", "doc_outline", "doc_read", "doc_find", "doc_verify",
     "skills_list", "skill_view",
@@ -126,6 +126,8 @@ async def open_session(flags, cwd, assembly=None):
             extension_factories=list(assembly.extension_factories) if assembly else None,
             custom_tools=list(assembly.custom_tools) if assembly else None,
             parts=list(assembly.parts) if assembly else None,
+            model_profile=assembly.model_profile if assembly else None,
+            model_defaults_read_only=assembly.model_defaults_read_only if assembly else False,
         ),
         {"cwd": sm.getCwd(), "agentDir": get_agent_dir(), "sessionManager": sm},
     )
@@ -134,6 +136,9 @@ async def open_session(flags, cwd, assembly=None):
         return runtime, None, "; ".join(hard)
     if runtime.session.model is None:
         return runtime, None, "No model is available; check provider, model, and credentials."
+    if not runtime.session.modelRegistry.hasConfiguredAuth(runtime.session.model):
+        model = runtime.session.model
+        return runtime, None, f"No configured authentication for {model.provider}/{model.id}; use misaka setup."
     try:
         # Both one-shot sessions and persisted subagent children need the same
         # startup hooks (inbox, subagent registry and dynamic extension tools).
@@ -278,9 +283,14 @@ async def _run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
         role = last.get("role") if isinstance(last, dict) else getattr(last, "role", None)
         if role == "assistant":
             stop = last.get("stopReason") if isinstance(last, dict) else getattr(last, "stopReason", None)
-            if stop in ("error", "aborted") and not timed_out:
+            if stop in ("error", "aborted", "length") and not timed_out:
+                # A reply cut at the output cap never reached its tool call; callers that
+                # extract JSON would fail on the truncated text anyway, and the research
+                # driver needs the cause by name to nudge one more turn.
+                from misaka.ai.utils.overflow import output_limit_error
                 err = (last.get("errorMessage") if isinstance(last, dict)
-                       else getattr(last, "errorMessage", None)) or f"request {stop}"
+                       else getattr(last, "errorMessage", None)) or (
+                    output_limit_error(last) if stop == "length" else f"request {stop}")
             parts = last.get("content") if isinstance(last, dict) else getattr(last, "content", None)
             for c in parts or []:
                 ctype = c.get("type") if isinstance(c, dict) else getattr(c, "type", None)

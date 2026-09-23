@@ -4,71 +4,112 @@ Every setting has a working default. This page is reference material: read it wh
 want to change something, not before your first run. [README.md](README.md) covers
 installing and running.
 
-Files live under `~/.misaka/`. Environment variables override the files, and all of
+Files live under the home (`~/.misaka/`, see [Paths](#paths)). Environment variables override the files, and all of
 them are optional.
 
 ## Files
 
 | Where | What |
 |---|---|
-| `agent/settings.json` | engine settings; `defaultProvider` / `defaultModel` are the product defaults (picking a model in the `/model` selector writes them; `/model <name>` only switches this session) |
-| `agent/auth.json` | stored credentials (`/login`), kept at mode 0600 |
-| `agent/models.json` | custom providers and models (an OpenAI-compatible gateway, a local server); their IDs are valid `defaultModel` values |
-| `profiles/last_order/` | Last Order: persona (`SOUL.md`), MCP servers (`config.yaml`, `mcp/`), `skills/`, and `config.json` `{"model": "..."}` to pin her model |
-| `profiles/sisters/<id>/` | one directory per Sister (`misaka create`): `DESCRIBE.md` for routing, `SOUL.md`, `config.json` to pin a model, `skills/` |
-| `allies.json` | the recognised ally CLIs |
+| `settings.json` | every setting: pi's (`defaultProvider` / `defaultModel` are the product defaults -- picking a model in the `/model` selector writes them; `/model <name>` only switches this session; `theme`, `compaction`, ...) and MISAKA's sections `allies`, `skills`, `moa`, `web`, `lcm`, `auxiliary` |
+| `credentials/auth.json` | stored provider credentials (`/login`), kept at mode 0600 |
+| `.env` | environment for code that is not MISAKA, loaded into every MISAKA process at start (dotenv syntax, mode 0600): web vendor keys (`misaka web set env.X` writes them here), the keys a skill's script expects, a plugin's knobs such as `LCM_*`, an SDK's `AZURE_OPENAI_*`. Never a `MISAKA_*` variable -- those are settings, or a parent's hand-off to a child, and the loader ignores them |
+| `models.json` | custom providers and models (an OpenAI-compatible gateway, a local server); their IDs are valid `defaultModel` values |
+| `profiles/last_order/` | Last Order: persona (`SOUL.md`), `settings.json` with what is hers alone -- `defaultProvider`/`defaultModel` (her pinned model), `mcpServers`, `web` -- her own `.env` (vendor keys and skill secrets that are hers, over the home's), and `skills/`, `subagents/` |
+| `profiles/sisters/<id>/` | one directory per Sister (`misaka create`): `DESCRIBE.md` for routing, `SOUL.md`, the same `settings.json` and `.env`, `skills/`, `subagents/` |
 
 ## Models and agent behaviour
 
-| Variable | Default | Meaning |
+Everything here is a section of `settings.json`. No `MISAKA_*` environment variable sets a
+knob: a `MISAKA_*` name in the environment is what a parent process hands a child (its role,
+its card, its leases), and the `.env` loader ignores such names. Code that is not MISAKA
+(plugins, SDKs, skills' scripts) reads its own variables from `.env`.
+
+| Setting | Default | Meaning |
 |---|---|---|
-| `MISAKA_PROVIDER` / `MISAKA_MODEL` | `settings.json`, then `anthropic` / `claude-sonnet-4-5` | provider and model for Sisters and chat |
-| `MISAKA_LO_MODEL` | Last Order's pinned model, then `MISAKA_MODEL` | Last Order's model |
-| `MISAKA_SUBAGENT_MODEL` | the parent's model | model for subagents a Sister spawns |
-| `MISAKA_DISABLE_BACKGROUND_TASKS` | unset | disable subagent background launch and transitions |
-| `MISAKA_AUTO_BACKGROUND_TASKS` | unset | move foreground subagents into the background after 120 seconds, after the child acknowledges its policy change |
-| `MISAKA_FORK_SUBAGENT` | unset | opt-in interactive implicit Agent forks; `/agents fork <directive>` preserves native `/fork` navigation |
-| `MISAKA_COORDINATOR_MODE` | unset | reserves coordinator ownership and disables implicit forks; does not enable an upstream coordinator implementation |
-| `MISAKA_MANAGED_AGENTS_DIR` | unset | operator-managed agent definitions, highest definition precedence |
-| `MISAKA_EFFORT_LEVEL` | unset | subagent effort payload fallback, independent of thinking mode |
-| `MISAKA_DISABLE_AUTO_MEMORY` | unset | explicit true/false override for automatic agent memory |
-| `MISAKA_SIMPLE` | unset | disable automatic agent memory in simple mode |
-| `MISAKA_REMOTE` | unset | remote memory context; automatic memory requires an explicit remote memory directory |
-| `MISAKA_REMOTE_MEMORY_DIR` | unset | remote-host agent-memory directory |
-| `MISAKA_AGENT_MEMORY_SNAPSHOT` | unset | enable agent user-memory snapshot initialization checks; existing memory is not silently overwritten |
-| `MISAKA_SUBAGENT_HOOKS_DISABLED` | internal | parent-to-child hook-disable fence; applies to frontmatter hooks too |
-| `MISAKA_SUBAGENT_MANAGED_HOOKS_ONLY` | internal | parent-to-child managed-hook-only fence |
-| `MISAKA_SMALL_FAST_MODEL` | the provider's own small model | model for cheap internal calls |
-| `MISAKA_FORCE_MODEL` | none | overrides every model choice, card configuration included |
-| `MISAKA_CACHE_RETENTION` | `short` | `long` asks the provider for long prompt-cache retention |
-| `MISAKA_WEB_CONFIG` | `~/.misaka/web.json` | web search: backend choice, keyless tier, and vendor credentials |
-| `MISAKA_WEB_CACHE` | `~/.misaka/cache/web` | where web_extract keeps page text for its TTL |
-| `MISAKA_ALLOW_PRIVATE_URLS` | off | lets the web tools reach private and loopback addresses; cloud metadata endpoints stay blocked either way |
+| `defaultProvider` / `defaultModel` | `anthropic` / `claude-sonnet-4-5` | provider and model for every role without a pin of her own; `/model` writes them |
+| `profiles/<role>/settings.json` `defaultProvider` / `defaultModel` | none | that role's pinned model (Last Order's included); `/model` Ctrl+S in her window writes it |
+| `subagents.small_fast_model` | the provider's own small model | model for cheap internal calls |
+| `subagents.max_concurrent` | host CPUs | subagents one session runs at once |
+| `subagents.task_max_output` | `32000` (max `160000`) | characters of a subagent's output kept |
+| `subagents.effort_level` | `auto` | subagent effort payload, independent of thinking mode (`low`/`medium`/`high` or a number on Claude) |
+| `subagents.background_tasks` | `true` | `false` disables subagent background launch and transitions |
+| `subagents.auto_background_tasks` | `false` | move foreground subagents into the background after 120 seconds, after the child acknowledges its policy change |
+| `subagents.coordinator_mode` | `false` | reserves coordinator ownership and disables implicit forks; does not enable an upstream coordinator implementation |
+| `subagents.managed_agents_dir` | none | operator-managed agent definitions, highest definition precedence |
+| `subagents.builtin_agents` | `true` | `false` hides the built-in agent types from non-interactive sessions |
+| `subagents.agent_list_in_messages` | `false` | list the available agents in messages |
+| `subagents.verification_agent` | `false` | offer the built-in `verification` agent |
+| `subagents.auto_memory` | `true` | automatic agent memory (`autoMemoryEnabled` in the pi settings still applies) |
+| `subagents.simple` | `false` | simple mode: no automatic agent memory |
+| `subagents.memory_home` | `state/agent-memory` | where agent memory files live |
+| `subagents.memory_snapshot` | `false` | agent user-memory snapshot initialization checks; existing memory is never silently overwritten |
+| `subagents.inherit_process_group` | `false` | `true` keeps child agents in MISAKA's process group |
+| `web.allow_private_urls` | `false` | lets the web tools reach private and loopback addresses; cloud metadata endpoints stay blocked either way |
+
+Hand-offs a parent sets for its child, never for you to set: `MISAKA_SUBAGENT_*` (model, effort,
+hooks fences, permissions), `MISAKA_FORK_SUBAGENT`, `MISAKA_REMOTE` / `MISAKA_REMOTE_MEMORY_DIR`,
+`MISAKA_PROFILE_DIR` / `MISAKA_WHO` / `MISAKA_WORKSPACE`, the `MISAKA_USAGE_*` leases.
+Variables the pi engine itself reads stay theirs: `MISAKA_CACHE_RETENTION` (`long` asks the
+provider for long prompt-cache retention), `MISAKA_OAUTH_CALLBACK_HOST`.
 
 ## Paths
 
-Each is a directory or file MISAKA owns.
+Everything MISAKA owns on this machine lives under one directory, the home. `MISAKA_HOME` moves
+it (default `~/.misaka`); there is no per-path override. The layout is declared once, in
+`misaka/config/home.py`.
+
+```
+~/.misaka/
+  settings.json  models.json  keybindings.json  .env                 what you edit (.env: owner-only)
+  MISAKA.md  skills/  themes/  prompts/  extensions/  subagents/     shared by every role
+  profiles/          last_order/  sisters/<id>/     one directory per role
+  credentials/       auth.json  vault/  mcp-auth/                    owner-only
+  state/             board.db  messages.db  sessions/  tasks/  ...   what the program writes; back this up
+  shared/            the one place an agent may create things of its own
+  cache/  logs/      safe to delete
+  run/               the panel daemon's socket, its roster snapshot, locks
+```
+
+Every setting is a section of `settings.json`, as in Hermes's one `config.yaml`: pi's own keys
+(`defaultModel`, `theme`, `compaction`, ...) beside MISAKA's `allies` (the hand-launched ally
+allow-list), `skills`, `moa`, `web`, `lcm` and `auxiliary`. A project's `.misaka/settings.json`
+overlays it, and a role's `profiles/<role>/settings.json` overlays that -- but a role's file may
+hold only what is the role's own: `defaultProvider`/`defaultModel` (the model she starts on),
+`mcpServers` and `web`. Everything else a role session changes is written to the home's file,
+because it is yours, not hers. Credentials are the one thing kept out of `settings.json`:
+`credentials/auth.json` for providers (`/login`; OAuth tokens rotate, so they never live in a
+hand-edited file), and `.env` for everything other code reads from the environment -- as Hermes
+keeps `~/.hermes/.env`. Every MISAKA process loads the home's `.env` at start (the shell's own
+variables win), and a role session lays `profiles/<role>/.env` over it (over the home's file,
+under the shell): her own vendor keys, the secrets her skills asked for. `misaka web set env.X`
+and a skill's credential prompt write there. What a skill's script actually receives still passes
+the skills' environment policy (its blocklist and the `skills.env_passthrough` allow-list).
+
+`state/sessions/` holds every conversation: `<role>/<folder bucket>/`, with a card's under
+`cards/<id>/`, research conversations under `research/<run>--<scope>/`, nested agents beside
+their parent, or under `subagents/<parent>/` for in-memory parents. A role directory keeps what
+you edit flat (`SOUL.md`, `settings.json`, `.env`, `skills/`, `subagents/`); what the program writes for
+that role follows the home's layout inside it (`cache/`, `logs/`). When the home is too deep for a unix socket path, the socket moves to
+`/tmp/misaka-<uid>-<hash>/` on its own.
+
+A project's own configuration is `<project>/.misaka/` (`settings.json`, `prompts/`, `themes/`,
+`subagents/`, gated by project trust). The home is never a project: run from your home directory,
+there is no project scope.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MISAKA_CODING_AGENT_DIR` | `~/.misaka/agent` | the engine directory: settings, auth and models (an explicit SDK engine home may also own sessions) |
-| `MISAKA_DB` / `MISAKA_MESSAGES` | `~/.misaka/{board,messages}.db` | task board and message queue |
-| `MISAKA_TASKS` | `~/.misaka/tasks` | per-card locks and read-only skill copies; no transcripts or research reports |
-| `MISAKA_PROFILES` | `~/.misaka/profiles` | roles: personalities, skills, MCP config (created on first run) |
-| `MISAKA_SESSIONS` | `~/.misaka/sessions` | every conversation: `<role>/<folder bucket>/`, with a card's under `cards/<id>/`, research conversations under `research/<run>--<scope>/`, nested agents beside their parent, or under `subagents/<parent>/` for in-memory parents |
+| `MISAKA_HOME` | `~/.misaka` | the home: every path above |
 | `MISAKA_PAGEINDEX` | `<cwd>/.pageindex` | unscoped library calls only; CLI and session tools always use `<workspace>/.pageindex` |
-| `MISAKA_OFFICE_CACHE` | `~/.misaka/cache/office` | unscoped library cache; session tools use `<workspace>/.office-cache` |
-| `MISAKA_OFFICE_INTENT` | `~/.misaka/office_intent` | unscoped library archive; session tools use `<workspace>/.office-intent` |
-| `MISAKA_OCR_LANGS` | `eng+chi_sim+jpn` | tesseract language codes for scanned PDFs, joined with `+`; needs `ocrmypdf` on PATH (`brew install ocrmypdf`) |
-| `MISAKA_WORKTREE_DIR` | `~/.misaka/worktrees` | git worktrees for isolated agents |
-| `MISAKA_AGENT_MEMORY_HOME` | `~/.misaka/memory` | agent memory files |
-| `MISAKA_NET_SOCK` / `MISAKA_NET_SNAPSHOT` | `~/.misaka/net.sock` / `net.json` | the panel daemon's socket and roster snapshot |
 | `MISAKA_GHOSTTY_VT` | `misaka/ui/panel/lib/libghostty-vt.<dylib\|so>` | the terminal emulator behind every pane (libghostty-vt, herdr's; `misaka/ui/panel/lib/README.md` has the rebuild recipe) |
 | `MISAKA_INPUT_HISTORY` | none — the feature is off unless set | file for persistent chat input history |
 | `MISAKA_TELEMETRY` | unset — the `enableInstallTelemetry` setting decides (default on) | whether this install may be identified to an outside service; set at all (`0` included) and it wins over the setting |
 | `MISAKA_TIMING` | `0` | `1` prints startup timings to stderr, grouped by namespace (`main`, `extensions`) |
-| `MISAKA_MCP_CONFIG` | the profile's `mcp/` | MCP server configuration |
-| `MISAKA_MCP_CACHE` | `~/.misaka/cache/mcp_schema_cache.json` | cached MCP tool schemas |
+| `MISAKA_MCP_CONFIG` | none | a parent's hand-off: extra MCP servers for a child |
+
+Document reading: `documents.ocr_langs` in `settings.json` (default `eng+chi_sim+jpn`) gives the
+tesseract language codes for scanned PDFs, joined with `+`; it needs `ocrmypdf` on PATH
+(`brew install ocrmypdf`).
 
 `misaka update` reports whether this install is behind the repository's `main` branch, and
 `--apply` fast-forwards it. It follows the branch rather than release tags, the way Hermes
@@ -90,35 +131,32 @@ stops; `--yes` skips the confirmation.
 
 ## Budget, concurrency and limits
 
-| Variable | Default | Meaning |
+| Setting | Default | Meaning |
 |---|---|---|
-| `MISAKA_TOKEN_CAP` | `0` (off) | token budget shown and enforced on the board |
-| `MISAKA_BEAST_AT` | `0.85` | fraction of the cap at which a card drops to beast mode |
-| `MISAKA_SUBAGENT_TOKEN_RESERVATION` | `32768` | tokens held back for a subagent |
-| `MISAKA_TURN_TOKEN_LIMIT` | none | per-turn token ceiling |
-| `MISAKA_MAX_CONCURRENT_SISTERS` | free memory / 256 MiB, 4–12 | cards running at once on this host |
-| `MISAKA_MAX_CONCURRENT_PER_SISTER` | the host cap | cards one Sister runs at once |
-| `MISAKA_MAX_CONCURRENT_SUBAGENTS` | host CPUs | subagents one session runs at once |
-| `MISAKA_SUBAGENT_TOOL_CEILING` | none | comma-separated tools a subagent may not exceed |
-| `MISAKA_TASK_MAX_OUTPUT` | `32000` (max `160000`) | characters of a subagent's output kept |
-| `MISAKA_SKILL_COPY_CAP_MB` | `200` | size ceiling when copying a skill into a sandbox |
-| `MISAKA_JUDGE_TIMEOUT` | `600` | seconds a research planner / judge call may take |
-| `MISAKA_RESEARCH_PLAN_APPROVAL` | `1` (on) | a research node's plan waits for the user's go-ahead in conversation before its cards exist; `0` for unattended runs |
-| `MISAKA_MCP_INIT_TIMEOUT` / `MISAKA_MCP_CALL_TIMEOUT` | `30` / `120` | seconds for MCP startup and per call |
-| `MISAKA_MCP_REQUIRED_WAIT` | `30` | seconds to wait for a required MCP server |
+| `research.token_cap` | `0` (off) | token budget shown and enforced on the board |
+| `research.beast_at` | `0.85` | fraction of the cap at which a card drops to beast mode |
+| `research.plan_approval` | `true` | a research node's plan waits for the user's go-ahead in conversation before its cards exist; `false` for unattended runs |
+| `network.max_concurrent_sisters` | free memory / 256 MiB, 4–12 | cards running at once on this host |
+| `network.max_concurrent_per_sister` | the host cap | cards one Sister runs at once |
+| `skills.copy_cap_mb` | `200` | size ceiling when copying a skill into a sandbox |
+| `mcp.init_timeout` / `mcp.call_timeout` | `30` / `120` | seconds for MCP startup and per call |
+| `mcp.required_wait` | `30` | seconds to wait for a required MCP server |
+
+Hand-offs, set by a parent for its child: `MISAKA_SUBAGENT_TOKEN_RESERVATION` (tokens held back
+for a subagent), `MISAKA_TURN_TOKEN_LIMIT` (a card's per-turn ceiling), `MISAKA_SUBAGENT_TOOL_CEILING`.
 
 ## Terminal and panel
 
-| Variable | Default | Meaning |
+| Setting | Default | Meaning |
 |---|---|---|
-| `MISAKA_THEME` | the terminal's | `dark` or `light` |
-| `MISAKA_APP_TITLE` / `MISAKA_TAGLINE` | `MISAKA` | what the header shows |
-| `MISAKA_PANEL_PREFIX` | `ctrl+b` | the panel's prefix chord |
-| `MISAKA_TUI_ESC_TIMEOUT` | `10` ms, `100` under ssh | how long a lone ESC waits for an Alt+key second byte |
-| `MISAKA_ALLOW_NESTED` | unset | `1` allows opening the panel inside one of its own panes |
-| `MISAKA_HARDWARE_CURSOR` / `MISAKA_CLEAR_ON_SHRINK` | `settings.json`, else off | `1` enables; the settings file wins when it names them |
-| `MISAKA_OAUTH_CALLBACK_HOST` | `127.0.0.1` | host the OAuth loopback listener binds |
-| `MISAKA_INHERIT_PROCESS_GROUP` | unset | `1` keeps child agents in MISAKA's process group |
+| `panel.prefix` | `ctrl+b` | the panel's prefix chord (`ctrl+g` under tmux, whose `ctrl+b` is taken) |
+| `tui.esc_timeout_ms` | `10`, `100` under ssh or in a pane | how long a lone ESC waits for an Alt+key second byte |
+| `showHardwareCursor` / `terminal.clearOnShrink` | off | pi's own; `MISAKA_HARDWARE_CURSOR=1` / `MISAKA_CLEAR_ON_SHRINK=1` are pi's environment fallbacks when the file does not name them |
+
+Hand-offs the panel sets for its panes: `MISAKA_THEME` (`dark` / `light`), `MISAKA_APP_TITLE` /
+`MISAKA_TAGLINE` (what a pane's header shows), `MISAKA_NET_PANE`, `MISAKA_INPUT_HISTORY`.
+Escape hatches, never settings: `MISAKA_ALLOW_NESTED=1` opens the panel inside one of its own
+panes; `MISAKA_GHOSTTY_VT` points at a libghostty-vt you built yourself.
 
 ## Context engine
 
@@ -137,9 +175,11 @@ for summaries lives in the global `settings.json` under `auxiliary.compression`.
 ### Project cache lifetime
 
 MISAKA LCM is the project-scoped fork of hermes-lcm. Its database and content sidecars
-live in `<project>/.misaka/lcm/`. The session's project is fixed at startup and inherited
-by its workers; changing a tool's directory does not change its LCM project. A native
-`lcm-project` session metadata entry retains the owner project for resumed worktrees.
+live in `<project>/.misaka/lcm/`; a session whose directory is no project (the home is
+never one) keeps them in the plugin's own directory, `state/plugins/misaka-lcm/lcm/`.
+The session's project is fixed at startup and inherited by its workers; changing a
+tool's directory does not change its LCM project. A native `lcm-project` session
+metadata entry retains the owner project for resumed worktrees.
 
 Each process holds a project storage lease. Closing/reloading one session keeps the
 cache available to the project's other sessions. Once the last project runtime exits,

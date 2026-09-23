@@ -104,47 +104,11 @@ def prune(con, *, now=None):
 
 
 def init(con):
-    """Tables and trigger every connect; the one-off backfill only until it is recorded.
-
-    The trigger has to match the code that reads its events, so repairing it is an invariant
-    worth re-asserting on every connection. The backfill is not: it is a correlated scan of
-    the whole task table, and it used to run from every ``subscribe`` as well.
-    """
+    """Tables and trigger on every connect; the trigger has to match the code that reads its events."""
     con.executescript(SCHEMA)
-    task_columns = {
-        row[1] for row in con.execute("PRAGMA table_info(tasks)").fetchall()
-    }
-    if {"id", "status", "generation", "completed_at", "created_at"} <= task_columns:
-        con.executescript(TASK_TRIGGER)           # install the replacement before retiring old triggers
-        # One statement, not "SELECT sqlite_master then bare DROP": v3 is on every board this
-        # build inherits, so the first time two processes connect to one after the upgrade --
-        # chat + panel, Last Order + a Sister, two `misaka dm` children -- both read it as
-        # present and both issued the DROP. The loser got "no such trigger" straight out of
-        # tasks.connect() and died at startup. busy_timeout cannot help: that is stale
-        # metadata, not a lock conflict. IF EXISTS makes the loser a no-op.
-        for obsolete in ("task_terminal_notification", "task_terminal_notification_v2",
-                         "task_terminal_notification_v3"):
-            con.execute(f'DROP TRIGGER IF EXISTS "{obsolete}"')
-        if con.execute(
-            "SELECT 1 FROM schema_migrations WHERE component='notifications' AND version=?",
-            (NOTIFICATION_SCHEMA_VERSION,),
-        ).fetchone():
-            prune(con)
-            return
-        con.execute(
-            "INSERT OR IGNORE INTO notification_events"
-            "(resource_type,resource_id,kind,payload,dedupe_key,created_at) "
-            "SELECT 'task',id,'terminal',json_object('status',status,'generation',generation),"
-            "'task:'||id||':'||generation||':'||status||':backfill',COALESCE(completed_at,created_at) "
-            "FROM tasks t WHERE status IN ('done','failed','stopped','blocked','triage') "
-            "AND NOT EXISTS (SELECT 1 FROM notification_events n WHERE n.resource_type='task' "
-            "AND n.resource_id=t.id AND n.kind='terminal' "
-            "AND n.payload=json_object('status',t.status,'generation',t.generation))"
-        )
-    con.execute(
-        "INSERT OR IGNORE INTO schema_migrations(component,version,applied_at) VALUES(?,?,?)",
-        ("notifications", NOTIFICATION_SCHEMA_VERSION, int(time.time())),
-    )
+    con.executescript(TASK_TRIGGER)
+    from misaka.core.platform.tasks import require_schema
+    require_schema(con, "notifications", NOTIFICATION_SCHEMA_VERSION, populated=False)
     prune(con)
 
 

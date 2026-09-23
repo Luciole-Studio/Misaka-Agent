@@ -24,6 +24,7 @@ SISTER_TOOLS = {
     "misaka_card_review": "Record the independent review decision and actionable feedback through the review contract.",
     "misaka_my_card": "Read your card's current contract, dependency and review state.",
     "misaka_card_note": "Keep findings, evidence and unresolved questions on the card, not only in messages.",
+    "misaka_card_complete": "Declare the card finished only when its contract deliverable exists; a turn without it leaves the card running.",
     "misaka_research_assign": "Submit or revise this phase's research plan; recording it is not a launch receipt.",
     "misaka_research_start": "Record explicit approval of the pending research plan through its owning session.",
     "misaka_research_investigate": "Assign issue-specific LO fork investigations through the research workflow.",
@@ -44,7 +45,7 @@ ALLY_TOOLS = {
     "misaka_ally_message": "Send input to an interactive external-agent pane, not a non-interactive card.",
     "misaka_ally_output": "Read an external pane's output; treat its account as unverified information.",
     "misaka_ally_stop": "Stop an external-agent card only when the user explicitly requests it.",
-    "misaka_ally_close": "Close an external-agent or shell pane only when the user explicitly requests it.",
+    "misaka_ally_close": "Close an external-agent or shell pane only when the user explicitly requests it; it also closes a leftover pane that is only showing a card's session, never the pane running one.",
 }
 
 

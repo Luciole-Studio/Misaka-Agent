@@ -29,7 +29,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from misaka.core.web.browser.vault.host import atomic_write_bytes, get_hermes_home
+from misaka.config import home
+from misaka.core.web.browser.vault.host import atomic_write_bytes
+from misaka.core.web.scope import current_scope
 
 VAULT_KINDS = ("login", "payment", "address")
 
@@ -184,11 +186,11 @@ class VaultItemMeta:
 
 
 class VaultStore:
-    """Encrypted, profile-scoped vault under ``<MISAKA profile>/vault/``."""
+    """Encrypted vault among the credentials of the role in scope, or of the home."""
 
     def __init__(self, base_dir: Path | None = None):
         self._base = Path(base_dir) if base_dir is not None else (
-            Path(get_hermes_home()) / "vault"
+            home.path("vault", current_scope().profile_dir)
         )
         self._vault_path = self._base / "vault.json.enc"
         self._key_path = self._base / "vault.key"

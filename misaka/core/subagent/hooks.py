@@ -22,7 +22,7 @@ from typing import Any
 import httpx
 from pydantic import AnyUrl
 
-from misaka.core.tools._web.bounded import pin_to_address, vet_public_url
+from misaka.core.web.bounded import pin_to_address, vet_public_url
 
 HookResult = dict[str, Any]
 HookEvaluator = Callable[..., Awaitable[Any] | Any]

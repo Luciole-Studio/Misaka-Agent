@@ -38,25 +38,49 @@ Two roles do the work.
 A run moves through five steps.
 
 1. **Plan.** Last Order drafts an approach and shows it to you.
-2. **Your go-ahead.** The plan waits. You talk it over with her in an ordinary
-   conversation and she revises it until you agree. There is no approval command and
-   no magic keyword; she starts the run herself once you are satisfied. Set
-   `MISAKA_RESEARCH_PLAN_APPROVAL=0` for unattended runs, and a command-line
-   `misaka research` whose root has no conversation runs unattended as a whole.
+2. **Plan approval.** Bare `/research` asks you to choose **Require approval** or
+   **Automatic** after depth, LO parallelism, Sister cards per LO and follow-ups.
+   Require approval waits for your go-ahead in an ordinary conversation with Last Order;
+   Automatic proceeds after an accepted plan, while genuine clarification still needs input.
+   The choice is saved for this run, its forks and follow-up rounds, including resume.
+   `research.plan_approval` in `settings.json` supplies the default (true; false for automatic).
+   Direct `/research QUESTION` and command-line `misaka research` use that default;
+   the CLI prints how to attach to its resident root conversation when a plan waits.
 3. **Cards.** The plan becomes task cards. Sisters pick them up and work in parallel,
-   up to the run's concurrency limit. Each Sister outlines her approach in ordinary
-   prose and then does the work in that same session. There is no separate planning
+   up to the run's per-LO Sister card limit (`--sister-parallel`, default 4). Each Sister
+   outlines her approach in ordinary prose and then does the work in that same session. There is no separate planning
    file or JSON handoff to fill in.
 4. **More rounds, if needed.** Instead of concluding, Last Order can send her Sisters
    out again. `--followups N` caps how many extra rounds she gets after the first cards
    come back, default 2. Talking a plan over with you is never counted against it.
-   Every round's plan waits for your go-ahead like the first.
+   Every round uses the same plan-approval mode as the first.
 5. **Conclusion and red team.** The conclusion is written from all rounds. A red team
    then attacks it. A review that finds no material issue, or that hits the depth
    limit, is recorded without spending a model turn.
 
 A branch you do not want researched can be dropped at your decision. The node closes
 unresearched, and the reason stays on record for final adjudication.
+
+The root Last Order stays in the same session from planning through the global
+report draft, independent red-team review, and final adjudication. `/research`
+reuses your chat; command-line Research owns a headless root until the driver ends.
+Only fork nodes get separate LO processes. A paused or failed run keeps its saved
+conversation for resume; final reporting never falls back to a one-shot LO.
+
+Ordinary and Research sessions load the same role base: shared `MISAKA.md`, role
+`SOUL.md`, and role duties. Research adds its mode-specific rules through the shared
+prompt assembly; foreground versus headless changes presentation and lifecycle,
+not the identity prompt. Tool guidance still follows the actual available tools.
+
+Research has two independent concurrency settings: `--parallel N` limits LO nodes
+(default 4), while `--sister-parallel N` limits active Sister cards per LO (default 4),
+including multiple sessions of the same Sister. Both are saved with the run and
+reused on resume and in fork nodes; old runs without the Sister setting keep 4.
+Global/per-Sister admission limits and task dependencies can reduce actual concurrency.
+These are card slots, not a count of all windows or nested subagents.
+For example, `/research --parallel 4 --sister-parallel 8 QUESTION` (or
+`misaka research --parallel 4 --sister-parallel 8 "QUESTION"`). Bare `/research`
+lets you choose both in the options picker.
 
 ## What lands on disk
 
@@ -105,7 +129,7 @@ Two things MISAKA will not install for you:
   `apt install git`.
 - **ripgrep** and **fd** back the `grep` and `find` tools. Install them with
   `brew install ripgrep fd` or `apt install ripgrep fd-find`, or drop the binaries
-  into `~/.misaka/agent/bin`.
+  into `~/.misaka/cache/bin`.
 
 ## First run
 
@@ -136,7 +160,7 @@ export ANTHROPIC_API_KEY=sk-ant-...   # honoured for every builtin provider
 misaka auth check                     # per-provider, through the resolver sessions use
 ```
 
-Inside a chat, `/login` stores an OAuth token or API key in `~/.misaka/agent/auth.json`
+Inside a chat, `/login` stores an OAuth token or API key in `~/.misaka/credentials/auth.json`
 at mode 0600. `/model` opens the model selector; picking from it saves the choice as
 the default for every Sister, while `/model <name>` switches only the session in front
 of you.
@@ -181,17 +205,31 @@ and closing an attached window only detaches it.
 give agents a corpus they can cite from and quote-check against. `misaka doc` is the
 same thing from the shell.
 
-Web search works with no configuration: a keyless vendor ring serves it. To pin a
-backend or add a key:
+Web search has a no-key fallback. Configure all Web tools with the same interactive
+settings menu from either entrypoint:
 
 ```sh
-misaka web set backend tavily
-misaka web set env.TAVILY_API_KEY tvly-...   # written 0600 to ~/.misaka/web.json
+misaka web                 # interactive menu in a terminal; status when piped
+misaka setup web           # the identical menu, also included in full setup
+misaka web --profile ~/.misaka/profiles/sisters/10032  # this Sister's overrides
+misaka web status          # local configuration/readiness, not a network test
 ```
 
-An exported variable always wins over the file. `misaka web setup` has a provider and
-tier picker with hidden credential prompts. `misaka web --help` covers discovery,
-enable/disable, reload, and the current limits.
+The menu covers separate search/extraction providers, free/paid/automatic tiers,
+provider enable/disable, hidden credentials, browser connections and engines,
+proxy/TLS, cache, blocklists, timeouts, xAI/X search, vault settings, OAuth accounts,
+and optional tool installation. Provider choices come from the live registry,
+including explicitly loaded trusted extensions (`--extension PATH`). Login, install,
+and online account checks require an explicit choice; opening the menu sends no
+requests and writes nothing. Confirmed edits save individually, so cancelling later
+does not undo earlier saves.
+
+Vendor keys are written with mode 0600 to `~/.misaka/.env` only when saved; the rest of the web configuration goes to `settings.json`.
+Profile edits do not copy shared secrets; removing an override reveals shared values.
+An exported variable always wins over files, including an empty export. Automatic
+routing is not a promise of free-only service: existing credentials take precedence.
+The existing `misaka web setup <provider>`, `set`, `unset`, and other scripting commands
+remain available; `misaka web --help` lists them.
 
 Agents also get the ordinary working tools: `bash`, `read`, `write`, `edit`, `grep`,
 `find`, `web_fetch`, `download_file`, and `office` for `.docx`, `.xlsx` and `.pptx`.
@@ -217,35 +255,36 @@ what differs.
 
 ## Configuration
 
-Everything lives under `~/.misaka/`, and environment variables override the files.
+Everything lives under one home, `~/.misaka/` (`MISAKA_HOME` moves it). MISAKA's own switches are sections of `settings.json`; `.env` holds what other code reads from the environment (vendor keys, a plugin's knobs).
 
 | Where | What |
 |---|---|
-| `agent/settings.json` | engine settings, including `defaultProvider` and `defaultModel` |
-| `agent/auth.json` | stored credentials, mode 0600 |
-| `agent/models.json` | custom providers and models, such as an OpenAI-compatible gateway |
-| `profiles/last_order/` | Last Order's persona, skills and MCP config |
-| `profiles/sisters/<id>/` | one directory per Sister |
+| `settings.json` | every setting, as sections: pi's own keys (`defaultProvider`, `defaultModel`, ...), `allies`, `skills`, `moa`, `web` |
+| `credentials/auth.json` | stored credentials, mode 0600 |
+| `models.json` | custom providers and models, such as an OpenAI-compatible gateway |
+| `MISAKA.md`, `skills/`, `subagents/` | what every role shares: identity, skills, sub-agent types |
+| `profiles/last_order/` | Last Order's persona, own skills and `settings.json` (model pin, `mcpServers`) |
+| `profiles/sisters/<id>/` | one directory per Sister, same layout |
 
-The most useful few:
+The most useful few settings:
 
-| Variable | Default | Meaning |
+| Setting | Default | Meaning |
 |---|---|---|
-| `MISAKA_PROVIDER` / `MISAKA_MODEL` | `anthropic` / `claude-sonnet-4-5` | provider and model for Sisters and chat |
-| `MISAKA_MAX_CONCURRENT_SISTERS` | free memory / 256 MiB, 4–12 | cards running at once on this host |
-| `MISAKA_TOKEN_CAP` | `0`, off | token budget shown and enforced on the board |
-| `MISAKA_RESEARCH_PLAN_APPROVAL` | `1`, on | whether a plan waits for your go-ahead |
-| `MISAKA_THEME` | the terminal's | `dark` or `light` |
+| `defaultProvider` / `defaultModel` | `anthropic` / `claude-sonnet-4-5` | provider and model for every role without a pin of her own |
+| `network.max_concurrent_sisters` | free memory / 256 MiB, 4–12 | cards running at once on this host |
+| `research.token_cap` | `0`, off | token budget shown and enforced on the board |
+| `research.plan_approval` | `true` | whether a plan waits for your go-ahead |
+| `lcm.context_threshold` | `0.35` | the share of the context window at which LCM compacts |
 
-**[CONFIGURATION.md](CONFIGURATION.md) documents all seventy or so variables**, grouped
-by what they control. A number that does not parse stops the command and names the
-variable and value. Every `MISAKA_*` name not in those tables is set by MISAKA for its
-own child processes.
+**[CONFIGURATION.md](CONFIGURATION.md) documents every setting**, grouped by what it
+controls. A value that does not fit stops the command and names the setting and value.
+`MISAKA_*` names in the environment are what MISAKA sets for its own child processes, never
+settings; `MISAKA_HOME` alone is yours.
 
 ## Diagnose
 
 `/debug` in a chat writes the rendered screen and the whole conversation to
-`~/.misaka/agent/misaka-debug.log` at mode 0600 and prints the path. That is the only
+`~/.misaka/logs/misaka-debug.log` at mode 0600 and prints the path. That is the only
 diagnostic switch. There are no debug environment variables.
 
 ## Built on

@@ -25,20 +25,29 @@
 一次运行分五步。
 
 1. **起草计划。** Last Order 拟出思路，拿给你看。
-2. **等你点头。** 计划会停在这里等你。你和她像平常聊天那样讨论，她按你的意见改，
-   直到你认可。没有审批命令，也没有什么关键词，她自己判断你满意了就开始。无人值守
-   时设 `MISAKA_RESEARCH_PLAN_APPROVAL=0`；命令行的 `misaka research` 因为根节点
-   没有对话，整体就是无人值守运行。
-3. **发卡。** 计划变成任务卡，Sisters 领走并行开工，受运行的并发上限约束。每位
-   Sister 先用普通散文说清自己打算怎么做，然后就在同一个会话里做完。没有另起的
+2. **计划审批。** 直接输入 `/research`，在深度、LO 并发、每个 LO 的 Sister 卡片数、
+   追加轮次之后选择 **Require approval（需批准）** 或 **Automatic（自动）**。
+   需批准时，和 Last Order 像平常聊天那样讨论，认可计划后再开工；自动模式接受计划后
+   直接推进，但必要的澄清仍会询问你。选择随本次研究保存，根节点、分支、追加轮次与恢复共用。
+   settings.json 的 `research.plan_approval` 提供默认值（true；false 为自动）；直接 `/research 问题`
+   和命令行 `misaka research` 使用该默认值。命令行需要审批时，会显示接入根节点对话的方法。
+3. **发卡。** 计划变成任务卡，Sisters 领走并行开工，受每个 LO 的 Sister 卡片上限（`--sister-parallel`，默认 4）约束。
+   每位 Sister 先用普通散文说清自己打算怎么做，然后就在同一个会话里做完。没有另起的
    计划文件，也没有要填的 JSON 交接格式。
 4. **按需追加轮次。** Last Order 可以不急着收尾，再派 Sisters 出去一轮。
    `--followups N` 限定第一批卡回来之后她还能追加几轮，默认 2。和你讨论计划从不计入
-   这个额度。每一轮的计划都和第一轮一样要等你点头。
+   这个额度。每一轮沿用本次研究选择的计划审批模式。
 5. **结论与红队。** 结论综合所有轮次写成，然后红队上来攻击它。若审查没发现实质问题，
    或者已经触到深度上限，就直接记录，不花一次模型调用。
    
 你不想深究的分支可以由你决定跳过。该节点不做研究直接关闭，理由留档，等最终裁定时一并考虑。
+
+研究有两项独立的并发设置：`--parallel N` 限制同时运行的 LO 节点数（默认 4），
+`--sister-parallel N` 限制每个 LO 的活动 Sister 卡片数（默认 4），同一 Sister 的多个
+会话也分别占槽。两项设置随研究记录保存，恢复和分支节点共用；旧研究缺少新字段时仍按 4。
+实际并发还受全局／单个 Sister 准入额度和任务依赖约束；这不是所有窗口或嵌套子代理的数量。
+例如 `/research --parallel 4 --sister-parallel 8 问题`，或
+`misaka research --parallel 4 --sister-parallel 8 "问题"`。直接输入 `/research` 也可分别选择。
 
 ## 产出物长什么样
 
@@ -84,7 +93,7 @@ uv venv .venv --python 3.13 && uv sync
   用 `xcode-select --install` 或 `apt install git` 装上。
 - **ripgrep** 和 **fd** 是 `grep` 与 `find` 两个工具的后端。用
   `brew install ripgrep fd` 或 `apt install ripgrep fd-find` 装，也可以把二进制
-  直接放进 `~/.misaka/agent/bin`。
+  直接放进 `~/.misaka/cache/bin`。
 
 ## 第一次运行
 
@@ -111,7 +120,7 @@ export ANTHROPIC_API_KEY=sk-ant-...   # 所有内置供应商都认环境变量
 misaka auth check                     # 逐个供应商检查，走的是会话用的同一套解析
 ```
 
-在聊天里，`/login` 会把 OAuth token 或 API key 存进 `~/.misaka/agent/auth.json`，
+在聊天里，`/login` 会把 OAuth token 或 API key 存进 `~/.misaka/credentials/auth.json`，
 权限 0600。`/model` 打开模型选择器，从里面选会存成所有 Sister 的默认值；
 `/model <名字>` 只切换你眼前这一个会话。
 
@@ -155,7 +164,7 @@ misaka web status      # 当前搜索后端与凭据
 
 ```sh
 misaka web set backend tavily
-misaka web set env.TAVILY_API_KEY tvly-...   # 以 0600 写入 ~/.misaka/web.json
+misaka web set env.TAVILY_API_KEY tvly-...   # 以 0600 写入 ~/.misaka/.env
 ```
 
 导出的环境变量始终压过配置文件。`misaka web setup` 提供供应商与档位选择器，
@@ -180,34 +189,35 @@ LCM 自己配置的脱敏、忽略、保留与 GC 策略依然生效——这里
 
 ## 配置
 
-全局配置主要在 `~/.misaka/` 下，LCM 临时缓存位于项目工作目录。算法参数的环境变量压过配置文件。
+全局配置都在唯一的根目录 `~/.misaka/` 下（用 `MISAKA_HOME` 可整体挪走），LCM 临时缓存位于项目工作目录。算法参数的环境变量压过配置文件。
 
 | 位置 | 内容 |
 |---|---|
-| `agent/settings.json` | 引擎设置，含 `defaultProvider` 与 `defaultModel` |
-| `agent/auth.json` | 保存的凭据，权限 0600 |
-| `agent/models.json` | 自定义供应商与模型，例如 OpenAI 兼容网关 |
+| `settings.json` | 所有设置，按节存放：pi 自己的键（`defaultProvider`、`defaultModel`…）、`allies`、`skills`、`moa`、`web` |
+| `credentials/auth.json` | 保存的凭据，权限 0600 |
+| `models.json` | 自定义供应商与模型，例如 OpenAI 兼容网关 |
+| `MISAKA.md`、`skills/`、`subagents/` | 所有角色共享的身份、技能、子代理类型 |
 | `profiles/last_order/` | Last Order 的人格、技能与 MCP 配置 |
 | `profiles/sisters/<id>/` | 每位 Sister 一个目录 |
 
-最常用的几个：
+最常用的几个设置：
 
-| 变量 | 默认值 | 含义 |
+| 设置 | 默认值 | 含义 |
 |---|---|---|
-| `MISAKA_PROVIDER` / `MISAKA_MODEL` | `anthropic` / `claude-sonnet-4-5` | Sisters 与聊天用的供应商和模型 |
-| `MISAKA_MAX_CONCURRENT_SISTERS` | 空闲内存 / 256 MiB，取 4–12 | 本机同时运行的卡数 |
-| `MISAKA_TOKEN_CAP` | `0`，关闭 | 任务板上显示并强制执行的 token 预算 |
-| `MISAKA_RESEARCH_PLAN_APPROVAL` | `1`，开启 | 计划是否要等你点头 |
-| `MISAKA_THEME` | 跟随终端 | `dark` 或 `light` |
+| `defaultProvider` / `defaultModel` | `anthropic` / `claude-sonnet-4-5` | 没有自己钉模型的角色所用的供应商和模型 |
+| `network.max_concurrent_sisters` | 空闲内存 / 256 MiB，取 4–12 | 本机同时运行的卡数 |
+| `research.token_cap` | `0`，关闭 | 任务板上显示并强制执行的 token 预算 |
+| `research.plan_approval` | `true` | 计划是否要等你点头 |
+| `lcm.context_threshold` | `0.35` | 上下文用到多少比例时 LCM 开始压缩 |
 
-**全部七十来个变量记在 [CONFIGURATION.md](CONFIGURATION.md)**，按控制对象分组。
-数值解析不了时命令会停下，并报出变量名和它的值。这些表里没有的 `MISAKA_*` 名字，
-都是 MISAKA 设给自己子进程用的。
+**全部设置记在 [CONFIGURATION.md](CONFIGURATION.md)**，按控制对象分组。值不合法时命令会停下，
+并报出设置名和它的值。环境里的 `MISAKA_*` 名字都是 MISAKA 设给自己子进程用的，不是设置；
+只有 `MISAKA_HOME` 归你。供应商密钥、插件旋钮这类"别的代码从环境里读"的东西放 `~/.misaka/.env`。
 
 ## 排查
 
 聊天里的 `/debug` 会把渲染出的屏幕和整段对话写进
-`~/.misaka/agent/misaka-debug.log`，权限 0600，并打印路径。这是唯一的诊断开关，
+`~/.misaka/logs/misaka-debug.log`，权限 0600，并打印路径。这是唯一的诊断开关，
 没有任何 debug 环境变量。
 
 ## 建立在什么之上

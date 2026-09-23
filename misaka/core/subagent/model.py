@@ -166,12 +166,14 @@ def install_effort_adapter(agent: Any, env: Mapping[str, str]) -> None:
     effort_override field, matching the source object spread. Numeric values
     remain ant-only. Other MISAKA providers keep their native request contract.
     """
-    raw = env.get("MISAKA_EFFORT_LEVEL")
-    if raw is not None and raw.casefold() in {"unset", "auto"}:
+    from misaka.config.product import setting
+
+    raw = setting("subagents", "effort_level", None)          # the user's choice; "auto" = none
+    if isinstance(raw, str) and raw.casefold() in {"unset", "auto"}:
         return
     if raw is None:
         try:
-            raw = json.loads(env.get("MISAKA_SUBAGENT_EFFORT", "null"))
+            raw = json.loads(env.get("MISAKA_SUBAGENT_EFFORT", "null"))   # the parent's hand-off
         except ValueError:
             return
     effort = parse_effort(raw)

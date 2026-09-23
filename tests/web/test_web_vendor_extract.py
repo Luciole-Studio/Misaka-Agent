@@ -15,17 +15,16 @@ page's address.
 
 from __future__ import annotations
 
-import json
 import sys
 
 import httpx
 import pytest
+from webconf import write_web
 
-from misaka.config.product import CFG
-from misaka.core.tools._web import website_policy
-from misaka.core.tools._web.bounded import UnsafeUrlError
-from misaka.core.web import keyless
+from misaka.config import home
+from misaka.core.web import keyless, website_policy
 from misaka.core.web.backends import exa, firecrawl, keenable, parallel, tavily
+from misaka.core.web.bounded import UnsafeUrlError
 
 _VENDOR_ENV = (
     "EXA_API_KEY",
@@ -45,8 +44,7 @@ def web_home(monkeypatch, tmp_path):
     """A throwaway web config and an empty vendor environment for every test."""
     for name in _VENDOR_ENV:
         monkeypatch.delenv(name, raising=False)
-    path = tmp_path / "web.json"
-    monkeypatch.setitem(CFG, "web_config", str(path))
+    path = home.path("settings")           # the "web" section lives here now
     # The blocklist is cached for 30s keyed on the config path; a test that writes one
     # must not inherit the previous test's answer, nor leave its own behind.
     website_policy.invalidate_cache()
@@ -59,7 +57,7 @@ def web_home(monkeypatch, tmp_path):
 def no_dns(monkeypatch):
     """Firecrawl's post-scrape SSRF gate, stubbed to "public" and resolving nothing.
 
-    :func:`misaka.core.tools._web.bounded.vet_public_url` calls ``getaddrinfo``. The one
+    :func:`misaka.core.web.bounded.vet_public_url` calls ``getaddrinfo``. The one
     test that cares about the gate re-patches this with a raiser.
     """
 
@@ -69,8 +67,8 @@ def no_dns(monkeypatch):
     monkeypatch.setattr(firecrawl, "vet_public_url", _vetted)
 
 
-def write_config(path, **keys) -> None:
-    path.write_text(json.dumps(keys), encoding="utf-8")
+def write_config(_path, **keys) -> None:
+    write_web(keys)
 
 
 # ---------------------------------------------------------------------------

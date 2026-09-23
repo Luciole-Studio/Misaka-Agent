@@ -10,15 +10,25 @@ import json
 import stat
 
 import pytest
+from webconf import read_web
 
+from misaka.config import home
 from misaka.core.web import config
 
 
+class _Layer:
+    """What the product stored: the ``web`` section of settings.json with the credentials folded in."""
+
+    def read_text(self):
+        return json.dumps(read_web())
+
+    def stat(self):
+        return home.path("env").stat()
+
+
 @pytest.fixture
-def web_home(tmp_path, monkeypatch):
-    path = tmp_path / "web.json"
-    monkeypatch.setitem(config.CFG, "web_config", str(path))
-    return path
+def web_home():
+    return _Layer()
 
 
 def test_a_scalar_key_is_written(web_home):
@@ -131,7 +141,7 @@ def test_unset_is_a_noop_on_an_absent_key(web_home):
 def test_credential_status_never_reveals_the_value(web_home):
     config.set_config("env.TAVILY_API_KEY", "tvly-secret-value")
     rows = {name: (is_set, src) for name, is_set, src in config.credential_status()}
-    assert rows["TAVILY_API_KEY"] == (True, "web.json")
+    assert rows["TAVILY_API_KEY"] == (True, home.display(home.path("env")))
     assert rows["EXA_API_KEY"] == (False, "")
 
 

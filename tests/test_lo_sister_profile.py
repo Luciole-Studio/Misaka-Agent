@@ -96,7 +96,7 @@ class CoordinatorOutputTests(unittest.IsolatedAsyncioTestCase):
         source = entry()
         original = copy.deepcopy(source)
         part = capabilities.SisterCapabilitiesPart("/fixture-workspace")
-        part.attach(SimpleNamespace(getActiveToolNames=list))
+        part.attach(SimpleNamespace(getActiveToolNames=list, refreshTools=lambda: None))
 
         async def render():
             text = (await part.before_agent_start({"systemPrompt": "BASE\n"}, None))["systemPrompt"]

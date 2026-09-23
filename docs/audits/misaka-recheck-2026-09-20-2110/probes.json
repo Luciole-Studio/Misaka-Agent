@@ -1,0 +1,198 @@
+{
+  "at": "2026-09-20T21:15:23.344639+09:00",
+  "registration_probe": [
+    {
+      "kind": "critique",
+      "title": "[t_reviewer] report.md",
+      "path": "/private/tmp/misaka-recheck-20260920-2110/fixture-yyhorsf_/nodes/r_fixture/cards/t_writer/report.md",
+      "sha256": "50e8e98a8de109d75a5b6bcb4d6abad1531b542ad580e27522f7928ea6ab1e23",
+      "branch_id": null,
+      "task_id": "t_reviewer",
+      "metadata": {
+        "source_file": "nodes/r_fixture/cards/t_writer/report.md",
+        "submission_digest_verified": true
+      }
+    }
+  ],
+  "plan_strict_reader_error": "artifact a_2ea3413351 changed since it was registered: /Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/plan.json",
+  "plan_backup_matches_registered_hash": true,
+  "title_corruption_rows": 159,
+  "title_examples": [
+    {
+      "path": "downloads/pages/02d7ce89e9a3.md",
+      "csv_title": "Wellington: The Path to Victory 1769-1814; Waterloo and the Fortunes of Peace 1814 u20131852   u00bb Explore the Comment",
+      "decoded_title": "Wellington: The Path to Victory 1769-1814; Waterloo and the Fortunes of Peace 1814–1852  » Explore the Commentary"
+    },
+    {
+      "path": "downloads/pages/0425dd27bde8.md",
+      "csv_title": "Gallica | V u00e9rification de s u00e9curit u00e9",
+      "decoded_title": "Gallica | Vérification de sécurité"
+    },
+    {
+      "path": "downloads/pages/05431bdd1dd4.md",
+      "csv_title": "Senatsbeschlu ufffd  ufffdber die Aus ufffdbung der Funktionen der Deputirten des gesetzgebenden K ufffdrpers der IV. Se",
+      "decoded_title": "Senatsbeschlu� �ber die Aus�bung der Funktionen der Deputirten des gesetzgebenden K�rpers der IV. Serie w�hrend der am n�chstfolgenden 1. Februar beginnende Session (1813)"
+    },
+    {
+      "path": "downloads/pages/05a35bd11a97.md",
+      "csv_title": "Gaetan Souchet D'Alvimart, The Alleged Envoy of Napoleon to Mexico, 1807 u20131809",
+      "decoded_title": "Gaetan Souchet D'Alvimart, The Alleged Envoy of Napoleon to Mexico, 1807–1809"
+    },
+    {
+      "path": "downloads/pages/0933736149e2.md",
+      "csv_title": "S ufffdbastiani's Report from the Near East",
+      "decoded_title": "S�bastiani's Report from the Near East"
+    }
+  ],
+  "prefix_only_reference_pairs": 12,
+  "prefix_only_examples": [
+    {
+      "material": "downloads/pages/190f0f766ff1.md",
+      "url": "https://api.parliament.uk/historic-hansard/commons/1809/jan/20/count-nicolas-de-romanzoff?view=full",
+      "assigned_card": "t_759180",
+      "prefix_only_matches": [
+        {
+          "path": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_759180/SOURCES.md",
+          "different_url": "https://api.parliament.uk/historic-hansard/commons/1809/jan/20/count-nicolas-de-romanzoff"
+        }
+      ]
+    },
+    {
+      "material": "downloads/pages/190f0f766ff1.md",
+      "url": "https://api.parliament.uk/historic-hansard/commons/1809/jan/20/count-nicolas-de-romanzoff?view=full",
+      "assigned_card": "t_a8401d",
+      "prefix_only_matches": [
+        {
+          "path": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_a8401d/SOURCES.md",
+          "different_url": "https://api.parliament.uk/historic-hansard/commons/1809/jan/20/count-nicolas-de-romanzoff"
+        }
+      ]
+    },
+    {
+      "material": "downloads/pages/24084fc70707.md",
+      "url": "https://en.wikipedia.org/wiki/British_anti-invasion_preparations_of_1803%E2%80%9305",
+      "assigned_card": "t_2c338c",
+      "prefix_only_matches": [
+        {
+          "path": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_2c338c/SOURCES.md",
+          "different_url": "https://en.wikipedia.org/wiki/British_anti-invasion_preparations_of_1803%E2%80%931805"
+        }
+      ]
+    },
+    {
+      "material": "downloads/pages/314c96ca5bf7.md",
+      "url": "https://en.wikipedia.org/wiki/British_anti-invasion_preparations_of_1803%E2%80%931805",
+      "assigned_card": "t_b7b7b1",
+      "prefix_only_matches": [
+        {
+          "path": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_b7b7b1/SOURCES.md",
+          "different_url": "https://en.wikipedia.org/wiki/British_anti-invasion_preparations_of_1803%E2%80%9305"
+        },
+        {
+          "path": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_b7b7b1/SOURCES.md",
+          "different_url": "https://en.wikipedia.org/wiki/British_anti-invasion_preparations_of_1803%E2%80%9305"
+        }
+      ]
+    },
+    {
+      "material": "downloads/pages/4b40ca3af7f7.md",
+      "url": "https://www.napoleon.org/en/history-of-the-two-empires/articles/treaty-between-prussia-and-france-tilsit-9-july-1807/",
+      "assigned_card": "t_3dc3c2",
+      "prefix_only_matches": [
+        {
+          "path": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_3dc3c2/SOURCES.md",
+          "different_url": "https://www.napoleon.org/en/history-of-the-two-empires/articles/treaty-between-france-and-russia-tilsit-7-july-1807/"
+        }
+      ]
+    },
+    {
+      "material": "downloads/pages/721feaa5f41a.md",
+      "url": "https://api.parliament.uk/historic-hansard/commons/1809/jan/20/count-nicolas-de-romanzoff/",
+      "assigned_card": "t_759180",
+      "prefix_only_matches": [
+        {
+          "path": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_759180/SOURCES.md",
+          "different_url": "https://api.parliament.uk/historic-hansard/commons/1809/jan/20/count-nicolas-de-romanzoff"
+        }
+      ]
+    },
+    {
+      "material": "downloads/pages/721feaa5f41a.md",
+      "url": "https://api.parliament.uk/historic-hansard/commons/1809/jan/20/count-nicolas-de-romanzoff/",
+      "assigned_card": "t_a8401d",
+      "prefix_only_matches": [
+        {
+          "path": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_a8401d/SOURCES.md",
+          "different_url": "https://api.parliament.uk/historic-hansard/commons/1809/jan/20/count-nicolas-de-romanzoff"
+        }
+      ]
+    },
+    {
+      "material": "downloads/pages/d234c679f667.md",
+      "url": "https://archive.org/stream/historyofbritisharm05fort/historyofbritisharm05fort_djvu.txt?x=defence",
+      "assigned_card": "t_759180",
+      "prefix_only_matches": [
+        {
+          "path": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_759180/SOURCES.md",
+          "different_url": "https://archive.org/stream/historyofbritisharm05fort/historyofbritisharm05fort_djvu.txt"
+        }
+      ]
+    },
+    {
+      "material": "downloads/pages/d234c679f667.md",
+      "url": "https://archive.org/stream/historyofbritisharm05fort/historyofbritisharm05fort_djvu.txt?x=defence",
+      "assigned_card": "t_a8401d",
+      "prefix_only_matches": [
+        {
+          "path": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_a8401d/SOURCES.md",
+          "different_url": "https://archive.org/stream/historyofbritisharm05fort/historyofbritisharm05fort_djvu.txt"
+        }
+      ]
+    },
+    {
+      "material": "downloads/pages/ff744d3eea74.md",
+      "url": "https://www.napoleon.org/en/history-of-the-two-empires/articles/treaty-between-france-and-russia-tilsit-7-july-1807/",
+      "assigned_card": "t_75e9a5",
+      "prefix_only_matches": [
+        {
+          "path": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_75e9a5/SOURCES.md",
+          "different_url": "https://www.napoleon.org/en/history-of-the-two-empires/articles/treaty-between-prussia-and-france-tilsit-9-july-1807/"
+        },
+        {
+          "path": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_75e9a5/SOURCES.md",
+          "different_url": "https://www.napoleon.org/en/history-of-the-two-empires/articles/treaty-between-prussia-and-france-tilsit-9-july-1807/"
+        }
+      ]
+    },
+    {
+      "material": "downloads/pages/ff744d3eea74.md",
+      "url": "https://www.napoleon.org/en/history-of-the-two-empires/articles/treaty-between-france-and-russia-tilsit-7-july-1807/",
+      "assigned_card": "t_7da32d",
+      "prefix_only_matches": [
+        {
+          "path": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_7da32d/SOURCES.md",
+          "different_url": "https://www.napoleon.org/en/history-of-the-two-empires/articles/treaty-between-prussia-and-france-tilsit-9-july-1807/"
+        },
+        {
+          "path": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_7da32d/SOURCES.md",
+          "different_url": "https://www.napoleon.org/en/history-of-the-two-empires/articles/treaty-between-prussia-and-france-tilsit-9-july-1807/"
+        }
+      ]
+    },
+    {
+      "material": "downloads/pages/ff744d3eea74.md",
+      "url": "https://www.napoleon.org/en/history-of-the-two-empires/articles/treaty-between-france-and-russia-tilsit-7-july-1807/",
+      "assigned_card": "t_b7b7b1",
+      "prefix_only_matches": [
+        {
+          "path": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_b7b7b1/SOURCES.md",
+          "different_url": "https://www.napoleon.org/en/history-of-the-two-empires/articles/treaty-between-prussia-and-france-tilsit-9-july-1807/"
+        },
+        {
+          "path": "/Users/makiko/Documents/exam/nodes/r_b55f2c1cf5/cards/t_b7b7b1/SOURCES.md",
+          "different_url": "https://www.napoleon.org/en/history-of-the-two-empires/articles/treaty-between-prussia-and-france-tilsit-9-july-1807/"
+        }
+      ]
+    }
+  ]
+}

@@ -33,6 +33,7 @@ _DELETE_SESSION_SCOPE_TABLE = "temp_lcm_delete_session_scope"
 _DELETE_SESSION_SCOPE_INSERT_CHUNK = 512
 from .search_query import (
     AGE_DECAY_RATE,
+    balanced_sql_expr,
     compute_search_candidate_cap,
     compute_directness_rank_bonus_upper_bound,
     compute_directness_score,
@@ -699,7 +700,7 @@ class SummaryDAG:
         for term in terms:
             like_clauses.append("summary LIKE ? ESCAPE '\\'")
             args.append(f"%{escape_like(term)}%")
-        where.append("(" + " OR ".join(like_clauses) + ")")
+        where.append(balanced_sql_expr(like_clauses, "OR"))
         fetch_limit = compute_like_fallback_fetch_limit(limit, terms, phrases)
         base_args = list(args)
         collapse_risky_repeats = contains_risky_fts_ascii(query)

@@ -47,7 +47,7 @@ def proxy_environment() -> dict[str, str]:
 
 
 def _proxy_url(raw: str, name: str) -> str:
-    from misaka.core.tools._web.url_safety import (
+    from misaka.core.web.url_safety import (
         always_blocked_address,
         always_blocked_host,
     )
@@ -102,7 +102,7 @@ def proxy_for_url(url: str, *, api: bool = False) -> str | None:
 
 
 def trusted_private_hosts(value=None) -> tuple[str, ...]:
-    from misaka.core.tools._web.url_safety import always_blocked_host, literal_address
+    from misaka.core.web.url_safety import always_blocked_host, literal_address
 
     if value is None:
         value = config.web_config(strict=True).get('trusted_private_hosts', [])
@@ -126,7 +126,7 @@ def trusted_private_hosts(value=None) -> tuple[str, ...]:
 
 
 def policy_key() -> str:
-    from misaka.core.tools._web.url_safety import allow_private_urls
+    from misaka.core.web.url_safety import allow_private_urls
 
     enabled = proxy_dns_enabled()
     values = (enabled, proxy_environment() if enabled else {}, trusted_private_hosts(), allow_private_urls(),

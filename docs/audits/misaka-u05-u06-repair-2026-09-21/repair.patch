@@ -1,0 +1,1058 @@
+--- a/misaka/cli/chat.py
++++ b/misaka/cli/chat.py
+@@ -208,7 +208,7 @@
+         "Ctrl+C/D closes window",
+     ))
+     screen.footer = Text("", 1, 1)
+-    owner, cursor, sending = None, None, set()
++    owner, cursor, stream_cursor, sending = None, None, None, set()
+     receipt = ""
+     if attach:
+         from misaka.core.session_catalog import _object, owner_record
+@@ -262,12 +262,17 @@
+         while not closed.is_set():
+             try:
+                 if owner is not None:
+-                    snapshot = _display_value(await request(owner, "snapshot", cursor=cursor))
++                    snapshot = _display_value(await request(owner, "snapshot", cursor=cursor,
++                                                            stream_cursor=stream_cursor))
+                     cursor = snapshot["cursor"]
+                     if snapshot["entries"] is not None:
+                         screen.updateEntries(snapshot["entries"])
++                    if snapshot["stream_cursor"] != stream_cursor:
++                        screen.updateStreaming(snapshot["streaming"])
++                        stream_cursor = snapshot["stream_cursor"]
+                     workflow = snapshot["workflow"]
+-                    phase = (f" · depth {workflow['depth']} · node {workflow['phase']}" if workflow else "")
++                    phase = (f" · research {workflow['run_phase']} ({workflow['run_status']})"
++                             f" · depth {workflow['depth']} · node {workflow['node_phase']}" if workflow else "")
+                     state = "pause requested" if snapshot["paused"] else snapshot["state"]
+                     header.setText(f"{owner.get('role', 'Session')} · session {state}{phase}\n{snapshot['cwd']}")
+                     queued = snapshot["steering"] + snapshot["follow_up"]
+@@ -312,6 +317,8 @@
+             except (OSError, ValueError, KeyError, TimeoutError) as error:
+                 stamp = None
+                 changed = True
++                screen.updateStreaming(None)
++                stream_cursor = None
+                 if owner is not None and not os.path.exists(str(owner.get("control") or "")):
+                     # The owning process exited (a research node that finished its routine, a
+                     # closed window): its input socket is gone, the conversation itself is not.
+@@ -343,6 +350,7 @@
+                 pass
+     finally:
+         unsubscribe()
++        screen.updateStreaming(None)
+         for task in sending:
+             task.cancel()
+         await asyncio.gather(*sending, return_exceptions=True)
+--- a/misaka/core/research/window.py
++++ b/misaka/core/research/window.py
+@@ -16,6 +16,16 @@
+ from misaka.utils.values import read_field
+ 
+ 
++def node_description(con, node_id):
++    """Keep run-wide progress distinct from the current node's lifecycle."""
++    from misaka.core.research import runs
++
++    node = runs.node(con, node_id)
++    run = runs.get(con, node["run_id"])
++    return {"run_id": run["id"], "node": node["id"], "depth": node["depth"],
++            "run_phase": run["phase"], "run_status": run["status"], "node_phase": node["status"]}
++
++
+ class WindowLO:
+     """The synchronous planner calls back onto the window's own event loop and session.
+ 
+@@ -24,7 +34,7 @@
+     cancelling asyncio.to_thread alone does not stop its thread.
+     """
+ 
+-    def __init__(self, session, check_active, *, headless=False):
++    def __init__(self, session, check_active, *, describe, headless=False):
+         self.session = session
+         self.session_file = session.sessionManager.sessionFile
+         self.loop = asyncio.get_running_loop()
+@@ -43,6 +53,17 @@
+         # the same filter. A phase scope only adds its temporary commands.
+         self.mode = ExitStack()
+         self.mode.enter_context(self.publisher.snapshot())
++        control = for_session(session)
++        if control is not None:
++            previous = control.describe
++
++            def restore_description():
++                # A later owner may have replaced this window's description.
++                if control.describe is describe:
++                    control.describe = previous
++
++            self.mode.callback(restore_description)
++            control.describe = describe
+ 
+     def run_llm_json(self, _profile, prompt, _provider, _model, **options):
+         return asyncio.run_coroutine_threadsafe(self._turn(prompt, options), self.loop).result()
+@@ -249,14 +270,12 @@
+             if error:
+                 raise RuntimeError(error)
+             check_active()
+-            bridge = WindowLO(session, check_active, headless=True)
++            bridge = WindowLO(session, check_active, describe=lambda: node_description(con, node["id"]), headless=True)
+             runs.set_node(con, node["id"], session_file=bridge.session_file)
+             if node["parent_id"] is None:
+                 runs.set_state(con, run["id"], root_session=bridge.session_file, driver_lock=run["driver_lock"])
+             control = for_session(session)
+             control.check_active = check_active
+-            control.describe = lambda: {"node": node["id"], "depth": node["depth"],
+-                                        "phase": runs.node(con, node["id"])["status"]}
+ 
+             async def human_input(text, preflight):
+                 if session.isStreaming:
+--- a/misaka/core/research/wiring/node.py
++++ b/misaka/core/research/wiring/node.py
+@@ -61,7 +61,7 @@
+         from misaka.core.platform import notifications
+         from misaka.core.research import workflow
+         from misaka.core.research.node import PaneRunner
+-        from misaka.core.research.window import WindowLO
++        from misaka.core.research.window import WindowLO, node_description
+         from misaka.core.session_control import for_session
+         con = task_store.connect(os.path.expanduser(CFG["db"]))
+         runs.init(con)
+@@ -75,10 +75,6 @@
+             owner = runs.node(con, self.node_id)
+             if owner["runner_key"] != self.runner_key or runs.get(con, self.run_id)["driver_lock"] != run["driver_lock"]:
+                 raise RuntimeError("Research node or driver changed owners.")
+-
+-        def describe():
+-            branch = runs.node(con, self.node_id)
+-            return {"node": self.node_id, "depth": branch["depth"], "phase": branch["status"]}
+ 
+         def progress(event):
+             branch = runs.node(con, self.node_id)
+@@ -96,13 +92,12 @@
+         window = None
+         control = None
+         try:
+-            window = WindowLO(self.session, check_active)
++            window = WindowLO(self.session, check_active, describe=lambda: node_description(con, self.node_id))
+             runs.set_node(con, self.node_id, session_file=window.session_file)
+             control = for_session(self.session)
+             if control is not None:         # a chat attached from elsewhere sees the node, not just a session
+-                previous_check, previous_describe = control.check_active, control.describe
++                previous_check = control.check_active
+                 control.check_active = check_active
+-                control.describe = describe
+             runner = PaneRunner(con, cfg, label, os.environ.get("MISAKA_NET_PANE"))
+             result = await workflow.expand_node(con, cfg, runner, window, run_id=self.run_id, node_id=self.node_id,
+                                                 progress=progress, session=self.session)
+@@ -126,11 +121,8 @@
+             finally:
+                 # The conversation outlives this runner and its connection. Do not
+                 # detach callbacks installed by a subsequent owner during cleanup.
+-                if control is not None:
+-                    if control.check_active is check_active:
+-                        control.check_active = previous_check
+-                    if control.describe is describe:
+-                        control.describe = previous_describe
++                if control is not None and control.check_active is check_active:
++                    control.check_active = previous_check
+                 try:
+                     runs.release_runner(con, "research_branches", self.node_id, self.runner_key)
+                 finally:
+--- a/misaka/core/research/workflow.py
++++ b/misaka/core/research/workflow.py
+@@ -1468,7 +1468,7 @@
+         if budget.exhausted(con, cfg.get("token_cap")):
+             return partial(halts["budget"])
+         from misaka.core.research.node import HeadlessRunner, PaneRunner
+-        from misaka.core.research.window import WindowLO, node_session
++        from misaka.core.research.window import WindowLO, node_description, node_session
+         root = next(n for n in runs.nodes(con, run_id) if n["parent_id"] is None)
+         # The driver owns the root in-process; never register it as a killable child.
+         with runs.owned_txn(con, run):
+@@ -1480,7 +1480,7 @@
+             root_context = context
+             session = window.session
+         else:
+-            window = WindowLO(session, check_active)
++            window = WindowLO(session, check_active, describe=lambda: node_description(con, root["id"]))
+         check_active()
+         with runs.owned_txn(con, run):
+             runs.set_state(con, run_id, root_session=window.session_file, driver_lock=driver_lock)
+--- a/misaka/core/session_control.py
++++ b/misaka/core/session_control.py
+@@ -10,6 +10,8 @@
+ import os
+ import tempfile
+ from pathlib import Path
++
++from misaka.utils.values import read_field
+ 
+ 
+ def for_session(session):
+@@ -57,6 +59,12 @@
+         self.on_input = None
+         self.describe = dict
+         self.check_active = lambda: None
++        self._stream_revision = 0
++        self._unsubscribe_stream = None
++
++    def _stream_event(self, event):
++        if read_field(event, "type") in {"message_start", "message_update", "message_end", "agent_end"}:
++            self._stream_revision += 1
+ 
+     async def start(self):
+         if self.server is not None:
+@@ -68,9 +76,13 @@
+         self.path = str(Path(self.directory.name) / "control.sock")
+         self.server = await asyncio.start_unix_server(self._serve, self.path, limit=1024 * 1024)
+         os.chmod(self.path, 0o600)
++        self._unsubscribe_stream = self.session.subscribe(self._stream_event)
+ 
+     def close(self):
+         self.accepting = False
++        if self._unsubscribe_stream is not None:
++            self._unsubscribe_stream()
++            self._unsubscribe_stream = None
+         if self.server is not None:
+             self.server.close()
+             self.server = None
+@@ -145,10 +157,18 @@
+         if operation == "snapshot":
+             manager = self.session.sessionManager
+             cursor = [manager.getLeafId(), len(manager.getEntries())]
++            streaming = self.session.state.streamingMessage
++            if read_field(streaming, "role") != "assistant":
++                streaming = None
++            # Keep native in-flight content separate from committed history. A history
++            # change also resends the preview after the view rebuilds its branch.
++            stream_cursor = [self.session.sessionId, *cursor, self._stream_revision, streaming is not None]
+             return {"id": self.session.sessionId, "cwd": manager.getCwd(),
+                     "state": "idle" if self.session.isIdle else "working", "paused": self.paused,
+                     "error": self.error, "workflow": self.describe(), "cursor": cursor,
+                     "steering": self.session.getSteeringMessages(), "follow_up": self.session.getFollowUpMessages(),
++                    "stream_cursor": stream_cursor,
++                    "streaming": streaming if command.get("stream_cursor") != stream_cursor else None,
+                     "entries": manager.buildContextEntries() if command.get("cursor") != cursor else None}
+         if not self.accepting:
+             raise ValueError("The original owner is finishing; no further input is accepted.")
+--- a/misaka/ui/tui/interactive/conversation.py
++++ b/misaka/ui/tui/interactive/conversation.py
+@@ -65,6 +65,7 @@
+         self.hiddenThinkingLabel = getattr(self, "hiddenThinkingLabel", self.defaultHiddenThinkingLabel)
+         self.entries = []
+         self._toolComponentsById = {}
++        self._liveComponent = None
+ 
+     def mount(self):
+         for child in (
+@@ -117,6 +118,7 @@
+ 
+     def updateEntries(self, entries) -> None:
+         """Follow committed context, preserving components unless its branch changed."""
++        self.updateStreaming(None)
+         if entries[:len(self.entries)] != self.entries:
+             self.entries = []
+             self._toolComponentsById.clear()
+@@ -126,3 +128,20 @@
+         )
+         self.entries = entries
+         self._request_render()
++
++    def updateStreaming(self, message) -> None:
++        """Render an owner's transient assistant without adding it to saved entries."""
++        if message is None:
++            if self._liveComponent is not None:
++                self.chatContainer.removeChild(self._liveComponent)
++                self._liveComponent = None
++                self._request_render()
++            return
++        if self._liveComponent is None:
++            self._liveComponent = AssistantMessageComponent(
++                hideThinkingBlock=self.hideThinkingBlock, markdownTheme=self.getMarkdownThemeWithSettings(),
++                hiddenThinkingLabel=self.hiddenThinkingLabel, outputPad=self.outputPad,
++            )
++            self.chatContainer.addChild(self._liveComponent)
++        self._liveComponent.updateContent(message, True)
++        self._request_render()
+--- a/tests/test_prompt_assembly_integration.py
++++ b/tests/test_prompt_assembly_integration.py
+@@ -442,7 +442,7 @@
+         monkeypatch.setattr(session, "_allowedToolNames", set(normal) | {"fixture_late", "misaka_research_assign"})
+         selected = [name for name in normal if name not in {"write", "doc_verify"}]
+         session.setActiveToolsByName(selected)
+-        owner = WindowLO(session, lambda: None)
++        owner = WindowLO(session, lambda: None, describe=dict)
+         expected = list(research_tools(selected))
+         assert session.getActiveToolNames() == expected
+         assert list(planner.session_tools(owner)) == expected
+@@ -503,7 +503,7 @@
+         normal = session.getActiveToolNames()
+         # In-memory SDK session, but a stable path for WindowLO's routing check.
+         session.sessionManager.sessionFile = str(prompt_home / "fixture.jsonl")
+-        owner = window.WindowLO(session, lambda: None)
++        owner = window.WindowLO(session, lambda: None, describe=dict)
+         phase = tool_definition(name="misaka_research_assign", label="Plan", description="Fixture", parameters={}, execute=None)
+         stale = session.getActiveToolNames()
+         selected = [n for n in normal if n != "write"]
+--- a/tests/test_research_edge_repairs.py
++++ b/tests/test_research_edge_repairs.py
+@@ -399,7 +399,7 @@
+         getActiveToolNames=list,
+         sendCustomMessage=send,
+     )
+-    bridge = window.WindowLO(session, lambda: None)
++    bridge = window.WindowLO(session, lambda: None, describe=dict)
+     try:
+         _obj, text, error = await bridge._execute_turn(
+             "phase fixture", {"session_dir": str(tmp_path), "tools": []}
+--- a/tests/test_research_node_control_cleanup.py
++++ b/tests/test_research_node_control_cleanup.py
+@@ -1,14 +1,13 @@
+ """A resident window must not keep its completed runner's database callbacks."""
+ import asyncio
+ import sqlite3
++from contextlib import contextmanager
+ from types import SimpleNamespace
+-from unittest.mock import AsyncMock
+ 
+ import pytest
+ 
+ from misaka.core.network.wiring.capabilities import SisterCapabilitiesPart
+ from misaka.core.research import runs, workflow
+-from misaka.core.research.window import WindowLO
+ from misaka.core.research.wiring import node
+ from misaka.core.session_control import SessionControl
+ 
+@@ -18,16 +17,17 @@
+     con = sqlite3.connect(":memory:")
+     con.row_factory = sqlite3.Row
+     con.executescript("""
+-        CREATE TABLE research_runs(id, stop_requested, driver_lock);
+-        INSERT INTO research_runs VALUES('run', 0, 'driver');
+-        CREATE TABLE research_branches(id, runner_key, depth, status, last_error);
+-        INSERT INTO research_branches VALUES('node', 'key', 1, 'executing', NULL);
++        CREATE TABLE research_runs(id, stop_requested, driver_lock, phase, status);
++        INSERT INTO research_runs VALUES('run', 0, 'driver', 'active', 'active');
++        CREATE TABLE research_branches(id, runner_key, depth, status, last_error, run_id);
++        INSERT INTO research_branches VALUES('node', 'key', 1, 'executing', NULL, 'run');
+     """)
+     session = SimpleNamespace(
+         sessionManager=SimpleNamespace(sessionFile="/tmp/unused-fixture.jsonl"),
+         moments=SimpleNamespace(parts=[SisterCapabilitiesPart("/tmp")], send_message=lambda *args: None))
+     control = SessionControl(session, None)
+     previous_check, previous_describe = control.check_active, control.describe
++    previous_input = control.on_input
+     replacement_check = lambda: None
+     replacement_describe = lambda: {"owner": "replacement"}
+     session.moments.parts.append(SimpleNamespace(control=control))
+@@ -36,7 +36,8 @@
+ 
+     async def expand(*args, **kwargs):
+         control.check_active()
+-        assert control.describe() == {"node": "node", "depth": 1, "phase": "executing"}
++        assert control.describe() == {"run_id": "run", "node": "node", "depth": 1,
++                                      "run_phase": "active", "run_status": "active", "node_phase": "executing"}
+         con.execute("UPDATE research_branches SET runner_key='other'")
+         with pytest.raises(RuntimeError, match="changed owners"):
+             control.check_active()
+@@ -66,7 +67,11 @@
+     monkeypatch.setattr(runs, "release_runner", release)
+     monkeypatch.setattr(workflow, "expand_node", expand)
+     if outcome == "close_error":
+-        monkeypatch.setattr(WindowLO, "close", AsyncMock(side_effect=RuntimeError("close failure")))
++        @contextmanager
++        def broken_snapshot():
++            yield
++            raise RuntimeError("close failure")
++        monkeypatch.setattr(session.moments.parts[0], "snapshot", broken_snapshot)
+     try:
+         if outcome == "cancelled":
+             with pytest.raises(asyncio.CancelledError):
+@@ -79,6 +84,7 @@
+         assert released == [("research_branches", "node", "key")]
+         assert control.check_active is (replacement_check if outcome == "replaced" else previous_check)
+         assert control.describe is (replacement_describe if outcome == "replaced" else previous_describe)
++        assert control.on_input is previous_input
+         control.check_active()
+         control.describe()
+         with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+--- a/tests/test_research_root_lifecycle.py
++++ b/tests/test_research_root_lifecycle.py
+@@ -39,7 +39,7 @@
+             events.append("dispose")
+ 
+     monkeypatch.setattr(window, "node_session", resident)
+-    monkeypatch.setattr(window, "WindowLO", lambda supplied, check: owner)
++    monkeypatch.setattr(window, "WindowLO", lambda supplied, check, *, describe: owner)
+     runner = SimpleNamespace(close=lambda: events.append("runner-close"))
+     monkeypatch.setattr(node, "HeadlessRunner", lambda *a: runner)
+     monkeypatch.setattr(report, "review_receipt", lambda *a: {})
+--- a/tests/test_research_sweep_repairs.py
++++ b/tests/test_research_sweep_repairs.py
+@@ -390,7 +390,7 @@
+     monkeypatch.setattr(
+         window,
+         "WindowLO",
+-        lambda session, check: SimpleNamespace(
++        lambda session, check, *, describe: SimpleNamespace(
+             session_file=str(Path(run["workspace"]) / "session.jsonl"),
+             close=AsyncMock(),
+         ),
+--- a/tests/test_session_snapshot_branch.py
++++ b/tests/test_session_snapshot_branch.py
+@@ -15,7 +15,9 @@
+     manager.branch(root)
+     right = manager.appendMessage({"role": "user", "content": "right", "timestamp": 2})
+     session = SimpleNamespace(sessionManager=manager, sessionId=manager.sessionId, isIdle=True,
+-                              getSteeringMessages=list, getFollowUpMessages=list)
++                              getSteeringMessages=list, getFollowUpMessages=list,
++                              state=SimpleNamespace(streamingMessage=None),
++                              subscribe=lambda callback: lambda: None)
+     control = SessionControl(session, None)
+     for leaf, expected in ((right, [root, right]), (left, [root, left]), (None, [])):
+         manager.resetLeaf() if leaf is None else manager.branch(leaf)
+@@ -36,7 +38,9 @@
+         {"role": "user", "content": "right summary", "timestamp": 2}])
+     manager.branch(left)
+     session = SimpleNamespace(sessionManager=manager, sessionId=manager.sessionId, isIdle=True,
+-                              getSteeringMessages=list, getFollowUpMessages=list)
++                              getSteeringMessages=list, getFollowUpMessages=list,
++                              state=SimpleNamespace(streamingMessage=None),
++                              subscribe=lambda callback: lambda: None)
+     snapshot = await SessionControl(session, None)._execute({"operation": "snapshot"})
+     assert snapshot["entries"] == manager.buildContextEntries()
+ 
+@@ -48,7 +52,9 @@
+     path = tmp_path / "catalog.json"
+     path.write_text(json.dumps(record))
+     session = SimpleNamespace(sessionManager=manager, sessionId=manager.sessionId, isIdle=True,
+-                              getSteeringMessages=list, getFollowUpMessages=list)
++                              getSteeringMessages=list, getFollowUpMessages=list,
++                              state=SimpleNamespace(streamingMessage=None),
++                              subscribe=lambda callback: lambda: None)
+     catalog = SimpleNamespace(record=str(path), instance="original", spec=None)
+     control = SessionControl(session, catalog)
+     await control.start()
+--- /dev/null
++++ b/tests/test_session_streaming_snapshot.py
+@@ -0,0 +1,205 @@
++"""Live previews come from native memory, not partially committed transcripts."""
++import json
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++from test_skill_command_delivery import (
++    host as host,  # noqa: PLC0414 - explicit offline fixture re-export
++)
++
++from misaka.agent.agent import Agent
++from misaka.core.session_control import SessionControl, request
++from misaka.core.session_manager import SessionManager
++
++
++def assistant(text):
++    return {'role': 'assistant', 'content': [{'type': 'thinking', 'thinking': 'checking'},
++                                           {'type': 'text', 'text': text}],
++            'timestamp': 1, 'stopReason': 'stop', 'api': 'anthropic-messages',
++            'provider': 'fixture', 'model': 'fixture',
++            'usage': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0, 'totalTokens': 0,
++                      'cost': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0, 'total': 0}}}
++
++
++def fixture_session(tmp_path):
++    manager = SessionManager.create(str(tmp_path), str(tmp_path / 'sessions'))
++    manager.appendMessage({'role': 'user', 'content': 'question', 'timestamp': 0})
++    manager.appendMessage(assistant('saved answer'))
++    agent, listeners = Agent(), []
++
++    def subscribe(callback):
++        listeners.append(callback)
++        return lambda: listeners.remove(callback)
++
++    session = SimpleNamespace(sessionManager=manager, sessionId=manager.sessionId,
++                              agent=agent, state=agent.state, isIdle=False,
++                              getSteeringMessages=list, getFollowUpMessages=list, subscribe=subscribe)
++
++    def emit(kind, message=None):
++        event = SimpleNamespace(type=kind, message=message)
++        agent._reduce_state(event)  # Native source of streamingMessage; no parallel buffer.
++        for callback in tuple(listeners):
++            callback(event)
++
++    return session, emit, listeners
++
++
++async def snapshot(control, previous=None):
++    return await control._execute({'operation': 'snapshot',
++                                  'cursor': previous['cursor'] if previous else None,
++                                  'stream_cursor': previous['stream_cursor'] if previous else None})
++
++
++async def test_stream_updates_without_replaying_or_writing_history(tmp_path):
++    session, emit, listeners = fixture_session(tmp_path)
++    control = SessionControl(session, None)
++    path = Path(session.sessionManager.getSessionFile())
++    before = path.read_bytes()
++    await control.start()
++    try:
++        first = await snapshot(control)
++        emit('message_start', assistant('par'))
++        live = await snapshot(control, first)
++        assert live['entries'] is None and live['cursor'] == first['cursor']
++        assert live['stream_cursor'] != first['stream_cursor']
++        assert live['streaming'] is session.state.streamingMessage
++        assert live['streaming']['content'][0]['thinking'] == 'checking'
++        unchanged = await snapshot(control, live)
++        assert unchanged['stream_cursor'] == live['stream_cursor']
++        assert unchanged['streaming'] is None and unchanged['entries'] is None
++        emit('message_update', assistant('partial 中文'))
++        updated = await snapshot(control, live)
++        assert updated['stream_cursor'] != live['stream_cursor']
++        assert updated['streaming']['content'][1]['text'] == 'partial 中文'
++        assert updated['entries'] is None
++        assert path.read_bytes() == before
++        assert 'partial' not in path.read_text()
++        emit('message_end', assistant('final answer'))
++        session.sessionManager.appendMessage(assistant('final answer'))
++        final = await snapshot(control, updated)
++        assert final['streaming'] is None and final['stream_cursor'] != updated['stream_cursor']
++        assert len(final['entries']) == len(first['entries']) + 1
++        assert sum('final answer' in str(entry) for entry in final['entries']) == 1
++    finally:
++        control.close()
++    assert listeners == []
++
++
++@pytest.mark.parametrize('end', ['agent_end', 'reset', 'message_end'])
++async def test_abort_reset_or_end_explicitly_clears_preview(tmp_path, end):
++    session, emit, _ = fixture_session(tmp_path)
++    control = SessionControl(session, None)
++    await control.start()
++    try:
++        emit('message_start', assistant('partial'))
++        live = await snapshot(control)
++        if end == 'reset':
++            session.agent.reset()
++            session.sessionManager.resetLeaf()
++        else:
++            emit(end, assistant('stopped'))
++        cleared = await snapshot(control, live)
++        assert cleared['stream_cursor'] != live['stream_cursor']
++        assert cleared['streaming'] is None
++    finally:
++        control.close()
++
++
++async def test_reconnect_seeds_existing_stream_and_lifecycle_has_one_subscription(tmp_path):
++    session, emit, listeners = fixture_session(tmp_path)
++    emit('message_start', assistant('already generating'))
++    control = SessionControl(session, None)
++    await control.start()
++    await control.start()
++    try:
++        assert len(listeners) == 1
++        initial = await snapshot(control)
++        assert initial['streaming']['content'][1]['text'] == 'already generating'
++        # Native bookkeeping changes history while the same assistant keeps streaming.
++        session.sessionManager.appendCustomEntry('progress', {'value': 1})
++        updated = await snapshot(control, initial)
++        assert updated['entries'] is not None
++        assert updated['stream_cursor'] != initial['stream_cursor']
++        assert updated['streaming'] is session.state.streamingMessage
++    finally:
++        control.close()
++        control.close()
++    assert listeners == []
++    await control.start()
++    assert len(listeners) == 1
++    control.close()
++    assert not listeners
++
++
++async def test_socket_serializes_preview_and_still_rejects_wrong_owner(tmp_path):
++    session, emit, _ = fixture_session(tmp_path)
++    record = {'id': session.sessionId, 'instance': 'owner'}
++    path = tmp_path / 'catalog.json'
++    path.write_text(json.dumps(record))
++    catalog = SimpleNamespace(record=str(path), instance='owner', spec=None)
++    control = SessionControl(session, catalog)
++    await control.start()
++    record['control'] = control.path
++    try:
++        emit('message_update', assistant('socket preview'))
++        wire = await request(record, 'snapshot')
++        assert wire['streaming']['content'][1]['text'] == 'socket preview'
++        with pytest.raises(ValueError, match='changed owners'):
++            await request({**record, 'instance': 'different'}, 'snapshot')
++    finally:
++        control.close()
++
++
++async def test_real_agent_session_publishes_native_stream_and_commits_once(host):
++    import asyncio
++
++    from misaka.ai.types import AssistantMessage, DoneEvent, StartEvent, TextDeltaEvent
++    from misaka.ai.utils.event_stream import AssistantMessageEventStream
++    from misaka.utils.values import read_field
++
++    session = host.session
++    control = SessionControl(session, None)
++    output = AssistantMessageEventStream()
++    partial = AssistantMessage(**{**assistant('NATIVE_PARTIAL'), 'api': session.model.api,
++                                  'provider': session.model.provider, 'model': session.model.id})
++    started, updated = asyncio.Event(), asyncio.Event()
++
++    def observe(event):
++        if read_field(event, 'type') == 'message_start' and read_field(read_field(event, 'message'), 'role') == 'assistant':
++            started.set()
++        if read_field(event, 'type') == 'message_update':
++            updated.set()
++
++    unsubscribe = session.subscribe(observe)
++    session.agent.streamFn = lambda *_args, **_kwargs: output
++    await control.start()
++    turn = asyncio.create_task(session.prompt('native fixture question'))
++    try:
++        output.push(StartEvent(partial=partial))
++        await asyncio.wait_for(started.wait(), 3)
++        first = await snapshot(control)
++        assert first['streaming'].content[1].text == 'NATIVE_PARTIAL'
++        assert 'NATIVE_PARTIAL' not in str(session.sessionManager.getEntries())
++        final = partial.model_copy(deep=True)
++        final.content[1].text = 'NATIVE_FINAL'
++        output.push(TextDeltaEvent(contentIndex=1, delta='_FINAL', partial=final))
++        await asyncio.wait_for(updated.wait(), 3)
++        second = await snapshot(control, first)
++        assert second['entries'] is None and second['stream_cursor'] != first['stream_cursor']
++        assert second['streaming'].content[1].text == 'NATIVE_FINAL'
++        output.push(DoneEvent(reason='stop', message=final))
++        output.end(final)
++        await asyncio.wait_for(turn, 3)
++        done = await snapshot(control, second)
++        assert done['streaming'] is None
++        assert sum('NATIVE_FINAL' in str(e) for e in done['entries']) == 1
++        reopened = SessionManager.open(session.sessionFile)
++        assert sum('NATIVE_FINAL' in str(e) for e in reopened.getEntries()) == 1
++        assert host.errors == []
++    finally:
++        if not turn.done():
++            turn.cancel()
++        await asyncio.gather(turn, return_exceptions=True)
++        unsubscribe()
++        control.close()
+--- /dev/null
++++ b/tests/test_session_live_viewer.py
+@@ -0,0 +1,176 @@
++"""The real Sessions follow loop renders owner snapshots without driving an agent."""
++
++import asyncio
++from types import SimpleNamespace
++
++import pytest
++
++from misaka.cli.chat import follow_session
++from misaka.core import session_catalog, session_control
++from misaka.core.settings_manager import SettingsManager
++from misaka.ui.tui import Container
++from misaka.ui.tui.interactive.components.assistant_message import (
++    AssistantMessageComponent,
++)
++from misaka.ui.tui.interactive.conversation import Conversation
++from misaka.utils.ansi import strip_ansi
++
++
++class ViewerUI(Container):
++    """No terminal, render thread, input source, socket, or session owner."""
++
++    def __init__(self):
++        super().__init__()
++        self.terminal = SimpleNamespace(rows=40, columns=120)
++        self.listener = None
++        self.started = self.stopped = False
++
++    def requestRender(self, *_args):
++        pass
++
++    def setFocus(self, component):
++        component.focused = True
++
++    def addInputListener(self, listener):
++        self.listener = listener
++
++        def unsubscribe():
++            self.listener = None
++
++        return unsubscribe
++
++    def start(self):
++        self.started = True
++
++    def stop(self):
++        self.stopped = True
++
++
++@pytest.fixture
++def viewer(monkeypatch, tmp_path):
++    ui = ViewerUI()
++    screen = Conversation(ui, SettingsManager.inMemory({"hideThinkingBlock": False}), str(tmp_path))
++    owner = {"role": "LO", "state": "running", "control": str(tmp_path / "owner.sock")}
++    monkeypatch.setattr(session_catalog, "owner_record", lambda _path: owner)
++
++    async def next_poll(awaitable, *, timeout):
++        # Replace only polling delay; follow_session still owns and checks its real close event.
++        awaitable.close()
++        await asyncio.sleep(0)
++        raise TimeoutError
++
++    monkeypatch.setattr(asyncio, "wait_for", next_poll)
++    return screen, tmp_path / "session.jsonl"
++
++
++def message(text, thinking=""):
++    content = ([{"type": "thinking", "thinking": thinking}] if thinking else [])
++    content.append({"type": "text", "text": text})
++    return {"role": "assistant", "content": content, "timestamp": 0}
++
++
++def entry(identifier, value):
++    return {"type": "message", "id": identifier, "parentId": None, "message": value}
++
++
++def snapshot(cursor, stream_cursor, entries=None, streaming=None, workflow=None):
++    return {
++        "cursor": cursor, "entries": entries,
++        "stream_cursor": stream_cursor, "streaming": streaming,
++        "workflow": workflow, "state": "running", "paused": False,
++        "cwd": "/fixture", "steering": [], "follow_up": [], "error": "",
++    }
++
++
++def assistants(screen):
++    return [child for child in screen.chatContainer.children if isinstance(child, AssistantMessageComponent)]
++
++
++def rendered(screen):
++    return strip_ansi("\n".join(screen.chatContainer.render(120)))
++
++
++async def test_follow_live_thinking_text_commit_and_sanitize(viewer, monkeypatch):
++    screen, path = viewer
++    history = [entry("u", {"role": "user", "content": "question", "timestamp": 0})]
++    final = message("FINAL_ANSWER", "VISIBLE_THOUGHT expanded")
++    workflow = {
++        "run_id": "run", "node": "root", "depth": 0,
++        "run_phase": "final_report", "run_status": "running", "node_phase": "completed",
++    }
++    calls, live = [], []
++
++    async def request(_owner, operation, **arguments):
++        calls.append((operation, arguments))
++        assert operation == "snapshot"  # Watching must not send input, resume, or create an owner.
++        poll = len(calls)
++        if poll == 1:
++            assert arguments.get("stream_cursor") is None
++            return snapshot("history-1", "stream-1", history,
++                            message("FIRST_TEXT", "\x1b[31mVISIBLE_THOUGHT\x1b[0m\x00"), workflow)
++        if poll == 2:
++            assert arguments == {"cursor": "history-1", "stream_cursor": "stream-1"}
++            assert screen.entries == history
++            live.extend(assistants(screen))
++            assert len(live) == 1 and live[0].isStreaming
++            assert live[0].lastMessage["content"][0]["thinking"] == "VISIBLE_THOUGHT"
++            assert "VISIBLE_THOUGHT" in rendered(screen) and "FIRST_TEXT" in rendered(screen)
++            assert "final_report" in screen.headerContainer.children[0].text
++            assert "completed" in screen.headerContainer.children[0].text
++            return snapshot("history-1", "stream-2", streaming=final, workflow=workflow)
++        if poll == 3:
++            assert assistants(screen) == live
++            assert "FINAL_ANSWER" in rendered(screen) and "expanded" in rendered(screen)
++            assert screen.entries == history
++            return snapshot("history-1", "stream-2", workflow=workflow)
++        if poll == 4:
++            # An unchanged stream cursor with a null payload means "no update", not "clear".
++            assert assistants(screen) == live
++            return snapshot("history-2", "stream-3", [*history, entry("a", final)], workflow=workflow)
++        assert poll == 5
++        committed = assistants(screen)
++        assert len(committed) == 1 and committed[0] is not live[0]
++        assert not committed[0].isStreaming
++        assert rendered(screen).count("FINAL_ANSWER") == 1
++        assert screen._liveComponent is None
++        screen.ui.listener("\x03")
++        return snapshot("history-2", "stream-3", workflow=workflow)
++
++    monkeypatch.setattr(session_control, "request", request)
++    assert await follow_session(screen, path, attach=True) == 0
++    assert len(calls) == 5 and screen.ui.started and screen.ui.stopped
++    assert screen.ui.listener is None and screen._liveComponent is None
++
++
++async def test_follow_disconnect_clears_live_and_reconnects_without_replaying_input(viewer, monkeypatch):
++    screen, path = viewer
++    calls = []
++
++    async def request(_owner, operation, **arguments):
++        calls.append((operation, arguments))
++        assert operation == "snapshot"
++        poll = len(calls)
++        if poll == 1:
++            return snapshot("same-history", "same-stream", [], message("IN_PROGRESS"))
++        if poll == 2:
++            assert "IN_PROGRESS" in rendered(screen)
++            # Unsent editor text remains local across disconnects.
++            screen.editor.setText("LOCAL_DRAFT")
++            raise OSError("fixture disconnect")
++        if poll == 3:
++            assert arguments["stream_cursor"] is None
++            assert screen._liveComponent is None and not assistants(screen)
++            assert screen.editor.getText() == "LOCAL_DRAFT"
++            return snapshot("same-history", "same-stream", streaming=message("RECONNECTED"))
++        assert poll == 4
++        assert arguments["stream_cursor"] == "same-stream"
++        assert "RECONNECTED" in rendered(screen)
++        assert screen.editor.getText() == "LOCAL_DRAFT"
++        screen.ui.listener("\x04")
++        return snapshot("same-history", "same-stream")
++
++    monkeypatch.setattr(session_control, "request", request)
++    assert await follow_session(screen, path, attach=True) == 0
++    assert len(calls) == 4
++    assert screen._liveComponent is None and not assistants(screen)
++    assert screen.ui.stopped and screen.ui.listener is None
+--- /dev/null
++++ b/tests/test_research_workflow_description.py
+@@ -0,0 +1,231 @@
++"""Research descriptions follow the owning window, not one entry-point's callbacks."""
++import asyncio
++from contextlib import contextmanager
++from types import SimpleNamespace
++from unittest.mock import AsyncMock
++
++import pytest
++
++from misaka.core.network.wiring.capabilities import SisterCapabilitiesPart
++from misaka.core.platform import tasks
++from misaka.core.research import runs, window, workflow
++from misaka.core.session_control import SessionControl
++
++
++@pytest.fixture
++def research(tmp_path, monkeypatch):
++    monkeypatch.setattr(runs, "_commit", lambda *args: None)
++    con = tasks.connect(str(tmp_path / "board.db"))
++    run = runs.create(con, workspace=str(tmp_path), question="Description fixture")
++    root = runs.nodes(con, run["id"])[0]
++    publisher = SisterCapabilitiesPart(str(tmp_path), [])
++    session = SimpleNamespace(
++        sessionManager=SimpleNamespace(sessionFile=str(tmp_path / "root.jsonl")),
++        moments=SimpleNamespace(parts=[publisher]), isIdle=True, isStreaming=False,
++        waitForIdle=AsyncMock())
++    control = SessionControl(session, None)
++    session.moments.parts.append(SimpleNamespace(control=control))
++    try:
++        yield con, run, root, session, control, publisher
++    finally:
++        con.close()
++
++
++@pytest.mark.parametrize("outcome", ["normal", "cancel", "replacement", "cleanup_error"])
++async def test_window_description_restores_on_exit_without_touching_ingress(research, outcome):
++    con, run, root, session, control, publisher = research
++    previous = control.describe
++    original_input, original_check = control.on_input, control.check_active
++    replacement = lambda: {"owner": "next"}
++    if outcome == "cleanup_error":
++        @contextmanager
++        def broken_snapshot():
++            yield
++            raise RuntimeError("snapshot cleanup failed")
++        publisher.snapshot = broken_snapshot
++    describe = lambda: window.node_description(con, root["id"])
++    owner = window.WindowLO(session, lambda: None, describe=describe)
++    assert control.describe is describe
++    assert control.describe() == {
++        "run_id": run["id"], "node": root["id"], "depth": 0,
++        "run_phase": "created", "run_status": "active", "node_phase": "queued"}
++    runs.set_node(con, root["id"], status="closed")
++    runs.set_state(con, run["id"], phase="finalizing")
++    assert control.describe()["node_phase"] == "closed"
++    assert control.describe()["run_phase"] == "finalizing"
++    assert "phase" not in control.describe()
++    assert control.on_input is original_input and control.check_active is original_check
++    if outcome == "replacement":
++        control.describe = replacement
++    if outcome == "cancel":
++        entered = asyncio.Event()
++
++        async def pending():
++            entered.set()
++            try:
++                await asyncio.Future()
++            finally:
++                await asyncio.sleep(0)
++        task = asyncio.create_task(pending())
++        owner.pending.add(task)
++        await entered.wait()
++        closing = asyncio.create_task(owner.close())
++        await asyncio.sleep(0)
++        closing.cancel()
++        with pytest.raises(asyncio.CancelledError):
++            await closing
++        assert task.done()
++    elif outcome == "cleanup_error":
++        with pytest.raises(RuntimeError, match="snapshot cleanup failed"):
++            await owner.close()
++    else:
++        await owner.close()
++    await owner.close()  # ExitStack cleanup is idempotent even after an exit error.
++    assert control.describe is (replacement if outcome == "replacement" else previous)
++    assert control.on_input is original_input and control.check_active is original_check
++    con.close()
++    control.describe()  # no stale callback may read the now-closed research database
++
++
++async def test_resumed_window_rebinds_live_run_and_node_status(research):
++    con, run, root, session, control, _ = research
++    previous = control.describe
++    for phase, status in [("waiting_input", "waiting_input"), ("active", "active")]:
++        runs.set_state(con, run["id"], phase=phase, status=status)
++        owner = window.WindowLO(session, lambda: None,
++                                describe=lambda: window.node_description(con, root["id"]))
++        assert control.describe()["run_phase"] == phase
++        assert control.describe()["run_status"] == status
++        await owner.close()
++        assert control.describe is previous
++
++
++@pytest.mark.parametrize("child", [False, True])
++@pytest.mark.parametrize("outcome", ["normal", "error", "cancel"])
++async def test_headless_root_and_branch_share_live_description(research, monkeypatch, child, outcome):
++    from misaka.core import wiring
++    from misaka.core.platform import session as platform_session
++    from misaka.core.research import planner
++
++    con, run, root, session, control, _ = research
++    previous = control.describe
++    branch = runs.create_node(con, run["id"], trigger="Child", parent_id=root["id"], depth=1) if child else root
++    assert runs.acquire_driver(con, run["id"], "driver")
++    runs.prepare_runner(con, "research_branches", branch["id"])
++    run, branch = runs.get(con, run["id"]), runs.node(con, branch["id"])
++    monkeypatch.setattr(wiring, "role_session_setup", lambda *args, **kwargs: ([], object(), {}))
++    monkeypatch.setattr(planner, "_lo_session", lambda *args: run["workspace"])
++    monkeypatch.setattr(platform_session, "open_session", AsyncMock(return_value=(object(), session, None)))
++    disposed = []
++
++    async def dispose(runtime):
++        assert control.describe is previous
++        disposed.append(runtime)
++    monkeypatch.setattr(platform_session, "dispose", dispose)
++    async def drive():
++        async with window.node_session(con, {"roles_root": run["workspace"], "db": "fixture"}, run, branch):
++            description = control.describe()
++            assert description == {"run_id": run["id"], "node": branch["id"], "depth": int(child),
++                                   "run_phase": "created", "run_status": "active", "node_phase": "queued"}
++            assert control.on_input is not None
++            control.check_active()
++            runs.set_node(con, branch["id"], status="executing")
++            assert control.describe()["node_phase"] == "executing"
++            if outcome == "error":
++                raise RuntimeError("headless failed")
++            if outcome == "cancel":
++                raise asyncio.CancelledError
++    if outcome == "normal":
++        await drive()
++    else:
++        with pytest.raises(RuntimeError if outcome == "error" else asyncio.CancelledError):
++            await drive()
++    assert control.describe is previous
++    assert len(disposed) == 1
++
++
++@pytest.mark.parametrize("outcome", ["waiting", "error", "cancel"])
++async def test_foreground_workflow_binds_and_restores_description(research, monkeypatch, outcome):
++    from misaka.core.research import node
++
++    con, run, root, session, control, _ = research
++    previous = control.describe
++    monkeypatch.delenv("MISAKA_NET_PANE", raising=False)
++    monkeypatch.setattr(workflow, "_bundle", lambda *args, **kwargs: None)
++    monkeypatch.setattr(workflow, "_try_refresh_workspace_index", lambda *args: None)
++    monkeypatch.setattr(workflow, "_settle_stopped_tasks", AsyncMock())
++    monkeypatch.setattr(workflow, "settle_done_tasks", lambda *args, **kwargs: None)
++    monkeypatch.setattr(node, "HeadlessRunner", lambda *args: SimpleNamespace(close=lambda: None))
++
++    async def expand(*args, **kwargs):
++        assert control.describe() == {"run_id": run["id"], "node": root["id"], "depth": 0,
++                                      "run_phase": "active", "run_status": "active", "node_phase": "queued"}
++        if outcome == "error":
++            raise RuntimeError("expand failed")
++        if outcome == "cancel":
++            raise asyncio.CancelledError
++        return {"reason": "waiting_input", "questions": ["Which scope?"]}
++    monkeypatch.setattr(workflow, "_expand", expand)
++    if outcome == "waiting":
++        assert (await workflow.run(con, {}, object(), run_id=run["id"], session=session))["reason"] == "waiting_input"
++    else:
++        with pytest.raises(RuntimeError if outcome == "error" else asyncio.CancelledError):
++            await workflow.run(con, {}, object(), run_id=run["id"], session=session)
++    assert control.describe is previous
++    assert runs.get(con, run["id"])["driver_lock"] is None
++
++
++@pytest.mark.parametrize("resume", [False, True])
++async def test_root_description_outlives_closed_node_through_report_and_resume(research, monkeypatch, resume):
++    from misaka.core.research import node, report
++
++    con, run, root, session, control, _ = research
++    previous = control.describe
++    monkeypatch.delenv("MISAKA_NET_PANE", raising=False)
++    monkeypatch.setattr(workflow, "_bundle", lambda *args, **kwargs: None)
++    monkeypatch.setattr(workflow, "_try_refresh_workspace_index", lambda *args: None)
++    monkeypatch.setattr(workflow, "settle_done_tasks", lambda *args, **kwargs: None)
++    monkeypatch.setattr(node, "HeadlessRunner", lambda *args: SimpleNamespace(close=lambda: None))
++    runs.record_action(con, run, root, "plan", {"red_team": {"assignee": "10032"}},
++                       session_file=session.sessionManager.sessionFile, tool_call_id="plan")
++    if resume:
++        runs.set_node(con, root["id"], status="closed")
++        runs.set_state(con, run["id"], status="failed", phase="finalizing")
++
++    async def expand(*args, **kwargs):
++        assert not resume, "Resume must not repeat a closed node"
++        assert control.describe()["run_phase"] == "active"
++        runs.set_node(con, root["id"], status="closed")
++        return "closed"
++    monkeypatch.setattr(workflow, "_expand", expand)
++    seen = []
++
++    def check_finalizing(stage):
++        description = control.describe()
++        assert description["run_phase"] == "finalizing"
++        assert description["run_status"] == "active"
++        assert description["node_phase"] == "closed"
++        seen.append(stage)
++
++    def prepare(*args, **kwargs):
++        check_finalizing("draft")
++        return {"id": "draft", "sha256": "fixture", "path": str(run["workspace"] + "/draft.md")}
++
++    async def review(*args, **kwargs):
++        check_finalizing("review")
++        return "done"
++
++    def finalize(*args, **kwargs):
++        check_finalizing("final")
++        aid, path = runs.write_text(con, run["id"], "final", "Final", runs.run_path(run, "final.md"), "Fixture")
++        return {"artifact": aid, "path": path}
++    monkeypatch.setattr(report, "prepare", prepare)
++    monkeypatch.setattr(workflow, "_submit_tasks", AsyncMock(return_value={"@final-review": "review"}))
++    monkeypatch.setattr(workflow, "_drive_tasks", review)
++    monkeypatch.setattr(report, "review_receipt", lambda *args: {})
++    monkeypatch.setattr(report, "finalize", finalize)
++    result = await workflow.run(con, {}, object(), run_id=run["id"], session=session, resume=resume)
++    assert result["reason"] == "done"
++    assert seen == ["draft", "review", "final"]
++    assert control.describe is previous
++    assert runs.get(con, run["id"])["status"] == "done"

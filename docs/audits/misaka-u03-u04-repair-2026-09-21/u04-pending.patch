@@ -1,0 +1,6229 @@
+--- a/THIRD_PARTY_NOTICES.md
++++ b/THIRD_PARTY_NOTICES.md
+@@ -20,6 +20,18 @@
+ - 说明：MISAKA 的内核是 Pi 的 Python 移植，是本仓库最大的单一上游来源。分叉处在代码里
+   以 `# MISAKA fork:` 注释标出并说明理由。Pi 树内自带许可证头的两个文件
+   （`utils/ansi.ts`、`tui/src/stdin-buffer.ts`）另见下面的 ansi-regex 与 OpenTUI 两条。
++- 工具参数解析增量对照：`c7cdb460aa8a0cebef3446c4166729b8a0d97ead` 的
++  `packages/ai/src/utils/json-parse.ts`；只对齐该解析行为及相关终结调用，不表示整个
++  Pi 内核已升级至此提交。流式预览仍保留 MISAKA 的解析节流。
++
++## partial-json
++
++- 上游：https://github.com/promplate/partial-json-parser-js ，npm 包 `partial-json@0.1.7`。
++- 许可证：MIT，Copyright (c) 2023 Promplate Dev Team。
++- 本仓库位置：`misaka/ai/utils/json_parse.py` 的部分 JSON 恢复逻辑，忠实移植 Pi
++  使用的默认 `Allow.ALL` 路径，不引入 Node.js 运行时依赖。
++- 完整许可证：`misaka/ai/utils/PARTIAL_JSON_LICENSE`。
++- 固定 Pi 源码执行生成的对照样本：`tests/fixtures/pi_json_parse_c7cdb460.json`。
+ 
+ ## ansi-regex / strip-ansi
+ 
+--- a/misaka/agent/agent_loop.py
++++ b/misaka/agent/agent_loop.py
+@@ -659,10 +659,6 @@
+     config: AgentLoopConfig,
+     signal: Any | None,
+ ) -> PreparedToolCall | ImmediateToolCallOutcome:
+-    if tool_call.argumentsError is not None:
+-        return ImmediateToolCallOutcome(
+-            kind="immediate", result=create_error_tool_result(tool_call.argumentsError), isError=True,
+-        )
+     tool = next((candidate for candidate in current_context.tools or [] if candidate.name == tool_call.name), None)
+     if tool is None:
+         tool = next((candidate for candidate in current_context.tools or []
+--- a/misaka/agent/proxy.py
++++ b/misaka/agent/proxy.py
+@@ -17,6 +17,7 @@
+ import codecs
+ import json
+ import logging
++import math
+ import time
+ from collections.abc import AsyncIterator, Mapping
+ from typing import Any, Literal, NotRequired, TypedDict
+@@ -53,7 +54,7 @@
+     Usage,
+ )
+ from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
+-from misaka.ai.utils.json_parse import StreamingArgs, parse_streaming_json
++from misaka.ai.utils.json_parse import parse_streaming_json
+ from misaka.utils.values import signal_aborted
+ 
+ logger = logging.getLogger(__name__)
+@@ -209,11 +210,13 @@
+ 
+ 
+ def _serialize_context(context: Context) -> dict[str, Any]:
+-    # Keep native parse diagnostics in history, not in the upstream wire protocol.
+-    payload = context.model_dump(mode="json", exclude_none=True, exclude={
+-        "tools": True,
+-        "messages": {"__all__": {"content": {"__all__": {"argumentsError"}}}},
+-    })
++    payload = context.model_dump(mode="json", exclude_none=True, exclude={"tools"})
++    # Unlike optional metadata, parsed arguments: null is a required wire value.
++    for message in payload["messages"]:
++        if message["role"] == "assistant":
++            for block in message["content"]:
++                if block["type"] == "toolCall":
++                    block.setdefault("arguments", None)
+     if context.tools is not None:
+         payload["tools"] = []
+         for tool in context.tools:
+@@ -441,7 +444,11 @@
+         raw = f"{tool_call_buffers.get(index, '')}{proxy_event['delta']}"
+         tool_call_buffers[index] = raw
+         parsed = parse_streaming_json(raw)
+-        content.arguments = parsed if isinstance(parsed, dict) else {}
++        # Pi's `parsed || {}` retains arrays but normalizes null/false/zero/NaN.
++        content.arguments = (
++            parsed if isinstance(parsed, (dict, list))
++            or (parsed and not (isinstance(parsed, float) and math.isnan(parsed))) else {}
++        )
+         return ToolCallDeltaEvent(
+             contentIndex=index,
+             delta=proxy_event["delta"],
+@@ -465,15 +472,10 @@
+         for key in raw_keys:
+             if key in ToolCall.model_fields:
+                 setattr(content, key, getattr(finalized, key))
+-        raw = tool_call_buffers.pop(index, None)
+-        if raw and content.argumentsError is None:
+-            StreamingArgs(raw).finish_into(content)
++        tool_call_buffers.pop(index, None)
+         return ToolCallEndEvent(contentIndex=index, toolCall=content, partial=partial)
+ 
+     if event_type == "done":
+-        for index, raw in tool_call_buffers.items():
+-            if raw:
+-                StreamingArgs(raw).finish_into(_require_content(partial, index, "toolCall", "done"))
+         tool_call_buffers.clear()
+         reason = proxy_event["reason"]
+         partial.stopReason = reason
+--- a/misaka/ai/providers/amazon_bedrock.py
++++ b/misaka/ai/providers/amazon_bedrock.py
+@@ -774,7 +774,7 @@
+             continue
+         block = output.content[content_index]
+         if block.type == "toolCall":
+-            accumulated.finish_into(block)
++            block.arguments = accumulated.finish()
+     partial_json.clear()
+     # A stream can settle without stopping every block, so sweep the redacted buffers too:
+     # what is left here belongs to blocks the stream never closed.
+@@ -927,7 +927,7 @@
+         # only ever preserves ``{}`` -- but the shape has to match, not the luck.
+         accumulated = partial_json.pop(content_index, None)
+         if accumulated is not None and accumulated.raw:
+-            accumulated.finish_into(block)
++            block.arguments = accumulated.finish()
+         stream.push(ToolCallEndEvent(contentIndex=content_index, toolCall=block, partial=output))
+ 
+ 
+--- a/misaka/ai/providers/anthropic.py
++++ b/misaka/ai/providers/anthropic.py
+@@ -739,7 +739,7 @@
+                             "type": "tool_use",
+                             "id": block.id,
+                             "name": to_claude_code_name(block.name) if is_oauth else block.name,
+-                            "input": block.arguments or {},
++                            "input": block.arguments if block.arguments is not None else {},
+                         }
+                     )
+ 
+@@ -1330,7 +1330,7 @@
+                                 if is_oauth
+                                 else str(content_block.get("name") or "")
+                             ),
+-                            arguments=initial_arguments if isinstance(initial_arguments, dict) else {},
++                            arguments=initial_arguments if initial_arguments is not None else {},
+                         )
+                         output.content.append(block)
+                         provider_indexes[provider_index] = len(output.content) - 1
+@@ -1388,7 +1388,7 @@
+                         # openai-completions and openai-responses adapters.
+                         accumulated = tool_partial_json.get(provider_index)
+                         if accumulated is not None and accumulated.raw:
+-                            accumulated.finish_into(block)
++                            block.arguments = accumulated.finish()
+                         _note_empty_tool_arguments(output, block, accumulated, dropped_deltas)
+                         stream.push(ToolCallEndEvent(contentIndex=content_index, toolCall=block, partial=output))
+                     continue
+@@ -1407,13 +1407,13 @@
+                         _update_usage_from_anthropic_usage(output, usage, usage_model)
+ 
+             # A compatible endpoint may omit a block-stop event. Finalize every raw
+-            # buffer before dispatch; a streaming preview alone is never executable.
++            # buffer before dispatch so the throttled preview includes the final tail.
+             for provider_index, accumulated in tool_partial_json.items():
+                 content_index = provider_indexes.get(provider_index)
+                 if content_index is not None and accumulated.raw:
+                     block = output.content[content_index]
+                     if isinstance(block, ToolCall):
+-                        accumulated.finish_into(block)
++                        block.arguments = accumulated.finish()
+             if signal_aborted(_option(options, "signal")):
+                 raise RuntimeError("Request was aborted")
+             if output.stopReason == "pending":
+--- a/misaka/ai/providers/google_shared.py
++++ b/misaka/ai/providers/google_shared.py
+@@ -168,7 +168,7 @@
+ 
+                 if block.type == "toolCall":
+                     thought_signature = _resolve_thought_signature(is_same_provider_and_model, block.thoughtSignature)
+-                    function_call: dict[str, Any] = {"name": block.name, "args": block.arguments or {}}
++                    function_call: dict[str, Any] = {"name": block.name, "args": block.arguments if block.arguments is not None else {}}
+                     if requires_tool_call_id(model.id):
+                         function_call["id"] = block.id
+                     part = {"functionCall": function_call}
+--- a/misaka/ai/providers/mistral.py
++++ b/misaka/ai/providers/mistral.py
+@@ -674,7 +674,7 @@
+ 
+             function = _coalesce_attr(tool_call, "function") or {}
+             raw_arguments = function.get("arguments") if isinstance(function, dict) else _coalesce_attr(function, "arguments")
+-            args_delta = raw_arguments if isinstance(raw_arguments, str) else json.dumps(raw_arguments or {})
++            args_delta = raw_arguments if isinstance(raw_arguments, str) else json.dumps(_tool_arguments_or_empty(raw_arguments))
+             accumulated = partial_args_by_index.setdefault(existing_index, StreamingArgs())
+             accumulated.append(args_delta)
+             block.arguments = accumulated.arguments
+@@ -695,7 +695,7 @@
+         # that actually received something may overwrite what the tool call was born with.
+         accumulated = partial_args_by_index.get(index)
+         if accumulated is not None and accumulated.raw:
+-            accumulated.finish_into(block)
++            block.arguments = accumulated.finish()
+         stream.push(ToolCallEndEvent(contentIndex=index, toolCall=block, partial=output))
+ 
+     return saw_finish_reason
+@@ -727,6 +727,13 @@
+     if isinstance(value, Mapping):
+         return {str(key): strip_symbol_keys(entry) for key, entry in value.items()}
+     return value
++
++
++def _tool_arguments_or_empty(arguments: Any) -> Any:
++    """Pi's JavaScript `arguments || {}` preserves arrays, unlike Python's `or`."""
++    if isinstance(arguments, (dict, list)):
++        return arguments
++    return arguments if arguments and not (isinstance(arguments, float) and math.isnan(arguments)) else {}
+ 
+ 
+ def to_chat_messages(messages: list[MessageValue], supports_images: bool) -> list[dict[str, Any]]:
+@@ -775,7 +782,7 @@
+                             "type": "function",
+                             "function": {
+                                 "name": block.name,
+-                                "arguments": json.dumps(block.arguments or {}),
++                                "arguments": json.dumps(_tool_arguments_or_empty(block.arguments)),
+                             },
+                         }
+                     )
+--- a/misaka/ai/providers/openai_completions.py
++++ b/misaka/ai/providers/openai_completions.py
+@@ -301,7 +301,7 @@
+                 else:
+                     partial_args = tool_call_partial_args.get(index)
+                     if partial_args is not None and partial_args.raw:
+-                        partial_args.finish_into(block)
++                        block.arguments = partial_args.finish()
+                     stream.push(ToolCallEndEvent(contentIndex=index, toolCall=block, partial=output))
+ 
+             def ensure_text_block() -> TextContent:
+--- a/misaka/ai/providers/openai_responses_shared.py
++++ b/misaka/ai/providers/openai_responses_shared.py
+@@ -587,7 +587,7 @@
+                 previous_partial_json = current_tool_args.raw
+                 # The arguments are complete here: replace the buffer and parse it whole.
+                 current_tool_args = StreamingArgs(event.get("arguments", ""))
+-                current_tool_args.finish_into(current_block)
++                current_block.arguments = current_tool_args.finish()
+                 if current_tool_args.raw.startswith(previous_partial_json):
+                     delta = current_tool_args.raw[len(previous_partial_json) :]
+                     if delta:
+@@ -651,7 +651,7 @@
+                     output.content.append(tool_call)
+                 final_args = (current_tool_args if tool_call is current_block and current_tool_args.raw
+                               else StreamingArgs(item.get("arguments") or "{}"))
+-                final_args.finish_into(tool_call)
++                tool_call.arguments = final_args.finish()
+                 if tool_call is current_block:
+                     current_tool_args = StreamingArgs()
+                     current_block = None
+--- a/misaka/ai/providers/pi_messages.py
++++ b/misaka/ai/providers/pi_messages.py
+@@ -72,7 +72,7 @@
+ )
+ from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
+ from misaka.ai.utils.headers import headers_to_record
+-from misaka.ai.utils.json_parse import StreamingArgs, parse_streaming_json
++from misaka.ai.utils.json_parse import parse_streaming_json
+ from misaka.ai.utils.provider_env import get_provider_env_value
+ from misaka.core.http_dispatcher import createHttpxIdleTimeout
+ from misaka.utils.values import maybe_await, signal_aborted
+@@ -294,11 +294,13 @@
+     """
+     if not isinstance(context, BaseModel):
+         return context
+-    # Keep native parse diagnostics in history, not in the upstream wire protocol.
+-    payload = context.model_dump(mode="json", exclude_none=True, exclude={
+-        "tools": True,
+-        "messages": {"__all__": {"content": {"__all__": {"argumentsError"}}}},
+-    })
++    payload = context.model_dump(mode="json", exclude_none=True, exclude={"tools"})
++    # Unlike optional metadata, parsed arguments: null is a required wire value.
++    for message in payload["messages"]:
++        if message["role"] == "assistant":
++            for block in message["content"]:
++                if block["type"] == "toolCall":
++                    block.setdefault("arguments", None)
+     tools = getattr(context, "tools", None)
+     # ``is not None``, not truthiness: upstream hands the whole context to JSON.stringify,
+     # which writes ``"tools":[]`` for an empty list and omits the key only for undefined.
+@@ -386,9 +388,6 @@
+         event_type = event.get("type")
+ 
+         if event_type == "done":
+-            for index, raw in self._tool_json.items():
+-                if raw:
+-                    StreamingArgs(raw).finish_into(self._content_at(index))
+             self._tool_json.clear()
+             self._apply_terminal(event)
+             return DoneEvent(reason=event["reason"], message=self.partial)
+@@ -444,9 +443,7 @@
+             for key, value in dict(event["toolCall"]).items():
+                 if key in ToolCall.model_fields:
+                     setattr(block, key, value)
+-            raw = self._tool_json.pop(index, None)
+-            if raw and block.argumentsError is None:
+-                StreamingArgs(raw).finish_into(block)
++            self._tool_json.pop(index, None)
+             return ToolCallEndEvent(contentIndex=index, toolCall=block, partial=self.partial)
+ 
+         # Upstream's union is closed, so an unknown type is a protocol violation. TS still
+--- a/misaka/ai/types.py
++++ b/misaka/ai/types.py
+@@ -177,10 +177,8 @@
+     type: Literal["toolCall"] = "toolCall"
+     id: str
+     name: str
+-    arguments: dict[str, Any]
+-    # MISAKA fork: a lossy streaming preview is not an executable final argument set.
+-    # Persist the failure with the call so replay and provider bridges retain the fence.
+-    argumentsError: str | None = None
++    # Like Pi at runtime, preserve the parsed wire value until tool schema validation.
++    arguments: Any
+     thoughtSignature: str | None = None
+     # OpenAI Responses namespace for dynamically loaded or namespaced tools.
+     namespace: str | None = None
+--- /dev/null
++++ b/misaka/ai/utils/PARTIAL_JSON_LICENSE
+@@ -0,0 +1,21 @@
++MIT License
++
++Copyright (c) 2023 Promplate Dev Team
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE.
+--- a/misaka/ai/utils/json_parse.py
++++ b/misaka/ai/utils/json_parse.py
+@@ -1,4 +1,10 @@
+-"""Helpers for repairing and incrementally parsing provider JSON fragments."""
++"""Pi JSON parsing, with throttled streaming previews.
++
++Pi: earendil-works/pi c7cdb460aa8a0cebef3446c4166729b8a0d97ead,
++packages/ai/src/utils/json-parse.ts. The partial parser is a Python port of
++partial-json 0.1.7's default Allow.ALL path (promplate/partial-json-parser-js).
++Copyright (c) 2023 Promplate Dev Team; MIT license: PARTIAL_JSON_LICENSE.
++"""
+ 
+ from __future__ import annotations
+ 
+@@ -83,233 +89,167 @@
+ 
+ def parse_json_with_repair(json_string: str) -> TJson:
+     try:
+-        return json.loads(json_string)
+-    except json.JSONDecodeError:
++        return _json_loads(json_string)
++    except ValueError:
+         repaired_json = repair_json(json_string)
+         if repaired_json != json_string:
+-            return json.loads(repaired_json)
++            return _json_loads(repaired_json)
+         raise
+ 
+ 
+-_PARTIAL_LITERALS = ("true", "false", "null")
+-
+-
+-def _unterminated_escape_start(text: str) -> int | None:
+-    """Index of a trailing ``\\uXXX`` that never got its fourth hex digit."""
+-    start = text.rfind("\\u")
+-    if start < 0 or len(text) - start > 5:
+-        return None
+-    # Only a real escape counts: `\\\\u` is a literal backslash followed by `u`.
+-    backslashes = len(text[:start + 1]) - len(text[:start + 1].rstrip("\\"))
+-    if backslashes % 2 == 0:
+-        return None
+-    return start if all(c in "0123456789abcdefABCDEF" for c in text[start + 2:]) else None
+-
+-
+-def _complete_json_prefix(partial_json: str) -> str | None:
+-    """Close a truncated JSON prefix the way ``partial-json`` does, at every depth.
+-
+-    Three rules, applied uniformly rather than only to the outermost object -- which is
+-    what an earlier revision did, leaving nested values wrong:
+-
+-    * a key with no value yet is dropped (``{"path`` -> ``{}``, ``{"a": {"k`` -> ``{"a": {}}``)
+-    * a value that has begun is completed (``{"a": "he`` -> ``{"a": "he"}``)
+-    * a truncated bare literal is finished (``"ok": t`` -> ``true``); an ambiguous prefix
+-      is dropped instead of guessed
+-
+-    Returns ``None`` when the text is already complete or does not start a container, so
+-    the existing repair chain keeps handling everything this does not cover.
+-    """
+-    text = partial_json.strip()
+-    if not text:
+-        return None
+-
+-    out: list[str] = []
+-    stack: list[str] = []
+-    in_string = False
+-    escaped = False
++# JSON.parse uses IEEE-754 numbers and rejects the non-JSON constants accepted by
++# Python's decoder. partial-json handles those constants itself on the fallback path.
++def _json_number(value: str) -> int | float:
++    number = float(value)
++    return int(number) if number.is_integer() and (number != 0 or not value.startswith("-")) else number
++
++
++def _invalid_constant(value: str):
++    raise ValueError(f"Invalid JSON constant: {value}")
++
++
++def _json_loads(value: str) -> Any:
++    return json.loads(value, parse_int=_json_number, parse_constant=_invalid_constant)
++
++
++_JS_WHITESPACE = " \t\n\r\v\f\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
++
++
++def _parse_partial_json(value: str) -> Any:
++    """partial-json 0.1.7, Allow.ALL: preserve its recovery decisions verbatim."""
++    text = value.strip(_JS_WHITESPACE)
++    length = len(text)
+     index = 0
+-    # Index in `out` just past the last element/pair that is safe to keep, per container.
+-    safe: list[int] = []
+-
+-    while index < len(text):
+-        char = text[index]
+-        if in_string:
+-            out.append(char)
+-            if escaped:
+-                escaped = False
+-            elif char == "\\":
+-                escaped = True
+-            elif char == '"':
+-                in_string = False
+-                if stack and stack[-1] == "value":
+-                    stack.pop()
+-                    safe[-1] = len(out)
+-                elif stack and stack[-1] == "[":
+-                    # An array has elements, not keys: a finished string is complete.
+-                    safe[-1] = len(out)
+-            index += 1
+-            continue
+-
+-        if char == '"':
+-            in_string = True
+-            out.append(char)
+-        elif char in "{[":
+-            out.append(char)
+-            stack.append(char)
+-            safe.append(len(out))
+-        elif char in "}]":
+-            out.append(char)
+-            if stack and stack[-1] in "{[":
+-                stack.pop()
+-                safe.pop()
+-                # The container that just closed *was* the pending value, so that slot is
+-                # filled too. Leaving the marker makes the unwind close one bracket twice.
+-                if stack and stack[-1] == "value":
+-                    stack.pop()
+-                if safe:
+-                    safe[-1] = len(out)
+-        elif char == ":":
+-            out.append(char)
+-            stack.append("value")
+-        elif char == ",":
+-            if stack and stack[-1] == "value":
+-                stack.pop()
+-            out.append(char)
+-            if safe:
+-                safe[-1] = len(out) - 1
+-        elif char.isspace():
+-            out.append(char)
+-        else:
+-            # A bare literal or number: consume the whole run so it can be judged at once.
+-            run_end = index
+-            while run_end < len(text) and (text[run_end].isalnum() or text[run_end] in "+-.eE"):
+-                run_end += 1
+-            if run_end == index:
+-                # Reject unknown syntax; skipping it would silently change the value.
+-                return None
+-            token = text[index:run_end]
+-            completed = _complete_bare_token(token, run_end >= len(text))
+-            if completed is None:
+-                index = run_end
+-                continue
+-            out.append(completed)
+-            if stack and stack[-1] == "value":
+-                stack.pop()
+-            if safe:
+-                safe[-1] = len(out)
+-            index = run_end
+-            continue
+-        index += 1
+-
+-    if not stack and not in_string:
+-        # Nothing is open. Either the text was already well-formed -- leave it to the
+-        # caller's ordinary parse -- or a bare top-level token was completed (`tru`).
+-        produced = "".join(out)
+-        return None if produced == text or not produced else produced
+-
+-    # Unwind: cut each open container back to its last safe point and close it.
+-    if in_string:
+-        # An escape cut in half (`"a \\` or `"a \\u00e`) cannot be closed -- appending the
+-        # quote would escape it, or leave a short \\u. Upstream keeps the text before it.
+-        text_so_far = "".join(out)
+-        trailing = len(text_so_far) - len(text_so_far.rstrip("\\"))
+-        if trailing % 2:
+-            del out[len(out) - 1:]
+-        else:
+-            short = _unterminated_escape_start(text_so_far)
+-            if short is not None:
+-                del out[short:]
+-        if not stack:
+-            # A bare top-level string (`"q\\`): there is no container, just the string.
+-            out.append('"')
+-        elif stack[-1] == "value":
+-            # A value that had begun gets closed -- upstream keeps what streamed so far.
+-            out.append('"')
+-            stack.pop()
+-            if safe:
+-                safe[-1] = len(out)
+-        elif stack and stack[-1] == "[":
+-            # Inside an array the streaming string is an element, so it is completed the
+-            # same way a value is.
+-            out.append('"')
+-            if safe:
+-                safe[-1] = len(out)
+-        # A *key* that is still streaming needs no branch: it has no value yet, so the
+-        # container unwind below cuts back past it anyway -- closing its quote here would
+-        # only leave `{"p"}`, which the same cut then removes.
+-    while stack:
+-        opener = stack.pop()
+-        if opener not in "{[":
+-            continue  # a pending value marker: nothing to close, the pair is cut instead
+-        cut = safe.pop()
+-        del out[cut:]
+-        out.append("}" if opener == "{" else "]")
+-        if safe:
+-            safe[-1] = len(out)
+-    return "".join(out)
+-
+-
+-def _complete_bare_token(token: str, at_end: bool) -> str | None:
+-    """A finished literal/number stays; a truncated one is completed or dropped."""
+-    if not at_end:
+-        return token
+-    for literal in _PARTIAL_LITERALS:
+-        if literal == token:
+-            return token
+-    matches = [literal for literal in _PARTIAL_LITERALS if literal.startswith(token)]
+-    if len(matches) == 1:
+-        return matches[0]
+-    if matches:
+-        return None  # ambiguous prefix: drop rather than guess
++
++    def char() -> str:
++        return text[index] if index < length else ""
++
++    def substring(start: int, end: int | None = None) -> str:
++        # JS substring clamps negative indices and swaps an inverted range.
++        start = min(length, max(0, start))
++        end = length if end is None else min(length, max(0, end))
++        return text[min(start, end):max(start, end)]
++
++    def skip_blank() -> None:
++        nonlocal index
++        while index < length and text[index] in " \n\r\t":
++            index += 1
++
++    def parse_string() -> Any:
++        nonlocal index
++        start = index
++        escaped = False
++        index += 1
++        while index < length and (char() != '"' or (escaped and text[index - 1] == "\\")):
++            escaped = not escaped if char() == "\\" else False
++            index += 1
++        if char() == '"':
++            index += 1
++            return _json_loads(substring(start, index - int(escaped)))
++        try:
++            return _json_loads(substring(start, index - int(escaped)) + '"')
++        except ValueError:
++            return _json_loads(substring(start, text.rfind("\\")) + '"')
++
++    def parse_object() -> dict[str, Any]:
++        nonlocal index
++        index += 1
++        skip_blank()
++        result = {}
++        try:
++            while char() != "}":
++                skip_blank()
++                if index >= length:
++                    return result
++                key = parse_string()
++                skip_blank()
++                index += 1  # Upstream skips a colon without checking it.
++                value = parse_any()
++                # Assignment to JS Object.prototype.__proto__ creates no own property.
++                if key != "__proto__":
++                    result[key] = value
++                skip_blank()
++                if char() == ",":
++                    index += 1
++        except (ValueError, RecursionError):
++            return result
++        index += 1
++        return result
++
++    def parse_array() -> list[Any]:
++        nonlocal index
++        index += 1
++        result = []
++        try:
++            while char() != "]":
++                result.append(parse_any())
++                skip_blank()
++                if char() == ",":
++                    index += 1
++        except (ValueError, RecursionError):
++            return result
++        index += 1
++        return result
++
++    def parse_number() -> Any:
++        nonlocal index
++        if index == 0:
++            try:
++                return _json_loads(text)
++            except ValueError:
++                return _json_loads(substring(0, text.rfind("e")))
++        start = index
++        if char() == "-":
++            index += 1
++        while index < length and char() not in ",]}":
++            index += 1
++        try:
++            return _json_loads(substring(start, index))
++        except ValueError:
++            if substring(start, index) == "-":
++                raise
++            return _json_loads(substring(start, text.rfind("e")))
++
++    def parse_any() -> Any:
++        nonlocal index
++        skip_blank()
++        if index >= length:
++            raise ValueError("Unexpected end of input")
++        if char() == '"':
++            return parse_string()
++        if char() == "{":
++            return parse_object()
++        if char() == "[":
++            return parse_array()
++        for literal, parsed in (("null", None), ("true", True), ("false", False),
++                                ("Infinity", float("inf")), ("-Infinity", -float("inf")),
++                                ("NaN", float("nan"))):
++            remaining = length - index
++            if text.startswith(literal, index) or (
++                remaining < len(literal) and literal.startswith(text[index:])
++                and (literal != "-Infinity" or remaining > 1)
++            ):
++                index += len(literal)
++                return parsed
++        return parse_number()
++
++    return parse_any()
++
++
++def parse_streaming_json(partial_json: str | None) -> TJson:
++    if partial_json is None or not partial_json.strip(_JS_WHITESPACE):
++        return {}
+     try:
+-        json.loads(token)
+-    except ValueError:
+-        # Only a half-written *exponent* is recoverable: upstream yields -2 for `-2e` and
+-        # 1.2 for `1.2e-`, but drops `1.` and `0.` entirely -- a fraction with no digits
+-        # invalidates the number rather than truncating it.
+-        mantissa, marker, _ = token.partition("e") if "e" in token else token.partition("E")
+-        if not marker:
+-            return None
+-        try:
+-            json.loads(mantissa)
+-        except ValueError:
+-            return None
+-        return mantissa
+-    return token
+-
+-
+-def _or_empty(value: Any) -> TJson:
+-    """Upstream's completion path ends in ``?? {}``: a completed *top-level* null is
+-    indistinguishable from "nothing parsed", so both become the empty object.
+-
+-    Only the top level, and only on this path: a null nested inside a container is a real
+-    value and survives, and a document that is already complete keeps its own null.
+-    """
+-    return {} if value is None else value
+-
+-
+-def parse_streaming_json(partial_json: str | None) -> TJson:
+-    if partial_json is None or partial_json.strip() == "":
+-        return {}
+-
+-    try:
+-        # A complete document parses as itself, null included -- the coalescing below
+-        # belongs to the completion path only.
+         return parse_json_with_repair(partial_json)
+-    except Exception:  # noqa: BLE001 - JSONDecodeError normally, RecursionError when nesting is pathological
+-        trimmed = _complete_json_prefix(partial_json)
+-        if trimmed is not None:
++    except (ValueError, RecursionError):
++        try:
++            value = _parse_partial_json(partial_json)
++        except (ValueError, RecursionError):
+             try:
+-                # No post-trimming: the completer already decided, escape-aware, how much
+-                # of each string survives. Re-clipping by raw character count would cut
+-                # `"line\n` back to `line`.
+-                return _or_empty(json.loads(trimmed))
+-            except ValueError:
+-                pass
+-        # Nothing recoverable. Upstream's parser also yields the empty object for a
+-        # prefix that has not produced a single complete value yet (`3.`, `-`).
+-        return {}
++                value = _parse_partial_json(repair_json(partial_json))
++            except (ValueError, RecursionError):
++                return {}
++        return {} if value is None else value
+ 
+ 
+ STREAMING_PARSE_THRESHOLD_BYTES = 2048
+@@ -321,7 +261,7 @@
+     Providers deliver tool arguments as JSON fragments, and every adapter used to hand
+     ``parse_streaming_json`` the *whole* accumulated buffer again on every fragment.
+     That parse is two to three full scans of the buffer (``json.loads``, a
+-    character-by-character repair pass, then ``json_repair``), so a 38KB Write argument
++    character-by-character repair pass, then partial parsing), so a 38KB Write argument
+     arriving in 20-character fragments was parsed ~1950 times over growing prefixes --
+     measured at 31s of loop-thread CPU for one tool call.
+ 
+@@ -355,26 +295,10 @@
+         return self._value
+ 
+     def finish(self) -> Any:
+-        """MISAKA fork: final arguments require a complete object, never prefix recovery.
+-
+-        Keep the existing complete-string escape repair and empty/no-argument convention.
+-        Incremental UI previews still use the permissive parser in arguments.
+-        """
+-        value = parse_json_with_repair(self._raw) if self._raw.strip() else {}
+-        if not isinstance(value, dict):
+-            raise ValueError("Final tool arguments must be a JSON object")  # noqa: TRY004 - malformed wire value, same contract as JSONDecodeError
+-        self._value = value
+-        self._parsed_length = len(self._raw)
++        """Finalize with Pi's best-effort parser, without the preview throttle."""
++        if self._parsed_length != len(self._raw):
++            self._parse()
+         return self._value
+-
+-    def finish_into(self, tool_call) -> None:
+-        """Keep malformed calls in the batch, but return an error receipt instead of executing."""
+-        try:
+-            tool_call.arguments = self.finish()
+-            tool_call.argumentsError = None
+-        except (ValueError, RecursionError):
+-            tool_call.arguments = {}
+-            tool_call.argumentsError = "Invalid final tool arguments; resend a complete JSON object."
+ 
+     def _is_stale(self) -> bool:
+         total = len(self._raw)
+--- /dev/null
++++ b/tests/fixtures/pi_json_parse_c7cdb460.json
+@@ -0,0 +1,5024 @@
++{
++  "metadata": {
++    "pi_commit": "c7cdb460aa8a0cebef3446c4166729b8a0d97ead",
++    "pi_path": "packages/ai/src/utils/json-parse.ts",
++    "pi_sha256": "828440b19a64773f696ced9461166913ddaddd8479697fbde32d3f298872b153",
++    "partial_json": "0.1.7",
++    "note": "Generated from unmodified pinned Pi parser with partial-json 0.1.7; complete inputs, every prefix, deterministic malformed mutations. $number encodes non-finite values and negative zero."
++  },
++  "cases": [
++    {
++      "id": 0,
++      "raw": null,
++      "expected": {}
++    },
++    {
++      "id": 1,
++      "raw": "",
++      "expected": {}
++    },
++    {
++      "id": 2,
++      "raw": " ",
++      "expected": {}
++    },
++    {
++      "id": 3,
++      "raw": "\n\t",
++      "expected": {}
++    },
++    {
++      "id": 4,
++      "raw": "{}",
++      "expected": {}
++    },
++    {
++      "id": 5,
++      "raw": "[]",
++      "expected": []
++    },
++    {
++      "id": 6,
++      "raw": "null",
++      "expected": null
++    },
++    {
++      "id": 7,
++      "raw": "true",
++      "expected": true
++    },
++    {
++      "id": 8,
++      "raw": "false",
++      "expected": false
++    },
++    {
++      "id": 9,
++      "raw": "0",
++      "expected": 0
++    },
++    {
++      "id": 10,
++      "raw": "-0",
++      "expected": {
++        "$number": "-0"
++      }
++    },
++    {
++      "id": 11,
++      "raw": "-0.0",
++      "expected": {
++        "$number": "-0"
++      }
++    },
++    {
++      "id": 12,
++      "raw": "-",
++      "expected": {}
++    },
++    {
++      "id": 13,
++      "raw": "1.",
++      "expected": {}
++    },
++    {
++      "id": 14,
++      "raw": "1e",
++      "expected": 1
++    },
++    {
++      "id": 15,
++      "raw": "1E",
++      "expected": {}
++    },
++    {
++      "id": 16,
++      "raw": "1e+",
++      "expected": 1
++    },
++    {
++      "id": 17,
++      "raw": "1E+",
++      "expected": {}
++    },
++    {
++      "id": 18,
++      "raw": "1e-",
++      "expected": 1
++    },
++    {
++      "id": 19,
++      "raw": "1E-",
++      "expected": {}
++    },
++    {
++      "id": 20,
++      "raw": "1e999",
++      "expected": {
++        "$number": "Infinity"
++      }
++    },
++    {
++      "id": 21,
++      "raw": "9007199254740993",
++      "expected": 9007199254740992
++    },
++    {
++      "id": 22,
++      "raw": "9999999999999999999999999",
++      "expected": 1e+25
++    },
++    {
++      "id": 23,
++      "raw": "NaN",
++      "expected": {
++        "$number": "NaN"
++      }
++    },
++    {
++      "id": 24,
++      "raw": "Na",
++      "expected": {
++        "$number": "NaN"
++      }
++    },
++    {
++      "id": 25,
++      "raw": "N",
++      "expected": {
++        "$number": "NaN"
++      }
++    },
++    {
++      "id": 26,
++      "raw": "Infinity",
++      "expected": {
++        "$number": "Infinity"
++      }
++    },
++    {
++      "id": 27,
++      "raw": "Inf",
++      "expected": {
++        "$number": "Infinity"
++      }
++    },
++    {
++      "id": 28,
++      "raw": "I",
++      "expected": {
++        "$number": "Infinity"
++      }
++    },
++    {
++      "id": 29,
++      "raw": "-Infinity",
++      "expected": {
++        "$number": "-Infinity"
++      }
++    },
++    {
++      "id": 30,
++      "raw": "-Inf",
++      "expected": {
++        "$number": "-Infinity"
++      }
++    },
++    {
++      "id": 31,
++      "raw": "-I",
++      "expected": {
++        "$number": "-Infinity"
++      }
++    },
++    {
++      "id": 32,
++      "raw": "-NaN",
++      "expected": {}
++    },
++    {
++      "id": 33,
++      "raw": "n",
++      "expected": {}
++    },
++    {
++      "id": 34,
++      "raw": "nu",
++      "expected": {}
++    },
++    {
++      "id": 35,
++      "raw": "nul",
++      "expected": {}
++    },
++    {
++      "id": 36,
++      "raw": "t",
++      "expected": true
++    },
++    {
++      "id": 37,
++      "raw": "tr",
++      "expected": true
++    },
++    {
++      "id": 38,
++      "raw": "tru",
++      "expected": true
++    },
++    {
++      "id": 39,
++      "raw": "f",
++      "expected": false
++    },
++    {
++      "id": 40,
++      "raw": "fa",
++      "expected": false
++    },
++    {
++      "id": 41,
++      "raw": "fal",
++      "expected": false
++    },
++    {
++      "id": 42,
++      "raw": "fals",
++      "expected": false
++    },
++    {
++      "id": 43,
++      "raw": "tru x",
++      "expected": {}
++    },
++    {
++      "id": 44,
++      "raw": "true false",
++      "expected": true
++    },
++    {
++      "id": 45,
++      "raw": "not-json",
++      "expected": {}
++    },
++    {
++      "id": 46,
++      "raw": "undefined",
++      "expected": {}
++    },
++    {
++      "id": 47,
++      "raw": "{\"note\":\"an \"unescaped\" quote\"}",
++      "expected": {
++        "note": "an "
++      }
++    },
++    {
++      "id": 48,
++      "raw": "{\"note\":\"half",
++      "expected": {
++        "note": "half"
++      }
++    },
++    {
++      "id": 49,
++      "raw": "{\"k\":truX}",
++      "expected": {}
++    },
++    {
++      "id": 50,
++      "raw": "{\"k\":1.}",
++      "expected": {}
++    },
++    {
++      "id": 51,
++      "raw": "{\"k\":1e}",
++      "expected": {
++        "k": 1
++      }
++    },
++    {
++      "id": 52,
++      "raw": "{\"k\":1E}",
++      "expected": {}
++    },
++    {
++      "id": 53,
++      "raw": "{\"k\":null rubbish}",
++      "expected": {
++        "k": null
++      }
++    },
++    {
++      "id": 54,
++      "raw": "{\"a\":1 \"b\":2}",
++      "expected": {}
++    },
++    {
++      "id": 55,
++      "raw": "{\"a\" 1}",
++      "expected": {}
++    },
++    {
++      "id": 56,
++      "raw": "{\"a\":1,}",
++      "expected": {
++        "a": 1
++      }
++    },
++    {
++      "id": 57,
++      "raw": "{\"a\":1,,\"b\":2}",
++      "expected": {
++        "a": 1
++      }
++    },
++    {
++      "id": 58,
++      "raw": "[1,,2]",
++      "expected": [
++        1
++      ]
++    },
++    {
++      "id": 59,
++      "raw": "[1 2]",
++      "expected": []
++    },
++    {
++      "id": 60,
++      "raw": "[1,2,]",
++      "expected": [
++        1,
++        2
++      ]
++    },
++    {
++      "id": 61,
++      "raw": "{\"__proto__\":{\"test\":1},\"ok\":2",
++      "expected": {
++        "ok": 2
++      }
++    },
++    {
++      "id": 62,
++      "raw": "{\"a\":1,\"a\":2",
++      "expected": {
++        "a": 2
++      }
++    },
++    {
++      "id": 63,
++      "raw": "{\"a\":\"raw\nline\"}",
++      "expected": {
++        "a": "raw\nline"
++      }
++    },
++    {
++      "id": 64,
++      "raw": "{\"a\":\"bad\\qescape\"}",
++      "expected": {
++        "a": "bad\\qescape"
++      }
++    },
++    {
++      "id": 65,
++      "raw": "{\"a\":\"bad\\q",
++      "expected": {
++        "a": "bad"
++      }
++    },
++    {
++      "id": 66,
++      "raw": "\"bad\\q",
++      "expected": "bad"
++    },
++    {
++      "id": 67,
++      "raw": "\"\\u12",
++      "expected": ""
++    },
++    {
++      "id": 68,
++      "raw": "\"a\\",
++      "expected": "a"
++    },
++    {
++      "id": 69,
++      "raw": "\"\\uD800\"",
++      "expected": "\ud800"
++    },
++    {
++      "id": 70,
++      "raw": "{\"a\":NaN,\"b\":Inf",
++      "expected": {
++        "a": {
++          "$number": "NaN"
++        },
++        "b": {
++          "$number": "Infinity"
++        }
++      }
++    },
++    {
++      "id": 71,
++      "raw": "[Infinity,-Infinity,NaN]",
++      "expected": [
++        {
++          "$number": "Infinity"
++        },
++        {
++          "$number": "-Infinity"
++        },
++        {
++          "$number": "NaN"
++        }
++      ]
++    },
++    {
++      "id": 72,
++      "raw": "﻿{\"a\":1}﻿",
++      "expected": {
++        "a": 1
++      }
++    },
++    {
++      "id": 73,
++      "raw": "
+\ No newline at end of file
++{\"a\":1}
+\ No newline at end of file
++",
++      "expected": {}
++    },
++    {
++      "id": 74,
++      "raw": "{ \"a\":1}",
++      "expected": {}
++    },
++    {
++      "id": 75,
++      "raw": "\"x\" junk",
++      "expected": "x"
++    },
++    {
++      "id": 76,
++      "raw": "[true]junk",
++      "expected": [
++        true
++      ]
++    },
++    {
++      "id": 77,
++      "raw": "{}junk",
++      "expected": {}
++    },
++    {
++      "id": 78,
++      "raw": "{",
++      "expected": {}
++    },
++    {
++      "id": 79,
++      "raw": "{\"",
++      "expected": {}
++    },
++    {
++      "id": 80,
++      "raw": "{\"n",
++      "expected": {}
++    },
++    {
++      "id": 81,
++      "raw": "{\"no",
++      "expected": {}
++    },
++    {
++      "id": 82,
++      "raw": "{\"not",
++      "expected": {}
++    },
++    {
++      "id": 83,
++      "raw": "{\"note",
++      "expected": {}
++    },
++    {
++      "id": 84,
++      "raw": "{\"note\"",
++      "expected": {}
++    },
++    {
++      "id": 85,
++      "raw": "{\"note\":",
++      "expected": {}
++    },
++    {
++      "id": 86,
++      "raw": "{\"note\":\"",
++      "expected": {
++        "note": ""
++      }
++    },
++    {
++      "id": 87,
++      "raw": "{\"note\":\"a",
++      "expected": {
++        "note": "a"
++      }
++    },
++    {
++      "id": 88,
++      "raw": "{\"note\":\"an",
++      "expected": {
++        "note": "an"
++      }
++    },
++    {
++      "id": 89,
++      "raw": "{\"note\":\"an ",
++      "expected": {
++        "note": "an"
++      }
++    },
++    {
++      "id": 90,
++      "raw": "{\"note\":\"an \\",
++      "expected": {
++        "note": "an "
++      }
++    },
++    {
++      "id": 91,
++      "raw": "{\"note\":\"an \\\"",
++      "expected": {
++        "note": "an \""
++      }
++    },
++    {
++      "id": 92,
++      "raw": "{\"note\":\"an \\\"e",
++      "expected": {
++        "note": "an \"e"
++      }
++    },
++    {
++      "id": 93,
++      "raw": "{\"note\":\"an \\\"es",
++      "expected": {
++        "note": "an \"es"
++      }
++    },
++    {
++      "id": 94,
++      "raw": "{\"note\":\"an \\\"esc",
++      "expected": {
++        "note": "an \"esc"
++      }
++    },
++    {
++      "id": 95,
++      "raw": "{\"note\":\"an \\\"esca",
++      "expected": {
++        "note": "an \"esca"
++      }
++    },
++    {
++      "id": 96,
++      "raw": "{\"note\":\"an \\\"escap",
++      "expected": {
++        "note": "an \"escap"
++      }
++    },
++    {
++      "id": 97,
++      "raw": "{\"note\":\"an \\\"escape",
++      "expected": {
++        "note": "an \"escape"
++      }
++    },
++    {
++      "id": 98,
++      "raw": "{\"note\":\"an \\\"escaped",
++      "expected": {
++        "note": "an \"escaped"
++      }
++    },
++    {
++      "id": 99,
++      "raw": "{\"note\":\"an \\\"escaped\\",
++      "expected": {
++        "note": "an \"escaped"
++      }
++    },
++    {
++      "id": 100,
++      "raw": "{\"note\":\"an \\\"escaped\\\"",
++      "expected": {
++        "note": "an \"escaped\""
++      }
++    },
++    {
++      "id": 101,
++      "raw": "{\"note\":\"an \\\"escaped\\\" ",
++      "expected": {
++        "note": "an \"escaped\""
++      }
++    },
++    {
++      "id": 102,
++      "raw": "{\"note\":\"an \\\"escaped\\\" q",
++      "expected": {
++        "note": "an \"escaped\" q"
++      }
++    },
++    {
++      "id": 103,
++      "raw": "{\"note\":\"an \\\"escaped\\\" qu",
++      "expected": {
++        "note": "an \"escaped\" qu"
++      }
++    },
++    {
++      "id": 104,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quo",
++      "expected": {
++        "note": "an \"escaped\" quo"
++      }
++    },
++    {
++      "id": 105,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quot",
++      "expected": {
++        "note": "an \"escaped\" quot"
++      }
++    },
++    {
++      "id": 106,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote",
++      "expected": {
++        "note": "an \"escaped\" quote"
++      }
++    },
++    {
++      "id": 107,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\"",
++      "expected": {
++        "note": "an \"escaped\" quote"
++      }
++    },
++    {
++      "id": 108,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\",",
++      "expected": {
++        "note": "an \"escaped\" quote"
++      }
++    },
++    {
++      "id": 109,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\",\"",
++      "expected": {
++        "note": "an \"escaped\" quote"
++      }
++    },
++    {
++      "id": 110,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\",\"b",
++      "expected": {
++        "note": "an \"escaped\" quote"
++      }
++    },
++    {
++      "id": 111,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\",\"bo",
++      "expected": {
++        "note": "an \"escaped\" quote"
++      }
++    },
++    {
++      "id": 112,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\",\"boo",
++      "expected": {
++        "note": "an \"escaped\" quote"
++      }
++    },
++    {
++      "id": 113,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\",\"bool",
++      "expected": {
++        "note": "an \"escaped\" quote"
++      }
++    },
++    {
++      "id": 114,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\",\"bool\"",
++      "expected": {
++        "note": "an \"escaped\" quote"
++      }
++    },
++    {
++      "id": 115,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\",\"bool\":",
++      "expected": {
++        "note": "an \"escaped\" quote"
++      }
++    },
++    {
++      "id": 116,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\",\"bool\":t",
++      "expected": {
++        "note": "an \"escaped\" quote",
++        "bool": true
++      }
++    },
++    {
++      "id": 117,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\",\"bool\":tr",
++      "expected": {
++        "note": "an \"escaped\" quote",
++        "bool": true
++      }
++    },
++    {
++      "id": 118,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\",\"bool\":tru",
++      "expected": {
++        "note": "an \"escaped\" quote",
++        "bool": true
++      }
++    },
++    {
++      "id": 119,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\",\"bool\":true",
++      "expected": {
++        "note": "an \"escaped\" quote",
++        "bool": true
++      }
++    },
++    {
++      "id": 120,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\",\"bool\":true,",
++      "expected": {
++        "note": "an \"escaped\" quote",
++        "bool": true
++      }
++    },
++    {
++      "id": 121,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\",\"bool\":true,\"",
++      "expected": {
++        "note": "an \"escaped\" quote",
++        "bool": true
++      }
++    },
++    {
++      "id": 122,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\",\"bool\":true,\"n",
++      "expected": {
++        "note": "an \"escaped\" quote",
++        "bool": true
++      }
++    },
++    {
++      "id": 123,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\",\"bool\":true,\"nu",
++      "expected": {
++        "note": "an \"escaped\" quote",
++        "bool": true
++      }
++    },
++    {
++      "id": 124,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\",\"bool\":true,\"nul",
++      "expected": {
++        "note": "an \"escaped\" quote",
++        "bool": true
++      }
++    },
++    {
++      "id": 125,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\",\"bool\":true,\"null",
++      "expected": {
++        "note": "an \"escaped\" quote",
++        "bool": true
++      }
++    },
++    {
++      "id": 126,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\",\"bool\":true,\"null\"",
++      "expected": {
++        "note": "an \"escaped\" quote",
++        "bool": true
++      }
++    },
++    {
++      "id": 127,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\",\"bool\":true,\"null\":",
++      "expected": {
++        "note": "an \"escaped\" quote",
++        "bool": true
++      }
++    },
++    {
++      "id": 128,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\",\"bool\":true,\"null\":n",
++      "expected": {
++        "note": "an \"escaped\" quote",
++        "bool": true,
++        "null": null
++      }
++    },
++    {
++      "id": 129,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\",\"bool\":true,\"null\":nu",
++      "expected": {
++        "note": "an \"escaped\" quote",
++        "bool": true,
++        "null": null
++      }
++    },
++    {
++      "id": 130,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\",\"bool\":true,\"null\":nul",
++      "expected": {
++        "note": "an \"escaped\" quote",
++        "bool": true,
++        "null": null
++      }
++    },
++    {
++      "id": 131,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\",\"bool\":true,\"null\":null",
++      "expected": {
++        "note": "an \"escaped\" quote",
++        "bool": true,
++        "null": null
++      }
++    },
++    {
++      "id": 132,
++      "raw": "{\"note\":\"an \\\"escaped\\\" quote\",\"bool\":true,\"null\":null}",
++      "expected": {
++        "note": "an \"escaped\" quote",
++        "bool": true,
++        "null": null
++      }
++    },
++    {
++      "id": 133,
++      "raw": "{\"a",
++      "expected": {}
++    },
++    {
++      "id": 134,
++      "raw": "{\"a\"",
++      "expected": {}
++    },
++    {
++      "id": 135,
++      "raw": "{\"a\":",
++      "expected": {}
++    },
++    {
++      "id": 136,
++      "raw": "{\"a\":{",
++      "expected": {
++        "a": {}
++      }
++    },
++    {
++      "id": 137,
++      "raw": "{\"a\":{\"",
++      "expected": {
++        "a": {}
++      }
++    },
++    {
++      "id": 138,
++      "raw": "{\"a\":{\"b",
++      "expected": {
++        "a": {}
++      }
++    },
++    {
++      "id": 139,
++      "raw": "{\"a\":{\"b\"",
++      "expected": {
++        "a": {}
++      }
++    },
++    {
++      "id": 140,
++      "raw": "{\"a\":{\"b\":",
++      "expected": {
++        "a": {}
++      }
++    },
++    {
++      "id": 141,
++      "raw": "{\"a\":{\"b\":[",
++      "expected": {
++        "a": {
++          "b": []
++        }
++      }
++    },
++    {
++      "id": 142,
++      "raw": "{\"a\":{\"b\":[1",
++      "expected": {
++        "a": {
++          "b": [
++            1
++          ]
++        }
++      }
++    },
++    {
++      "id": 143,
++      "raw": "{\"a\":{\"b\":[1,",
++      "expected": {
++        "a": {
++          "b": [
++            1
++          ]
++        }
++      }
++    },
++    {
++      "id": 144,
++      "raw": "{\"a\":{\"b\":[1,-",
++      "expected": {
++        "a": {
++          "b": [
++            1
++          ]
++        }
++      }
++    },
++    {
++      "id": 145,
++      "raw": "{\"a\":{\"b\":[1,-2",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2
++          ]
++        }
++      }
++    },
++    {
++      "id": 146,
++      "raw": "{\"a\":{\"b\":[1,-2.",
++      "expected": {
++        "a": {
++          "b": [
++            1
++          ]
++        }
++      }
++    },
++    {
++      "id": 147,
++      "raw": "{\"a\":{\"b\":[1,-2.5",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5
++          ]
++        }
++      }
++    },
++    {
++      "id": 148,
++      "raw": "{\"a\":{\"b\":[1,-2.5,",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5
++          ]
++        }
++      }
++    },
++    {
++      "id": 149,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0
++          ]
++        }
++      }
++    },
++    {
++      "id": 150,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0
++          ]
++        }
++      }
++    },
++    {
++      "id": 151,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,t",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true
++          ]
++        }
++      }
++    },
++    {
++      "id": 152,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,tr",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true
++          ]
++        }
++      }
++    },
++    {
++      "id": 153,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,tru",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true
++          ]
++        }
++      }
++    },
++    {
++      "id": 154,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true
++          ]
++        }
++      }
++    },
++    {
++      "id": 155,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true
++          ]
++        }
++      }
++    },
++    {
++      "id": 156,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,f",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false
++          ]
++        }
++      }
++    },
++    {
++      "id": 157,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,fa",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false
++          ]
++        }
++      }
++    },
++    {
++      "id": 158,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,fal",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false
++          ]
++        }
++      }
++    },
++    {
++      "id": 159,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,fals",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false
++          ]
++        }
++      }
++    },
++    {
++      "id": 160,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false
++          ]
++        }
++      }
++    },
++    {
++      "id": 161,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false
++          ]
++        }
++      }
++    },
++    {
++      "id": 162,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,n",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null
++          ]
++        }
++      }
++    },
++    {
++      "id": 163,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,nu",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null
++          ]
++        }
++      }
++    },
++    {
++      "id": 164,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,nul",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null
++          ]
++        }
++      }
++    },
++    {
++      "id": 165,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null
++          ]
++        }
++      }
++    },
++    {
++      "id": 166,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null
++          ]
++        }
++      }
++    },
++    {
++      "id": 167,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            ""
++          ]
++        }
++      }
++    },
++    {
++      "id": 168,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"l",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "l"
++          ]
++        }
++      }
++    },
++    {
++      "id": 169,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"li",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "li"
++          ]
++        }
++      }
++    },
++    {
++      "id": 170,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"lin",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "lin"
++          ]
++        }
++      }
++    },
++    {
++      "id": 171,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line"
++          ]
++        }
++      }
++    },
++    {
++      "id": 172,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line"
++          ]
++        }
++      }
++    },
++    {
++      "id": 173,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\n",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\n"
++          ]
++        }
++      }
++    },
++    {
++      "id": 174,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nq",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nq"
++          ]
++        }
++      }
++    },
++    {
++      "id": 175,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nqu",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nqu"
++          ]
++        }
++      }
++    },
++    {
++      "id": 176,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquo",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquo"
++          ]
++        }
++      }
++    },
++    {
++      "id": 177,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquot",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquot"
++          ]
++        }
++      }
++    },
++    {
++      "id": 178,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote"
++          ]
++        }
++      }
++    },
++    {
++      "id": 179,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote"
++          ]
++        }
++      }
++    },
++    {
++      "id": 180,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\""
++          ]
++        }
++      }
++    },
++    {
++      "id": 181,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"s",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"s"
++          ]
++        }
++      }
++    },
++    {
++      "id": 182,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"sl",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"sl"
++          ]
++        }
++      }
++    },
++    {
++      "id": 183,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"sla",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"sla"
++          ]
++        }
++      }
++    },
++    {
++      "id": 184,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"slas",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"slas"
++          ]
++        }
++      }
++    },
++    {
++      "id": 185,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"slash",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"slash"
++          ]
++        }
++      }
++    },
++    {
++      "id": 186,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"slash\\",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"slash"
++          ]
++        }
++      }
++    },
++    {
++      "id": 187,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"slash\\\\",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"slash\\"
++          ]
++        }
++      }
++    },
++    {
++      "id": 188,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"slash\\\\\"",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"slash\\"
++          ]
++        }
++      }
++    },
++    {
++      "id": 189,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"slash\\\\\"]",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"slash\\"
++          ]
++        }
++      }
++    },
++    {
++      "id": 190,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"slash\\\\\"]}",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"slash\\"
++          ]
++        }
++      }
++    },
++    {
++      "id": 191,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"slash\\\\\"]},",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"slash\\"
++          ]
++        }
++      }
++    },
++    {
++      "id": 192,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"slash\\\\\"]},\"",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"slash\\"
++          ]
++        }
++      }
++    },
++    {
++      "id": 193,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"slash\\\\\"]},\"t",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"slash\\"
++          ]
++        }
++      }
++    },
++    {
++      "id": 194,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"slash\\\\\"]},\"ta",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"slash\\"
++          ]
++        }
++      }
++    },
++    {
++      "id": 195,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"slash\\\\\"]},\"tai",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"slash\\"
++          ]
++        }
++      }
++    },
++    {
++      "id": 196,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"slash\\\\\"]},\"tail",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"slash\\"
++          ]
++        }
++      }
++    },
++    {
++      "id": 197,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"slash\\\\\"]},\"tail\"",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"slash\\"
++          ]
++        }
++      }
++    },
++    {
++      "id": 198,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"slash\\\\\"]},\"tail\":",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"slash\\"
++          ]
++        }
++      }
++    },
++    {
++      "id": 199,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"slash\\\\\"]},\"tail\":\"",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"slash\\"
++          ]
++        },
++        "tail": ""
++      }
++    },
++    {
++      "id": 200,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"slash\\\\\"]},\"tail\":\"終",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"slash\\"
++          ]
++        },
++        "tail": "終"
++      }
++    },
++    {
++      "id": 201,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"slash\\\\\"]},\"tail\":\"終わ",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"slash\\"
++          ]
++        },
++        "tail": "終わ"
++      }
++    },
++    {
++      "id": 202,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"slash\\\\\"]},\"tail\":\"終わり",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"slash\\"
++          ]
++        },
++        "tail": "終わり"
++      }
++    },
++    {
++      "id": 203,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"slash\\\\\"]},\"tail\":\"終わり\ud83d",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"slash\\"
++          ]
++        },
++        "tail": "終わり\ud83d"
++      }
++    },
++    {
++      "id": 204,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"slash\\\\\"]},\"tail\":\"終わり😀",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"slash\\"
++          ]
++        },
++        "tail": "終わり😀"
++      }
++    },
++    {
++      "id": 205,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"slash\\\\\"]},\"tail\":\"終わり😀\"",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"slash\\"
++          ]
++        },
++        "tail": "終わり😀"
++      }
++    },
++    {
++      "id": 206,
++      "raw": "{\"a\":{\"b\":[1,-2.5,0,true,false,null,\"line\\nquote\\\"slash\\\\\"]},\"tail\":\"終わり😀\"}",
++      "expected": {
++        "a": {
++          "b": [
++            1,
++            -2.5,
++            0,
++            true,
++            false,
++            null,
++            "line\nquote\"slash\\"
++          ]
++        },
++        "tail": "終わり😀"
++      }
++    },
++    {
++      "id": 207,
++      "raw": "{\"u",
++      "expected": {}
++    },
++    {
++      "id": 208,
++      "raw": "{\"un",
++      "expected": {}
++    },
++    {
++      "id": 209,
++      "raw": "{\"uni",
++      "expected": {}
++    },
++    {
++      "id": 210,
++      "raw": "{\"unic",
++      "expected": {}
++    },
++    {
++      "id": 211,
++      "raw": "{\"unico",
++      "expected": {}
++    },
++    {
++      "id": 212,
++      "raw": "{\"unicod",
++      "expected": {}
++    },
++    {
++      "id": 213,
++      "raw": "{\"unicode",
++      "expected": {}
++    },
++    {
++      "id": 214,
++      "raw": "{\"unicode\"",
++      "expected": {}
++    },
++    {
++      "id": 215,
++      "raw": "{\"unicode\":",
++      "expected": {}
++    },
++    {
++      "id": 216,
++      "raw": "{\"unicode\":\"",
++      "expected": {
++        "unicode": ""
++      }
++    },
++    {
++      "id": 217,
++      "raw": "{\"unicode\":\"\\",
++      "expected": {
++        "unicode": ""
++      }
++    },
++    {
++      "id": 218,
++      "raw": "{\"unicode\":\"\\u",
++      "expected": {
++        "unicode": ""
++      }
++    },
++    {
++      "id": 219,
++      "raw": "{\"unicode\":\"\\u0",
++      "expected": {
++        "unicode": ""
++      }
++    },
++    {
++      "id": 220,
++      "raw": "{\"unicode\":\"\\u00",
++      "expected": {
++        "unicode": ""
++      }
++    },
++    {
++      "id": 221,
++      "raw": "{\"unicode\":\"\\u00e",
++      "expected": {
++        "unicode": ""
++      }
++    },
++    {
++      "id": 222,
++      "raw": "{\"unicode\":\"\\u00e9",
++      "expected": {
++        "unicode": "é"
++      }
++    },
++    {
++      "id": 223,
++      "raw": "{\"unicode\":\"\\u00e9\\",
++      "expected": {
++        "unicode": "é"
++      }
++    },
++    {
++      "id": 224,
++      "raw": "{\"unicode\":\"\\u00e9\\u",
++      "expected": {
++        "unicode": "é"
++      }
++    },
++    {
++      "id": 225,
++      "raw": "{\"unicode\":\"\\u00e9\\uD",
++      "expected": {
++        "unicode": "é"
++      }
++    },
++    {
++      "id": 226,
++      "raw": "{\"unicode\":\"\\u00e9\\uD8",
++      "expected": {
++        "unicode": "é"
++      }
++    },
++    {
++      "id": 227,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83",
++      "expected": {
++        "unicode": "é"
++      }
++    },
++    {
++      "id": 228,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D",
++      "expected": {
++        "unicode": "é\ud83d"
++      }
++    },
++    {
++      "id": 229,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\",
++      "expected": {
++        "unicode": "é\ud83d"
++      }
++    },
++    {
++      "id": 230,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\u",
++      "expected": {
++        "unicode": "é\ud83d"
++      }
++    },
++    {
++      "id": 231,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uD",
++      "expected": {
++        "unicode": "é\ud83d"
++      }
++    },
++    {
++      "id": 232,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE",
++      "expected": {
++        "unicode": "é\ud83d"
++      }
++    },
++    {
++      "id": 233,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE0",
++      "expected": {
++        "unicode": "é\ud83d"
++      }
++    },
++    {
++      "id": 234,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00",
++      "expected": {
++        "unicode": "é😀"
++      }
++    },
++    {
++      "id": 235,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\"",
++      "expected": {
++        "unicode": "é😀"
++      }
++    },
++    {
++      "id": 236,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",",
++      "expected": {
++        "unicode": "é😀"
++      }
++    },
++    {
++      "id": 237,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"",
++      "expected": {
++        "unicode": "é😀"
++      }
++    },
++    {
++      "id": 238,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"e",
++      "expected": {
++        "unicode": "é😀"
++      }
++    },
++    {
++      "id": 239,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"es",
++      "expected": {
++        "unicode": "é😀"
++      }
++    },
++    {
++      "id": 240,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"esc",
++      "expected": {
++        "unicode": "é😀"
++      }
++    },
++    {
++      "id": 241,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"esca",
++      "expected": {
++        "unicode": "é😀"
++      }
++    },
++    {
++      "id": 242,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"escap",
++      "expected": {
++        "unicode": "é😀"
++      }
++    },
++    {
++      "id": 243,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"escape",
++      "expected": {
++        "unicode": "é😀"
++      }
++    },
++    {
++      "id": 244,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"escape\"",
++      "expected": {
++        "unicode": "é😀"
++      }
++    },
++    {
++      "id": 245,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"escape\":",
++      "expected": {
++        "unicode": "é😀"
++      }
++    },
++    {
++      "id": 246,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"escape\":\"",
++      "expected": {
++        "unicode": "é😀",
++        "escape": ""
++      }
++    },
++    {
++      "id": 247,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"escape\":\"\\",
++      "expected": {
++        "unicode": "é😀",
++        "escape": ""
++      }
++    },
++    {
++      "id": 248,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"escape\":\"\\b",
++      "expected": {
++        "unicode": "é😀",
++        "escape": "\b"
++      }
++    },
++    {
++      "id": 249,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"escape\":\"\\b\\",
++      "expected": {
++        "unicode": "é😀",
++        "escape": "\b"
++      }
++    },
++    {
++      "id": 250,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"escape\":\"\\b\\f",
++      "expected": {
++        "unicode": "é😀",
++        "escape": "\b\f"
++      }
++    },
++    {
++      "id": 251,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"escape\":\"\\b\\f\\",
++      "expected": {
++        "unicode": "é😀",
++        "escape": "\b\f"
++      }
++    },
++    {
++      "id": 252,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"escape\":\"\\b\\f\\n",
++      "expected": {
++        "unicode": "é😀",
++        "escape": "\b\f\n"
++      }
++    },
++    {
++      "id": 253,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"escape\":\"\\b\\f\\n\\",
++      "expected": {
++        "unicode": "é😀",
++        "escape": "\b\f\n"
++      }
++    },
++    {
++      "id": 254,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"escape\":\"\\b\\f\\n\\r",
++      "expected": {
++        "unicode": "é😀",
++        "escape": "\b\f\n\r"
++      }
++    },
++    {
++      "id": 255,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"escape\":\"\\b\\f\\n\\r\\",
++      "expected": {
++        "unicode": "é😀",
++        "escape": "\b\f\n\r"
++      }
++    },
++    {
++      "id": 256,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"escape\":\"\\b\\f\\n\\r\\t",
++      "expected": {
++        "unicode": "é😀",
++        "escape": "\b\f\n\r\t"
++      }
++    },
++    {
++      "id": 257,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"escape\":\"\\b\\f\\n\\r\\t\\",
++      "expected": {
++        "unicode": "é😀",
++        "escape": "\b\f\n\r\t"
++      }
++    },
++    {
++      "id": 258,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"escape\":\"\\b\\f\\n\\r\\t\\/",
++      "expected": {
++        "unicode": "é😀",
++        "escape": "\b\f\n\r\t/"
++      }
++    },
++    {
++      "id": 259,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"escape\":\"\\b\\f\\n\\r\\t\\/\\",
++      "expected": {
++        "unicode": "é😀",
++        "escape": "\b\f\n\r\t/"
++      }
++    },
++    {
++      "id": 260,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"escape\":\"\\b\\f\\n\\r\\t\\/\\\\",
++      "expected": {
++        "unicode": "é😀",
++        "escape": "\b\f\n\r\t/\\"
++      }
++    },
++    {
++      "id": 261,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"escape\":\"\\b\\f\\n\\r\\t\\/\\\\\\",
++      "expected": {
++        "unicode": "é😀",
++        "escape": "\b\f\n\r\t/\\"
++      }
++    },
++    {
++      "id": 262,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"escape\":\"\\b\\f\\n\\r\\t\\/\\\\\\\"",
++      "expected": {
++        "unicode": "é😀",
++        "escape": "\b\f\n\r\t/\\\""
++      }
++    },
++    {
++      "id": 263,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"escape\":\"\\b\\f\\n\\r\\t\\/\\\\\\\"\"",
++      "expected": {
++        "unicode": "é😀",
++        "escape": "\b\f\n\r\t/\\\""
++      }
++    },
++    {
++      "id": 264,
++      "raw": "{\"unicode\":\"\\u00e9\\uD83D\\uDE00\",\"escape\":\"\\b\\f\\n\\r\\t\\/\\\\\\\"\"}",
++      "expected": {
++        "unicode": "é😀",
++        "escape": "\b\f\n\r\t/\\\""
++      }
++    },
++    {
++      "id": 265,
++      "raw": "[",
++      "expected": []
++    },
++    {
++      "id": 266,
++      "raw": "[n",
++      "expected": [
++        null
++      ]
++    },
++    {
++      "id": 267,
++      "raw": "[nu",
++      "expected": [
++        null
++      ]
++    },
++    {
++      "id": 268,
++      "raw": "[nul",
++      "expected": [
++        null
++      ]
++    },
++    {
++      "id": 269,
++      "raw": "[null",
++      "expected": [
++        null
++      ]
++    },
++    {
++      "id": 270,
++      "raw": "[null,",
++      "expected": [
++        null
++      ]
++    },
++    {
++      "id": 271,
++      "raw": "[null,t",
++      "expected": [
++        null,
++        true
++      ]
++    },
++    {
++      "id": 272,
++      "raw": "[null,tr",
++      "expected": [
++        null,
++        true
++      ]
++    },
++    {
++      "id": 273,
++      "raw": "[null,tru",
++      "expected": [
++        null,
++        true
++      ]
++    },
++    {
++      "id": 274,
++      "raw": "[null,true",
++      "expected": [
++        null,
++        true
++      ]
++    },
++    {
++      "id": 275,
++      "raw": "[null,true,",
++      "expected": [
++        null,
++        true
++      ]
++    },
++    {
++      "id": 276,
++      "raw": "[null,true,f",
++      "expected": [
++        null,
++        true,
++        false
++      ]
++    },
++    {
++      "id": 277,
++      "raw": "[null,true,fa",
++      "expected": [
++        null,
++        true,
++        false
++      ]
++    },
++    {
++      "id": 278,
++      "raw": "[null,true,fal",
++      "expected": [
++        null,
++        true,
++        false
++      ]
++    },
++    {
++      "id": 279,
++      "raw": "[null,true,fals",
++      "expected": [
++        null,
++        true,
++        false
++      ]
++    },
++    {
++      "id": 280,
++      "raw": "[null,true,false",
++      "expected": [
++        null,
++        true,
++        false
++      ]
++    },
++    {
++      "id": 281,
++      "raw": "[null,true,false,",
++      "expected": [
++        null,
++        true,
++        false
++      ]
++    },
++    {
++      "id": 282,
++      "raw": "[null,true,false,-",
++      "expected": [
++        null,
++        true,
++        false
++      ]
++    },
++    {
++      "id": 283,
++      "raw": "[null,true,false,-1",
++      "expected": [
++        null,
++        true,
++        false,
++        -1
++      ]
++    },
++    {
++      "id": 284,
++      "raw": "[null,true,false,-1,",
++      "expected": [
++        null,
++        true,
++        false,
++        -1
++      ]
++    },
++    {
++      "id": 285,
++      "raw": "[null,true,false,-1,0",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0
++      ]
++    },
++    {
++      "id": 286,
++      "raw": "[null,true,false,-1,0,",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0
++      ]
++    },
++    {
++      "id": 287,
++      "raw": "[null,true,false,-1,0,2",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2
++      ]
++    },
++    {
++      "id": 288,
++      "raw": "[null,true,false,-1,0,2.",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0
++      ]
++    },
++    {
++      "id": 289,
++      "raw": "[null,true,false,-1,0,2.5",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5
++      ]
++    },
++    {
++      "id": 290,
++      "raw": "[null,true,false,-1,0,2.5,",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5
++      ]
++    },
++    {
++      "id": 291,
++      "raw": "[null,true,false,-1,0,2.5,1",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1
++      ]
++    },
++    {
++      "id": 292,
++      "raw": "[null,true,false,-1,0,2.5,1e",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1
++      ]
++    },
++    {
++      "id": 293,
++      "raw": "[null,true,false,-1,0,2.5,1e3",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1000
++      ]
++    },
++    {
++      "id": 294,
++      "raw": "[null,true,false,-1,0,2.5,1e3,",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1000
++      ]
++    },
++    {
++      "id": 295,
++      "raw": "[null,true,false,-1,0,2.5,1e3,-",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1000
++      ]
++    },
++    {
++      "id": 296,
++      "raw": "[null,true,false,-1,0,2.5,1e3,-2",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1000,
++        -2
++      ]
++    },
++    {
++      "id": 297,
++      "raw": "[null,true,false,-1,0,2.5,1e3,-2e",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1000,
++        -2
++      ]
++    },
++    {
++      "id": 298,
++      "raw": "[null,true,false,-1,0,2.5,1e3,-2e-",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1000,
++        -2
++      ]
++    },
++    {
++      "id": 299,
++      "raw": "[null,true,false,-1,0,2.5,1e3,-2e-3",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1000,
++        -0.002
++      ]
++    },
++    {
++      "id": 300,
++      "raw": "[null,true,false,-1,0,2.5,1e3,-2e-3,",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1000,
++        -0.002
++      ]
++    },
++    {
++      "id": 301,
++      "raw": "[null,true,false,-1,0,2.5,1e3,-2e-3,{",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1000,
++        -0.002,
++        {}
++      ]
++    },
++    {
++      "id": 302,
++      "raw": "[null,true,false,-1,0,2.5,1e3,-2e-3,{\"",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1000,
++        -0.002,
++        {}
++      ]
++    },
++    {
++      "id": 303,
++      "raw": "[null,true,false,-1,0,2.5,1e3,-2e-3,{\"k",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1000,
++        -0.002,
++        {}
++      ]
++    },
++    {
++      "id": 304,
++      "raw": "[null,true,false,-1,0,2.5,1e3,-2e-3,{\"ke",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1000,
++        -0.002,
++        {}
++      ]
++    },
++    {
++      "id": 305,
++      "raw": "[null,true,false,-1,0,2.5,1e3,-2e-3,{\"key",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1000,
++        -0.002,
++        {}
++      ]
++    },
++    {
++      "id": 306,
++      "raw": "[null,true,false,-1,0,2.5,1e3,-2e-3,{\"key\"",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1000,
++        -0.002,
++        {}
++      ]
++    },
++    {
++      "id": 307,
++      "raw": "[null,true,false,-1,0,2.5,1e3,-2e-3,{\"key\":",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1000,
++        -0.002,
++        {}
++      ]
++    },
++    {
++      "id": 308,
++      "raw": "[null,true,false,-1,0,2.5,1e3,-2e-3,{\"key\":\"",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1000,
++        -0.002,
++        {
++          "key": ""
++        }
++      ]
++    },
++    {
++      "id": 309,
++      "raw": "[null,true,false,-1,0,2.5,1e3,-2e-3,{\"key\":\"v",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1000,
++        -0.002,
++        {
++          "key": "v"
++        }
++      ]
++    },
++    {
++      "id": 310,
++      "raw": "[null,true,false,-1,0,2.5,1e3,-2e-3,{\"key\":\"va",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1000,
++        -0.002,
++        {
++          "key": "va"
++        }
++      ]
++    },
++    {
++      "id": 311,
++      "raw": "[null,true,false,-1,0,2.5,1e3,-2e-3,{\"key\":\"val",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1000,
++        -0.002,
++        {
++          "key": "val"
++        }
++      ]
++    },
++    {
++      "id": 312,
++      "raw": "[null,true,false,-1,0,2.5,1e3,-2e-3,{\"key\":\"valu",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1000,
++        -0.002,
++        {
++          "key": "valu"
++        }
++      ]
++    },
++    {
++      "id": 313,
++      "raw": "[null,true,false,-1,0,2.5,1e3,-2e-3,{\"key\":\"value",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1000,
++        -0.002,
++        {
++          "key": "value"
++        }
++      ]
++    },
++    {
++      "id": 314,
++      "raw": "[null,true,false,-1,0,2.5,1e3,-2e-3,{\"key\":\"value\"",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1000,
++        -0.002,
++        {
++          "key": "value"
++        }
++      ]
++    },
++    {
++      "id": 315,
++      "raw": "[null,true,false,-1,0,2.5,1e3,-2e-3,{\"key\":\"value\"}",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1000,
++        -0.002,
++        {
++          "key": "value"
++        }
++      ]
++    },
++    {
++      "id": 316,
++      "raw": "[null,true,false,-1,0,2.5,1e3,-2e-3,{\"key\":\"value\"}]",
++      "expected": [
++        null,
++        true,
++        false,
++        -1,
++        0,
++        2.5,
++        1000,
++        -0.002,
++        {
++          "key": "value"
++        }
++      ]
++    },
++    {
++      "id": 317,
++      "raw": "{\"f",
++      "expected": {}
++    },
++    {
++      "id": 318,
++      "raw": "{\"fi",
++      "expected": {}
++    },
++    {
++      "id": 319,
++      "raw": "{\"fir",
++      "expected": {}
++    },
++    {
++      "id": 320,
++      "raw": "{\"firs",
++      "expected": {}
++    },
++    {
++      "id": 321,
++      "raw": "{\"first",
++      "expected": {}
++    },
++    {
++      "id": 322,
++      "raw": "{\"first\"",
++      "expected": {}
++    },
++    {
++      "id": 323,
++      "raw": "{\"first\":",
++      "expected": {}
++    },
++    {
++      "id": 324,
++      "raw": "{\"first\":\"",
++      "expected": {
++        "first": ""
++      }
++    },
++    {
++      "id": 325,
++      "raw": "{\"first\":\"c",
++      "expected": {
++        "first": "c"
++      }
++    },
++    {
++      "id": 326,
++      "raw": "{\"first\":\"co",
++      "expected": {
++        "first": "co"
++      }
++    },
++    {
++      "id": 327,
++      "raw": "{\"first\":\"com",
++      "expected": {
++        "first": "com"
++      }
++    },
++    {
++      "id": 328,
++      "raw": "{\"first\":\"comp",
++      "expected": {
++        "first": "comp"
++      }
++    },
++    {
++      "id": 329,
++      "raw": "{\"first\":\"compl",
++      "expected": {
++        "first": "compl"
++      }
++    },
++    {
++      "id": 330,
++      "raw": "{\"first\":\"comple",
++      "expected": {
++        "first": "comple"
++      }
++    },
++    {
++      "id": 331,
++      "raw": "{\"first\":\"complet",
++      "expected": {
++        "first": "complet"
++      }
++    },
++    {
++      "id": 332,
++      "raw": "{\"first\":\"complete",
++      "expected": {
++        "first": "complete"
++      }
++    },
++    {
++      "id": 333,
++      "raw": "{\"first\":\"complete\"",
++      "expected": {
++        "first": "complete"
++      }
++    },
++    {
++      "id": 334,
++      "raw": "{\"first\":\"complete\",",
++      "expected": {
++        "first": "complete"
++      }
++    },
++    {
++      "id": 335,
++      "raw": "{\"first\":\"complete\",\"",
++      "expected": {
++        "first": "complete"
++      }
++    },
++    {
++      "id": 336,
++      "raw": "{\"first\":\"complete\",\"l",
++      "expected": {
++        "first": "complete"
++      }
++    },
++    {
++      "id": 337,
++      "raw": "{\"first\":\"complete\",\"la",
++      "expected": {
++        "first": "complete"
++      }
++    },
++    {
++      "id": 338,
++      "raw": "{\"first\":\"complete\",\"las",
++      "expected": {
++        "first": "complete"
++      }
++    },
++    {
++      "id": 339,
++      "raw": "{\"first\":\"complete\",\"last",
++      "expected": {
++        "first": "complete"
++      }
++    },
++    {
++      "id": 340,
++      "raw": "{\"first\":\"complete\",\"last\"",
++      "expected": {
++        "first": "complete"
++      }
++    },
++    {
++      "id": 341,
++      "raw": "{\"first\":\"complete\",\"last\":",
++      "expected": {
++        "first": "complete"
++      }
++    },
++    {
++      "id": 342,
++      "raw": "{\"first\":\"complete\",\"last\":\"",
++      "expected": {
++        "first": "complete",
++        "last": ""
++      }
++    },
++    {
++      "id": 343,
++      "raw": "{\"first\":\"complete\",\"last\":\"t",
++      "expected": {
++        "first": "complete",
++        "last": "t"
++      }
++    },
++    {
++      "id": 344,
++      "raw": "{\"first\":\"complete\",\"last\":\"tr",
++      "expected": {
++        "first": "complete",
++        "last": "tr"
++      }
++    },
++    {
++      "id": 345,
++      "raw": "{\"first\":\"complete\",\"last\":\"tru",
++      "expected": {
++        "first": "complete",
++        "last": "tru"
++      }
++    },
++    {
++      "id": 346,
++      "raw": "{\"first\":\"complete\",\"last\":\"trun",
++      "expected": {
++        "first": "complete",
++        "last": "trun"
++      }
++    },
++    {
++      "id": 347,
++      "raw": "{\"first\":\"complete\",\"last\":\"trunc",
++      "expected": {
++        "first": "complete",
++        "last": "trunc"
++      }
++    },
++    {
++      "id": 348,
++      "raw": "{\"first\":\"complete\",\"last\":\"trunca",
++      "expected": {
++        "first": "complete",
++        "last": "trunca"
++      }
++    },
++    {
++      "id": 349,
++      "raw": "{\"first\":\"complete\",\"last\":\"truncat",
++      "expected": {
++        "first": "complete",
++        "last": "truncat"
++      }
++    },
++    {
++      "id": 350,
++      "raw": "{\"first\":\"complete\",\"last\":\"truncate",
++      "expected": {
++        "first": "complete",
++        "last": "truncate"
++      }
++    },
++    {
++      "id": 351,
++      "raw": "{\"first\":\"complete\",\"last\":\"truncated",
++      "expected": {
++        "first": "complete",
++        "last": "truncated"
++      }
++    },
++    {
++      "id": 352,
++      "raw": "{\"first\":\"complete\",\"last\":\"truncated\\",
++      "expected": {
++        "first": "complete",
++        "last": "truncated"
++      }
++    },
++    {
++      "id": 353,
++      "raw": "{\"first\":\"complete\",\"last\":\"truncated\\u",
++      "expected": {
++        "first": "complete",
++        "last": "truncated"
++      }
++    },
++    {
++      "id": 354,
++      "raw": "{\"first\":\"complete\",\"last\":\"truncated\\u1",
++      "expected": {
++        "first": "complete",
++        "last": "truncated"
++      }
++    },
++    {
++      "id": 355,
++      "raw": "{\"first\":\"complete\",\"last\":\"truncated\\u12",
++      "expected": {
++        "first": "complete",
++        "last": "truncated"
++      }
++    },
++    {
++      "id": 356,
++      "raw": "{\"first\":\"complete\",\"last\":\"truncated\\u123",
++      "expected": {
++        "first": "complete",
++        "last": "truncated"
++      }
++    },
++    {
++      "id": 357,
++      "raw": "{\"first\":\"complete\",\"last\":\"truncated\\u1234",
++      "expected": {
++        "first": "complete",
++        "last": "truncatedሴ"
++      }
++    },
++    {
++      "id": 358,
++      "raw": "{\"first\":\"complete\",\"last\":\"truncated\\u1234\"",
++      "expected": {
++        "first": "complete",
++        "last": "truncatedሴ"
++      }
++    },
++    {
++      "id": 359,
++      "raw": "{\"first\":\"complete\",\"last\":\"truncated\\u1234\"}",
++      "expected": {
++        "first": "complete",
++        "last": "truncatedሴ"
++      }
++    },
++    {
++      "id": 360,
++      "raw": "{\"nu",
++      "expected": {}
++    },
++    {
++      "id": 361,
++      "raw": "{\"num",
++      "expected": {}
++    },
++    {
++      "id": 362,
++      "raw": "{\"num\"",
++      "expected": {}
++    },
++    {
++      "id": 363,
++      "raw": "{\"num\":",
++      "expected": {}
++    },
++    {
++      "id": 364,
++      "raw": "{\"num\":1",
++      "expected": {
++        "num": 1
++      }
++    },
++    {
++      "id": 365,
++      "raw": "{\"num\":1.",
++      "expected": {}
++    },
++    {
++      "id": 366,
++      "raw": "{\"num\":1.2",
++      "expected": {
++        "num": 1.2
++      }
++    },
++    {
++      "id": 367,
++      "raw": "{\"num\":1.2e",
++      "expected": {
++        "num": 1.2
++      }
++    },
++    {
++      "id": 368,
++      "raw": "{\"num\":1.2e+",
++      "expected": {
++        "num": 1.2
++      }
++    },
++    {
++      "id": 369,
++      "raw": "{\"num\":1.2e+3",
++      "expected": {
++        "num": 1200
++      }
++    },
++    {
++      "id": 370,
++      "raw": "{\"num\":1.2e+3,",
++      "expected": {
++        "num": 1200
++      }
++    },
++    {
++      "id": 371,
++      "raw": "{\"num\":1.2e+3,\"",
++      "expected": {
++        "num": 1200
++      }
++    },
++    {
++      "id": 372,
++      "raw": "{\"num\":1.2e+3,\"l",
++      "expected": {
++        "num": 1200
++      }
++    },
++    {
++      "id": 373,
++      "raw": "{\"num\":1.2e+3,\"la",
++      "expected": {
++        "num": 1200
++      }
++    },
++    {
++      "id": 374,
++      "raw": "{\"num\":1.2e+3,\"lar",
++      "expected": {
++        "num": 1200
++      }
++    },
++    {
++      "id": 375,
++      "raw": "{\"num\":1.2e+3,\"larg",
++      "expected": {
++        "num": 1200
++      }
++    },
++    {
++      "id": 376,
++      "raw": "{\"num\":1.2e+3,\"large",
++      "expected": {
++        "num": 1200
++      }
++    },
++    {
++      "id": 377,
++      "raw": "{\"num\":1.2e+3,\"large\"",
++      "expected": {
++        "num": 1200
++      }
++    },
++    {
++      "id": 378,
++      "raw": "{\"num\":1.2e+3,\"large\":",
++      "expected": {
++        "num": 1200
++      }
++    },
++    {
++      "id": 379,
++      "raw": "{\"num\":1.2e+3,\"large\":9",
++      "expected": {
++        "num": 1200,
++        "large": 9
++      }
++    },
++    {
++      "id": 380,
++      "raw": "{\"num\":1.2e+3,\"large\":90",
++      "expected": {
++        "num": 1200,
++        "large": 90
++      }
++    },
++    {
++      "id": 381,
++      "raw": "{\"num\":1.2e+3,\"large\":900",
++      "expected": {
++        "num": 1200,
++        "large": 900
++      }
++    },
++    {
++      "id": 382,
++      "raw": "{\"num\":1.2e+3,\"large\":9007",
++      "expected": {
++        "num": 1200,
++        "large": 9007
++      }
++    },
++    {
++      "id": 383,
++      "raw": "{\"num\":1.2e+3,\"large\":90071",
++      "expected": {
++        "num": 1200,
++        "large": 90071
++      }
++    },
++    {
++      "id": 384,
++      "raw": "{\"num\":1.2e+3,\"large\":900719",
++      "expected": {
++        "num": 1200,
++        "large": 900719
++      }
++    },
++    {
++      "id": 385,
++      "raw": "{\"num\":1.2e+3,\"large\":9007199",
++      "expected": {
++        "num": 1200,
++        "large": 9007199
++      }
++    },
++    {
++      "id": 386,
++      "raw": "{\"num\":1.2e+3,\"large\":90071992",
++      "expected": {
++        "num": 1200,
++        "large": 90071992
++      }
++    },
++    {
++      "id": 387,
++      "raw": "{\"num\":1.2e+3,\"large\":900719925",
++      "expected": {
++        "num": 1200,
++        "large": 900719925
++      }
++    },
++    {
++      "id": 388,
++      "raw": "{\"num\":1.2e+3,\"large\":9007199254",
++      "expected": {
++        "num": 1200,
++        "large": 9007199254
++      }
++    },
++    {
++      "id": 389,
++      "raw": "{\"num\":1.2e+3,\"large\":90071992547",
++      "expected": {
++        "num": 1200,
++        "large": 90071992547
++      }
++    },
++    {
++      "id": 390,
++      "raw": "{\"num\":1.2e+3,\"large\":900719925474",
++      "expected": {
++        "num": 1200,
++        "large": 900719925474
++      }
++    },
++    {
++      "id": 391,
++      "raw": "{\"num\":1.2e+3,\"large\":9007199254740",
++      "expected": {
++        "num": 1200,
++        "large": 9007199254740
++      }
++    },
++    {
++      "id": 392,
++      "raw": "{\"num\":1.2e+3,\"large\":90071992547409",
++      "expected": {
++        "num": 1200,
++        "large": 90071992547409
++      }
++    },
++    {
++      "id": 393,
++      "raw": "{\"num\":1.2e+3,\"large\":900719925474099",
++      "expected": {
++        "num": 1200,
++        "large": 900719925474099
++      }
++    },
++    {
++      "id": 394,
++      "raw": "{\"num\":1.2e+3,\"large\":9007199254740993",
++      "expected": {
++        "num": 1200,
++        "large": 9007199254740992
++      }
++    },
++    {
++      "id": 395,
++      "raw": "{\"num\":1.2e+3,\"large\":9007199254740993,",
++      "expected": {
++        "num": 1200,
++        "large": 9007199254740992
++      }
++    },
++    {
++      "id": 396,
++      "raw": "{\"num\":1.2e+3,\"large\":9007199254740993,\"",
++      "expected": {
++        "num": 1200,
++        "large": 9007199254740992
++      }
++    },
++    {
++      "id": 397,
++      "raw": "{\"num\":1.2e+3,\"large\":9007199254740993,\"z",
++      "expected": {
++        "num": 1200,
++        "large": 9007199254740992
++      }
++    },
++    {
++      "id": 398,
++      "raw": "{\"num\":1.2e+3,\"large\":9007199254740993,\"ze",
++      "expected": {
++        "num": 1200,
++        "large": 9007199254740992
++      }
++    },
++    {
++      "id": 399,
++      "raw": "{\"num\":1.2e+3,\"large\":9007199254740993,\"zer",
++      "expected": {
++        "num": 1200,
++        "large": 9007199254740992
++      }
++    },
++    {
++      "id": 400,
++      "raw": "{\"num\":1.2e+3,\"large\":9007199254740993,\"zero",
++      "expected": {
++        "num": 1200,
++        "large": 9007199254740992
++      }
++    },
++    {
++      "id": 401,
++      "raw": "{\"num\":1.2e+3,\"large\":9007199254740993,\"zero\"",
++      "expected": {
++        "num": 1200,
++        "large": 9007199254740992
++      }
++    },
++    {
++      "id": 402,
++      "raw": "{\"num\":1.2e+3,\"large\":9007199254740993,\"zero\":",
++      "expected": {
++        "num": 1200,
++        "large": 9007199254740992
++      }
++    },
++    {
++      "id": 403,
++      "raw": "{\"num\":1.2e+3,\"large\":9007199254740993,\"zero\":-",
++      "expected": {
++        "num": 1200,
++        "large": 9007199254740992
++      }
++    },
++    {
++      "id": 404,
++      "raw": "{\"num\":1.2e+3,\"large\":9007199254740993,\"zero\":-0",
++      "expected": {
++        "num": 1200,
++        "large": 9007199254740992,
++        "zero": {
++          "$number": "-0"
++        }
++      }
++    },
++    {
++      "id": 405,
++      "raw": "{\"num\":1.2e+3,\"large\":9007199254740993,\"zero\":-0}",
++      "expected": {
++        "num": 1200,
++        "large": 9007199254740992,
++        "zero": {
++          "$number": "-0"
++        }
++      }
++    },
++    {
++      "id": 406,
++      "raw": "\"a\":true,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": "a"
++    },
++    {
++      "id": 407,
++      "raw": "\"\"a\":true,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": ""
++    },
++    {
++      "id": 408,
++      "raw": "\\\"a\":true,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {}
++    },
++    {
++      "id": 409,
++      "raw": "?\"a\":true,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {}
++    },
++    {
++      "id": 410,
++      "raw": ",\"a\":true,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {}
++    },
++    {
++      "id": 411,
++      "raw": ":\"a\":true,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {}
++    },
++    {
++      "id": 412,
++      "raw": "{\"\":true,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {
++        "": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "hello"
++      }
++    },
++    {
++      "id": 413,
++      "raw": "{\"\"\":true,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {}
++    },
++    {
++      "id": 414,
++      "raw": "{\"\\\":true,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {
++        "\":true,": ":[1,2],"
++      }
++    },
++    {
++      "id": 415,
++      "raw": "{\"?\":true,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {
++        "?": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "hello"
++      }
++    },
++    {
++      "id": 416,
++      "raw": "{\",\":true,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {
++        ",": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "hello"
++      }
++    },
++    {
++      "id": 417,
++      "raw": "{\":\":true,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {
++        ":": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "hello"
++      }
++    },
++    {
++      "id": 418,
++      "raw": "{\"a\"true,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {}
++    },
++    {
++      "id": 419,
++      "raw": "{\"a\"\"true,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "hello"
++      }
++    },
++    {
++      "id": 420,
++      "raw": "{\"a\"\\true,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "hello"
++      }
++    },
++    {
++      "id": 421,
++      "raw": "{\"a\"?true,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "hello"
++      }
++    },
++    {
++      "id": 422,
++      "raw": "{\"a\",true,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "hello"
++      }
++    },
++    {
++      "id": 423,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "hello"
++      }
++    },
++    {
++      "id": 424,
++      "raw": "{\"a\":tue,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {}
++    },
++    {
++      "id": 425,
++      "raw": "{\"a\":t\"ue,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {}
++    },
++    {
++      "id": 426,
++      "raw": "{\"a\":t\\ue,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {}
++    },
++    {
++      "id": 427,
++      "raw": "{\"a\":t?ue,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {}
++    },
++    {
++      "id": 428,
++      "raw": "{\"a\":t,ue,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {}
++    },
++    {
++      "id": 429,
++      "raw": "{\"a\":t:ue,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {}
++    },
++    {
++      "id": 430,
++      "raw": "{\"a\":tru,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {}
++    },
++    {
++      "id": 431,
++      "raw": "{\"a\":tru\",\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {}
++    },
++    {
++      "id": 432,
++      "raw": "{\"a\":tru\\,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {}
++    },
++    {
++      "id": 433,
++      "raw": "{\"a\":tru?,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {}
++    },
++    {
++      "id": 434,
++      "raw": "{\"a\":tru,,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {}
++    },
++    {
++      "id": 435,
++      "raw": "{\"a\":tru:,\"b\":[1,2],\"c\":\"hello\"}",
++      "expected": {}
++    },
++    {
++      "id": 436,
++      "raw": "{\"a\":true,b\":[1,2],\"c\":\"hello\"}",
++      "expected": {
++        "a": true
++      }
++    },
++    {
++      "id": 437,
++      "raw": "{\"a\":true,\\b\":[1,2],\"c\":\"hello\"}",
++      "expected": {
++        "a": true
++      }
++    },
++    {
++      "id": 438,
++      "raw": "{\"a\":true,?b\":[1,2],\"c\":\"hello\"}",
++      "expected": {
++        "a": true
++      }
++    },
++    {
++      "id": 439,
++      "raw": "{\"a\":true,,b\":[1,2],\"c\":\"hello\"}",
++      "expected": {
++        "a": true
++      }
++    },
++    {
++      "id": 440,
++      "raw": "{\"a\":true,:b\":[1,2],\"c\":\"hello\"}",
++      "expected": {
++        "a": true
++      }
++    },
++    {
++      "id": 441,
++      "raw": "{\"a\":true,\"b:[1,2],\"c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b:[1,2],": ":"
++      }
++    },
++    {
++      "id": 442,
++      "raw": "{\"a\":true,\"b\\:[1,2],\"c\":\"hello\"}",
++      "expected": {
++        "a": true
++      }
++    },
++    {
++      "id": 443,
++      "raw": "{\"a\":true,\"b?:[1,2],\"c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b?:[1,2],": ":"
++      }
++    },
++    {
++      "id": 444,
++      "raw": "{\"a\":true,\"b,:[1,2],\"c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b,:[1,2],": ":"
++      }
++    },
++    {
++      "id": 445,
++      "raw": "{\"a\":true,\"b::[1,2],\"c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b::[1,2],": ":"
++      }
++    },
++    {
++      "id": 446,
++      "raw": "{\"a\":true,\"b\":1,2],\"c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": 1
++      }
++    },
++    {
++      "id": 447,
++      "raw": "{\"a\":true,\"b\":\"1,2],\"c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": "1,2],"
++      }
++    },
++    {
++      "id": 448,
++      "raw": "{\"a\":true,\"b\":\\1,2],\"c\":\"hello\"}",
++      "expected": {
++        "a": true
++      }
++    },
++    {
++      "id": 449,
++      "raw": "{\"a\":true,\"b\":?1,2],\"c\":\"hello\"}",
++      "expected": {
++        "a": true
++      }
++    },
++    {
++      "id": 450,
++      "raw": "{\"a\":true,\"b\":,1,2],\"c\":\"hello\"}",
++      "expected": {
++        "a": true
++      }
++    },
++    {
++      "id": 451,
++      "raw": "{\"a\":true,\"b\"::1,2],\"c\":\"hello\"}",
++      "expected": {
++        "a": true
++      }
++    },
++    {
++      "id": 452,
++      "raw": "{\"a\":true,\"b\":[12],\"c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          12
++        ],
++        "c": "hello"
++      }
++    },
++    {
++      "id": 453,
++      "raw": "{\"a\":true,\"b\":[1\"2],\"c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": []
++      }
++    },
++    {
++      "id": 454,
++      "raw": "{\"a\":true,\"b\":[1\\2],\"c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": []
++      }
++    },
++    {
++      "id": 455,
++      "raw": "{\"a\":true,\"b\":[1?2],\"c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": []
++      }
++    },
++    {
++      "id": 456,
++      "raw": "{\"a\":true,\"b\":[1:2],\"c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": []
++      }
++    },
++    {
++      "id": 457,
++      "raw": "{\"a\":true,\"b\":[1,2,\"c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2,
++          "c"
++        ]
++      }
++    },
++    {
++      "id": 458,
++      "raw": "{\"a\":true,\"b\":[1,2\",\"c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1
++        ],
++        "c": "hello"
++      }
++    },
++    {
++      "id": 459,
++      "raw": "{\"a\":true,\"b\":[1,2\\,\"c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1
++        ],
++        "c": "hello"
++      }
++    },
++    {
++      "id": 460,
++      "raw": "{\"a\":true,\"b\":[1,2?,\"c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1
++        ],
++        "c": "hello"
++      }
++    },
++    {
++      "id": 461,
++      "raw": "{\"a\":true,\"b\":[1,2,,\"c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "hello"
++      }
++    },
++    {
++      "id": 462,
++      "raw": "{\"a\":true,\"b\":[1,2:,\"c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1
++        ],
++        "c": "hello"
++      }
++    },
++    {
++      "id": 463,
++      "raw": "{\"a\":true,\"b\":[1,2],c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ]
++      }
++    },
++    {
++      "id": 464,
++      "raw": "{\"a\":true,\"b\":[1,2],\\c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ]
++      }
++    },
++    {
++      "id": 465,
++      "raw": "{\"a\":true,\"b\":[1,2],?c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ]
++      }
++    },
++    {
++      "id": 466,
++      "raw": "{\"a\":true,\"b\":[1,2],,c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ]
++      }
++    },
++    {
++      "id": 467,
++      "raw": "{\"a\":true,\"b\":[1,2],:c\":\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ]
++      }
++    },
++    {
++      "id": 468,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c:\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ]
++      }
++    },
++    {
++      "id": 469,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c\\:\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ]
++      }
++    },
++    {
++      "id": 470,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c?:\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ]
++      }
++    },
++    {
++      "id": 471,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c,:\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ]
++      }
++    },
++    {
++      "id": 472,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c::\"hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ]
++      }
++    },
++    {
++      "id": 473,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c\":hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ]
++      }
++    },
++    {
++      "id": 474,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c\":\\hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ]
++      }
++    },
++    {
++      "id": 475,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c\":?hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ]
++      }
++    },
++    {
++      "id": 476,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c\":,hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ]
++      }
++    },
++    {
++      "id": 477,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c\"::hello\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ]
++      }
++    },
++    {
++      "id": 478,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c\":\"hllo\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "hllo"
++      }
++    },
++    {
++      "id": 479,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c\":\"h\"llo\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "h"
++      }
++    },
++    {
++      "id": 480,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c\":\"h\\llo\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "h\\llo"
++      }
++    },
++    {
++      "id": 481,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c\":\"h?llo\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "h?llo"
++      }
++    },
++    {
++      "id": 482,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c\":\"h,llo\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "h,llo"
++      }
++    },
++    {
++      "id": 483,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c\":\"h:llo\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "h:llo"
++      }
++    },
++    {
++      "id": 484,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c\":\"helo\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "helo"
++      }
++    },
++    {
++      "id": 485,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c\":\"hel\"o\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "hel"
++      }
++    },
++    {
++      "id": 486,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c\":\"hel\\o\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "hel\\o"
++      }
++    },
++    {
++      "id": 487,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c\":\"hel?o\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "hel?o"
++      }
++    },
++    {
++      "id": 488,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c\":\"hel,o\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "hel,o"
++      }
++    },
++    {
++      "id": 489,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c\":\"hel:o\"}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "hel:o"
++      }
++    },
++    {
++      "id": 490,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c\":\"hello}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "hello}"
++      }
++    },
++    {
++      "id": 491,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c\":\"hello\\}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "hello"
++      }
++    },
++    {
++      "id": 492,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c\":\"hello?}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "hello?}"
++      }
++    },
++    {
++      "id": 493,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c\":\"hello,}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "hello,}"
++      }
++    },
++    {
++      "id": 494,
++      "raw": "{\"a\":true,\"b\":[1,2],\"c\":\"hello:}",
++      "expected": {
++        "a": true,
++        "b": [
++          1,
++          2
++        ],
++        "c": "hello:}"
++      }
++    },
++    {
++      "id": 495,
++      "raw": "1,\"text\",{\"a\":false}]",
++      "expected": {}
++    },
++    {
++      "id": 496,
++      "raw": "\"1,\"text\",{\"a\":false}]",
++      "expected": "1,"
++    },
++    {
++      "id": 497,
++      "raw": "\\1,\"text\",{\"a\":false}]",
++      "expected": {}
++    },
++    {
++      "id": 498,
++      "raw": "?1,\"text\",{\"a\":false}]",
++      "expected": {}
++    },
++    {
++      "id": 499,
++      "raw": ",1,\"text\",{\"a\":false}]",
++      "expected": {}
++    },
++    {
++      "id": 500,
++      "raw": ":1,\"text\",{\"a\":false}]",
++      "expected": {}
++    },
++    {
++      "id": 501,
++      "raw": "[1\"text\",{\"a\":false}]",
++      "expected": []
++    },
++    {
++      "id": 502,
++      "raw": "[1\"\"text\",{\"a\":false}]",
++      "expected": []
++    },
++    {
++      "id": 503,
++      "raw": "[1\\\"text\",{\"a\":false}]",
++      "expected": []
++    },
++    {
++      "id": 504,
++      "raw": "[1?\"text\",{\"a\":false}]",
++      "expected": []
++    },
++    {
++      "id": 505,
++      "raw": "[1,\"text\",{\"a\":false}]",
++      "expected": [
++        1,
++        "text",
++        {
++          "a": false
++        }
++      ]
++    },
++    {
++      "id": 506,
++      "raw": "[1:\"text\",{\"a\":false}]",
++      "expected": []
++    },
++    {
++      "id": 507,
++      "raw": "[1,\"ext\",{\"a\":false}]",
++      "expected": [
++        1,
++        "ext",
++        {
++          "a": false
++        }
++      ]
++    },
++    {
++      "id": 508,
++      "raw": "[1,\"\"ext\",{\"a\":false}]",
++      "expected": [
++        1,
++        ""
++      ]
++    },
++    {
++      "id": 509,
++      "raw": "[1,\"\\ext\",{\"a\":false}]",
++      "expected": [
++        1,
++        "\\ext",
++        {
++          "a": false
++        }
++      ]
++    },
++    {
++      "id": 510,
++      "raw": "[1,\"?ext\",{\"a\":false}]",
++      "expected": [
++        1,
++        "?ext",
++        {
++          "a": false
++        }
++      ]
++    },
++    {
++      "id": 511,
++      "raw": "[1,\",ext\",{\"a\":false}]",
++      "expected": [
++        1,
++        ",ext",
++        {
++          "a": false
++        }
++      ]
++    },
++    {
++      "id": 512,
++      "raw": "[1,\":ext\",{\"a\":false}]",
++      "expected": [
++        1,
++        ":ext",
++        {
++          "a": false
++        }
++      ]
++    },
++    {
++      "id": 513,
++      "raw": "[1,\"tet\",{\"a\":false}]",
++      "expected": [
++        1,
++        "tet",
++        {
++          "a": false
++        }
++      ]
++    },
++    {
++      "id": 514,
++      "raw": "[1,\"te\"t\",{\"a\":false}]",
++      "expected": [
++        1,
++        "te"
++      ]
++    },
++    {
++      "id": 515,
++      "raw": "[1,\"te\\t\",{\"a\":false}]",
++      "expected": [
++        1,
++        "te\t",
++        {
++          "a": false
++        }
++      ]
++    },
++    {
++      "id": 516,
++      "raw": "[1,\"te?t\",{\"a\":false}]",
++      "expected": [
++        1,
++        "te?t",
++        {
++          "a": false
++        }
++      ]
++    },
++    {
++      "id": 517,
++      "raw": "[1,\"te,t\",{\"a\":false}]",
++      "expected": [
++        1,
++        "te,t",
++        {
++          "a": false
++        }
++      ]
++    },
++    {
++      "id": 518,
++      "raw": "[1,\"te:t\",{\"a\":false}]",
++      "expected": [
++        1,
++        "te:t",
++        {
++          "a": false
++        }
++      ]
++    },
++    {
++      "id": 519,
++      "raw": "[1,\"text,{\"a\":false}]",
++      "expected": [
++        1,
++        "text,{"
++      ]
++    },
++    {
++      "id": 520,
++      "raw": "[1,\"text\\,{\"a\":false}]",
++      "expected": [
++        1
++      ]
++    },
++    {
++      "id": 521,
++      "raw": "[1,\"text?,{\"a\":false}]",
++      "expected": [
++        1,
++        "text?,{"
++      ]
++    },
++    {
++      "id": 522,
++      "raw": "[1,\"text,,{\"a\":false}]",
++      "expected": [
++        1,
++        "text,,{"
++      ]
++    },
++    {
++      "id": 523,
++      "raw": "[1,\"text:,{\"a\":false}]",
++      "expected": [
++        1,
++        "text:,{"
++      ]
++    },
++    {
++      "id": 524,
++      "raw": "[1,\"text\",\"a\":false}]",
++      "expected": [
++        1,
++        "text",
++        "a"
++      ]
++    },
++    {
++      "id": 525,
++      "raw": "[1,\"text\",\"\"a\":false}]",
++      "expected": [
++        1,
++        "text",
++        ""
++      ]
++    },
++    {
++      "id": 526,
++      "raw": "[1,\"text\",\\\"a\":false}]",
++      "expected": [
++        1,
++        "text"
++      ]
++    },
++    {
++      "id": 527,
++      "raw": "[1,\"text\",?\"a\":false}]",
++      "expected": [
++        1,
++        "text"
++      ]
++    },
++    {
++      "id": 528,
++      "raw": "[1,\"text\",,\"a\":false}]",
++      "expected": [
++        1,
++        "text"
++      ]
++    },
++    {
++      "id": 529,
++      "raw": "[1,\"text\",:\"a\":false}]",
++      "expected": [
++        1,
++        "text"
++      ]
++    },
++    {
++      "id": 530,
++      "raw": "[1,\"text\",{\"\":false}]",
++      "expected": [
++        1,
++        "text",
++        {
++          "": false
++        }
++      ]
++    },
++    {
++      "id": 531,
++      "raw": "[1,\"text\",{\"\"\":false}]",
++      "expected": [
++        1,
++        "text",
++        {}
++      ]
++    },
++    {
++      "id": 532,
++      "raw": "[1,\"text\",{\"\\\":false}]",
++      "expected": [
++        1,
++        "text",
++        {}
++      ]
++    },
++    {
++      "id": 533,
++      "raw": "[1,\"text\",{\"?\":false}]",
++      "expected": [
++        1,
++        "text",
++        {
++          "?": false
++        }
++      ]
++    },
++    {
++      "id": 534,
++      "raw": "[1,\"text\",{\",\":false}]",
++      "expected": [
++        1,
++        "text",
++        {
++          ",": false
++        }
++      ]
++    },
++    {
++      "id": 535,
++      "raw": "[1,\"text\",{\":\":false}]",
++      "expected": [
++        1,
++        "text",
++        {
++          ":": false
++        }
++      ]
++    },
++    {
++      "id": 536,
++      "raw": "[1,\"text\",{\"a\"false}]",
++      "expected": [
++        1,
++        "text",
++        {}
++      ]
++    },
++    {
++      "id": 537,
++      "raw": "[1,\"text\",{\"a\"\"false}]",
++      "expected": [
++        1,
++        "text",
++        {
++          "a": false
++        }
++      ]
++    },
++    {
++      "id": 538,
++      "raw": "[1,\"text\",{\"a\"\\false}]",
++      "expected": [
++        1,
++        "text",
++        {
++          "a": false
++        }
++      ]
++    },
++    {
++      "id": 539,
++      "raw": "[1,\"text\",{\"a\"?false}]",
++      "expected": [
++        1,
++        "text",
++        {
++          "a": false
++        }
++      ]
++    },
++    {
++      "id": 540,
++      "raw": "[1,\"text\",{\"a\",false}]",
++      "expected": [
++        1,
++        "text",
++        {
++          "a": false
++        }
++      ]
++    },
++    {
++      "id": 541,
++      "raw": "[1,\"text\",{\"a\":flse}]",
++      "expected": [
++        1,
++        "text",
++        {}
++      ]
++    },
++    {
++      "id": 542,
++      "raw": "[1,\"text\",{\"a\":f\"lse}]",
++      "expected": [
++        1,
++        "text",
++        {}
++      ]
++    },
++    {
++      "id": 543,
++      "raw": "[1,\"text\",{\"a\":f\\lse}]",
++      "expected": [
++        1,
++        "text",
++        {}
++      ]
++    },
++    {
++      "id": 544,
++      "raw": "[1,\"text\",{\"a\":f?lse}]",
++      "expected": [
++        1,
++        "text",
++        {}
++      ]
++    },
++    {
++      "id": 545,
++      "raw": "[1,\"text\",{\"a\":f,lse}]",
++      "expected": [
++        1,
++        "text",
++        {}
++      ]
++    },
++    {
++      "id": 546,
++      "raw": "[1,\"text\",{\"a\":f:lse}]",
++      "expected": [
++        1,
++        "text",
++        {}
++      ]
++    },
++    {
++      "id": 547,
++      "raw": "[1,\"text\",{\"a\":fale}]",
++      "expected": [
++        1,
++        "text",
++        {}
++      ]
++    },
++    {
++      "id": 548,
++      "raw": "[1,\"text\",{\"a\":fal\"e}]",
++      "expected": [
++        1,
++        "text",
++        {}
++      ]
++    },
++    {
++      "id": 549,
++      "raw": "[1,\"text\",{\"a\":fal\\e}]",
++      "expected": [
++        1,
++        "text",
++        {}
++      ]
++    },
++    {
++      "id": 550,
++      "raw": "[1,\"text\",{\"a\":fal?e}]",
++      "expected": [
++        1,
++        "text",
++        {}
++      ]
++    },
++    {
++      "id": 551,
++      "raw": "[1,\"text\",{\"a\":fal,e}]",
++      "expected": [
++        1,
++        "text",
++        {}
++      ]
++    },
++    {
++      "id": 552,
++      "raw": "[1,\"text\",{\"a\":fal:e}]",
++      "expected": [
++        1,
++        "text",
++        {}
++      ]
++    },
++    {
++      "id": 553,
++      "raw": "[1,\"text\",{\"a\":false]",
++      "expected": [
++        1,
++        "text",
++        {
++          "a": false
++        }
++      ]
++    },
++    {
++      "id": 554,
++      "raw": "[1,\"text\",{\"a\":false\"]",
++      "expected": [
++        1,
++        "text",
++        {
++          "a": false
++        }
++      ]
++    },
++    {
++      "id": 555,
++      "raw": "[1,\"text\",{\"a\":false\\]",
++      "expected": [
++        1,
++        "text",
++        {
++          "a": false
++        }
++      ]
++    },
++    {
++      "id": 556,
++      "raw": "[1,\"text\",{\"a\":false?]",
++      "expected": [
++        1,
++        "text",
++        {
++          "a": false
++        }
++      ]
++    },
++    {
++      "id": 557,
++      "raw": "[1,\"text\",{\"a\":false,]",
++      "expected": [
++        1,
++        "text",
++        {
++          "a": false
++        }
++      ]
++    },
++    {
++      "id": 558,
++      "raw": "[1,\"text\",{\"a\":false:]",
++      "expected": [
++        1,
++        "text",
++        {
++          "a": false
++        }
++      ]
++    }
++  ]
++}
+--- /dev/null
++++ b/tests/test_json_parse.py
+@@ -0,0 +1,71 @@
++"""Offline parity corpus generated by the pinned, unmodified Pi parser."""
++
++import json
++import math
++from pathlib import Path
++
++import pytest
++
++from misaka.ai.utils import json_parse
++
++_CORPUS = json.loads(
++    (Path(__file__).parent / "fixtures" / "pi_json_parse_c7cdb460.json").read_text()
++)
++
++
++def _encode(value):
++    if isinstance(value, float):
++        if not math.isfinite(value):
++            return {"$number": "NaN" if math.isnan(value) else "Infinity" if value > 0 else "-Infinity"}
++        if value == 0 and math.copysign(1, value) < 0:
++            return {"$number": "-0"}
++    if isinstance(value, list):
++        return [_encode(item) for item in value]
++    if isinstance(value, dict):
++        return {key: _encode(item) for key, item in value.items()}
++    return value
++
++
++@pytest.mark.parametrize("case", _CORPUS["cases"], ids=lambda case: str(case["id"]))
++def test_parse_matches_pinned_pi(case):
++    assert _encode(json_parse.parse_streaming_json(case["raw"])) == case["expected"]
++
++
++@pytest.mark.parametrize("case", _CORPUS["cases"], ids=lambda case: str(case["id"]))
++def test_final_arguments_match_pinned_pi(case):
++    args = json_parse.StreamingArgs(case["raw"] or "")
++    assert _encode(args.finish()) == case["expected"]
++
++
++def test_streaming_parse_stays_throttled_and_finishes_exactly(monkeypatch):
++    raw = json.dumps({"content": "x" * 40000})
++    parse = json_parse.parse_streaming_json
++    lengths = []
++
++    def counted(value):
++        lengths.append(len(value))
++        return parse(value)
++
++    monkeypatch.setattr(json_parse, "parse_streaming_json", counted)
++    args = json_parse.StreamingArgs()
++    for offset in range(0, len(raw), 20):
++        args.append(raw[offset:offset + 20])
++        _ = args.arguments
++    assert args.finish() == json.loads(raw)
++    assert len(lengths) < 140
++    assert lengths[-1] == len(raw)
++
++
++def test_small_fragment_still_updates_immediately():
++    args = json_parse.StreamingArgs()
++    args.append('{"path":"f')
++    assert args.arguments == {"path": "f"}
++    args.append('ile"}')
++    assert args.finish() == {"path": "file"}
++
++
++def test_integral_sse_indexes_stay_python_integers():
++    # The shared complete parser also decodes provider SSE event envelopes.
++    event = json_parse.parse_json_with_repair('{"index":0,"usage":{"output_tokens":1}}')
++    assert type(event["index"]) is int
++    assert type(event["usage"]["output_tokens"]) is int
+--- a/tests/test_research_repair_contracts.py
++++ b/tests/test_research_repair_contracts.py
+@@ -2,6 +2,7 @@
+ 
+ import asyncio
+ import errno
++import json
+ import os
+ import threading
+ from pathlib import Path
+@@ -73,39 +74,35 @@
+ 
+ 
+ @pytest.mark.parametrize(
+-    "raw,valid",
++    "raw,expected",
+     [
+-        ("{}", True),
+-        ("", True),
+-        ('{"note":"yes"}', True),
+-        ('{"note":"hello\nworld"}', True),
+-        ('{"note":"C:\\q"}', True),
+-        ('{"note":"hello', False),
+-        ("not-json", False),
+-        ('{"note":"an "unescaped" quote"}', False),
+-        ("null", False),
+-        ("[]", False),
+-        ('{"note":true}garbage', False),
++        ("{}", {}),
++        ("", {}),
++        ('{"note":"yes"}', {"note": "yes"}),
++        ('{"note":"hello\nworld"}', {"note": "hello\nworld"}),
++        ('{"note":"C:\\q"}', {"note": "C:\\q"}),
++        ('{"note":"hello', {"note": "hello"}),
++        ("not-json", {}),
++        ('{"note":"an "unescaped" quote"}', {"note": "an "}),
++        ('{"note":true}garbage', {"note": True}),
++        ("null", None),
++        ("[]", []),
++        ("false", False),
++        ("42", 42),
+     ],
+ )
+-def test_final_arguments_are_not_a_streaming_preview(raw, valid):
++def test_final_arguments_follow_pi_recovery_and_survive_serialization(raw, expected):
+     args = StreamingArgs(raw)
+     _preview = args.arguments
+-    call = ToolCall(id="fixture", name="probe", arguments={})
+-    args.finish_into(call)
+-    assert (call.argumentsError is None) == valid
+-    assert (
+-        ToolCall.model_validate_json(call.model_dump_json()).argumentsError
+-        == call.argumentsError
+-    )
+-    if not valid:
+-        with pytest.raises(ValueError):
+-            args.finish()
+-    assert StreamingArgs('{"note":"hello').arguments == {"note": "hello"}
++    call = ToolCall(id="fixture", name="probe", arguments=args.finish())
++    assert call.arguments == expected
++    assert ToolCall.model_validate_json(call.model_dump_json()).arguments == expected
++    assert "argumentsError" not in call.model_dump()
+ 
+ 
+ @pytest.mark.parametrize("execution", ["sequential", "parallel"])
+-async def test_invalid_call_gets_receipt_without_blocking_valid_sibling(execution):
++@pytest.mark.parametrize("raw", ["not-json", "null", "[]", "42", '{"note":{}}'])
++async def test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling(execution, raw):
+     called, prepared = [], []
+ 
+     async def probe(call_id, args, *_):
+@@ -120,13 +117,16 @@
+         name="probe",
+         label="probe",
+         description="memory only",
+-        parameters={"type": "object", "properties": {"note": {"type": "string"}}},
++        parameters={
++            "type": "object",
++            "properties": {"note": {"type": "string"}},
++            "required": ["note"],
++        },
+         prepareArguments=prepare,
+         execute=probe,
+     )
+-    bad, good = [ToolCall(id=i, name="probe", arguments={}) for i in ["bad", "good"]]
+-    StreamingArgs("not-json").finish_into(bad)
+-    StreamingArgs("{}").finish_into(good)
++    bad = ToolCall(id="bad", name="probe", arguments=StreamingArgs(raw).finish())
++    good = ToolCall(id="good", name="probe", arguments=StreamingArgs('{"note":"hello').finish())
+     msg = AssistantMessage.model_validate_json(message([bad, good]).model_dump_json())
+     result = await execute_tool_calls(
+         AgentContext(systemPrompt="", messages=[], tools=[tool]),
+@@ -135,25 +135,34 @@
+         None,
+         lambda e: None,
+     )
+-    assert called == [("good", {})]
+-    assert prepared == [{}]
++    assert called == [("good", {"note": "hello"})]
++    assert prepared == [bad.arguments, {"note": "hello"}]
+     assert [(r.toolCallId, r.isError) for r in result.messages] == [
+         ("bad", True),
+         ("good", False),
+     ]
++    error = result.messages[0].content[0].text
++    assert 'Validation failed for tool "probe"' in error
++    assert "Received arguments:" in error
+ 
+ 
+ @pytest.mark.parametrize(
+-    "raw,inline,stop_block",
++    "raw,initial,stop_block,expected",
+     [
+-        ("not-json", False, True),
+-        ('{"note":"hello', False, False),
+-        ("{}", False, True),
+-        ("", True, True),
++        ("not-json", {}, True, {}),
++        ('{"note":"hello', {}, False, {"note": "hello"}),
++        ("{}", {}, True, {}),
++        ("", {"note": "inline"}, True, {"note": "inline"}),
++        ("null", {}, True, None),
++        ("[]", {}, False, []),
++        ("", [], True, []),
++        ("", False, True, False),
++        ("", 0, True, 0),
++        ("", "", True, ""),
+     ],
+ )
+ async def test_anthropic_finalization_on_real_stream_path(
+-    monkeypatch, raw, inline, stop_block
++    monkeypatch, raw, initial, stop_block, expected
+ ):
+     from misaka.ai.providers import anthropic
+ 
+@@ -165,7 +174,7 @@
+                 "type": "tool_use",
+                 "id": "call",
+                 "name": "probe",
+-                "input": {"note": "inline"} if inline else {},
++                "input": initial,
+             },
+         }
+     ]
+@@ -195,15 +204,14 @@
+     result = await stream.result()
+     assert result.stopReason == "toolUse", result.errorMessage
+     call = result.content[0]
+-    assert bool(call.argumentsError) == (bool(raw) and raw != "{}")
+-    if inline:
+-        assert call.arguments == {"note": "inline"}
++    assert call.arguments == expected
+     assert seen[-1].type == "done"
+ 
+ 
+ @pytest.mark.parametrize("bridge", ["proxy", "pi-messages"])
+ @pytest.mark.parametrize("send_end", [True, False])
+-def test_transport_preserves_raw_parse_failure(bridge, send_end):
++@pytest.mark.parametrize("raw,preview", [("not-json", {}), ('{"note":"preview', {"note": "preview"}), ("[]", [])])
++def test_transport_respects_backend_final_arguments_or_last_preview(bridge, send_end, raw, preview):
+     from misaka.agent.proxy import _process_proxy_event
+     from misaka.ai.providers.pi_messages import _EventConverter
+ 
+@@ -222,7 +230,7 @@
+             "toolName": "probe",
+         }
+     )
+-    convert({"type": "toolcall_delta", "contentIndex": 0, "delta": "not-json"})
++    convert({"type": "toolcall_delta", "contentIndex": 0, "delta": raw})
+     if send_end:
+         convert(
+             {
+@@ -232,7 +240,7 @@
+                     "type": "toolCall",
+                     "id": "fixture",
+                     "name": "probe",
+-                    "arguments": {},
++                    "arguments": {"note": "backend-final"},
+                 },
+             }
+         )
+@@ -240,12 +248,27 @@
+         {"type": "done", "reason": "toolUse", "usage": message().usage.model_dump()}
+     )
+     result = converter.partial if bridge == "pi-messages" else partial
+-    assert result.content[0].argumentsError
+-
+-
+-@pytest.mark.parametrize("raw", ["not-json", "{}"])
++    assert result.content[0].arguments == ({"note": "backend-final"} if send_end else preview)
++    restored = AssistantMessage.model_validate_json(result.model_dump_json())
++    assert restored == result
++
++
++@pytest.mark.parametrize("raw,expected", [("NaN", {}), ("null", {}), ("false", {}), ("0", {}), ("[]", []), ("42", 42)])
++def test_proxy_preview_uses_javascript_fallback_truthiness(raw, expected):
++    from misaka.agent.proxy import _process_proxy_event
++
++    partial, buffers = message(), {}
++    _process_proxy_event(
++        {"type": "toolcall_start", "contentIndex": 0, "id": "fixture", "toolName": "probe"},
++        partial, buffers,
++    )
++    _process_proxy_event({"type": "toolcall_delta", "contentIndex": 0, "delta": raw}, partial, buffers)
++    assert partial.content[0].arguments == expected
++
++
++@pytest.mark.parametrize("raw,expected", [("not-json", {}), ("{}", {}), ('{"note":"hello', {"note": "hello"}), ("null", None)])
+ @pytest.mark.parametrize("start", [False, True])
+-async def test_responses_final_item_has_same_validation(raw, start):
++async def test_responses_final_item_uses_pi_recovery(raw, expected, start):
+     from misaka.ai.providers.openai_responses_shared import process_responses_stream
+ 
+     item = {
+@@ -272,7 +295,7 @@
+         incoming(), output, SimpleNamespace(push=seen.append), model("openai-responses")
+     )
+     call = next(e.toolCall for e in seen if e.type == "toolcall_end")
+-    assert bool(call.argumentsError) == (raw != "{}")
++    assert call.arguments == expected
+ 
+ 
+ @pytest.mark.parametrize("existing", ["file", "hardlink", "symlink"])
+@@ -600,22 +623,28 @@
+ 
+ 
+ @pytest.mark.parametrize("bridge", ["proxy", "pi-messages"])
+-def test_native_argument_error_is_persisted_but_not_sent_on_wire(bridge):
++@pytest.mark.parametrize("arguments", [{"note": "hello"}, {}, [], None, 42])
++def test_tool_call_session_and_wire_share_pi_fields(bridge, arguments, tmp_path):
+     from misaka.agent import proxy
+     from misaka.ai.providers import pi_messages
+     from misaka.ai.types import UserMessage
+-
+-    call = ToolCall(id="bad", name="probe", arguments={}, argumentsError="fixture")
+-    context = Context(
+-        messages=[UserMessage(content="hello", timestamp=0), message([call])]
+-    )
++    from misaka.core.session_manager import SessionManager
++
++    call = ToolCall(id="fixture", name="probe", arguments=arguments)
++    context = Context(messages=[UserMessage(content="hello", timestamp=0), message([call])])
++    manager = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
++    for msg in context.messages:
++        manager.appendMessage(msg)
++    restored = SessionManager.open(manager.getSessionFile()).buildSessionContext().messages
++    restored_context = Context.model_validate({"messages": restored})
++    assert restored_context == context
+     serialize = (proxy if bridge == "proxy" else pi_messages)._serialize_context
+-    wire = serialize(context)
++    wire = serialize(restored_context)
+     assert wire["messages"][0]["content"] == "hello"
+-    assert "argumentsError" not in wire["messages"][1]["content"][0]
+-    assert (
+-        context.model_dump()["messages"][1]["content"][0]["argumentsError"] == "fixture"
+-    )
++    serialized_call = wire["messages"][1]["content"][0]
++    assert "argumentsError" not in serialized_call
++    assert serialized_call["arguments"] == arguments
++    assert restored_context.messages[1].content[0].arguments == arguments
+ 
+ 
+ def test_copy_close_failure_removes_partial_target(tmp_path, monkeypatch):
+@@ -766,8 +795,8 @@
+ 
+ 
+ @pytest.mark.parametrize("stop_block", [False, True])
+-@pytest.mark.parametrize("raw", ["not-json", "{}"])
+-def test_bedrock_validates_closed_and_unclosed_blocks(stop_block, raw):
++@pytest.mark.parametrize("raw,expected", [("not-json", {}), ("{}", {}), ('{"note":"hello', {"note": "hello"}), ("null", None)])
++def test_bedrock_recovers_closed_and_unclosed_blocks_like_pi(stop_block, raw, expected):
+     from misaka.ai.providers import amazon_bedrock as bedrock
+ 
+     output = message([ToolCall(id="call", name="probe", arguments={})])
+@@ -782,13 +811,13 @@
+         )
+     else:
+         bedrock.finish_open_tool_arguments(buffers, output)
+-    assert bool(output.content[0].argumentsError) == (raw != "{}")
++    assert output.content[0].arguments == expected
+     assert not buffers
+ 
+ 
+ @pytest.mark.parametrize("provider", ["mistral", "openai-completions"])
+-@pytest.mark.parametrize("raw", ["not-json", "{}"])
+-async def test_chat_completion_finalization(provider, raw, monkeypatch):
++@pytest.mark.parametrize("raw,expected", [("not-json", {}), ("{}", {}), ('{"note":"hello', {"note": "hello"}), ("null", None)])
++async def test_chat_completion_finalization(provider, raw, expected, monkeypatch):
+     from misaka.ai.providers import mistral, openai_completions
+ 
+     async def incoming():
+@@ -831,7 +860,52 @@
+             pass
+         output = await stream.result()
+     assert output.stopReason == "toolUse", output.errorMessage
+-    assert bool(output.content[0].argumentsError) == (raw != "{}")
++    assert output.content[0].arguments == expected
++
++
++@pytest.mark.parametrize("provider", ["anthropic", "google", "mistral"])
++@pytest.mark.parametrize("arguments", [[], {}, False, 0, "", None, 42, "yes"])
++def test_provider_replays_parsed_values_with_pi_fallback(provider, arguments):
++    from misaka.ai.providers import anthropic, google_shared, mistral
++
++    msg = message([ToolCall(id="fixture", name="probe", arguments=arguments)])
++    if provider == "anthropic":
++        wire = anthropic.convert_messages([msg], model(), False)
++        actual = wire[0]["content"][0]["input"]
++    elif provider == "google":
++        wire = google_shared.convert_messages(model("google-generative-ai"), Context(messages=[msg]))
++        actual = wire[0]["parts"][0]["functionCall"]["args"]
++    else:
++        wire = mistral.to_chat_messages([msg], False)
++        actual = json.loads(wire[0]["toolCalls"][0]["function"]["arguments"])
++    if provider == "mistral":
++        expected = arguments if isinstance(arguments, (dict, list)) or arguments else {}
++    else:
++        expected = arguments if arguments is not None else {}
++    assert actual == expected
++
++
++def test_mistral_replay_normalizes_nan_like_pi():
++    from misaka.ai.providers import mistral
++
++    msg = message([ToolCall(id="fixture", name="probe", arguments=float("nan"))])
++    wire = mistral.to_chat_messages([msg], False)
++    assert json.loads(wire[0]["toolCalls"][0]["function"]["arguments"]) == {}
++
++
++@pytest.mark.parametrize("arguments", [[], {}, False, 0, None, 42])
++async def test_mistral_structured_input_preserves_pi_truthiness(arguments):
++    from misaka.ai.providers import mistral
++
++    async def incoming():
++        yield {"choices": [{"delta": {"tool_calls": [
++            {"index": 0, "id": "fixture", "function": {"name": "probe", "arguments": arguments}},
++        ]}, "finish_reason": "tool_calls"}]}
++
++    output = message()
++    await mistral.consume_chat_stream(model("mistral-conversations"), output,
++        SimpleNamespace(push=lambda event: None), incoming())
++    assert output.content[0].arguments == (arguments if isinstance(arguments, (dict, list)) or arguments else {})
+ 
+ 
+ @pytest.mark.parametrize("halt", ["stop", "takeover"])

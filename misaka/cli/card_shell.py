@@ -56,7 +56,7 @@ def launch(task_id, resume_only=False, say=None):
     with contextlib.closing(db.connect(CFG["db"])) as con:
         row = db.get(con, task_id)
         handoffs = worker.card_handoffs(con, row) if row is not None else []
-        extras = (worker.card_extras(con, row, include_colleagues=False)
+        extras = (worker.card_extras(con, row)
                   if row is not None else {})
     if row is None:
         sys.exit(f"Card not found: {task_id}")

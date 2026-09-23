@@ -17,8 +17,8 @@ The existing `/lcm` operator command remains opt-in and unchanged.
 
 ## Configuration and lifetime
 
-Preferences are stored in `<agent-dir>/plugins/misaka-lcm/settings.json`
-(normally `~/.misaka/agent/plugins/misaka-lcm/settings.json`). This file contains
+Preferences are stored in the home, at `state/plugins/misaka-lcm/settings.json`
+(normally `~/.misaka/state/plugins/misaka-lcm/settings.json`). This file contains
 four preferences only, not task content. Writes are locked, atomic and mode 0600.
 Invalid JSON/keys/types are reported rather than silently overwritten. Existing
 `LCM_*` environment overrides still win, including explicit false/empty values;
@@ -35,6 +35,12 @@ New-code runtimes reload these preferences at their next serialized LCM operatio
 without replacing engines or changing transcript cursors. Processes started before
 this implementation need one restart to load the new plugin code. No user process
 is automatically restarted. Native session archives remain unchanged.
+
+One default differs from upstream: `embedding_query_timeout_s` is 30 s here (upstream 3 s).
+Upstream applies that deadline to `lcm_grep`'s full-text arm as well, interrupting the SQLite
+query, and a research project's `lcm.db` grows to tens of megabytes, where 3 s dropped the
+message-search arm in silence (2026-09-18, B32). `LCM_EMBEDDING_QUERY_TIMEOUT_S` still wins
+when set; the vendored code is untouched.
 
 ## Actual automatic-recall path
 

@@ -1,0 +1,3327 @@
+FFFFFFFFFFFFFFFFFFFFFFF.F..FFFFFFFF..FFFFFFFF....FF..FF..FF....FFFFFF... [ 62%]
+.FFFF....FFFFFFF...FFFFFFFFFFFFFFFFFFFF....F                             [100%]
+=================================== FAILURES ===================================
+_ test_final_arguments_follow_pi_recovery_and_survive_serialization[{}-expected0] _
+
+raw = '{}', expected = {}
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("{}", {}),
+            ("", {}),
+            ('{"note":"yes"}', {"note": "yes"}),
+            ('{"note":"hello\nworld"}', {"note": "hello\nworld"}),
+            ('{"note":"C:\\q"}', {"note": "C:\\q"}),
+            ('{"note":"hello', {"note": "hello"}),
+            ("not-json", {}),
+            ('{"note":"an "unescaped" quote"}', {"note": "an "}),
+            ('{"note":true}garbage', {"note": True}),
+            ("null", None),
+            ("[]", []),
+            ("false", False),
+            ("42", 42),
+        ],
+    )
+    def test_final_arguments_follow_pi_recovery_and_survive_serialization(raw, expected):
+        args = StreamingArgs(raw)
+        _preview = args.arguments
+        call = ToolCall(id="fixture", name="probe", arguments=args.finish())
+        assert call.arguments == expected
+        assert ToolCall.model_validate_json(call.model_dump_json()).arguments == expected
+>       assert "argumentsError" not in call.model_dump()
+E       AssertionError: assert 'argumentsError' not in {'type': 'toolCall', 'id': 'fixture', 'name': 'probe', 'arguments': {}, ...}
+E        +  where {'type': 'toolCall', 'id': 'fixture', 'name': 'probe', 'arguments': {}, ...} = model_dump()
+E        +    where model_dump = ToolCall(type='toolCall', id='fixture', name='probe', arguments={}, argumentsError=None, thoughtSignature=None, namespace=None).model_dump
+
+../u04_callers_contract_red.py:100: AssertionError
+_ test_final_arguments_follow_pi_recovery_and_survive_serialization[-expected1] _
+
+raw = '', expected = {}
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("{}", {}),
+            ("", {}),
+            ('{"note":"yes"}', {"note": "yes"}),
+            ('{"note":"hello\nworld"}', {"note": "hello\nworld"}),
+            ('{"note":"C:\\q"}', {"note": "C:\\q"}),
+            ('{"note":"hello', {"note": "hello"}),
+            ("not-json", {}),
+            ('{"note":"an "unescaped" quote"}', {"note": "an "}),
+            ('{"note":true}garbage', {"note": True}),
+            ("null", None),
+            ("[]", []),
+            ("false", False),
+            ("42", 42),
+        ],
+    )
+    def test_final_arguments_follow_pi_recovery_and_survive_serialization(raw, expected):
+        args = StreamingArgs(raw)
+        _preview = args.arguments
+        call = ToolCall(id="fixture", name="probe", arguments=args.finish())
+        assert call.arguments == expected
+        assert ToolCall.model_validate_json(call.model_dump_json()).arguments == expected
+>       assert "argumentsError" not in call.model_dump()
+E       AssertionError: assert 'argumentsError' not in {'type': 'toolCall', 'id': 'fixture', 'name': 'probe', 'arguments': {}, ...}
+E        +  where {'type': 'toolCall', 'id': 'fixture', 'name': 'probe', 'arguments': {}, ...} = model_dump()
+E        +    where model_dump = ToolCall(type='toolCall', id='fixture', name='probe', arguments={}, argumentsError=None, thoughtSignature=None, namespace=None).model_dump
+
+../u04_callers_contract_red.py:100: AssertionError
+_ test_final_arguments_follow_pi_recovery_and_survive_serialization[{"note":"yes"}-expected2] _
+
+raw = '{"note":"yes"}', expected = {'note': 'yes'}
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("{}", {}),
+            ("", {}),
+            ('{"note":"yes"}', {"note": "yes"}),
+            ('{"note":"hello\nworld"}', {"note": "hello\nworld"}),
+            ('{"note":"C:\\q"}', {"note": "C:\\q"}),
+            ('{"note":"hello', {"note": "hello"}),
+            ("not-json", {}),
+            ('{"note":"an "unescaped" quote"}', {"note": "an "}),
+            ('{"note":true}garbage', {"note": True}),
+            ("null", None),
+            ("[]", []),
+            ("false", False),
+            ("42", 42),
+        ],
+    )
+    def test_final_arguments_follow_pi_recovery_and_survive_serialization(raw, expected):
+        args = StreamingArgs(raw)
+        _preview = args.arguments
+        call = ToolCall(id="fixture", name="probe", arguments=args.finish())
+        assert call.arguments == expected
+        assert ToolCall.model_validate_json(call.model_dump_json()).arguments == expected
+>       assert "argumentsError" not in call.model_dump()
+E       AssertionError: assert 'argumentsError' not in {'type': 'toolCall', 'id': 'fixture', 'name': 'probe', 'arguments': {'note': 'yes'}, ...}
+E        +  where {'type': 'toolCall', 'id': 'fixture', 'name': 'probe', 'arguments': {'note': 'yes'}, ...} = model_dump()
+E        +    where model_dump = ToolCall(type='toolCall', id='fixture', name='probe', arguments={'note': 'yes'}, argumentsError=None, thoughtSignature=None, namespace=None).model_dump
+
+../u04_callers_contract_red.py:100: AssertionError
+_ test_final_arguments_follow_pi_recovery_and_survive_serialization[{"note":"hello\nworld"}-expected3] _
+
+raw = '{"note":"hello\nworld"}', expected = {'note': 'hello\nworld'}
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("{}", {}),
+            ("", {}),
+            ('{"note":"yes"}', {"note": "yes"}),
+            ('{"note":"hello\nworld"}', {"note": "hello\nworld"}),
+            ('{"note":"C:\\q"}', {"note": "C:\\q"}),
+            ('{"note":"hello', {"note": "hello"}),
+            ("not-json", {}),
+            ('{"note":"an "unescaped" quote"}', {"note": "an "}),
+            ('{"note":true}garbage', {"note": True}),
+            ("null", None),
+            ("[]", []),
+            ("false", False),
+            ("42", 42),
+        ],
+    )
+    def test_final_arguments_follow_pi_recovery_and_survive_serialization(raw, expected):
+        args = StreamingArgs(raw)
+        _preview = args.arguments
+        call = ToolCall(id="fixture", name="probe", arguments=args.finish())
+        assert call.arguments == expected
+        assert ToolCall.model_validate_json(call.model_dump_json()).arguments == expected
+>       assert "argumentsError" not in call.model_dump()
+E       AssertionError: assert 'argumentsError' not in {'type': 'toolCall', 'id': 'fixture', 'name': 'probe', 'arguments': {'note': 'hello\nworld'}, ...}
+E        +  where {'type': 'toolCall', 'id': 'fixture', 'name': 'probe', 'arguments': {'note': 'hello\nworld'}, ...} = model_dump()
+E        +    where model_dump = ToolCall(type='toolCall', id='fixture', name='probe', arguments={'note': 'hello\nworld'}, argumentsError=None, thoughtSignature=None, namespace=None).model_dump
+
+../u04_callers_contract_red.py:100: AssertionError
+_ test_final_arguments_follow_pi_recovery_and_survive_serialization[{"note":"C:\\q"}-expected4] _
+
+raw = '{"note":"C:\\q"}', expected = {'note': 'C:\\q'}
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("{}", {}),
+            ("", {}),
+            ('{"note":"yes"}', {"note": "yes"}),
+            ('{"note":"hello\nworld"}', {"note": "hello\nworld"}),
+            ('{"note":"C:\\q"}', {"note": "C:\\q"}),
+            ('{"note":"hello', {"note": "hello"}),
+            ("not-json", {}),
+            ('{"note":"an "unescaped" quote"}', {"note": "an "}),
+            ('{"note":true}garbage', {"note": True}),
+            ("null", None),
+            ("[]", []),
+            ("false", False),
+            ("42", 42),
+        ],
+    )
+    def test_final_arguments_follow_pi_recovery_and_survive_serialization(raw, expected):
+        args = StreamingArgs(raw)
+        _preview = args.arguments
+        call = ToolCall(id="fixture", name="probe", arguments=args.finish())
+        assert call.arguments == expected
+        assert ToolCall.model_validate_json(call.model_dump_json()).arguments == expected
+>       assert "argumentsError" not in call.model_dump()
+E       AssertionError: assert 'argumentsError' not in {'type': 'toolCall', 'id': 'fixture', 'name': 'probe', 'arguments': {'note': 'C:\\q'}, ...}
+E        +  where {'type': 'toolCall', 'id': 'fixture', 'name': 'probe', 'arguments': {'note': 'C:\\q'}, ...} = model_dump()
+E        +    where model_dump = ToolCall(type='toolCall', id='fixture', name='probe', arguments={'note': 'C:\\q'}, argumentsError=None, thoughtSignature=None, namespace=None).model_dump
+
+../u04_callers_contract_red.py:100: AssertionError
+_ test_final_arguments_follow_pi_recovery_and_survive_serialization[{"note":"hello-expected5] _
+
+raw = '{"note":"hello', expected = {'note': 'hello'}
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("{}", {}),
+            ("", {}),
+            ('{"note":"yes"}', {"note": "yes"}),
+            ('{"note":"hello\nworld"}', {"note": "hello\nworld"}),
+            ('{"note":"C:\\q"}', {"note": "C:\\q"}),
+            ('{"note":"hello', {"note": "hello"}),
+            ("not-json", {}),
+            ('{"note":"an "unescaped" quote"}', {"note": "an "}),
+            ('{"note":true}garbage', {"note": True}),
+            ("null", None),
+            ("[]", []),
+            ("false", False),
+            ("42", 42),
+        ],
+    )
+    def test_final_arguments_follow_pi_recovery_and_survive_serialization(raw, expected):
+        args = StreamingArgs(raw)
+        _preview = args.arguments
+>       call = ToolCall(id="fixture", name="probe", arguments=args.finish())
+                                                              ^^^^^^^^^^^^^
+
+../u04_callers_contract_red.py:97: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+misaka/ai/utils/json_parse.py:363: in finish
+    value = parse_json_with_repair(self._raw) if self._raw.strip() else {}
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+misaka/ai/utils/json_parse.py:86: in parse_json_with_repair
+    return json.loads(json_string)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/json/__init__.py:352: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x105cff8c0>, s = '{"note":"hello'
+idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+>           obj, end = self.scan_once(s, idx)
+                       ^^^^^^^^^^^^^^^^^^^^^^
+E           json.decoder.JSONDecodeError: Unterminated string starting at: line 1 column 9 (char 8)
+
+/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/json/decoder.py:361: JSONDecodeError
+_ test_final_arguments_follow_pi_recovery_and_survive_serialization[not-json-expected6] _
+
+raw = 'not-json', expected = {}
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("{}", {}),
+            ("", {}),
+            ('{"note":"yes"}', {"note": "yes"}),
+            ('{"note":"hello\nworld"}', {"note": "hello\nworld"}),
+            ('{"note":"C:\\q"}', {"note": "C:\\q"}),
+            ('{"note":"hello', {"note": "hello"}),
+            ("not-json", {}),
+            ('{"note":"an "unescaped" quote"}', {"note": "an "}),
+            ('{"note":true}garbage', {"note": True}),
+            ("null", None),
+            ("[]", []),
+            ("false", False),
+            ("42", 42),
+        ],
+    )
+    def test_final_arguments_follow_pi_recovery_and_survive_serialization(raw, expected):
+        args = StreamingArgs(raw)
+        _preview = args.arguments
+>       call = ToolCall(id="fixture", name="probe", arguments=args.finish())
+                                                              ^^^^^^^^^^^^^
+
+../u04_callers_contract_red.py:97: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+misaka/ai/utils/json_parse.py:363: in finish
+    value = parse_json_with_repair(self._raw) if self._raw.strip() else {}
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+misaka/ai/utils/json_parse.py:86: in parse_json_with_repair
+    return json.loads(json_string)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/json/__init__.py:352: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x105cff8c0>, s = 'not-json', idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+            obj, end = self.scan_once(s, idx)
+        except StopIteration as err:
+>           raise JSONDecodeError("Expecting value", s, err.value) from None
+E           json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+
+/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/json/decoder.py:363: JSONDecodeError
+_ test_final_arguments_follow_pi_recovery_and_survive_serialization[{"note":"an "unescaped" quote"}-expected7] _
+
+raw = '{"note":"an "unescaped" quote"}', expected = {'note': 'an '}
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("{}", {}),
+            ("", {}),
+            ('{"note":"yes"}', {"note": "yes"}),
+            ('{"note":"hello\nworld"}', {"note": "hello\nworld"}),
+            ('{"note":"C:\\q"}', {"note": "C:\\q"}),
+            ('{"note":"hello', {"note": "hello"}),
+            ("not-json", {}),
+            ('{"note":"an "unescaped" quote"}', {"note": "an "}),
+            ('{"note":true}garbage', {"note": True}),
+            ("null", None),
+            ("[]", []),
+            ("false", False),
+            ("42", 42),
+        ],
+    )
+    def test_final_arguments_follow_pi_recovery_and_survive_serialization(raw, expected):
+        args = StreamingArgs(raw)
+        _preview = args.arguments
+>       call = ToolCall(id="fixture", name="probe", arguments=args.finish())
+                                                              ^^^^^^^^^^^^^
+
+../u04_callers_contract_red.py:97: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+misaka/ai/utils/json_parse.py:363: in finish
+    value = parse_json_with_repair(self._raw) if self._raw.strip() else {}
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+misaka/ai/utils/json_parse.py:86: in parse_json_with_repair
+    return json.loads(json_string)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/json/__init__.py:352: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x105cff8c0>
+s = '{"note":"an "unescaped" quote"}', idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+>           obj, end = self.scan_once(s, idx)
+                       ^^^^^^^^^^^^^^^^^^^^^^
+E           json.decoder.JSONDecodeError: Expecting ',' delimiter: line 1 column 14 (char 13)
+
+/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/json/decoder.py:361: JSONDecodeError
+_ test_final_arguments_follow_pi_recovery_and_survive_serialization[{"note":true}garbage-expected8] _
+
+raw = '{"note":true}garbage', expected = {'note': True}
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("{}", {}),
+            ("", {}),
+            ('{"note":"yes"}', {"note": "yes"}),
+            ('{"note":"hello\nworld"}', {"note": "hello\nworld"}),
+            ('{"note":"C:\\q"}', {"note": "C:\\q"}),
+            ('{"note":"hello', {"note": "hello"}),
+            ("not-json", {}),
+            ('{"note":"an "unescaped" quote"}', {"note": "an "}),
+            ('{"note":true}garbage', {"note": True}),
+            ("null", None),
+            ("[]", []),
+            ("false", False),
+            ("42", 42),
+        ],
+    )
+    def test_final_arguments_follow_pi_recovery_and_survive_serialization(raw, expected):
+        args = StreamingArgs(raw)
+        _preview = args.arguments
+>       call = ToolCall(id="fixture", name="probe", arguments=args.finish())
+                                                              ^^^^^^^^^^^^^
+
+../u04_callers_contract_red.py:97: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+misaka/ai/utils/json_parse.py:363: in finish
+    value = parse_json_with_repair(self._raw) if self._raw.strip() else {}
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+misaka/ai/utils/json_parse.py:86: in parse_json_with_repair
+    return json.loads(json_string)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/json/__init__.py:352: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x105cff8c0>
+s = '{"note":true}garbage'
+_w = <built-in method match of re.Pattern object at 0x105dad490>
+
+    def decode(self, s, _w=WHITESPACE.match):
+        """Return the Python representation of ``s`` (a ``str`` instance
+        containing a JSON document).
+    
+        """
+        obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+        end = _w(s, end).end()
+        if end != len(s):
+>           raise JSONDecodeError("Extra data", s, end)
+E           json.decoder.JSONDecodeError: Extra data: line 1 column 14 (char 13)
+
+/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/json/decoder.py:348: JSONDecodeError
+_ test_final_arguments_follow_pi_recovery_and_survive_serialization[null-None] _
+
+raw = 'null', expected = None
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("{}", {}),
+            ("", {}),
+            ('{"note":"yes"}', {"note": "yes"}),
+            ('{"note":"hello\nworld"}', {"note": "hello\nworld"}),
+            ('{"note":"C:\\q"}', {"note": "C:\\q"}),
+            ('{"note":"hello', {"note": "hello"}),
+            ("not-json", {}),
+            ('{"note":"an "unescaped" quote"}', {"note": "an "}),
+            ('{"note":true}garbage', {"note": True}),
+            ("null", None),
+            ("[]", []),
+            ("false", False),
+            ("42", 42),
+        ],
+    )
+    def test_final_arguments_follow_pi_recovery_and_survive_serialization(raw, expected):
+        args = StreamingArgs(raw)
+        _preview = args.arguments
+>       call = ToolCall(id="fixture", name="probe", arguments=args.finish())
+                                                              ^^^^^^^^^^^^^
+
+../u04_callers_contract_red.py:97: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <misaka.ai.utils.json_parse.StreamingArgs object at 0x10e2ecf80>
+
+    def finish(self) -> Any:
+        """MISAKA fork: final arguments require a complete object, never prefix recovery.
+    
+        Keep the existing complete-string escape repair and empty/no-argument convention.
+        Incremental UI previews still use the permissive parser in arguments.
+        """
+        value = parse_json_with_repair(self._raw) if self._raw.strip() else {}
+        if not isinstance(value, dict):
+>           raise ValueError("Final tool arguments must be a JSON object")  # noqa: TRY004 - malformed wire value, same contract as JSONDecodeError
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           ValueError: Final tool arguments must be a JSON object
+
+misaka/ai/utils/json_parse.py:365: ValueError
+_ test_final_arguments_follow_pi_recovery_and_survive_serialization[[]-expected10] _
+
+raw = '[]', expected = []
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("{}", {}),
+            ("", {}),
+            ('{"note":"yes"}', {"note": "yes"}),
+            ('{"note":"hello\nworld"}', {"note": "hello\nworld"}),
+            ('{"note":"C:\\q"}', {"note": "C:\\q"}),
+            ('{"note":"hello', {"note": "hello"}),
+            ("not-json", {}),
+            ('{"note":"an "unescaped" quote"}', {"note": "an "}),
+            ('{"note":true}garbage', {"note": True}),
+            ("null", None),
+            ("[]", []),
+            ("false", False),
+            ("42", 42),
+        ],
+    )
+    def test_final_arguments_follow_pi_recovery_and_survive_serialization(raw, expected):
+        args = StreamingArgs(raw)
+        _preview = args.arguments
+>       call = ToolCall(id="fixture", name="probe", arguments=args.finish())
+                                                              ^^^^^^^^^^^^^
+
+../u04_callers_contract_red.py:97: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <misaka.ai.utils.json_parse.StreamingArgs object at 0x10e392380>
+
+    def finish(self) -> Any:
+        """MISAKA fork: final arguments require a complete object, never prefix recovery.
+    
+        Keep the existing complete-string escape repair and empty/no-argument convention.
+        Incremental UI previews still use the permissive parser in arguments.
+        """
+        value = parse_json_with_repair(self._raw) if self._raw.strip() else {}
+        if not isinstance(value, dict):
+>           raise ValueError("Final tool arguments must be a JSON object")  # noqa: TRY004 - malformed wire value, same contract as JSONDecodeError
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           ValueError: Final tool arguments must be a JSON object
+
+misaka/ai/utils/json_parse.py:365: ValueError
+_ test_final_arguments_follow_pi_recovery_and_survive_serialization[false-False] _
+
+raw = 'false', expected = False
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("{}", {}),
+            ("", {}),
+            ('{"note":"yes"}', {"note": "yes"}),
+            ('{"note":"hello\nworld"}', {"note": "hello\nworld"}),
+            ('{"note":"C:\\q"}', {"note": "C:\\q"}),
+            ('{"note":"hello', {"note": "hello"}),
+            ("not-json", {}),
+            ('{"note":"an "unescaped" quote"}', {"note": "an "}),
+            ('{"note":true}garbage', {"note": True}),
+            ("null", None),
+            ("[]", []),
+            ("false", False),
+            ("42", 42),
+        ],
+    )
+    def test_final_arguments_follow_pi_recovery_and_survive_serialization(raw, expected):
+        args = StreamingArgs(raw)
+        _preview = args.arguments
+>       call = ToolCall(id="fixture", name="probe", arguments=args.finish())
+                                                              ^^^^^^^^^^^^^
+
+../u04_callers_contract_red.py:97: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <misaka.ai.utils.json_parse.StreamingArgs object at 0x10e311780>
+
+    def finish(self) -> Any:
+        """MISAKA fork: final arguments require a complete object, never prefix recovery.
+    
+        Keep the existing complete-string escape repair and empty/no-argument convention.
+        Incremental UI previews still use the permissive parser in arguments.
+        """
+        value = parse_json_with_repair(self._raw) if self._raw.strip() else {}
+        if not isinstance(value, dict):
+>           raise ValueError("Final tool arguments must be a JSON object")  # noqa: TRY004 - malformed wire value, same contract as JSONDecodeError
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           ValueError: Final tool arguments must be a JSON object
+
+misaka/ai/utils/json_parse.py:365: ValueError
+___ test_final_arguments_follow_pi_recovery_and_survive_serialization[42-42] ___
+
+raw = '42', expected = 42
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("{}", {}),
+            ("", {}),
+            ('{"note":"yes"}', {"note": "yes"}),
+            ('{"note":"hello\nworld"}', {"note": "hello\nworld"}),
+            ('{"note":"C:\\q"}', {"note": "C:\\q"}),
+            ('{"note":"hello', {"note": "hello"}),
+            ("not-json", {}),
+            ('{"note":"an "unescaped" quote"}', {"note": "an "}),
+            ('{"note":true}garbage', {"note": True}),
+            ("null", None),
+            ("[]", []),
+            ("false", False),
+            ("42", 42),
+        ],
+    )
+    def test_final_arguments_follow_pi_recovery_and_survive_serialization(raw, expected):
+        args = StreamingArgs(raw)
+        _preview = args.arguments
+>       call = ToolCall(id="fixture", name="probe", arguments=args.finish())
+                                                              ^^^^^^^^^^^^^
+
+../u04_callers_contract_red.py:97: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <misaka.ai.utils.json_parse.StreamingArgs object at 0x10e390740>
+
+    def finish(self) -> Any:
+        """MISAKA fork: final arguments require a complete object, never prefix recovery.
+    
+        Keep the existing complete-string escape repair and empty/no-argument convention.
+        Incremental UI previews still use the permissive parser in arguments.
+        """
+        value = parse_json_with_repair(self._raw) if self._raw.strip() else {}
+        if not isinstance(value, dict):
+>           raise ValueError("Final tool arguments must be a JSON object")  # noqa: TRY004 - malformed wire value, same contract as JSONDecodeError
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           ValueError: Final tool arguments must be a JSON object
+
+misaka/ai/utils/json_parse.py:365: ValueError
+_ test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling[not-json-sequential] _
+
+execution = 'sequential', raw = 'not-json'
+
+    @pytest.mark.parametrize("execution", ["sequential", "parallel"])
+    @pytest.mark.parametrize("raw", ["not-json", "null", "[]", "42", '{"note":{}}'])
+    async def test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling(execution, raw):
+        called, prepared = [], []
+    
+        async def probe(call_id, args, *_):
+            called.append((call_id, args))
+            return AgentToolResult(content=[TextContent(text="ok")], details={})
+    
+        def prepare(args):
+            prepared.append(args)
+            return args
+    
+        tool = AgentTool(
+            name="probe",
+            label="probe",
+            description="memory only",
+            parameters={
+                "type": "object",
+                "properties": {"note": {"type": "string"}},
+                "required": ["note"],
+            },
+            prepareArguments=prepare,
+            execute=probe,
+        )
+>       bad = ToolCall(id="bad", name="probe", arguments=StreamingArgs(raw).finish())
+                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+../u04_callers_contract_red.py:128: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+misaka/ai/utils/json_parse.py:363: in finish
+    value = parse_json_with_repair(self._raw) if self._raw.strip() else {}
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+misaka/ai/utils/json_parse.py:86: in parse_json_with_repair
+    return json.loads(json_string)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/json/__init__.py:352: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x105cff8c0>, s = 'not-json', idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+            obj, end = self.scan_once(s, idx)
+        except StopIteration as err:
+>           raise JSONDecodeError("Expecting value", s, err.value) from None
+E           json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+
+/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/json/decoder.py:363: JSONDecodeError
+_ test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling[not-json-parallel] _
+
+execution = 'parallel', raw = 'not-json'
+
+    @pytest.mark.parametrize("execution", ["sequential", "parallel"])
+    @pytest.mark.parametrize("raw", ["not-json", "null", "[]", "42", '{"note":{}}'])
+    async def test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling(execution, raw):
+        called, prepared = [], []
+    
+        async def probe(call_id, args, *_):
+            called.append((call_id, args))
+            return AgentToolResult(content=[TextContent(text="ok")], details={})
+    
+        def prepare(args):
+            prepared.append(args)
+            return args
+    
+        tool = AgentTool(
+            name="probe",
+            label="probe",
+            description="memory only",
+            parameters={
+                "type": "object",
+                "properties": {"note": {"type": "string"}},
+                "required": ["note"],
+            },
+            prepareArguments=prepare,
+            execute=probe,
+        )
+>       bad = ToolCall(id="bad", name="probe", arguments=StreamingArgs(raw).finish())
+                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+../u04_callers_contract_red.py:128: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+misaka/ai/utils/json_parse.py:363: in finish
+    value = parse_json_with_repair(self._raw) if self._raw.strip() else {}
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+misaka/ai/utils/json_parse.py:86: in parse_json_with_repair
+    return json.loads(json_string)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/json/__init__.py:352: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x105cff8c0>, s = 'not-json', idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+            obj, end = self.scan_once(s, idx)
+        except StopIteration as err:
+>           raise JSONDecodeError("Expecting value", s, err.value) from None
+E           json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+
+/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/json/decoder.py:363: JSONDecodeError
+_ test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling[null-sequential] _
+
+execution = 'sequential', raw = 'null'
+
+    @pytest.mark.parametrize("execution", ["sequential", "parallel"])
+    @pytest.mark.parametrize("raw", ["not-json", "null", "[]", "42", '{"note":{}}'])
+    async def test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling(execution, raw):
+        called, prepared = [], []
+    
+        async def probe(call_id, args, *_):
+            called.append((call_id, args))
+            return AgentToolResult(content=[TextContent(text="ok")], details={})
+    
+        def prepare(args):
+            prepared.append(args)
+            return args
+    
+        tool = AgentTool(
+            name="probe",
+            label="probe",
+            description="memory only",
+            parameters={
+                "type": "object",
+                "properties": {"note": {"type": "string"}},
+                "required": ["note"],
+            },
+            prepareArguments=prepare,
+            execute=probe,
+        )
+>       bad = ToolCall(id="bad", name="probe", arguments=StreamingArgs(raw).finish())
+                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+../u04_callers_contract_red.py:128: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <misaka.ai.utils.json_parse.StreamingArgs object at 0x10e3df300>
+
+    def finish(self) -> Any:
+        """MISAKA fork: final arguments require a complete object, never prefix recovery.
+    
+        Keep the existing complete-string escape repair and empty/no-argument convention.
+        Incremental UI previews still use the permissive parser in arguments.
+        """
+        value = parse_json_with_repair(self._raw) if self._raw.strip() else {}
+        if not isinstance(value, dict):
+>           raise ValueError("Final tool arguments must be a JSON object")  # noqa: TRY004 - malformed wire value, same contract as JSONDecodeError
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           ValueError: Final tool arguments must be a JSON object
+
+misaka/ai/utils/json_parse.py:365: ValueError
+_ test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling[null-parallel] _
+
+execution = 'parallel', raw = 'null'
+
+    @pytest.mark.parametrize("execution", ["sequential", "parallel"])
+    @pytest.mark.parametrize("raw", ["not-json", "null", "[]", "42", '{"note":{}}'])
+    async def test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling(execution, raw):
+        called, prepared = [], []
+    
+        async def probe(call_id, args, *_):
+            called.append((call_id, args))
+            return AgentToolResult(content=[TextContent(text="ok")], details={})
+    
+        def prepare(args):
+            prepared.append(args)
+            return args
+    
+        tool = AgentTool(
+            name="probe",
+            label="probe",
+            description="memory only",
+            parameters={
+                "type": "object",
+                "properties": {"note": {"type": "string"}},
+                "required": ["note"],
+            },
+            prepareArguments=prepare,
+            execute=probe,
+        )
+>       bad = ToolCall(id="bad", name="probe", arguments=StreamingArgs(raw).finish())
+                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+../u04_callers_contract_red.py:128: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <misaka.ai.utils.json_parse.StreamingArgs object at 0x10e28bb00>
+
+    def finish(self) -> Any:
+        """MISAKA fork: final arguments require a complete object, never prefix recovery.
+    
+        Keep the existing complete-string escape repair and empty/no-argument convention.
+        Incremental UI previews still use the permissive parser in arguments.
+        """
+        value = parse_json_with_repair(self._raw) if self._raw.strip() else {}
+        if not isinstance(value, dict):
+>           raise ValueError("Final tool arguments must be a JSON object")  # noqa: TRY004 - malformed wire value, same contract as JSONDecodeError
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           ValueError: Final tool arguments must be a JSON object
+
+misaka/ai/utils/json_parse.py:365: ValueError
+_ test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling[[]-sequential] _
+
+execution = 'sequential', raw = '[]'
+
+    @pytest.mark.parametrize("execution", ["sequential", "parallel"])
+    @pytest.mark.parametrize("raw", ["not-json", "null", "[]", "42", '{"note":{}}'])
+    async def test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling(execution, raw):
+        called, prepared = [], []
+    
+        async def probe(call_id, args, *_):
+            called.append((call_id, args))
+            return AgentToolResult(content=[TextContent(text="ok")], details={})
+    
+        def prepare(args):
+            prepared.append(args)
+            return args
+    
+        tool = AgentTool(
+            name="probe",
+            label="probe",
+            description="memory only",
+            parameters={
+                "type": "object",
+                "properties": {"note": {"type": "string"}},
+                "required": ["note"],
+            },
+            prepareArguments=prepare,
+            execute=probe,
+        )
+>       bad = ToolCall(id="bad", name="probe", arguments=StreamingArgs(raw).finish())
+                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+../u04_callers_contract_red.py:128: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <misaka.ai.utils.json_parse.StreamingArgs object at 0x10e385e80>
+
+    def finish(self) -> Any:
+        """MISAKA fork: final arguments require a complete object, never prefix recovery.
+    
+        Keep the existing complete-string escape repair and empty/no-argument convention.
+        Incremental UI previews still use the permissive parser in arguments.
+        """
+        value = parse_json_with_repair(self._raw) if self._raw.strip() else {}
+        if not isinstance(value, dict):
+>           raise ValueError("Final tool arguments must be a JSON object")  # noqa: TRY004 - malformed wire value, same contract as JSONDecodeError
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           ValueError: Final tool arguments must be a JSON object
+
+misaka/ai/utils/json_parse.py:365: ValueError
+_ test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling[[]-parallel] _
+
+execution = 'parallel', raw = '[]'
+
+    @pytest.mark.parametrize("execution", ["sequential", "parallel"])
+    @pytest.mark.parametrize("raw", ["not-json", "null", "[]", "42", '{"note":{}}'])
+    async def test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling(execution, raw):
+        called, prepared = [], []
+    
+        async def probe(call_id, args, *_):
+            called.append((call_id, args))
+            return AgentToolResult(content=[TextContent(text="ok")], details={})
+    
+        def prepare(args):
+            prepared.append(args)
+            return args
+    
+        tool = AgentTool(
+            name="probe",
+            label="probe",
+            description="memory only",
+            parameters={
+                "type": "object",
+                "properties": {"note": {"type": "string"}},
+                "required": ["note"],
+            },
+            prepareArguments=prepare,
+            execute=probe,
+        )
+>       bad = ToolCall(id="bad", name="probe", arguments=StreamingArgs(raw).finish())
+                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+../u04_callers_contract_red.py:128: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <misaka.ai.utils.json_parse.StreamingArgs object at 0x10e420580>
+
+    def finish(self) -> Any:
+        """MISAKA fork: final arguments require a complete object, never prefix recovery.
+    
+        Keep the existing complete-string escape repair and empty/no-argument convention.
+        Incremental UI previews still use the permissive parser in arguments.
+        """
+        value = parse_json_with_repair(self._raw) if self._raw.strip() else {}
+        if not isinstance(value, dict):
+>           raise ValueError("Final tool arguments must be a JSON object")  # noqa: TRY004 - malformed wire value, same contract as JSONDecodeError
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           ValueError: Final tool arguments must be a JSON object
+
+misaka/ai/utils/json_parse.py:365: ValueError
+_ test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling[42-sequential] _
+
+execution = 'sequential', raw = '42'
+
+    @pytest.mark.parametrize("execution", ["sequential", "parallel"])
+    @pytest.mark.parametrize("raw", ["not-json", "null", "[]", "42", '{"note":{}}'])
+    async def test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling(execution, raw):
+        called, prepared = [], []
+    
+        async def probe(call_id, args, *_):
+            called.append((call_id, args))
+            return AgentToolResult(content=[TextContent(text="ok")], details={})
+    
+        def prepare(args):
+            prepared.append(args)
+            return args
+    
+        tool = AgentTool(
+            name="probe",
+            label="probe",
+            description="memory only",
+            parameters={
+                "type": "object",
+                "properties": {"note": {"type": "string"}},
+                "required": ["note"],
+            },
+            prepareArguments=prepare,
+            execute=probe,
+        )
+>       bad = ToolCall(id="bad", name="probe", arguments=StreamingArgs(raw).finish())
+                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+../u04_callers_contract_red.py:128: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <misaka.ai.utils.json_parse.StreamingArgs object at 0x10e433b80>
+
+    def finish(self) -> Any:
+        """MISAKA fork: final arguments require a complete object, never prefix recovery.
+    
+        Keep the existing complete-string escape repair and empty/no-argument convention.
+        Incremental UI previews still use the permissive parser in arguments.
+        """
+        value = parse_json_with_repair(self._raw) if self._raw.strip() else {}
+        if not isinstance(value, dict):
+>           raise ValueError("Final tool arguments must be a JSON object")  # noqa: TRY004 - malformed wire value, same contract as JSONDecodeError
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           ValueError: Final tool arguments must be a JSON object
+
+misaka/ai/utils/json_parse.py:365: ValueError
+_ test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling[42-parallel] _
+
+execution = 'parallel', raw = '42'
+
+    @pytest.mark.parametrize("execution", ["sequential", "parallel"])
+    @pytest.mark.parametrize("raw", ["not-json", "null", "[]", "42", '{"note":{}}'])
+    async def test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling(execution, raw):
+        called, prepared = [], []
+    
+        async def probe(call_id, args, *_):
+            called.append((call_id, args))
+            return AgentToolResult(content=[TextContent(text="ok")], details={})
+    
+        def prepare(args):
+            prepared.append(args)
+            return args
+    
+        tool = AgentTool(
+            name="probe",
+            label="probe",
+            description="memory only",
+            parameters={
+                "type": "object",
+                "properties": {"note": {"type": "string"}},
+                "required": ["note"],
+            },
+            prepareArguments=prepare,
+            execute=probe,
+        )
+>       bad = ToolCall(id="bad", name="probe", arguments=StreamingArgs(raw).finish())
+                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+../u04_callers_contract_red.py:128: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <misaka.ai.utils.json_parse.StreamingArgs object at 0x10e435640>
+
+    def finish(self) -> Any:
+        """MISAKA fork: final arguments require a complete object, never prefix recovery.
+    
+        Keep the existing complete-string escape repair and empty/no-argument convention.
+        Incremental UI previews still use the permissive parser in arguments.
+        """
+        value = parse_json_with_repair(self._raw) if self._raw.strip() else {}
+        if not isinstance(value, dict):
+>           raise ValueError("Final tool arguments must be a JSON object")  # noqa: TRY004 - malformed wire value, same contract as JSONDecodeError
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           ValueError: Final tool arguments must be a JSON object
+
+misaka/ai/utils/json_parse.py:365: ValueError
+_ test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling[{"note":{}}-sequential] _
+
+execution = 'sequential', raw = '{"note":{}}'
+
+    @pytest.mark.parametrize("execution", ["sequential", "parallel"])
+    @pytest.mark.parametrize("raw", ["not-json", "null", "[]", "42", '{"note":{}}'])
+    async def test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling(execution, raw):
+        called, prepared = [], []
+    
+        async def probe(call_id, args, *_):
+            called.append((call_id, args))
+            return AgentToolResult(content=[TextContent(text="ok")], details={})
+    
+        def prepare(args):
+            prepared.append(args)
+            return args
+    
+        tool = AgentTool(
+            name="probe",
+            label="probe",
+            description="memory only",
+            parameters={
+                "type": "object",
+                "properties": {"note": {"type": "string"}},
+                "required": ["note"],
+            },
+            prepareArguments=prepare,
+            execute=probe,
+        )
+        bad = ToolCall(id="bad", name="probe", arguments=StreamingArgs(raw).finish())
+>       good = ToolCall(id="good", name="probe", arguments=StreamingArgs('{"note":"hello').finish())
+                                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+../u04_callers_contract_red.py:129: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+misaka/ai/utils/json_parse.py:363: in finish
+    value = parse_json_with_repair(self._raw) if self._raw.strip() else {}
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+misaka/ai/utils/json_parse.py:86: in parse_json_with_repair
+    return json.loads(json_string)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/json/__init__.py:352: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x105cff8c0>, s = '{"note":"hello'
+idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+>           obj, end = self.scan_once(s, idx)
+                       ^^^^^^^^^^^^^^^^^^^^^^
+E           json.decoder.JSONDecodeError: Unterminated string starting at: line 1 column 9 (char 8)
+
+/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/json/decoder.py:361: JSONDecodeError
+_ test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling[{"note":{}}-parallel] _
+
+execution = 'parallel', raw = '{"note":{}}'
+
+    @pytest.mark.parametrize("execution", ["sequential", "parallel"])
+    @pytest.mark.parametrize("raw", ["not-json", "null", "[]", "42", '{"note":{}}'])
+    async def test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling(execution, raw):
+        called, prepared = [], []
+    
+        async def probe(call_id, args, *_):
+            called.append((call_id, args))
+            return AgentToolResult(content=[TextContent(text="ok")], details={})
+    
+        def prepare(args):
+            prepared.append(args)
+            return args
+    
+        tool = AgentTool(
+            name="probe",
+            label="probe",
+            description="memory only",
+            parameters={
+                "type": "object",
+                "properties": {"note": {"type": "string"}},
+                "required": ["note"],
+            },
+            prepareArguments=prepare,
+            execute=probe,
+        )
+        bad = ToolCall(id="bad", name="probe", arguments=StreamingArgs(raw).finish())
+>       good = ToolCall(id="good", name="probe", arguments=StreamingArgs('{"note":"hello').finish())
+                                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+../u04_callers_contract_red.py:129: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+misaka/ai/utils/json_parse.py:363: in finish
+    value = parse_json_with_repair(self._raw) if self._raw.strip() else {}
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+misaka/ai/utils/json_parse.py:86: in parse_json_with_repair
+    return json.loads(json_string)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/json/__init__.py:352: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x105cff8c0>, s = '{"note":"hello'
+idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+>           obj, end = self.scan_once(s, idx)
+                       ^^^^^^^^^^^^^^^^^^^^^^
+E           json.decoder.JSONDecodeError: Unterminated string starting at: line 1 column 9 (char 8)
+
+/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/json/decoder.py:361: JSONDecodeError
+_ test_anthropic_finalization_on_real_stream_path[{"note":"hello-initial1-False-expected1] _
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10ef56450>
+raw = '{"note":"hello', initial = {}, stop_block = False
+expected = {'note': 'hello'}
+
+    @pytest.mark.parametrize(
+        "raw,initial,stop_block,expected",
+        [
+            ("not-json", {}, True, {}),
+            ('{"note":"hello', {}, False, {"note": "hello"}),
+            ("{}", {}, True, {}),
+            ("", {"note": "inline"}, True, {"note": "inline"}),
+            ("null", {}, True, None),
+            ("[]", {}, False, []),
+            ("", [], True, []),
+            ("", False, True, False),
+            ("", 0, True, 0),
+            ("", "", True, ""),
+        ],
+    )
+    async def test_anthropic_finalization_on_real_stream_path(
+        monkeypatch, raw, initial, stop_block, expected
+    ):
+        from misaka.ai.providers import anthropic
+    
+        events = [
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "call",
+                    "name": "probe",
+                    "input": initial,
+                },
+            }
+        ]
+        if raw:
+            events.append(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "input_json_delta", "partial_json": raw},
+                }
+            )
+        if stop_block:
+            events.append({"type": "content_block_stop", "index": 0})
+        events.append({"type": "message_delta", "delta": {"stop_reason": "tool_use"}})
+    
+        async def incoming():
+            for event in events:
+                yield event
+    
+        monkeypatch.setattr(
+            anthropic, "_create_raw_response", AsyncMock(return_value=incoming())
+        )
+        stream = anthropic.stream_anthropic(
+            model(), Context(messages=[]), {"client": object()}
+        )
+        seen = [event async for event in stream]
+        result = await stream.result()
+        assert result.stopReason == "toolUse", result.errorMessage
+        call = result.content[0]
+>       assert call.arguments == expected
+E       AssertionError: assert {} == {'note': 'hello'}
+E         
+E         Right contains 1 more item:
+E         {'note': 'hello'}
+E         Use -v to get more diff
+
+../u04_callers_contract_red.py:207: AssertionError
+___ test_anthropic_finalization_on_real_stream_path[null-initial4-True-None] ___
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10efd4b00>
+raw = 'null', initial = {}, stop_block = True, expected = None
+
+    @pytest.mark.parametrize(
+        "raw,initial,stop_block,expected",
+        [
+            ("not-json", {}, True, {}),
+            ('{"note":"hello', {}, False, {"note": "hello"}),
+            ("{}", {}, True, {}),
+            ("", {"note": "inline"}, True, {"note": "inline"}),
+            ("null", {}, True, None),
+            ("[]", {}, False, []),
+            ("", [], True, []),
+            ("", False, True, False),
+            ("", 0, True, 0),
+            ("", "", True, ""),
+        ],
+    )
+    async def test_anthropic_finalization_on_real_stream_path(
+        monkeypatch, raw, initial, stop_block, expected
+    ):
+        from misaka.ai.providers import anthropic
+    
+        events = [
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "call",
+                    "name": "probe",
+                    "input": initial,
+                },
+            }
+        ]
+        if raw:
+            events.append(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "input_json_delta", "partial_json": raw},
+                }
+            )
+        if stop_block:
+            events.append({"type": "content_block_stop", "index": 0})
+        events.append({"type": "message_delta", "delta": {"stop_reason": "tool_use"}})
+    
+        async def incoming():
+            for event in events:
+                yield event
+    
+        monkeypatch.setattr(
+            anthropic, "_create_raw_response", AsyncMock(return_value=incoming())
+        )
+        stream = anthropic.stream_anthropic(
+            model(), Context(messages=[]), {"client": object()}
+        )
+        seen = [event async for event in stream]
+        result = await stream.result()
+        assert result.stopReason == "toolUse", result.errorMessage
+        call = result.content[0]
+>       assert call.arguments == expected
+E       AssertionError: assert {} == None
+E        +  where {} = ToolCall(type='toolCall', id='call', name='probe', arguments={}, argumentsError='Invalid final tool arguments; resend a complete JSON object.', thoughtSignature=None, namespace=None).arguments
+
+../u04_callers_contract_red.py:207: AssertionError
+_ test_anthropic_finalization_on_real_stream_path[[]-initial5-False-expected5] _
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10f140dd0>
+raw = '[]', initial = {}, stop_block = False, expected = []
+
+    @pytest.mark.parametrize(
+        "raw,initial,stop_block,expected",
+        [
+            ("not-json", {}, True, {}),
+            ('{"note":"hello', {}, False, {"note": "hello"}),
+            ("{}", {}, True, {}),
+            ("", {"note": "inline"}, True, {"note": "inline"}),
+            ("null", {}, True, None),
+            ("[]", {}, False, []),
+            ("", [], True, []),
+            ("", False, True, False),
+            ("", 0, True, 0),
+            ("", "", True, ""),
+        ],
+    )
+    async def test_anthropic_finalization_on_real_stream_path(
+        monkeypatch, raw, initial, stop_block, expected
+    ):
+        from misaka.ai.providers import anthropic
+    
+        events = [
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "call",
+                    "name": "probe",
+                    "input": initial,
+                },
+            }
+        ]
+        if raw:
+            events.append(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "input_json_delta", "partial_json": raw},
+                }
+            )
+        if stop_block:
+            events.append({"type": "content_block_stop", "index": 0})
+        events.append({"type": "message_delta", "delta": {"stop_reason": "tool_use"}})
+    
+        async def incoming():
+            for event in events:
+                yield event
+    
+        monkeypatch.setattr(
+            anthropic, "_create_raw_response", AsyncMock(return_value=incoming())
+        )
+        stream = anthropic.stream_anthropic(
+            model(), Context(messages=[]), {"client": object()}
+        )
+        seen = [event async for event in stream]
+        result = await stream.result()
+        assert result.stopReason == "toolUse", result.errorMessage
+        call = result.content[0]
+>       assert call.arguments == expected
+E       assert {} == []
+E         
+E         Use -v to get more diff
+
+../u04_callers_contract_red.py:207: AssertionError
+__ test_anthropic_finalization_on_real_stream_path[-initial6-True-expected6] ___
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10efd2c80>, raw = ''
+initial = [], stop_block = True, expected = []
+
+    @pytest.mark.parametrize(
+        "raw,initial,stop_block,expected",
+        [
+            ("not-json", {}, True, {}),
+            ('{"note":"hello', {}, False, {"note": "hello"}),
+            ("{}", {}, True, {}),
+            ("", {"note": "inline"}, True, {"note": "inline"}),
+            ("null", {}, True, None),
+            ("[]", {}, False, []),
+            ("", [], True, []),
+            ("", False, True, False),
+            ("", 0, True, 0),
+            ("", "", True, ""),
+        ],
+    )
+    async def test_anthropic_finalization_on_real_stream_path(
+        monkeypatch, raw, initial, stop_block, expected
+    ):
+        from misaka.ai.providers import anthropic
+    
+        events = [
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "call",
+                    "name": "probe",
+                    "input": initial,
+                },
+            }
+        ]
+        if raw:
+            events.append(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "input_json_delta", "partial_json": raw},
+                }
+            )
+        if stop_block:
+            events.append({"type": "content_block_stop", "index": 0})
+        events.append({"type": "message_delta", "delta": {"stop_reason": "tool_use"}})
+    
+        async def incoming():
+            for event in events:
+                yield event
+    
+        monkeypatch.setattr(
+            anthropic, "_create_raw_response", AsyncMock(return_value=incoming())
+        )
+        stream = anthropic.stream_anthropic(
+            model(), Context(messages=[]), {"client": object()}
+        )
+        seen = [event async for event in stream]
+        result = await stream.result()
+        assert result.stopReason == "toolUse", result.errorMessage
+        call = result.content[0]
+>       assert call.arguments == expected
+E       assert {} == []
+E         
+E         Use -v to get more diff
+
+../u04_callers_contract_red.py:207: AssertionError
+______ test_anthropic_finalization_on_real_stream_path[-False-True-False] ______
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10efd3af0>, raw = ''
+initial = False, stop_block = True, expected = False
+
+    @pytest.mark.parametrize(
+        "raw,initial,stop_block,expected",
+        [
+            ("not-json", {}, True, {}),
+            ('{"note":"hello', {}, False, {"note": "hello"}),
+            ("{}", {}, True, {}),
+            ("", {"note": "inline"}, True, {"note": "inline"}),
+            ("null", {}, True, None),
+            ("[]", {}, False, []),
+            ("", [], True, []),
+            ("", False, True, False),
+            ("", 0, True, 0),
+            ("", "", True, ""),
+        ],
+    )
+    async def test_anthropic_finalization_on_real_stream_path(
+        monkeypatch, raw, initial, stop_block, expected
+    ):
+        from misaka.ai.providers import anthropic
+    
+        events = [
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "call",
+                    "name": "probe",
+                    "input": initial,
+                },
+            }
+        ]
+        if raw:
+            events.append(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "input_json_delta", "partial_json": raw},
+                }
+            )
+        if stop_block:
+            events.append({"type": "content_block_stop", "index": 0})
+        events.append({"type": "message_delta", "delta": {"stop_reason": "tool_use"}})
+    
+        async def incoming():
+            for event in events:
+                yield event
+    
+        monkeypatch.setattr(
+            anthropic, "_create_raw_response", AsyncMock(return_value=incoming())
+        )
+        stream = anthropic.stream_anthropic(
+            model(), Context(messages=[]), {"client": object()}
+        )
+        seen = [event async for event in stream]
+        result = await stream.result()
+        assert result.stopReason == "toolUse", result.errorMessage
+        call = result.content[0]
+>       assert call.arguments == expected
+E       AssertionError: assert {} == False
+E        +  where {} = ToolCall(type='toolCall', id='call', name='probe', arguments={}, argumentsError=None, thoughtSignature=None, namespace=None).arguments
+
+../u04_callers_contract_red.py:207: AssertionError
+__________ test_anthropic_finalization_on_real_stream_path[-0-True-0] __________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10efd3a10>, raw = ''
+initial = 0, stop_block = True, expected = 0
+
+    @pytest.mark.parametrize(
+        "raw,initial,stop_block,expected",
+        [
+            ("not-json", {}, True, {}),
+            ('{"note":"hello', {}, False, {"note": "hello"}),
+            ("{}", {}, True, {}),
+            ("", {"note": "inline"}, True, {"note": "inline"}),
+            ("null", {}, True, None),
+            ("[]", {}, False, []),
+            ("", [], True, []),
+            ("", False, True, False),
+            ("", 0, True, 0),
+            ("", "", True, ""),
+        ],
+    )
+    async def test_anthropic_finalization_on_real_stream_path(
+        monkeypatch, raw, initial, stop_block, expected
+    ):
+        from misaka.ai.providers import anthropic
+    
+        events = [
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "call",
+                    "name": "probe",
+                    "input": initial,
+                },
+            }
+        ]
+        if raw:
+            events.append(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "input_json_delta", "partial_json": raw},
+                }
+            )
+        if stop_block:
+            events.append({"type": "content_block_stop", "index": 0})
+        events.append({"type": "message_delta", "delta": {"stop_reason": "tool_use"}})
+    
+        async def incoming():
+            for event in events:
+                yield event
+    
+        monkeypatch.setattr(
+            anthropic, "_create_raw_response", AsyncMock(return_value=incoming())
+        )
+        stream = anthropic.stream_anthropic(
+            model(), Context(messages=[]), {"client": object()}
+        )
+        seen = [event async for event in stream]
+        result = await stream.result()
+        assert result.stopReason == "toolUse", result.errorMessage
+        call = result.content[0]
+>       assert call.arguments == expected
+E       AssertionError: assert {} == 0
+E        +  where {} = ToolCall(type='toolCall', id='call', name='probe', arguments={}, argumentsError=None, thoughtSignature=None, namespace=None).arguments
+
+../u04_callers_contract_red.py:207: AssertionError
+___________ test_anthropic_finalization_on_real_stream_path[--True-] ___________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10efd3310>, raw = ''
+initial = '', stop_block = True, expected = ''
+
+    @pytest.mark.parametrize(
+        "raw,initial,stop_block,expected",
+        [
+            ("not-json", {}, True, {}),
+            ('{"note":"hello', {}, False, {"note": "hello"}),
+            ("{}", {}, True, {}),
+            ("", {"note": "inline"}, True, {"note": "inline"}),
+            ("null", {}, True, None),
+            ("[]", {}, False, []),
+            ("", [], True, []),
+            ("", False, True, False),
+            ("", 0, True, 0),
+            ("", "", True, ""),
+        ],
+    )
+    async def test_anthropic_finalization_on_real_stream_path(
+        monkeypatch, raw, initial, stop_block, expected
+    ):
+        from misaka.ai.providers import anthropic
+    
+        events = [
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "call",
+                    "name": "probe",
+                    "input": initial,
+                },
+            }
+        ]
+        if raw:
+            events.append(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "input_json_delta", "partial_json": raw},
+                }
+            )
+        if stop_block:
+            events.append({"type": "content_block_stop", "index": 0})
+        events.append({"type": "message_delta", "delta": {"stop_reason": "tool_use"}})
+    
+        async def incoming():
+            for event in events:
+                yield event
+    
+        monkeypatch.setattr(
+            anthropic, "_create_raw_response", AsyncMock(return_value=incoming())
+        )
+        stream = anthropic.stream_anthropic(
+            model(), Context(messages=[]), {"client": object()}
+        )
+        seen = [event async for event in stream]
+        result = await stream.result()
+        assert result.stopReason == "toolUse", result.errorMessage
+        call = result.content[0]
+>       assert call.arguments == expected
+E       AssertionError: assert {} == ''
+E        +  where {} = ToolCall(type='toolCall', id='call', name='probe', arguments={}, argumentsError=None, thoughtSignature=None, namespace=None).arguments
+
+../u04_callers_contract_red.py:207: AssertionError
+_ test_transport_respects_backend_final_arguments_or_last_preview[not-json-preview0-True-proxy] _
+
+bridge = 'proxy', send_end = True, raw = 'not-json', preview = {}
+
+    @pytest.mark.parametrize("bridge", ["proxy", "pi-messages"])
+    @pytest.mark.parametrize("send_end", [True, False])
+    @pytest.mark.parametrize("raw,preview", [("not-json", {}), ('{"note":"preview', {"note": "preview"}), ("[]", [])])
+    def test_transport_respects_backend_final_arguments_or_last_preview(bridge, send_end, raw, preview):
+        from misaka.agent.proxy import _process_proxy_event
+        from misaka.ai.providers.pi_messages import _EventConverter
+    
+        converter = _EventConverter(model())
+        partial, buffers = message(), {}
+        convert = (
+            converter.convert
+            if bridge == "pi-messages"
+            else lambda e: _process_proxy_event(e, partial, buffers)
+        )
+        convert(
+            {
+                "type": "toolcall_start",
+                "contentIndex": 0,
+                "id": "fixture",
+                "toolName": "probe",
+            }
+        )
+        convert({"type": "toolcall_delta", "contentIndex": 0, "delta": raw})
+        if send_end:
+            convert(
+                {
+                    "type": "toolcall_end",
+                    "contentIndex": 0,
+                    "toolCall": {
+                        "type": "toolCall",
+                        "id": "fixture",
+                        "name": "probe",
+                        "arguments": {"note": "backend-final"},
+                    },
+                }
+            )
+        convert(
+            {"type": "done", "reason": "toolUse", "usage": message().usage.model_dump()}
+        )
+        result = converter.partial if bridge == "pi-messages" else partial
+>       assert result.content[0].arguments == ({"note": "backend-final"} if send_end else preview)
+E       AssertionError: assert {} == {'note': 'backend-final'}
+E         
+E         Right contains 1 more item:
+E         {'note': 'backend-final'}
+E         Use -v to get more diff
+
+../u04_callers_contract_red.py:251: AssertionError
+_ test_transport_respects_backend_final_arguments_or_last_preview[not-json-preview0-True-pi-messages] _
+
+bridge = 'pi-messages', send_end = True, raw = 'not-json', preview = {}
+
+    @pytest.mark.parametrize("bridge", ["proxy", "pi-messages"])
+    @pytest.mark.parametrize("send_end", [True, False])
+    @pytest.mark.parametrize("raw,preview", [("not-json", {}), ('{"note":"preview', {"note": "preview"}), ("[]", [])])
+    def test_transport_respects_backend_final_arguments_or_last_preview(bridge, send_end, raw, preview):
+        from misaka.agent.proxy import _process_proxy_event
+        from misaka.ai.providers.pi_messages import _EventConverter
+    
+        converter = _EventConverter(model())
+        partial, buffers = message(), {}
+        convert = (
+            converter.convert
+            if bridge == "pi-messages"
+            else lambda e: _process_proxy_event(e, partial, buffers)
+        )
+        convert(
+            {
+                "type": "toolcall_start",
+                "contentIndex": 0,
+                "id": "fixture",
+                "toolName": "probe",
+            }
+        )
+        convert({"type": "toolcall_delta", "contentIndex": 0, "delta": raw})
+        if send_end:
+            convert(
+                {
+                    "type": "toolcall_end",
+                    "contentIndex": 0,
+                    "toolCall": {
+                        "type": "toolCall",
+                        "id": "fixture",
+                        "name": "probe",
+                        "arguments": {"note": "backend-final"},
+                    },
+                }
+            )
+        convert(
+            {"type": "done", "reason": "toolUse", "usage": message().usage.model_dump()}
+        )
+        result = converter.partial if bridge == "pi-messages" else partial
+>       assert result.content[0].arguments == ({"note": "backend-final"} if send_end else preview)
+E       AssertionError: assert {} == {'note': 'backend-final'}
+E         
+E         Right contains 1 more item:
+E         {'note': 'backend-final'}
+E         Use -v to get more diff
+
+../u04_callers_contract_red.py:251: AssertionError
+_ test_transport_respects_backend_final_arguments_or_last_preview[{"note":"preview-preview1-True-proxy] _
+
+bridge = 'proxy', send_end = True, raw = '{"note":"preview'
+preview = {'note': 'preview'}
+
+    @pytest.mark.parametrize("bridge", ["proxy", "pi-messages"])
+    @pytest.mark.parametrize("send_end", [True, False])
+    @pytest.mark.parametrize("raw,preview", [("not-json", {}), ('{"note":"preview', {"note": "preview"}), ("[]", [])])
+    def test_transport_respects_backend_final_arguments_or_last_preview(bridge, send_end, raw, preview):
+        from misaka.agent.proxy import _process_proxy_event
+        from misaka.ai.providers.pi_messages import _EventConverter
+    
+        converter = _EventConverter(model())
+        partial, buffers = message(), {}
+        convert = (
+            converter.convert
+            if bridge == "pi-messages"
+            else lambda e: _process_proxy_event(e, partial, buffers)
+        )
+        convert(
+            {
+                "type": "toolcall_start",
+                "contentIndex": 0,
+                "id": "fixture",
+                "toolName": "probe",
+            }
+        )
+        convert({"type": "toolcall_delta", "contentIndex": 0, "delta": raw})
+        if send_end:
+            convert(
+                {
+                    "type": "toolcall_end",
+                    "contentIndex": 0,
+                    "toolCall": {
+                        "type": "toolCall",
+                        "id": "fixture",
+                        "name": "probe",
+                        "arguments": {"note": "backend-final"},
+                    },
+                }
+            )
+        convert(
+            {"type": "done", "reason": "toolUse", "usage": message().usage.model_dump()}
+        )
+        result = converter.partial if bridge == "pi-messages" else partial
+>       assert result.content[0].arguments == ({"note": "backend-final"} if send_end else preview)
+E       AssertionError: assert {} == {'note': 'backend-final'}
+E         
+E         Right contains 1 more item:
+E         {'note': 'backend-final'}
+E         Use -v to get more diff
+
+../u04_callers_contract_red.py:251: AssertionError
+_ test_transport_respects_backend_final_arguments_or_last_preview[{"note":"preview-preview1-True-pi-messages] _
+
+bridge = 'pi-messages', send_end = True, raw = '{"note":"preview'
+preview = {'note': 'preview'}
+
+    @pytest.mark.parametrize("bridge", ["proxy", "pi-messages"])
+    @pytest.mark.parametrize("send_end", [True, False])
+    @pytest.mark.parametrize("raw,preview", [("not-json", {}), ('{"note":"preview', {"note": "preview"}), ("[]", [])])
+    def test_transport_respects_backend_final_arguments_or_last_preview(bridge, send_end, raw, preview):
+        from misaka.agent.proxy import _process_proxy_event
+        from misaka.ai.providers.pi_messages import _EventConverter
+    
+        converter = _EventConverter(model())
+        partial, buffers = message(), {}
+        convert = (
+            converter.convert
+            if bridge == "pi-messages"
+            else lambda e: _process_proxy_event(e, partial, buffers)
+        )
+        convert(
+            {
+                "type": "toolcall_start",
+                "contentIndex": 0,
+                "id": "fixture",
+                "toolName": "probe",
+            }
+        )
+        convert({"type": "toolcall_delta", "contentIndex": 0, "delta": raw})
+        if send_end:
+            convert(
+                {
+                    "type": "toolcall_end",
+                    "contentIndex": 0,
+                    "toolCall": {
+                        "type": "toolCall",
+                        "id": "fixture",
+                        "name": "probe",
+                        "arguments": {"note": "backend-final"},
+                    },
+                }
+            )
+        convert(
+            {"type": "done", "reason": "toolUse", "usage": message().usage.model_dump()}
+        )
+        result = converter.partial if bridge == "pi-messages" else partial
+>       assert result.content[0].arguments == ({"note": "backend-final"} if send_end else preview)
+E       AssertionError: assert {} == {'note': 'backend-final'}
+E         
+E         Right contains 1 more item:
+E         {'note': 'backend-final'}
+E         Use -v to get more diff
+
+../u04_callers_contract_red.py:251: AssertionError
+_ test_transport_respects_backend_final_arguments_or_last_preview[{"note":"preview-preview1-False-proxy] _
+
+bridge = 'proxy', send_end = False, raw = '{"note":"preview'
+preview = {'note': 'preview'}
+
+    @pytest.mark.parametrize("bridge", ["proxy", "pi-messages"])
+    @pytest.mark.parametrize("send_end", [True, False])
+    @pytest.mark.parametrize("raw,preview", [("not-json", {}), ('{"note":"preview', {"note": "preview"}), ("[]", [])])
+    def test_transport_respects_backend_final_arguments_or_last_preview(bridge, send_end, raw, preview):
+        from misaka.agent.proxy import _process_proxy_event
+        from misaka.ai.providers.pi_messages import _EventConverter
+    
+        converter = _EventConverter(model())
+        partial, buffers = message(), {}
+        convert = (
+            converter.convert
+            if bridge == "pi-messages"
+            else lambda e: _process_proxy_event(e, partial, buffers)
+        )
+        convert(
+            {
+                "type": "toolcall_start",
+                "contentIndex": 0,
+                "id": "fixture",
+                "toolName": "probe",
+            }
+        )
+        convert({"type": "toolcall_delta", "contentIndex": 0, "delta": raw})
+        if send_end:
+            convert(
+                {
+                    "type": "toolcall_end",
+                    "contentIndex": 0,
+                    "toolCall": {
+                        "type": "toolCall",
+                        "id": "fixture",
+                        "name": "probe",
+                        "arguments": {"note": "backend-final"},
+                    },
+                }
+            )
+        convert(
+            {"type": "done", "reason": "toolUse", "usage": message().usage.model_dump()}
+        )
+        result = converter.partial if bridge == "pi-messages" else partial
+>       assert result.content[0].arguments == ({"note": "backend-final"} if send_end else preview)
+E       AssertionError: assert {} == {'note': 'preview'}
+E         
+E         Right contains 1 more item:
+E         {'note': 'preview'}
+E         Use -v to get more diff
+
+../u04_callers_contract_red.py:251: AssertionError
+_ test_transport_respects_backend_final_arguments_or_last_preview[{"note":"preview-preview1-False-pi-messages] _
+
+bridge = 'pi-messages', send_end = False, raw = '{"note":"preview'
+preview = {'note': 'preview'}
+
+    @pytest.mark.parametrize("bridge", ["proxy", "pi-messages"])
+    @pytest.mark.parametrize("send_end", [True, False])
+    @pytest.mark.parametrize("raw,preview", [("not-json", {}), ('{"note":"preview', {"note": "preview"}), ("[]", [])])
+    def test_transport_respects_backend_final_arguments_or_last_preview(bridge, send_end, raw, preview):
+        from misaka.agent.proxy import _process_proxy_event
+        from misaka.ai.providers.pi_messages import _EventConverter
+    
+        converter = _EventConverter(model())
+        partial, buffers = message(), {}
+        convert = (
+            converter.convert
+            if bridge == "pi-messages"
+            else lambda e: _process_proxy_event(e, partial, buffers)
+        )
+        convert(
+            {
+                "type": "toolcall_start",
+                "contentIndex": 0,
+                "id": "fixture",
+                "toolName": "probe",
+            }
+        )
+        convert({"type": "toolcall_delta", "contentIndex": 0, "delta": raw})
+        if send_end:
+            convert(
+                {
+                    "type": "toolcall_end",
+                    "contentIndex": 0,
+                    "toolCall": {
+                        "type": "toolCall",
+                        "id": "fixture",
+                        "name": "probe",
+                        "arguments": {"note": "backend-final"},
+                    },
+                }
+            )
+        convert(
+            {"type": "done", "reason": "toolUse", "usage": message().usage.model_dump()}
+        )
+        result = converter.partial if bridge == "pi-messages" else partial
+>       assert result.content[0].arguments == ({"note": "backend-final"} if send_end else preview)
+E       AssertionError: assert {} == {'note': 'preview'}
+E         
+E         Right contains 1 more item:
+E         {'note': 'preview'}
+E         Use -v to get more diff
+
+../u04_callers_contract_red.py:251: AssertionError
+_ test_transport_respects_backend_final_arguments_or_last_preview[[]-preview2-True-proxy] _
+
+bridge = 'proxy', send_end = True, raw = '[]', preview = []
+
+    @pytest.mark.parametrize("bridge", ["proxy", "pi-messages"])
+    @pytest.mark.parametrize("send_end", [True, False])
+    @pytest.mark.parametrize("raw,preview", [("not-json", {}), ('{"note":"preview', {"note": "preview"}), ("[]", [])])
+    def test_transport_respects_backend_final_arguments_or_last_preview(bridge, send_end, raw, preview):
+        from misaka.agent.proxy import _process_proxy_event
+        from misaka.ai.providers.pi_messages import _EventConverter
+    
+        converter = _EventConverter(model())
+        partial, buffers = message(), {}
+        convert = (
+            converter.convert
+            if bridge == "pi-messages"
+            else lambda e: _process_proxy_event(e, partial, buffers)
+        )
+        convert(
+            {
+                "type": "toolcall_start",
+                "contentIndex": 0,
+                "id": "fixture",
+                "toolName": "probe",
+            }
+        )
+        convert({"type": "toolcall_delta", "contentIndex": 0, "delta": raw})
+        if send_end:
+            convert(
+                {
+                    "type": "toolcall_end",
+                    "contentIndex": 0,
+                    "toolCall": {
+                        "type": "toolCall",
+                        "id": "fixture",
+                        "name": "probe",
+                        "arguments": {"note": "backend-final"},
+                    },
+                }
+            )
+        convert(
+            {"type": "done", "reason": "toolUse", "usage": message().usage.model_dump()}
+        )
+        result = converter.partial if bridge == "pi-messages" else partial
+>       assert result.content[0].arguments == ({"note": "backend-final"} if send_end else preview)
+E       AssertionError: assert {} == {'note': 'backend-final'}
+E         
+E         Right contains 1 more item:
+E         {'note': 'backend-final'}
+E         Use -v to get more diff
+
+../u04_callers_contract_red.py:251: AssertionError
+_ test_transport_respects_backend_final_arguments_or_last_preview[[]-preview2-True-pi-messages] _
+
+bridge = 'pi-messages', send_end = True, raw = '[]', preview = []
+
+    @pytest.mark.parametrize("bridge", ["proxy", "pi-messages"])
+    @pytest.mark.parametrize("send_end", [True, False])
+    @pytest.mark.parametrize("raw,preview", [("not-json", {}), ('{"note":"preview', {"note": "preview"}), ("[]", [])])
+    def test_transport_respects_backend_final_arguments_or_last_preview(bridge, send_end, raw, preview):
+        from misaka.agent.proxy import _process_proxy_event
+        from misaka.ai.providers.pi_messages import _EventConverter
+    
+        converter = _EventConverter(model())
+        partial, buffers = message(), {}
+        convert = (
+            converter.convert
+            if bridge == "pi-messages"
+            else lambda e: _process_proxy_event(e, partial, buffers)
+        )
+        convert(
+            {
+                "type": "toolcall_start",
+                "contentIndex": 0,
+                "id": "fixture",
+                "toolName": "probe",
+            }
+        )
+        convert({"type": "toolcall_delta", "contentIndex": 0, "delta": raw})
+        if send_end:
+            convert(
+                {
+                    "type": "toolcall_end",
+                    "contentIndex": 0,
+                    "toolCall": {
+                        "type": "toolCall",
+                        "id": "fixture",
+                        "name": "probe",
+                        "arguments": {"note": "backend-final"},
+                    },
+                }
+            )
+        convert(
+            {"type": "done", "reason": "toolUse", "usage": message().usage.model_dump()}
+        )
+        result = converter.partial if bridge == "pi-messages" else partial
+>       assert result.content[0].arguments == ({"note": "backend-final"} if send_end else preview)
+E       AssertionError: assert {} == {'note': 'backend-final'}
+E         
+E         Right contains 1 more item:
+E         {'note': 'backend-final'}
+E         Use -v to get more diff
+
+../u04_callers_contract_red.py:251: AssertionError
+_ test_transport_respects_backend_final_arguments_or_last_preview[[]-preview2-False-proxy] _
+
+bridge = 'proxy', send_end = False, raw = '[]', preview = []
+
+    @pytest.mark.parametrize("bridge", ["proxy", "pi-messages"])
+    @pytest.mark.parametrize("send_end", [True, False])
+    @pytest.mark.parametrize("raw,preview", [("not-json", {}), ('{"note":"preview', {"note": "preview"}), ("[]", [])])
+    def test_transport_respects_backend_final_arguments_or_last_preview(bridge, send_end, raw, preview):
+        from misaka.agent.proxy import _process_proxy_event
+        from misaka.ai.providers.pi_messages import _EventConverter
+    
+        converter = _EventConverter(model())
+        partial, buffers = message(), {}
+        convert = (
+            converter.convert
+            if bridge == "pi-messages"
+            else lambda e: _process_proxy_event(e, partial, buffers)
+        )
+        convert(
+            {
+                "type": "toolcall_start",
+                "contentIndex": 0,
+                "id": "fixture",
+                "toolName": "probe",
+            }
+        )
+        convert({"type": "toolcall_delta", "contentIndex": 0, "delta": raw})
+        if send_end:
+            convert(
+                {
+                    "type": "toolcall_end",
+                    "contentIndex": 0,
+                    "toolCall": {
+                        "type": "toolCall",
+                        "id": "fixture",
+                        "name": "probe",
+                        "arguments": {"note": "backend-final"},
+                    },
+                }
+            )
+        convert(
+            {"type": "done", "reason": "toolUse", "usage": message().usage.model_dump()}
+        )
+        result = converter.partial if bridge == "pi-messages" else partial
+>       assert result.content[0].arguments == ({"note": "backend-final"} if send_end else preview)
+E       assert {} == []
+E         
+E         Use -v to get more diff
+
+../u04_callers_contract_red.py:251: AssertionError
+_ test_transport_respects_backend_final_arguments_or_last_preview[[]-preview2-False-pi-messages] _
+
+bridge = 'pi-messages', send_end = False, raw = '[]', preview = []
+
+    @pytest.mark.parametrize("bridge", ["proxy", "pi-messages"])
+    @pytest.mark.parametrize("send_end", [True, False])
+    @pytest.mark.parametrize("raw,preview", [("not-json", {}), ('{"note":"preview', {"note": "preview"}), ("[]", [])])
+    def test_transport_respects_backend_final_arguments_or_last_preview(bridge, send_end, raw, preview):
+        from misaka.agent.proxy import _process_proxy_event
+        from misaka.ai.providers.pi_messages import _EventConverter
+    
+        converter = _EventConverter(model())
+        partial, buffers = message(), {}
+        convert = (
+            converter.convert
+            if bridge == "pi-messages"
+            else lambda e: _process_proxy_event(e, partial, buffers)
+        )
+        convert(
+            {
+                "type": "toolcall_start",
+                "contentIndex": 0,
+                "id": "fixture",
+                "toolName": "probe",
+            }
+        )
+        convert({"type": "toolcall_delta", "contentIndex": 0, "delta": raw})
+        if send_end:
+            convert(
+                {
+                    "type": "toolcall_end",
+                    "contentIndex": 0,
+                    "toolCall": {
+                        "type": "toolCall",
+                        "id": "fixture",
+                        "name": "probe",
+                        "arguments": {"note": "backend-final"},
+                    },
+                }
+            )
+        convert(
+            {"type": "done", "reason": "toolUse", "usage": message().usage.model_dump()}
+        )
+        result = converter.partial if bridge == "pi-messages" else partial
+>       assert result.content[0].arguments == ({"note": "backend-final"} if send_end else preview)
+E       assert {} == []
+E         
+E         Use -v to get more diff
+
+../u04_callers_contract_red.py:251: AssertionError
+_____ test_proxy_preview_uses_javascript_fallback_truthiness[[]-expected4] _____
+
+raw = '[]', expected = []
+
+    @pytest.mark.parametrize("raw,expected", [("NaN", {}), ("null", {}), ("false", {}), ("0", {}), ("[]", []), ("42", 42)])
+    def test_proxy_preview_uses_javascript_fallback_truthiness(raw, expected):
+        from misaka.agent.proxy import _process_proxy_event
+    
+        partial, buffers = message(), {}
+        _process_proxy_event(
+            {"type": "toolcall_start", "contentIndex": 0, "id": "fixture", "toolName": "probe"},
+            partial, buffers,
+        )
+        _process_proxy_event({"type": "toolcall_delta", "contentIndex": 0, "delta": raw}, partial, buffers)
+>       assert partial.content[0].arguments == expected
+E       assert {} == []
+E         
+E         Use -v to get more diff
+
+../u04_callers_contract_red.py:266: AssertionError
+________ test_proxy_preview_uses_javascript_fallback_truthiness[42-42] _________
+
+raw = '42', expected = 42
+
+    @pytest.mark.parametrize("raw,expected", [("NaN", {}), ("null", {}), ("false", {}), ("0", {}), ("[]", []), ("42", 42)])
+    def test_proxy_preview_uses_javascript_fallback_truthiness(raw, expected):
+        from misaka.agent.proxy import _process_proxy_event
+    
+        partial, buffers = message(), {}
+        _process_proxy_event(
+            {"type": "toolcall_start", "contentIndex": 0, "id": "fixture", "toolName": "probe"},
+            partial, buffers,
+        )
+        _process_proxy_event({"type": "toolcall_delta", "contentIndex": 0, "delta": raw}, partial, buffers)
+>       assert partial.content[0].arguments == expected
+E       AssertionError: assert {} == 42
+E        +  where {} = ToolCall(type='toolCall', id='fixture', name='probe', arguments={}, argumentsError=None, thoughtSignature=None, namespace=None).arguments
+
+../u04_callers_contract_red.py:266: AssertionError
+__ test_responses_final_item_uses_pi_recovery[False-{"note":"hello-expected2] __
+
+raw = '{"note":"hello', expected = {'note': 'hello'}, start = False
+
+    @pytest.mark.parametrize("raw,expected", [("not-json", {}), ("{}", {}), ('{"note":"hello', {"note": "hello"}), ("null", None)])
+    @pytest.mark.parametrize("start", [False, True])
+    async def test_responses_final_item_uses_pi_recovery(raw, expected, start):
+        from misaka.ai.providers.openai_responses_shared import process_responses_stream
+    
+        item = {
+            "type": "function_call",
+            "id": "item",
+            "call_id": "call",
+            "name": "probe",
+            "arguments": raw,
+        }
+    
+        async def incoming():
+            if start:
+                yield {
+                    "type": "response.output_item.added",
+                    "item": {**item, "arguments": ""},
+                }
+                yield {"type": "response.function_call_arguments.delta", "delta": raw}
+                yield {"type": "response.function_call_arguments.done", "arguments": raw}
+            yield {"type": "response.output_item.done", "item": item}
+            yield {"type": "response.completed", "response": {"status": "completed"}}
+    
+        output, seen = message(), []
+        await process_responses_stream(
+            incoming(), output, SimpleNamespace(push=seen.append), model("openai-responses")
+        )
+        call = next(e.toolCall for e in seen if e.type == "toolcall_end")
+>       assert call.arguments == expected
+E       AssertionError: assert {} == {'note': 'hello'}
+E         
+E         Right contains 1 more item:
+E         {'note': 'hello'}
+E         Use -v to get more diff
+
+../u04_callers_contract_red.py:298: AssertionError
+_________ test_responses_final_item_uses_pi_recovery[False-null-None] __________
+
+raw = 'null', expected = None, start = False
+
+    @pytest.mark.parametrize("raw,expected", [("not-json", {}), ("{}", {}), ('{"note":"hello', {"note": "hello"}), ("null", None)])
+    @pytest.mark.parametrize("start", [False, True])
+    async def test_responses_final_item_uses_pi_recovery(raw, expected, start):
+        from misaka.ai.providers.openai_responses_shared import process_responses_stream
+    
+        item = {
+            "type": "function_call",
+            "id": "item",
+            "call_id": "call",
+            "name": "probe",
+            "arguments": raw,
+        }
+    
+        async def incoming():
+            if start:
+                yield {
+                    "type": "response.output_item.added",
+                    "item": {**item, "arguments": ""},
+                }
+                yield {"type": "response.function_call_arguments.delta", "delta": raw}
+                yield {"type": "response.function_call_arguments.done", "arguments": raw}
+            yield {"type": "response.output_item.done", "item": item}
+            yield {"type": "response.completed", "response": {"status": "completed"}}
+    
+        output, seen = message(), []
+        await process_responses_stream(
+            incoming(), output, SimpleNamespace(push=seen.append), model("openai-responses")
+        )
+        call = next(e.toolCall for e in seen if e.type == "toolcall_end")
+>       assert call.arguments == expected
+E       AssertionError: assert {} == None
+E        +  where {} = ToolCall(type='toolCall', id='call|item', name='probe', arguments={}, argumentsError='Invalid final tool arguments; resend a complete JSON object.', thoughtSignature=None, namespace=None).arguments
+
+../u04_callers_contract_red.py:298: AssertionError
+__ test_responses_final_item_uses_pi_recovery[True-{"note":"hello-expected2] ___
+
+raw = '{"note":"hello', expected = {'note': 'hello'}, start = True
+
+    @pytest.mark.parametrize("raw,expected", [("not-json", {}), ("{}", {}), ('{"note":"hello', {"note": "hello"}), ("null", None)])
+    @pytest.mark.parametrize("start", [False, True])
+    async def test_responses_final_item_uses_pi_recovery(raw, expected, start):
+        from misaka.ai.providers.openai_responses_shared import process_responses_stream
+    
+        item = {
+            "type": "function_call",
+            "id": "item",
+            "call_id": "call",
+            "name": "probe",
+            "arguments": raw,
+        }
+    
+        async def incoming():
+            if start:
+                yield {
+                    "type": "response.output_item.added",
+                    "item": {**item, "arguments": ""},
+                }
+                yield {"type": "response.function_call_arguments.delta", "delta": raw}
+                yield {"type": "response.function_call_arguments.done", "arguments": raw}
+            yield {"type": "response.output_item.done", "item": item}
+            yield {"type": "response.completed", "response": {"status": "completed"}}
+    
+        output, seen = message(), []
+        await process_responses_stream(
+            incoming(), output, SimpleNamespace(push=seen.append), model("openai-responses")
+        )
+        call = next(e.toolCall for e in seen if e.type == "toolcall_end")
+>       assert call.arguments == expected
+E       AssertionError: assert {} == {'note': 'hello'}
+E         
+E         Right contains 1 more item:
+E         {'note': 'hello'}
+E         Use -v to get more diff
+
+../u04_callers_contract_red.py:298: AssertionError
+__________ test_responses_final_item_uses_pi_recovery[True-null-None] __________
+
+raw = 'null', expected = None, start = True
+
+    @pytest.mark.parametrize("raw,expected", [("not-json", {}), ("{}", {}), ('{"note":"hello', {"note": "hello"}), ("null", None)])
+    @pytest.mark.parametrize("start", [False, True])
+    async def test_responses_final_item_uses_pi_recovery(raw, expected, start):
+        from misaka.ai.providers.openai_responses_shared import process_responses_stream
+    
+        item = {
+            "type": "function_call",
+            "id": "item",
+            "call_id": "call",
+            "name": "probe",
+            "arguments": raw,
+        }
+    
+        async def incoming():
+            if start:
+                yield {
+                    "type": "response.output_item.added",
+                    "item": {**item, "arguments": ""},
+                }
+                yield {"type": "response.function_call_arguments.delta", "delta": raw}
+                yield {"type": "response.function_call_arguments.done", "arguments": raw}
+            yield {"type": "response.output_item.done", "item": item}
+            yield {"type": "response.completed", "response": {"status": "completed"}}
+    
+        output, seen = message(), []
+        await process_responses_stream(
+            incoming(), output, SimpleNamespace(push=seen.append), model("openai-responses")
+        )
+        call = next(e.toolCall for e in seen if e.type == "toolcall_end")
+>       assert call.arguments == expected
+E       AssertionError: assert {} == None
+E        +  where {} = ToolCall(type='toolCall', id='call|item', name='probe', arguments={}, argumentsError='Invalid final tool arguments; resend a complete JSON object.', thoughtSignature=None, namespace=None).arguments
+
+../u04_callers_contract_red.py:298: AssertionError
+______ test_tool_call_session_and_wire_share_pi_fields[arguments2-proxy] _______
+
+bridge = 'proxy', arguments = []
+tmp_path = PosixPath('/private/tmp/misaka-u03-u04-20260921-7ql70p6u/u04-callers-final-red-state-tv22u7e6/tmp/pytest-of-makiko/pytest-0/test_tool_call_session_and_wir4')
+
+    @pytest.mark.parametrize("bridge", ["proxy", "pi-messages"])
+    @pytest.mark.parametrize("arguments", [{"note": "hello"}, {}, [], None, 42])
+    def test_tool_call_session_and_wire_share_pi_fields(bridge, arguments, tmp_path):
+        from misaka.agent import proxy
+        from misaka.ai.providers import pi_messages
+        from misaka.ai.types import UserMessage
+        from misaka.core.session_manager import SessionManager
+    
+>       call = ToolCall(id="fixture", name="probe", arguments=arguments)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value=[], input_type=list]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:633: ValidationError
+___ test_tool_call_session_and_wire_share_pi_fields[arguments2-pi-messages] ____
+
+bridge = 'pi-messages', arguments = []
+tmp_path = PosixPath('/private/tmp/misaka-u03-u04-20260921-7ql70p6u/u04-callers-final-red-state-tv22u7e6/tmp/pytest-of-makiko/pytest-0/test_tool_call_session_and_wir5')
+
+    @pytest.mark.parametrize("bridge", ["proxy", "pi-messages"])
+    @pytest.mark.parametrize("arguments", [{"note": "hello"}, {}, [], None, 42])
+    def test_tool_call_session_and_wire_share_pi_fields(bridge, arguments, tmp_path):
+        from misaka.agent import proxy
+        from misaka.ai.providers import pi_messages
+        from misaka.ai.types import UserMessage
+        from misaka.core.session_manager import SessionManager
+    
+>       call = ToolCall(id="fixture", name="probe", arguments=arguments)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value=[], input_type=list]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:633: ValidationError
+_________ test_tool_call_session_and_wire_share_pi_fields[None-proxy] __________
+
+bridge = 'proxy', arguments = None
+tmp_path = PosixPath('/private/tmp/misaka-u03-u04-20260921-7ql70p6u/u04-callers-final-red-state-tv22u7e6/tmp/pytest-of-makiko/pytest-0/test_tool_call_session_and_wir6')
+
+    @pytest.mark.parametrize("bridge", ["proxy", "pi-messages"])
+    @pytest.mark.parametrize("arguments", [{"note": "hello"}, {}, [], None, 42])
+    def test_tool_call_session_and_wire_share_pi_fields(bridge, arguments, tmp_path):
+        from misaka.agent import proxy
+        from misaka.ai.providers import pi_messages
+        from misaka.ai.types import UserMessage
+        from misaka.core.session_manager import SessionManager
+    
+>       call = ToolCall(id="fixture", name="probe", arguments=arguments)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value=None, input_type=NoneType]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:633: ValidationError
+______ test_tool_call_session_and_wire_share_pi_fields[None-pi-messages] _______
+
+bridge = 'pi-messages', arguments = None
+tmp_path = PosixPath('/private/tmp/misaka-u03-u04-20260921-7ql70p6u/u04-callers-final-red-state-tv22u7e6/tmp/pytest-of-makiko/pytest-0/test_tool_call_session_and_wir7')
+
+    @pytest.mark.parametrize("bridge", ["proxy", "pi-messages"])
+    @pytest.mark.parametrize("arguments", [{"note": "hello"}, {}, [], None, 42])
+    def test_tool_call_session_and_wire_share_pi_fields(bridge, arguments, tmp_path):
+        from misaka.agent import proxy
+        from misaka.ai.providers import pi_messages
+        from misaka.ai.types import UserMessage
+        from misaka.core.session_manager import SessionManager
+    
+>       call = ToolCall(id="fixture", name="probe", arguments=arguments)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value=None, input_type=NoneType]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:633: ValidationError
+__________ test_tool_call_session_and_wire_share_pi_fields[42-proxy] ___________
+
+bridge = 'proxy', arguments = 42
+tmp_path = PosixPath('/private/tmp/misaka-u03-u04-20260921-7ql70p6u/u04-callers-final-red-state-tv22u7e6/tmp/pytest-of-makiko/pytest-0/test_tool_call_session_and_wir8')
+
+    @pytest.mark.parametrize("bridge", ["proxy", "pi-messages"])
+    @pytest.mark.parametrize("arguments", [{"note": "hello"}, {}, [], None, 42])
+    def test_tool_call_session_and_wire_share_pi_fields(bridge, arguments, tmp_path):
+        from misaka.agent import proxy
+        from misaka.ai.providers import pi_messages
+        from misaka.ai.types import UserMessage
+        from misaka.core.session_manager import SessionManager
+    
+>       call = ToolCall(id="fixture", name="probe", arguments=arguments)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value=42, input_type=int]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:633: ValidationError
+_______ test_tool_call_session_and_wire_share_pi_fields[42-pi-messages] ________
+
+bridge = 'pi-messages', arguments = 42
+tmp_path = PosixPath('/private/tmp/misaka-u03-u04-20260921-7ql70p6u/u04-callers-final-red-state-tv22u7e6/tmp/pytest-of-makiko/pytest-0/test_tool_call_session_and_wir9')
+
+    @pytest.mark.parametrize("bridge", ["proxy", "pi-messages"])
+    @pytest.mark.parametrize("arguments", [{"note": "hello"}, {}, [], None, 42])
+    def test_tool_call_session_and_wire_share_pi_fields(bridge, arguments, tmp_path):
+        from misaka.agent import proxy
+        from misaka.ai.providers import pi_messages
+        from misaka.ai.types import UserMessage
+        from misaka.core.session_manager import SessionManager
+    
+>       call = ToolCall(id="fixture", name="probe", arguments=arguments)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value=42, input_type=int]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:633: ValidationError
+_ test_bedrock_recovers_closed_and_unclosed_blocks_like_pi[{"note":"hello-expected2-False] _
+
+stop_block = False, raw = '{"note":"hello', expected = {'note': 'hello'}
+
+    @pytest.mark.parametrize("stop_block", [False, True])
+    @pytest.mark.parametrize("raw,expected", [("not-json", {}), ("{}", {}), ('{"note":"hello', {"note": "hello"}), ("null", None)])
+    def test_bedrock_recovers_closed_and_unclosed_blocks_like_pi(stop_block, raw, expected):
+        from misaka.ai.providers import amazon_bedrock as bedrock
+    
+        output = message([ToolCall(id="call", name="probe", arguments={})])
+        buffers = {0: StreamingArgs(raw)}
+        if stop_block:
+            bedrock.handle_content_block_stop(
+                {"contentBlockIndex": 0},
+                {0: 0},
+                buffers,
+                output,
+                SimpleNamespace(push=lambda e: None),
+            )
+        else:
+            bedrock.finish_open_tool_arguments(buffers, output)
+>       assert output.content[0].arguments == expected
+E       AssertionError: assert {} == {'note': 'hello'}
+E         
+E         Right contains 1 more item:
+E         {'note': 'hello'}
+E         Use -v to get more diff
+
+../u04_callers_contract_red.py:814: AssertionError
+_ test_bedrock_recovers_closed_and_unclosed_blocks_like_pi[{"note":"hello-expected2-True] _
+
+stop_block = True, raw = '{"note":"hello', expected = {'note': 'hello'}
+
+    @pytest.mark.parametrize("stop_block", [False, True])
+    @pytest.mark.parametrize("raw,expected", [("not-json", {}), ("{}", {}), ('{"note":"hello', {"note": "hello"}), ("null", None)])
+    def test_bedrock_recovers_closed_and_unclosed_blocks_like_pi(stop_block, raw, expected):
+        from misaka.ai.providers import amazon_bedrock as bedrock
+    
+        output = message([ToolCall(id="call", name="probe", arguments={})])
+        buffers = {0: StreamingArgs(raw)}
+        if stop_block:
+            bedrock.handle_content_block_stop(
+                {"contentBlockIndex": 0},
+                {0: 0},
+                buffers,
+                output,
+                SimpleNamespace(push=lambda e: None),
+            )
+        else:
+            bedrock.finish_open_tool_arguments(buffers, output)
+>       assert output.content[0].arguments == expected
+E       AssertionError: assert {} == {'note': 'hello'}
+E         
+E         Right contains 1 more item:
+E         {'note': 'hello'}
+E         Use -v to get more diff
+
+../u04_callers_contract_red.py:814: AssertionError
+__ test_bedrock_recovers_closed_and_unclosed_blocks_like_pi[null-None-False] ___
+
+stop_block = False, raw = 'null', expected = None
+
+    @pytest.mark.parametrize("stop_block", [False, True])
+    @pytest.mark.parametrize("raw,expected", [("not-json", {}), ("{}", {}), ('{"note":"hello', {"note": "hello"}), ("null", None)])
+    def test_bedrock_recovers_closed_and_unclosed_blocks_like_pi(stop_block, raw, expected):
+        from misaka.ai.providers import amazon_bedrock as bedrock
+    
+        output = message([ToolCall(id="call", name="probe", arguments={})])
+        buffers = {0: StreamingArgs(raw)}
+        if stop_block:
+            bedrock.handle_content_block_stop(
+                {"contentBlockIndex": 0},
+                {0: 0},
+                buffers,
+                output,
+                SimpleNamespace(push=lambda e: None),
+            )
+        else:
+            bedrock.finish_open_tool_arguments(buffers, output)
+>       assert output.content[0].arguments == expected
+E       AssertionError: assert {} == None
+E        +  where {} = ToolCall(type='toolCall', id='call', name='probe', arguments={}, argumentsError='Invalid final tool arguments; resend a complete JSON object.', thoughtSignature=None, namespace=None).arguments
+
+../u04_callers_contract_red.py:814: AssertionError
+___ test_bedrock_recovers_closed_and_unclosed_blocks_like_pi[null-None-True] ___
+
+stop_block = True, raw = 'null', expected = None
+
+    @pytest.mark.parametrize("stop_block", [False, True])
+    @pytest.mark.parametrize("raw,expected", [("not-json", {}), ("{}", {}), ('{"note":"hello', {"note": "hello"}), ("null", None)])
+    def test_bedrock_recovers_closed_and_unclosed_blocks_like_pi(stop_block, raw, expected):
+        from misaka.ai.providers import amazon_bedrock as bedrock
+    
+        output = message([ToolCall(id="call", name="probe", arguments={})])
+        buffers = {0: StreamingArgs(raw)}
+        if stop_block:
+            bedrock.handle_content_block_stop(
+                {"contentBlockIndex": 0},
+                {0: 0},
+                buffers,
+                output,
+                SimpleNamespace(push=lambda e: None),
+            )
+        else:
+            bedrock.finish_open_tool_arguments(buffers, output)
+>       assert output.content[0].arguments == expected
+E       AssertionError: assert {} == None
+E        +  where {} = ToolCall(type='toolCall', id='call', name='probe', arguments={}, argumentsError='Invalid final tool arguments; resend a complete JSON object.', thoughtSignature=None, namespace=None).arguments
+
+../u04_callers_contract_red.py:814: AssertionError
+_____ test_chat_completion_finalization[{"note":"hello-expected2-mistral] ______
+
+provider = 'mistral', raw = '{"note":"hello', expected = {'note': 'hello'}
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10f67a890>
+
+    @pytest.mark.parametrize("provider", ["mistral", "openai-completions"])
+    @pytest.mark.parametrize("raw,expected", [("not-json", {}), ("{}", {}), ('{"note":"hello', {"note": "hello"}), ("null", None)])
+    async def test_chat_completion_finalization(provider, raw, expected, monkeypatch):
+        from misaka.ai.providers import mistral, openai_completions
+    
+        async def incoming():
+            yield {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "fixture-call",
+                                    "type": "function",
+                                    "function": {"name": "probe", "arguments": raw},
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            }
+    
+        if provider == "mistral":
+            output = message()
+            assert await mistral.consume_chat_stream(
+                model("mistral-conversations"),
+                output,
+                SimpleNamespace(push=lambda e: None),
+                incoming(),
+            )
+        else:
+            monkeypatch.setattr(
+                openai_completions,
+                "_create_completion_stream",
+                AsyncMock(return_value=incoming()),
+            )
+            stream = openai_completions.stream_openai_completions(
+                model(provider), Context(messages=[]), {"client": object()}
+            )
+            async for _event in stream:
+                pass
+            output = await stream.result()
+        assert output.stopReason == "toolUse", output.errorMessage
+>       assert output.content[0].arguments == expected
+E       AssertionError: assert {} == {'note': 'hello'}
+E         
+E         Right contains 1 more item:
+E         {'note': 'hello'}
+E         Use -v to get more diff
+
+../u04_callers_contract_red.py:863: AssertionError
+_ test_chat_completion_finalization[{"note":"hello-expected2-openai-completions] _
+
+provider = 'openai-completions', raw = '{"note":"hello'
+expected = {'note': 'hello'}
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1114be900>
+
+    @pytest.mark.parametrize("provider", ["mistral", "openai-completions"])
+    @pytest.mark.parametrize("raw,expected", [("not-json", {}), ("{}", {}), ('{"note":"hello', {"note": "hello"}), ("null", None)])
+    async def test_chat_completion_finalization(provider, raw, expected, monkeypatch):
+        from misaka.ai.providers import mistral, openai_completions
+    
+        async def incoming():
+            yield {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "fixture-call",
+                                    "type": "function",
+                                    "function": {"name": "probe", "arguments": raw},
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            }
+    
+        if provider == "mistral":
+            output = message()
+            assert await mistral.consume_chat_stream(
+                model("mistral-conversations"),
+                output,
+                SimpleNamespace(push=lambda e: None),
+                incoming(),
+            )
+        else:
+            monkeypatch.setattr(
+                openai_completions,
+                "_create_completion_stream",
+                AsyncMock(return_value=incoming()),
+            )
+            stream = openai_completions.stream_openai_completions(
+                model(provider), Context(messages=[]), {"client": object()}
+            )
+            async for _event in stream:
+                pass
+            output = await stream.result()
+        assert output.stopReason == "toolUse", output.errorMessage
+>       assert output.content[0].arguments == expected
+E       AssertionError: assert {} == {'note': 'hello'}
+E         
+E         Right contains 1 more item:
+E         {'note': 'hello'}
+E         Use -v to get more diff
+
+../u04_callers_contract_red.py:863: AssertionError
+_____________ test_chat_completion_finalization[null-None-mistral] _____________
+
+provider = 'mistral', raw = 'null', expected = None
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1114bedd0>
+
+    @pytest.mark.parametrize("provider", ["mistral", "openai-completions"])
+    @pytest.mark.parametrize("raw,expected", [("not-json", {}), ("{}", {}), ('{"note":"hello', {"note": "hello"}), ("null", None)])
+    async def test_chat_completion_finalization(provider, raw, expected, monkeypatch):
+        from misaka.ai.providers import mistral, openai_completions
+    
+        async def incoming():
+            yield {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "fixture-call",
+                                    "type": "function",
+                                    "function": {"name": "probe", "arguments": raw},
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            }
+    
+        if provider == "mistral":
+            output = message()
+            assert await mistral.consume_chat_stream(
+                model("mistral-conversations"),
+                output,
+                SimpleNamespace(push=lambda e: None),
+                incoming(),
+            )
+        else:
+            monkeypatch.setattr(
+                openai_completions,
+                "_create_completion_stream",
+                AsyncMock(return_value=incoming()),
+            )
+            stream = openai_completions.stream_openai_completions(
+                model(provider), Context(messages=[]), {"client": object()}
+            )
+            async for _event in stream:
+                pass
+            output = await stream.result()
+        assert output.stopReason == "toolUse", output.errorMessage
+>       assert output.content[0].arguments == expected
+E       AssertionError: assert {} == None
+E        +  where {} = ToolCall(type='toolCall', id='fixture-call', name='probe', arguments={}, argumentsError='Invalid final tool arguments; resend a complete JSON object.', thoughtSignature=None, namespace=None).arguments
+
+../u04_callers_contract_red.py:863: AssertionError
+_______ test_chat_completion_finalization[null-None-openai-completions] ________
+
+provider = 'openai-completions', raw = 'null', expected = None
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1114bf700>
+
+    @pytest.mark.parametrize("provider", ["mistral", "openai-completions"])
+    @pytest.mark.parametrize("raw,expected", [("not-json", {}), ("{}", {}), ('{"note":"hello', {"note": "hello"}), ("null", None)])
+    async def test_chat_completion_finalization(provider, raw, expected, monkeypatch):
+        from misaka.ai.providers import mistral, openai_completions
+    
+        async def incoming():
+            yield {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "fixture-call",
+                                    "type": "function",
+                                    "function": {"name": "probe", "arguments": raw},
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            }
+    
+        if provider == "mistral":
+            output = message()
+            assert await mistral.consume_chat_stream(
+                model("mistral-conversations"),
+                output,
+                SimpleNamespace(push=lambda e: None),
+                incoming(),
+            )
+        else:
+            monkeypatch.setattr(
+                openai_completions,
+                "_create_completion_stream",
+                AsyncMock(return_value=incoming()),
+            )
+            stream = openai_completions.stream_openai_completions(
+                model(provider), Context(messages=[]), {"client": object()}
+            )
+            async for _event in stream:
+                pass
+            output = await stream.result()
+        assert output.stopReason == "toolUse", output.errorMessage
+>       assert output.content[0].arguments == expected
+E       AssertionError: assert {} == None
+E        +  where {} = ToolCall(type='toolCall', id='fixture-call', name='probe', arguments={}, argumentsError='Invalid final tool arguments; resend a complete JSON object.', thoughtSignature=None, namespace=None).arguments
+
+../u04_callers_contract_red.py:863: AssertionError
+__ test_provider_replays_parsed_values_with_pi_fallback[arguments0-anthropic] __
+
+provider = 'anthropic', arguments = []
+
+    @pytest.mark.parametrize("provider", ["anthropic", "google", "mistral"])
+    @pytest.mark.parametrize("arguments", [[], {}, False, 0, "", None, 42, "yes"])
+    def test_provider_replays_parsed_values_with_pi_fallback(provider, arguments):
+        from misaka.ai.providers import anthropic, google_shared, mistral
+    
+>       msg = message([ToolCall(id="fixture", name="probe", arguments=arguments)])
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value=[], input_type=list]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:871: ValidationError
+___ test_provider_replays_parsed_values_with_pi_fallback[arguments0-google] ____
+
+provider = 'google', arguments = []
+
+    @pytest.mark.parametrize("provider", ["anthropic", "google", "mistral"])
+    @pytest.mark.parametrize("arguments", [[], {}, False, 0, "", None, 42, "yes"])
+    def test_provider_replays_parsed_values_with_pi_fallback(provider, arguments):
+        from misaka.ai.providers import anthropic, google_shared, mistral
+    
+>       msg = message([ToolCall(id="fixture", name="probe", arguments=arguments)])
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value=[], input_type=list]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:871: ValidationError
+___ test_provider_replays_parsed_values_with_pi_fallback[arguments0-mistral] ___
+
+provider = 'mistral', arguments = []
+
+    @pytest.mark.parametrize("provider", ["anthropic", "google", "mistral"])
+    @pytest.mark.parametrize("arguments", [[], {}, False, 0, "", None, 42, "yes"])
+    def test_provider_replays_parsed_values_with_pi_fallback(provider, arguments):
+        from misaka.ai.providers import anthropic, google_shared, mistral
+    
+>       msg = message([ToolCall(id="fixture", name="probe", arguments=arguments)])
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value=[], input_type=list]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:871: ValidationError
+____ test_provider_replays_parsed_values_with_pi_fallback[False-anthropic] _____
+
+provider = 'anthropic', arguments = False
+
+    @pytest.mark.parametrize("provider", ["anthropic", "google", "mistral"])
+    @pytest.mark.parametrize("arguments", [[], {}, False, 0, "", None, 42, "yes"])
+    def test_provider_replays_parsed_values_with_pi_fallback(provider, arguments):
+        from misaka.ai.providers import anthropic, google_shared, mistral
+    
+>       msg = message([ToolCall(id="fixture", name="probe", arguments=arguments)])
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value=False, input_type=bool]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:871: ValidationError
+______ test_provider_replays_parsed_values_with_pi_fallback[False-google] ______
+
+provider = 'google', arguments = False
+
+    @pytest.mark.parametrize("provider", ["anthropic", "google", "mistral"])
+    @pytest.mark.parametrize("arguments", [[], {}, False, 0, "", None, 42, "yes"])
+    def test_provider_replays_parsed_values_with_pi_fallback(provider, arguments):
+        from misaka.ai.providers import anthropic, google_shared, mistral
+    
+>       msg = message([ToolCall(id="fixture", name="probe", arguments=arguments)])
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value=False, input_type=bool]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:871: ValidationError
+_____ test_provider_replays_parsed_values_with_pi_fallback[False-mistral] ______
+
+provider = 'mistral', arguments = False
+
+    @pytest.mark.parametrize("provider", ["anthropic", "google", "mistral"])
+    @pytest.mark.parametrize("arguments", [[], {}, False, 0, "", None, 42, "yes"])
+    def test_provider_replays_parsed_values_with_pi_fallback(provider, arguments):
+        from misaka.ai.providers import anthropic, google_shared, mistral
+    
+>       msg = message([ToolCall(id="fixture", name="probe", arguments=arguments)])
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value=False, input_type=bool]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:871: ValidationError
+______ test_provider_replays_parsed_values_with_pi_fallback[0-anthropic] _______
+
+provider = 'anthropic', arguments = 0
+
+    @pytest.mark.parametrize("provider", ["anthropic", "google", "mistral"])
+    @pytest.mark.parametrize("arguments", [[], {}, False, 0, "", None, 42, "yes"])
+    def test_provider_replays_parsed_values_with_pi_fallback(provider, arguments):
+        from misaka.ai.providers import anthropic, google_shared, mistral
+    
+>       msg = message([ToolCall(id="fixture", name="probe", arguments=arguments)])
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value=0, input_type=int]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:871: ValidationError
+________ test_provider_replays_parsed_values_with_pi_fallback[0-google] ________
+
+provider = 'google', arguments = 0
+
+    @pytest.mark.parametrize("provider", ["anthropic", "google", "mistral"])
+    @pytest.mark.parametrize("arguments", [[], {}, False, 0, "", None, 42, "yes"])
+    def test_provider_replays_parsed_values_with_pi_fallback(provider, arguments):
+        from misaka.ai.providers import anthropic, google_shared, mistral
+    
+>       msg = message([ToolCall(id="fixture", name="probe", arguments=arguments)])
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value=0, input_type=int]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:871: ValidationError
+_______ test_provider_replays_parsed_values_with_pi_fallback[0-mistral] ________
+
+provider = 'mistral', arguments = 0
+
+    @pytest.mark.parametrize("provider", ["anthropic", "google", "mistral"])
+    @pytest.mark.parametrize("arguments", [[], {}, False, 0, "", None, 42, "yes"])
+    def test_provider_replays_parsed_values_with_pi_fallback(provider, arguments):
+        from misaka.ai.providers import anthropic, google_shared, mistral
+    
+>       msg = message([ToolCall(id="fixture", name="probe", arguments=arguments)])
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value=0, input_type=int]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:871: ValidationError
+_______ test_provider_replays_parsed_values_with_pi_fallback[-anthropic] _______
+
+provider = 'anthropic', arguments = ''
+
+    @pytest.mark.parametrize("provider", ["anthropic", "google", "mistral"])
+    @pytest.mark.parametrize("arguments", [[], {}, False, 0, "", None, 42, "yes"])
+    def test_provider_replays_parsed_values_with_pi_fallback(provider, arguments):
+        from misaka.ai.providers import anthropic, google_shared, mistral
+    
+>       msg = message([ToolCall(id="fixture", name="probe", arguments=arguments)])
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value='', input_type=str]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:871: ValidationError
+________ test_provider_replays_parsed_values_with_pi_fallback[-google] _________
+
+provider = 'google', arguments = ''
+
+    @pytest.mark.parametrize("provider", ["anthropic", "google", "mistral"])
+    @pytest.mark.parametrize("arguments", [[], {}, False, 0, "", None, 42, "yes"])
+    def test_provider_replays_parsed_values_with_pi_fallback(provider, arguments):
+        from misaka.ai.providers import anthropic, google_shared, mistral
+    
+>       msg = message([ToolCall(id="fixture", name="probe", arguments=arguments)])
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value='', input_type=str]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:871: ValidationError
+________ test_provider_replays_parsed_values_with_pi_fallback[-mistral] ________
+
+provider = 'mistral', arguments = ''
+
+    @pytest.mark.parametrize("provider", ["anthropic", "google", "mistral"])
+    @pytest.mark.parametrize("arguments", [[], {}, False, 0, "", None, 42, "yes"])
+    def test_provider_replays_parsed_values_with_pi_fallback(provider, arguments):
+        from misaka.ai.providers import anthropic, google_shared, mistral
+    
+>       msg = message([ToolCall(id="fixture", name="probe", arguments=arguments)])
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value='', input_type=str]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:871: ValidationError
+_____ test_provider_replays_parsed_values_with_pi_fallback[None-anthropic] _____
+
+provider = 'anthropic', arguments = None
+
+    @pytest.mark.parametrize("provider", ["anthropic", "google", "mistral"])
+    @pytest.mark.parametrize("arguments", [[], {}, False, 0, "", None, 42, "yes"])
+    def test_provider_replays_parsed_values_with_pi_fallback(provider, arguments):
+        from misaka.ai.providers import anthropic, google_shared, mistral
+    
+>       msg = message([ToolCall(id="fixture", name="probe", arguments=arguments)])
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value=None, input_type=NoneType]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:871: ValidationError
+______ test_provider_replays_parsed_values_with_pi_fallback[None-google] _______
+
+provider = 'google', arguments = None
+
+    @pytest.mark.parametrize("provider", ["anthropic", "google", "mistral"])
+    @pytest.mark.parametrize("arguments", [[], {}, False, 0, "", None, 42, "yes"])
+    def test_provider_replays_parsed_values_with_pi_fallback(provider, arguments):
+        from misaka.ai.providers import anthropic, google_shared, mistral
+    
+>       msg = message([ToolCall(id="fixture", name="probe", arguments=arguments)])
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value=None, input_type=NoneType]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:871: ValidationError
+______ test_provider_replays_parsed_values_with_pi_fallback[None-mistral] ______
+
+provider = 'mistral', arguments = None
+
+    @pytest.mark.parametrize("provider", ["anthropic", "google", "mistral"])
+    @pytest.mark.parametrize("arguments", [[], {}, False, 0, "", None, 42, "yes"])
+    def test_provider_replays_parsed_values_with_pi_fallback(provider, arguments):
+        from misaka.ai.providers import anthropic, google_shared, mistral
+    
+>       msg = message([ToolCall(id="fixture", name="probe", arguments=arguments)])
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value=None, input_type=NoneType]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:871: ValidationError
+______ test_provider_replays_parsed_values_with_pi_fallback[42-anthropic] ______
+
+provider = 'anthropic', arguments = 42
+
+    @pytest.mark.parametrize("provider", ["anthropic", "google", "mistral"])
+    @pytest.mark.parametrize("arguments", [[], {}, False, 0, "", None, 42, "yes"])
+    def test_provider_replays_parsed_values_with_pi_fallback(provider, arguments):
+        from misaka.ai.providers import anthropic, google_shared, mistral
+    
+>       msg = message([ToolCall(id="fixture", name="probe", arguments=arguments)])
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value=42, input_type=int]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:871: ValidationError
+_______ test_provider_replays_parsed_values_with_pi_fallback[42-google] ________
+
+provider = 'google', arguments = 42
+
+    @pytest.mark.parametrize("provider", ["anthropic", "google", "mistral"])
+    @pytest.mark.parametrize("arguments", [[], {}, False, 0, "", None, 42, "yes"])
+    def test_provider_replays_parsed_values_with_pi_fallback(provider, arguments):
+        from misaka.ai.providers import anthropic, google_shared, mistral
+    
+>       msg = message([ToolCall(id="fixture", name="probe", arguments=arguments)])
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value=42, input_type=int]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:871: ValidationError
+_______ test_provider_replays_parsed_values_with_pi_fallback[42-mistral] _______
+
+provider = 'mistral', arguments = 42
+
+    @pytest.mark.parametrize("provider", ["anthropic", "google", "mistral"])
+    @pytest.mark.parametrize("arguments", [[], {}, False, 0, "", None, 42, "yes"])
+    def test_provider_replays_parsed_values_with_pi_fallback(provider, arguments):
+        from misaka.ai.providers import anthropic, google_shared, mistral
+    
+>       msg = message([ToolCall(id="fixture", name="probe", arguments=arguments)])
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value=42, input_type=int]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:871: ValidationError
+_____ test_provider_replays_parsed_values_with_pi_fallback[yes-anthropic] ______
+
+provider = 'anthropic', arguments = 'yes'
+
+    @pytest.mark.parametrize("provider", ["anthropic", "google", "mistral"])
+    @pytest.mark.parametrize("arguments", [[], {}, False, 0, "", None, 42, "yes"])
+    def test_provider_replays_parsed_values_with_pi_fallback(provider, arguments):
+        from misaka.ai.providers import anthropic, google_shared, mistral
+    
+>       msg = message([ToolCall(id="fixture", name="probe", arguments=arguments)])
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value='yes', input_type=str]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:871: ValidationError
+_______ test_provider_replays_parsed_values_with_pi_fallback[yes-google] _______
+
+provider = 'google', arguments = 'yes'
+
+    @pytest.mark.parametrize("provider", ["anthropic", "google", "mistral"])
+    @pytest.mark.parametrize("arguments", [[], {}, False, 0, "", None, 42, "yes"])
+    def test_provider_replays_parsed_values_with_pi_fallback(provider, arguments):
+        from misaka.ai.providers import anthropic, google_shared, mistral
+    
+>       msg = message([ToolCall(id="fixture", name="probe", arguments=arguments)])
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value='yes', input_type=str]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:871: ValidationError
+______ test_provider_replays_parsed_values_with_pi_fallback[yes-mistral] _______
+
+provider = 'mistral', arguments = 'yes'
+
+    @pytest.mark.parametrize("provider", ["anthropic", "google", "mistral"])
+    @pytest.mark.parametrize("arguments", [[], {}, False, 0, "", None, 42, "yes"])
+    def test_provider_replays_parsed_values_with_pi_fallback(provider, arguments):
+        from misaka.ai.providers import anthropic, google_shared, mistral
+    
+>       msg = message([ToolCall(id="fixture", name="probe", arguments=arguments)])
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value='yes', input_type=str]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:871: ValidationError
+__________________ test_mistral_replay_normalizes_nan_like_pi __________________
+
+    def test_mistral_replay_normalizes_nan_like_pi():
+        from misaka.ai.providers import mistral
+    
+>       msg = message([ToolCall(id="fixture", name="probe", arguments=float("nan"))])
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       pydantic_core._pydantic_core.ValidationError: 1 validation error for ToolCall
+E       arguments
+E         Input should be a valid dictionary [type=dict_type, input_value=nan, input_type=float]
+E           For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+
+../u04_callers_contract_red.py:891: ValidationError
+______ test_mistral_structured_input_preserves_pi_truthiness[arguments0] _______
+
+arguments = []
+
+    @pytest.mark.parametrize("arguments", [[], {}, False, 0, None, 42])
+    async def test_mistral_structured_input_preserves_pi_truthiness(arguments):
+        from misaka.ai.providers import mistral
+    
+        async def incoming():
+            yield {"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "fixture", "function": {"name": "probe", "arguments": arguments}},
+            ]}, "finish_reason": "tool_calls"}]}
+    
+        output = message()
+        await mistral.consume_chat_stream(model("mistral-conversations"), output,
+            SimpleNamespace(push=lambda event: None), incoming())
+>       assert output.content[0].arguments == (arguments if isinstance(arguments, (dict, list)) or arguments else {})
+E       assert {} == []
+E         
+E         Use -v to get more diff
+
+../u04_callers_contract_red.py:908: AssertionError
+__________ test_mistral_structured_input_preserves_pi_truthiness[42] ___________
+
+arguments = 42
+
+    @pytest.mark.parametrize("arguments", [[], {}, False, 0, None, 42])
+    async def test_mistral_structured_input_preserves_pi_truthiness(arguments):
+        from misaka.ai.providers import mistral
+    
+        async def incoming():
+            yield {"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "fixture", "function": {"name": "probe", "arguments": arguments}},
+            ]}, "finish_reason": "tool_calls"}]}
+    
+        output = message()
+        await mistral.consume_chat_stream(model("mistral-conversations"), output,
+            SimpleNamespace(push=lambda event: None), incoming())
+>       assert output.content[0].arguments == (arguments if isinstance(arguments, (dict, list)) or arguments else {})
+E       AssertionError: assert {} == 42
+E        +  where {} = ToolCall(type='toolCall', id='fixture', name='probe', arguments={}, argumentsError='Invalid final tool arguments; resend a complete JSON object.', thoughtSignature=None, namespace=None).arguments
+
+../u04_callers_contract_red.py:908: AssertionError
+=========================== short test summary info ============================
+FAILED ::test_final_arguments_follow_pi_recovery_and_survive_serialization[{}-expected0]
+FAILED ::test_final_arguments_follow_pi_recovery_and_survive_serialization[-expected1]
+FAILED ::test_final_arguments_follow_pi_recovery_and_survive_serialization[{"note":"yes"}-expected2]
+FAILED ::test_final_arguments_follow_pi_recovery_and_survive_serialization[{"note":"hello\nworld"}-expected3]
+FAILED ::test_final_arguments_follow_pi_recovery_and_survive_serialization[{"note":"C:\\q"}-expected4]
+FAILED ::test_final_arguments_follow_pi_recovery_and_survive_serialization[{"note":"hello-expected5]
+FAILED ::test_final_arguments_follow_pi_recovery_and_survive_serialization[not-json-expected6]
+FAILED ::test_final_arguments_follow_pi_recovery_and_survive_serialization[{"note":"an "unescaped" quote"}-expected7]
+FAILED ::test_final_arguments_follow_pi_recovery_and_survive_serialization[{"note":true}garbage-expected8]
+FAILED ::test_final_arguments_follow_pi_recovery_and_survive_serialization[null-None]
+FAILED ::test_final_arguments_follow_pi_recovery_and_survive_serialization[[]-expected10]
+FAILED ::test_final_arguments_follow_pi_recovery_and_survive_serialization[false-False]
+FAILED ::test_final_arguments_follow_pi_recovery_and_survive_serialization[42-42]
+FAILED ::test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling[not-json-sequential]
+FAILED ::test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling[not-json-parallel]
+FAILED ::test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling[null-sequential]
+FAILED ::test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling[null-parallel]
+FAILED ::test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling[[]-sequential]
+FAILED ::test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling[[]-parallel]
+FAILED ::test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling[42-sequential]
+FAILED ::test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling[42-parallel]
+FAILED ::test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling[{"note":{}}-sequential]
+FAILED ::test_schema_invalid_call_gets_receipt_without_blocking_valid_sibling[{"note":{}}-parallel]
+FAILED ::test_anthropic_finalization_on_real_stream_path[{"note":"hello-initial1-False-expected1]
+FAILED ::test_anthropic_finalization_on_real_stream_path[null-initial4-True-None]
+FAILED ::test_anthropic_finalization_on_real_stream_path[[]-initial5-False-expected5]
+FAILED ::test_anthropic_finalization_on_real_stream_path[-initial6-True-expected6]
+FAILED ::test_anthropic_finalization_on_real_stream_path[-False-True-False]
+FAILED ::test_anthropic_finalization_on_real_stream_path[-0-True-0] - Asserti...
+FAILED ::test_anthropic_finalization_on_real_stream_path[--True-] - Assertion...
+FAILED ::test_transport_respects_backend_final_arguments_or_last_preview[not-json-preview0-True-proxy]
+FAILED ::test_transport_respects_backend_final_arguments_or_last_preview[not-json-preview0-True-pi-messages]
+FAILED ::test_transport_respects_backend_final_arguments_or_last_preview[{"note":"preview-preview1-True-proxy]
+FAILED ::test_transport_respects_backend_final_arguments_or_last_preview[{"note":"preview-preview1-True-pi-messages]
+FAILED ::test_transport_respects_backend_final_arguments_or_last_preview[{"note":"preview-preview1-False-proxy]
+FAILED ::test_transport_respects_backend_final_arguments_or_last_preview[{"note":"preview-preview1-False-pi-messages]
+FAILED ::test_transport_respects_backend_final_arguments_or_last_preview[[]-preview2-True-proxy]
+FAILED ::test_transport_respects_backend_final_arguments_or_last_preview[[]-preview2-True-pi-messages]
+FAILED ::test_transport_respects_backend_final_arguments_or_last_preview[[]-preview2-False-proxy]
+FAILED ::test_transport_respects_backend_final_arguments_or_last_preview[[]-preview2-False-pi-messages]
+FAILED ::test_proxy_preview_uses_javascript_fallback_truthiness[[]-expected4]
+FAILED ::test_proxy_preview_uses_javascript_fallback_truthiness[42-42] - Asse...
+FAILED ::test_responses_final_item_uses_pi_recovery[False-{"note":"hello-expected2]
+FAILED ::test_responses_final_item_uses_pi_recovery[False-null-None] - Assert...
+FAILED ::test_responses_final_item_uses_pi_recovery[True-{"note":"hello-expected2]
+FAILED ::test_responses_final_item_uses_pi_recovery[True-null-None] - Asserti...
+FAILED ::test_tool_call_session_and_wire_share_pi_fields[arguments2-proxy] - ...
+FAILED ::test_tool_call_session_and_wire_share_pi_fields[arguments2-pi-messages]
+FAILED ::test_tool_call_session_and_wire_share_pi_fields[None-proxy] - pydant...
+FAILED ::test_tool_call_session_and_wire_share_pi_fields[None-pi-messages] - ...
+FAILED ::test_tool_call_session_and_wire_share_pi_fields[42-proxy] - pydantic...
+FAILED ::test_tool_call_session_and_wire_share_pi_fields[42-pi-messages] - py...
+FAILED ::test_bedrock_recovers_closed_and_unclosed_blocks_like_pi[{"note":"hello-expected2-False]
+FAILED ::test_bedrock_recovers_closed_and_unclosed_blocks_like_pi[{"note":"hello-expected2-True]
+FAILED ::test_bedrock_recovers_closed_and_unclosed_blocks_like_pi[null-None-False]
+FAILED ::test_bedrock_recovers_closed_and_unclosed_blocks_like_pi[null-None-True]
+FAILED ::test_chat_completion_finalization[{"note":"hello-expected2-mistral]
+FAILED ::test_chat_completion_finalization[{"note":"hello-expected2-openai-completions]
+FAILED ::test_chat_completion_finalization[null-None-mistral] - AssertionErro...
+FAILED ::test_chat_completion_finalization[null-None-openai-completions] - As...
+FAILED ::test_provider_replays_parsed_values_with_pi_fallback[arguments0-anthropic]
+FAILED ::test_provider_replays_parsed_values_with_pi_fallback[arguments0-google]
+FAILED ::test_provider_replays_parsed_values_with_pi_fallback[arguments0-mistral]
+FAILED ::test_provider_replays_parsed_values_with_pi_fallback[False-anthropic]
+FAILED ::test_provider_replays_parsed_values_with_pi_fallback[False-google]
+FAILED ::test_provider_replays_parsed_values_with_pi_fallback[False-mistral]
+FAILED ::test_provider_replays_parsed_values_with_pi_fallback[0-anthropic] - ...
+FAILED ::test_provider_replays_parsed_values_with_pi_fallback[0-google] - pyd...
+FAILED ::test_provider_replays_parsed_values_with_pi_fallback[0-mistral] - py...
+FAILED ::test_provider_replays_parsed_values_with_pi_fallback[-anthropic] - p...
+FAILED ::test_provider_replays_parsed_values_with_pi_fallback[-google] - pyda...
+FAILED ::test_provider_replays_parsed_values_with_pi_fallback[-mistral] - pyd...
+FAILED ::test_provider_replays_parsed_values_with_pi_fallback[None-anthropic]
+FAILED ::test_provider_replays_parsed_values_with_pi_fallback[None-google] - ...
+FAILED ::test_provider_replays_parsed_values_with_pi_fallback[None-mistral]
+FAILED ::test_provider_replays_parsed_values_with_pi_fallback[42-anthropic]
+FAILED ::test_provider_replays_parsed_values_with_pi_fallback[42-google] - py...
+FAILED ::test_provider_replays_parsed_values_with_pi_fallback[42-mistral] - p...
+FAILED ::test_provider_replays_parsed_values_with_pi_fallback[yes-anthropic]
+FAILED ::test_provider_replays_parsed_values_with_pi_fallback[yes-google] - p...
+FAILED ::test_provider_replays_parsed_values_with_pi_fallback[yes-mistral] - ...
+FAILED ::test_mistral_replay_normalizes_nan_like_pi - pydantic_core._pydantic...
+FAILED ::test_mistral_structured_input_preserves_pi_truthiness[arguments0] - ...
+FAILED ::test_mistral_structured_input_preserves_pi_truthiness[42] - Assertio...
+84 failed, 32 passed, 55 deselected in 2.66s

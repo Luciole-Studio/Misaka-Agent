@@ -125,10 +125,10 @@ the manifest, not only the conclusions.
     _obj, text, err = worker.run_llm_json(
         os.path.join(cfg["roles_root"], "last_order"), prompt,
         cfg["provider"], cfg["default_model"], cwd=root, tools=list(planner.session_tools(worker, tools)),
-        timeout=None, soul=False, raw=True, research_context=True,
+        timeout=None, raw=True, research_context=True,
         usage_db=cfg.get("db"), usage_task_id=run["id"], usage_generation=1,
         usage_token_cap=cfg.get("token_cap"), session_dir=session_dir, session_file=run["root_session"],
-        continue_session=bool(find_most_recent_session(session_dir)), thinking="high",
+        continue_session=bool(find_most_recent_session(session_dir)),
     )
     if check_active:
         check_active()
@@ -187,7 +187,8 @@ Compare synthesis against node records for lost qualifications, counterevidence 
 You may search/read supplementary sources; preserve and locate anything you use. Do not edit the draft.
 
 ## deliverable
-Write `critique.md` under your card's deliverable directory. For each objection identify the draft passage,
+`critique.md`
+Write it under your card's deliverable directory. For each objection identify the draft passage,
 source/context, reasoning, and a suggested correction or an explicit unresolved disagreement.
 Call `misaka_card_note` with your complete `issues` list (kind, question, rationale, priority, material).
 Use issues=[] explicitly if none. The root Last Order will adjudicate this review; no new research branches

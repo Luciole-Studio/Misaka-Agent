@@ -77,10 +77,10 @@ def current_scope() -> WebScope:
 
 def auth_identity():
     """Atomic auth-file replacement invalidates both search and extract account caches."""
-    from misaka.config import get_auth_path
+    from misaka.config import home
     scope = current_scope()
     try:
-        path = Path(scope.profile_dir) / 'auth.json' if scope.profile_dir else Path(get_auth_path())
+        path = Path(scope.profile_dir) / 'auth.json' if scope.profile_dir else home.path('auth')
     except (OSError, RuntimeError):
         return None  # A home-less local process has no OAuth account to cache.
     try:

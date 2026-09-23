@@ -4,13 +4,14 @@ from __future__ import annotations
 import asyncio
 import os
 import shlex
+import time
 
 from misaka.config import CFG, current_config
 from misaka.core.moments import CoreCommand
 from misaka.core.platform import budget
 from misaka.core.platform import tasks as task_store
 from misaka.core.research import node as research_node
-from misaka.core.research import runs, workflow
+from misaka.core.research import planner, runs, workflow
 from misaka.ui.tui.interactive.components.ask_user_question import (
     AskUserQuestionComponent,
 )
@@ -19,15 +20,19 @@ from misaka.utils.values import read_field
 _CON = None
 _DEPTH_QUESTION = "How deep should this research run go?"
 _PARALLEL_QUESTION = "How many Last Order nodes may run at once?"
+_SISTER_PARALLEL_QUESTION = "How many Sister cards may be active per Last Order node?"
 _ROUNDS_QUESTION = "After its first cards are back, how many more times may a node send its Sisters out before it concludes?"
+_APPROVAL_QUESTION = "Should each research plan wait for your approval?"
 USAGE = (
-    "Usage: /research [DEPTH] [--parallel N] [--followups N] [QUESTION]\n"
+    "Usage: /research [DEPTH] [--parallel N] [--sister-parallel N] [--followups N] [QUESTION]\n"
     f"       Start research at once (depth defaults to {runs.DEFAULT_LIMITS['max_depth']}, LO parallelism to "
-    f"{runs.DEFAULT_LIMITS['parallel']}, follow-up rounds per node to {runs.DEFAULT_LIMITS['max_followups']}).\n"
-    "       Bare /research lets you pick depth, LO parallelism and follow-ups; your next message is the question.\n"
-    "       Every node's plan waits for your go-ahead: talk it over with that Last Order (the root's in this\n"
-    "       window, a fork's in its own tab) and she starts it once you agree; MISAKA_RESEARCH_PLAN_APPROVAL=0 turns this off.\n"
-    "       Options precede QUESTION; --depth N is also accepted. Sister slots per LO are unchanged.\n"
+    f"{runs.DEFAULT_LIMITS['parallel']}, Sister cards per LO to {runs.DEFAULT_LIMITS['sister_parallel']}, follow-up rounds per node to {runs.DEFAULT_LIMITS['max_followups']}).\n"
+    "       Bare /research lets you pick depth, LO parallelism, Sister cards per LO, follow-ups and plan approval; your next message is the question.\n"
+    "       Require approval: each root, fork and follow-up plan waits for your go-ahead in its LO window.\n"
+    "       Automatic: accepted plans proceed without that extra wait; genuine clarification still applies.\n"
+    "       The choice is saved for this run, including resume. The default comes from settings.json research.plan_approval (true).\n"
+    "       Options precede QUESTION; --depth N is also accepted. --parallel limits LO nodes.\n"
+    "       --sister-parallel N limits active Sister cards per LO; global/per-Sister admission limits still apply.\n"
     "       --followups N: after its first cards are back, how many more times a node may send its Sisters out\n"
     "       before it concludes (0-6). Talking a plan over with you is never counted.\n"
     "       /research status [RUN_ID]          show the latest run of this folder, or the run you name\n"
@@ -74,7 +79,7 @@ def parse_command(raw):
         if len(tokens) > 2:
             raise ValueError(USAGE)
         return {"action": "stop", "run_id": tokens[1] if len(tokens) == 2 else None}
-    # Activation: [start] [DEPTH] [--depth N] [--parallel N] [QUESTION...]. Use the raw
+    # Activation: [start] [DEPTH] [--depth N] [--parallel N] [--sister-parallel N] [QUESTION...]. Use the raw
     # line, not the shlex tokens: an apostrophe in "Stalin's constitution" is not an open quote.
     line = (raw or "").strip()
     words = line.split(None, 1)
@@ -85,8 +90,9 @@ def parse_command(raw):
     selected = {}
     while words:
         option, separator, value = words[0].partition("=")
-        if option in {"--depth", "--parallel", "--followups"}:
-            key = {"--depth": "max_depth", "--parallel": "parallel", "--followups": "max_followups"}[option]
+        if option in {"--depth", "--parallel", "--sister-parallel", "--followups"}:
+            key = {"--depth": "max_depth", "--parallel": "parallel",
+                   "--sister-parallel": "sister_parallel", "--followups": "max_followups"}[option]
             if key in selected:
                 raise ValueError(f"{option} was supplied more than once.")
             if not separator:
@@ -106,7 +112,7 @@ def parse_command(raw):
         words = line.split(None, 1)
     limits = runs.normalize_limits(selected)
     return {"action": "activate", "depth": limits["max_depth"], "parallel": limits["parallel"],
-            "rounds": limits["max_followups"], "explicit": explicit, "question": line}
+            "sister_parallel": limits["sister_parallel"], "rounds": limits["max_followups"], "explicit": explicit, "question": line}
 
 
 def _workspace(ctx):
@@ -132,7 +138,9 @@ def _status(con, target, workspace):
     return (
         f"{value['id']} | project {runs.project_name(run)!r} ({value['workspace']}) | "
         f"{value['status']}/{value['phase']} | depth {value['wave']}/{value['limits']['max_depth']} | "
-        f"LO parallelism {value['limits']['parallel']} | follow-ups per node {value['limits']['max_followups']} | "
+        f"LO parallelism {value['limits']['parallel']} | Sister cards per LO {value['limits']['sister_parallel']} | "
+        f"follow-ups per node {value['limits']['max_followups']} | "
+        f"plan approval {'required' if planner.plan_waits_for_user(_cfg(), run) else 'automatic'} | "
         f"tasks {value['tasks']} | nodes {value['nodes']} | open issues {value['open_issues']}"
         + token_text
         + (f" | error {value['last_error']}" if value["last_error"] else "")
@@ -142,7 +150,7 @@ def _status(con, target, workspace):
 class ResearchPart:
     """Last Order's human-only ``/research`` command and run drivers."""
 
-    def __init__(self, worker=None):
+    def __init__(self):
         drivers = {}     # this session's research drivers; another session's are not ours to stop
         con = _con()
         # In a pane, a fork node is a pane too (its own tab beside this one); elsewhere a
@@ -153,9 +161,13 @@ class ResearchPart:
         self.session = None
 
         def send_progress(content, *, run_id=None, details=None):
+            from misaka.core.moments import MEMORY
+
             payload = dict(details or {})
             if run_id:
                 payload["run_id"] = run_id
+            if payload.get("stage") in TICK_STAGES:
+                payload[MEMORY] = False        # shown once in the feed, dropped from every request: not memory
             self.session.moments.send_message(
                 {"customType": "research-progress", "display": True,
                  "content": content, "details": payload},
@@ -173,7 +185,7 @@ class ResearchPart:
                     send_progress(content, run_id=run_id, details=event)
 
                 result = await workflow.run(
-                    con, dict(_cfg()), spawner, worker, run_id=run_id, progress=progress, resume=resume, clarification=clarification,
+                    con, dict(_cfg()), spawner, run_id=run_id, progress=progress, resume=resume, clarification=clarification,
                     origin_session=getattr(getattr(ctx, "sessionManager", None), "sessionId", None), session=self.session)
                 if result["reason"] == "waiting_input":
                     questions = "\n".join(f"- {q}" for q in result.get("questions") or [])
@@ -224,57 +236,66 @@ class ResearchPart:
             drivers[run_id] = asyncio.create_task(drive(run_id, ctx, resume=resume, clarification=clarification))
             return True
 
-        pending = {"depth": None, "parallel": None, "rounds": None, "workspace": None}
+        pending = {"depth": None, "parallel": None, "sister_parallel": None, "rounds": None, "workspace": None, "plan_approval": None}
         starts = set()
 
-        async def begin(question, depth, parallel, workspace, ctx, rounds=None):
+        async def begin(question, depth, parallel, workspace, ctx, rounds, sister_parallel, plan_approval):
             from misaka.core.platform import cards as card_files
             await asyncio.to_thread(card_files.init_project, workspace, draft_brief=False)
             run = runs.create(
                 con, workspace=workspace, question=question,
-                limits={"max_depth": depth, "parallel": parallel,
+                limits={"max_depth": depth, "parallel": parallel, "sister_parallel": sister_parallel, "plan_approval": plan_approval,
                         **({"max_followups": rounds} if rounds is not None else {})},
                 token_start=budget.spent(con),
                 origin_session=getattr(getattr(ctx, "sessionManager", None), "sessionId", None),
             )
+            # The discipline itself is not written into the transcript: `context` puts it in
+            # front of the model on every request while a run of this conversation is open
+            # (2026-09-18, B31: the one-off copy scrolled away, and after a while Last Order
+            # went back to being an ordinary assistant in the middle of a paused run).
             self.session.moments.send_message(
                 {"customType": "research-discipline", "display": True,
-                 "content": workflow.RESEARCH_DISCIPLINE,
+                 "content": f"Research mode is on for run {run['id']}: the research workflow's "
+                            "rules apply to this conversation for as long as the run is open.",
                  "details": {"run_id": run["id"]}},
                 {"deliverAs": "followUp", "triggerTurn": False},
             )
             launch(run["id"], ctx)
             ctx.ui.notify(
                 f"Research run started: {run['id']} | project {runs.project_name(run)!r} | "
-                f"maximum depth {depth} | LO parallelism {parallel} | follow-ups per node "
-                f"{runs.limits(run)['max_followups']}. Use /research status to check progress.",
+                f"maximum depth {depth} | LO parallelism {parallel} | Sister cards per LO {sister_parallel} | follow-ups per node "
+                f"{runs.limits(run)['max_followups']} | plan approval {'required' if plan_approval else 'automatic'}. "
+                "Use /research status to check progress.",
                 "info",
             )
 
-        async def begin_safely(question, depth, parallel, workspace, ctx, rounds=None):
+        async def begin_safely(question, depth, parallel, workspace, ctx, rounds, sister_parallel, plan_approval):
             try:
-                await begin(question, depth, parallel, workspace, ctx, rounds)
+                await begin(question, depth, parallel, workspace, ctx, rounds, sister_parallel, plan_approval)
             except Exception as error:  # noqa: BLE001 - the failure is shown and the question is kept for a retry
                 pending["depth"] = depth
                 pending["parallel"] = parallel
+                pending["sister_parallel"] = sister_parallel
                 pending["rounds"] = rounds
+                pending["plan_approval"] = plan_approval
                 pending["workspace"] = workspace
                 send_progress(
                     f"Research startup failed: {type(error).__name__}: {error}\n"
                     "Research mode is still waiting for a question: send it again, or enter /research to leave research mode.",
-                    details={"stage": "startup_error", "depth": depth, "parallel": parallel},
+                    details={"stage": "startup_error", "depth": depth, "parallel": parallel, "sister_parallel": sister_parallel,
+                             "plan_approval": plan_approval},
                 )
 
-        def start_question(question, depth, parallel, workspace, ctx, rounds=None):
+        def start_question(question, depth, parallel, workspace, ctx, rounds, sister_parallel, plan_approval):
             """Persist the question, then let this window plan it as the run's root LO."""
             self.session.moments.send_message(
                 {"customType": "research-question", "display": True,
                  "content": f"Research question | {question}",
-                 "details": {"question": question, "depth": depth, "parallel": parallel, "rounds": rounds,
-                             "workspace": workspace}},
+                 "details": {"question": question, "depth": depth, "parallel": parallel, "sister_parallel": sister_parallel, "rounds": rounds,
+                             "workspace": workspace, "plan_approval": plan_approval}},
                 {"deliverAs": "followUp", "triggerTurn": False},
             )
-            task = asyncio.create_task(begin_safely(question, depth, parallel, workspace, ctx, rounds))
+            task = asyncio.create_task(begin_safely(question, depth, parallel, workspace, ctx, rounds, sister_parallel, plan_approval))
             starts.add(task)
             task.add_done_callback(starts.discard)
 
@@ -285,8 +306,10 @@ class ResearchPart:
             if not question:
                 return {"action": "handled"}
             depth, parallel, rounds, workspace = pending["depth"], pending["parallel"], pending["rounds"], pending["workspace"]
-            pending.update(depth=None, parallel=None, rounds=None, workspace=None)
-            start_question(question, depth, parallel, workspace, ctx, rounds)
+            sister_parallel = pending["sister_parallel"]
+            plan_approval = pending["plan_approval"]
+            pending.update(depth=None, parallel=None, sister_parallel=None, rounds=None, workspace=None, plan_approval=None)
+            start_question(question, depth, parallel, workspace, ctx, rounds, sister_parallel, plan_approval)
             return {"action": "handled"}
 
         self._capture_question = capture_question
@@ -302,7 +325,8 @@ class ResearchPart:
                         ctx.ui.notify("Research startup in progress. This window will plan the root node.", "info")
                     elif pending["depth"] is not None and not spec["target"]:
                         ctx.ui.notify(f"Research mode is waiting for a question | maximum depth {pending['depth']} | "
-                                      f"LO parallelism {pending['parallel']}.", "info")
+                                      f"LO parallelism {pending['parallel']} | Sister cards per LO {pending['sister_parallel']} | "
+                                      f"plan approval {'required' if pending['plan_approval'] else 'automatic'}.", "info")
                     else:
                         ctx.ui.notify(_status(con, spec["target"], _workspace(ctx)), "info")
                     return
@@ -310,7 +334,7 @@ class ResearchPart:
                     run = _find_run(con, spec["run_id"], _workspace(ctx), active=True)
                     if not run:
                         if pending["depth"] is not None:
-                            pending.update(depth=None, parallel=None, rounds=None, workspace=None)
+                            pending.update(depth=None, parallel=None, sister_parallel=None, rounds=None, workspace=None, plan_approval=None)
                             ctx.ui.notify("Research mode closed.", "info")
                             return
                         ctx.ui.notify("No active research run.", "info")
@@ -343,15 +367,22 @@ class ResearchPart:
                     ctx.ui.notify("A research run is already active in this window; stop it before starting another.", "info")
                     return
                 if pending["depth"] is not None and not spec["explicit"]:
-                    pending.update(depth=None, parallel=None, rounds=None, workspace=None)
+                    pending.update(depth=None, parallel=None, sister_parallel=None, rounds=None, workspace=None, plan_approval=None)
                     ctx.ui.notify("Research mode closed.", "info")
                     return
+                spec["plan_approval"] = planner.plan_waits_for_user(_cfg())
                 if spec.get("question"):
                     # `/research [DEPTH] QUESTION`: no picker, no waiting for the next message.
-                    pending.update(depth=None, parallel=None, rounds=None, workspace=None)
-                    start_question(spec["question"], spec["depth"], spec["parallel"], _workspace(ctx), ctx, spec["rounds"])
+                    pending.update(depth=None, parallel=None, sister_parallel=None, rounds=None, workspace=None, plan_approval=None)
+                    start_question(spec["question"], spec["depth"], spec["parallel"], _workspace(ctx), ctx, spec["rounds"], spec["sister_parallel"], spec["plan_approval"])
                     return
                 if not spec["explicit"]:
+                    approval_options = [
+                        {"label": "Require approval", "description": "Each root, fork and follow-up plan waits for your go-ahead before execution."},
+                        {"label": "Automatic", "description": "Accepted plans proceed without an extra approval wait; genuine clarification still needs your input."},
+                    ]
+                    if not spec["plan_approval"]:
+                        approval_options.reverse()
                     result = await ctx.ui.custom(
                         lambda tui, _theme, keybindings, done: AskUserQuestionComponent(
                             [{
@@ -368,9 +399,18 @@ class ResearchPart:
                                 "question": _PARALLEL_QUESTION,
                                 "multiSelect": False,
                                 "options": [
-                                    {"label": "4", "description": "Default: up to 4 LO nodes at once; Sister slots per LO stay unchanged."},
+                                    {"label": "4", "description": "Default: up to 4 LO nodes at once; independent of Sister cards per LO."},
                                     {"label": "1", "description": "One LO node at a time; lowest concurrent resource use."},
                                     {"label": "8", "description": "Up to 8 LO nodes at once; more simultaneous sessions and requests."},
+                                ],
+                            }, {
+                                "header": "Sister cards per LO",
+                                "question": _SISTER_PARALLEL_QUESTION,
+                                "multiSelect": False,
+                                "options": [
+                                    {"label": "4", "description": "Default: up to 4 active Sister cards per LO; global admission limits still apply."},
+                                    {"label": "1", "description": "One active Sister card per LO at a time."},
+                                    {"label": "8", "description": "Up to 8 active Sister cards per LO, including multiple sessions of the same Sister."},
                                 ],
                             }, {
                                 "header": "Follow-ups",
@@ -379,8 +419,13 @@ class ResearchPart:
                                 "options": [
                                     {"label": "2", "description": "Default: up to two more rounds of cards after the first, per node."},
                                     {"label": "0", "description": "None: every node concludes from its first cards."},
-                                    {"label": "4", "description": "Up to four more rounds per node; thorough, slow, and more plans to approve."},
+                                    {"label": "4", "description": "Up to four more rounds per node; thorough and slow, with more plans to review if approval is required."},
                                 ],
+                            }, {
+                                "header": "Plan approval",
+                                "question": _APPROVAL_QUESTION,
+                                "multiSelect": False,
+                                "options": approval_options,
                             }],
                             done,
                             tui=tui,
@@ -392,21 +437,33 @@ class ResearchPart:
                     if result.get("action") == "clarify":
                         self.session.moments.send_user_message(
                             "I chose \"Chat about this\" in the research-options picker. Ask me what I want "
-                            "to clarify and talk through depth, LO parallelism and rounds; do not start research yet."
+                            "to clarify and talk through depth, LO parallelism, Sister cards per LO, rounds and plan approval; do not start research yet."
                         )
                         return
                     answers = result.get("answers") or {}
+                    approval = answers.get(_APPROVAL_QUESTION)
+                    if approval is not None:
+                        choices = {"require approval": True, "automatic": False}
+                        choice = str(approval).strip().lower()
+                        if choice not in choices:
+                            raise ValueError("Plan approval must be Require approval or Automatic.")
+                        spec["plan_approval"] = choices[choice]
                     picked = {"max_depth": answers.get(_DEPTH_QUESTION), "parallel": answers.get(_PARALLEL_QUESTION),
+                              "sister_parallel": answers.get(_SISTER_PARALLEL_QUESTION),
                               "max_followups": answers.get(_ROUNDS_QUESTION)}
                     limits = runs.normalize_limits({k: v for k, v in picked.items() if v is not None})
-                    spec.update(depth=limits["max_depth"], parallel=limits["parallel"], rounds=limits["max_followups"])
+                    spec.update(depth=limits["max_depth"], parallel=limits["parallel"],
+                                sister_parallel=limits["sister_parallel"], rounds=limits["max_followups"])
                 pending["depth"] = spec["depth"]
                 pending["parallel"] = spec["parallel"]
+                pending["sister_parallel"] = spec["sister_parallel"]
                 pending["rounds"] = spec["rounds"]
+                pending["plan_approval"] = spec["plan_approval"]
                 pending["workspace"] = _workspace(ctx)
                 ctx.ui.notify(
                     f"Research mode enabled | maximum depth {spec['depth']} | LO parallelism {spec['parallel']} | "
-                    f"follow-ups per node {spec['rounds']} | "
+                    f"Sister cards per LO {spec['sister_parallel']} | follow-ups per node {spec['rounds']} | "
+                    f"plan approval {'required' if spec['plan_approval'] else 'automatic'} | "
                     f"workspace {pending['workspace']}. Your next regular message becomes the "
                     "research question; this Last Order writes the brief and root plan together.",
                     "info",
@@ -434,7 +491,7 @@ class ResearchPart:
             for run_id, _task in live:
                 current = runs.get(con, run_id)
                 if current and current["status"] == "stopping" and not current["driver_lock"]:
-                    await workflow.run(con, dict(_cfg()), spawner, worker, run_id=run_id)
+                    await workflow.run(con, dict(_cfg()), spawner, run_id=run_id)
 
         self._cleanup = cleanup
 
@@ -444,20 +501,32 @@ class ResearchPart:
     async def input(self, event, ctx):
         return await self._capture_question(event, ctx)
 
-    async def context(self, event, _ctx):
+    async def context(self, event, ctx):
         """What the model sees of the run, without editing the transcript or tool pairs: the
         status ticks of every node and card (still displayed) and the completion notices of
         research cards the phases already consumed are left out -- a run of a dozen nodes puts
         hundreds of them in the root window, and they were the bulk of what compaction ate --
-        and a delivered final report archives its superseded drafts."""
+        a delivered final report archives its superseded drafts, and while a run of this
+        conversation is open its rules stand at the head of the request, rebuilt each time from
+        the board rather than remembered from the transcript."""
         messages = event["messages"]
+        session_id = getattr(getattr(ctx, "sessionManager", None), "sessionId", None)
+        try:
+            own_runs = runs.for_session(_con(), session_id)
+        except Exception:  # noqa: BLE001 - the board is not this hook's to fail the request over
+            own_runs = []
+        notice = mode_notice(own_runs)
+        active = {run["id"] for run in own_runs if run["status"] in runs.ACTIVE}
         delivered = {read_field(message, "details", {}).get("run_id") for message in messages
                      if read_field(message, "customType") == "research-final"
                      and (read_field(message, "details") or {}).get("final_artifact")}
-        out, drafting, changed = [], False, False
+        out, drafting, changed = [], False, bool(notice)
+        if notice:
+            out.append({"role": "custom", "customType": "research-mode", "display": False,
+                        "content": notice, "timestamp": int(time.time() * 1000)})
         for message in messages:
             role, kind = read_field(message, "role"), read_field(message, "customType")
-            if role == "custom" and _feed_noise(kind, read_field(message, "details") or {}):
+            if role == "custom" and _feed_noise(kind, read_field(message, "details") or {}, active):
                 changed = True
                 continue
             if kind == "research-phase" and delivered:
@@ -491,14 +560,37 @@ class ResearchPart:
 TICK_STAGES = {"tasks", "node", "assigned", "red_team", "planning", "level"}
 
 
-def _feed_noise(kind, details):
+def _feed_noise(kind, details, active_runs=frozenset()):
     """A custom message of the run's feed that the model has no use for: a status tick, or the
-    completion notice of a research card whose result the phase turn already read."""
+    completion notice of a research card whose result the phase turn already read -- which is
+    only ever true while that run's driver is running; a card finishing under a paused run is
+    news for Last Order (2026-09-18, B26)."""
     if kind == "research-progress":
         return details.get("stage") in TICK_STAGES
     if kind == "sister-notification":
-        return bool(details.get("research")) and details.get("boardStatus", details.get("status")) == "done"
+        research = details.get("research") or {}
+        return (bool(research) and research.get("run_id") in active_runs
+                and details.get("boardStatus", details.get("status")) == "done")
     return False
+
+
+PAUSED_STATUSES = {"failed", "stopped"}
+
+
+def mode_notice(own_runs):
+    """The standing notice for the runs a conversation started: the workflow discipline while
+    any of them is being driven, the paused notice while none is and some are not finished,
+    nothing once they are all done (or there never were any)."""
+    active = [run for run in own_runs if run["status"] in runs.ACTIVE]
+    if active:
+        ids = ", ".join(run["id"] for run in active)
+        return f"{workflow.RESEARCH_DISCIPLINE.rstrip()}\nActive research run(s) of this conversation: {ids}."
+    paused = [run for run in own_runs if run["status"] in PAUSED_STATUSES]
+    if paused:
+        return workflow.RESEARCH_PAUSED.format(
+            run_ids=", ".join(run["id"] for run in paused),
+            statuses=", ".join(sorted({run["status"] for run in paused})))
+    return None
 
 
 SESSION_KINDS = {"foreground", "dm"}
@@ -506,8 +598,7 @@ ROLES = {"last_order"}
 
 
 def part(spec):
-    from misaka.core.network import worker
     from misaka.core.research.wiring.node import node_identity
-    if node_identity():        # a fork node's own window: its routine is NodePart's, and no run starts from there
+    if spec.research_context or node_identity():  # an existing workflow already owns this session
         return None
-    return ResearchPart(worker)
+    return ResearchPart()

@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from misaka.core.tools._web.academic import AcademicRoute, route_academic
+from misaka.core.web.academic import AcademicRoute, route_academic
 
 # (输入 URL, 期望 kind, 期望抓取的 URL)
 ROUTES: list[tuple[str, str, str]] = [

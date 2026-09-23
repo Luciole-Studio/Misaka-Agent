@@ -19,28 +19,15 @@ from misaka.ui.tui.interactive.theme.theme import get_select_list_theme, theme
 
 THINKING_SELECT_LIST_LAYOUT = SelectListLayoutOptions(minPrimaryColumnWidth=12, maxPrimaryColumnWidth=32)
 
-# Budget-based models: the token counts are real (`thinking.budget_tokens`).
-# There is no xhigh budget tier, so it clamps to high.
+# Pi b03a367a4f, thinking-selector.ts: LEVEL_DESCRIPTIONS (word-for-word).
 LEVEL_DESCRIPTIONS: dict[ThinkingLevel, str] = {
     "off": "No reasoning",
     "minimal": "Very brief reasoning (~1k tokens)",
     "low": "Light reasoning (~2k tokens)",
     "medium": "Moderate reasoning (~8k tokens)",
     "high": "Deep reasoning (~16k tokens)",
-    "xhigh": "Extra-high reasoning (budget clamps to high, ~16k)",
-    "max": "Maximum reasoning (budget clamps to high, ~16k)",
-}
-
-# Adaptive models send an `output_config.effort` keyword instead of a budget,
-# so token counts would be misleading here; minimal and low both map to "low".
-ADAPTIVE_LEVEL_DESCRIPTIONS: dict[ThinkingLevel, str] = {
-    "off": "No reasoning",
-    "minimal": 'Adaptive effort "low" (same as low)',
-    "low": 'Adaptive effort "low"',
-    "medium": 'Adaptive effort "medium"',
-    "high": 'Adaptive effort "high"',
-    "xhigh": "Adaptive effort from model map",
-    "max": "Adaptive effort from model map",
+    "xhigh": "Extra-high reasoning (~32k tokens)",
+    "max": "Maximum reasoning",
 }
 
 
@@ -51,21 +38,19 @@ class ThinkingSelectorComponent(Container):
         availableLevels: list[ThinkingLevel],
         onSelect: Callable[[ThinkingLevel], None],
         onCancel: Callable[[], None],
-        descriptions: dict[ThinkingLevel, str] | None = None,
         onSelectAsDefault: Callable[[ThinkingLevel], None] | None = None,
         defaultThinkingLevel: ThinkingLevel | None = None,
     ) -> None:
         super().__init__()
 
-        descriptions = descriptions or LEVEL_DESCRIPTIONS
         items = [
             SelectItem(
                 value=level,
                 label=level,
                 description=(
-                    f"{descriptions[level]} · default"
+                    f"{LEVEL_DESCRIPTIONS[level]} · default"
                     if level == defaultThinkingLevel
-                    else descriptions[level]
+                    else LEVEL_DESCRIPTIONS[level]
                 ),
             )
             for level in availableLevels

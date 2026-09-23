@@ -11,7 +11,7 @@ class ResearchMethodHandoffTests(unittest.TestCase):
     def setUp(self):
         self.task = {"local_id": "r2/a", "title": "Current task", "assignee": "10032",
                      "question": "Which explanation holds?", "rationale": "Compare the premises.",
-                     "deliverable": "Write findings.md."}
+                     "deliverable": "findings.md"}
 
     def test_method_fields_reach_the_card_without_changing_inputs(self):
         task = {**self.task, "method": "  Compare explanations.\nTest a counterexample.  ",

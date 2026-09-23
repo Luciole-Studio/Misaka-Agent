@@ -83,10 +83,9 @@ class Controller:
                 if cancelled:
                     await self.close()
                     raise cancelled
-                from misaka.config.product import CFG
                 from misaka.core.web.scope import current_scope
                 handshake = await self.exchange({'id': 'hello', 'op': 'hello', 'profile_dir': current_scope().profile_dir,
-                                                  'cwd': self.cwd, 'web_config': CFG['web_config']}, timeout=15)
+                                                  'cwd': self.cwd}, timeout=15)
                 self.capabilities = set(handshake.get('capabilities', []))
             if name not in self.capabilities:
                 raise ValueError('The bound browser controller does not advertise ' + name)
@@ -157,8 +156,6 @@ async def serve():
                     if request.get('op') != 'hello':
                         raise ValueError('Controller requires a binding handshake')
                     binding = request['binding']
-                    from misaka.config.product import CFG
-                    CFG['web_config'] = request['web_config']
                     scope = WebScope(request.get('profile_dir'))
                     owner = WebRuntime(scope)
                     manager = BrowserManager(request['cwd'])

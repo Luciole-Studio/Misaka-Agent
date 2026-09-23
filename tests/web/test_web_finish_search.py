@@ -6,11 +6,10 @@ import time
 
 import httpx
 import pytest
+from webconf import write_web
 
-from misaka.config.product import CFG
 from misaka.core.auth_storage import AuthStorage
-from misaka.core.tools._web import bounded
-from misaka.core.web import config, registry, x_search
+from misaka.core.web import bounded, config, registry, x_search
 from misaka.core.web.backends import ddgs, xai
 from misaka.core.web.backends.perplexity import (
     PerplexityWebSearchProvider,
@@ -22,7 +21,6 @@ from misaka.core.web.scope import WebScope
 
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
-    monkeypatch.setitem(CFG, 'web_config', str(tmp_path / 'shared.json'))
     for key in config.provider_variables() | {'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
                                              'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
                                              'SSL_CERT_FILE', 'SSL_CERT_DIR'}:
@@ -162,13 +160,12 @@ async def test_logout_wins_before_rejected_refresh(monkeypatch, isolated):
 
 
 async def test_profile_proxy_rotation_uses_snapshot_and_retires_pool(monkeypatch, isolated):
-    path = isolated / 'web.json'
-    path.write_text(json.dumps({'env': {'HTTPS_PROXY': 'http://proxy-a.test:8123', 'PERPLEXITY_API_KEY': 'KEY'}}))
+    write_web({'env': {'HTTPS_PROXY': 'http://proxy-a.test:8123', 'PERPLEXITY_API_KEY': 'KEY'}}, profile=isolated)
     _requests, clients = net(monkeypatch, lambda r: httpx.Response(200, json={'results': []}))
     runtime = WebRuntime()
     try:
         await runtime.run(PerplexityWebSearchProvider().search, 'a')
-        path.write_text(json.dumps({'env': {'HTTPS_PROXY': 'http://proxy-b.test:8123', 'PERPLEXITY_API_KEY': 'KEY'}}))
+        write_web({'env': {'HTTPS_PROXY': 'http://proxy-b.test:8123', 'PERPLEXITY_API_KEY': 'KEY'}}, profile=isolated)
         await runtime.run(PerplexityWebSearchProvider().search, 'b')
         assert clients[0][1].is_closed and not clients[1][1].is_closed
     finally:
@@ -179,8 +176,8 @@ async def test_profile_proxy_rotation_uses_snapshot_and_retires_pool(monkeypatch
 
 def test_ddgs_receives_profile_network_but_no_model_tokens(monkeypatch, isolated):
     monkeypatch.setenv('ANTHROPIC_API_KEY', 'private-model-key')
-    (isolated / 'web.json').write_text(json.dumps({'env': {'https_proxy': 'http://user:pass@proxy.test:8080',
-                                                         'SSL_CERT_FILE': '/fixture/ca.pem', 'DDGS_PROXY': 'socks5h://proxy.test:1234'}}))
+    write_web({'env': {'https_proxy': 'http://user:pass@proxy.test:8080',
+                       'SSL_CERT_FILE': '/fixture/ca.pem', 'DDGS_PROXY': 'socks5h://proxy.test:1234'}}, profile=isolated)
     env = ddgs._worker_env()
     assert 'ANTHROPIC_API_KEY' not in env
     assert env['HTTPS_PROXY'] == 'http://user:pass@proxy.test:8080'

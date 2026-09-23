@@ -1,8 +1,14 @@
 """Workspace navigation across the project brief, task cards, research runs, and indexed artifacts."""
+import json
 import os
+import re
 
 from misaka.core.documents import index as corpus
 from misaka.core.platform import cards
+
+_ARTIFACT_SCAN_CHARS = 256 * 1024
+_ARTIFACT_MAX_HEADINGS = 120
+_ARTIFACT_MAX_TITLE_CHARS = 200
 
 
 def _doc_node(m, workspace=None):
@@ -22,21 +28,41 @@ def _doc_node(m, workspace=None):
 
 
 def _artifact_node(row):
-    """Build a cheap heading tree for a Markdown artifact."""
-    children = []
+    """Keep every artifact navigable; only preview bounded, textual Markdown headings."""
+    node = {"node_id": f"artifact:{row['id']}", "title": row["title"],
+            "summary": row["kind"], "path": row["path"], "nodes": []}
+    if os.path.splitext(row["path"])[1].lower() not in {".md", ".markdown"}:
+        return node
     try:
-        with open(row["path"], encoding="utf-8", errors="replace") as f:
-            for lineno, line in enumerate(f, 1):
-                stripped = line.lstrip()
-                if stripped.startswith("#"):
-                    title = stripped.lstrip("#").strip()
-                    if title:
-                        children.append({"node_id": f"artifact:{row['id']}#L{lineno}",
-                                         "title": title, "summary": f"Line {lineno}"})
-    except OSError:
-        pass
-    return {"node_id": f"artifact:{row['id']}", "title": row["title"],
-            "summary": row["kind"], "path": row["path"], "nodes": children[:120]}
+        metadata = json.loads(dict(row).get("metadata_json") or "{}")
+    except (TypeError, ValueError):
+        return node
+    if not isinstance(metadata, dict) or metadata.get("binary"):
+        return node
+    try:
+        with open(row["path"], encoding="utf-8") as f:
+            text = f.read(_ARTIFACT_SCAN_CHARS + 1)
+    except (OSError, UnicodeError):
+        return node
+    if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", text):
+        return node  # A misleading .md suffix must not turn binary controls into prose.
+    truncated = len(text) > _ARTIFACT_SCAN_CHARS
+    if truncated:
+        text = text[:_ARTIFACT_SCAN_CHARS].rpartition("\n")[0]  # Only complete physical lines.
+    for lineno, line in enumerate(text.split("\n"), 1):
+        stripped = line.lstrip()
+        if stripped.startswith("#") and (title := stripped.lstrip("#").strip()):
+            if len(node["nodes"]) == _ARTIFACT_MAX_HEADINGS:
+                truncated = True
+                break
+            preview = (title if len(title) <= _ARTIFACT_MAX_TITLE_CHARS
+                       else title[:_ARTIFACT_MAX_TITLE_CHARS - 1] + "…")
+            truncated |= preview != title
+            node["nodes"].append({"node_id": f"artifact:{row['id']}#L{lineno}",
+                                  "title": preview, "summary": f"Line {lineno}"})
+    if truncated:
+        node["summary"] += " · heading preview truncated; read the file for more"
+    return node
 
 
 def _project_file(workspace):
@@ -86,7 +112,7 @@ def _conversation_nodes(bcon, run, research_store):
         if not path:
             row = bcon.execute("SELECT session_file FROM task_runs WHERE task_id=? AND session_file IS NOT NULL "
                                "ORDER BY started_at DESC LIMIT 1", (task["id"],)).fetchone()
-            path = row[0] if row else None
+            path = row["session_file"] if row else None
         node = _session_node(f"session:card:{task['id']}",
                              f"[{task['id']}] {task['title']} · Sister {task['assignee']} ({task['research_kind']})", path)
         if node:

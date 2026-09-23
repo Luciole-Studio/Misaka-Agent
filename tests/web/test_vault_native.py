@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from misaka.config import home
 from misaka.core.web import WebPart, config
 from misaka.core.web.browser import settings
 from misaka.core.web.browser.vault import host, tools
@@ -51,7 +52,7 @@ class Page:
 
 
 def login(part, password='fixture-vault-password'):
-    store = VaultStore(Path(part.scope.profile_dir) / 'vault')
+    store = VaultStore(home.path('vault', part.scope.profile_dir))
     return store.add_item('login', 'Fixture', {'identifier': 'fixture-user',
         'identifier_type': 'username', 'password': password,
         'otp_secret': 'JBSWY3DPEHPK3PXP'}, origin='https://example.test')

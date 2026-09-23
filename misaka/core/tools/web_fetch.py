@@ -33,8 +33,9 @@ from misaka.core.documents.prompt import WEB_EVIDENCE_GUIDELINE
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.tools._common import run_with_abort
-from misaka.core.tools._web.academic import route_academic
-from misaka.core.tools._web.bounded import (
+from misaka.core.web import debug
+from misaka.core.web.academic import route_academic
+from misaka.core.web.bounded import (
     DEFAULT_MAX_FETCH_BYTES,
     MAX_REDIRECT_HOPS,
     UnsafeUrlError,
@@ -43,21 +44,20 @@ from misaka.core.tools._web.bounded import (
     open_checked_stream,
     read_bounded,
 )
+from misaka.core.web.config import redact_secrets, redact_values, web_config
 
 # The evidence writer is shared with web_extract; parsing and saving run off-loop.
-from misaka.core.tools._web.evidence import citable_url
-from misaka.core.tools._web.evidence import save_page as _save_page
-from misaka.core.tools._web.negative_cache import (
+from misaka.core.web.evidence import citable_url
+from misaka.core.web.evidence import save_page as _save_page
+from misaka.core.web.negative_cache import (
     record_failure,
     record_success,
     skip_reason,
 )
-from misaka.core.tools._web.screening import screen_url
-from misaka.core.tools._web.single_flight import single_flight
-from misaka.core.web import debug
-from misaka.core.web.config import redact_secrets, redact_values, web_config
 from misaka.core.web.network import policy_key
 from misaka.core.web.scope import cache_namespace
+from misaka.core.web.screening import screen_url
+from misaka.core.web.single_flight import single_flight
 from misaka.core.web.timeouts import operation_seconds
 from misaka.utils.async_lifecycle import run_in_thread
 from misaka.utils.values import signal_aborted

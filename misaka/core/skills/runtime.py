@@ -6,7 +6,6 @@ Remote adapters consume mount/file manifests through the existing shell operatio
 interface; no Hermes terminal manager or background uploader is started.
 """
 import contextvars
-import json
 import os
 import shutil
 import stat
@@ -14,8 +13,6 @@ import tempfile
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-
-from filelock import FileLock
 
 from misaka.utils import atomic
 
@@ -74,7 +71,7 @@ def credential_read_error(path):
     if error := validate_within_dir(path, runtime.profile):
         return error
     rel = Path(path).relative_to(runtime.profile)
-    denied = {".env", "auth.json", "credentials.json", ".skill-secrets.json", "mcp-tokens", "tokens", "sessions"}
+    denied = {".env", "auth.json", "credentials.json", "mcp-tokens", "tokens", "sessions"}
     if any(p in denied for p in rel.parts) or any(p.startswith(".") for p in rel.parts):
         return "Master stores are not Skill credential files."
     return None
@@ -96,16 +93,15 @@ class SkillRuntime:
         return type(self)(self.profile, backend=self.backend, remote=self.remote, capture=self.capture, platform=self.platform)
 
     def load_env(self):
+        """The environment plus the role's own ``.env`` (hermes: the profile's .env), the
+        way ``config.env.values`` layers it; ``MISAKA_*`` names in the file are ignored."""
+        from misaka.config import env as env_file
+
         data = dict(self.env)
         if self.profile is not None:
-            path = self.profile / ".skill-secrets.json"
-            if path.exists():
-                if validate_within_dir(path, self.profile):
-                    raise ValueError("Invalid role secret store path.")
-                raw = json.loads(path.read_text())
-                if not isinstance(raw, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in raw.items()):
-                    raise ValueError("Invalid role secret store; existing bytes preserved.")
-                data.update(raw)
+            for name, value in env_file.read(self.profile).items():
+                if not name.startswith(env_file.RESERVED_PREFIX):
+                    data[name] = value
         return data
 
     def store_secret(self, name, value):
@@ -114,19 +110,14 @@ class SkillRuntime:
             raise ValueError("This is not a Skill service-secret name.")
         if not isinstance(value, str) or not value or "\x00" in value:
             raise ValueError("Secret must be nonempty text without NUL.")
+        from misaka.config import env as env_file
+
         from .write import _safe_parents
         _safe_parents(self.profile, create=True)
-        with self._lock, FileLock(str(self.profile / ".skill-secrets.lock")):
+        with self._lock:
             if self.closed:
                 raise RuntimeError("Skill runtime is closed.")
-            path = self.profile / ".skill-secrets.json"
-            if validate_within_dir(path, self.profile):
-                raise ValueError("Invalid role secret store path.")
-            # Validate the whole existing store before a read-modify-write.
-            self.load_env()
-            data = json.loads(path.read_text()) if path.exists() else {}
-            data[name] = value
-            atomic.write_text(path, json.dumps(data, ensure_ascii=False), mode=0o600)
+            env_file.write({name: value}, self.profile)     # the role's .env, locked and owner-only
 
     def register_env(self, names):
         from .vendor.readiness import _ENV_VAR_NAME_RE

@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from misaka.core.tools._web.single_flight import _inflight, single_flight
+from misaka.core.web.single_flight import _inflight, single_flight
 
 
 @pytest.fixture(autouse=True)

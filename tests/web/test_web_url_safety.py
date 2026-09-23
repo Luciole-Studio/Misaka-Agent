@@ -7,13 +7,13 @@ The address *reachability* half lives next door in tests/test_web_bounded.py.
 from __future__ import annotations
 
 import ipaddress
-import json
 
 import pytest
+from webconf import write_web
 
-from misaka.config.product import CFG
-from misaka.core.tools._web import url_safety
-from misaka.core.tools._web.url_safety import (
+from misaka.config import home
+from misaka.core.web import url_safety
+from misaka.core.web.url_safety import (
     CGNAT_NETWORK,
     allow_private_urls,
     always_blocked_address,
@@ -305,9 +305,9 @@ def test_addresses_outside_the_floor(value):
     assert always_blocked_address(value) is False
 
 
-def test_the_floor_ignores_the_operator_opt_out(monkeypatch):
+def test_the_floor_ignores_the_operator_opt_out(web_json):
     """``allow_private_urls`` can widen what is reachable; it can never open this."""
-    monkeypatch.setenv("MISAKA_ALLOW_PRIVATE_URLS", "true")
+    write_web({"allow_private_urls": True})
     assert allow_private_urls() is True
     assert always_blocked_address("169.254.169.254") is True
     assert always_blocked_host("metadata.google.internal") is True
@@ -341,12 +341,9 @@ def test_cgnat_is_the_range_ipaddress_will_not_flag():
 
 
 @pytest.fixture
-def web_json(monkeypatch, tmp_path):
-    """A throwaway ``web.json`` and no ``MISAKA_ALLOW_PRIVATE_URLS`` in the environment."""
-    monkeypatch.delenv("MISAKA_ALLOW_PRIVATE_URLS", raising=False)
-    path = tmp_path / "web.json"
-    monkeypatch.setitem(CFG, "web_config", str(path))
-    return path
+def web_json():
+    """A throwaway web configuration, empty."""
+    return home.path("settings")           # the "web" section lives here now
 
 
 def test_nothing_set_means_blocked(web_json):
@@ -355,22 +352,18 @@ def test_nothing_set_means_blocked(web_json):
 
 
 @pytest.mark.parametrize("value", ["true", "1", "yes", "on", "TRUE", " True "])
-def test_env_opts_out(web_json, monkeypatch, value):
-    monkeypatch.setenv("MISAKA_ALLOW_PRIVATE_URLS", value)
+def test_the_setting_opts_out_in_every_spelling(web_json, value):
+    write_web({"allow_private_urls": value})
     assert allow_private_urls() is True
 
 
-@pytest.mark.parametrize("value", ["false", "0", "no", "off"])
-def test_env_false_wins_over_a_config_that_says_true(web_json, monkeypatch, value):
-    """An explicit false must not fall through to the file.
-
-    Someone exporting this for one process is answering the question, not declining to
-    answer it -- and the process they are protecting is usually the one running untrusted
-    output.
-    """
-    web_json.write_text(json.dumps({"allow_private_urls": True}), encoding="utf-8")
-    monkeypatch.setenv("MISAKA_ALLOW_PRIVATE_URLS", value)
+def test_the_environment_no_longer_has_a_say(web_json, monkeypatch):
+    """A MISAKA_* name in the environment is a hand-off, never a switch (2026-09-22)."""
+    monkeypatch.setenv("MISAKA_ALLOW_PRIVATE_URLS", "true")
     assert allow_private_urls() is False
+    write_web({"allow_private_urls": True})
+    monkeypatch.setenv("MISAKA_ALLOW_PRIVATE_URLS", "false")
+    assert allow_private_urls() is True
 
 
 @pytest.mark.parametrize("stored, expected", [
@@ -384,18 +377,18 @@ def test_env_false_wins_over_a_config_that_says_true(web_json, monkeypatch, valu
     ("", False),
 ])
 def test_config_value(web_json, stored, expected):
-    web_json.write_text(json.dumps({"allow_private_urls": stored}), encoding="utf-8")
+    write_web({"allow_private_urls": stored})
     assert allow_private_urls() is expected
 
 
 def test_unset_key_in_an_existing_config_means_blocked(web_json):
-    web_json.write_text(json.dumps({"backend": "tavily"}), encoding="utf-8")
+    write_web({"backend": "tavily"})
     assert allow_private_urls() is False
 
 
 @pytest.mark.parametrize("body", ["{not json", "[]", '"a string"'])
 def test_a_malformed_config_never_raises_and_stays_closed(web_json, body):
-    web_json.write_text(body, encoding="utf-8")
+    web_json.write_text(body, encoding="utf-8")   # the settings file itself, malformed
     assert allow_private_urls() is False
 
 
@@ -406,7 +399,7 @@ def test_the_toggle_is_not_cached(web_json):
     read of ``web.json`` here is uncached and a security toggle that alone needs a
     restart -- with nothing on screen saying so -- is unsupportable.
     """
-    web_json.write_text(json.dumps({"allow_private_urls": True}), encoding="utf-8")
+    write_web({"allow_private_urls": True})
     assert allow_private_urls() is True
-    web_json.write_text(json.dumps({"allow_private_urls": False}), encoding="utf-8")
+    write_web({"allow_private_urls": False})
     assert allow_private_urls() is False

@@ -4,6 +4,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from misaka.config import profiles
@@ -211,8 +212,10 @@ COMPLETION_INSTRUCTIONS = """
 
 ---
 ## Completion
-- When the work is complete, end with a concise plain-text summary. The system records the result; do not write a
-  submission file.
+- When the work is complete, call `misaka_card_complete` with a concise summary, then end the turn. The system
+  submits the card when that turn ends; do not write a submission file.
+- A turn that ends without that call leaves the card running: that is how to answer a message from Last Order or
+  report progress. A card whose contract names a deliverable cannot be completed until that file exists there.
 - Put deliverables in the requested location. Successful `write`, `edit`, and `office` operations are recorded
   automatically.
 - On a research card, record final evidence-backed findings and concrete uncertainties with `misaka_card_note`.
@@ -221,6 +224,63 @@ COMPLETION_INSTRUCTIONS = """
 
 class IncompleteSubmission(ValueError):
     """The turn ended without what the card's kind requires; the model can supply it."""
+
+
+_DELIVERABLE_CLAUSE = re.compile(r"^##[ \t]+deliverable[ \t]*\r?$", re.MULTILINE | re.IGNORECASE)
+
+
+def _card_field(task, key):
+    """A card row (``sqlite3.Row``) or a plain dict: rows have no ``get``."""
+    try:
+        return task[key]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def contract_deliverable(task):
+    """The file the card's contract names under ``## deliverable``, or None for a card without one."""
+    from misaka.core.network.card_contract import split_deliverable
+
+    body = str(_card_field(task, "body") or "")
+    matches = list(_DELIVERABLE_CLAUSE.finditer(body))
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise ValueError("Invalid deliverable: the card has multiple deliverable sections.")
+    section = re.split(r"^##[ \t]+", body[matches[0].end():], maxsplit=1, flags=re.MULTILINE)[0]
+    return split_deliverable(section)[0]
+
+
+def missing_deliverable(task):
+    """The contract deliverable that is not yet a non-empty file under the card's output
+    directory, or None when the card has no contract deliverable or it is in place.
+
+    A turn that ends in plain text used to complete the card whatever it had produced
+    (2026-09-18, B27): every note Last Order sent a running Sister -- "continue", "not
+    approved, rework", a side errand -- ended a turn, and the turn ended the card, deliverable
+    or not, even when the Sister had just written "not submitting yet". The contract names
+    the file; until it exists the card is not done, whatever the turn said."""
+    try:
+        name = contract_deliverable(task)
+    except ValueError as error:
+        return str(error)  # malformed contracts block completion, including the idle-turn notice
+    if name is None:
+        return None
+    output_dir = _card_field(task, "output_dir")
+    if not output_dir:
+        return name
+    try:
+        root = Path(output_dir).resolve(strict=True)
+        workspace = _card_field(task, "workspace")
+        if workspace:
+            root.relative_to(Path(workspace).resolve(strict=True))
+        path = (root / name).resolve(strict=True)
+        path.relative_to(root)  # a symlink outside this card is not its deliverable
+        if path.is_file() and path.stat().st_size > 0:
+            return None
+    except (OSError, RuntimeError, ValueError):
+        pass
+    return name
 
 
 def card_handoffs(con, task):
@@ -264,7 +324,7 @@ def materials_on_hand(workspace):
     Returns "" when there is nothing to show."""
     if not workspace:
         return ""
-    from misaka.core.tools._web.evidence import read_provenance
+    from misaka.core.web.evidence import read_provenance
     root = os.path.join(workspace, _download_dir_name())
     if not os.path.isdir(root):
         return ""
@@ -311,52 +371,23 @@ def materials_on_hand(workspace):
     return "\n".join(lines)
 
 
-def colleague_lines(assignee, cfg=None):
-    """Who else is on the board, for the card's Colleagues section: Last Order and every other
-    Sister with her description. ``assignee`` herself is left out."""
-    from misaka.config import current_config, sisters
-    from misaka.core.network import roster as roster_mod
-    root = (cfg or {}).get("profiles_root") or current_config().get("profiles_root")
-    lines = ["- last-order — coordinates this board; `request_input=true` parks this card for her answer"]
-    for name in sorted(sisters()):
-        if name == assignee:
-            continue
-        try:
-            description = roster_mod.describe_line(name, root=root) or "no description"
-        except Exception:  # noqa: BLE001 - a broken profile must not keep a card from starting
-            description = "no description"
-        lines.append(f"- {name} — {description}")
-    return lines
-
-
-def card_extras(con, task, cfg=None, *, include_colleagues=True, include_materials=True):
+def card_extras(con, task, cfg=None, *, include_materials=True):
     """Research/material context shared by every card entry point.
 
-    Legacy callers may also request colleague lines; engine sessions use the single
-    system-prompt routing catalog instead of duplicating it in the task body. Restore
-    paths can skip materials they will not publish, avoiding unrelated filesystem reads.
+    Who else is on the board reaches a session through its system prompt's routing catalog,
+    never through the task body. Restore paths can skip materials they will not publish,
+    avoiding unrelated filesystem reads.
     """
-    extras = {"_research": None, "_colleagues": [], "_materials": ""}
+    extras = {"_research": None, "_materials": ""}
     with contextlib.suppress(Exception):   # a board without the research schema is an ordinary board
         if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_run_tasks'").fetchone():
             row = con.execute("SELECT run_id, branch_id, kind FROM research_run_tasks WHERE task_id=?",
                               (task["id"],)).fetchone()
             if row is not None:
                 extras["_research"] = dict(row)
-    if include_colleagues:
-        extras["_colleagues"] = colleague_lines(task["assignee"], cfg)
     if include_materials:
         extras["_materials"] = materials_on_hand(task["workspace"])
     return extras
-
-
-def research_addendum_flags(task):
-    """The research Sister's working rules, appended to her system prompt once per session when
-    the card belongs to a research run; nothing for an ordinary card."""
-    if not (isinstance(task, dict) and task.get("_research")):
-        return []
-    from misaka.core.research.planner import RESEARCH_SISTER_DISCIPLINE
-    return ["--append-system-prompt", RESEARCH_SISTER_DISCIPLINE]
 
 
 def card_prompt(task):
@@ -395,8 +426,8 @@ def card_prompt(task):
             "\n\n## Previous attempt\n"
             f"The previous attempt on this card failed: {failure}\n"
             f"Consecutive failures so far: {int(task.get('consecutive_failures') or 0)} of "
-            f"{task_store.FAILURE_LIMIT} allowed. If the work is already complete, verify it and "
-            "end this turn with the plain-text summary. A turn that ends without that summary "
+            f"{task_store.FAILURE_LIMIT} allowed. If the work is already complete, verify it, call "
+            "`misaka_card_complete`, and end this turn with the plain-text summary. A session that ends without that call "
             "counts as another failure regardless of what it did."
         )
     prompt = body + COMPLETION_INSTRUCTIONS
@@ -405,17 +436,6 @@ def card_prompt(task):
 
         prompt += _b.BEAST_SUFFIX
     return prompt
-
-
-def _load_profile(profile_dir):
-    """Return ``(SOUL.md path or None, config.json dict)`` for a profile directory."""
-    soul = os.path.join(profile_dir, "SOUL.md")
-    cfg_path = os.path.join(profile_dir, "config.json")
-    cfg = {}
-    if os.path.exists(cfg_path):
-        with open(cfg_path, encoding="utf-8") as f:
-            cfg = json.load(f)
-    return (soul if os.path.exists(soul) else None), cfg
 
 
 def _artifact(root, value):
@@ -514,19 +534,10 @@ def build_submission(con, task, summary):
             baseline = json.loads(baseline_row["payload"] or "{}").get("files")
         except (AttributeError, TypeError, ValueError):
             baseline = None
-        if isinstance(baseline, dict):
-            artifacts.extend(
-                path for path, revision in current.items()
-                if baseline.get(path) != revision
-            )
-        elif con.execute(
-            "SELECT 1 FROM task_runs WHERE task_id=? AND generation<? LIMIT 1",
-            (task["id"], task["generation"]),
-        ).fetchone():
+        if not isinstance(baseline, dict):
+            # Every generation freezes one before its first model turn (record_output_baseline).
             raise ValueError("output directory baseline is missing for this generation")
-        else:
-            # A first-generation legacy session started with an empty per-card directory.
-            artifacts.extend(current)
+        artifacts.extend(path for path, revision in current.items() if baseline.get(path) != revision)
 
     for event in con.execute(
         "SELECT payload FROM events WHERE task_id=? AND kind='artifact_written' "
@@ -579,108 +590,9 @@ def build_submission(con, task, summary):
     return submission
 
 
-def bare_session_setup(profile_dir, provider, default_model, *, cwd=None, tools=None, model=None,
-                       soul=True, session_dir=None, continue_session=False, thinking="low",
-                       extra_tools=(), session_file=None, sister_catalog=None, research_context=False):
-    """Restricted LO assembly; Research shares MISAKA.md independently of role SOUL.md."""
-    _soul_path, cfg = _load_profile(profile_dir)
-    model = os.environ.get("MISAKA_FORCE_MODEL") or model or cfg.get("model") or default_model
-    flags = ["--provider", provider, "--model", model, "--thinking", thinking]
-    if session_dir:
-        flags += ["--session-dir", os.path.abspath(session_dir)]
-        if session_file:
-            flags += ["--session", os.path.abspath(session_file)]
-        elif continue_session:
-            flags.append("--continue")
-    else:
-        flags.append("--no-session")
-    workdir = cwd or os.getcwd()
-    role = profiles.role_of(profile_dir)
-    from misaka.core.wiring import Assembly, SessionSpec
-
-    allowed = [*(tools or ()), *(tool.name for tool in extra_tools)]
-    assembly = Assembly(spec=SessionSpec(
-        profile_dir=profile_dir,
-        role=role,
-        workspace=workdir,
-        kind="bare",
-        sender=role.rsplit("/", 1)[-1],
-        tool_ceiling=None,
-        sister_catalog=tuple(sister_catalog) if sister_catalog is not None else None,
-        research_context=research_context,
-    ), extra_tools=tuple(extra_tools))
-    flags += ["-t", ",".join(dict.fromkeys(allowed))] if allowed else ["-nt"]
-    if research_context:
-        flags += ["--append-system-prompt", profiles.shared_soul()]
-    if soul:
-        from misaka.config import identity
-        for section in identity.prompt_sections(profile_dir, role):
-            flags += ["--append-system-prompt", section]
-    env = {"MISAKA_PROFILE_DIR": profile_dir,
-           "MISAKA_WHO": role,
-           "MISAKA_MCP_ROLE": role,
-           "MISAKA_WORKSPACE": workdir}
-    return flags, assembly, env
-
-
-def run_llm_json(profile_dir, prompt, provider, default_model,
-                 cwd=None, tools=None, timeout=600, model=None,
-                 usage_db=None, usage_task_id=None, usage_generation=None,
-                 usage_token_cap=None, on_event=None, raw=False,
-                 soul=True, session_dir=None, continue_session=False,
-                 thinking="low", extra_tools=(), session_file=None, sister_catalog=None, research_context=False):
-    """Run a bare session and extract its first JSON object, or return raw Markdown."""
-    from misaka.core.network import validate
-
-    workdir = cwd or os.getcwd()
-    flags, assembly, env = bare_session_setup(
-        profile_dir, provider, default_model, cwd=workdir, tools=tools, model=model,
-        soul=soul, session_dir=session_dir, continue_session=continue_session, thinking=thinking,
-        extra_tools=extra_tools, session_file=session_file, sister_catalog=sister_catalog, research_context=research_context)
-    if usage_db and usage_task_id and usage_generation is not None:
-        env.update({
-            "MISAKA_USAGE_DB": str(usage_db),
-            "MISAKA_USAGE_TASK_ID": str(usage_task_id),
-            "MISAKA_USAGE_GENERATION": str(usage_generation),
-            "MISAKA_USAGE_TOKEN_CAP": str(int(usage_token_cap or 0)),
-        })
-    reservation = _reserve_usage(
-        usage_db, usage_task_id, usage_generation, usage_token_cap, timeout
-    )
-    if not reservation.get("allowed"):
-        return None, "", "shared token budget exhausted"
-    if reservation.get("tokens"):
-        env["MISAKA_TURN_TOKEN_LIMIT"] = str(reservation["tokens"])
-    recorder = _UsageRecorder(
-        on_event, usage_db, usage_task_id, usage_generation, reservation
-    )
-    r = None
-    try:
-        r = run_coro(_run_with_reservation(run_session(
-            flags, prompt, workdir, timeout=timeout, assembly=assembly,
-            env=env, on_event=recorder), usage_db, reservation))
-    finally:
-        recorder.settle(
-            r.get("budget_usage")
-            if isinstance(r, dict)
-            else int(reservation.get("tokens") or 0)
-        )
-    if r["timed_out"]:
-        return None, r["text"] or "", "timeout"
-    if r["error"]:
-        return None, r["text"] or "", r["error"]
-    if raw:
-        return None, r["text"] or "", None
-    obj = validate.extract_json(r["text"] or "")
-    if obj is None:
-        return None, r["text"] or "", "no json in output"
-    return obj, r["text"] or "", None
-
-
 def card_session_setup(task, workspace, profile_dir, provider, default_model):
     """Build the shared session configuration for headless and interactive cards."""
-    _soul, cfg = _load_profile(profile_dir)
-    model = os.environ.get("MISAKA_FORCE_MODEL") or task["model"] or cfg.get("model") or default_model
+    model = profiles.explicit_model_override(profile_dir, task["model"])
     os.makedirs(workspace, exist_ok=True)
     state_dir = task_store.task_state_dir(task["id"])
     os.makedirs(state_dir, exist_ok=True)
@@ -692,8 +604,10 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
     # card's sandbox (SessionSpec.skill_roots) and nothing else.
     from misaka.config import sessions as session_roots
 
-    flags = ["--provider", provider, "--model", model, "--thinking", "low",
-             "--session-dir", session_roots.card_session_dir(task)]
+    # New cards follow saved thinking defaults; resumed cards keep their native setting.
+    flags = ["--session-dir", session_roots.card_session_dir(task)]
+    if model:
+        flags += ["--model", model]
     ro_root = os.path.join(state_dir, ".skills-ro")
     sender = role.rsplit("/", 1)[-1]
     from misaka.core.wiring import SessionSpec, assemble
@@ -723,12 +637,11 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
         task_id=task.get("id"),
         tool_ceiling=MANAGEMENT_TOOLS if beast and delegates else None,
         skill_roots=skill_roots,
+        research_context=bool(task.get("_research")),
     ))
-    flags += ["--append-system-prompt", profiles.shared_soul()]
     from misaka.config import identity
-    for section in identity.prompt_sections(profile_dir, role):
+    for section in identity.base_prompt_sources(profile_dir, role):
         flags += ["--append-system-prompt", section]
-    flags += research_addendum_flags(task)
     return flags, assembly, prompt, ro_root, role
 
 
@@ -751,7 +664,10 @@ def run_card(
     flags, assembly, prompt, ro_root, role = card_session_setup(
         task, workspace, profile_dir, provider, default_model
     )
-    env = {"MISAKA_PROFILE_DIR": profile_dir,
+    from misaka.config import env as env_file
+
+    env = {**env_file.role_overlay(profile_dir),      # the Sister's own .env, then the card's hand-off names
+           "MISAKA_PROFILE_DIR": profile_dir,
            "MISAKA_WHO": role,
            "MISAKA_MCP_ROLE": role,
            "MISAKA_WORKSPACE": workspace,

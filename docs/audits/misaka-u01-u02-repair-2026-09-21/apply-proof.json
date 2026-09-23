@@ -1,0 +1,36 @@
+{
+  "at": "2026-09-21T13:26:31.572331+09:00",
+  "applied_files": {
+    "misaka/core/session_manager.py": {
+      "before": "06aac700ea035e6025d92231569143aba08e7b465a0f91622e542413abef03a2",
+      "after": "4bea3592ae378a14bad40831484940c2e77a4bc273b0e9d402ce8d014b934f26"
+    },
+    "misaka/core/subagent/runtime.py": {
+      "before": "be44014a5782b71a356f7d95287d309ddc804451074362bf672232da8cd946d9",
+      "after": "b14f2153bcc488e9ed50eecb582762fa79594c89f97d8625d505c698d6736b32"
+    },
+    "misaka/core/network/sister_runtime.py": {
+      "before": "1227adf3845d8ecf030ce238c44200813fa4fd09f257ce8d1bc87b81ac6d4223",
+      "after": "19acf1b8e51fc651e174de7bfa9dff5492f0391db5d63faaf5320c5fdcbe00f9"
+    },
+    "misaka/core/research/bundle.py": {
+      "before": "b0f2ebba8a0e7cf00ead658f589131a1a6918c704effded0a8e06fb0e6c98153",
+      "after": "2971490329ff44ae1ca4d5155ab0723a14c3503f8a482359dd38b87ca94fac90"
+    },
+    "misaka/workspace.py": {
+      "before": "918b44eab5cfe0ef361f19b5c9be5c9be14321e4f711cb0b7924c7151464d84a",
+      "after": "ce2c20cc13f8b81eefb3999ca055bc018676c77b49501cb3ed21251496dd399a"
+    },
+    "tests/test_session_jsonl_record_boundaries.py": {
+      "before": null,
+      "after": "7050215771e2e9f00e018306184e9a2d37fd8321bdd9355207c46e8699315526"
+    },
+    "tests/test_workspace_artifact_outline.py": {
+      "before": null,
+      "after": "222978d83d9422ebbeb668ab63c4e9eacfe33c101baa909c4b7b74060638abf2"
+    }
+  },
+  "all_targets_match_tested_copy": true,
+  "unrelated_snapshot_files_changed": [],
+  "index_unchanged": true
+}

@@ -11,8 +11,8 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from webconf import write_web
 
-from misaka.config.product import CFG
 from misaka.core.web import WebPart, config, keyless, x_search
 from misaka.core.web.browser import BrowserManager, settings
 from misaka.core.web.browser.session import BrowserSession
@@ -23,7 +23,6 @@ from misaka.core.wiring import SessionSpec
 
 @pytest.fixture
 def scope(tmp_path, monkeypatch):
-    monkeypatch.setitem(CFG, 'web_config', str(tmp_path / 'shared.json'))
     for key in config.provider_variables() | {'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
             'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy', 'SSL_CERT_FILE', 'SSL_CERT_DIR'}:
         monkeypatch.delenv(key, raising=False)
@@ -33,7 +32,7 @@ def scope(tmp_path, monkeypatch):
 
 async def test_keyless_firecrawl_uses_profile_network_without_changing_hermes_client_lifetime(scope, monkeypatch):
     route = 'http://proxy.example.test:8080'
-    (scope / 'web.json').write_text(json.dumps({'env': {'HTTPS_PROXY': route}}))
+    write_web({'env': {'HTTPS_PROXY': route}}, profile=scope)
     constructed = []
     real_client = httpx.AsyncClient
     def client(**kwargs):
@@ -58,7 +57,7 @@ async def test_other_api_routes_use_profile_network_without_changing_hermes_clie
     from misaka.core.web.backends.searxng import SearXNGWebSearchProvider
     from misaka.core.web.backends.tavily import TavilyWebSearchProvider
     route = 'http://proxy.example.test:8080'
-    (scope / 'web.json').write_text(json.dumps({'env': {'HTTPS_PROXY': route}}))
+    write_web({'env': {'HTTPS_PROXY': route}}, profile=scope)
     monkeypatch.setenv('BRAVE_SEARCH_API_KEY', 'fixture-brave-key-12345')
     monkeypatch.setenv('SEARXNG_URL', 'https://searx.example.test')
     monkeypatch.setenv('TAVILY_API_KEY', 'fixture-tavily-key-12345')
@@ -86,7 +85,7 @@ async def test_download_keeps_valid_unicode_dataset(scope, monkeypatch, encoding
     import functools
 
     from misaka.core.tools import download_file
-    from misaka.core.tools._web import bounded
+    from misaka.core.web import bounded
     content = 'country\tvalue\n日本\t12\n中国\t13\n'.encode(encoding)
     transport = httpx.MockTransport(lambda request: httpx.Response(200, content=content,
         headers={'content-type': 'text/tab-separated-values; charset=' + encoding}, request=request))
@@ -101,7 +100,7 @@ async def test_download_keeps_valid_unicode_dataset(scope, monkeypatch, encoding
 async def test_xai_web_refresh_uses_profile_network(scope, monkeypatch):
     from misaka.core.web.backends.xai import _resolve_credentials
     route = 'http://proxy.example.test:8080'
-    (scope / 'web.json').write_text(json.dumps({'env': {'HTTPS_PROXY': route}}))
+    write_web({'env': {'HTTPS_PROXY': route}}, profile=scope)
     (scope / 'auth.json').write_text(json.dumps({'xai': {'type': 'oauth', 'access': 'fixture-old-access', 'refresh': 'fixture-old-refresh', 'expires': 0}}))
     constructed = []
     real_client = httpx.AsyncClient
@@ -162,7 +161,7 @@ async def test_web_fetch_preserves_document_base_links(scope, monkeypatch, base_
     import functools
 
     from misaka.core.tools import web_fetch
-    from misaka.core.tools._web import bounded
+    from misaka.core.web import bounded
     html = ('<html><head>' + (f'<base href="{base_href}">' if base_href else '')
             + '</head><body><p>Read the <a href="paper.pdf">full paper</a>.</p></body></html>')
     transport = httpx.MockTransport(lambda request: httpx.Response(200, text=html,
@@ -187,7 +186,7 @@ async def web_session(scope, monkeypatch):
     from misaka.core.wiring import SessionSpec
     monkeypatch.setattr(settings, 'executable', lambda _: sys.executable)
     monkeypatch.setenv('XAI_API_KEY', 'fixture-xai-key-only-for-tool-registration')
-    (scope / 'web.json').write_text(json.dumps({'browser': {'backend': 'agent-browser'}}))
+    write_web({'browser': {'backend': 'agent-browser'}}, profile=scope)
     owner = WebPart(SessionSpec(str(scope), 'sister', str(scope), 'bare'))
     auth = AuthStorage.inMemory()
     loader = DefaultResourceLoader({'cwd': str(scope), 'agentDir': str(scope), 'noExtensions': True,
@@ -255,7 +254,7 @@ async def test_duplicate_id_is_renamed_without_dropping_calls(web_session, monke
 
 async def test_disabling_browser_blocks_existing_runtime(scope, monkeypatch):
     cfg = {'command': sys.executable, 'backend': 'agent-browser', 'cloud_provider': 'local'}
-    (scope / 'web.json').write_text(json.dumps({'browser': cfg}))
+    write_web({'browser': cfg}, profile=scope)
     part = WebPart(SessionSpec(str(scope), 'sister', str(scope), 'bare'))
     tool = next(t for t in part.tools if t.name == 'browser_snapshot')
     calls = []
@@ -273,7 +272,7 @@ async def test_disabling_browser_blocks_existing_runtime(scope, monkeypatch):
 
 
 async def test_browser_snapshot_failed_save_does_not_invent_read_pointer(scope, monkeypatch):
-    (scope / 'web.json').write_text(json.dumps({'browser': {'command': sys.executable, 'backend': 'agent-browser'}}))
+    write_web({'browser': {'command': sys.executable, 'backend': 'agent-browser'}}, profile=scope)
     part = WebPart(SessionSpec(str(scope), 'sister', str(scope), 'bare'))
     tool = next(t for t in part.tools if t.name == 'browser_snapshot')
     async def perform(self, name, args, call_id=''):
@@ -452,7 +451,7 @@ async def test_oauth_profile_route_is_context_local_and_not_left_on_other_logins
     from misaka.ai.utils.oauth.xai import _http_post_form, with_http_options
     from misaka.core.web.network import api_network_options
     route = 'http://proxy.example.test:8080'
-    (scope / 'web.json').write_text(json.dumps({'env': {'HTTPS_PROXY': route}}))
+    write_web({'env': {'HTTPS_PROXY': route}}, profile=scope)
     seen = []
     real_client = httpx.AsyncClient
     def client(**kwargs):
@@ -472,7 +471,7 @@ async def test_json_web_error_contract_reaches_host_without_judging_prose(web_se
     from misaka.ai.types import ToolCall
     from misaka.core.web import extract, tool
     payload = ({'success': False, 'error': 'fixture structured failure'} if failure else
-               {'success': True, 'data': {'web': []}, 'results': [], 'quote': '"error" and "failed" are words in a document'})
+               {'success': True, 'data': {'web': []}, 'results': [{'content': 'A page quoting "error" and "failed".', 'error': None}], 'quote': '"error" and "failed" are words in a document'})
     async def respond(*args, **kwargs):
         return json.dumps(payload)
     monkeypatch.setattr(tool if name == 'web_search' else extract, name + '_tool', respond)
@@ -502,8 +501,8 @@ async def test_api_and_forced_oauth_refresh_honor_profile_ca_and_no_proxy(scope,
     from misaka.core.auth_storage import AuthStorage
     from misaka.core.web.backends.brave_free import BraveFreeWebSearchProvider
     from misaka.core.web.backends.xai import OAuthAccount, _force_refresh_oauth_token
-    (scope / 'web.json').write_text(json.dumps({'env': {'HTTPS_PROXY': 'http://proxy.example.test:8080',
-        'NO_PROXY': 'auth.x.ai,api.search.brave.com', 'SSL_CERT_FILE': certifi.where()}}))
+    write_web({'env': {'HTTPS_PROXY': 'http://proxy.example.test:8080',
+        'NO_PROXY': 'auth.x.ai,api.search.brave.com', 'SSL_CERT_FILE': certifi.where()}}, profile=scope)
     monkeypatch.setenv('BRAVE_SEARCH_API_KEY', 'fixture-brave-secret')
     seen = []
     real_client = httpx.AsyncClient

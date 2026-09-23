@@ -19,6 +19,8 @@ def main(argv: list[str] | None = None) -> int:
     if len(args) != 2 or args[0] != "--run-card":
         sys.exit("usage: python -m misaka.cli.research_node --run-card TASK_ID")
     bootstrap.install()
+    from misaka.config import env as env_file
+    env_file.load()
     return node.main_card(args[1])
 
 

@@ -17,22 +17,18 @@ def prompt_home(tmp_path, monkeypatch):
         folder = tmp_path / leaf
         folder.mkdir(exist_ok=True)
         monkeypatch.setenv(key, str(folder))
-    monkeypatch.setenv("MISAKA_MCP_CACHE", str(tmp_path / "mcp-cache.json"))
     monkeypatch.setenv("LCM_DB_PATH", str(tmp_path / "lcm.db"))
     monkeypatch.chdir(tmp_path)
 
     from misaka.cli import bootstrap
-    from misaka.config import CFG
+    from misaka.config import home
     from misaka.core import wiring
     from misaka.core.network.wiring import network
     from misaka.core.research.wiring import research
 
     monkeypatch.setattr(wiring, "bundled", wiring.bundled)
     bootstrap.install()
-    for key, leaf in (("roles_root", "profiles"), ("profiles_root", "profiles/sisters"),
-                      ("db", "board.db"), ("messages_db", "messages.db"), ("lcm_db", "lcm.db"),
-                      ("tasks_root", "tasks"), ("web_config", "web.json"), ("web_cache", "cache/web")):
-        monkeypatch.setitem(CFG, key, str(tmp_path / leaf))
+    monkeypatch.setenv(home.ENV_HOME, str(tmp_path))
     for module in (network, research):
         monkeypatch.setattr(module, "_CON", None)
     for role in ("last_order", "sisters/10032", "sisters/10033"):
@@ -63,13 +59,12 @@ def prompt_home(tmp_path, monkeypatch):
 @asynccontextmanager
 async def assembled(home, role, kind, *, research=False, custom=False, prompt_flags=None):
     from misaka.cli.args import parse_args
-    from misaka.config import identity, profiles
+    from misaka.config import identity
     from misaka.core.extensions.runner import emit_session_shutdown_event
-    from misaka.core.network import worker
     from misaka.core.resource_loader import DefaultResourceLoader
     from misaka.core.sdk import create_agent_session
     from misaka.core.session_manager import SessionManager
-    from misaka.core.wiring import SessionSpec, assemble
+    from misaka.core.wiring import SessionSpec, assemble, role_session_setup
 
     workspace = home / "workspace"
     workspace.mkdir(exist_ok=True)
@@ -83,21 +78,21 @@ async def assembled(home, role, kind, *, research=False, custom=False, prompt_fl
                        task_id="fixture-card" if kind == "card" else None,
                        research_context=research)
     assembly = assemble(spec)
-    if kind == "bare":
-        bare_flags, assembly, _env = worker.bare_session_setup(
-            str(profile), "fixture", "fixture-model", cwd=str(workspace),
-            soul=False, research_context=research)
-        sections = parse_args(bare_flags).appendSystemPrompt or []
+    if kind in {"foreground", "headless"}:
+        role_flags, assembly, _env = role_session_setup(
+            str(profile), str(workspace), research_context=research,
+            receive_messages=kind == "foreground")
+        sections = parse_args(role_flags).appendSystemPrompt or []
     else:
-        sections = [profiles.shared_soul(), *identity.prompt_sections(str(profile), role)]
-    if research and kind == "card":
-        sections += worker.research_addendum_flags({"_research": {"run_id": "fixture-run"}})[1::2]
+        sections = identity.base_prompt_sources(str(profile), role)
     options = {"cwd": str(workspace), "agentDir": str(agent_dir)}
     prompt_options = {"appendSystemPrompt": sections}
     if prompt_flags is not None:
         parsed = parse_args(prompt_flags)
         prompt_options = {"systemPrompt": parsed.systemPrompt,
                           "appendSystemPrompt": parsed.appendSystemPrompt or []}
+    if prompt_flags is not None:
+        options.update(tools=parsed.tools, noTools=parsed.noTools)
     loader = DefaultResourceLoader({**options, "extensionFactories": assembly.extension_factories,
                                     **prompt_options})
     await loader.reload()
@@ -129,7 +124,7 @@ async def final_prompt(session):
 @pytest.mark.parametrize(("role", "kind", "research"), [
     ("last_order", "foreground", False),
     ("last_order", "foreground", True),
-    ("last_order", "bare", True),
+    ("last_order", "headless", True),
     ("sisters/10032", "foreground", False),
     ("sisters/10032", "card", False),
     ("sisters/10032", "card", True),
@@ -138,6 +133,7 @@ async def test_real_role_assembly(prompt_home, role, kind, research):
     from misaka.config import identity
     from misaka.core.network.wiring.collaboration import SISTER_TOOLS
     from misaka.core.research.planner import RESEARCH_SISTER_DISCIPLINE
+    from misaka.core.research.prompting import RESEARCH_LO_ORCHESTRATION
 
     async with assembled(prompt_home, role, kind, research=research) as session:
         text = await final_prompt(session)
@@ -157,6 +153,7 @@ async def test_real_role_assembly(prompt_home, role, kind, research):
             assert "misaka_my_card" in active
             assert "- `misaka_my_card`:" in text
             assert "misaka_card_state" not in text
+        assert text.count(RESEARCH_LO_ORCHESTRATION) == int(research and role == "last_order")
         assert (RESEARCH_SISTER_DISCIPLINE in text) == (research and kind == "card")
         assert await final_prompt(session) == text  # repeated full folds do not accumulate blocks
 
@@ -199,7 +196,7 @@ async def test_custom_system_and_live_tool_selection(prompt_home, role):
 async def test_bare_research_with_custom_system_keeps_duties_without_false_tools(prompt_home):
     from misaka.config import identity
 
-    async with assembled(prompt_home, "last_order", "bare", research=True, custom=True) as session:
+    async with assembled(prompt_home, "last_order", "headless", research=True, custom=True) as session:
         session.setActiveToolsByName(["read"])
         text = await final_prompt(session)
         assert text.startswith("CUSTOM SYSTEM: keep this exact opening.\n")
@@ -209,55 +206,36 @@ async def test_bare_research_with_custom_system_keeps_duties_without_false_tools
         assert "## Sister capability profiles" in text
 
 
-@pytest.mark.parametrize("soul", [False, True])
-@pytest.mark.parametrize("resumed", [False, True])
+@pytest.mark.parametrize("research", [False, True])
 @pytest.mark.parametrize("custom", [False, True])
-async def test_research_bare_loads_shared_file_independently_of_role_persona(prompt_home, soul, resumed, custom):
+async def test_role_entry_keeps_shared_base_and_explicit_tool_ceiling(prompt_home, research, custom):
     from misaka.cli.args import parse_args
-    from misaka.config import identity
-    from misaka.core.network import worker
+    from misaka.config import home, identity
+    from misaka.core.wiring import role_session_setup
 
-    shared = prompt_home / "profiles" / "MISAKA.md"
-    content = "# Shared fixture\n\n请用中文。Keep the user's shared research conventions.\n"
+    shared = home.path("shared_soul")
+    content = "# Shared fixture\n\n请用中文。Keep the user's shared conventions.\n"
     shared.write_text(content, encoding="utf-8")
-    before = shared.read_bytes()
     profile = prompt_home / "profiles" / "last_order"
-    options = {"session_dir": str(prompt_home / "sessions"), "continue_session": True,
-               "session_file": str(prompt_home / "sessions" / "existing.jsonl")} if resumed else {}
-    flags, assembly, _env = worker.bare_session_setup(
-        str(profile), "fixture", "fixture-model", cwd=str(prompt_home / "workspace"),
-        tools=["read"], soul=soul, research_context=True, **options)
-    parsed = parse_args(flags)
-    assert assembly.spec.kind == "bare" and assembly.spec.research_context
-    assert (parsed.appendSystemPrompt or []).count(str(shared)) == 1
-    assert parsed.tools == ["read"]
-    assert ("--session" in flags) == resumed
-    assert ("--no-session" in flags) != resumed
-    async with assembled(prompt_home, "last_order", "bare", research=True,
+    flags, assembly, _env = role_session_setup(
+        str(profile), str(prompt_home / "workspace"), research_context=research)
+    assert assembly.spec.kind == "foreground"
+    assert (parse_args(flags).appendSystemPrompt or []).count(str(shared)) == 1
+    assert parse_args(flags).tools is None and not parse_args(flags).noTools
+    flags += ["--tools", "read"]
+    async with assembled(prompt_home, "last_order", "headless", research=research,
                          custom=custom, prompt_flags=flags) as session:
-        session.setActiveToolsByName(parsed.tools)
         text = await final_prompt(session)
         assert text.count(content.strip()) == 1
         assert text.count(identity.COMMON_CHARTER) == text.count(identity.COORDINATOR_ROLE) == 1
-        assert ("Fixture voice for last_order." in text) == soul
+        assert "Fixture voice for last_order." in text
         assert set(session.getActiveToolNames()) == {"read"}
+        session.setActiveToolsByName(["read", "bash", "misaka_card"])
+        assert set(session.getActiveToolNames()) == {"read"}  # Research never lifts CLI permission ceilings
         assert text.count("## Sister capability profiles") == 1
         assert "## Sub-agents" not in text and "## Allies" not in text
         assert await final_prompt(session) == text
-    assert shared.read_bytes() == before
-
-
-@pytest.mark.parametrize("soul", [False, True])
-def test_nonresearch_bare_keeps_its_existing_shared_file_policy(prompt_home, soul):
-    from misaka.cli.args import parse_args
-    from misaka.core.network import worker
-
-    shared = prompt_home / "profiles" / "MISAKA.md"
-    flags, _assembly, _env = worker.bare_session_setup(
-        str(prompt_home / "profiles" / "last_order"), "fixture", "fixture-model",
-        cwd=str(prompt_home / "workspace"), soul=soul, research_context=False)
-    assert str(shared) not in (parse_args(flags).appendSystemPrompt or [])
-    assert not shared.exists()
+    assert shared.read_text() == content
 
 
 async def test_durable_sister_real_child_flags_retain_persona_and_current_tool_guidance(prompt_home):
@@ -326,13 +304,23 @@ async def test_research_scope_keeps_enabled_user_questions(prompt_home, tools):
         assert "AskUserQuestion" not in planner.session_tools(SimpleNamespace(session=session), allowed)
 
 
-async def test_research_questions_do_not_enable_headless_or_child_prompts(prompt_home, monkeypatch):
+async def test_role_questions_are_available_without_enabling_child_dialogs(prompt_home, monkeypatch):
     from misaka.core import ask_user
     from misaka.core.wiring import SessionSpec, ToolCollector
 
-    for role, kind in (("last_order", "bare"), ("sisters/10032", "card")):
-        async with assembled(prompt_home, role, kind, research=True) as session:
-            assert "AskUserQuestion" not in session.getActiveToolNames()
+    async with assembled(prompt_home, "last_order", "headless", research=True) as session:
+        assert "AskUserQuestion" in session.getActiveToolNames()
+        definition = session.getToolDefinition("AskUserQuestion")
+        result = await definition.execute("fixture", {"questions": [{
+            "question": "Which scope?", "header": "Scope", "options": [
+                {"label": "Narrow", "description": "One topic"},
+                {"label": "Wide", "description": "Two topics"}]}]}, None, None, None)
+        assert result["details"]["action"] == "unanswered"
+        assert result["details"]["answers"] == {}
+        assert "Which scope?" in result["content"][0]["text"]
+        assert "do not assume approval" in result["content"][0]["text"]
+    async with assembled(prompt_home, "sisters/10032", "card", research=True) as session:
+        assert "AskUserQuestion" not in session.getActiveToolNames()
     monkeypatch.setenv("MISAKA_NET_PANE", "fixture")
     spec = SessionSpec(str(prompt_home / "profiles/sisters/10032"), "sisters/10032",
                        str(prompt_home / "workspace"), "card", research_context=True)
@@ -341,3 +329,228 @@ async def test_research_questions_do_not_enable_headless_or_child_prompts(prompt
     assert [tool.name for tool in collector.tools] == ["AskUserQuestion"]
     monkeypatch.setenv("MISAKA_SUBAGENT_ID", "fixture-child")
     assert ask_user.activate(spec) is None
+
+
+@pytest.mark.parametrize("research", [False, True])
+@pytest.mark.parametrize("custom", [False, True])
+async def test_lo_entrypoints_share_actual_default_tools_and_complete_prompt(prompt_home, research, custom):
+    from contextlib import ExitStack
+    from types import SimpleNamespace
+
+    from misaka.core.research import planner
+    from misaka.core.research.prompting import RESEARCH_LO_ORCHESTRATION
+
+    texts, tools = [], []
+    for kind in ("foreground", "headless"):
+        async with assembled(prompt_home, "last_order", kind, research=research, custom=custom) as session:
+            # Do not normalize both sessions to a hand-picked test list. Start from
+            # the real default registry, then apply the production Research delta.
+            with ExitStack() as scope:
+                initial = session.getActiveToolNames()
+                assert {"AskUserQuestion", "misaka_ally_start", "SendMessage"} <= set(initial)
+                assert ("misaka_card" in initial) == (not research)
+                if research:
+                    scope.enter_context(session.toolScope(list(planner.session_tools(SimpleNamespace(session=session)))))
+                    assert "misaka_card" not in session.getActiveToolNames()
+                    assert "AskUserQuestion" in session.getActiveToolNames()
+                tools.append(session.getActiveToolNames())
+                texts.append(await final_prompt(session))
+                assert texts[-1].count(RESEARCH_LO_ORCHESTRATION) == int(research)
+                assert RESEARCH_LO_ORCHESTRATION.isascii()
+            assert session.getActiveToolNames() == initial
+    assert tools[0] == tools[1]
+    assert texts[0] == texts[1]
+
+
+@pytest.mark.parametrize("role,kind", [("last_order", "foreground"), ("sisters/10032", "card")])
+async def test_research_overlay_is_reversible_without_losing_base(prompt_home, role, kind):
+    from misaka.core.network.wiring.capabilities import SisterCapabilitiesPart
+    from misaka.core.research.planner import RESEARCH_SISTER_DISCIPLINE
+    from misaka.core.research.prompting import RESEARCH_LO_ORCHESTRATION
+
+    async with assembled(prompt_home, role, kind) as session:
+        session.setActiveToolsByName(["read"])
+        base = await final_prompt(session)
+        publisher = next(p for p in session.moments.parts if isinstance(p, SisterCapabilitiesPart))
+        for _ in range(2):
+            with publisher.snapshot():
+                research = await final_prompt(session)
+                assert await final_prompt(session) == research
+                assert "Fixture voice for " + role in research
+                assert research != base
+                assert research.count(RESEARCH_LO_ORCHESTRATION) == int(role == "last_order")
+                if kind == "card":
+                    assert research.count(RESEARCH_SISTER_DISCIPLINE) == 1
+            assert await final_prompt(session) == base
+
+
+def test_lo_runtime_adapters_use_one_role_entry():
+    import ast
+    import inspect
+    import textwrap
+
+    from misaka.cli import chat
+    from misaka.core.research import node, window
+
+    for adapter in (chat.launch, node.run_interactive, window.node_session.__wrapped__):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(adapter)))
+        calls = [n.func.id for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+        assert calls.count("role_session_setup") == 1
+        assert not any(isinstance(n, ast.Constant) and n.value == "--thinking" for n in ast.walk(tree))
+        assert not {"SessionSpec", "assemble", "Assembly", "build_system_prompt"}.intersection(calls)
+
+
+async def test_research_role_keeps_tools_without_stealing_root_notifications(prompt_home):
+    from unittest.mock import AsyncMock
+
+    from misaka.core.network.wiring.network import NetworkPart
+    from misaka.core.research.wiring.node import NodePart
+    from misaka.core.research.wiring.research import ResearchPart
+
+    async with assembled(prompt_home, "last_order", "headless", research=True) as session:
+        parts = session.moments.parts
+        assert not any(isinstance(p, (NodePart, ResearchPart)) for p in parts)
+        network = next(p for p in parts if isinstance(p, NetworkPart))
+        assert "misaka_card" not in session.getActiveToolNames()
+        assert "misaka_board" in session.getActiveToolNames()
+        network._resume_briefing = AsyncMock()
+        network._settle_orphans = AsyncMock()
+        network._collect_pending = AsyncMock()
+        await network.session_start({}, None)
+        await network.before_agent_start({}, None)
+        network._resume_briefing.assert_not_called()
+        network._settle_orphans.assert_not_called()
+        network._collect_pending.assert_not_called()
+        assert network._pending_watch is None
+
+
+async def test_research_inherits_order_and_preserves_selection_through_lifecycle(prompt_home, monkeypatch):
+    from misaka.core.platform.toolkit import tool_definition
+    from misaka.core.research import planner
+    from misaka.core.research.tool_policy import DRIVER_OWNED_TOOLS, research_tools
+    from misaka.core.research.window import WindowLO
+
+    async with assembled(prompt_home, "last_order", "foreground") as session:
+        normal = session.getActiveToolNames()
+        assert len(DRIVER_OWNED_TOOLS) == 9
+        assert DRIVER_OWNED_TOOLS <= set(normal)
+        # Configured permission ceiling is not permission to revive a user-disabled tool.
+        monkeypatch.setattr(session, "_allowedToolNames", set(normal) | {"fixture_late", "misaka_research_assign"})
+        selected = [name for name in normal if name not in {"write", "doc_verify"}]
+        session.setActiveToolsByName(selected)
+        owner = WindowLO(session, lambda: None, describe=dict)
+        expected = list(research_tools(selected))
+        assert session.getActiveToolNames() == expected
+        assert list(planner.session_tools(owner)) == expected
+        assert {"misaka_sister_stop", "misaka_sister_message", "skill_manage",
+                "misaka_board", "misaka_ally_start", "SendMessage"} <= set(expected)
+        for name in DRIVER_OWNED_TOOLS:
+            result = await session.agent.beforeToolCall({"toolCall": {"name": name}, "args": {}})
+            assert result["block"]
+        assert not await session.agent.beforeToolCall({"toolCall": {"name": "misaka_sister_message"}, "args": {}})
+        late = tool_definition(name="fixture_late", label="Late", description="Fixture", parameters={}, execute=None)
+        phase = tool_definition(name="misaka_research_assign", label="Plan", description="Fixture", parameters={}, execute=None)
+        try:
+            with session.toolScope([*expected, phase.name]):
+                session.registerCustomTools([phase])
+                assert session.getActiveToolNames() == [*expected, phase.name]
+                session.registerCustomTools([late])
+                session.refreshTools()
+                assert session.getActiveToolNames() == [*expected, phase.name]
+                assert "write" not in session.getActiveToolNames()
+                session.unregisterCustomTools([phase])
+            # Between phases / while waiting for approval: late ordinary tools join,
+            # phase commands leave, and the Research filter still applies.
+            expected.append(late.name)
+            assert session.getActiveToolNames() == expected
+            session.refreshTools()
+            assert session.getActiveToolNames() == expected
+            await session.reload()
+            assert session.getActiveToolNames() == expected
+            assert list(planner.session_tools(owner)) == expected
+        finally:
+            await owner.close()
+            await owner.close()  # restoration is idempotent
+        assert session.getActiveToolNames() == [*selected, late.name]
+        session.unregisterCustomTools([late])
+        assert session.getActiveToolNames() == selected
+
+
+@pytest.mark.parametrize("thinking", ["max", "medium", "off"])
+@pytest.mark.parametrize("outcome", ["answer", "error", "cancelled"])
+async def test_research_turn_rechecks_selection_and_keeps_mode_between_turns(prompt_home, monkeypatch, outcome, thinking):
+    import asyncio
+    from types import SimpleNamespace
+
+    from misaka.core.platform.toolkit import tool_definition
+    from misaka.core.research import window
+    from misaka.core.research.tool_policy import research_tools
+
+    monkeypatch.setattr(window.worker, "_reserve_usage", lambda *_: {"allowed": True, "token": None})
+    monkeypatch.setattr(window.worker, "_UsageRecorder", lambda *_: SimpleNamespace(settle=lambda *_: None))
+    async with assembled(prompt_home, "last_order", "foreground") as session:
+        # Research must preserve the current selection, independent of model clamping.
+        session.agent.state.thinkingLevel = thinking
+
+        def unexpected_override(*_args, **_kwargs):
+            raise AssertionError("Research changed the user-selected thinking level")
+
+        monkeypatch.setattr(session, "setThinkingLevel", unexpected_override)
+        normal = session.getActiveToolNames()
+        # In-memory SDK session, but a stable path for WindowLO's routing check.
+        session.sessionManager.sessionFile = str(prompt_home / "fixture.jsonl")
+        owner = window.WindowLO(session, lambda: None, describe=dict)
+        phase = tool_definition(name="misaka_research_assign", label="Plan", description="Fixture", parameters={}, execute=None)
+        stale = session.getActiveToolNames()
+        selected = [n for n in normal if n != "write"]
+        session.setActiveToolsByName(selected)
+        expected = list(research_tools(selected))
+        seen = []
+
+        async def send(*_args):
+            assert session.agent.state.thinkingLevel == thinking
+            # A user adjustment during a turn must also survive phase cleanup.
+            session.agent.state.thinkingLevel = "low"
+            seen.append(session.getActiveToolNames())
+            assert seen[-1] == [*expected, phase.name]
+            if outcome == "cancelled":
+                raise asyncio.CancelledError
+            if outcome == "error":
+                raise RuntimeError("fixture failure")
+
+        monkeypatch.setattr(session, "sendCustomMessage", send)
+        try:
+            call = owner._execute_turn("fixture", {"session_dir": str(prompt_home), "tools": stale,
+                                                   "extra_tools": [phase], "thinking": "high"})
+            if outcome == "answer":
+                await call
+            else:
+                with pytest.raises(asyncio.CancelledError if outcome == "cancelled" else RuntimeError):
+                    await call
+            assert session.agent.state.thinkingLevel == "low"
+            assert len(seen) == 1
+            assert session.getActiveToolNames() == expected
+            assert phase.name not in {t.name for t in session.getAllTools()}
+        finally:
+            await owner.close()
+        assert session.agent.state.thinkingLevel == "low"
+        assert session.getActiveToolNames() == selected
+
+
+def test_research_planning_and_report_do_not_set_thinking(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from misaka.core.research import planner, report
+
+    worker = SimpleNamespace(run_llm_json=Mock(return_value=(None, "Fixture answer", None)))
+    cfg = {"roles_root": str(tmp_path), "provider": "fixture", "default_model": "fixture"}
+    planner._call(worker, cfg, "Plan", cwd=str(tmp_path), session_dir=str(tmp_path))
+    monkeypatch.setattr(report, "_nodes", lambda *_: [])
+    monkeypatch.setattr(report, "_boundary", lambda *_: [])
+    run = {"id": "fixture", "workspace": str(tmp_path), "question": "Fixture?",
+           "root_session": str(tmp_path / "session.jsonl")}
+    assert report._write(None, run, cfg, worker, "Report", tools=()) == "Fixture answer"
+    assert worker.run_llm_json.call_count == 2
+    for call in worker.run_llm_json.call_args_list:
+        assert "thinking" not in call.kwargs

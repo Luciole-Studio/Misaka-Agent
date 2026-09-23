@@ -166,6 +166,9 @@ class TodoPart:
         self._summary = None
         self._summary_token = None
         self._nudged_generation = None    # the generation already given its one extra turn
+        self._held_generation = None      # the generation already told that a turn without misaka_card_complete leaves the card running
+        self._completion = None           # (generation, summary) recorded by misaka_card_complete; None = the card is not done
+        self._turn_clean = False          # the last agent_end was a plain stop (not error/aborted/length)
         self._touched = 0.0
         self._in_flight = 0               # tool calls started and not yet answered
         self._stamper = None              # the task that stamps progress while one is
@@ -282,7 +285,42 @@ class TodoPart:
             cards.append_log(row["workspace"], task_id, sender, p.text)
             return _text("Logged on the card.")
 
+        class CompleteParams(BaseModel):
+            summary: str = Field(description="What the card delivered, for Last Order: the deliverable, the main "
+                                             "findings, and what could not be settled.")
+
+        async def complete_exec(tool_call_id, raw, signal, on_update, ctx):
+            from misaka.core.network import worker
+            p = raw if isinstance(raw, CompleteParams) else CompleteParams(**(raw or {}))
+            row = self._owned_row()
+            if row is None:
+                raise ValueError("This card is not running under this session; nothing to complete.")
+            missing = worker.missing_deliverable(row)
+            if missing:
+                raise ValueError(f"Cannot complete: the contract deliverable `{missing}` is not under "
+                                 f"`{row['output_dir']}` yet. Write it, then call misaka_card_complete again.")
+            # The same checks the submission will make, so a red-team card without its issue
+            # list hears it now rather than at the end of the turn.
+            worker.build_submission(con(), row, p.summary.strip())
+            self._completion = (int(row["generation"]), p.summary.strip())
+            return _text("Completion recorded for this attempt. End the turn now with a short plain-text "
+                         "summary; the card is submitted when the turn ends.")
+
         self.tools = [
+            ToolDefinition(
+                name="misaka_card_complete", label="Complete the card",
+                description="Declare this card's work finished: the contract deliverable is in place and the summary "
+                            "is what Last Order will read. The card is submitted when the turn then ends. A turn that "
+                            "ends without this call leaves the card running: use that for replies to Last Order and "
+                            "progress reports.",
+                parameters=CompleteParams.model_json_schema(), execute=complete_exec,
+                promptSnippet="Declare the card finished and submit it",
+                promptGuidelines=[
+                    ("Call `misaka_card_complete` only when the contract deliverable exists in the card's output "
+                     "directory and the work is done; then end the turn with a short summary."),
+                    ("Answering a message from Last Order or reporting progress does not finish the card: just end "
+                     "the turn without the call and keep working on the next one."),
+                ]),
             ToolDefinition(
                 name="misaka_todo", label="Update task to-do list",
                 description="Add, assign, and update the task card's nested to-do items; progress appears in the global execution tree.",
@@ -358,6 +396,24 @@ class TodoPart:
             return None
         return row
 
+    def get_permission_settings(self):
+        """Delegate only this live card's output writes, never a workspace-wide grant."""
+        generation, claim_lock = self._ownership()
+        if generation is None or self.session is None:
+            return {}
+        row = self._bdb.get(self.con(), self.task_id)
+        if (row is None or row["status"] != "running" or int(row["generation"]) != generation
+                or row["claim_lock"] != claim_lock or not row["output_dir"]):
+            return {}
+        workspace = Path(self._bdb.workspace_for(row)).resolve()
+        output = Path(row["output_dir"]).resolve()
+        # A missing/invalid output directory must not fall back to the entire project.
+        # Board paths are canonical at creation; a replaced symlink must not move the grant.
+        if output != Path(row["output_dir"]) or output == workspace or not output.is_relative_to(workspace):
+            return {}
+        tools = {name.casefold() for name in self.session.getActiveToolNames()}
+        return {"writeDirectories": {name: [str(output)] for name in ("write", "edit") if name in tools}}
+
     async def agent_start(self, event=None, ctx=None):
         self._summary = None
         self._summary_token = None
@@ -368,14 +424,24 @@ class TodoPart:
             worker.record_output_baseline(self.con(), row)
 
     async def agent_end(self, event, ctx=None):
-        reason, summary = _assistant_end(event)
-        self._summary = summary if reason == "stop" and self._owned_row() is not None else None
+        reason, text = _assistant_end(event)
+        self._turn_clean = reason == "stop"
+        row = self._owned_row() if self._turn_clean else None
+        completion = self._completion if row is not None else None
+        if completion is not None and completion[0] != int(row["generation"]):
+            completion = self._completion = None      # recorded for an earlier attempt: void
+        # Only a turn that declared completion submits (2026-09-18, B27): before this, any
+        # turn ending in plain text completed the card, so every note Last Order sent a
+        # running Sister ended it -- even one whose reply said "not submitting yet".
+        self._summary = (completion[1] or text) if completion is not None else None
         self._summary_token = object() if self._summary is not None else None
 
     async def agent_settled(self, event=None, ctx=None):
         self._calls_settled()
         summary, token = self._summary, self._summary_token
         if summary is None or token is None:
+            if self._turn_clean and self._completion is None:
+                self._hold_if_running()
             return
         from misaka.core.subagent import extension as subagent
 
@@ -425,8 +491,8 @@ class TodoPart:
                 # What is missing is the model's to supply: one more turn, in this session,
                 # before the miss costs an attempt. The second miss fails like any other.
                 self._nudged_generation = int(row["generation"])
-                self._prompt(f"Submission incomplete: {error} Then end the turn again with "
-                             "the plain-text summary.")
+                self._prompt(f"Submission incomplete: {error} Then call misaka_card_complete again and "
+                             "end the turn with the plain-text summary.")
                 self._summary = self._summary_token = None
                 return
             if self._owned_row() is not None:
@@ -440,6 +506,23 @@ class TodoPart:
                 )
         if self._summary_token is token and (accepted or self._owned_row() is None):
             self._summary = self._summary_token = None
+            self._completion = None
+
+    def _hold_if_running(self):
+        """A clean turn end without ``misaka_card_complete``: the card stays running and the
+        claim stays held. Not a failure -- a reply to Last Order or a progress report is
+        supposed to end this way -- and said once per attempt so a long card is not nagged
+        on every turn."""
+        row = self._owned_row()
+        if row is None or self._held_generation == int(row["generation"]):
+            return
+        from misaka.core.network import worker
+        self._held_generation = int(row["generation"])
+        missing = worker.missing_deliverable(row)
+        detail = (f"its deliverable `{missing}` is not under `{row['output_dir']}` yet"
+                  if missing else "the turn ended without `misaka_card_complete`")
+        self._hold(f"The card is still running: {detail}. Call `misaka_card_complete` when the work "
+                   "is done; if this turn only answered a message, keep working.")
 
     def _record_artifact(self, value):
         row = self._owned_row()
@@ -466,6 +549,16 @@ class TodoPart:
                  "content": "[To-do reminder] " + text, "details": {}},
                 {"deliverAs": "followUp", "triggerTurn": False})
         except Exception:  # noqa: BLE001, S110 - reminders must never interrupt work
+            pass
+
+    def _hold(self, text):
+        """The turn ended but the card did not: shown now, read by the model on its next turn."""
+        try:
+            self.session.moments.send_message(
+                {"customType": "submission-held", "display": True,
+                 "content": "[Card still running] " + text, "details": {}},
+                {"deliverAs": "followUp", "triggerTurn": False})
+        except Exception:  # noqa: BLE001, S110 - the hold itself is the safe state; the notice is best-effort
             pass
 
     def _prompt(self, text):

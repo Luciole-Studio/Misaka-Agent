@@ -11,6 +11,8 @@ import os
 import tempfile
 from pathlib import Path
 
+from misaka.utils.values import read_field
+
 
 def for_session(session):
     return next((part.control for part in session.moments.parts
@@ -57,6 +59,12 @@ class SessionControl:
         self.on_input = None
         self.describe = dict
         self.check_active = lambda: None
+        self._stream_revision = 0
+        self._unsubscribe_stream = None
+
+    def _stream_event(self, event):
+        if read_field(event, "type") in {"message_start", "message_update", "message_end", "agent_end"}:
+            self._stream_revision += 1
 
     async def start(self):
         if self.server is not None:
@@ -68,9 +76,13 @@ class SessionControl:
         self.path = str(Path(self.directory.name) / "control.sock")
         self.server = await asyncio.start_unix_server(self._serve, self.path, limit=1024 * 1024)
         os.chmod(self.path, 0o600)
+        self._unsubscribe_stream = self.session.subscribe(self._stream_event)
 
     def close(self):
         self.accepting = False
+        if self._unsubscribe_stream is not None:
+            self._unsubscribe_stream()
+            self._unsubscribe_stream = None
         if self.server is not None:
             self.server.close()
             self.server = None
@@ -145,10 +157,18 @@ class SessionControl:
         if operation == "snapshot":
             manager = self.session.sessionManager
             cursor = [manager.getLeafId(), len(manager.getEntries())]
+            streaming = self.session.state.streamingMessage
+            if read_field(streaming, "role") != "assistant":
+                streaming = None
+            # Keep native in-flight content separate from committed history. A history
+            # change also resends the preview after the view rebuilds its branch.
+            stream_cursor = [self.session.sessionId, *cursor, self._stream_revision, streaming is not None]
             return {"id": self.session.sessionId, "cwd": manager.getCwd(),
                     "state": "idle" if self.session.isIdle else "working", "paused": self.paused,
                     "error": self.error, "workflow": self.describe(), "cursor": cursor,
                     "steering": self.session.getSteeringMessages(), "follow_up": self.session.getFollowUpMessages(),
+                    "stream_cursor": stream_cursor,
+                    "streaming": streaming if command.get("stream_cursor") != stream_cursor else None,
                     "entries": manager.buildContextEntries() if command.get("cursor") != cursor else None}
         if not self.accepting:
             raise ValueError("The original owner is finishing; no further input is accepted.")

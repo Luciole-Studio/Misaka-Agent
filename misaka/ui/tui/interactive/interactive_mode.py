@@ -30,11 +30,11 @@ from misaka.ai.types import ImageContent
 from misaka.config import (
     APP_NAME,
     APP_TITLE,
-    CONFIG_DIR_NAME,
     VERSION,
     get_agent_dir,
     get_auth_path,
     get_debug_log_path,
+    home,
 )
 from misaka.core.agent_session_runtime import (
     ContextCarryUnsupportedError,
@@ -65,7 +65,7 @@ from misaka.core.session_cwd import (
 from misaka.core.session_manager import (
     InvalidSessionFileError,
     SessionManager,
-    session_entry_to_context_messages,
+    session_entry_to_display_messages,
     sessions_root_of,
 )
 from misaka.core.settings_manager import DefaultProjectTrust
@@ -140,7 +140,6 @@ from misaka.ui.tui.interactive.components.settings_selector import (
     SettingsSelectorComponent,
 )
 from misaka.ui.tui.interactive.components.thinking_selector import (
-    ADAPTIVE_LEVEL_DESCRIPTIONS,
     ThinkingSelectorComponent,
 )
 from misaka.ui.tui.interactive.components.tool_execution import ToolExecutionComponent
@@ -1852,9 +1851,9 @@ class InteractiveMode(Conversation):
             return "."
         if not relative.startswith(f"..{os.sep}") and relative != "..":
             return relative
-        home = os.path.expanduser("~")
-        if path.startswith(f"{home}{os.sep}"):
-            return f"~/{os.path.relpath(path, home)}"
+        user_home = os.path.expanduser("~")
+        if path.startswith(f"{user_home}{os.sep}"):
+            return f"~/{os.path.relpath(path, user_home)}"
         return path
 
     def formatContextPath(self, path: str) -> str:
@@ -2470,7 +2469,7 @@ class InteractiveMode(Conversation):
         items = [
             item
             for entry in entries
-            for item in ([entry] if read_field(entry, "type") == "custom" else session_entry_to_context_messages(entry))
+            for item in ([entry] if read_field(entry, "type") == "custom" else session_entry_to_display_messages(entry))
         ]
         self._renderSessionItems(items, options)
 
@@ -2500,9 +2499,9 @@ class InteractiveMode(Conversation):
             Text(
                 interactive_theme.theme.fg(
                     "warning",
-                    f"This project is not trusted. Project {CONFIG_DIR_NAME}/settings.json, "
-                    f"{CONFIG_DIR_NAME}/prompts, {CONFIG_DIR_NAME}/themes, and Sisters project "
-                    f"agent definitions in {CONFIG_DIR_NAME}/agents are ignored. "
+                    f"This project is not trusted. Project {home.DIR_NAME}/settings.json, "
+                    f"{home.DIR_NAME}/prompts, {home.DIR_NAME}/themes, and Sisters project "
+                    f"agent definitions in {home.DIR_NAME}/{home.SUBAGENTS_DIR} are ignored. "
                     f"Use /trust to save a trust decision, then restart {APP_NAME}.",
                 ),
                 1,
@@ -3886,7 +3885,6 @@ class InteractiveMode(Conversation):
                         # the one interactive path pi persists (interactive-mode.ts:5665
                         # `{ persist: true }`).
                         await maybe_await(self.session.setModel(selected_model, persist=True))
-                        self._persist_role_default_model(selected_model)
                     except Exception as error:  # noqa: BLE001
                         selected_model = None
                         selection_error = (
@@ -5067,8 +5065,11 @@ class InteractiveMode(Conversation):
 
     def showModelSelector(self, initialSearchInput: str | None = None) -> None:
         def build_selector(done: Callable[[], None]) -> dict[str, Any]:
-            default_provider = _safe_call_str(self.settingsManager, "getDefaultProvider", "")
-            default_model = _safe_call_str(self.settingsManager, "getDefaultModel", "")
+            get_pair = _callable_attr(self.settingsManager, "getDefaultModelPair")
+            default_provider, default_model = get_pair() if get_pair else (
+                _safe_call_str(self.settingsManager, "getDefaultProvider", ""),
+                _safe_call_str(self.settingsManager, "getDefaultModel", ""),
+            )
             selector = ModelSelectorComponent(
                 self.ui,
                 getattr(self.session, "model", None),
@@ -5732,20 +5733,6 @@ class InteractiveMode(Conversation):
         self.updateEditorBorderColor()
         self.showStatus(f"Thinking level: {level}")
 
-    def _persist_role_default_model(self, model: Any) -> None:
-        """MISAKA fork: also pin the new default where this role's launcher reads it.
-
-        ``misaka chat`` starts Last Order on the model pinned in her profile, which
-        ``config.product`` reads ahead of settings.json. Without this the selector would
-        report "Default model: X" and the next launch would come back on the old one.
-        """
-        from misaka.config import profiles
-
-        profiles.persist_role_default_model(
-            os.environ.get("MISAKA_PROFILE_DIR") or "",
-            str(read_field(model, "id", "") or ""),
-        )
-
     async def _handle_model_select(
         self,
         model: Any,
@@ -5755,8 +5742,6 @@ class InteractiveMode(Conversation):
     ) -> None:
         try:
             await self.session.setModel(model, persist=persist)
-            if persist:
-                self._persist_role_default_model(model)
             await maybe_await(self.updateAvailableProviderCount())
             self.footer.invalidate()
             self.updateEditorBorderColor()
@@ -5801,10 +5786,6 @@ class InteractiveMode(Conversation):
         self.showStatus(f"Default thinking level: {level}" if persist else f"Thinking level: {level}")
 
     def showThinkingSelector(self, *, persist: bool = False) -> None:
-        # Adaptive models send an effort keyword rather than a budget, so use the
-        # description table without token counts.
-        compat = getattr(self.session.model, "compat", None)
-        adaptive = getattr(compat, "forceAdaptiveThinking", None) is True
         self.showSelector(
             lambda done: {
                 "component": ThinkingSelectorComponent(
@@ -5812,7 +5793,6 @@ class InteractiveMode(Conversation):
                     list(self.session.getAvailableThinkingLevels()),
                     lambda level: (done(), self._apply_thinking_level(level, persist=persist)),
                     lambda: (done(), self._request_render()),
-                    descriptions=ADAPTIVE_LEVEL_DESCRIPTIONS if adaptive else None,
                     onSelectAsDefault=lambda level: (done(), self._apply_thinking_level(level, persist=True)),
                     defaultThinkingLevel=(
                         _safe_call_str(

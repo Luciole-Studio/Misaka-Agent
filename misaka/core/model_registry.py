@@ -61,7 +61,7 @@ from misaka.ai.types import (
 )
 from misaka.ai.utils.headers import resolve_provider_headers
 from misaka.ai.utils.oauth.types import OAuthCredentials
-from misaka.config import get_agent_dir
+from misaka.config import get_agent_dir, home
 from misaka.core.models_store import FileModelsStore
 from misaka.core.provider_display_names import BUILT_IN_PROVIDER_DISPLAY_NAMES
 from misaka.core.resolve_config_value import (
@@ -91,6 +91,7 @@ class _ThinkingLevelMapSchema(_ConfigModel):
     medium: str | None = None
     high: str | None = None
     xhigh: str | None = None
+    max: str | None = None
 
 
 class _ModelCostTierSchema(_ConfigModel):
@@ -693,6 +694,25 @@ class _LegacyRuntimeProvider:
         return self._stream(model, context, options, simple=True)
 
 
+# What a provider says when the credential itself was refused, as opposed to a transient
+# failure: the account is fine, the token in hand is not. An OAuth access token rotated by
+# another client on the same account reads exactly like this (2026-09-18, B7: the Codex CLI
+# refreshed the shared refresh token, and four cards' first request came back
+# "Encountered invalidated oauth token for user" while misaka's copy was still inside its
+# own expiry window, so nothing refreshed and a person had to restart each card by hand).
+_REJECTED_CREDENTIAL_PATTERN = re.compile(
+    r"\b(401|unauthorized|invalidated\s+oauth|invalid[_ -]?api[_ -]?key|"
+    r"invalid[_ -]?(?:access[_ -]?)?token|token[_ -]?(?:is[_ -]?)?(?:expired|revoked|invalid)|"
+    r"expired[_ -]?token|authentication[_ -]?(?:failed|error))\b",
+    re.IGNORECASE,
+)
+
+
+def is_rejected_credential_error(text: str | None) -> bool:
+    """Whether a failed request says the credential was refused rather than the service."""
+    return bool(text) and bool(_REJECTED_CREDENTIAL_PATTERN.search(str(text)))
+
+
 class ModelRegistry:
     def __init__(
         self,
@@ -701,6 +721,10 @@ class ModelRegistry:
         modelsStore: Any | None = None,
     ):
         self._models: list[Model] = []
+        # The key each provider last handed to a request, and the keys already replaced after
+        # a provider refused them: one rejected key is recovered from once (B7).
+        self._lastResolvedApiKey: dict[str, str] = {}
+        self._recoveredCredentials: dict[str, set[str]] = {}
         self._providerRequestConfigs: dict[str, _ProviderRequestConfig] = {}
         self._modelRequestHeaders: dict[str, dict[str, str]] = {}
         self._registeredProviders: dict[str, ProviderConfigInput] = {}
@@ -729,9 +753,13 @@ class ModelRegistry:
         self.authStorage = authStorage
         self._modelsJsonPath = normalize_path(modelsJsonPath) if modelsJsonPath else None
         if modelsStore is None:
+            # pi keeps the store beside models.json. The home keeps it with its state; a
+            # models.json somewhere else still gets its store as a sibling.
             modelsStore = (
                 FileModelsStore(
-                    os.path.join(os.path.dirname(self._modelsJsonPath), "models-store.json")
+                    str(home.path("models_store"))
+                    if os.path.realpath(self._modelsJsonPath) == str(home.path("models"))
+                    else os.path.join(os.path.dirname(self._modelsJsonPath), "models-store.json")
                 )
                 if self._modelsJsonPath
                 else InMemoryModelsStore()
@@ -1597,6 +1625,7 @@ class ModelRegistry:
             model_env,
             providerEnv=provider_env,
         )
+        self._rememberResolvedKey(model.provider, resolution)
         return resolution.model_copy(
             update={
                 "auth": resolution.auth.model_copy(
@@ -1609,6 +1638,55 @@ class ModelRegistry:
                 )
             }
         )
+
+    def _rememberResolvedKey(self, provider: str, resolution: AuthResult) -> None:
+        """Remember the credential this provider was handed, in the shape a forced refresh
+        compares against: the flow's own access token, never the header it is sent in. A flow
+        that carries its credential in a header leaves ``apiKey`` unset, and recording the
+        header string there would leave the refresh unforced and the dead token in place."""
+        key = resolution.auth.apiKey
+        if not key and resolution.auth.headers:
+            from misaka.ai.utils.oauth import getOAuthProvider
+            stored = self.authStorage.get(provider)
+            flow = getOAuthProvider(provider)
+            if flow is not None and isinstance(stored, Mapping) and stored.get("type") == "oauth":
+                try:
+                    key = flow.getApiKey(OAuthCredentials.model_validate(
+                        {name: value for name, value in stored.items() if name != "type"}))
+                except Exception:  # noqa: BLE001 - an unreadable credential simply is not remembered
+                    key = None
+        if key:
+            self._lastResolvedApiKey[provider] = key
+
+    async def recoverRejectedCredential(self, provider: str) -> bool:
+        """Replace a stored OAuth token this provider has just refused. True if it changed.
+
+        The refresh runs under the credential store's own lock and only forces when the
+        stored token is still the one that was refused, so several sessions hitting the same
+        rejection refresh once between them and the rest read the replacement. A key is
+        recovered from once: a second refusal of the same token is the account's answer, not
+        a stale copy, and must reach the caller instead of looping (2026-09-18, B7)."""
+        rejected = self._lastResolvedApiKey.get(provider)
+        if not rejected:
+            return False
+        seen = self._recoveredCredentials.setdefault(provider, set())
+        if rejected in seen:
+            return False
+        stored = self.authStorage.get(provider)
+        if not isinstance(stored, Mapping) or stored.get("type") != "oauth":
+            return False          # a configured key is the user's to replace, not ours
+        try:
+            refreshed = await self.authStorage.refreshOAuthTokenWithLock(
+                provider, rejected_api_key=rejected
+            )
+        except Exception:  # noqa: BLE001 - a refresh that could not run is not the account's answer
+            return False
+        seen.add(rejected)      # the store answered; this token is spent whatever it said
+        key = (refreshed or {}).get("apiKey")
+        if not key or key == rejected:
+            return False
+        self._lastResolvedApiKey[provider] = key
+        return True
 
     def hasProvider(self, provider: str) -> bool:
         """Whether the runtime or static model catalog knows this provider."""

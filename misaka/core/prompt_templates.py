@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
 
+from misaka.config import home
 from misaka.core.source_info import SourceInfo, create_synthetic_source_info
 from misaka.utils.frontmatter import parse_frontmatter
 from misaka.utils.paths import resolve_path
@@ -142,7 +143,8 @@ def load_prompt_templates(options: LoadPromptTemplatesOptions) -> list[PromptTem
 
     templates: list[PromptTemplate] = []
     global_prompts_dir = os.path.join(resolved_agent_dir, "prompts")
-    project_prompts_dir = os.path.join(resolved_cwd, ".misaka", "prompts")
+    project_dir = home.project_dir(resolved_cwd)
+    project_prompts_dir = str(project_dir / "prompts") if project_dir is not None else None
 
     def is_under_path(target: str, root: str) -> bool:
         normalized_root = os.path.abspath(root)
@@ -158,7 +160,7 @@ def load_prompt_templates(options: LoadPromptTemplatesOptions) -> list[PromptTem
                 resolved_path,
                 {"source": "local", "scope": "user", "baseDir": global_prompts_dir},
             )
-        if is_under_path(resolved_path, project_prompts_dir):
+        if project_prompts_dir is not None and is_under_path(resolved_path, project_prompts_dir):
             return create_synthetic_source_info(
                 resolved_path,
                 {"source": "local", "scope": "project", "baseDir": project_prompts_dir},

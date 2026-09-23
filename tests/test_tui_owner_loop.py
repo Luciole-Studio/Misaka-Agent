@@ -105,9 +105,9 @@ async def test_forced_render_preempts_throttled_frame():
 
 @pytest.mark.asyncio
 async def test_overflow_preserves_primary_error_and_cleans_up_on_owner(tmp_path, monkeypatch):
-    from misaka import config
+    from misaka.config import home
 
-    monkeypatch.setattr(config, "get_agent_dir", lambda: str(tmp_path))
+    monkeypatch.setenv(home.ENV_HOME, str(tmp_path))
     loop = asyncio.get_running_loop()
     owner = threading.get_ident()
     crashed = asyncio.Event()
@@ -135,7 +135,7 @@ async def test_overflow_preserves_primary_error_and_cleans_up_on_owner(tmp_path,
         assert isinstance(error, RuntimeError) and "105 > 93" in str(error)
         assert "signal only works" not in str(error)
         assert terminal.stop_threads == [owner]
-        assert (tmp_path / "misaka-crash.log").exists()
+        assert home.path("crash_log").exists()
     finally:
         if not ui.stopped:
             ui.stop()

@@ -41,7 +41,7 @@ misaka research "日本の公共図書館運動は1920年から1950年にかけ�
 2. **あなたの承諾を待つ。** 計画はここで止まります。普通の会話として話し合い、彼女は
    あなたの意見を受けて書き直し、納得がいくまで続けます。承認コマンドも合言葉もありません。
    あなたが納得したと判断した時点で、彼女自身が開始を記録します。無人で走らせるときは
-   `MISAKA_RESEARCH_PLAN_APPROVAL=0` を指定します。コマンドラインの `misaka research` は
+   settings.json の `research.plan_approval` を false にします。コマンドラインの `misaka research` は
    ルートに会話がないため、全体が無人実行になります。
 3. **カードを配る。** 計画がタスクカードになり、Sisters が受け取って並列で作業します。
    同時実行数は上限に従います。各 Sister はまず自分のやり方を普通の散文で簡潔に述べ、
@@ -104,7 +104,7 @@ MISAKA が代わりに入れてくれないものが二つあります。
 - **git** は必須です。`misaka init` がプロジェクトのリポジトリを作り、採用された結果は
   そこにコミットされます。`xcode-select --install` または `apt install git` で先に入れてください。
 - **ripgrep** と **fd** は `grep` と `find` ツールの実体です。`brew install ripgrep fd`
-  か `apt install ripgrep fd-find` で入れるか、バイナリを `~/.misaka/agent/bin` に
+  か `apt install ripgrep fd-find` で入れるか、バイナリを `~/.misaka/cache/bin` に
   置いてください。
 
 ## 最初の一回
@@ -136,7 +136,7 @@ export ANTHROPIC_API_KEY=sk-ant-...   # 組み込みプロバイダはすべて�
 misaka auth check                     # プロバイダごとに、セッションと同じ解決経路で確認
 ```
 
-チャットの中では `/login` が OAuth トークンか API キーを `~/.misaka/agent/auth.json` に
+チャットの中では `/login` が OAuth トークンか API キーを `~/.misaka/credentials/auth.json` に
 パーミッション 0600 で保存します。`/model` はモデル選択画面を開き、そこで選ぶとすべての
 Sister の既定値として保存されます。`/model <名前>` は目の前のセッションだけを切り替えます。
 
@@ -185,7 +185,7 @@ Web 検索は設定ゼロで動きます。キー不要のベンダーリング�
 
 ```sh
 misaka web set backend tavily
-misaka web set env.TAVILY_API_KEY tvly-...   # ~/.misaka/web.json に 0600 で書かれます
+misaka web set env.TAVILY_API_KEY tvly-...   # ~/.misaka/.env に 0600 で書かれます
 ```
 
 エクスポートされた環境変数は常にファイルより優先されます。`misaka web setup` にはプロバイダと
@@ -214,34 +214,36 @@ LCM に設定された秘匿化・除外・保持・GC の各ポリシーはそ�
 
 ## 設定
 
-すべて `~/.misaka/` の下にあり、環境変数がファイルより優先されます。
+すべて 1 つのホーム `~/.misaka/`(`MISAKA_HOME` で移動できます)の下にあり、環境変数がファイルより優先されます。
 
 | 場所 | 内容 |
 |---|---|
-| `agent/settings.json` | エンジン設定。`defaultProvider` と `defaultModel` を含む |
-| `agent/auth.json` | 保存された認証情報、パーミッション 0600 |
-| `agent/models.json` | 独自プロバイダとモデル。OpenAI 互換ゲートウェイなど |
+| `settings.json` | すべての設定をセクションで保持：pi 自身のキー（`defaultProvider`、`defaultModel`…）、`allies`、`skills`、`moa`、`web` |
+| `credentials/auth.json` | 保存された認証情報、パーミッション 0600 |
+| `models.json` | 独自プロバイダとモデル。OpenAI 互換ゲートウェイなど |
+| `MISAKA.md`、`skills/`、`subagents/` | 全ロール共有のアイデンティティ、スキル、サブエージェント種別 |
 | `profiles/last_order/` | Last Order の人格・スキル・MCP 設定 |
 | `profiles/sisters/<id>/` | Sister ごとに一つのディレクトリ |
 
-よく使うものだけ挙げると:
+よく使う設定だけ挙げると:
 
-| 変数 | 既定値 | 意味 |
+| 設定 | 既定値 | 意味 |
 |---|---|---|
-| `MISAKA_PROVIDER` / `MISAKA_MODEL` | `anthropic` / `claude-sonnet-4-5` | Sisters とチャットのプロバイダとモデル |
-| `MISAKA_MAX_CONCURRENT_SISTERS` | 空きメモリ / 256 MiB、4〜12 | このホストで同時に走るカード数 |
-| `MISAKA_TOKEN_CAP` | `0`、無効 | ボードに表示され強制される token 予算 |
-| `MISAKA_RESEARCH_PLAN_APPROVAL` | `1`、有効 | 計画があなたの承諾を待つかどうか |
-| `MISAKA_THEME` | 端末に従う | `dark` または `light` |
+| `defaultProvider` / `defaultModel` | `anthropic` / `claude-sonnet-4-5` | 自分のモデルを固定していないロールが使うプロバイダとモデル |
+| `network.max_concurrent_sisters` | 空きメモリ / 256 MiB、4〜12 | このホストで同時に走るカード数 |
+| `research.token_cap` | `0`、無効 | ボードに表示され強制される token 予算 |
+| `research.plan_approval` | `true` | 計画があなたの承諾を待つかどうか |
+| `lcm.context_threshold` | `0.35` | コンテキストのどの割合で LCM が圧縮を始めるか |
 
-**七十ほどある変数の全体は [CONFIGURATION.md](CONFIGURATION.md) にあります。**
-制御する対象ごとにまとめてあります。数値として解釈できない値が来るとコマンドは停止し、
-変数名とその値を示します。これらの表にない `MISAKA_*` は、MISAKA が自分の子プロセス用に
-設定しているものです。
+**設定の全体は [CONFIGURATION.md](CONFIGURATION.md) にあります。** 制御する対象ごとに
+まとめてあります。解釈できない値が来るとコマンドは停止し、設定名とその値を示します。
+環境にある `MISAKA_*` は MISAKA が自分の子プロセス用に設定しているもので、設定ではありません。
+`MISAKA_HOME` だけがあなたのものです。ベンダーの鍵やプラグインのつまみのように「他のコードが
+環境から読む」ものは `~/.misaka/.env` に置きます。
 
 ## 診断
 
-チャット内の `/debug` は、描画された画面と会話全体を `~/.misaka/agent/misaka-debug.log`
+チャット内の `/debug` は、描画された画面と会話全体を `~/.misaka/logs/misaka-debug.log`
 にパーミッション 0600 で書き出し、そのパスを表示します。診断スイッチはこれだけで、
 デバッグ用の環境変数は存在しません。
 

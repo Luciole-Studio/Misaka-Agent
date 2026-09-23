@@ -7,7 +7,7 @@ import re
 import time
 from collections.abc import AsyncIterator, Iterable, Mapping
 from collections.abc import Set as AbstractSet
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 try:
     from anthropic import AsyncAnthropic, omit
@@ -72,6 +72,7 @@ from misaka.ai.utils.diagnostics import (
     append_assistant_message_diagnostic,
     create_assistant_message_diagnostic,
 )
+from misaka.ai.utils.estimate import clamp_max_tokens_to_context
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
 from misaka.ai.utils.json_parse import StreamingArgs, parse_json_with_repair
@@ -546,10 +547,9 @@ def build_params(
             ),
         ]
 
+    # Managed effort models always use adaptive thinking so prefix mismatches can
+    # be dropped instead of surfacing as persistent 400 responses.
     if managed_effort:
-        # Always adaptive: the binding control lets the server drop a thinking block whose
-        # prefix no longer matches, instead of failing the whole request with a 400 that
-        # would repeat on every retry.
         params["thinking"] = {
             "type": "adaptive",
             "display": _option(options, "thinkingDisplay", "summarized"),
@@ -559,19 +559,25 @@ def build_params(
     elif model.reasoning:
         thinking_enabled = _option(options, "thinkingEnabled")
         if thinking_enabled:
+            # Default to "summarized" so Opus 4.7 and Mythos Preview behave like
+            # older Claude 4 models (whose API default is also "summarized").
             display = _option(options, "thinkingDisplay", "summarized")
             if _force_adaptive_thinking(model) is True:
+                # Adaptive thinking: Claude decides when and how much to think.
                 params["thinking"] = {"type": "adaptive", "display": display}
                 effort = _option(options, "effort")
                 if effort:
                     params["output_config"] = {"effort": effort}
             else:
+                # Budget-based thinking for older models
                 params["thinking"] = {
                     "type": "enabled",
                     "budget_tokens": _option(options, "thinkingBudgetTokens") or 1024,
                     "display": display,
                 }
-        elif thinking_enabled is False:
+        elif thinking_enabled is False and (
+            model.thinkingLevelMap is None or model.thinkingLevelMap.get("off", False) is not None
+        ):
             params["thinking"] = {"type": "disabled"}
 
     metadata = _option(options, "metadata")
@@ -859,17 +865,34 @@ def convert_tools(
     return converted
 
 
-def map_stop_reason(reason: str) -> StopReason:
+class _StopReasonResult(TypedDict):
+    stopReason: StopReason
+    errorMessage: NotRequired[str]
+
+
+def map_stop_reason(reason: str, stop_details: Mapping[str, Any] | None = None) -> _StopReasonResult:
+    # Pi b03a367a4f, api/anthropic-messages.ts: mapStopReason.
     if reason == "end_turn":
-        return "stop"
+        return {"stopReason": "stop"}
     if reason == "max_tokens":
-        return "length"
+        return {"stopReason": "length"}
     if reason == "tool_use":
-        return "toolUse"
-    if reason in {"refusal", "sensitive"}:
-        return "error"
-    if reason in {"pause_turn", "stop_sequence"}:
-        return "stop"
+        return {"stopReason": "toolUse"}
+    if reason == "refusal":
+        explanation = stop_details.get("explanation") if isinstance(stop_details, Mapping) else None
+        return {
+            "stopReason": "error",
+            "errorMessage": explanation if isinstance(explanation, str) and explanation else
+                "The model refused to complete the request",
+        }
+    if reason == "pause_turn":  # Stop is good enough -> resubmit
+        return {"stopReason": "stop"}
+    if reason == "stop_sequence":
+        # We don't supply stop sequences, so this should never happen
+        return {"stopReason": "stop"}
+    if reason == "sensitive":  # Content flagged by safety filters (not yet in SDK types)
+        return {"stopReason": "error", "errorMessage": "Provider stopped with: sensitive"}
+    # Handle unknown stop reasons gracefully (API may add new values)
     raise RuntimeError(f"Unhandled stop reason: {reason}")
 
 
@@ -1181,7 +1204,7 @@ def stream_anthropic(
             provider=model.provider,
             model=model.id,
             usage=_empty_usage(),
-            stopReason="stop",
+            stopReason="pending",
             timestamp=time.time_ns() // 1_000_000,
             # Recorded only for managed-effort models, and only because the next request
             # replays it: an unmanaged response has no provider-native level to state.
@@ -1372,8 +1395,13 @@ def stream_anthropic(
 
                 if event_type == "message_delta":
                     delta = event.get("delta")
-                    if isinstance(delta, Mapping) and isinstance(delta.get("stop_reason"), str):
-                        output.stopReason = map_stop_reason(delta["stop_reason"])
+                    if (isinstance(delta, Mapping)
+                            and isinstance(delta.get("stop_reason"), str) and delta["stop_reason"]):
+                        output.rawStopReason = delta["stop_reason"]
+                        stop_reason_result = map_stop_reason(delta["stop_reason"], delta.get("stop_details"))
+                        output.stopReason = stop_reason_result["stopReason"]
+                        if stop_reason_result.get("errorMessage"):
+                            output.errorMessage = stop_reason_result["errorMessage"]
                     usage = event.get("usage")
                     if isinstance(usage, Mapping):
                         _update_usage_from_anthropic_usage(output, usage, usage_model)
@@ -1388,8 +1416,10 @@ def stream_anthropic(
                         accumulated.finish_into(block)
             if signal_aborted(_option(options, "signal")):
                 raise RuntimeError("Request was aborted")
+            if output.stopReason == "pending":
+                raise RuntimeError("Anthropic stream ended without a stop reason")
             if output.stopReason in {"aborted", "error"}:
-                raise RuntimeError("An unknown error occurred")
+                raise RuntimeError(output.errorMessage or "An unknown error occurred")
             stream.push(DoneEvent(reason=output.stopReason, message=output))
         except Exception as error:  # noqa: BLE001 - every failure becomes an error event on the stream
             output.stopReason = "aborted" if signal_aborted(_option(options, "signal")) else "error"
@@ -1437,6 +1467,11 @@ def _note_empty_tool_arguments(output: AssistantMessage, block: ToolCall, accumu
 
 
 def map_thinking_level_to_effort(model: Model, level: str | None) -> AnthropicEffort:
+    """Map ThinkingLevel to Anthropic effort levels for adaptive thinking.
+
+    Note: effort "max" is available on all adaptive-thinking Claude models, while native
+    "xhigh" is only available on Opus 4.7/4.8, Sonnet 5, and Fable 5.
+    """
     mapped = model.thinkingLevelMap.get(level) if level and model.thinkingLevelMap else None
     if isinstance(mapped, str):
         return mapped  # type: ignore[return-value]
@@ -1472,6 +1507,8 @@ def stream_simple_anthropic(
     if not options or not options.reasoning:
         return stream_anthropic(model, context, {**base.model_dump(), "thinkingEnabled": False})
 
+    # For models with adaptive thinking: use an effort level.
+    # For older models: use budget-based thinking.
     if _force_adaptive_thinking(model) is True:
         return stream_anthropic(
             model,
@@ -1483,22 +1520,25 @@ def stream_simple_anthropic(
             },
         )
 
+    # Undefined means the caller did not request an output cap; let the helper use the model cap.
+    # Do not coerce to 0 here, or the thinking budget would become the entire max_tokens value.
     adjusted = adjust_max_tokens_for_thinking(
         base.maxTokens,
         model.maxTokens,
         options.reasoning,
         options.thinkingBudgets,
     )
+    max_tokens = clamp_max_tokens_to_context(model, context, adjusted.maxTokens)
     return stream_anthropic(
         model,
         context,
         {
             **base.model_dump(),
-            "maxTokens": adjusted.maxTokens,
+            "maxTokens": max_tokens,
             "thinkingEnabled": True,
             # Thinking and the answer share max_tokens: always leave the answer its room.
             "thinkingBudgetTokens": clamp_thinking_budget_to_answer_room(
-                adjusted.thinkingBudget, adjusted.maxTokens
+                adjusted.thinkingBudget, max_tokens
             ),
         },
     )

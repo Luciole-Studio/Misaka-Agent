@@ -17,31 +17,27 @@ import stat
 import time
 
 import pytest
+from webconf import write_web
 
-from misaka.config.product import CFG
+from misaka.config import home
 from misaka.core.web import cache
 
 
 @pytest.fixture(autouse=True)
 def web_home(monkeypatch, tmp_path):
     """A throwaway ``~/.misaka``: config path and cache directory both under tmp_path."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    config_path = tmp_path / ".misaka" / "web.json"
-    monkeypatch.setitem(CFG, "web_config", str(config_path))
-    monkeypatch.setitem(CFG, "web_cache", str(tmp_path / ".misaka" / "cache" / "web"))
-    return config_path
+    return home.path("settings")
 
 
 @pytest.fixture
-def cache_dir(tmp_path):
-    """Where :func:`misaka.core.web.cache._cache_dir` resolves under this HOME."""
-    return tmp_path / ".misaka" / "cache" / "web"
+def cache_dir():
+    """Where :func:`misaka.core.web.cache._cache_dir` resolves in this test's home."""
+    return home.path("web_cache")
 
 
-def write_config(web_home, **values):
-    """Write ``web.json`` the way the CLI writer would, then let the cache read it back."""
-    web_home.parent.mkdir(parents=True, exist_ok=True)
-    web_home.write_text(json.dumps(values), encoding="utf-8")
+def write_config(_web_home, **values):
+    """Store the web settings the way the CLI writer would, then let the cache read it back."""
+    write_web(values)
 
 
 def index_of(cache_dir) -> dict:
@@ -334,8 +330,13 @@ def test_an_undeterminable_home_is_a_miss_not_a_failed_extraction(monkeypatch):
     ``Error extracting content: Could not determine home directory.`` for a batch of URLs
     that never needed the cache.
     """
-    monkeypatch.setitem(CFG, "web_cache", "~/.misaka/cache/web")
-    monkeypatch.setattr("os.path.expanduser", lambda path: path)  # neither HOME nor pwd
+    from pathlib import Path
+
+    def no_home():
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.delenv(home.ENV_HOME)                                    # no explicit home either
+    monkeypatch.setattr(Path, "home", staticmethod(no_home))
 
     assert cache._cache_dir() is None
     assert cache.extract_cache_get("https://example.com/a") is None

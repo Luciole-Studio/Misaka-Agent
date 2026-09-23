@@ -145,7 +145,9 @@ def _small_fast_hook_model(parent: Any, available: list[Any]) -> Any:
         provider_override = os.environ.get("ANTHROPIC_SMALL_FAST_MODEL")
         keywords = ("haiku", "small", "fast", "mini", "flash", "nano")
 
-    override = os.environ.get("MISAKA_SMALL_FAST_MODEL") or provider_override
+    from misaka.config.product import setting
+
+    override = setting("subagents", "small_fast_model", None, str) or provider_override
     if override and override.casefold() in by_id:
         return by_id[override.casefold()]
 
@@ -444,6 +446,7 @@ async def amain() -> int:
             mcp_role=mcp_role,
             receive_messages=bool(card),
             task_id=card,
+            research_context=bool(card) and os.environ.get("MISAKA_RESEARCH_CONTEXT") == "1",
             skill_roots=(("sandbox", sandbox),) if sandbox else None,
         )),
     )
@@ -535,11 +538,13 @@ async def amain() -> int:
         requested_model = str(hook.get("model") or "").strip()
         if requested_model:
             provider, model_id = resolve_model_spec(
-                {}, None, requested_model, parent_model, available
+                {}, None, requested_model, parent_model, session.modelRegistry.getAll()
             )
             model = session.modelRegistry.find(provider, normalize_model_for_api(model_id))
             if model is None:
                 raise RuntimeError(f"Hook model is not available: {provider}/{model_id}")
+            if not session.modelRegistry.hasConfiguredAuth(model):
+                raise RuntimeError(f"No configured authentication for hook model: {provider}/{model_id}")
         else:
             model = _small_fast_hook_model(parent_model, available)
 
@@ -947,9 +952,9 @@ async def amain() -> int:
             item["name"].split("__", 2)[1] for item in fork_snapshot["tools"]
             if str(item.get("name", "")).startswith("mcp__") and item["name"].count("__") >= 2
         )
-    deadline = asyncio.get_running_loop().time() + float(
-        os.environ.get("MISAKA_MCP_REQUIRED_WAIT", "30")
-    )
+    from misaka.config.product import setting
+
+    deadline = asyncio.get_running_loop().time() + setting("mcp", "required_wait", 30.0, float)
     while required_mcp:
         active_mcp_servers = mcp_server_names()
         if all(

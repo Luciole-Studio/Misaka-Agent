@@ -16,11 +16,10 @@ import uuid
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
-from pathlib import Path
 
 from filelock import FileLock
 
-from misaka.config import get_agent_dir
+from misaka.config import home
 from misaka.core.web import config
 from misaka.core.web.scope import current_scope
 from misaka.utils.async_lifecycle import settle_thread_call
@@ -48,8 +47,7 @@ def enabled():
 
 
 def directory():
-    profile = current_scope().profile_dir
-    return Path(get_agent_dir() if profile is None else profile) / "logs" / "web"
+    return home.path("web_logs", current_scope().profile_dir)
 
 
 def active():

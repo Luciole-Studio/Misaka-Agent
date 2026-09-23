@@ -7,9 +7,9 @@ from pathlib import Path
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.tools._common import run_with_abort
-from misaka.core.tools._web.evidence import save_page
 from misaka.core.web import config
 from misaka.core.web.browser import settings
+from misaka.core.web.evidence import save_page
 from misaka.core.web.runtime import current_runtime
 from misaka.utils.async_lifecycle import run_in_thread
 from misaka.utils.atomic import write_bytes

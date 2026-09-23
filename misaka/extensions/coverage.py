@@ -1,6 +1,6 @@
 """coverage_scan: where does a question actually live in the literature? OpenAlex, grouped by
 subfield and topic, so a plan is checked against the field's real distribution rather than
-the planner's memory. Every role, including the bare one-shot sessions research planning runs in."""
+the planner's memory. Every role, including the resident headless sessions used by Research."""
 from __future__ import annotations
 
 import asyncio

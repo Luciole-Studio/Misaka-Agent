@@ -16,8 +16,8 @@ def test_office_cache_does_not_bypass_private_material_guard(tmp_path):
     import asyncio
 
     from misaka.core.documents.office import cache
-    from misaka.core.tools._web.evidence import check_material_read
     from misaka.core.tools.read import create_read_tool_definition
+    from misaka.core.web.evidence import check_material_read
 
     project = tmp_path / 'project'
     project.mkdir()
@@ -55,8 +55,8 @@ def test_role_config_survives_failed_model_write(tmp_path, monkeypatch):
 
     profile = tmp_path / 'profile'
     profile.mkdir()
-    config = profile / 'config.json'
-    original = json.dumps({'model': 'old/model', 'custom_option': 'keep this'})
+    config = profile / 'settings.json'
+    original = json.dumps({'defaultProvider': 'old', 'defaultModel': 'model', 'custom_option': 'keep this'})
     config.write_text(original)
 
     def disk_full(*args, **kwargs):
@@ -136,7 +136,7 @@ def test_mailbox_initialization_failure_closes_database(tmp_path, monkeypatch):
     connection.execute('CREATE TABLE messages(id INTEGER PRIMARY KEY)')
     monkeypatch.setattr(messages.sqlite3, 'connect', lambda *args, **kwargs: connection)
     try:
-        with pytest.raises(sqlite3.OperationalError, match='delivered_at'):
+        with pytest.raises(RuntimeError, match='another MISAKA'):
             messages.connect(str(db))
         with pytest.raises(sqlite3.ProgrammingError, match='closed'):
             connection.execute('SELECT 1')
@@ -458,13 +458,13 @@ async def test_mail_renews_lease_while_waiting_for_persistence(tmp_path, monkeyp
 def test_profile_success_preserves_fields_and_invalid_config_is_not_overwritten(tmp_path):
     from misaka.config import profiles
 
-    config = tmp_path / 'config.json'
-    config.write_text('{"custom": 0, "model": "old"}')
-    assert profiles.persist_role_default_model(str(tmp_path), 'new')
-    assert json.loads(config.read_text()) == {'custom': 0, 'model': 'new'}
-    assert not profiles.persist_role_default_model(str(tmp_path), 'new')
+    config = tmp_path / 'settings.json'
+    config.write_text('{"custom": 0, "defaultProvider": "old", "defaultModel": "m"}')
+    assert profiles.persist_role_default_model(str(tmp_path), 'new/m')
+    assert json.loads(config.read_text()) == {'custom': 0, 'defaultProvider': 'new', 'defaultModel': 'm'}
+    assert not profiles.persist_role_default_model(str(tmp_path), 'new/m')
     config.write_text('{broken')
-    assert not profiles.persist_role_default_model(str(tmp_path), 'another')
+    assert not profiles.persist_role_default_model(str(tmp_path), 'another/m')
     assert config.read_text() == '{broken'
 
 

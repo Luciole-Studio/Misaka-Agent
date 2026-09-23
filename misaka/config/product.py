@@ -1,20 +1,29 @@
 """MISAKA product-side configuration.
 
-Defaults are the engine's own (``~/.misaka/agent/settings.json``: ``defaultProvider`` and
-``defaultModel``, what ``/model`` saves) with a builtin provider behind them, so a fresh install
-runs; Last Order's model is her profile's pinned one (``profiles/last_order/config.json``, the
-same ``{"model": ...}`` a Sister carries), else the default. ``MISAKA_*`` environment variables
-override everything. Model settings are read when a session is assembled because ``/model`` can
-change them in a long-lived process. Numbers are parsed here once, so a bad value names itself.
+Every product knob is a section of the home's ``settings.json`` (``research``, ``network``,
+``mcp``, ``documents``, ``panel``, ``subagents``, ``skills`` ...), read at use so a long-lived
+process sees an edit; ``setting()`` is the one reader and names a bad value by its key. Models
+are the engine's own (``defaultProvider``/``defaultModel``, what ``/model`` saves) with a builtin
+pair behind them so a fresh install runs; Last Order's model is her role's pin
+(``profiles/last_order/settings.json``), else the default. No environment variable overrides a
+setting: ``MISAKA_*`` names in the environment are what a parent hands a child, never a knob.
 """
 import json
 import os
 
-from misaka.config.engine import get_agent_dir
+from misaka.config import home
 
-# The one path in ~/.misaka that had no override, which is also the one a test run
-# reaches by accident: every sibling below is redirectable, so this is too.
-ROLES_ROOT = os.path.expanduser(os.environ.get("MISAKA_PROFILES") or "~/.misaka/profiles")
+# The product paths ``CFG`` answers for. Each is a row of ``home.LAYOUT`` under the same name.
+_PATHS = ("db", "messages_db", "web_cache", "office_cache", "office_intent",
+          "net_sock", "net_snapshot", "tasks_root", "profiles_root", "roles_root")
+
+# The product knobs ``CFG`` answers for, by their settings.json section and key, with the default.
+_KNOBS = {
+    "token_cap": ("research", "token_cap", 0, int),
+    "research_plan_approval": ("research", "plan_approval", True, bool),
+}
+
+_settings_cache: tuple[str, int, dict] | None = None     # (path, mtime_ns, document)
 
 
 def _json(path):
@@ -26,83 +35,86 @@ def _json(path):
         return {}
 
 
-def _number(name, default, cast):
-    raw = os.environ.get(name, default)
+def settings_document() -> dict:
+    """The home's ``settings.json`` as it is now (re-read when the file changes)."""
+    global _settings_cache
+    path = str(home.path("settings"))
+    try:
+        stamp = os.stat(path).st_mtime_ns
+    except OSError:
+        stamp = -1
+    if _settings_cache is None or _settings_cache[0] != path or _settings_cache[1] != stamp:
+        _settings_cache = (path, stamp, _json(path) if stamp >= 0 else {})
+    return _settings_cache[2]
+
+
+def setting(section: str, key: str, default, cast=None):
+    """One product knob: ``settings.json[section][key]``, else ``default``. ``cast`` (int, float,
+    bool or str) is applied to what the file holds; a value that does not fit refuses to start
+    the process rather than being silently ignored."""
+    block = settings_document().get(section)
+    if not isinstance(block, dict) or key not in block:
+        return default
+    raw = block[key]
+    if cast is None or cast is str and isinstance(raw, str):
+        return raw
+    if cast is bool:
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, str) and raw.strip().lower() in {"1", "true", "yes", "on", "0", "false", "no", "off", ""}:
+            return raw.strip().lower() in {"1", "true", "yes", "on"}
+        raise SystemExit(f"settings.json: {section}.{key}={raw!r} is not a boolean")
+    if isinstance(raw, bool):
+        raise SystemExit(f"settings.json: {section}.{key}={raw!r} is not a {cast.__name__}")
     try:
         return cast(raw)
-    except ValueError:
-        raise SystemExit(f"{name}={raw!r} is not a number") from None
+    except (TypeError, ValueError):
+        raise SystemExit(f"settings.json: {section}.{key}={raw!r} is not a {cast.__name__}") from None
 
 
 def _models():
     """Return one provider/model pair, then Last Order's model, from the live settings."""
-    settings = _json(os.path.join(get_agent_dir(), "settings.json"))
-    env_provider = str(os.environ.get("MISAKA_PROVIDER") or "").strip()
-    env_model = str(os.environ.get("MISAKA_MODEL") or "").strip()
-    if bool(env_provider) != bool(env_model):
-        raise SystemExit("MISAKA_PROVIDER and MISAKA_MODEL must be set together")
-    saved_provider = str(settings.get("defaultProvider") or "").strip()
-    saved_model = str(settings.get("defaultModel") or "").strip()
-    provider, model = (
-        (env_provider, env_model)
-        if env_provider
-        else (saved_provider, saved_model)
-        if saved_provider and saved_model
-        else ("anthropic", "claude-sonnet-4-5")
-    )
-    pinned = str(
-        _json(os.path.join(ROLES_ROOT, "last_order", "config.json")).get("model") or ""
-    ).strip()
-    lo_model = str(os.environ.get("MISAKA_LO_MODEL") or "").strip() or pinned or model
+    from misaka.config import profiles
+
+    settings = settings_document()
+    provider = str(settings.get("defaultProvider") or "").strip()
+    model = str(settings.get("defaultModel") or "").strip()
+    if not (provider and model):
+        provider, model = "anthropic", "claude-sonnet-4-5"
+    lo_model = profiles.pinned_model(str(home.path("roles_root") / "last_order")) or model
     return provider, model, lo_model
 
-CFG = {
-    "db": os.environ.get("MISAKA_DB", "~/.misaka/board.db"),
-    "messages_db": os.environ.get("MISAKA_MESSAGES", "~/.misaka/messages.db"),
-    # Hand-maintained list of recognised ally CLIs. This file is the single source of
-    # truth (seeded on first run; deliberately no environment-variable override).
-    "allies": "~/.misaka/allies.json",
-    # Web search: which backend, whether the no-key vendor ring may serve, and the
-    # vendor credentials -- one file rather than an environment variable per vendor,
-    # because a sub-agent child inherits a scrubbed environment but reads the same file.
-    "web_config": os.environ.get("MISAKA_WEB_CONFIG", "~/.misaka/web.json"),
-    # Extracted page text, kept for a TTL so a re-read of the same URL costs nothing.
-    # Addressed here rather than expanded from ``~`` at the call site so a test run
-    # cannot reach the developer's own cache -- the same reason web_config is here.
-    "web_cache": os.environ.get("MISAKA_WEB_CACHE", "~/.misaka/cache/web"),
-    # Rendered Office markdown, keyed by (path, size, mtime): a continuation read of a
-    # 50-sheet workbook must not re-parse it. Addressed here for the same reason
-    # ``web_cache`` is -- a test run must not reach the developer's own cache.
-    "office_cache": os.environ.get("MISAKA_OFFICE_CACHE", "~/.misaka/cache/office"),
-    # What the model actually asked the office tool to write, one JSON per call. A
-    # deliverable that came out wrong is otherwise unexplainable: the ops that produced it
-    # are gone the moment the call returns, leaving only the file and a receipt saying it
-    # worked.
-    "office_intent": os.environ.get("MISAKA_OFFICE_INTENT", "~/.misaka/office_intent"),
-    "net_sock": os.environ.get("MISAKA_NET_SOCK", "~/.misaka/net.sock"),
-    "net_snapshot": os.environ.get("MISAKA_NET_SNAPSHOT", "~/.misaka/net.json"),
-    "tasks_root": os.path.realpath(os.path.expanduser(os.environ.get("MISAKA_TASKS", "~/.misaka/tasks"))),
-    # As in pi: personalities are user data and live next to skills/MCP under
-    # ~/.misaka/profiles/<role>/, never in the source tree.
-    "profiles_root": os.path.join(ROLES_ROOT, "sisters"),
-    "roles_root": ROLES_ROOT,
-    "judge_timeout": _number("MISAKA_JUDGE_TIMEOUT", "600", int),
-    "token_cap": _number("MISAKA_TOKEN_CAP", "0", int),
-    # A node's plan waits for the user's go-ahead (recorded by its Last Order once they agree in
-    # conversation) before any card is created. Off for unattended runs and tests.
-    "research_plan_approval": os.environ.get("MISAKA_RESEARCH_PLAN_APPROVAL", "1").strip().lower()
-    not in {"0", "false", "no", "off", ""},
-}
+
+class _Config(dict):
+    """Product settings, plus the product's paths, both resolved at each lookup.
+
+    Nothing is stored: ``CFG["db"]`` asks ``home`` every time, ``CFG["token_cap"]`` asks
+    ``settings.json`` every time, so a process pointed at another home (``MISAKA_HOME``) or a
+    user who edited the file sees it at once. Storing one -- ``monkeypatch.setitem`` in a test --
+    overrides that lookup until the key is deleted again. ``CFG.get(key)`` does not resolve
+    (a dict's ``get`` never asks ``__missing__``): index with ``CFG[key]``.
+    """
+
+    def __missing__(self, key):
+        if key in _PATHS:
+            return str(home.path(key))
+        if key in _KNOBS:
+            return setting(*_KNOBS[key])
+        raise KeyError(key)
+
+
+CFG = _Config()
 
 
 def current_config():
     """Return product configuration with the current saved provider/model pair."""
     provider, model, lo_model = _models()
-    return {**CFG, "provider": provider, "default_model": model, "lo_model": lo_model}
+    return {**{key: CFG[key] for key in (*_PATHS, *_KNOBS)}, **CFG,
+            "provider": provider, "default_model": model, "lo_model": lo_model}
 
 
 def sisters():
-    """Return the registered Sister IDs (subdirectory names under ~/.misaka/profiles/sisters/)."""
+    """Return the registered Sister IDs (subdirectory names under the Sisters' profiles root)."""
     root = CFG["profiles_root"]
     if not os.path.isdir(root):
         return set()

@@ -2,12 +2,11 @@
 
 import asyncio
 import json
-from pathlib import Path
 
 import httpx
 import pytest
+from webconf import read_web, write_web
 
-from misaka.config.product import CFG
 from misaka.core import web
 from misaka.core.web import cache, config, registry
 from misaka.core.web.backends import parallel
@@ -21,10 +20,8 @@ def isolated(monkeypatch, tmp_path):
         monkeypatch.delenv(key, raising=False)
     for name in config._CREDENTIAL_VARS + config._ENDPOINT_VARS:
         monkeypatch.delenv(name, raising=False)
-    path = tmp_path / "web.json"
-    path.write_text(json.dumps({"backend": "parallel", "keyless_rescue": False,
-                                "cache_enabled": False, "env": {"PARALLEL_API_KEY": "TOKEN"}}))
-    monkeypatch.setitem(CFG, "web_config", str(path))
+    write_web({"backend": "parallel", "keyless_rescue": False,
+               "cache_enabled": False, "env": {"PARALLEL_API_KEY": "TOKEN"}})
     cache.search_memo.clear()
     registry.reset_for_tests()
     yield
@@ -223,9 +220,9 @@ async def test_same_origin_redirect_works_cross_origin_never_receives_payload(mo
 
 
 async def test_config_file_base_url_is_used_by_both_parallel_operations(monkeypatch):
-    cfg = json.loads(Path(CFG["web_config"]).read_text())
+    cfg = json.loads(json.dumps(read_web()))
     cfg["env"]["PARALLEL_BASE_URL"] = "https://example.test/prefix/"
-    Path(CFG["web_config"]).write_text(json.dumps(cfg))
+    write_web(cfg)
     sent = []
 
     def handler(request):

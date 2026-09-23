@@ -4,12 +4,11 @@ import os
 import sys
 
 from misaka.cli import bootstrap
-from misaka.config import CFG, VERSION, current_config, layout
+from misaka.config import CFG, VERSION, current_config, home, layout
 from misaka.core.documents import index as corpus
 from misaka.core.network import board as tail
 from misaka.core.platform import budget
 from misaka.core.platform import tasks as db
-from misaka.utils import atomic
 
 
 class _ExactArgumentParser(argparse.ArgumentParser):
@@ -52,15 +51,12 @@ def _parser():
     st = sub.add_parser("setup", help="First-run wizard: environment, model & provider, Sisters, documents, web search, project")
     up = sub.add_parser("update", help="Report whether this install is behind the repository; --apply fast-forwards it")
     up.add_argument("--apply", action="store_true", help="Run the update instead of only reporting it")
-    un = sub.add_parser("uninstall", help="Remove this machine's MISAKA data (~/.misaka); project folders are never touched")
+    un = sub.add_parser("uninstall", help=f"Remove this machine's MISAKA data ({home.display()}); project folders are never touched")
     un.add_argument("--yes", action="store_true", help="Skip the confirmation")
     un.add_argument("--dry-run", action="store_true", help="List what would be removed and stop")
     st.add_argument("section", nargs="?", help="Run one section only: environment | model | sisters | documents | web | project")
 
-    ini = sub.add_parser("init", help="Make this folder a MISAKA project (git repo + PROJECT.md + cards/) and initialize the database")
-    ini.add_argument("--migrate", action="store_true",
-                     help="One-shot: write card files for every existing board row (all projects) and run the "
-                          "agent-directory migrations (credentials → auth.json; sessions/tools/commands/keybindings layout)")
+    sub.add_parser("init", help="Make this folder a MISAKA project (git repo + PROJECT.md + cards/) and initialize the database")
 
     nt = sub.add_parser("net", help="Control the Misaka Network daemon and its panes")
     nt_sub = nt.add_subparsers(dest="net_cmd", required=True)
@@ -110,6 +106,8 @@ def _parser():
     rs.add_argument("--resume", metavar="RUN_ID", help="Resume an existing research run")
     rs.add_argument("--depth", type=int, default=3, help="Maximum branch depth")
     rs.add_argument("--parallel", type=int, help="Maximum concurrent LO nodes (default: 4); saved with the run")
+    rs.add_argument("--sister-parallel", type=int,
+                    help="Maximum active Sister cards per LO node (default: 4); saved with the run, subject to global admission limits")
     rs.add_argument("--followups", type=int,
                     help="After its first cards are back, how many more times a node may send Sisters out before concluding (default: 2, 0-6)")
     rs.add_argument("--runner-key", help=argparse.SUPPRESS)
@@ -161,8 +159,9 @@ def _parser():
     ac = sub.add_parser("auth", help="Check or print provider credentials")
     ac.add_argument("auth_args", nargs=argparse.REMAINDER)
 
-    wb = sub.add_parser("web", help="Show or change web-search configuration (~/.misaka/web.json)")
-    wb.add_argument("op", nargs="?", default="status", choices=["status", "set", "unset", "providers", "setup", "enable", "disable", "accounts", "login", "logout", "browser-status", "browser-providers", "browser-setup", "browser-install", "browser-connect", "browser-disconnect", "gateway-login", "gateway-logout", "gateway-status"])
+    wb = sub.add_parser("web", help=f"Show or change web-search configuration ({home.display(home.path('settings'))}, keys in {home.display(home.path('env'))})")
+    wb.add_argument("op", nargs="?", default=None, choices=["configure", "status", "set", "unset", "providers", "setup", "enable", "disable", "accounts", "login", "logout", "browser-status", "browser-providers", "browser-setup", "browser-install", "browser-connect", "browser-disconnect", "gateway-login", "gateway-logout", "gateway-status"],
+                    help="No operation: interactive settings in a terminal, status otherwise")
     wb.add_argument("key", nargs="?", help="backend | search_backend | extract_backend | "
                                            "keyless_fallback | keyless_rescue | allow_private_urls | "
                                            "cache_enabled | cache_ttl_minutes | cache_exempt_hosts | "
@@ -283,25 +282,13 @@ def _cmd_net(args):
 
 def _cmd_init(args):
     from misaka.core.platform import cards
-    if args.migrate:
-        written, existed, no_folder = cards.migrate(db.connect(CFG["db"]))
-        print(f"migrated {written} card(s) to files ({existed} already had files, "
-              f"{no_folder} skipped: project folder gone)")
-        from misaka.config import migrations
-        result = migrations.run_migrations(os.getcwd())
-        if result["migratedAuthProviders"]:
-            print("migrated credentials to auth.json: " + ", ".join(result["migratedAuthProviders"]))
-        for warning in result["deprecationWarnings"]:
-            print(f"warning: {warning}")
-    else:
-        try:
-            lines = cards.init_project(os.getcwd())
-        except RuntimeError as err:
-            # Missing or failing git: a prerequisite the user has to install, not a bug.
-            sys.exit(str(err))
-        for line in lines:
-            print(line)
-    print("board:", os.path.expanduser(CFG["db"]))
+    try:
+        lines = cards.init_project(os.getcwd())
+    except RuntimeError as err:
+        # Missing or failing git: a prerequisite the user has to install, not a bug.
+        sys.exit(str(err))
+    for line in lines:
+        print(line)
 
 
 def _cmd_create(args):
@@ -346,20 +333,11 @@ def _cmd_board(args):
 def _cmd_research(args):
     import asyncio as _asyncio
 
-    from misaka.core.network import worker as worker_mod
     from misaka.core.research import node as research_node
     from misaka.core.research import planner, runs, workflow
     if args.node:
         sys.exit(research_node.main(*args.node, runner_key=args.runner_key))
     cfg = current_config()
-    # A command-line run has no conversation for its root Last Order: her turns are one-shot
-    # calls, so nobody could agree to her plan. The fork nodes it spawns do have live sessions
-    # and would otherwise stop and wait for a go-ahead the root never asked for; the whole run
-    # therefore runs unattended, and the node processes inherit that through the environment.
-    if cfg.get("research_plan_approval", True):
-        print("Unattended run: plans are not held for approval (use the panel's /research for that).")
-    cfg["research_plan_approval"] = False
-    os.environ["MISAKA_RESEARCH_PLAN_APPROVAL"] = "0"
     # Preflight before anything is written: a run with no Sister to assign to dies deep
     # inside the workflow (planner._roster), after the workspace has been git-initialised
     # and committed into, and the message that surfaces there names neither the roster nor
@@ -394,6 +372,7 @@ def _cmd_research(args):
         try:
             limits = runs.normalize_limits({"max_depth": args.depth,
                                             **({"parallel": args.parallel} if args.parallel is not None else {}),
+                                            **({"sister_parallel": args.sister_parallel} if args.sister_parallel is not None else {}),
                                             **({"max_followups": args.followups} if args.followups is not None else {})})
         except ValueError as error:
             sys.exit(str(error))
@@ -403,15 +382,22 @@ def _cmd_research(args):
                           limits=limits,
                           token_start=budget.spent(con))
         print(f"Research run {run['id']}: {run['workspace']}")
+    def progress(event):
+        print(event["message"], flush=True)
+        for item in event.get("tasks") or []:
+            print(f"  - {item['title']} → Sister {item['assignee']}", flush=True)
+
     try:
         out = _asyncio.run(workflow.run(
-            con, cfg, research_node.ProcessSpawner(), worker_mod,
-            run_id=run["id"], poll_seconds=1.0, resume=bool(args.resume)))
+            con, cfg, research_node.ProcessSpawner(),
+            run_id=run["id"], poll_seconds=1.0, resume=bool(args.resume), progress=progress))
     except RuntimeError as err:
         # Node failures already print their own reason above; the workflow's own summary is
         # the useful part, and a traceback of the event loop is not.
         sys.exit(f"Research run {run['id']} stopped: {err}")
     print(f"Research run {run['id']}: {out['reason']}")
+    for question in out.get("questions") or []:
+        print(f"  - {question}")
     final = out.get("final") or {}
     if final.get("path"):
         print(final["path"])
@@ -424,41 +410,32 @@ def _cmd_web(args):
 
 
 def _cmd_moa(args):
-    import json as _json
-    import os as _os
+    from misaka.core.moa.provider import (
+        load_moa_config,
+        raw_moa_config,
+        save_moa_config,
+    )
 
-    from misaka.core.moa.provider import MOA_CONFIG_PATH, load_moa_config
-
-    path = _os.path.expanduser(MOA_CONFIG_PATH)
     cfg = load_moa_config()
     if args.op == "configure":
         from misaka.core.moa import configure as moa_configure
         try:
             moa_configure.configure(args.name)
-        except RuntimeError as error:
-            sys.exit(str(error))
         except (EOFError, KeyboardInterrupt):
             sys.exit("\nNothing was written.")
         return
     if args.op == "delete":
         if not args.name:
             sys.exit("Usage: misaka moa delete <preset>")
-        raw = {}
-        try:
-            with open(path, encoding="utf-8") as f:
-                raw = _json.load(f)
-        except (OSError, ValueError):
-            pass
+        raw = raw_moa_config()
         presets = raw.get("presets") if isinstance(raw.get("presets"), dict) else {}
         if args.name not in presets:
-            # `moa list` prints load_moa_config(), which invents one preset when the file has
-            # none; delete can only touch presets the file actually declares. Naming a preset
-            # the listing shows but the file does not hold used to report it as unknown and
-            # then list it as available in the same sentence.
+            # `moa list` prints load_moa_config(), which invents one preset when none is
+            # written; delete can only touch presets the settings actually declare.
             if args.name in cfg["presets"]:
-                sys.exit(f'"{args.name}" is the built-in MoA preset, not one this file defines, '
-                         f"so there is nothing to delete. Write your own presets into {path} "
-                         "to replace it.")
+                sys.exit(f'"{args.name}" is the built-in MoA preset, not one your settings define, '
+                         f"so there is nothing to delete. Write your own presets under \"moa\" in "
+                         f"{home.display(home.path('settings'))} to replace it.")
             known = ", ".join(cfg["presets"]) or "none"
             sys.exit(f'Unknown preset "{args.name}". Available presets: {known}.')
         if len(presets) <= 1:
@@ -466,11 +443,11 @@ def _cmd_moa(args):
         del presets[args.name]
         if raw.get("default_preset") == args.name:
             raw["default_preset"] = next(iter(presets))
-        atomic.write_text(path, _json.dumps(raw, ensure_ascii=False, indent=2))
+        save_moa_config(raw)
         print(f"Deleted preset '{args.name}'; default: {raw.get('default_preset')}")
     else:
         from misaka.core.moa import configure as moa_configure
-        moa_configure.describe(cfg, path, print)
+        moa_configure.describe(cfg, print)
 
 
 def _cmd_skills(args):
@@ -743,6 +720,11 @@ def main(argv=None):
     """The CLI entry point: one handler per sub-command (``COMMANDS``), each opening the board only
     if it uses it; ``argv`` defaults to the process arguments so tests can drive it directly."""
     bootstrap.install()
+    from misaka.config import env as env_file
+    from misaka.config.engine import configure_logging
+    home.ensure()
+    configure_logging()      # warnings go to the log file, never to a TUI's screen (B6)
+    env_file.load()          # the home's .env: environment for code that is not MISAKA
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["lcm"]:
         # Read-only/dry-run operators must not bootstrap user directories or open
@@ -784,6 +766,6 @@ def main(argv=None):
     try:
         return COMMANDS[args.cmd](args)
     except SkillsConfigError as error:
-        # A skills.json the user broke by hand is their file to fix, not a traceback.
+        # A settings.json the user broke by hand is their file to fix, not a traceback.
         print(f"misaka: {error}", file=sys.stderr)
         return 1

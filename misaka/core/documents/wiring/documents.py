@@ -1,7 +1,12 @@
 """Document navigation, reading, search, and quotation-verification tools."""
 import asyncio
+import base64
+import json
+import math
 import os
-from io import BytesIO
+import subprocess
+import sys
+from pathlib import Path
 
 from pydantic import BaseModel, Field
 
@@ -92,14 +97,6 @@ def _page_from_ocr(row, page):
 
 # -- rendering a page as a picture ----------------------------------------------------------------
 
-# The read tool resizes every inline image to at most 2000x2000 (``image_resize``'s default
-# maxWidth/maxHeight) before it reaches the model, so rendering a page any larger than that is
-# work thrown away -- and thrown away only after the giant bitmap has been allocated: an A0
-# poster at scale 2.0 is 6740x9532 px, a quarter of a gigabyte of RGB. The same bound therefore
-# caps the render itself, and a direct render at the cap is sharper than a downscale of a bigger
-# one. ``_MAX_SCALE`` catches the model that asks for 300 on a page already 2000 px wide.
-_MAX_RENDER_PX = 2000
-_MAX_SCALE = 10.0
 _SOURCE_STEM = "source"
 
 
@@ -137,37 +134,17 @@ def _source(doc_id, ctx):
 
 
 def _render_page(pdf_path, page, scale):
-    """Render one 1-based page of a PDF to PNG bytes: ``(png, page count)``.
-
-    ``png`` is None when ``page`` is outside the document -- the caller needs the page count to
-    say so usefully. Blocking and GIL-holding throughout: callers go through ``_off_loop``.
-    """
-    import pypdfium2 as pdfium
-    pdf = pdfium.PdfDocument(pdf_path)
-    try:
-        count = len(pdf)
-        if not 1 <= page <= count:
-            return None, count
-        pg = pdf[page - 1]
-        try:
-            width, height = pg.get_size()                 # points; pixels = points * scale
-            scale = min(scale, _MAX_SCALE, _MAX_RENDER_PX / max(width, height, 1))
-            bitmap = pg.render(scale=max(scale, 1 / _MAX_RENDER_PX))
-            try:
-                # to_pil() shares the bitmap's buffer, so the PNG has to be written before it goes.
-                image = bitmap.to_pil()
-                try:
-                    buffer = BytesIO()
-                    image.save(buffer, format="PNG")
-                finally:
-                    image.close()
-            finally:
-                bitmap.close()
-        finally:
-            pg.close()
-        return buffer.getvalue(), count
-    finally:
-        pdf.close()
+    """Isolate PDFium's process-global state and native faults from concurrent tools."""
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).with_name("_pdf_render.py")),
+         str(pdf_path), str(page), str(scale)],
+        capture_output=True, timeout=60, check=False,
+    )
+    if result.returncode:
+        reason = result.stderr.decode("utf-8", errors="replace").strip()[-2000:]
+        raise RuntimeError(f"PDF renderer exited with code {result.returncode}: {reason}")
+    value = json.loads(result.stdout)
+    return (base64.b64decode(value["png"], validate=True) if value["png"] else None), value["pages"]
 
 
 def register(harn):
@@ -287,26 +264,26 @@ def register(harn):
     async def doc_page_image(tool_call_id, params, signal, on_update, ctx):
         root, source, title = await _off_loop(_source, params.doc_id, ctx)
         if root is None:
-            return _text("Document not found. Use doc_list to find its document ID.")
+            raise ValueError("Document not found. Use doc_list to find its document ID.")
         if source is None or os.path.splitext(source)[1].lower() != ".pdf":
             kind = os.path.splitext(source)[1].lower().lstrip(".") if source else "no stored source"
-            return _text(f"Refused: {params.doc_id} was not indexed from a PDF ({kind}), and only "
-                         f"PDF pages can be rendered. Use doc_read for its text.")
-        if params.scale <= 0:
-            return _text("scale must be greater than 0.")
+            raise ValueError(f"{params.doc_id} was not indexed from a PDF ({kind}), and only "
+                             f"PDF pages can be rendered. Use doc_read for its text.")
+        if not math.isfinite(params.scale) or params.scale <= 0:
+            raise ValueError("scale must be finite and greater than 0.")
         try:
             png, count = await _off_loop(_render_page, source, params.page, params.scale)
-        except Exception as e:  # noqa: BLE001 - pypdfium raises its own error type for a damaged
-            # page or a PDF it cannot open; the model can act on the reason, not on a traceback.
-            return _text(f"Could not render {params.doc_id} p{params.page}: {e}")
+        except Exception as e:
+            # Child failures/timeouts are tool errors, with the requested locator attached.
+            raise RuntimeError(f"Could not render {params.doc_id} p{params.page}: {e}") from e
         if signal_aborted(signal):
             return _text("Cancelled.")
         if png is None:
             # ``count`` is the PDF's own page count, which is what the render is indexed by; the
             # extracted pages are numbered by pdftotext's form feeds, one per page, so the two
             # agree and a page number from doc_read/doc_find lands where the model expects.
-            return _text(f"Page {params.page} is outside {params.doc_id}: it has {count} page"
-                         f"{'' if count == 1 else 's'}, numbered from 1.")
+            raise ValueError(f"Page {params.page} is outside {params.doc_id}: it has {count} page"
+                             f"{'' if count == 1 else 's'}, numbered from 1.")
         resized = await resize_image_bytes(png, "image/png")
         note = _get_non_vision_image_note(getattr(ctx, "model", None))
         # The title names the document the way a caption should, but it is the document's own

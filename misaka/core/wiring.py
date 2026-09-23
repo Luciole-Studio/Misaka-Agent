@@ -118,6 +118,7 @@ PART_MODULES: tuple[str, ...] = (
     "misaka.core.network.wiring.capabilities",
     "misaka.core.network.wiring.collaboration",
     "misaka.core.skills.wiring.skills",
+    "misaka.core.platform.home_guard",
     "misaka.core.research.wiring.research",
     "misaka.core.research.wiring.node",
     "misaka.core.subagent",
@@ -231,7 +232,48 @@ class Assembly:
             "extensionFactories": self.extension_factories,
             "customTools": self.custom_tools,
             "parts": self.parts,
+            "modelProfile": self.model_profile,
+            "modelDefaultsReadOnly": self.model_defaults_read_only,
         }
+
+    @property
+    def model_profile(self) -> str | None:
+        # A generic child owns its agent definition, not its parent's role pin.
+        return self.spec.profile_dir if self.spec and self.spec.kind != "child" else None
+
+    @property
+    def model_defaults_read_only(self) -> bool:
+        return bool(self.spec and self.spec.kind == "child")
+
+
+def role_session_setup(profile_dir, workspace, *, model=None,
+                       receive_messages=False, research_context=False, startup_skills=()):
+    """One role session entry, independent of terminal, root/fork and lifetime.
+
+    Callers add only their transport/session-selection flags. Research changes the
+    mode overlay and per-phase tool scope, never the base capability registry.
+    """
+    from misaka.config import identity
+
+    role = profiles.role_of(profile_dir)
+    sender = "last-order" if profiles.is_last_order(profile_dir) else role.rsplit("/", 1)[-1]
+    flags = []
+    override = profiles.explicit_model_override(profile_dir, model)
+    if override:
+        flags += ["--model", override]
+    for section in identity.base_prompt_sources(profile_dir, role):
+        flags += ["--append-system-prompt", section]
+    assembly = assemble(SessionSpec(
+        profile_dir=profile_dir, role=role, workspace=workspace, kind="foreground",
+        sender=sender, mcp_role=sender, receive_messages=receive_messages,
+        research_context=research_context, startup_skills=tuple(startup_skills)))
+    from misaka.config import env as env_file
+
+    # The role's own .env first (its vendor keys, its plugin knobs), then the hand-off names.
+    env = {**env_file.role_overlay(profile_dir),
+           "MISAKA_PROFILE_DIR": profile_dir, "MISAKA_WHO": sender,
+           "MISAKA_MCP_ROLE": sender, "MISAKA_WORKSPACE": workspace}
+    return flags, assembly, env
 
 
 def assemble(spec: SessionSpec) -> Assembly:

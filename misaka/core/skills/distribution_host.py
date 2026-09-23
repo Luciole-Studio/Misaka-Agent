@@ -37,7 +37,7 @@ def resolve_nous_runtime_credentials():
 
 def http_get(url, *, timeout=20, headers=None, params=None, follow_redirects=True):
     """Preserve HTTPX responses, with MISAKA's existing per-hop/pinned bounded transport."""
-    from misaka.core.tools._web.bounded import (
+    from misaka.core.web.bounded import (
         UnsafeUrlError,
         open_checked_stream,
         read_bounded,

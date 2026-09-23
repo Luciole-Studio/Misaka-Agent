@@ -4,13 +4,14 @@ import asyncio
 import json
 import stat
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 import pytest
+from webconf import read_web, write_web
 
 from misaka.cli import app
+from misaka.config import home
 from misaka.config.product import CFG
 from misaka.core.web import WebPart, cache, config, dispatch, keyless, registry
 from misaka.core.web.provider import WebSearchProvider
@@ -23,11 +24,10 @@ from misaka.core.wiring import SessionSpec
 def isolated(tmp_path, monkeypatch):
     for name in config._CREDENTIAL_VARS + config._ENDPOINT_VARS + ("MISAKA_ALLOW_PRIVATE_URLS", "CUSTOM_TOKEN"):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setitem(CFG, "web_config", str(tmp_path / "web.json"))
     monkeypatch.setitem(CFG, "web_cache", str(tmp_path / "cache"))
-    monkeypatch.setenv("MISAKA_CODING_AGENT_DIR", str(tmp_path / "agent"))
+    monkeypatch.setenv("MISAKA_HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
-    write(Path(CFG["web_config"]), keyless_fallback=False, keyless_rescue=False)
+    write(home.path("env"), keyless_fallback=False, keyless_rescue=False)
     registry.reset_for_tests()
     cache.search_memo.clear()
     yield
@@ -36,8 +36,8 @@ def isolated(tmp_path, monkeypatch):
 
 
 def write(path, **values):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(values))
+    """``path`` names a layer: the home's .env, or ``<profile>/.env`` for a role's own."""
+    write_web(values, profile=None if path == home.path("env") else path.parent)
 
 
 class Provider(WebSearchProvider):
@@ -76,7 +76,7 @@ async def search(owner, query="same query"):
 
 
 def test_profile_defaults_falsey_overrides_and_writes_do_not_copy_shared_secrets(tmp_path):
-    write(Path(CFG["web_config"]), env={"CUSTOM_TOKEN": "shared-secret-token", "EXA_API_KEY": "shared-exa"},
+    write(home.path("env"), env={"CUSTOM_TOKEN": "shared-secret-token", "EXA_API_KEY": "shared-exa"},
           provider_tier={"exa": "free"}, keyless_rescue=True,
           website_blocklist={"enabled": True, "shared_files": ["global.txt"]})
     profile = tmp_path / "profile"
@@ -88,9 +88,9 @@ def test_profile_defaults_falsey_overrides_and_writes_do_not_copy_shared_secrets
         assert config.web_config()["website_blocklist"]["shared_files"] == [str(tmp_path / "global.txt")]
         config.set_config("search_backend", "exa")
         assert config.provider_tier("exa") == "auto"
-        doc = json.loads((profile / "web.json").read_text())
+        doc = read_web(profile)
         assert doc["env"] == {"CUSTOM_TOKEN": ""}
-        assert "shared-secret-token" not in (profile / "web.json").read_text()
+        assert "shared-secret-token" not in json.dumps(doc)
         config.unset_config("env.CUSTOM_TOKEN")
         assert config.provider_env("CUSTOM_TOKEN") == "shared-secret-token"
 
@@ -171,8 +171,8 @@ def test_both_cache_halves_and_flight_use_the_same_isolation_boundary(tmp_path, 
 
 
 async def test_profile_policy_and_private_url_flag_reach_direct_and_vendor_tools(tmp_path):
-    from misaka.core.tools._web.url_safety import allow_private_urls
-    from misaka.core.tools._web.website_policy import check_website_access
+    from misaka.core.web.url_safety import allow_private_urls
+    from misaka.core.web.website_policy import check_website_access
 
     left, right = part(tmp_path / "left"), part(tmp_path / "right")
     write(tmp_path / "left" / "web.json", allow_private_urls=True,
@@ -248,7 +248,7 @@ async def test_inherited_ring_transport_is_not_rescued_twice(name, tmp_path, mon
     monkeypatch.setattr(module, "extract_with_failover", failed_extract)
     monkeypatch.setattr(dispatch, "search_with_failover", duplicate_search)
     monkeypatch.setattr(dispatch, "extract_with_failover", duplicate_extract)
-    write(Path(CFG["web_config"]), backend=name, keyless_fallback=True, keyless_rescue=True)
+    write(home.path("env"), backend=name, keyless_fallback=True, keyless_rescue=True)
     owner, provider = part(tmp_path / name), Derived()
     owner.configure_tools([extension(provider)])
     try:
@@ -266,21 +266,23 @@ async def test_inherited_ring_transport_is_not_rescued_twice(name, tmp_path, mon
 
 def test_config_transaction_preserves_concurrent_writes_and_invalid_documents(tmp_path):
     with ThreadPoolExecutor(max_workers=6) as workers:
-        list(workers.map(lambda index: config.set_config(f"env.KEY_{index}", str(index)), range(18)))
+        list(workers.map(lambda index: config.set_config(f"env.VENDOR_{index}_API_KEY", str(index)), range(18)))
     assert len(config.web_config()["env"]) == 18
-    path = Path(CFG["web_config"])
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    path.write_text("{malformed original")
-    with pytest.raises(ValueError):
-        config.set_config("backend", "exa")
-    assert path.read_text() == "{malformed original"
+    assert stat.S_IMODE(home.path("env").stat().st_mode) == 0o600
+    # A malformed file refuses the writes that target it and is left as it is.
+    for path, key in ((home.path("env"), "env.VENDOR_1_API_KEY"), (home.path("settings"), "backend")):
+        path.write_text("{malformed original")
+        with pytest.raises(ValueError):
+            config.set_config(key, "exa")
+        assert path.read_text() == "{malformed original"
+        path.unlink()
 
 
 def test_cli_schema_consumer_saves_paid_tier_and_secret_without_printing_it(tmp_path, monkeypatch, capsys):
     profile = tmp_path / "cli-profile"
     monkeypatch.setattr("getpass.getpass", lambda _: "saved-cli-secret")
     app.main(["web", "setup", "exa", "--profile", str(profile), "--tier", "paid", "--capability", "search"])
-    doc = json.loads((profile / "web.json").read_text())
+    doc = read_web(profile)
     assert doc["search_backend"] == "exa" and "extract_backend" not in doc
     assert doc["provider_tier"]["exa"] == "paid"
     assert doc["env"]["EXA_API_KEY"] == "saved-cli-secret"
@@ -300,12 +302,12 @@ def test_cli_free_variant_has_no_credential_prompt_and_disable_is_real(tmp_path,
 
 
 def test_cli_does_not_select_an_unsupported_capability(capsys):
-    before = Path(CFG["web_config"]).read_bytes()
+    before = home.path("settings").read_bytes()
     with pytest.raises(SystemExit) as error:
         app.main(["web", "setup", "ddgs", "--capability", "extract", "--yes"])
     assert error.value.code == 2
     assert "supports only search" in capsys.readouterr().err
-    assert Path(CFG["web_config"]).read_bytes() == before
+    assert home.path("settings").read_bytes() == before
 
 
 async def make_session(tmp_path, factories, *, allowed=None):
@@ -590,7 +592,7 @@ async def test_interrupted_reload_does_not_reopen_old_extension_providers(tmp_pa
 
 async def test_direct_fetch_single_flight_never_shares_a_different_profiles_redirect_policy(tmp_path, monkeypatch):
     from misaka.core.tools import web_fetch
-    from misaka.core.tools._web.website_policy import check_website_access
+    from misaka.core.web.website_policy import check_website_access
 
     workspace = str(tmp_path / "shared-workspace")
     left = WebPart(SessionSpec(str(tmp_path / "left"), "sister", workspace, "bare"))
@@ -634,7 +636,7 @@ async def test_direct_fetch_single_flight_never_shares_a_different_profiles_redi
 
 
 def test_negative_fetch_cache_belongs_to_the_session_not_the_process():
-    from misaka.core.tools._web import negative_cache
+    from misaka.core.web import negative_cache
 
     left, right = WebScope(), WebScope()
     url = "https://example.org/"

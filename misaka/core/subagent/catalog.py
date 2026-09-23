@@ -5,7 +5,6 @@ reconstruct announcements from the active conversation, including after compact.
 """
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -14,7 +13,6 @@ from misaka.core.subagent.agents import (
     AgentDefinitionsResult,
     roster_text,
 )
-from misaka.core.subagent.background import _truthy
 from misaka.utils.values import read_field
 
 SOURCE_GROUPS = (
@@ -68,7 +66,9 @@ def display_catalog(catalog: AgentDefinitionsResult) -> str:
 
 def list_in_messages() -> bool:
     # Native host has no GrowthBook gate; explicit opt-in mirrors source default false.
-    return _truthy(os.environ.get('MISAKA_AGENT_LIST_IN_MESSAGES'))
+    from misaka.config.product import setting
+
+    return setting("subagents", "agent_list_in_messages", False, bool)
 
 
 def listing_delta(agents: Mapping[str, AgentDefinition], messages: Sequence[Any]) -> dict[str, Any] | None:

@@ -85,7 +85,7 @@ herdr `ApiClient::request_value` 本身同步连接、写请求、`BufReader::re
 ## ⑭ 私有材料打包：本地跨模块漏检查
 
 上游 `tools/web_tools.py` 的缓存／截断逻辑不是 MISAKA 的 Research 来源包。
-本地 `tools/_web/evidence.py::check_material_read` 已定义私有材料保护；
+本地 `web/evidence.py::check_material_read` 已定义私有材料保护；
 `research/bundle.py` 打包路径没有使用它。问题属于本地模块之间遗漏既有保护，
 没有从 Hermes Web 下载一个同等来源打包器即可修复的对应关系。
 

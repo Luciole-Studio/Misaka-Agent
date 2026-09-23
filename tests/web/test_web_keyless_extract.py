@@ -17,10 +17,10 @@ import json
 
 import httpx
 import pytest
+from webconf import write_web
 
-from misaka.config.product import CFG
-from misaka.core.tools._web import bounded
-from misaka.core.web import keyless
+from misaka.config import home
+from misaka.core.web import bounded, keyless
 
 
 @pytest.fixture(autouse=True)
@@ -29,15 +29,14 @@ def web_home(monkeypatch, tmp_path):
     async def resolve(*_args):
         return ["93.184.216.34"]
     monkeypatch.setattr(bounded, "_resolve_host", resolve)
-    path = tmp_path / "web.json"
-    monkeypatch.setitem(CFG, "web_config", str(path))
+    path = home.path("settings")           # the "web" section lives here now
     # The cursor is random per process; pin it so the walk order is assertable.
     monkeypatch.setattr(keyless.current_scope(), "cursor", [0])
     return path
 
 
-def write_config(path, **keys) -> None:
-    path.write_text(json.dumps(keys), encoding="utf-8")
+def write_config(_path, **keys) -> None:
+    write_web(keys)
 
 
 # ---------------------------------------------------------------------------

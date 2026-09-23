@@ -16,7 +16,7 @@ import threading
 from contextvars import ContextVar
 from pathlib import Path
 
-from misaka.config import get_agent_dir
+from misaka.config import home
 from misaka.core.web.config import provider_env, redact_secrets
 from misaka.core.web.scope import current_scope
 from misaka.utils.ansi import strip_ansi
@@ -33,7 +33,7 @@ _OP_ENV_ALLOWLIST = (
 
 def get_hermes_home():
     """Upstream spelling, native profile resolution; never reads HERMES_HOME."""
-    return Path(current_scope().profile_dir or get_agent_dir())
+    return Path(current_scope().profile_dir or home.home())
 
 
 def atomic_write_bytes(path, data, *, mode=0o600, fsync_dir=True):

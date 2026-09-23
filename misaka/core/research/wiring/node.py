@@ -61,7 +61,7 @@ class NodePart:
         from misaka.core.platform import notifications
         from misaka.core.research import workflow
         from misaka.core.research.node import PaneRunner
-        from misaka.core.research.window import WindowLO
+        from misaka.core.research.window import WindowLO, node_description
         from misaka.core.session_control import for_session
         con = task_store.connect(os.path.expanduser(CFG["db"]))
         runs.init(con)
@@ -75,10 +75,6 @@ class NodePart:
             owner = runs.node(con, self.node_id)
             if owner["runner_key"] != self.runner_key or runs.get(con, self.run_id)["driver_lock"] != run["driver_lock"]:
                 raise RuntimeError("Research node or driver changed owners.")
-
-        def describe():
-            branch = runs.node(con, self.node_id)
-            return {"node": self.node_id, "depth": branch["depth"], "phase": branch["status"]}
 
         def progress(event):
             branch = runs.node(con, self.node_id)
@@ -96,13 +92,12 @@ class NodePart:
         window = None
         control = None
         try:
-            window = WindowLO(self.session, check_active)
+            window = WindowLO(self.session, check_active, describe=lambda: node_description(con, self.node_id))
             runs.set_node(con, self.node_id, session_file=window.session_file)
             control = for_session(self.session)
             if control is not None:         # a chat attached from elsewhere sees the node, not just a session
-                previous_check, previous_describe = control.check_active, control.describe
+                previous_check = control.check_active
                 control.check_active = check_active
-                control.describe = describe
             runner = PaneRunner(con, cfg, label, os.environ.get("MISAKA_NET_PANE"))
             result = await workflow.expand_node(con, cfg, runner, window, run_id=self.run_id, node_id=self.node_id,
                                                 progress=progress, session=self.session)
@@ -126,11 +121,8 @@ class NodePart:
             finally:
                 # The conversation outlives this runner and its connection. Do not
                 # detach callbacks installed by a subsequent owner during cleanup.
-                if control is not None:
-                    if control.check_active is check_active:
-                        control.check_active = previous_check
-                    if control.describe is describe:
-                        control.describe = previous_describe
+                if control is not None and control.check_active is check_active:
+                    control.check_active = previous_check
                 try:
                     runs.release_runner(con, "research_branches", self.node_id, self.runner_key)
                 finally:

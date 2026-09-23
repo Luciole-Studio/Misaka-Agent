@@ -1,0 +1,76 @@
+{
+  "baseline": {
+    "summary": "19 passed, 15 errors in 28.84s",
+    "teardown_errors": [
+      "ERROR tests/test_research_mode_notice.py::test_a_board_without_research_tables_is_not_a_failure",
+      "ERROR tests/test_research_mode_notice.py::test_an_active_run_puts_the_discipline_in_front",
+      "ERROR tests/test_research_mode_notice.py::test_waiting_for_the_user_still_counts_as_driven",
+      "ERROR tests/test_research_mode_notice.py::test_a_paused_run_tells_lo_to_wait_for_the_user[failed]",
+      "ERROR tests/test_research_mode_notice.py::test_a_paused_run_tells_lo_to_wait_for_the_user[stopped]",
+      "ERROR tests/test_research_mode_notice.py::test_a_finished_run_leaves_the_conversation_alone",
+      "ERROR tests/test_research_mode_notice.py::test_the_discipline_wins_over_a_paused_sibling",
+      "ERROR tests/test_research_mode_notice.py::test_context_hook_prepends_an_ephemeral_notice",
+      "ERROR tests/test_research_mode_notice.py::test_context_hook_is_silent_without_a_run",
+      "ERROR tests/test_research_mode_notice.py::test_context_hook_survives_a_broken_board",
+      "ERROR tests/test_sister_notification_wakes_lo.py::test_a_driven_run_reads_its_own_results",
+      "ERROR tests/test_sister_notification_wakes_lo.py::test_a_run_nobody_drives_needs_last_order_woken[failed]",
+      "ERROR tests/test_sister_notification_wakes_lo.py::test_a_run_nobody_drives_needs_last_order_woken[stopped]",
+      "ERROR tests/test_sister_notification_wakes_lo.py::test_a_run_nobody_drives_needs_last_order_woken[done]",
+      "ERROR tests/test_sister_notification_wakes_lo.py::test_missing_context_or_board_wakes_last_order"
+    ],
+    "allocations": [
+      [
+        "tests/test_research_mode_notice.py",
+        "22"
+      ],
+      [
+        "tests/test_research_mode_notice.py",
+        "41"
+      ],
+      [
+        "tests/test_sister_notification_wakes_lo.py",
+        "16"
+      ]
+    ]
+  },
+  "patched": {
+    "summary": "19 passed, 15 errors in 26.95s",
+    "teardown_errors": [
+      "ERROR tests/test_research_mode_notice.py::test_a_board_without_research_tables_is_not_a_failure",
+      "ERROR tests/test_research_mode_notice.py::test_an_active_run_puts_the_discipline_in_front",
+      "ERROR tests/test_research_mode_notice.py::test_waiting_for_the_user_still_counts_as_driven",
+      "ERROR tests/test_research_mode_notice.py::test_a_paused_run_tells_lo_to_wait_for_the_user[failed]",
+      "ERROR tests/test_research_mode_notice.py::test_a_paused_run_tells_lo_to_wait_for_the_user[stopped]",
+      "ERROR tests/test_research_mode_notice.py::test_a_finished_run_leaves_the_conversation_alone",
+      "ERROR tests/test_research_mode_notice.py::test_the_discipline_wins_over_a_paused_sibling",
+      "ERROR tests/test_research_mode_notice.py::test_context_hook_prepends_an_ephemeral_notice",
+      "ERROR tests/test_research_mode_notice.py::test_context_hook_is_silent_without_a_run",
+      "ERROR tests/test_research_mode_notice.py::test_context_hook_survives_a_broken_board",
+      "ERROR tests/test_sister_notification_wakes_lo.py::test_a_driven_run_reads_its_own_results",
+      "ERROR tests/test_sister_notification_wakes_lo.py::test_a_run_nobody_drives_needs_last_order_woken[failed]",
+      "ERROR tests/test_sister_notification_wakes_lo.py::test_a_run_nobody_drives_needs_last_order_woken[stopped]",
+      "ERROR tests/test_sister_notification_wakes_lo.py::test_a_run_nobody_drives_needs_last_order_woken[done]",
+      "ERROR tests/test_sister_notification_wakes_lo.py::test_missing_context_or_board_wakes_last_order"
+    ],
+    "allocations": [
+      [
+        "tests/test_research_mode_notice.py",
+        "22"
+      ],
+      [
+        "tests/test_research_mode_notice.py",
+        "41"
+      ],
+      [
+        "tests/test_sister_notification_wakes_lo.py",
+        "16"
+      ]
+    ]
+  },
+  "unchanged_files": {
+    "tests/test_research_mode_notice.py": true,
+    "tests/test_sister_notification_wakes_lo.py": true,
+    "misaka/core/platform/tasks.py": true
+  },
+  "same_error_test_set": true
+}

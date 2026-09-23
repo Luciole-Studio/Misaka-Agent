@@ -175,8 +175,17 @@ async def test_derived_index_failure_does_not_reverse_completed_run(
 
     monkeypatch.setattr(workflow, "_refresh_workspace_index", index)
     monkeypatch.setattr(workflow, "_bundle", lambda *a, **k: None)
+    from contextlib import asynccontextmanager
+
+    from misaka.core.research import window
+
+    @asynccontextmanager
+    async def root_session(*args):
+        yield SimpleNamespace(session=object(), session_file="/tmp/fixture.jsonl", close=AsyncMock())
+
+    monkeypatch.setattr(window, "node_session", root_session)
     try:
-        await workflow.run(con, {}, SimpleNamespace(), None, run_id=run["id"])
+        await workflow.run(con, {}, SimpleNamespace(), run_id=run["id"])
     except OSError as e:
         assert fail_index and "workspace-index" in str(e)
     saved = runs.get(con, run["id"])
@@ -196,7 +205,7 @@ def test_bundle_url_resolution_keeps_document_identity(state, monkeypatch, docum
     from pathlib import Path
 
     from misaka.core.research import bundle
-    from misaka.core.tools._web.evidence import _frontmatter
+    from misaka.core.web.evidence import _frontmatter
 
     con, run, _root = state
     pages = Path(run["workspace"]) / "downloads/pages"
@@ -390,7 +399,7 @@ async def test_queued_followup_error_does_not_invalidate_phase_answer(
         getActiveToolNames=list,
         sendCustomMessage=send,
     )
-    bridge = window.WindowLO(session, lambda: None)
+    bridge = window.WindowLO(session, lambda: None, describe=dict)
     try:
         _obj, text, error = await bridge._execute_turn(
             "phase fixture", {"session_dir": str(tmp_path), "tools": []}

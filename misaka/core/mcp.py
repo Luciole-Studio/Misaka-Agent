@@ -6,15 +6,14 @@ extensions; this file is that extension.
 Protocol: JSON-RPC 2.0 over stdio (the MCP stdio transport). After the three-step
 handshake, `tools/list` is called and each tool is registered individually.
 
-Configuration follows Hermes: each role lists its own servers in
-`profiles/<role>/config.yaml`:
+Configuration: each role lists its own servers under ``mcpServers`` in
+`profiles/<role>/settings.json` (the entry shape is Hermes's ``mcp_servers``):
 
-    mcp_servers:
-      camofox:
-        command: npx
-        args: ["-y", "camofox-mcp"]
+    "mcpServers": {
+      "camofox": {"command": "npx", "args": ["-y", "camofox-mcp"]}
+    }
 
-A role can use whatever its own directory declares; no separate assignment field is
+A role can use whatever its own settings declare; no separate assignment field is
 needed. Hand-written servers live in `profiles/<role>/mcp/*.py` (as in Hermes). A parent
 *adds* servers to a sub-agent child through `MISAKA_MCP_CONFIG` (a `{"mcpServers": ...}`
 file); nothing else is read. `servers_for` unions that file with the child's own profile,
@@ -33,6 +32,7 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel
 
+from misaka.config import home
 from misaka.core.extensions import startup_sections
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.moments import CoreCommand
@@ -43,8 +43,22 @@ from misaka.utils.values import signal_aborted
 
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-INIT_TIMEOUT = float(os.environ.get("MISAKA_MCP_INIT_TIMEOUT", "30"))
-CALL_TIMEOUT = float(os.environ.get("MISAKA_MCP_CALL_TIMEOUT", "120"))
+
+
+def init_timeout() -> float:
+    """Seconds a server gets to answer the initialize handshake: settings.json ``mcp.init_timeout``."""
+    from misaka.config.product import setting
+
+    return setting("mcp", "init_timeout", 30.0, float)
+
+
+def call_timeout() -> float:
+    """Seconds one tool call may take: settings.json ``mcp.call_timeout``."""
+    from misaka.config.product import setting
+
+    return setting("mcp", "call_timeout", 120.0, float)
+
+
 PROTOCOL_VERSION = "2025-06-18"
 MAX_LIST_PAGES = 50  # Hermes _MCP_LIST_MAX_PAGES: bound forever-cursor discovery.
 logger = logging.getLogger(__name__)
@@ -86,8 +100,7 @@ class McpRoleContext:
 
 
 def _cache_path():
-    return os.path.expanduser(os.environ.get(
-        "MISAKA_MCP_CACHE", "~/.misaka/cache/mcp_schema_cache.json"))
+    return str(home.path("mcp_schema_cache"))
 
 
 def is_local(cfg):
@@ -98,7 +111,7 @@ def is_local(cfg):
     serve a stale tool list.
     """
     paths = [str(cfg.get("command") or "")] + [str(a) for a in (cfg.get("args") or [])]
-    roots = (_REPO, os.path.expanduser("~/.misaka"))
+    roots = (_REPO, str(home.home()))
     return any(p.startswith(r) or p.endswith((".py", ".js", ".mjs", ".ts"))
                for p in paths for r in roots if p)
 
@@ -146,29 +159,13 @@ def _clean(servers):
 
 
 def load_profile_config(profile_dir):
-    """The role's own `mcp_servers` (stored in ~/.misaka/profiles/<role>/config.yaml)."""
-    from misaka.config import profiles
-    p = profiles.config_yaml(profile_dir)
-    if not os.path.isfile(p):
-        # A Sister made before `create` started writing this file has none, and every Sister's
-        # creation message tells the user to edit it -- so put the commented skeleton there the
-        # first time the profile is actually loaded. It parses to no servers, so this profile
-        # behaves exactly as it did a moment ago; the user simply now has the file they were
-        # told to edit. Failure to write is not worth failing a session over.
-        try:
-            from misaka.core.network import roster
+    """The role's own ``mcpServers`` (its settings.json; a broken file reads as none)."""
+    from misaka.core.settings_manager import SettingsManager
 
-            roster.ensure_config_yaml(profile_dir, os.path.basename(profile_dir.rstrip(os.sep)))
-        except Exception:  # noqa: BLE001, S110 - a convenience, never a reason to break loading
-            pass
-        return {}
     try:
-        import yaml
-        with open(p, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
+        return _clean(SettingsManager.forRole(profile_dir).getScopedSection("role", "mcpServers"))
     except Exception:  # noqa: BLE001 - a broken config must not take the session down
         return {}
-    return _clean(data.get("mcp_servers"))
 
 
 def injected_servers():
@@ -185,7 +182,7 @@ def injected_servers():
 
 
 def servers_for(profile_dir):
-    """Servers available to a role: what its own config.yaml declares, plus what its parent injected."""
+    """Servers available to a role: what its own settings declare, plus what its parent injected."""
     servers = dict(load_profile_config(profile_dir))
     servers.update(injected_servers())
     return servers
@@ -225,8 +222,7 @@ class McpClient:
         stderr_target = asyncio.subprocess.DEVNULL
         stderr_log = None
         try:
-            from misaka.config import get_agent_dir
-            log_dir = os.path.join(get_agent_dir(), "mcp")
+            log_dir = str(home.path("mcp_logs"))
             os.makedirs(log_dir, exist_ok=True)
             safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(self.name)) or "server"
             stderr_log = open(os.path.join(log_dir, f"{safe_name}.stderr.log"), "ab")  # noqa: SIM115, ASYNC230 - handed to the child
@@ -335,7 +331,7 @@ class McpClient:
     async def _request(self, method, params, timeout=None, signal=None):
         """One JSON-RPC round trip, which the caller's abort signal can cut short.
 
-        Without the race a call runs to `CALL_TIMEOUT` (two minutes by default) after the
+        Without the race a call runs to ``call_timeout()`` (two minutes by default) after the
         person pressed Esc, because the agent loop cancels nothing: it awaits a tool's
         `execute` and leaves observing the signal to the tool, the way `core/tools/bash.py`
         does. `notifications/cancelled` is the protocol's own way to say so, and sending it
@@ -347,7 +343,7 @@ class McpClient:
         fut = asyncio.get_running_loop().create_future()
         self._pending[rid] = fut
         await self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
-        waiting = asyncio.ensure_future(asyncio.wait_for(fut, timeout or INIT_TIMEOUT))
+        waiting = asyncio.ensure_future(asyncio.wait_for(fut, timeout or init_timeout()))
         try:
             async with abort_race(signal) as aborting:
                 if aborting is None:
@@ -393,7 +389,7 @@ class McpClient:
     async def call_result(self, tool, args, signal=None):
         await self.ensure_started()
         return await self._request("tools/call", {"name": tool, "arguments": args or {}},
-                                   timeout=CALL_TIMEOUT, signal=signal)
+                                   timeout=call_timeout(), signal=signal)
 
     async def call(self, tool, args, signal=None):
         r = await self.call_result(tool, args, signal=signal)

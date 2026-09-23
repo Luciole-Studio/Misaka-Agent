@@ -26,7 +26,7 @@ ThinkingLevelMap: TypeAlias = dict[ModelThinkingLevel, str | None]
 
 CacheRetention: TypeAlias = Literal["none", "short", "long"]
 Transport: TypeAlias = Literal["sse", "websocket", "websocket-cached", "auto"]
-StopReason: TypeAlias = Literal["stop", "length", "toolUse", "error", "aborted"]
+StopReason: TypeAlias = Literal["pending", "stop", "length", "toolUse", "error", "aborted"]
 ImagesStopReason: TypeAlias = Literal["stop", "error", "aborted"]
 InputModality: TypeAlias = Literal["text", "image"]
 
@@ -259,6 +259,7 @@ class AssistantMessage(SchemaModel):
     usage: Usage
     stopReason: StopReason
     errorMessage: str | None = None
+    rawStopReason: str | None = None
     timestamp: int
 
     _normalize_null_content = field_validator("content", mode="before")(_content_never_null)

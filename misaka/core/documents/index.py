@@ -203,7 +203,9 @@ def _ocr_pages(p, meta=None):
     """
     if not shutil.which(OCR_BINARY):
         return None
-    langs = os.environ.get("MISAKA_OCR_LANGS") or OCR_LANGS_DEFAULT
+    from misaka.config.product import setting
+
+    langs = setting("documents", "ocr_langs", OCR_LANGS_DEFAULT, str) or OCR_LANGS_DEFAULT
     with tempfile.TemporaryDirectory(prefix=".ocr-", dir=os.path.dirname(os.path.abspath(p))) as tmp:
         sidecar = os.path.join(tmp, "sidecar.txt")
         try:
@@ -863,6 +865,52 @@ def _decode_markup(data, what="EPUB chapter"):
 # through the compression -- and an HTML page entered with its tags and its <script> counted as
 # prose.
 #
+DJVU_TEXT_BINARY = "djvutxt"
+DJVU_RENDER_BINARY = "ddjvu"
+DJVU_TIMEOUT = 300
+
+
+def _djvu_pages(p, meta=None):
+    """A DjVu book: its own text layer when it has one, otherwise rendered to PDF and handed
+    to the PDF path, so a scan goes through the same OCR every scanned PDF does.
+
+    CADAL and Wikimedia carry a large part of the scanned Chinese classics as DjVu
+    (2026-09-18, B10: download_file refused the format, a Sister fetched it by hand, and the
+    corpus then skipped it at submission). ``djvutxt`` prints the hidden text layer one page
+    per form feed, as pdftotext does, and exits 0 with nothing for a scan that has none. The
+    rendered PDF is a working copy: the DjVu's own bytes stay the document's identity.
+    """
+    if not shutil.which(DJVU_TEXT_BINARY):
+        _note(meta, "djvu_error", f"{DJVU_TEXT_BINARY} is not installed (brew install djvulibre)")
+        return []
+    try:
+        out = subprocess.run([DJVU_TEXT_BINARY, p], capture_output=True, text=True,
+                             timeout=DJVU_TIMEOUT, check=False)
+    except (OSError, subprocess.SubprocessError) as error:
+        _note(meta, "djvu_error", str(error)[:200])
+        return []
+    if out.returncode != 0:
+        _note(meta, "djvu_error", " ".join((out.stderr or "").split())[-200:] or f"exit {out.returncode}")
+        return []
+    pages = _form_feed_pages(out.stdout)
+    if _has_text_layer(pages) or not shutil.which(DJVU_RENDER_BINARY):
+        return pages
+    with tempfile.TemporaryDirectory(prefix=".djvu-", dir=os.path.dirname(os.path.abspath(p))) as tmp:
+        rendered = os.path.join(tmp, "scan.pdf")
+        try:
+            run = subprocess.run([DJVU_RENDER_BINARY, "-format=pdf", p, rendered],
+                                 capture_output=True, text=True, timeout=DJVU_TIMEOUT, check=False)
+        except (OSError, subprocess.SubprocessError) as error:
+            _note(meta, "djvu_error", str(error)[:200])
+            return pages
+        if run.returncode != 0 or not os.path.exists(rendered):
+            _note(meta, "djvu_error", " ".join((run.stderr or "").split())[-200:] or f"exit {run.returncode}")
+            return pages
+        ocred = _pdf_pages(rendered, meta)
+        # Only a rendering that actually read something beats the thin text layer it had.
+        return ocred if _has_text_layer(ocred) else pages
+
+
 # The last group is text with no format of its own: a card's analysis.csv, results.json, run.log
 # or paper.tex. These entered the corpus as text before this table existed, and the path that
 # carries them (``documents/workspace.ingest_artifacts``) swallows a ValueError without a word --
@@ -872,6 +920,7 @@ def _decode_markup(data, what="EPUB chapter"):
 
 _EXTRACTORS = {
     ".pdf": _pdf_pages,
+    ".djvu": _djvu_pages,
     ".epub": _epub_pages,
     ".html": _html_pages, ".htm": _html_pages, ".xhtml": _html_pages,
     ".xlsx": _office_pages, ".xlsm": _office_pages,
@@ -951,7 +1000,7 @@ def source_title(p):
 # How many pdfium subprocesses one outline build may open. PageIndex's own default is
 # "CPU count - 1", which is the right answer for a lone command and the wrong one here: this
 # runs in the tail of a research card's settlement, and the cards are already N-way parallel
-# (research_parallel per node, and the nodes run in parallel too), so the auto default
+# (sister_parallel per node, and the nodes run in parallel too), so the auto default
 # multiplies -- 3 nodes x 4 cards x 7 workers is 84 pdfium processes on an 8-core machine.
 # A caller that owns the whole machine passes its own `workers`.
 TREE_WORKERS = 2
@@ -1178,7 +1227,7 @@ def ingest(p, title=None, with_tree=True, task_id=None, workspace=None):
     formats it does read.
     """
     p = os.path.abspath(os.path.expanduser(p))
-    from misaka.core.tools._web.evidence import check_material_read
+    from misaka.core.web.evidence import check_material_read
     check_material_read(p)
     if workspace is not None and not under(p, workspace):
         raise ValueError("Document source resolves outside the workspace.")

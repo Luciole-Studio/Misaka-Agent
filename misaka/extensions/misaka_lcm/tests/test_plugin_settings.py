@@ -20,8 +20,7 @@ from misaka.extensions.misaka_lcm.host import context_engine as ce
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
     ce.close_all()
-    monkeypatch.setenv('MISAKA_CODING_AGENT_DIR', str(tmp_path / 'agent'))
-    monkeypatch.setenv('MISAKA_SESSIONS', str(tmp_path / 'sessions'))
+    monkeypatch.setenv('MISAKA_HOME', str(tmp_path))
     for spec in settings._FIELDS.values():
         monkeypatch.delenv(spec.env_key, raising=False)
     yield

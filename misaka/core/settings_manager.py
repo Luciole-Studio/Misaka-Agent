@@ -7,6 +7,7 @@ import copy
 import json
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypedDict
@@ -14,7 +15,7 @@ from typing import Any, Literal, TypedDict
 from filelock import FileLock, Timeout
 
 from misaka.ai.types import ModelThinkingLevel, Transport
-from misaka.config import CONFIG_DIR_NAME, get_agent_dir
+from misaka.config import get_agent_dir, home
 from misaka.core.http_dispatcher import (
     DEFAULT_HTTP_IDLE_TIMEOUT_MS,
     parseHttpIdleTimeoutMs,
@@ -32,7 +33,11 @@ type ThinkingBudgetsSettings = dict[str, Any]
 type MarkdownSettings = dict[str, Any]
 type WarningSettings = dict[str, Any]
 type Settings = dict[str, Any]
-type SettingsScope = Literal["global", "project"]
+type SettingsScope = Literal["global", "role", "project"]
+# The keys a role may hold a value of its own for. A role session that sets one of these writes
+# its own scope; every other key is the user's, shared by every role, and stays global. This
+# table is what keeps Last Order's and a Sister's configuration apart -- not per-key special cases.
+ROLE_KEYS = frozenset({"defaultProvider", "defaultModel", "mcpServers", "web"})
 type TransportSetting = Transport
 type DefaultProjectTrust = Literal["ask", "always", "never"]
 
@@ -107,7 +112,12 @@ class FileSettingsStorage(SettingsStorage):
         resolved_cwd = resolve_path(cwd)
         resolved_agent_dir = resolve_path(agent_dir)
         self.globalSettingsPath = str(Path(resolved_agent_dir) / "settings.json")
-        self.projectSettingsPath = str(Path(resolved_cwd) / CONFIG_DIR_NAME / "settings.json")
+        # None when ``cwd`` has no project scope of its own: its config directory is the home.
+        project_dir = home.project_dir(resolved_cwd)
+        self.projectSettingsPath = str(project_dir / "settings.json") if project_dir is not None else None
+
+    def path_for(self, scope: SettingsScope) -> str | None:
+        return self.globalSettingsPath if scope == "global" else self.projectSettingsPath
 
     @staticmethod
     def _lock_path(path: str) -> str:
@@ -132,7 +142,11 @@ class FileSettingsStorage(SettingsStorage):
         raise last_error or Exception("Failed to acquire settings lock")
 
     def withLock(self, scope: SettingsScope, fn: Any) -> None:
-        path = self.globalSettingsPath if scope == "global" else self.projectSettingsPath
+        path = self.path_for(scope)
+        if path is None:
+            if fn(None) is not None:
+                raise ValueError(f"This session has no {scope} settings to write.")
+            return
         directory = os.path.dirname(path)
         release_lock: Any = None
 
@@ -184,8 +198,11 @@ class SettingsManager:
         self.storage = storage
         self.globalSettings = copy.deepcopy(initialGlobal)
         self.projectSettings = copy.deepcopy(initialProject) if projectTrusted else {}
+        # The role's own values (``bindRole``); None while this manager serves no role.
+        self.roleSettings: Settings | None = None
+        self.roleSettingsLoadError: Exception | None = None
         self.projectTrusted = projectTrusted
-        self.settings = deep_merge_settings(self.globalSettings, self.projectSettings)
+        self.settings = self._merged()
         self.modifiedFields: set[str] = set()
         self.modifiedNestedFields: dict[str, set[str]] = {}
         self.modifiedProjectFields: set[str] = set()
@@ -195,6 +212,15 @@ class SettingsManager:
         self.errors: list[SettingsError] = list(initialErrors or [])
         self.settingsPaths = dict(settingsPaths or {})
         self.writeQueue: asyncio.Future[None] | None = None
+        # A role's own settings live in its directory (``ROLE_KEYS``); credentials and every
+        # other setting keep their scopes. The role is bound explicitly, never read from env.
+        self._modelProfileRegistry: Any = None
+        self._modelDefaultsReadOnly = False
+
+    def _merged(self) -> Settings:
+        """global <- project <- role: the role is the most specific owner of what it holds."""
+        merged = deep_merge_settings(self.globalSettings, self.projectSettings)
+        return deep_merge_settings(merged, self.roleSettings) if self.roleSettings else merged
 
     @classmethod
     def create(
@@ -214,6 +240,15 @@ class SettingsManager:
         )
 
     @classmethod
+    def forRole(cls, roleDir: str | None, cwd: str | None = None) -> SettingsManager:
+        """The settings a module without a session reads for a role (or for the home when
+        ``roleDir`` is None): global plus the role's own, never a project's -- the sections
+        such modules own (web, mcp, moa, skills, allies) have no project layer."""
+        manager = cls.create(cwd or os.getcwd(), None, {"projectTrusted": False})
+        manager.bindRole(roleDir)
+        return manager
+
+    @classmethod
     def fromStorage(
         cls,
         storage: SettingsStorage,
@@ -229,7 +264,7 @@ class SettingsManager:
         settingsPaths: dict[SettingsScope, str] | None = None,
     ) -> SettingsManager:
         project_trusted = (options or {}).get("projectTrusted", True)
-        settings_paths = dict(settingsPaths or {})
+        settings_paths = {scope: path for scope, path in (settingsPaths or {}).items() if path}
         global_load = cls.tryLoadFromStorage(storage, "global")
         project_load = cls.tryLoadFromStorage(storage, "project", project_trusted)
         initial_errors: list[SettingsError] = []
@@ -263,7 +298,7 @@ class SettingsManager:
         options: SettingsManagerOptions | None = None,
     ) -> SettingsManager:
         storage = InMemorySettingsStorage()
-        initial_settings = cls.migrateSettings(copy.deepcopy(settings or {}))
+        initial_settings = copy.deepcopy(settings or {})
         storage.withLock("global", lambda _current: json.dumps(initial_settings, indent=2, ensure_ascii=False))
         return cls.fromStorage(storage, options)
 
@@ -279,11 +314,9 @@ class SettingsManager:
 
         # Custom storage backends keep the existing withLock-only contract.
         if type(storage) is FileSettingsStorage:
-            path = (
-                storage.globalSettingsPath
-                if scope == "global"
-                else storage.projectSettingsPath
-            )
+            path = storage.path_for(scope)
+            if path is None:
+                return {}
             try:
                 os.stat(path)
             except FileNotFoundError:
@@ -298,7 +331,7 @@ class SettingsManager:
         storage.withLock(scope, capture)
         if not content:
             return {}
-        return cls.migrateSettings(json.loads(content.removeprefix("\ufeff")))
+        return json.loads(content.removeprefix("\ufeff"))
 
     @classmethod
     def tryLoadFromStorage(
@@ -311,27 +344,6 @@ class SettingsManager:
             return {"settings": cls.loadFromStorage(storage, scope, projectTrusted), "error": None}
         except Exception as error:  # noqa: BLE001
             return {"settings": {}, "error": error}
-
-    @classmethod
-    def migrateSettings(cls, settings: dict[str, Any]) -> Settings:
-        migrated = copy.deepcopy(settings)
-        if "queueMode" in migrated and "steeringMode" not in migrated:
-            migrated["steeringMode"] = migrated.pop("queueMode")
-
-        if "transport" not in migrated and isinstance(migrated.get("websockets"), bool):
-            migrated["transport"] = "websocket" if migrated.pop("websockets") else "sse"
-
-        retry_settings = migrated.get("retry")
-        if isinstance(retry_settings, dict):
-            provider_settings = retry_settings.get("provider")
-            if not isinstance(provider_settings, dict):
-                provider_settings = {}
-            max_delay = retry_settings.get("maxDelayMs")
-            if isinstance(max_delay, (int, float)) and not isinstance(max_delay, bool) and provider_settings.get("maxRetryDelayMs") is None:
-                retry_settings["provider"] = {**provider_settings, "maxRetryDelayMs": max_delay}
-            retry_settings.pop("maxDelayMs", None)
-
-        return migrated
 
     def getGlobalSettings(self) -> Settings:
         return copy.deepcopy(self.globalSettings)
@@ -352,7 +364,7 @@ class SettingsManager:
         if not trusted:
             self.projectSettings = {}
             self.projectSettingsLoadError = None
-            self.settings = deep_merge_settings(self.globalSettings, self.projectSettings)
+            self.settings = self._merged()
             return
 
         project_load = self.tryLoadFromStorage(self.storage, "project", trusted)
@@ -360,7 +372,7 @@ class SettingsManager:
         self.projectSettingsLoadError = project_load["error"]
         if project_load["error"] is not None:
             self.recordError("project", project_load["error"])
-        self.settings = deep_merge_settings(self.globalSettings, self.projectSettings)
+        self.settings = self._merged()
 
     async def reload(self) -> None:
         await self.flush()
@@ -385,7 +397,10 @@ class SettingsManager:
             self.projectSettingsLoadError = project_load["error"]
             self.recordError("project", project_load["error"])
 
-        self.settings = deep_merge_settings(self.globalSettings, self.projectSettings)
+        if self.roleSettings is not None:
+            self._load_role()
+
+        self.settings = self._merged()
 
     def applyOverrides(self, overrides: Settings) -> None:
         self.settings = deep_merge_settings(self.settings, overrides)
@@ -426,7 +441,7 @@ class SettingsManager:
         modifiedNestedFields: dict[str, set[str]],
     ) -> None:
         def persist(current: str | None) -> str:
-            current_file_settings = self.migrateSettings(json.loads(current.removeprefix("\ufeff"))) if current else {}
+            current_file_settings = json.loads(current.removeprefix("\ufeff")) if current else {}
             merged_settings: Settings = copy.deepcopy(current_file_settings)
             for field in modifiedFields:
                 value = snapshotSettings.get(field)
@@ -479,7 +494,7 @@ class SettingsManager:
         self.writeQueue = loop.create_task(runner())
 
     def save(self) -> None:
-        self.settings = deep_merge_settings(self.globalSettings, self.projectSettings)
+        self.settings = self._merged()
         if self.globalSettingsLoadError is not None:
             return
 
@@ -494,7 +509,7 @@ class SettingsManager:
     def saveProjectSettings(self, settings: Settings) -> None:
         self._assertProjectTrustedForWrite()
         self.projectSettings = copy.deepcopy(settings)
-        self.settings = deep_merge_settings(self.globalSettings, self.projectSettings)
+        self.settings = self._merged()
         if self.projectSettingsLoadError is not None:
             return
 
@@ -505,6 +520,134 @@ class SettingsManager:
             "project",
             lambda: self._persistScopedSettings("project", snapshot_project_settings, modified_fields, modified_nested_fields),
         )
+
+    # ── the role scope ──────────────────────────────────────────────────────────────────
+    # A role's settings.json is the manager's own business, whatever storage serves the global
+    # and project scopes: it is read once at bind, written synchronously under the file's lock,
+    # and the in-memory copy changes only after the file did. A write that fails raises to the
+    # caller with nothing changed -- the role's file, the global file, and this manager alike.
+
+    def _role_dir(self) -> str | None:
+        path = self.settingsPaths.get("role")
+        return os.path.dirname(path) if path else None
+
+    def _load_role(self) -> None:
+        from misaka.config import profiles
+
+        try:
+            self.roleSettings = profiles.role_settings(self._role_dir(), strict=True)
+            self.roleSettingsLoadError = None
+        except (OSError, ValueError) as error:
+            self.roleSettings = {}
+            self.roleSettingsLoadError = error
+            self.recordError("role", error)
+
+    def _write_role(self, apply: Callable[[dict[str, Any]], None]) -> None:
+        from filelock import FileLock
+
+        from misaka.config import profiles
+        from misaka.utils import atomic
+
+        role_dir = self._role_dir()
+        if role_dir is None:
+            raise RuntimeError("This session serves no role; there are no role settings to write")
+        path = profiles.settings_path(role_dir)
+        os.makedirs(role_dir, exist_ok=True)
+        with FileLock(path + ".lock"):
+            data = profiles.role_settings(role_dir, strict=True)
+            apply(data)
+            atomic.write_text(path, json.dumps(data, indent=2, ensure_ascii=False))
+        self.roleSettings = copy.deepcopy(data)
+        self.roleSettingsLoadError = None
+        self.settings = self._merged()
+
+    def _owner_scope(self, key: str) -> SettingsScope:
+        """Where a write of ``key`` from this session lands: the role's own file for a key the
+        role may hold, the user's global file for everything else."""
+        return "role" if self.roleSettings is not None and key in ROLE_KEYS else "global"
+
+    def getSection(self, key: str) -> dict[str, Any]:
+        """One named mapping of the merged settings (``web``, ``mcpServers``, ``moa``, ...)."""
+        return copy.deepcopy(self._settings_object(key))
+
+    def getScopedSection(self, scope: SettingsScope, key: str) -> dict[str, Any]:
+        """The section as one scope alone holds it, for what must know which file said it."""
+        source = {"global": self.globalSettings, "role": self.roleSettings or {}, "project": self.projectSettings}[scope]
+        value = source.get(key)
+        return copy.deepcopy(value) if isinstance(value, dict) else {}
+
+    def setValue(self, key: str, value: Any) -> None:
+        """Set one top-level key in the scope that owns it (``None`` removes it)."""
+        if self._owner_scope(key) == "role":
+            def apply(data: dict[str, Any]) -> None:
+                if value is None:
+                    data.pop(key, None)
+                else:
+                    data[key] = value
+            self._write_role(apply)
+        else:
+            self._require_writable_global()
+            if value is None:
+                self.globalSettings.pop(key, None)
+            else:
+                self.globalSettings[key] = value
+            self._write_global_now(key)
+
+    def updateSection(self, key: str, mutate: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+        """Edit the mapping under ``key`` in the scope that owns it and persist it.
+
+        ``mutate`` receives that scope's own copy of the section (not the merged view), so a
+        role's edit never copies the shared defaults into the role's file.
+        """
+        result: dict[str, Any] = {}
+
+        def apply(data: dict[str, Any]) -> None:
+            section = copy.deepcopy(data.get(key)) if isinstance(data.get(key), dict) else {}
+            mutate(section)
+            if section:
+                data[key] = section
+            else:
+                data.pop(key, None)
+            result.update(section)
+
+        if self._owner_scope(key) == "role":
+            self._write_role(apply)
+        else:
+            self._require_writable_global()
+            self._write_global_section(key, apply)
+        return copy.deepcopy(result)
+
+    def _write_global_section(self, key: str, apply: Callable[[dict[str, Any]], None]) -> None:
+        """Edit ``key`` in the global file as it is NOW, under its lock, the way ``_write_role``
+        does: this manager's copy may be older than the file (another process wrote the section
+        since it loaded), and writing the copy back would undo that write."""
+        def persist(current: str | None) -> str:
+            data = json.loads(current.removeprefix("\ufeff")) if current else {}
+            apply(data)
+            self.globalSettings.pop(key, None)
+            if key in data:
+                self.globalSettings[key] = copy.deepcopy(data[key])
+            return json.dumps(data, indent=2, ensure_ascii=False)
+
+        self.storage.withLock("global", persist)
+        self.modifiedFields.discard(key)
+        self.modifiedNestedFields.pop(key, None)
+        self.settings = self._merged()
+
+    def _write_global_now(self, key: str) -> None:
+        """Persist one global key at once, under the file's lock, merging into what the file
+        holds now. ``save`` queues on the event loop, which is right for a session's own
+        settings and wrong for a module that writes a section and reads it straight back."""
+        self.settings = self._merged()
+        self._persistScopedSettings("global", copy.deepcopy(self.globalSettings), {key}, {})
+        self.modifiedFields.discard(key)
+        self.modifiedNestedFields.pop(key, None)
+
+    def _require_writable_global(self) -> None:
+        """A settings file that did not parse is the user's to fix: writing over it would
+        silently destroy every setting in it, and ``save`` would otherwise drop the write."""
+        if self.globalSettingsLoadError is not None:
+            raise ValueError(f"Refusing to write {self.settingsPaths.get('global')}: {self.globalSettingsLoadError}")
 
     async def flush(self) -> None:
         queue = self.writeQueue
@@ -548,19 +691,87 @@ class SettingsManager:
         session_dir = self.settings.get("sessionDir")
         return normalize_path(session_dir) if session_dir else session_dir
 
+    def bindRole(self, profile_dir: str | None) -> None:
+        """Serve ``profile_dir`` as this session's role: its settings.json is read now and is
+        where the role's own keys (``ROLE_KEYS``) are written from here on."""
+        if not profile_dir:
+            return
+        from misaka.config import profiles
+
+        self.settingsPaths["role"] = profiles.settings_path(os.path.abspath(profile_dir))
+        self._load_role()
+        self.settings = self._merged()
+
+    def bindModelProfile(self, profile_dir: str, model_registry: Any) -> None:
+        self.bindRole(profile_dir)
+        self._modelProfileRegistry = model_registry
+
+    def getModelProfile(self) -> str | None:
+        return self._role_dir()
+
+    def restrictModelDefaults(self) -> None:
+        """A headless child edits its definition through /agents, never its parent's defaults."""
+        self._modelDefaultsReadOnly = True
+
+    def _role_pin(self) -> tuple[str, str] | None:
+        """The role's own provider/model pair, validated: half a pin or an unreadable file is
+        an error to report, never a quiet slide onto the shared default."""
+        if self.roleSettings is None:
+            return None
+        if self.roleSettingsLoadError is not None:
+            raise ValueError(f"Role settings could not be read: {self.roleSettingsLoadError}")
+        provider = self.roleSettings.get("defaultProvider")
+        model = self.roleSettings.get("defaultModel")
+        if not provider and not model:
+            return None
+        if not (isinstance(provider, str) and provider and isinstance(model, str) and model):
+            raise ValueError(f"{self.settingsPaths.get('role')}: defaultProvider and defaultModel go together")
+        if self._modelProfileRegistry is not None:
+            from misaka.config import profiles
+
+            provider, model = profiles.resolve_model_reference(
+                f"{provider}/{model}", self._modelProfileRegistry).split("/", 1)
+        return provider, model
+
+    def hasPinnedModelDefault(self) -> bool:
+        return self._role_pin() is not None
+
+    def getDefaultModelPair(self) -> tuple[str | None, str | None]:
+        pin = self._role_pin()
+        if pin is not None:
+            return pin
+        merged = deep_merge_settings(self.globalSettings, self.projectSettings)
+        return merged.get("defaultProvider"), merged.get("defaultModel")
+
     def getDefaultProvider(self) -> str | None:
-        return self.settings.get("defaultProvider")
+        return self.getDefaultModelPair()[0]
 
     def getDefaultModel(self) -> str | None:
-        return self.settings.get("defaultModel")
+        return self.getDefaultModelPair()[1]
 
     def setDefaultProvider(self, provider: str) -> None:
-        self._set_global_value("defaultProvider", provider)
+        self.setDefaultModelAndProvider(provider, self.getDefaultModel())
 
     def setDefaultModel(self, modelId: str) -> None:
-        self._set_global_value("defaultModel", modelId)
+        self.setDefaultModelAndProvider(self.getDefaultProvider(), modelId)
 
     def setDefaultModelAndProvider(self, provider: str, modelId: str) -> None:
+        if self._modelDefaultsReadOnly:
+            raise ValueError("Use /agents to save this child agent's definition; model switches here are session-only")
+        if self.roleSettings is not None:
+            if not provider or not modelId:
+                raise ValueError("Both provider and model are required")
+            if self._modelProfileRegistry is not None:
+                from misaka.config import profiles
+
+                provider, modelId = profiles.resolve_model_reference(
+                    f"{provider}/{modelId}", self._modelProfileRegistry).split("/", 1)
+
+            def apply(data: dict[str, Any]) -> None:
+                data["defaultProvider"], data["defaultModel"] = provider, modelId
+
+            self._write_role(apply)
+            return
         self.globalSettings["defaultProvider"] = provider
         self.globalSettings["defaultModel"] = modelId
         self.markModified("defaultProvider")

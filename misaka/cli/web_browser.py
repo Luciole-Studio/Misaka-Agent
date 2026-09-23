@@ -5,10 +5,9 @@ import json
 import os
 import shutil
 import subprocess
-from pathlib import Path
 from types import SimpleNamespace
 
-from misaka.config import get_agent_dir
+from misaka.config import home
 from misaka.core.web import config, gateway
 from misaka.core.web.browser import settings
 from misaka.core.web.browser.providers import providers
@@ -83,7 +82,7 @@ def run(args):
         name = args.key or 'agent-browser'
         if not args.yes and input(f'Install pinned {name} into the selected profile? [y/N] ').lower() != 'y':
             return
-        root = Path(current_scope().profile_dir or get_agent_dir()) / 'web-tools'
+        root = home.path('web_tools', current_scope().profile_dir)
         root.mkdir(parents=True, exist_ok=True)
         if name == 'agent-browser':
             npm = shutil.which('npm')

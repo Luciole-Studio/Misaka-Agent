@@ -9,8 +9,8 @@ What each section touches, and nothing else:
 
 - environment: reads the system (python, git, ripgrep, fd, pdftotext, ocrmypdf, the panel's
   terminal library) and prints what is missing, with the install command for this OS.
-- model: ``~/.misaka/agent/auth.json`` (the credential) and ``settings.json``
-  (``defaultProvider`` / ``defaultModel``), through the same registry every session uses;
+- model: ``~/.misaka/agent/auth.json`` (the credential) and either global ``settings.json``
+  or the selected role's ``config.json``, through the same registry every session uses;
   then one tiny real request, because a stored key that does not work is the failure that
   otherwise shows up an hour later inside a research run.
 - sisters: ``~/.misaka/profiles/sisters/<id>/`` through ``roster.create_sister``. Without at
@@ -18,7 +18,7 @@ What each section touches, and nothing else:
 - skills: installs ``DEFAULT_SKILLS`` from the optional catalog that ships in the package,
   into the shared layer every role reads. Nothing else is installed by default.
 - documents: the optional PDF outline extra and the office libraries, checked by import.
-- web: ``~/.misaka/web.json`` -- a pinned search backend and its key, or the keyless ring.
+- web: the same complete settings menu as ``misaka web`` (search, extraction, browser, accounts and policy).
 - research: nothing; it explains the shape of a run and the approval gate, which is the one
   behaviour a first run meets without warning.
 - project: ``misaka init`` on a folder, and optionally a first pass of ``misaka doc`` over a
@@ -45,6 +45,7 @@ from misaka.cli.setup_ui import (
     prompt_choice,
     prompt_yes_no,
 )
+from misaka.config import home
 
 SECTIONS = ("environment", "model", "sisters", "skills", "documents", "web", "research", "project")
 
@@ -58,13 +59,6 @@ SECTIONS = ("environment", "model", "sisters", "skills", "documents", "web", "re
 # further to walk than the person with a credit card.
 FEATURED_PROVIDERS = ("anthropic", "openai-codex", "github-copilot", "xai", "openrouter",
                       "openai", "google", "mistral", "amazon-bedrock", "ollama")
-
-# Web search backends that take a key, and the variable the backend reads it from.
-WEB_BACKENDS = (
-    ("tavily", "TAVILY_API_KEY"), ("brave-free", "BRAVE_SEARCH_API_KEY"), ("exa", "EXA_API_KEY"),
-    ("firecrawl", "FIRECRAWL_API_KEY"), ("perplexity", "PERPLEXITY_API_KEY"), ("parallel", "PARALLEL_API_KEY"),
-    ("keenable", "KEENABLE_API_KEY"), ("xai", "XAI_API_KEY"), ("searxng", "SEARXNG_URL"),
-)
 
 # The skills a research install wants out of the box, from the optional catalog under
 # ``core/skills/assets/optional/``. Everything else in that catalog (140 skills across 24
@@ -163,14 +157,31 @@ class Wizard:
 
     def model(self) -> None:
         from misaka.cli.auth import _create_runtime, _install_hint, _missing_sdk_extras
-        from misaka.config import current_config
+        from misaka.config import current_config, profiles
+        from misaka.core.model_resolver import findExactModelReferenceMatch
+        from misaka.core.network import roster
         ui.print_header("Model & Provider")
         cfg = current_config()
         runtime = _create_runtime(read_only=False)
         registry = runtime.registry
+        targets = [("Global default (roles without their own default)", None),
+                   ("Last Order", os.path.join(cfg["roles_root"], "last_order")),
+                   *[(f"Sister {sid}", os.path.join(cfg["profiles_root"], sid))
+                     for sid in roster.roster_names(root=cfg["profiles_root"])]]
+        target, profile = targets[prompt_choice("Whose default model should change?",
+                                               [label for label, _ in targets], 0,
+                                               "A role's saved default does not change other roles or the global default.")]
+        pinned = profiles.pinned_model(profile) if profile else ""
+        if pinned:
+            selected = findExactModelReferenceMatch(pinned, registry.getAll())
+            if selected is not None:
+                cfg = {**cfg, "provider": selected.provider, "default_model": selected.id}
+            else:
+                ui.print_warning(f"Saved role default {pinned!r} is not uniquely identified in the catalog; choose it below.")
         known = sorted({model.provider for model in registry.getAll()})
         current = cfg["provider"] if cfg["provider"] in known else None
-        ui.print_info(f"Current default: {cfg['provider']} / {cfg['default_model']}"
+        ui.print_info(f"{target}: {pinned or cfg['provider'] + '/' + cfg['default_model']}"
+                      + (" (following global default)" if profile and not pinned else "")
                       + ("" if current else "  (provider unknown to this install)"))
         featured = [p for p in FEATURED_PROVIDERS if p in known]
         if current and current not in featured:
@@ -178,7 +189,7 @@ class Wizard:
         oauth_ids = {p.id for p in registry.getOAuthProviders()}
         labels = [*self._provider_labels(registry, featured, oauth_ids), "Another provider..."]
         default = featured.index(current) if current in featured else 0
-        picked = prompt_choice("Which provider should Last Order and the Sisters use by default?", labels, default,
+        picked = prompt_choice(f"Default provider for {target}", labels, default,
                                "A browser sign-in uses a subscription you already pay for; an API key is billed per token.")
         if picked == len(featured):
             others = [p for p in known if p not in featured]
@@ -194,8 +205,15 @@ class Wizard:
         self._credential(registry, runtime.storage, provider)
         model_id = self._pick_model(registry, provider, cfg)
         from misaka.core.settings_manager import SettingsManager
-        SettingsManager.create(os.getcwd()).setDefaultModelAndProvider(provider, model_id)
-        ui.print_success(f"Default model saved: {provider} / {model_id}")
+        try:
+            if profile:
+                profiles.persist_role_default_model(profile, f"{provider}/{model_id}", strict=True)
+            else:
+                SettingsManager.create(os.getcwd()).setDefaultModelAndProvider(provider, model_id)
+        except (OSError, ValueError) as error:
+            ui.print_error(f"Default model was not saved: {error}")
+            return
+        ui.print_success(f"Default model saved for {target}: {provider} / {model_id}")
         self.state["provider"], self.state["model"] = provider, model_id
         self._verify(registry, provider, model_id)
 
@@ -244,7 +262,7 @@ class Wizard:
             ui.print_warning("No key entered; you can add one later with /login inside the chat.")
             return
         storage.set(provider, {"type": "api_key", "key": key})
-        ui.print_success(f"Key stored in {storage.authPath if hasattr(storage, 'authPath') else '~/.misaka/agent/auth.json'}")
+        ui.print_success(f"Key stored in {storage.authPath if hasattr(storage, 'authPath') else home.display(home.path('auth'))}")
 
     def _oauth(self, registry, provider: str) -> None:
         """The same login the chat's /login runs, drawn as terminal lines.
@@ -339,12 +357,12 @@ class Wizard:
         current = cfg["default_model"] if cfg["provider"] == provider else None
         default = ids.index(current) if current in ids else 0
         labels = []
-        for index, model in enumerate(models):
+        for model in models:
             name = f"  — {model.name}" if model.name and model.name != model.id else ""
-            labels.append(model.id + name + ("   (this install's default)" if index == default else ""))
+            labels.append(model.id + name + ("   (current default)" if model.id == current else ""))
         return ids[prompt_choice(
             f"Default model for {provider}", labels, default,
-            "Last Order plans and writes with this; the Sisters use it too unless you pin theirs below.")]
+            "Only the selected default-model scope will be updated.")]
 
     @staticmethod
     def _model_choices(models: list, current: str | None) -> list:
@@ -352,13 +370,13 @@ class Wizard:
         ``claude-sonnet-4-5`` and ``claude-sonnet-4-5-20250929``; a first run should not have to
         work out that those are one model. A dated id survives only when its undated form is
         absent from the catalog, or when it is the one already configured."""
-        known = {model.id for model in models}
+        known = {(model.provider, model.id) for model in models}
 
-        def dated_alias(model_id: str) -> bool:
-            head, _, tail = model_id.rpartition("-")
-            return len(tail) == 8 and tail.isdigit() and head in known
+        def dated_alias(model) -> bool:
+            head, _, tail = model.id.rpartition("-")
+            return len(tail) == 8 and tail.isdigit() and (model.provider, head) in known
 
-        kept = [model for model in models if model.id == current or not dated_alias(model.id)]
+        kept = [model for model in models if model.id == current or not dated_alias(model)]
         return kept or list(models)
 
     def _verify(self, registry, provider: str, model_id: str) -> None:
@@ -402,7 +420,7 @@ class Wizard:
                       f"  {ui.tilde(profiles.shared_soul())}",
                       "      the shared identity every role loads first",
                       f"  {ui.tilde(os.path.join(roles_root, 'last_order'))}/",
-                      "      Last Order, the coordinator: config.yaml for MCP servers, skills/ for her skills",
+                      "      Last Order, the coordinator: settings.json for her model and MCP servers, skills/ for her skills",
                       f"  {ui.tilde(os.path.join(roles_root, 'sisters'))}/<id>/",
                       "      one folder per Sister: DESCRIBE.md routes work to her, SOUL.md is her voice", "")
         existing = roster.roster_names()
@@ -438,7 +456,7 @@ class Wizard:
         from misaka.cli.auth import _create_runtime
         from misaka.config import current_config
         cfg = current_config()
-        default_label = f"The same as Last Order ({cfg['provider']} / {cfg['default_model']})"
+        default_label = f"Follow the global default ({cfg['provider']} / {cfg['default_model']})"
         if prompt_choice("Which model should the Sisters run?", [default_label, "Pin a different one"], 0,
                          "Sisters read and gather; Last Order plans and writes. A cheaper model here is normal.") == 0:
             return None
@@ -447,11 +465,14 @@ class Wizard:
         except Exception as error:  # noqa: BLE001 - a registry that will not open is not worth failing the section for
             ui.print_warning(f"The model catalog could not be read ({error}); the Sisters follow the default.")
             return None
-        models = self._model_choices([m for m in registry.getAll() if m.provider == cfg["provider"]], None)
+        models = self._model_choices([m for m in registry.getAll() if registry.hasConfiguredAuth(m)], None)
         if not models:
-            return prompt("Model id for the Sisters", "") or None
-        labels = [m.id + (f"  — {m.name}" if m.name and m.name != m.id else "") for m in models]
-        return models[prompt_choice(f"Model for the Sisters ({cfg['provider']})", labels, 0)].id
+            ui.print_warning("No configured models are available; run `misaka setup model` to configure a provider. "
+                             "The Sisters follow the global default for now.")
+            return None
+        labels = [f"{m.provider}/{m.id}" + (f"  — {m.name}" if m.name and m.name != m.id else "") for m in models]
+        selected = models[prompt_choice("Model for the Sisters (all configured providers)", labels, 0)]
+        return f"{selected.provider}/{selected.id}"
 
     # -- 4. skills ----------------------------------------------------------------------------
 
@@ -568,69 +589,38 @@ class Wizard:
     # -- 6. web -------------------------------------------------------------------------------
 
     def web(self) -> None:
-        from misaka.core.web import config
-        ui.print_header("Web search")
-        current = config.web_config()
-        backend = current.get("search_backend") or current.get("backend")
-        ui.print_info("Web search works with no configuration: a keyless vendor ring answers searches.",
-                      "A pinned backend with your own key is steadier and faster.")
-        if backend:
-            ui.print_success(f"Pinned backend: {backend}")
-        names = ["Keep the keyless ring only"] + [name for name, _env in WEB_BACKENDS]
-        default = 1 + [n for n, _e in WEB_BACKENDS].index(backend) if backend in dict(WEB_BACKENDS) else 0
-        choice = prompt_choice("Search backend", names, default)
-        if choice == 0:
-            if backend and prompt_yes_no(f"Unpin {backend} and use the ring only?", False):
-                config.unset_config("backend")
-                config.unset_config("search_backend")
-            self.state["web"] = "keyless ring"
-            return
-        name, env = WEB_BACKENDS[choice - 1]
-        label = "SearXNG instance URL" if env == "SEARXNG_URL" else f"{name} API key ({env})"
-        if config.has_env(env):
-            ui.print_success(f"{env} is already set; Enter keeps it.")
-        value = prompt(label, password=(env != "SEARXNG_URL"))
-        if not value and not config.has_env(env):
-            # Pinning without a credential is worse than not pinning: the resolver takes an
-            # explicit backend "ignoring availability", so every later search fails on the
-            # missing key instead of falling back. A zero-config install that worked would
-            # come out of this wizard broken, under a line that said it had been saved.
-            ui.print_warning(f"No {env} given, so {name} was not pinned: the keyless ring stays in charge.")
-            ui.print_info(f"Add it later with `misaka web set env.{env} <value>` and `misaka web set backend {name}`.")
-            self.state["web"] = "keyless ring"
-            return
-        changes = {"backend": name}
-        if value:
-            changes[f"env.{env}"] = value
-        path = config.update_config(changes)
-        ui.print_success(f"{name} saved in {path}")
-        self.state["web"] = name
+        from misaka.cli.web import run
+
+        run(SimpleNamespace(op="configure", profile=None, extension=[], key=None, value=None,
+                            capability=None, tier=None, install=False, login=False, yes=False), from_setup=True)
+        self.state["web"] = "Settings reviewed; use misaka web status for local readiness (not a network test)"
 
     # -- 7. research --------------------------------------------------------------------------
 
     def research(self) -> None:
-        """Nothing to configure, everything to say. A run's limits are per-run flags with
-        defaults in code, and the approval gate is an environment variable, so this section
-        reports rather than writes -- but a first run walks into the gate within minutes, and
-        a wizard that never mentions it is where the "it just stopped" reports come from."""
+        """Report defaults without changing them. The environment sets default plan approval;
+        the /research picker saves a per-run choice. Explain the wait before a first run."""
         from misaka.config import CFG
         from misaka.core.research import runs
         ui.print_header("How a research run behaves")
         limits = runs.DEFAULT_LIMITS
         ui.print_info("Last Order turns your question into a plan, the plan into cards, and hands the",
                       "cards to the Sisters. Per run, unless you pass the flags:", "")
-        ui.print_check(True, "parallel cards", f"{limits['parallel']}    (`--parallel`)")
+        ui.print_check(True, "parallel LO nodes", f"{limits['parallel']}    (`--parallel`)")
+        ui.print_check(True, "Sister cards per LO", f"{limits['sister_parallel']}    (`--sister-parallel`; global admission limits still apply)")
         ui.print_check(True, "follow-up rounds", f"{limits['max_followups']}    extra rounds a node may run before concluding (`--followups`)")
         ui.print_check(True, "sub-question depth", f"{limits['max_depth']}    (`--depth`)")
-        gate = bool(CFG.get("research_plan_approval", True))
+        gate = bool(CFG["research_plan_approval"])
         ui.print_check(gate, "plan approval",
                        "every node's plan waits for you, in a conversation with Last Order; she starts the "
                        "run herself once you agree" if gate else
-                       "off (MISAKA_RESEARCH_PLAN_APPROVAL=0): plans run unattended")
+                       "off (settings.json research.plan_approval = false): accepted plans proceed without an approval wait")
         if gate:
-            ui.print_info("", "So a run pauses and talks to you before it spends anything. There is no approve",
+            ui.print_info("", "So each plan waits for your go-ahead before its Sisters execute it. There is no approve",
                           "command and no keyword: you discuss the plan and she goes when you are satisfied.",
-                          "Set MISAKA_RESEARCH_PLAN_APPROVAL=0 for unattended runs.")
+                          "Set research.plan_approval to false in settings.json to make automatic plan execution the default.")
+        ui.print_info("Use bare /research to choose Require approval or Automatic after the other run settings.",
+                      "That choice is saved for this run and its forks, including resume; clarification still applies.")
         self.state["approval"] = gate
 
     # -- 8. project ---------------------------------------------------------------------------
@@ -704,9 +694,7 @@ class Wizard:
         for binary in ("git", "rg", "fd", "pdftotext"):
             ui.print_check(shutil.which(binary) is not None, binary, "" if shutil.which(binary) else _install_command(binary))
         ui.print_check(state.get("pageindex", None), "PDF outlines", "" if state.get("pageindex") else "optional")
-        # Web search works with no configuration at all, so this row is never a failure: the
-        # only question is whether a backend got pinned on top of the keyless ring.
-        ui.print_check(True, "web search", str(state.get("web") or "keyless ring"))
+        ui.print_check(None, "web tools", str(state.get("web") or "not checked: misaka web status"))
         skills = state.get("skills")
         ui.print_check(bool(skills) if skills is not None else None, "skills",
                        ", ".join(skills) if skills else "none added: `misaka skills optional-list`")

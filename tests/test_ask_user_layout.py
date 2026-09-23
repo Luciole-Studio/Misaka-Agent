@@ -17,7 +17,10 @@ def research_questions():
     tree = ast.parse(Path(research.__file__).read_text())
     call = next(node for node in ast.walk(tree) if isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Name) and node.func.id == "AskUserQuestionComponent")
-    return eval(compile(ast.Expression(call.args[0]), "<research picker>", "eval"), vars(research))
+    options = next(node.value for node in ast.walk(tree) if isinstance(node, ast.Assign)
+                   and any(isinstance(target, ast.Name) and target.id == "approval_options" for target in node.targets))
+    return eval(compile(ast.Expression(call.args[0]), "<research picker>", "eval"), vars(research),
+                {"approval_options": ast.literal_eval(options)})
 
 
 def plain(lines):
@@ -40,7 +43,7 @@ def test_research_picker_all_pages_fit(width):
         component.current = page
         component.answers = {q["question"]: q["options"][0]["label"] for q in questions[:page]}
         assert_fits(component, width)
-    component.current = 2
+    component.current = next(i for i, q in enumerate(questions) if q["question"] == research._ROUNDS_QUESTION)
     if width >= 30:
         rendered = plain(assert_fits(component, width))
         assert re.sub(r"\s+", "", research._ROUNDS_QUESTION) in re.sub(r"\s+", "", rendered)

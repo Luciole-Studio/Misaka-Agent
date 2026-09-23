@@ -32,9 +32,8 @@ from typing import Any
 
 import httpx
 
-from misaka.core.tools._web.bounded import UnsafeUrlError, vet_public_url
-from misaka.core.tools._web.website_policy import check_website_access
 from misaka.core.web.accounting import account_call
+from misaka.core.web.bounded import UnsafeUrlError, vet_public_url
 from misaka.core.web.config import (
     keyless_tier_enabled,
     provider_env,
@@ -50,6 +49,7 @@ from misaka.core.web.keyless import (
 from misaka.core.web.network import proxy_for_url
 from misaka.core.web.provider import WebSearchProvider, check_response
 from misaka.core.web.runtime import api_client
+from misaka.core.web.website_policy import check_website_access
 
 logger = logging.getLogger(__name__)
 

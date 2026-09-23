@@ -1,9 +1,9 @@
 """Role profile layout: ~/.misaka/profiles/<role>/.
 
-As in pi, personality (SOUL.md, config.json) and skills/MCP (skills/, mcp/,
-config.yaml) are user data that share one role directory; nothing lives in the
-source tree. Built-in subagent types ship with the package
-(misaka/core/subagent/agents/) and can be overridden in ~/.misaka/agent/agents/.
+A role directory is a partial overlay of the home: ``SOUL.md`` (voice), ``settings.json``
+(what she holds of her own: her pinned model, her MCP servers, her web overrides -- see
+``settings_manager.ROLE_KEYS``), ``skills/`` and ``subagents/``. Nothing lives in the source
+tree. Built-in subagent types ship with the package (misaka/core/subagent/agents/).
 
 ``<role>`` is a path relative to profiles/, e.g. ``last_order`` or ``sisters/10032``.
 """
@@ -26,59 +26,105 @@ def is_last_order(profile_dir):
     return role == "last_order"
 
 
-def config_yaml(profile_dir):
-    """Return the path of the role's config.yaml (MCP server definitions and the like)."""
-    return os.path.join(profile_dir, "config.yaml")
+def settings_path(profile_dir):
+    """The role's own settings file; ``SettingsManager`` reads it as the ``role`` scope."""
+    return os.path.join(profile_dir, "settings.json")
 
 
-def pinned_model(profile_dir):
-    """Return the model this role runs on, or ``""`` when she has none of her own.
+def role_settings(profile_dir, *, strict=False):
+    """The role's own settings as written, ``{}`` when she has none (or, unless strict, none readable)."""
+    if not profile_dir:
+        return {}
+    try:
+        with open(settings_path(profile_dir), encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        if strict:
+            raise
+        return {}
+    if not isinstance(data, dict):
+        if strict:
+            raise ValueError(f"Expected an object in {settings_path(profile_dir)}")
+        return {}
+    return data
+
+
+def pinned_model(profile_dir, *, strict=False):
+    """Return ``provider/model`` for the model this role runs on, or ``""`` when she has none of her own.
 
     One role, one model: her chat starts on it (``cli.chat.assembly``), her task cards
     run on it (``network.sister_runtime``), and the model selector writes it back
     (:func:`persist_role_default_model`). Without a pin the role falls back to the
     product-wide default, which is the global ``settings.json`` one.
     """
-    if not profile_dir:
+    data = role_settings(profile_dir, strict=strict)
+    provider = str(data.get("defaultProvider") or "").strip()
+    model = str(data.get("defaultModel") or "").strip()
+    if bool(provider) != bool(model):
+        if strict:
+            raise ValueError(f"{settings_path(profile_dir)}: defaultProvider and defaultModel go together")
         return ""
-    try:
-        with open(os.path.join(profile_dir, "config.json"), encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (OSError, ValueError):
-        return ""
-    return str(data.get("model") or "").strip() if isinstance(data, dict) else ""
+    return f"{provider}/{model}" if provider else ""
 
 
-def persist_role_default_model(profile_dir, model_id):
+def resolve_model_reference(reference, registry, *, fallback_provider=None):
+    """Resolve a role pin to provider/id without borrowing another role's endpoint.
+
+    An explicit legacy provider may disambiguate a bare ID. Canonical references
+    always win; raw model IDs containing slashes remain valid registry IDs.
+    """
+    from misaka.core.model_resolver import findExactModelReferenceMatch
+
+    reference = str(reference or "").strip()
+    models = list(registry.getAll())
+    model = findExactModelReferenceMatch(reference, models)
+    if model is None and fallback_provider:
+        model = next((m for m in models if m.provider == fallback_provider and m.id == reference), None)
+    if model is None:
+        matches = [f"{m.provider}/{m.id}" for m in models if m.id.casefold() == reference.casefold()]
+        if matches:
+            raise ValueError(f"Ambiguous model {reference!r}; choose provider/model: {', '.join(matches)}")
+        raise ValueError(f"Unknown model {reference!r}; choose a registered provider/model")
+    return f"{model.provider}/{model.id}"
+
+
+def explicit_model_override(profile_dir, model=None):
+    """Return only an explicit override (a ``--model`` or a card's own); saved defaults and pins
+    are never overrides -- the session resolves those itself."""
+    return model or None
+
+
+def persist_role_default_model(profile_dir, model_id, *, strict=False):
     """Record a newly chosen default model as this role's own pin.
 
-    Every role starts on her own pin, so a default set in her session -- Ctrl+S in the
-    model selector, or adopting a provider's default right after ``/login`` -- has to land
-    there or the next launch quietly ignores it and she comes back on the old model. pi's
-    ``setModel(persist=True)`` writes only the global ``settings.json`` default, which is
-    one value for the whole install: without this, setting a default for one Sister would
-    set it for every Sister and for Last Order too.
+    Callers save a canonical provider/model reference. Strict mode distinguishes a
+    failed save from an unchanged value; legacy callers retain the boolean contract.
     """
     if not profile_dir or not model_id:
+        if strict:
+            raise ValueError("A role profile and model reference are required")
         return False
-    path = os.path.join(profile_dir, "config.json")
+    provider, slash, model = str(model_id).partition("/")
+    if not slash or not provider or not model:
+        if strict:
+            raise ValueError(f"A role pin is a provider/model reference, not {model_id!r}")
+        return False
     try:
-        with open(path, encoding="utf-8") as handle:
-            data = json.load(handle)
-        if not isinstance(data, dict):
-            return False
-    except FileNotFoundError:
-        data = {}
-    except (OSError, ValueError):
-        return False
-    if data.get("model") == model_id:
-        return False
-    data["model"] = model_id
-    try:
+        from filelock import FileLock
+
         os.makedirs(profile_dir, exist_ok=True)
-        atomic.write_text(path, json.dumps(data, ensure_ascii=False, indent=2))
-    except OSError:
-        # The pin is a convenience, not the record: settings.json already has the default.
+        path = settings_path(profile_dir)
+        with FileLock(path + ".lock"):     # the lock SettingsManager takes for the same file
+            data = role_settings(profile_dir, strict=True)
+            if data.get("defaultProvider") == provider and data.get("defaultModel") == model:
+                return False
+            data["defaultProvider"], data["defaultModel"] = provider, model
+            atomic.write_text(path, json.dumps(data, ensure_ascii=False, indent=2))
+    except (OSError, ValueError):
+        if strict:
+            raise
         return False
     return True
 
@@ -91,15 +137,14 @@ SHARED_SOUL_TEMPLATE = """# MISAKA Network · Shared identity
 
 
 def shared_soul():
-    """Return the path of the shared soul, ~/.misaka/profiles/MISAKA.md, seeding it on first use.
+    """Return the path of the shared soul (``MISAKA.md`` in the home), seeding it on first use.
 
     Last Order, the Sisters, and their sub-agents all load it before their own
-    SOUL.md. An existing file is never overwritten. Research also loads this shared
-    file when its bare entry point omits the role-specific SOUL.md; shared user
-    conventions and role personality are separate inputs.
+    SOUL.md. An existing file is never overwritten. Research uses the same shared
+    conventions and role personality as ordinary sessions.
     """
-    from misaka.config import CFG
-    path = os.path.join(os.path.expanduser(CFG["roles_root"]), "MISAKA.md")
+    from misaka.config import home
+    path = str(home.path("shared_soul"))
     if not os.path.exists(path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:

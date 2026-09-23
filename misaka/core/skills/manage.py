@@ -681,8 +681,6 @@ def _bind_operations(profile_dir, operations, visible_roots):
             entry, err = index.resolve(visible_roots, name, require_compatible=False)
             if err:
                 return None, err
-            if entry.get("legacy"):
-                return None, "Legacy flat Skill documents are read-only; create a directory Skill to migrate one."
             if Path(entry.get("root", "")).resolve() != root.resolve():
                 return None, f"Skill '{name}' belongs to the {entry['layer']} layer; this session only manages its own role."
             rel = str(Path(entry["dir"]).relative_to(root))
@@ -692,7 +690,7 @@ def _bind_operations(profile_dir, operations, visible_roots):
         op["name"] = rel
         if op.get("absorbed_into"):
             target, err = index.resolve(visible_roots, op["absorbed_into"], require_compatible=False)
-            if err or target.get("legacy") or Path(target.get("root", "")).resolve() != root.resolve():
+            if err or Path(target.get("root", "")).resolve() != root.resolve():
                 return None, "The absorbing skill must exist in this role."
             op["absorbed_into"] = target["rel"]
         bound.append(op)

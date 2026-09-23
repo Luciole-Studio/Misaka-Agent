@@ -1,22 +1,20 @@
 """URL identity must agree between input normalization, policy rules and the HTTP client."""
 import json
-from pathlib import Path
 
 import httpx
 import pytest
+from webconf import write_web
 
 from misaka.config.product import CFG
 from misaka.core.tools import download_file, web_fetch
-from misaka.core.tools._web import bounded, website_policy
-from misaka.core.tools._web.url_safety import normalize_url_for_request
-from misaka.core.web import cache, config, extract
+from misaka.core.web import bounded, cache, config, extract, website_policy
+from misaka.core.web.url_safety import normalize_url_for_request
 
 URL = "https://source.example.org/paper"
 
 
 @pytest.fixture(autouse=True)
 def isolated_web(monkeypatch, tmp_path):
-    monkeypatch.setitem(CFG, "web_config", str(tmp_path / "web.json"))
     monkeypatch.setitem(CFG, "web_cache", str(tmp_path / "cache"))
     for key in ("MISAKA_USAGE_DB", "MISAKA_USAGE_TASK_ID", "MISAKA_USAGE_GENERATION"):
         monkeypatch.delenv(key, raising=False)
@@ -28,7 +26,7 @@ def isolated_web(monkeypatch, tmp_path):
 
 
 def configure(**values):
-    Path(CFG["web_config"]).write_text(json.dumps(values))
+    write_web(values)
     website_policy.invalidate_cache()
 
 

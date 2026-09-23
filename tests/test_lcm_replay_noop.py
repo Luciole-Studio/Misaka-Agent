@@ -89,7 +89,7 @@ def test_real_ingest_cache_jitter_then_reopen_and_fork(tmp_path, monkeypatch):
 
     config = LCMConfig(database_path=context_engine.config_bridge.database_path(SimpleNamespace(cwd=str(tmp_path))))
     monkeypatch.setenv("LCM_DATABASE_PATH", config.database_path)
-    monkeypatch.setenv("MISAKA_CODING_AGENT_DIR", str(tmp_path))
+    monkeypatch.setenv("MISAKA_HOME", str(tmp_path))
     monkeypatch.delenv("MISAKA_SUBAGENT_PARENT_SESSION_ID", raising=False)
     monkeypatch.setattr(context_engine.config_bridge, "load_config", lambda **_: config)
     manager = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))

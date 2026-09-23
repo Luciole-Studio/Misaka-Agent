@@ -86,8 +86,6 @@ def load(entry, session_id=None, *, file_path=None, profile_dir=None, preprocess
             "error": f"Skill '{name}' is not supported on this platform.",
             "readiness_status": "unsupported",
         }
-    if file_path and entry.get("legacy"):
-        return {"success": False, "error": "Legacy flat skills have no supporting directory."}
     if file_path:
         text, error = read_support_file(directory, file_path)
         return (
@@ -107,7 +105,7 @@ def load(entry, session_id=None, *, file_path=None, profile_dir=None, preprocess
     tags, related = (
         _parse_tags(hm.get(k) or fm.get(k, "")) for k in ("tags", "related_skills")
     )
-    linked = {} if entry.get("legacy") else collect_linked_files(directory)
+    linked = collect_linked_files(directory)
     setup = readiness(fm, profile_dir, runtime=runtime, name=name, capture=True)
     rendered = (
         preprocess_skill_content(

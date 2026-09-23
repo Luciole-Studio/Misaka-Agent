@@ -14,11 +14,11 @@ import json
 import os
 import secrets
 import sqlite3
-import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from misaka.config import home
 from misaka.core.platform import tasks as task_store
 from misaka.utils import atomic
 
@@ -144,7 +144,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS research_tasks_local ON research_run_tasks(run
 ACTIVE = ("active", "waiting_input", "stopping")
 NODE_TERMINAL = ("closed", "failed", "parked")
 # closing = own research complete, waiting for child nodes; no filesystem merge
-DEFAULT_LIMITS = {"max_depth": 3, "parallel": 4, "max_followups": 2}
+DEFAULT_LIMITS = {"max_depth": 3, "parallel": 4, "sister_parallel": 4, "max_followups": 2}
 RESEARCH_SCHEMA_VERSION = 16   # task planning stays in the card session; no separate plan-artifact link
 DRIVER_TTL_SECONDS = 300
 RESEARCH_TABLES = (
@@ -152,7 +152,6 @@ RESEARCH_TABLES = (
     "research_claims", "research_findings", "research_artifacts",
     "research_issues", "research_run_tasks", "research_branches", "research_runs",
 )
-ACTIVE_RESEARCH_TABLES = RESEARCH_TABLES
 
 
 def _execute_script(con, source):
@@ -169,7 +168,7 @@ def _execute_script(con, source):
 
 @contextmanager
 def _savepoint(con):
-    """Make migration rollback independent of a caller's surrounding transaction."""
+    """Make schema-creation rollback independent of a caller's surrounding transaction."""
     name = "research_schema_init"
     con.execute(f"SAVEPOINT {name}")
     try:
@@ -193,12 +192,6 @@ def _schema_state(con):
     return bool(row[0]), bool(row[1]), row[2]
 
 
-def _reject_newer(newest):
-    if newest is not None and int(newest) > RESEARCH_SCHEMA_VERSION:
-        raise RuntimeError(f"This board was written by a newer MISAKA (research schema v{newest}; this build knows "
-                           f"v{RESEARCH_SCHEMA_VERSION}). Upgrade MISAKA rather than downgrading the data.")
-
-
 def _matches_current_schema(con):
     """True when every active table has the current columns and UNIQUE constraints."""
     expected = sqlite3.connect(":memory:")
@@ -218,34 +211,9 @@ def _matches_current_schema(con):
             return columns, unique
 
         return all(signature(con, table) == signature(expected, table)
-                   for table in ACTIVE_RESEARCH_TABLES)
+                   for table in RESEARCH_TABLES)
     finally:
         expected.close()
-
-
-def _reject_interrupted_migration(con):
-    """Do not hide tables an older migration renamed before it could rebuild them."""
-    backups = []
-    for table in ACTIVE_RESEARCH_TABLES:
-        active = con.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
-        ).fetchone()
-        backup = con.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name GLOB ? LIMIT 1",
-            (f"{table}_bak_*",),
-        ).fetchone()
-        if backup:
-            backups.append(backup[0])
-        if not active and backup:
-            raise RuntimeError(
-                f"research: interrupted schema migration left {table} in {backup[0]}; "
-                "inspect or restore that backup before retrying"
-            )
-    if backups and _matches_current_schema(con):
-        raise RuntimeError(
-            "research: interrupted schema migration left current active tables beside "
-            f"{backups[0]}; inspect the backup before retrying"
-        )
 
 
 def _validate_current_schema(con):
@@ -261,97 +229,21 @@ def _validate_current_schema(con):
 
 
 def init(con):
-    has_runs, current, newest = _schema_state(con)
-    _reject_newer(newest)
+    has_runs, current, _newest = _schema_state(con)
     if has_runs and current:
         _validate_current_schema(con)
         return                               # the normal read path takes no SQLite write lock
-    if current:
-        raise RuntimeError("The research schema marker exists but the research_runs table is missing.")
-    _reject_interrupted_migration(con)
-
-    upgraded = None
-    # DDL is transactional in SQLite, but ``executescript`` commits implicitly. Keep renames, new
-    # tables, row copies, indexes, backfill and the version marker under one explicit transaction.
+    # DDL is transactional in SQLite, but ``executescript`` commits implicitly. Keep the new
+    # tables, indexes and the version marker under one explicit transaction.
     with task_store.write_txn(con), _savepoint(con):
-        # Another process may have migrated while this one waited for BEGIN IMMEDIATE.
-        has_runs, current, newest = _schema_state(con)
-        _reject_newer(newest)
+        # Another process may have created the schema while this one waited for BEGIN IMMEDIATE.
+        has_runs, current, _newest = _schema_state(con)
         if has_runs and current:
             _validate_current_schema(con)
-            return                           # current schema: nothing to migrate, nothing to replay
-        if current:
-            raise RuntimeError("The research schema marker exists but the research_runs table is missing.")
-        _reject_interrupted_migration(con)
-        if has_runs:
-            # No in-place migration from older schemas. The prose is in files, but the workflow state
-            # (phases, waves, driver leases, task links) lives only here, so the tables cannot be rebuilt
-            # from the files: the old ones are renamed, not dropped, and carried forward column by column.
-            suffix = f"_bak_{time.strftime('%Y%m%d%H%M%S')}"
-            renamed = []
-            for table in RESEARCH_TABLES:
-                if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
-                    continue
-                for index in con.execute(f'PRAGMA index_list("{table}")').fetchall():
-                    if index[3] == "c":   # named indexes stay global; free the names for the new tables
-                        con.execute(f'DROP INDEX IF EXISTS "{index[1]}"')
-                con.execute(f'ALTER TABLE "{table}" RENAME TO "{table}{suffix}"')
-                renamed.append((table, f"{table}{suffix}"))
-        else:
-            renamed = []
-        _execute_script(con, SCHEMA)
-        _execute_script(con, INDEXES)
-        if renamed:
-            upgraded = (suffix, _carry_forward(con, renamed))
-        con.execute("DROP TRIGGER IF EXISTS research_terminal_notification")  # obsolete and no longer consumed
-        _backfill_dependencies(con)
-        con.execute(
-            "INSERT INTO schema_migrations(component,version,applied_at) VALUES(?,?,?)",
-            ("research", RESEARCH_SCHEMA_VERSION, int(time.time())),
-        )
-    if upgraded:
-        suffix, copied = upgraded
-        print(f"research: schema upgraded to v{RESEARCH_SCHEMA_VERSION}; previous tables kept as *{suffix}, "
-              f"rows carried forward: {copied}", file=sys.stderr)
-
-
-def _carry_forward(con, renamed):
-    """Copy every old row over the columns both schemas share.
-
-    The surrounding schema transaction is deliberately aborted if a row violates the new schema:
-    silently keeping only some rows would turn the version marker into a lie.
-    """
-    copied = {}
-    for table, backup in renamed:
-        new_cols = [row[1] for row in con.execute(f'PRAGMA table_info("{table}")')]
-        old_cols = {row[1] for row in con.execute(f'PRAGMA table_info("{backup}")')}
-        shared = [col for col in new_cols if col in old_cols]
-        expected = con.execute(f'SELECT COUNT(*) FROM "{backup}"').fetchone()[0]
-        if not shared:
-            if new_cols and expected:
-                raise RuntimeError(
-                    f"research: {table}: no columns can carry {expected} old row(s) forward"
-                )
-            continue
-        cols = ",".join(f'"{col}"' for col in shared)
-        selected = [f'"{col}"' for col in shared]
-        if table == "research_run_tasks" and {"local_id", "task_id"} <= old_cols:
-            # Before v8 a node's probes could reuse local ids; the new unique index would drop the
-            # later ones. Transform only the copy: a backup must remain an exact recovery source.
-            selected[shared.index("local_id")] = (
-                'CASE WHEN "local_id" IS NOT NULL AND rowid NOT IN '
-                f'(SELECT MIN(rowid) FROM "{backup}" WHERE "local_id" IS NOT NULL '
-                'GROUP BY "run_id","branch_id","local_id") '
-                'THEN "local_id" || \'#\' || "task_id" ELSE "local_id" END'
-            )
-        source = ",".join(selected)
-        copied[table] = con.execute(
-            f'INSERT INTO "{table}" ({cols}) SELECT {source} FROM "{backup}"').rowcount
-        if copied[table] != expected:
-            raise RuntimeError(
-                f"research: {table}: copied {copied[table]} of {expected} row(s) from {backup}"
-            )
-    return copied
+            return
+        if task_store.require_schema(con, "research", RESEARCH_SCHEMA_VERSION, populated=has_runs):
+            _execute_script(con, SCHEMA)
+            _execute_script(con, INDEXES)
 
 
 def acquire_driver(con, run_id, lock, ttl_seconds=DRIVER_TTL_SECONDS):
@@ -389,51 +281,11 @@ def release_driver(con, run_id, lock):
 
 # Cards past these statuses keep their dependency history as it is: the DAG must not be rewritten
 # under a moving card, and a finished one (whose execution already finished) has
-# nothing left to wait for. Read by ``_backfill_dependencies`` and by ``workflow._submit_tasks``,
-# the two places that replay a plan's edges onto cards that may already have run.
+# nothing left to wait for. Read by ``workflow._submit_tasks``, which replays a plan's edges
+# onto cards that may already have run.
 SETTLED_TASK_STATUSES = frozenset({"running", "review", "done", "failed", "stopped", "archived"})
 
 
-def _backfill_dependencies(con):
-    """Replay the stored local-id dependencies into the generic task DAG.
-
-    Idempotent where nothing is wrong: edges that already exist are skipped, settled cards are
-    left alone, and a card whose project folder no longer exists cannot make the
-    replay fail. An edge that a *live* card refuses is the one thing it will not swallow -- see
-    the raise below."""
-    rows = con.execute(
-        "SELECT task_id,run_id,branch_id,local_id,depends_json FROM research_run_tasks"
-    ).fetchall()
-    by_scope = {(row["run_id"], row["branch_id"], row["local_id"]): row["task_id"] for row in rows}
-    for row in rows:
-        try:
-            dependencies = json.loads(row["depends_json"] or "[]")
-        except ValueError:
-            continue
-        parents = [by_scope.get((row["run_id"], row["branch_id"], dep)) for dep in dependencies]
-        if any(parent is None for parent in parents):
-            continue
-        task = task_store.get(con, row["task_id"])
-        if task is None or task["status"] in SETTLED_TASK_STATUSES:
-            continue
-        from misaka.core.platform import cards as card_files
-        if not os.path.isfile(card_files.card_path(task["workspace"], row["task_id"])):
-            continue        # the card's file is gone: its `needs` cannot be read, so nothing moves
-        try:
-            task_store.link_dependencies(con, parents, row["task_id"])
-        except (ValueError, OSError) as error:
-            raise RuntimeError(
-                f"Research dependency could not be replayed onto {row['task_id']}: {error}"
-            ) from error
-        if dependencies:
-            task_store.promote_task(con, row["task_id"])
-
-
-# Where a run's files go inside the project. "project-flat" (2026-09-05 .. 09-11) wrote every
-# root artifact as ``root/<run>-<name>`` and every fork artifact as ``forks/<node>-<name>``, with
-# each card's output folder beside them. "by-node" gives every node one folder -- its files, its
-# cards, and (bundle) the sources they cite -- and puts run-level products under ``final/``.
-# Old runs keep their layout; only new runs get the current one.
 ARTIFACT_LAYOUT = "by-node"
 LAYOUTS = frozenset({"project-flat", ARTIFACT_LAYOUT})
 
@@ -465,15 +317,18 @@ def normalize_limits(raw=None):
         raise ValueError("max_depth must be an integer") from error
     if not 0 <= depth <= 12:
         raise ValueError("max_depth must be between 0 and 12")
-    parallel = raw.get("parallel", DEFAULT_LIMITS["parallel"])
-    if isinstance(parallel, bool) or not isinstance(parallel, (int, str)):
-        raise ValueError("parallel must be a positive integer")  # noqa: TRY004 - startup callers surface ValueError
-    try:
-        parallel = int(parallel)
-    except ValueError as error:
-        raise ValueError("parallel must be a positive integer") from error
-    if parallel < 1:
-        raise ValueError("parallel must be a positive integer")
+    concurrency = {}
+    for key in ("parallel", "sister_parallel"):
+        value = raw.get(key, DEFAULT_LIMITS[key])
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            raise ValueError(f"{key} must be a positive integer")  # noqa: TRY004 - startup callers surface ValueError
+        try:
+            value = int(value)
+        except ValueError as error:
+            raise ValueError(f"{key} must be a positive integer") from error
+        if value < 1:
+            raise ValueError(f"{key} must be a positive integer")
+        concurrency[key] = value
     # How many more times a node may send its Sisters out after its first cards are back,
     # before it must conclude. Conversation with the user is never counted.
     followups = raw.get("max_followups", DEFAULT_LIMITS["max_followups"])
@@ -485,7 +340,12 @@ def normalize_limits(raw=None):
         raise ValueError("max_followups must be an integer between 0 and 6") from error
     if not 0 <= followups <= 6:
         raise ValueError("max_followups must be an integer between 0 and 6")
-    return {"max_depth": depth, "parallel": parallel, "max_followups": followups}
+    result = {"max_depth": depth, **concurrency, "max_followups": followups}
+    if "plan_approval" in raw:
+        if not isinstance(raw["plan_approval"], bool):
+            raise ValueError("plan_approval must be a boolean")
+        result["plan_approval"] = raw["plan_approval"]
+    return result
 
 
 def prepare_runner(con, table, row_id):
@@ -509,6 +369,40 @@ def claim_runner(con, table, row_id, key):
     return con.execute(f'UPDATE "{table}" SET runner_pid=?, runner_identity=? WHERE id=? AND runner_key=? '
                        'AND (runner_pid IS NULL OR (runner_pid=? AND runner_identity=?))',
                        (pid, identity, row_id, key, pid, identity)).rowcount == 1
+
+
+def note_claim_failure(con, table, row_id, key):
+    """Say which part of the claim fence refused this process, and leave it on the row.
+
+    2026-09-18 (B33): six node processes exited with "superseded execution" within a second
+    of spawning, four resumes in a row, and the driver could only report "no exception was
+    recorded". Every replay of the fence in isolation succeeded; the live difference was
+    never captured because the losing side wrote nothing down. Now it does: the row as the
+    process saw it against what the process holds, kept in ``last_error`` (only if nothing
+    else is there yet) so the driver's error carries it."""
+    from misaka.core.platform import processes
+    row = con.execute(f'SELECT runner_key, runner_pid, runner_identity FROM "{table}" WHERE id=?',
+                      (row_id,)).fetchone()
+    pid = os.getpid()
+    identity = processes.identity(pid)
+    if row is None:
+        reason = f"row {row_id} no longer exists"
+    elif not key:
+        reason = "this process was started without a runner key"
+    elif row["runner_key"] != key:
+        reason = (f"runner key mismatch: row holds {(row['runner_key'] or '')[:8] or 'NULL'!r}, "
+                  f"this process holds {key[:8]!r}")
+    elif row["runner_pid"] is not None and (row["runner_pid"] != pid or row["runner_identity"] != identity):
+        reason = (f"runner identity mismatch: row holds pid {row['runner_pid']} {row['runner_identity']!r}, "
+                  f"this process is pid {pid} {identity!r}")
+    else:
+        reason = "fence refused for no visible reason (the row changed between the claim and this read)"
+    text = f"claim refused: {reason}"
+    try:
+        con.execute(f'UPDATE "{table}" SET last_error=COALESCE(last_error,?) WHERE id=?', (text, row_id))
+    except sqlite3.Error:
+        pass
+    return text
 
 
 def release_runner(con, table, row_id, key):
@@ -543,6 +437,24 @@ def task_contexts(con):
 def project_name(run):
     """Display name of the run's project: the workspace folder's basename."""
     return os.path.basename(run["workspace"].rstrip(os.sep)) or run["workspace"]
+
+
+def for_session(con, session_id):
+    """The runs a conversation started, newest first -- the ones whose mode it is in."""
+    if not session_id or not con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_runs'").fetchone():
+        return []
+    return [dict(row) for row in con.execute(
+        "SELECT * FROM research_runs WHERE origin_session=? ORDER BY created_at DESC", (session_id,))]
+
+
+def is_active(con, run_id):
+    """Whether a driver is meant to be advancing this run right now."""
+    if not run_id or not con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_runs'").fetchone():
+        return False
+    row = con.execute("SELECT status FROM research_runs WHERE id=?", (run_id,)).fetchone()
+    return bool(row) and row["status"] in ACTIVE
 
 
 def ensure_layout(run):
@@ -665,7 +577,8 @@ def set_state(con, run_id, *, phase=None, status=None, error=None,
     a driver that lost its lease cannot fail or finish a run its successor now owns."""
     values, fields = [], []
     for name, value in (("phase", phase), ("status", status), ("last_error", error),
-                        ("root_session", root_session), ("final_artifact", final_artifact)):
+                        ("root_session", root_session and home.stored(root_session)),
+                        ("final_artifact", final_artifact)):
         if value is not None:
             fields.append(f"{name}=?")
             values.append(value)
@@ -891,7 +804,7 @@ def next_level(con, run_id):
 
 def set_node(con, node_id, *, status=None, session_file=None, context_artifact=None, owner=None):
     fields, values = [], []
-    for name, value in (("status", status), ("session_file", session_file),
+    for name, value in (("status", status), ("session_file", session_file and home.stored(session_file)),
                         ("context_artifact", context_artifact)):
         if value is not None:
             fields.append(f"{name}=?")
@@ -1000,7 +913,7 @@ def record_action(con, run, branch, key, payload, *, session_file, tool_call_id)
         con.execute(
             "INSERT INTO research_actions VALUES (?,?,?,?,?,?,?)",
             (run["id"], branch["id"], key, json.dumps(payload, ensure_ascii=False),
-             session_file, tool_call_id, int(time.time())),
+             session_file and home.stored(session_file), tool_call_id, int(time.time())),
         )
     return action(con, run["id"], branch["id"], key)
 
@@ -1015,7 +928,7 @@ def replace_action(con, run, branch, key, payload, *, session_file, tool_call_id
         con.execute(
             "INSERT INTO research_actions VALUES (?,?,?,?,?,?,?)",
             (run["id"], branch["id"], key, json.dumps(payload, ensure_ascii=False),
-             session_file, tool_call_id, int(time.time())),
+             session_file and home.stored(session_file), tool_call_id, int(time.time())),
         )
     return action(con, run["id"], branch["id"], key)
 

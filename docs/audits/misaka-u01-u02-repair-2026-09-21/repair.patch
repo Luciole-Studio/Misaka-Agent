@@ -1,0 +1,436 @@
+--- a/misaka/core/session_manager.py
++++ b/misaka/core/session_manager.py
+@@ -1202,7 +1202,8 @@
+ 
+ def _parse_jsonl_entries(content: str, *, strict: bool = False) -> list[FileEntry]:
+     entries: list[FileEntry] = []
+-    for line in content.splitlines():
++    # JSONL records end at LF; U+0085/U+2028/U+2029 are valid JSON string content.
++    for line in content.split("\n"):
+         if not line.strip():
+             continue
+         try:
+--- a/misaka/core/subagent/runtime.py
++++ b/misaka/core/subagent/runtime.py
+@@ -700,10 +700,10 @@
+     if not transcript.is_file():
+         raise ValueError(f"Sub-agent transcript does not exist: {transcript}")
+     try:
+-        raw_lines = transcript.read_text(encoding="utf-8").splitlines()
++        raw_lines = transcript.read_text(encoding="utf-8").split("\n")
+     except (OSError, UnicodeError) as error:
+         raise ValueError(f"Could not read sub-agent transcript: {error}") from error
+-    if not raw_lines:
++    if raw_lines == [""]:
+         raise ValueError(f"Sub-agent transcript is empty: {transcript}")
+ 
+     entries: list[dict[str, Any]] = []
+--- a/misaka/core/network/sister_runtime.py
++++ b/misaka/core/network/sister_runtime.py
+@@ -133,7 +133,7 @@
+     except OSError:
+         return None
+     out: list[str] = []
+-    for line in raw.splitlines():
++    for line in raw.split("\n"):
+         try:
+             entry = json.loads(line)
+         except ValueError:
+--- a/misaka/core/research/bundle.py
++++ b/misaka/core/research/bundle.py
+@@ -334,7 +334,7 @@
+             out.add(real)
+ 
+     try:
+-        lines = Path(session_file).read_text(encoding="utf-8").splitlines()
++        lines = Path(session_file).read_text(encoding="utf-8").split("\n")
+     except (OSError, TypeError, ValueError):
+         return out
+     for line in lines:
+--- a/misaka/workspace.py
++++ b/misaka/workspace.py
+@@ -1,8 +1,14 @@
+ """Workspace navigation across the project brief, task cards, research runs, and indexed artifacts."""
++import json
+ import os
++import re
+ 
+ from misaka.core.documents import index as corpus
+ from misaka.core.platform import cards
++
++_ARTIFACT_SCAN_CHARS = 256 * 1024
++_ARTIFACT_MAX_HEADINGS = 120
++_ARTIFACT_MAX_TITLE_CHARS = 200
+ 
+ 
+ def _doc_node(m, workspace=None):
+@@ -22,21 +28,41 @@
+ 
+ 
+ def _artifact_node(row):
+-    """Build a cheap heading tree for a Markdown artifact."""
+-    children = []
++    """Keep every artifact navigable; only preview bounded, textual Markdown headings."""
++    node = {"node_id": f"artifact:{row['id']}", "title": row["title"],
++            "summary": row["kind"], "path": row["path"], "nodes": []}
++    if os.path.splitext(row["path"])[1].lower() not in {".md", ".markdown"}:
++        return node
+     try:
+-        with open(row["path"], encoding="utf-8", errors="replace") as f:
+-            for lineno, line in enumerate(f, 1):
+-                stripped = line.lstrip()
+-                if stripped.startswith("#"):
+-                    title = stripped.lstrip("#").strip()
+-                    if title:
+-                        children.append({"node_id": f"artifact:{row['id']}#L{lineno}",
+-                                         "title": title, "summary": f"Line {lineno}"})
+-    except OSError:
+-        pass
+-    return {"node_id": f"artifact:{row['id']}", "title": row["title"],
+-            "summary": row["kind"], "path": row["path"], "nodes": children[:120]}
++        metadata = json.loads(dict(row).get("metadata_json") or "{}")
++    except (TypeError, ValueError):
++        return node
++    if not isinstance(metadata, dict) or metadata.get("binary"):
++        return node
++    try:
++        with open(row["path"], encoding="utf-8") as f:
++            text = f.read(_ARTIFACT_SCAN_CHARS + 1)
++    except (OSError, UnicodeError):
++        return node
++    if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", text):
++        return node  # A misleading .md suffix must not turn binary controls into prose.
++    truncated = len(text) > _ARTIFACT_SCAN_CHARS
++    if truncated:
++        text = text[:_ARTIFACT_SCAN_CHARS].rpartition("\n")[0]  # Only complete physical lines.
++    for lineno, line in enumerate(text.split("\n"), 1):
++        stripped = line.lstrip()
++        if stripped.startswith("#") and (title := stripped.lstrip("#").strip()):
++            if len(node["nodes"]) == _ARTIFACT_MAX_HEADINGS:
++                truncated = True
++                break
++            preview = (title if len(title) <= _ARTIFACT_MAX_TITLE_CHARS
++                       else title[:_ARTIFACT_MAX_TITLE_CHARS - 1] + "…")
++            truncated |= preview != title
++            node["nodes"].append({"node_id": f"artifact:{row['id']}#L{lineno}",
++                                  "title": preview, "summary": f"Line {lineno}"})
++    if truncated:
++        node["summary"] += " · heading preview truncated; read the file for more"
++    return node
+ 
+ 
+ def _project_file(workspace):
+--- /dev/null
++++ b/tests/test_session_jsonl_record_boundaries.py
+@@ -0,0 +1,163 @@
++"""Unicode inside JSON strings is content, never a JSONL record boundary."""
++import asyncio
++import json
++from pathlib import Path
++
++import pytest
++
++from misaka.core.session_manager import (
++    InvalidSessionFileError,
++    SessionManager,
++    _dump_jsonl,
++    _parse_jsonl_entries,
++    load_entries_from_file,
++    read_session_header,
++)
++
++TEXT = "中文\u0085next\u2028line\u2029paragraph\nreal newline\rreturn"
++
++
++def transcript(tmp_path):
++    manager = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
++    manager.appendMessage({"role": "user", "content": TEXT, "timestamp": 1})
++    manager.appendMessage({"role": "assistant", "content": [{"type": "text", "text": TEXT}], "timestamp": 2})
++    return manager, Path(manager.getSessionFile())
++
++
++@pytest.mark.parametrize("separator", ["\u0085", "\u2028", "\u2029"])
++@pytest.mark.parametrize("record_ending", ["\n", "\r\n"])
++@pytest.mark.parametrize("strict", [False, True])
++def test_jsonl_only_splits_at_lf(separator, record_ending, strict):
++    entries = [{"text": f"before{separator}after"}, {"text": "second"}]
++    content = _dump_jsonl(entries).replace("\n", record_ending)
++    assert separator in content  # Reproduce the native unescaped serializer.
++    assert _parse_jsonl_entries(content, strict=strict) == entries
++
++
++def test_native_open_list_and_forks_preserve_unicode(tmp_path):
++    from misaka.core.research.planner import fork_session
++
++    original, path = transcript(tmp_path)
++    before = path.read_bytes()
++    assert all(character.encode() in before for character in ("\u0085", "\u2028", "\u2029"))
++    assert read_session_header(str(path))["id"] == original.getSessionId()
++    for manager in (SessionManager.open(str(path)), SessionManager.openInMemory(str(path))):
++        assert manager.getEntries() == original.getEntries()
++        assert manager.getLeafId() == original.getLeafId()
++    for infos in (
++        asyncio.run(SessionManager.list(str(tmp_path), str(path.parent))),
++        asyncio.run(SessionManager.listAll(str(path.parent))),
++    ):
++        assert len(infos) == 1
++        assert infos[0].messageCount == 2
++        assert infos[0].firstMessage == TEXT
++        assert infos[0].allMessagesText == f"{TEXT} {TEXT}"
++
++    forked = SessionManager.forkFrom(str(path), str(tmp_path), str(tmp_path / "fork"))
++    research_path = fork_session(str(path), str(tmp_path / "research-fork"))
++    for manager in (forked, SessionManager.open(research_path)):
++        assert manager.getSessionId() != original.getSessionId()
++        assert manager.getEntries() == original.getEntries()
++        assert read_session_header(manager.getSessionFile())["parentSession"] == str(path)
++    assert path.read_bytes() == before
++
++
++@pytest.mark.parametrize("ending", [b"\n", b"\r\n", b""])
++def test_file_record_endings_and_header_unicode(tmp_path, ending):
++    header = {"type": "session", "id": "fixture", "version": 3, "cwd": str(tmp_path), "note": TEXT}
++    entries = [header, {"type": "custom", "id": "entry", "data": TEXT}]
++    records = [json.dumps(entry, ensure_ascii=False).encode() for entry in entries]
++    path = tmp_path / "fixture.jsonl"
++    path.write_bytes((ending or b"\n").join(records) + ending)
++    before = path.read_bytes()
++    assert read_session_header(str(path)) == header
++    assert load_entries_from_file(str(path), strict=True) == entries
++    assert path.read_bytes() == before
++    load_entries_from_file(str(path), strict=True, repair_unterminated=True)
++    assert path.read_bytes() == before + (b"\n" if not ending else b"")
++
++
++@pytest.mark.parametrize("broken", ['{"content":"unfinished', '[]', '{"content":"raw\nnewline"}'])
++def test_strict_rejects_malformed_records_without_modifying_file(tmp_path, broken):
++    _, path = transcript(tmp_path)
++    path.write_bytes(path.read_bytes() + broken.encode())
++    before = path.read_bytes()
++    with pytest.raises(InvalidSessionFileError):
++        SessionManager.open(str(path))
++    with pytest.raises(InvalidSessionFileError):
++        SessionManager.openInMemory(str(path))
++    with pytest.raises(RuntimeError, match="empty or invalid"):
++        SessionManager.forkFrom(str(path), str(tmp_path), str(tmp_path / "fork"))
++    assert path.read_bytes() == before
++
++
++def test_nonstrict_skips_only_bad_physical_records():
++    entries = [{"text": TEXT}, {"text": "tail"}]
++    content = _dump_jsonl(entries[:1]) + '{"truncated":\n[]\n\n' + _dump_jsonl(entries[1:])
++    assert _parse_jsonl_entries(content) == entries
++
++
++@pytest.mark.parametrize("content", ["", " \n", "{}\n", "[]\n"])
++def test_empty_or_missing_session_header_stays_invalid(tmp_path, content):
++    path = tmp_path / "invalid.jsonl"
++    path.write_text(content)
++    with pytest.raises(InvalidSessionFileError):
++        SessionManager.open(str(path))
++    assert read_session_header(str(path)) == {}
++    assert load_entries_from_file(str(path)) == []
++
++
++def test_sister_resume_preserves_unicode(tmp_path):
++    from misaka.core.subagent.runtime import read_resume_transcript
++
++    manager, path = transcript(tmp_path)
++    assert read_resume_transcript(path) == manager.fileEntries
++
++
++def test_sister_tail_preserves_unicode(tmp_path):
++    from misaka.core.network.sister_runtime import transcript_tail
++
++    _, path = transcript(tmp_path)
++    tail = transcript_tail(str(path))
++    assert f"[user] {TEXT}" in tail
++    assert f"[assistant] {TEXT}" in tail
++
++
++@pytest.mark.parametrize("broken", ['{"content":"unfinished', '[]', '{}'])
++def test_sister_resume_remains_strict(tmp_path, broken):
++    from misaka.core.subagent.runtime import read_resume_transcript
++
++    path = tmp_path / "invalid.jsonl"
++    path.write_text(broken)
++    with pytest.raises(ValueError):
++        read_resume_transcript(path)
++    assert path.read_text() == broken
++
++
++def test_sister_resume_reports_empty_transcript(tmp_path):
++    from misaka.core.subagent.runtime import read_resume_transcript
++
++    path = tmp_path / "empty.jsonl"
++    path.touch()
++    with pytest.raises(ValueError, match="transcript is empty"):
++        read_resume_transcript(path)
++
++
++def test_research_sources_keep_unicode_tool_records(tmp_path):
++    from misaka.core.research.bundle import _Index, consulted_in_session
++
++    source = tmp_path / "source.md"
++    source.write_text("# Fixture source\n")
++    entries = [
++        {"message": {"role": "assistant", "content": [
++            {"type": "text", "text": TEXT},
++            {"type": "toolCall", "name": "read", "arguments": {"path": str(source)}},
++        ]}},
++        {"message": {"role": "toolResult", "toolName": "web_extract", "content": TEXT,
++                     "details": {"saved_path": str(source)}}},
++    ]
++    path = tmp_path / "sources.jsonl"
++    index = _Index(str(tmp_path))
++    for entry in entries:
++        path.write_text(_dump_jsonl([entry]))
++        assert consulted_in_session(str(path), index) == {str(source.resolve())}
+--- /dev/null
++++ b/tests/test_workspace_artifact_outline.py
+@@ -0,0 +1,145 @@
++"""Only text headings belong in artifact previews, never binary payloads. Offline fixtures."""
++import hashlib
++import io
++import json
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++
++from misaka import workspace
++from misaka.core.platform import tasks
++from misaka.core.research import runs, tools, workflow
++
++
++def artifact(tmp_path, suffix='.md', content=b'# Heading\n', metadata=None):
++    path = tmp_path / ('artifact' + suffix)
++    path.write_bytes(content)
++    return {'id': 'a_fixture', 'path': str(path), 'title': 'Fixture', 'kind': 'task_output',
++            'metadata_json': json.dumps(metadata or {})}
++
++
++@pytest.mark.parametrize('suffix,metadata', [('.png', {}), ('.pdf', {}), ('.csv', {}),
++                                            ('.txt', {}), ('.docx', {}),
++                                            ('.json', {}), ('.md', {'binary': True})])
++def test_non_markdown_and_binary_files_are_never_opened(tmp_path, monkeypatch, suffix, metadata):
++    row = artifact(tmp_path, suffix, b'# BINARY PAYLOAD\xc2\x85\n', metadata)
++
++    def forbidden(*args, **kwargs):
++        pytest.fail('Navigation must not open binary/non-Markdown payloads')
++
++    monkeypatch.setattr(workspace, 'open', forbidden, raising=False)
++    node = workspace._artifact_node(row)
++    assert node == {'node_id': 'artifact:a_fixture', 'title': 'Fixture',
++                    'summary': 'task_output', 'path': row['path'], 'nodes': []}
++
++
++@pytest.mark.parametrize('content', [b'# partial\n\xffbad', b'# partial\n\0bad',
++                                      b'# partial\n\x01bad', b'\x89PNG\r\n\x1a\n# fake'])
++def test_mislabeled_binary_markdown_has_no_partial_headings(tmp_path, content):
++    assert workspace._artifact_node(artifact(tmp_path, content=content))['nodes'] == []
++
++
++@pytest.mark.parametrize('suffix', ['.md', '.MD', '.markdown', '.MARKDOWN'])
++def test_markdown_line_locators_and_unicode_are_preserved(tmp_path, suffix):
++    content = '# 中文\r\nbody\r\n  ## alpha\u0085beta\u2028gamma\u2029delta\n### last'
++    node = workspace._artifact_node(artifact(tmp_path, suffix, content.encode()))
++    assert [(h['node_id'], h['title']) for h in node['nodes']] == [
++        ('artifact:a_fixture#L1', '中文'),
++        ('artifact:a_fixture#L3', 'alpha\u0085beta\u2028gamma\u2029delta'),
++        ('artifact:a_fixture#L4', 'last')]
++
++
++@pytest.mark.parametrize('metadata_json', ['{broken', '[]', 'null'])
++def test_missing_file_and_invalid_metadata_leave_file_navigable(tmp_path, metadata_json):
++    row = artifact(tmp_path)
++    row['metadata_json'] = metadata_json
++    assert workspace._artifact_node(row)['nodes'] == []
++    row['metadata_json'] = '{}'
++    Path(row['path']).unlink()
++    node = workspace._artifact_node(row)
++    assert node['path'] == row['path'] and node['nodes'] == []
++
++
++def test_heading_count_and_title_length_are_bounded(tmp_path):
++    text = ''.join(f'# {n} ' + 'x' * 1000 + '\n' for n in range(130))
++    node = workspace._artifact_node(artifact(tmp_path, content=text.encode()))
++    assert len(node['nodes']) == 120
++    assert max(len(h['title']) for h in node['nodes']) <= 200
++    assert node['nodes'][-1]['node_id'] == 'artifact:a_fixture#L120'
++    assert 'truncated' in node['summary']
++
++
++@pytest.mark.parametrize('count', [120, 121])
++def test_heading_count_limit_marks_only_actual_truncation(tmp_path, count):
++    text = ''.join(f'# Heading {n}\n' for n in range(count))
++    node = workspace._artifact_node(artifact(tmp_path, content=text.encode()))
++    assert len(node['nodes']) == min(count, 120)
++    assert ('truncated' in node['summary']) == (count > 120)
++
++
++@pytest.mark.parametrize('length', [200, 201])
++@pytest.mark.parametrize('char', ['x', '中'])
++def test_heading_title_limit_marks_only_actual_truncation(tmp_path, length, char):
++    title = char * length
++    node = workspace._artifact_node(artifact(tmp_path, content=('# ' + title).encode()))
++    assert node['nodes'][0]['title'] == (title if length == 200 else char * 199 + '…')
++    assert ('truncated' in node['summary']) == (length > 200)
++
++
++def test_scan_is_bounded_and_never_emits_a_cut_line(tmp_path, monkeypatch):
++    row = artifact(tmp_path)
++    requested = []
++
++    class BoundedReader(io.StringIO):
++        def read(self, size=-1):
++            assert 0 < size <= 256 * 1024 + 1
++            requested.append(size)
++            return super().read(size)
++
++        def __next__(self):
++            pytest.fail('Unbounded line iteration may allocate an arbitrarily large line')
++
++    monkeypatch.setattr(workspace, 'open', lambda *a, **k: BoundedReader('# first\n# ' + 'x' * 400000), raising=False)
++    node = workspace._artifact_node(row)
++    assert requested and [x['title'] for x in node['nodes']] == ['first']
++    assert 'truncated' in node['summary']
++
++
++def test_unicode_at_scan_boundary_does_not_break_decoding(tmp_path):
++    # Text-mode reading counts characters, not bytes; don't produce a clipped heading.
++    text = '# first\n' + '中' * (256 * 1024 - 12) + '\n# 中文 heading beyond the limit\n'
++    node = workspace._artifact_node(artifact(tmp_path, content=text.encode()))
++    assert [h['title'] for h in node['nodes']] == ['first']
++    assert 'truncated' in node['summary']
++
++
++async def test_both_live_view_and_saved_index_preserve_binary_paths_without_payload(tmp_path, monkeypatch):
++    monkeypatch.setattr(runs, '_commit', lambda *a, **k: None)
++    monkeypatch.setattr(workspace.corpus, 'docs', lambda **k: [])
++    con = tasks.connect(str(tmp_path / 'board.db'))
++    try:
++        run = runs.create(con, workspace=str(tmp_path), question='fixture')
++        child = runs.create_node(con, run['id'], parent_id=runs.nodes(con, run['id'])[0]['id'],
++                                 trigger='child', depth=1)
++        for suffix,branch in [('.png', None), ('.pdf', child['id']), ('.md', None)]:
++            row = artifact(tmp_path, suffix, b'# BINARY PAYLOAD\xc2\x85\n' if suffix != '.md' else b'# Real heading\n')
++            runs.register_file(con, run['id'], 'task_output', 'Fixture '+suffix, row['path'],
++                               sha256=hashlib.sha256(Path(row['path']).read_bytes()).hexdigest(),
++                               branch_id=branch, metadata={'binary': suffix != '.md'})
++        aid, path = workflow._refresh_workspace_index(con, run)
++        saved = Path(path).read_text()
++        monkeypatch.setitem(tools.CFG, 'db', str(tmp_path / 'board.db'))
++        registered = []
++        tools.register(SimpleNamespace(registerTool=registered.append))
++        result = await registered[0].execute('fixture', {'view': 'workspace'}, None, None,
++                                             SimpleNamespace(cwd=str(tmp_path)))
++        live = result['content'][0]['text']
++        for rendered in (saved, live):
++            assert 'BINARY PAYLOAD' not in rendered
++            assert 'Real heading' in rendered
++            assert str(tmp_path / 'artifact.png') in rendered
++            assert str(tmp_path / 'artifact.pdf') in rendered
++        assert runs.artifact(con, aid)['kind'] == 'workspace_index'
++    finally:
++        con.close()

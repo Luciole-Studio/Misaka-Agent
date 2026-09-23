@@ -14,6 +14,7 @@ corpus indexed.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 
@@ -41,8 +42,10 @@ def _run_with_artifact(tmp_path, monkeypatch, filename, write):
         "INSERT INTO research_run_tasks (task_id,run_id,branch_id,kind,wave,created_at) "
         "VALUES (?,?,?,?,0,strftime('%s','now'))",
         ("t1", run["id"], node["id"], "explore"))
-    workflow._register_task_artifacts(
-        con, run, {"id": "t1", "workspace": str(workspace)}, {"artifacts": [filename]})
+    digest = hashlib.sha256((workspace / filename).read_bytes()).hexdigest()
+    workflow._register_task_artifacts(            # what dispatch._submitted records for every card
+        con, run, {"id": "t1", "workspace": str(workspace)},
+        {"artifacts": [filename], "artifact_digests": {filename: digest}})
     return con, run
 
 

@@ -1,7 +1,7 @@
 """Negative cache: time is injected, never slept."""
 import pytest
 
-from misaka.core.tools._web import negative_cache as nc
+from misaka.core.web import negative_cache as nc
 
 
 @pytest.fixture(autouse=True)

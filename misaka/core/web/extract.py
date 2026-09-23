@@ -45,20 +45,20 @@ from misaka.core.documents.prompt import WEB_EVIDENCE_GUIDELINE
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.tools._common import run_with_abort
-from misaka.core.tools._web.bounded import UnsafeUrlError, vet_public_url
-from misaka.core.tools._web.evidence import (
+from misaka.core.tools.path_utils import resolve_to_cwd
+from misaka.core.web import cache, debug
+from misaka.core.web.bounded import UnsafeUrlError, vet_public_url
+from misaka.core.web.config import redact_secrets, redact_values, web_config
+from misaka.core.web.dispatch import resolve_extractor
+from misaka.core.web.dispatch import web_extract as dispatch_extract
+from misaka.core.web.evidence import (
     citable_url,
     frontmatter_line_count,
     read_provenance,
     save_page,
 )
-from misaka.core.tools._web.screening import screen_url
-from misaka.core.tools.path_utils import resolve_to_cwd
-from misaka.core.web import cache, debug
-from misaka.core.web.config import redact_secrets, redact_values, web_config
-from misaka.core.web.dispatch import resolve_extractor
-from misaka.core.web.dispatch import web_extract as dispatch_extract
 from misaka.core.web.network import proxy_for_url
+from misaka.core.web.screening import screen_url
 from misaka.core.web.tool import tool_error
 from misaka.utils.async_lifecycle import run_in_thread
 from misaka.utils.values import signal_aborted
@@ -187,7 +187,7 @@ def truncate_with_footer(
     below that block and ``read`` is 1-indexed over the whole file, so the same arithmetic
     would point the model at the frontmatter and it would read yaml where it expected the
     page. The count comes from the writer
-    (:func:`~misaka.core.tools._web.evidence.frontmatter_line_count`) rather than from
+    (:func:`~misaka.core.web.evidence.frontmatter_line_count`) rather than from
     anyone's arithmetic here.
     """
     if len(content) <= char_limit:
@@ -639,12 +639,21 @@ def register(harn, workspace: str | None = None) -> None:
         # contract untouched.
         try:
             rendered = json.loads(result_json)
-            is_error = rendered.get("success") is False or bool(rendered.get("error"))
+            results = rendered.get("results")
+            if not isinstance(results, list):
+                raise TypeError("Expected an extraction results list")
+            entries = [entry for entry in results if isinstance(entry, dict)]
             saved_paths = list(dict.fromkeys(
-                entry["saved_path"]
-                for entry in rendered.get("results", [])
-                if isinstance(entry, dict) and entry.get("saved_path")
+                path for entry in entries
+                if isinstance(path := entry.get("saved_path"), str) and path.strip()
             ))
+            # MISAKA host status only: keep Hermes' body unchanged. A saved page is
+            # still usable when its preview is empty; partial success must retain it.
+            usable = bool(saved_paths) or any(
+                not entry.get("error") and isinstance(content := entry.get("content"), str) and content.strip()
+                for entry in entries
+            )
+            is_error = rendered.get("success") is False or bool(rendered.get("error")) or not usable
         except (AttributeError, TypeError, ValueError):
             saved_paths = []
             is_error = True

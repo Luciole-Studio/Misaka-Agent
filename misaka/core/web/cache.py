@@ -33,7 +33,7 @@ TTL of stale build output is the opposite of what the fetch was for. A host list
 ``cache_exempt_hosts`` is a staging deploy or a tunnel: public DNS, so the local-address
 heuristic cannot see it, but every fetch still has to be live. The safety questions --
 is this URL an SSRF target, does it carry a credential, does the operator's blocklist
-refuse it -- are asked before anything reaches here, in ``misaka.core.tools._web``.
+refuse it -- are asked before anything reaches here, in ``misaka.core.web``.
 
 Both halves read the same two config keys, so switching the cache off or retuning its TTL
 is one edit rather than two.
@@ -58,8 +58,8 @@ from filelock import FileLock
 
 from misaka.config import expand_tilde_path
 from misaka.config.product import CFG
-from misaka.core.tools._web.evidence import citable_url
 from misaka.core.web.config import redact_values, web_config
+from misaka.core.web.evidence import citable_url
 from misaka.core.web.scope import cache_namespace
 from misaka.utils import atomic
 
@@ -389,7 +389,7 @@ def _is_local_dev_url(url: str) -> bool:
     whole TTL.
 
     Hostname heuristics only, and no DNS: this is a freshness decision, not a security
-    boundary. The security boundary is :mod:`misaka.core.tools._web.bounded`, which
+    boundary. The security boundary is :mod:`misaka.core.web.bounded`, which
     resolves the name and pins the address -- and which refuses most of these outright
     unless the operator opened the private ranges.
     """

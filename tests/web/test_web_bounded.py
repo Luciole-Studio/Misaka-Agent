@@ -6,8 +6,9 @@ from dataclasses import dataclass
 
 import httpx
 import pytest
+from webconf import write_web
 
-from misaka.core.tools._web import bounded
+from misaka.core.web import bounded
 
 PUBLIC = "93.184.216.34"
 OTHER_PUBLIC = "23.192.228.80"
@@ -153,13 +154,13 @@ async def test_cgnat_and_metadata_addresses_are_refused_by_default(resolver, add
 
 
 async def test_allow_private_urls_opens_the_private_classes(monkeypatch, resolver):
-    monkeypatch.setenv("MISAKA_ALLOW_PRIVATE_URLS", "true")
+    write_web({"allow_private_urls": True})
     resolver["dev.example"] = ["10.0.0.7"]
     assert await bounded.vet_public_url("http://dev.example:8080/") == ("10.0.0.7",)
 
 
 async def test_allow_private_urls_also_reaches_localhost(monkeypatch, resolver):
-    monkeypatch.setenv("MISAKA_ALLOW_PRIVATE_URLS", "1")
+    write_web({"allow_private_urls": True})
     resolver["localhost"] = ["127.0.0.1"]
     assert await bounded.vet_public_url("http://localhost:3000/") == ("127.0.0.1",)
 
@@ -167,14 +168,14 @@ async def test_allow_private_urls_also_reaches_localhost(monkeypatch, resolver):
 @pytest.mark.parametrize("address", ["169.254.169.254", "100.100.100.200", "169.254.1.1"])
 async def test_the_metadata_floor_survives_allow_private_urls(monkeypatch, resolver, address):
     """The opt-out exists for corporate DNS, never for instance credentials."""
-    monkeypatch.setenv("MISAKA_ALLOW_PRIVATE_URLS", "true")
+    write_web({"allow_private_urls": True})
     resolver["host.example"] = [address]
     with pytest.raises(bounded.UnsafeUrlError):
         await bounded.vet_public_url("https://host.example/")
 
 
 async def test_a_metadata_hostname_is_refused_before_any_resolution(monkeypatch, resolver):
-    monkeypatch.setenv("MISAKA_ALLOW_PRIVATE_URLS", "true")
+    write_web({"allow_private_urls": True})
     with pytest.raises(bounded.UnsafeUrlError, match="metadata"):
         await bounded.vet_public_url("http://metadata.google.internal/computeMetadata/v1/")
     assert resolver.asked == []

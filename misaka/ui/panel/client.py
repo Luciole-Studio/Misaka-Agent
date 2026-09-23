@@ -7,29 +7,16 @@ import sys
 import threading
 import time
 
-from misaka.config import CFG
+from misaka.config import CFG, home
 
 
 def _sock_path():
     return os.path.expanduser(CFG["net_sock"])
 
 
-# sockaddr_un.sun_path: 104 bytes on the BSDs and macOS, 108 on Linux, terminator included.
-_SUN_PATH_MAX = 103 if sys.platform == "darwin" else 107
-
-
 def check_sock_path():
-    """Raise before a bind that cannot succeed. A path over the kernel's limit makes
-    ``bind`` fail with a bare ``OSError: AF_UNIX path too long`` from inside asyncio, which
-    reaches the user as a daemon traceback naming neither the path nor the way out."""
-    path = _sock_path()
-    length = len(os.fsencode(path))
-    if length > _SUN_PATH_MAX:
-        raise RuntimeError(
-            f"The panel's socket path is {length} bytes, and a unix socket allows "
-            f"{_SUN_PATH_MAX}:\n  {path}\n"
-            "Point MISAKA_NET_SOCK at a shorter path, for example "
-            "MISAKA_NET_SOCK=/tmp/misaka-net.sock.")
+    """The socket's directory must be this user's alone before anything binds or connects."""
+    home.private_dir(os.path.dirname(_sock_path()))
 
 
 def request(method, params=None, *, timeout=10):

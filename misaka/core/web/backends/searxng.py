@@ -12,7 +12,7 @@ Env var::
 
     SEARXNG_URL=http://localhost:8080
 
-**No SSRF vetting, deliberately.** ``misaka.core.tools._web.bounded`` exists because the
+**No SSRF vetting, deliberately.** ``misaka.core.web.bounded`` exists because the
 model picks those URLs; this one comes from the user's own config file, and the whole
 point of SearXNG is that the instance is theirs -- ``http://localhost:8080`` and a LAN
 address are the two normal values, and both are exactly what the vetting rejects. The

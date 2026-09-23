@@ -13,12 +13,13 @@ import json
 from pathlib import Path
 
 import pytest
+from webconf import write_web
 
+from misaka.config import home
 from misaka.config.product import CFG
 from misaka.core.platform import budget
 from misaka.core.platform.prompt_guard import MARKER
-from misaka.core.tools._web import website_policy
-from misaka.core.web import cache, extract, registry
+from misaka.core.web import cache, extract, registry, website_policy
 
 HERMES_WEB_TOOLS = Path(__file__).parent / "fixtures/hermes_990473a/tools/web_tools.py"
 
@@ -38,11 +39,10 @@ def web_home(tmp_path, monkeypatch):
     """A throwaway web.json and cache home, with no vendor credentials in the way."""
     for name in _VENDOR_ENV:
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setitem(CFG, "web_config", str(tmp_path / "web.json"))
     monkeypatch.setitem(CFG, "web_cache", str(tmp_path / "cache" / "web"))
     registry.reset_for_tests()
     website_policy.invalidate_cache()
-    yield tmp_path / "web.json"
+    yield home.path("settings")            # the "web" section lives here now
     registry.reset_for_tests()
     website_policy.invalidate_cache()
 
@@ -178,10 +178,7 @@ async def test_a_credential_named_parameter_fails_the_whole_call(monkeypatch):
 
 
 async def test_a_blocklisted_host_is_one_entry_not_the_whole_call(monkeypatch, web_home):
-    web_home.write_text(
-        json.dumps({"website_blocklist": {"enabled": True, "domains": ["blocked.test"]}}),
-        encoding="utf-8",
-    )
+    write_web({"website_blocklist": {"enabled": True, "domains": ["blocked.test"]}})
     website_policy.invalidate_cache()
     calls: list = []
     stub(monkeypatch, [page("https://a.test", "body a")], calls=calls)
@@ -195,7 +192,7 @@ async def test_a_blocklisted_host_is_one_entry_not_the_whole_call(monkeypatch, w
 
 
 async def test_a_private_address_is_refused_per_url(monkeypatch):
-    from misaka.core.tools._web.bounded import UnsafeUrlError
+    from misaka.core.web.bounded import UnsafeUrlError
 
     async def _vet(url, *, proxy=None):
         if "internal" in url:
@@ -227,7 +224,7 @@ async def test_more_than_five_urls_are_sliced(monkeypatch):
 
 
 async def test_a_search_only_backend_says_so_by_name(monkeypatch, web_home):
-    web_home.write_text(json.dumps({"extract_backend": "ddgs"}), encoding="utf-8")
+    write_web({"extract_backend": "ddgs"})
     result = body(await run(["https://a.test"]))
     assert result["success"] is False
     assert "search-only backend" in result["error"]
@@ -235,7 +232,7 @@ async def test_a_search_only_backend_says_so_by_name(monkeypatch, web_home):
 
 
 async def test_an_unknown_backend_is_reported_as_the_typo_it_is(monkeypatch, web_home):
-    web_home.write_text(json.dumps({"extract_backend": "tavly"}), encoding="utf-8")
+    write_web({"extract_backend": "tavly"})
     result = body(await run(["https://a.test"]))
     assert result["success"] is False
     assert "tavly" in result["error"]
@@ -335,11 +332,11 @@ async def test_a_base64_image_becomes_a_placeholder_and_a_real_link_survives(mon
 
 
 async def test_the_char_limit_comes_from_config_when_unset(monkeypatch, web_home):
-    web_home.write_text(json.dumps({"extract_char_limit": 2500}), encoding="utf-8")
+    write_web({"extract_char_limit": 2500})
     assert extract.extract_char_limit() == 2500
-    web_home.write_text(json.dumps({"extract_char_limit": 10}), encoding="utf-8")
+    write_web({"extract_char_limit": 10})
     assert extract.extract_char_limit() == 2000  # floored
-    web_home.write_text(json.dumps({"extract_char_limit": "nonsense"}), encoding="utf-8")
+    write_web({"extract_char_limit": "nonsense"})
     assert extract.extract_char_limit() == extract.DEFAULT_EXTRACT_CHAR_LIMIT
 
 
@@ -401,10 +398,7 @@ async def test_dispatch_stub_and_cache_do_not_fabricate_outbound_rows(monkeypatc
 
 
 async def test_the_result_order_is_the_argument_order(monkeypatch, web_home):
-    web_home.write_text(
-        json.dumps({"website_blocklist": {"enabled": True, "domains": ["blocked.test"]}}),
-        encoding="utf-8",
-    )
+    write_web({"website_blocklist": {"enabled": True, "domains": ["blocked.test"]}})
     website_policy.invalidate_cache()
     stub(monkeypatch, lambda urls: [page(u, f"body of {u}") for u in urls])
 

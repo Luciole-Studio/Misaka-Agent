@@ -65,6 +65,7 @@ class Conversation:
         self.hiddenThinkingLabel = getattr(self, "hiddenThinkingLabel", self.defaultHiddenThinkingLabel)
         self.entries = []
         self._toolComponentsById = {}
+        self._liveComponent = None
 
     def mount(self):
         for child in (
@@ -117,6 +118,7 @@ class Conversation:
 
     def updateEntries(self, entries) -> None:
         """Follow committed context, preserving components unless its branch changed."""
+        self.updateStreaming(None)
         if entries[:len(self.entries)] != self.entries:
             self.entries = []
             self._toolComponentsById.clear()
@@ -125,4 +127,21 @@ class Conversation:
             self.chatContainer, entries[len(self.entries):], self._toolComponentsById,
         )
         self.entries = entries
+        self._request_render()
+
+    def updateStreaming(self, message) -> None:
+        """Render an owner's transient assistant without adding it to saved entries."""
+        if message is None:
+            if self._liveComponent is not None:
+                self.chatContainer.removeChild(self._liveComponent)
+                self._liveComponent = None
+                self._request_render()
+            return
+        if self._liveComponent is None:
+            self._liveComponent = AssistantMessageComponent(
+                hideThinkingBlock=self.hideThinkingBlock, markdownTheme=self.getMarkdownThemeWithSettings(),
+                hiddenThinkingLabel=self.hiddenThinkingLabel, outputPad=self.outputPad,
+            )
+            self.chatContainer.addChild(self._liveComponent)
+        self._liveComponent.updateContent(message, True)
         self._request_render()

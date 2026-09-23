@@ -21,12 +21,16 @@ def _defined_falsy(value: str | bool | None) -> bool:
 
 
 def background_disabled() -> bool:
-    return _truthy(os.environ.get("MISAKA_DISABLE_BACKGROUND_TASKS"))
+    from misaka.config.product import setting
+
+    return not setting("subagents", "background_tasks", True, bool)
 
 
 def auto_background_seconds() -> float:
     # CCB getAutoBackgroundMs: 120_000 ms when enabled, no timer otherwise.
-    return 120.0 if _truthy(os.environ.get("MISAKA_AUTO_BACKGROUND_TASKS")) else 0.0
+    from misaka.config.product import setting
+
+    return 120.0 if setting("subagents", "auto_background_tasks", False, bool) else 0.0
 
 
 def default_bash_timeout_seconds() -> float:

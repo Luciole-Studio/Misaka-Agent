@@ -1,0 +1,893 @@
+{
+  "captured_at": "2026-09-20T19:50:34.697190+09:00",
+  "scope": "2026-09-20 当前对话这一轮实时运行审计及对应修复；不把早先提示词架构调整、旧日期全面审计或所有 error 回执当新增 bug。",
+  "counts": {
+    "confirmed_product_issues": 18,
+    "unfixed": 2,
+    "source_fixed": 16,
+    "other_tracked": 7,
+    "total_tracked": 25
+  },
+  "items": [
+    {
+      "id": "U01",
+      "title": "合法 JSONL 被 Unicode 分行误判为损坏",
+      "status": "已有源码修复记录",
+      "kind": "已确认产品问题",
+      "priority": "P1",
+      "symptom": "19:31 左右研究 r_b55f2c1cf5 创建后续分支时抛 InvalidSessionFileError，错误为 Unterminated string starting at: line 1 column 293 (char 292)。",
+      "cause": "原生会话读取器对整个文件使用 str.splitlines()，把 JSON 字符串中合法的 U+0085 当成记录边界；不是实际 LF 处的坏 JSON。fork_session 重新从磁盘读取旧记录，触发此前内存执行未遇到的错误。",
+      "locations": [
+        [
+          "misaka/core/session_manager.py",
+          1203,
+          1219
+        ],
+        [
+          "misaka/core/session_manager.py",
+          533,
+          540
+        ],
+        [
+          "misaka/core/research/planner.py",
+          600,
+          613
+        ],
+        [
+          "misaka/core/research/workflow.py",
+          650,
+          680
+        ]
+      ],
+      "evidence": "session-parse-proof.json：19:36:48 捕获 32,786,121 bytes；按 LF 分隔 709 条全部合法；splitlines 得 733 段，含 24 个 U+0085；原解析函数复现相同错误。第一个受影响物理行是 619，不是整个文件第 1 行。",
+      "fix": "已统一原生会话、子代理恢复、Sister 预览及 Research 来源四处读取的 LF 记录边界；严格 JSON 验证不变，无兼容回退。",
+      "acceptance": "同一文件按修复后的解析器通过；U+0085/U+2028/U+2029 字符串回归通过；真正截断尾记录仍按既有严格契约报错；隔离副本的原生 fork/resume 成功。",
+      "boundary": "本轮只读复现，没有修改会话或恢复研究。进入分支前的 DB 占位已经创建；后续恢复须验证复用占位而非重复派发。",
+      "tests": [
+        "tests/test_session_jsonl_record_boundaries.py"
+      ],
+      "repair": {
+        "at": "2026-09-21T13:28:45.465451+09:00",
+        "report": "docs/audits/misaka-u01-u02-repair-2026-09-21.md",
+        "previous_fix_proposal": "仅按 JSONL 的 LF 记录边界解析，保留严格 JSON 校验；不靠删除记录、改写用户历史或放松 strict 验证掩盖问题。",
+        "validation": "313 focused/adjacent tests passed with -W error in both isolated and applied main sources; scoped Ruff and AST passed.",
+        "runtime_boundary": "Disk source repair only; no live process restart/resume, no live session or DB mutation.",
+        "evidence": "docs/audits/misaka-u01-u02-repair-2026-09-21/live-input-proof.json",
+        "result": "实际故障 JSONL：旧解析复现原报错，修复解析 890 条无错；原输入不改写。"
+      }
+    },
+    {
+      "id": "U02",
+      "title": "工作区目录把 PNG 二进制当 Markdown 读入",
+      "status": "已有源码修复记录",
+      "kind": "已确认产品问题",
+      "priority": "P1",
+      "symptom": "18:31:53 的 misaka_research_view(workspace) 回包长达 1,049,249 字符，出现图片二进制乱码，随后进入原生历史及多个压缩记录。",
+      "cause": "_artifact_node 无条件用 UTF-8/errors=replace 打开所有产物，按 # 扫描标题；忽略登记中的 binary=true。随机二进制被生成伪标题，也带入触发 U01 的 U+0085。",
+      "locations": [
+        [
+          "misaka/workspace.py",
+          24,
+          39
+        ],
+        [
+          "misaka/core/research/tools.py",
+          59,
+          63
+        ]
+      ],
+      "evidence": "session-parse-proof.json：C1 的 tetlock_ocr/p16.png，artifact a_4b184a148f，PNG 魔数 89504e470d0a1a0a；独立读取生成 7 个伪标题/1471 字符/1 个 U+0085。来源登记 metadata.binary=true。",
+      "fix": "已移除二进制替换字符解码；所有文件节点保留，仅为非 binary 的有效 UTF-8 Markdown 生成预览；单产物扫描/标题数/标题长度分别限制 262144/120/200，标注截断；未新增全目录 token 上限。",
+      "acceptance": "PNG/PDF 等产物目录不出现二进制内容；真实 Markdown 标题保持；大型文件和标题有界；现存含特殊字符的历史仍由 U01 正确读回。",
+      "boundary": "U01 与 U02 是同一次事故里的两个独立根因，分别计数；修 U01 解决误报，修 U02 阻止污染继续发生。",
+      "tests": [
+        "tests/test_workspace_artifact_outline.py",
+        "tests/office/test_office_deliverables.py"
+      ],
+      "repair": {
+        "at": "2026-09-21T13:28:45.465451+09:00",
+        "report": "docs/audits/misaka-u01-u02-repair-2026-09-21.md",
+        "previous_fix_proposal": "目录保留二进制产物的文件节点/元信息，但只对可读 Markdown 文本生成标题树；限制单标题及总目录预算。不要把已有图片文件删除。",
+        "validation": "313 focused/adjacent tests passed with -W error in both isolated and applied main sources; scoped Ruff and AST passed.",
+        "runtime_boundary": "Disk source repair only; no live process restart/resume, no live session or DB mutation.",
+        "evidence": "docs/audits/misaka-u01-u02-repair-2026-09-21/live-input-proof.json",
+        "result": "实际 PNG：7 个伪标题降为 0，文件节点仍保留；根/分支、实时视图和导出目录均验证。"
+      }
+    },
+    {
+      "id": "U03",
+      "title": "网页提取全部失败却返回成功标记",
+      "status": "已有源码修复记录",
+      "kind": "已确认产品问题",
+      "priority": "P2",
+      "symptom": "12 批 web_extract 的每个结果都是 error 且 content 为空，但外层 isError=false。",
+      "cause": "工具包装只检查顶层 success/error，不检查 results 内全部条目失败的情形。",
+      "locations": [
+        [
+          "misaka/core/web/extract.py",
+          640,
+          654
+        ]
+      ],
+      "evidence": "tool-probe-result.json 独立假后端复现：all_failed / partial_success / success 都返回 isError=false；18:40 审计发现 12 批全失败、45 批至少一项失败，最后一批全失败在 16:33:48。",
+      "fix": "已在MISAKA宿主包装按逐页可用内容/已保存材料汇总状态；全失败正确报错，部分成功保留原文、错误及saved_paths。Hermes抽取算法不改。",
+      "acceptance": "全失败=true、全成功=false、部分成功不被误当全失败；空结果/坏 JSON 有明确语义。",
+      "boundary": "没有把网页拒绝访问等远端问题都归咎 MISAKA；本条是其错误标记确实错了。",
+      "tests": [
+        "tests/web/test_web_extract_result_status.py",
+        "tests/web/test_web_hermes_origin.py",
+        "tests/web/test_web_debug.py",
+        "tests/web/test_web_network_policy.py"
+      ],
+      "repair": {
+        "at": "2026-09-21T18:47:08.958264+09:00",
+        "report": "docs/audits/misaka-u03-u04-repair-2026-09-21.md",
+        "previous_fix_proposal": "按逐项结果汇总：全失败标为错误，部分成功保持可用并明确部分失败，保留原始逐项原因。",
+        "validation": "2378 passed, 1 skipped -W error in both isolated U03-only source and applied main source; scoped Ruff passed.",
+        "runtime_boundary": "Source only. No live process actions, no user history/DB mutations.",
+        "evidence": "docs/audits/misaka-u03-u04-repair-2026-09-21/source-apply-proof.json"
+      }
+    },
+    {
+      "id": "U04",
+      "title": "工具参数解析失败时丢失定位信息",
+      "status": "待修",
+      "kind": "已确认产品问题",
+      "priority": "P2",
+      "symptom": "16:34:33 的 edit 返回 Invalid final tool arguments; resend a complete JSON object，16:35:00 重试成功。",
+      "cause": "finish_into 捕获异常后把 arguments 改为 {}，只保留通用提示，未在该记录保存解析位置/原因和可控的原始参数诊断信息。",
+      "locations": [
+        [
+          "misaka/ai/utils/json_parse.py",
+          357,
+          377
+        ],
+        [
+          "misaka/agent/agent_loop.py",
+          650,
+          670
+        ]
+      ],
+      "evidence": "LO 原生会话物理行 461、463–464；18:46 审计报告已记录。错误调用被调度层拦截，没有执行不完整的 edit。",
+      "fix": "维持禁止执行残缺参数的规则；附解析错误类型、偏移、输入长度和有界脱敏摘要/受限诊断引用，保留关联 tool-call ID。",
+      "acceptance": "畸形调用仍不执行；完整重试正常；日志足够区分截断/非对象/语法错误，又不外泄 TOKEN 等敏感参数。",
+      "boundary": "已确认的是诊断缺口；原始畸形参数来自模型、代理网关还是流组装，现有证据不足以归因。它与 U01 不是同一个解析器问题。",
+      "tests": [],
+      "repair_candidate": {
+        "at": "2026-09-21T18:47:08.958264+09:00",
+        "status": "隔离候选已验证，未合入",
+        "report": "docs/audits/misaka-u03-u04-repair-2026-09-21.md",
+        "patch": "docs/audits/misaka-u03-u04-repair-2026-09-21/u04-pending.patch",
+        "decision_needed": "旧历史argumentsError字段：选择只读接入适配，或明确接受旧会话恢复受限。当前未收到选择。",
+        "approach": "按用户新要求回归固定Pi参数解析/终结行为，撤本地strict-final分叉；不是补充原始JSON诊断。",
+        "validation": "Complete U03+U04 candidate: 3580 passed, 1 skipped -W error. This does not cover or resolve old-field history compatibility."
+      }
+    },
+    {
+      "id": "U05",
+      "title": "Sessions 旁观页看不到尚未完成的流式消息",
+      "status": "已有源码修复记录",
+      "kind": "已确认产品问题",
+      "priority": "P2",
+      "symptom": "13:14–13:15 原窗口提取文本 23,693→25,967 字符，旁观 snapshot cursor 却保持 [8b441192,8]，不包含正在生成的 assistant。",
+      "cause": "snapshot 只返回 SessionManager 已完成 entries；cursor 仅 leaf/count。旁观消费者仅在这个 cursor 改变时更新，没有单独的临时流式状态。",
+      "locations": [
+        [
+          "misaka/core/session_control.py",
+          145,
+          152
+        ],
+        [
+          "misaka/cli/chat.py",
+          265,
+          283
+        ]
+      ],
+      "evidence": "early-live-audit.md 的 F1；本轮重新确认源码仍是相同路径。",
+      "fix": "已直接传递原生streamingMessage，历史与临时消息独立游标；界面复用消息组件，完成/断连清理，不持久化半条消息。",
+      "acceptance": "原窗口与旁观页都能显示增量文本；完成后不重复；无把半条消息写入会话或 LCM 的副作用。",
+      "boundary": "不是所有“思考变少”的通用解释，只证实旁观路径；不代表供应商实际推理 token 减少。",
+      "tests": [
+        "tests/test_session_streaming_snapshot.py",
+        "tests/test_session_live_viewer.py",
+        "tests/test_session_snapshot_branch.py"
+      ],
+      "repair": {
+        "at": "2026-09-21T15:32:23.774933+09:00",
+        "report": "docs/audits/misaka-u05-u06-repair-2026-09-21.md",
+        "previous_fix_proposal": "复用内存中的流式消息，增加临时视图及更新版本；保持原生消息完成后才持久化。",
+        "validation": "520 tests passed under -W error in isolated and applied sources. Expanded-suite SQLite fixture leaks reproduced identically on baseline and patched sources; see report.",
+        "runtime_boundary": "Source-only repair. Live owner/viewer not restarted or hot-updated. New protocol requires both processes to load this source."
+      }
+    },
+    {
+      "id": "U06",
+      "title": "前台 Research 根节点缺少阶段/深度描述",
+      "status": "已有源码修复记录",
+      "kind": "已确认产品问题",
+      "priority": "P2",
+      "symptom": "13:15 根 LO 正在 planning，SessionControl 返回 workflow={}。后台节点却有 node/depth/phase。",
+      "cause": "describe 默认为 dict；node_session 后台路径绑定了阶段描述，现有聊天根节点只创建 WindowLO，没有相同绑定。",
+      "locations": [
+        [
+          "misaka/core/session_control.py",
+          46,
+          58
+        ],
+        [
+          "misaka/core/research/window.py",
+          252,
+          259
+        ],
+        [
+          "misaka/core/research/workflow.py",
+          1477,
+          1487
+        ]
+      ],
+      "evidence": "early-live-audit.md 的 F2；本轮重读当前源码确认未补齐。",
+      "fix": "已由WindowLO统一安装/按身份恢复describe，三个入口共用node_description；区分run_phase/run_status/node_phase，退出前解绑，不改输入及ownership检查。",
+      "acceptance": "同一研究阶段的前后台接口描述一致；结束后不遗留旧节点信息；不额外创建会话。",
+      "boundary": "这是观测信息缺失，并非实际退出 research。",
+      "tests": [
+        "tests/test_research_workflow_description.py",
+        "tests/test_research_node_control_cleanup.py",
+        "tests/test_research_root_lifecycle.py"
+      ],
+      "repair": {
+        "at": "2026-09-21T15:32:23.774933+09:00",
+        "report": "docs/audits/misaka-u05-u06-repair-2026-09-21.md",
+        "previous_fix_proposal": "前后台复用同一节点描述绑定，并在研究退出时恢复原普通会话回调。",
+        "validation": "520 tests passed under -W error in isolated and applied sources. Expanded-suite SQLite fixture leaks reproduced identically on baseline and patched sources; see report.",
+        "runtime_boundary": "Source-only repair. Live owner/viewer not restarted or hot-updated. New protocol requires both processes to load this source."
+      }
+    },
+    {
+      "id": "F01",
+      "title": "进入 Research 强制覆盖 LO 思考档位",
+      "status": "已有源码修复记录",
+      "kind": "已确认产品问题",
+      "priority": "P2",
+      "symptom": "用户设 max，输入 /research 后变 high。",
+      "cause": "Research 多个入口显式覆盖 thinking，而非沿用 LO 默认/原生已保存档位。",
+      "locations": [
+        [
+          "misaka/core/research/planner.py",
+          180,
+          201
+        ],
+        [
+          "misaka/core/research/window.py",
+          95,
+          120
+        ],
+        [
+          "misaka/core/research/node.py",
+          398,
+          418
+        ],
+        [
+          "misaka/core/research/report.py",
+          120,
+          140
+        ]
+      ],
+      "evidence": "13:08 thinking-settings 修复记录；13:10 启动的新 LO 在 13:15 现场仍为 max，见 early-live-audit.md。",
+      "fix": "已删除 Research 强制 high，沿用默认设置、模型偏好和已有原生会话档位。",
+      "acceptance": "普通/Research/原生 fork 保留期望默认和覆盖优先级。",
+      "boundary": "有后启动进程的现场佐证，但不等于所有供应商出站请求已逐字段抓包验证。",
+      "tests": [
+        [
+          "tests/test_agent_model_runtime.py",
+          189
+        ]
+      ]
+    },
+    {
+      "id": "F02",
+      "title": "Sister 并发名额误用 LO 并发上限",
+      "status": "已有源码修复记录",
+      "kind": "已确认产品问题",
+      "priority": "P2",
+      "symptom": "18 张任务卡只启动 4 个 Sister，用户预期 8；窗口数也不等于 Sessions 总数。",
+      "cause": "每节点 Sister 槽位与 LO 分支并发复用同一上限，配置没有独立传到底层。",
+      "locations": [
+        [
+          "misaka/core/research/workflow.py",
+          447,
+          462
+        ],
+        [
+          "misaka/core/research/runs.py",
+          144,
+          151
+        ],
+        [
+          "misaka/core/research/wiring/research.py",
+          20,
+          44
+        ]
+      ],
+      "evidence": "14:21 sister-parallel 补丁与 focused-tests.log：125 passed；独立新增 sister_parallel，并贯通 CLI、聊天、保存与恢复。",
+      "fix": "已拆开 --parallel（LO 节点）与 --sister-parallel（每 LO 的 Sister 卡片）；仍遵守全局/每 Sister 准入限制。",
+      "acceptance": "设置 8 且满足所有准入条件时能调度 8 张；依赖/待帮助/未结算任务正确计槽；旧 run 不擅自改配置。",
+      "boundary": "并非设置一个 8 就强制永远开 8 个窗口；本条补丁未热更新当时旧 driver。",
+      "tests": [
+        [
+          "tests/test_research_sister_parallel.py",
+          1
+        ]
+      ]
+    },
+    {
+      "id": "F03",
+      "title": "子代理未继承当前任务输出目录的写权限",
+      "status": "已有源码修复记录",
+      "kind": "已确认产品问题",
+      "priority": "P1",
+      "symptom": "Sister 的 sub-agent 写自己卡片的产物也被批准墙拦截，出现多次 write/edit 权限失败。",
+      "cause": "卡片已拥有的局部产物写权限未作为有效、可撤销的范围传给原生子代理。",
+      "locations": [
+        [
+          "misaka/core/network/todo.py",
+          399,
+          416
+        ],
+        [
+          "misaka/core/subagent/configuration.py",
+          108,
+          166
+        ],
+        [
+          "misaka/core/subagent/policy.py",
+          1040,
+          1056
+        ]
+      ],
+      "evidence": "14:45 runtime-repairs 补丁；185 passed/45 subtests 的隔离 smoke 覆盖此路径。",
+      "fix": "已继承当前有效 generation/claim 的卡片 output_dir，仅 write/edit；失去所有权即撤销，路径/链接越界仍拦截。",
+      "acceptance": "当前卡片内可写；其他卡片/受保护路径不可越权；claim 失效后不再继承。",
+      "boundary": "只解决已授权局部产物写入；不等同于放开任意 shell 或私有技能树。",
+      "tests": [
+        [
+          "tests/test_runtime_tool_repairs.py",
+          109
+        ],
+        [
+          "tests/test_runtime_tool_repairs.py",
+          140
+        ],
+        [
+          "tests/test_subagent_native_startup.py",
+          176
+        ]
+      ]
+    },
+    {
+      "id": "F04",
+      "title": "PDF 原生渲染共享状态缺少故障隔离",
+      "status": "已有源码修复记录",
+      "kind": "已确认产品问题",
+      "priority": "P1",
+      "symptom": "PDF 页图工具在并发或坏文件场景暴露 PDFium 原生状态/崩溃风险。",
+      "cause": "原实现在线程中直接使用同一进程的 PDFium，全局原生状态并未获得进程级隔离。",
+      "locations": [
+        [
+          "misaka/core/documents/wiring/documents.py",
+          135,
+          152
+        ],
+        [
+          "misaka/core/documents/wiring/_pdf_render.py",
+          1,
+          47
+        ]
+      ],
+      "evidence": "14:45 runtime-repairs 补丁与隔离并发 PDF、损坏文档回归。",
+      "fix": "已移入短命渲染子进程，保留尺寸约束，设置超时，回收 native 资源并保留退出诊断。",
+      "acceptance": "并发页图稳定；坏 PDF/渲染子进程故障不杀死 Sister 主会话。",
+      "boundary": "现场个别 PDF 失败不能全部断言由同一个原生竞争引起；本条确认的是已复现/修补的隔离缺陷。",
+      "tests": [
+        [
+          "tests/test_runtime_tool_repairs.py",
+          31
+        ]
+      ]
+    },
+    {
+      "id": "F05",
+      "title": "PDF 页图工具把失败当普通成功文本",
+      "status": "已有源码修复记录",
+      "kind": "已确认产品问题",
+      "priority": "P2",
+      "symptom": "文档不存在、非 PDF、页码越界、渲染异常等返回普通文本而不是错误回执。",
+      "cause": "异常分支走 _text 返回，外层不能据此区分失败。",
+      "locations": [
+        [
+          "misaka/core/documents/wiring/documents.py",
+          264,
+          293
+        ]
+      ],
+      "evidence": "14:45 runtime-repairs task.patch；test_page_failures_are_real_tool_errors。",
+      "fix": "已让失败进入真实工具错误通路，并验证 scale 为有限正数。",
+      "acceptance": "无文档/坏参数/越界/渲染异常均 isError=true，正常页图保持成功。",
+      "boundary": "与 U03 同属标记问题，但分别位于 PDF 和 web_extract 两个实现；修一个不会自动修另一个。",
+      "tests": [
+        [
+          "tests/test_runtime_tool_repairs.py",
+          47
+        ]
+      ]
+    },
+    {
+      "id": "F06",
+      "title": "子进程被 asyncio 与进程树清理器重复等待回收",
+      "status": "已有源码修复记录",
+      "kind": "已确认产品问题",
+      "priority": "P2",
+      "symptom": "原生子代理退出时可能出现 child watcher 状态丢失/未知退出状态。",
+      "cause": "psutil.wait_procs 和 asyncio watcher 可能等待同一个直接子进程，抢先收割退出状态。",
+      "locations": [
+        [
+          "misaka/core/subagent/runtime.py",
+          70,
+          100
+        ],
+        [
+          "misaka/core/platform/processes.py",
+          202,
+          250
+        ]
+      ],
+      "evidence": "14:45 runtime-repairs 补丁与 watcher-baseline-red.log；延迟 watcher 回归。",
+      "fix": "已让 asyncio 独占其直接 child 的 wait；进程树仍清理后代，保留 kill/wait 兜底。",
+      "acceptance": "正常退出/忽略 TERM/慢 watcher 均保留真实退出码；后代清理仍生效。",
+      "boundary": "这是进程 watcher，不是 U05 的界面旁观者，两者不可合并。",
+      "tests": [
+        [
+          "tests/test_runtime_tool_repairs.py",
+          202
+        ],
+        [
+          "tests/test_runtime_tool_repairs.py",
+          241
+        ]
+      ]
+    },
+    {
+      "id": "F07",
+      "title": "Sister 根会话默认 high 被覆盖为 low/off",
+      "status": "已有源码修复记录",
+      "kind": "已确认产品问题",
+      "priority": "P2",
+      "symptom": "用户设置 Sister 默认 high，卡片里变 low；托管根还可能套用通用 child 的 off。",
+      "cause": "卡片启动强制 low，托管 Sister 根与一般子代理的默认策略混用。",
+      "locations": [
+        [
+          "misaka/core/network/worker.py",
+          631,
+          639
+        ],
+        [
+          "misaka/core/network/sister_runtime.py",
+          350,
+          368
+        ]
+      ],
+      "evidence": "15:17 final-repair-validation.md 的 Sister thinking 项。",
+      "fix": "已移除强制低档；保留默认、模型偏好、已保存会话与显式 override；通用子代理策略不变。",
+      "acceptance": "新卡片/恢复卡片/托管 Sister/显式覆盖的优先级分别正确。",
+      "boundary": "当时已运行的旧 Sister 不会因为磁盘改了而自动换档；不把所有 child 的 low 都报成这条 bug。",
+      "tests": []
+    },
+    {
+      "id": "F08",
+      "title": "Compaction 把无关记账追加误判成上下文切换",
+      "status": "已有源码修复记录",
+      "kind": "已确认产品问题",
+      "priority": "P1",
+      "symptom": "Auto-compaction failed: Session, branch, model or settings changed during compaction。",
+      "cause": "压缩等待期间追加的非上下文记账记录也改变 leaf/entries，旧检查一概拒绝发布，即使有效上下文未改变。",
+      "locations": [
+        [
+          "misaka/core/agent_session.py",
+          1510,
+          1534
+        ]
+      ],
+      "evidence": "15:17 final-repair-validation.md 与 test_compaction_source_guard；记录型追加可独立复现。",
+      "fix": "已仅容许原分支上连续的 custom/label/session_info 记账追加；真正消息、模型、分支、设置变化仍拒绝过期摘要，并报告变更字段。",
+      "acceptance": "记账追加不误杀压缩；真实上下文变化绝不发布旧摘要；所有异步边界一致检查。",
+      "boundary": "早先现场日志没保存究竟哪个字段变了；不能断言用户每次看到该错误都属于误报。真实切模型时拒绝旧压缩结果仍是正确行为。",
+      "tests": [
+        [
+          "tests/test_compaction_source_guard.py",
+          49
+        ],
+        [
+          "tests/test_compaction_source_guard.py",
+          125
+        ]
+      ]
+    },
+    {
+      "id": "F09",
+      "title": "交付说明与交付文件名没有拆开",
+      "status": "已有源码修复记录",
+      "kind": "已确认产品问题",
+      "priority": "P1",
+      "symptom": "C6/C9 交付字段的中文整段说明被当文件名，misaka_card_complete 卡住；C2 当时疑似。",
+      "cause": "卡片契约同时承载 basename 与说明，提交门禁用未规范化整段字段定位文件。",
+      "locations": [
+        [
+          "misaka/core/network/card_contract.py",
+          5,
+          39
+        ],
+        [
+          "misaka/core/research/planner.py",
+          1,
+          35
+        ],
+        [
+          "misaka/core/research/report.py",
+          1,
+          45
+        ]
+      ],
+      "evidence": "t_7da32d→c6_italy_germany.md；t_bef693→c9_war_finance.md；t_104134→c2_naval_econ_data.md（当时疑似，不能追认）；15:17 修复记录。",
+      "fix": "已共享拆分器，规范为文件名单独一行+说明；兼容已约定的旧中文冒号/Write 形式，保留严格交付文件校验。",
+      "acceptance": "已支持的历史契约正常提交；缺文件、空文件、歧义、非法路径和符号链接越界仍拒绝。",
+      "boundary": "没有在这轮汇总中直接编辑卡字段或代替 Sister 完成卡片。",
+      "tests": [
+        [
+          "tests/test_card_completion.py",
+          1
+        ],
+        [
+          "tests/test_card_contract_defaults.py",
+          1
+        ]
+      ]
+    },
+    {
+      "id": "F10",
+      "title": "Sessions 混淆子代理状态与父卡片状态",
+      "status": "已有源码修复记录",
+      "kind": "已确认产品问题",
+      "priority": "P2",
+      "symptom": "同一 session 的图标显示已结束/绿色，文字却仍 running。",
+      "cause": "child 生命周期与关联父卡片 task_status 被放到同一个状态表达中。",
+      "locations": [
+        [
+          "misaka/core/session_catalog.py",
+          433,
+          440
+        ],
+        [
+          "misaka/ui/panel/panel.py",
+          1718,
+          1727
+        ]
+      ],
+      "evidence": "15:17 final-repair-validation.md；独立 catalog/panel 测试。",
+      "fix": "已拆分 child_status、parent_task_status；面板明确显示各自状态。",
+      "acceptance": "child done + parent card running 不再显示为 child running；卡片/原生/托管会话标签各自正确。",
+      "boundary": "Sessions 是含子代理/历史记录的目录，不是窗口计数；记录比窗口多本身并非 bug。",
+      "tests": [
+        [
+          "tests/test_session_catalog_child_status.py",
+          36
+        ],
+        [
+          "tests/test_session_catalog_child_status.py",
+          70
+        ]
+      ]
+    },
+    {
+      "id": "F11",
+      "title": "LCM 长检索表达式撞上 SQLite 深度限制",
+      "status": "已有源码修复记录",
+      "kind": "已确认产品问题",
+      "priority": "P2",
+      "symptom": "多关键词 LIKE 检索生成的 SQL 表达式过深，可能触发 expression tree too large。",
+      "cause": "大量 OR/加分项左结合展开，深度线性增长，触及 SQLite 默认深度限制。",
+      "locations": [
+        [
+          "misaka/extensions/misaka_lcm/vendor/search_query.py",
+          267,
+          278
+        ],
+        [
+          "misaka/extensions/misaka_lcm/vendor/dag.py",
+          690,
+          710
+        ],
+        [
+          "misaka/extensions/misaka_lcm/vendor/store.py",
+          1470,
+          1535
+        ]
+      ],
+      "evidence": "15:17 final-repair-validation.md；message/summary LIKE 回归；343 项 vendored core/embedding 检查通过（有原有导入弃用警告）。",
+      "fix": "已构建平衡 OR 和整数求和表达式；保留全部词项与排序，而非截短检索词。",
+      "acceptance": "长查询通过且最后一个关键词仍有效；排序、作用域、取消/超时不变。",
+      "boundary": "现场触发的原始长查询未留存；这里是已独立复现并修补的路径，不声称复现了完全同一条用户输入。",
+      "tests": [
+        [
+          "tests/test_lcm_search_expression_depth.py",
+          18
+        ],
+        [
+          "tests/test_lcm_search_expression_depth.py",
+          54
+        ]
+      ]
+    },
+    {
+      "id": "L01",
+      "title": "只读复合 shell 被保守权限分类挡住",
+      "status": "待设计",
+      "kind": "限制/体验问题",
+      "priority": "P2",
+      "symptom": "简单 rg/cat 可执行，加 | head、分号或花括号后进入 ask，后台子代理因此绕路或等待。",
+      "cause": "shell 复合语法被视为路径不明确，workspace guard 先于一般授权规则。",
+      "locations": [
+        [
+          "misaka/core/subagent/policy.py",
+          200,
+          232
+        ],
+        [
+          "misaka/core/subagent/policy.py",
+          635,
+          650
+        ],
+        [
+          "misaka/core/subagent/policy.py",
+          1000,
+          1028
+        ]
+      ],
+      "evidence": "tool-probe-result.json 六组只读命令对比；17:02 C4、17:13 C17、18:23 red-team 存在对应失败。",
+      "fix": "优先复用原生 read/grep；若增强分类，仅承认可证明只读的有限复合结构，不全局放开 shell。",
+      "acceptance": "常见只读组合不无谓 ask；变量展开、写操作、外部/受保护路径仍受限制。",
+      "boundary": "保守分类是明确存在的能力限制；任意 Python 或 shell 需要批准不自动构成权限 bug。",
+      "tests": []
+    },
+    {
+      "id": "L02",
+      "title": "切换 LO 供应商不等于自动复活已失败的 driver",
+      "status": "待设计",
+      "kind": "限制/连续性边界",
+      "priority": "P1",
+      "symptom": "用户担忧额度耗尽后换供应商会不会中断 Research。",
+      "cause": "setModel 保留同一会话，但不替换已经发出的请求；配额错误可让 required phase 失败并释放 driver。模型设置变化不会自动重新调度已失败工作流。",
+      "locations": [
+        [
+          "misaka/core/agent_session.py",
+          836,
+          875
+        ],
+        [
+          "misaka/core/research/workflow.py",
+          1578,
+          1585
+        ]
+      ],
+      "evidence": "15:19 routing 审计、隔离 quota probe 及当前源码；没有为此向真实供应商发新请求。",
+      "fix": "把“模型切换”和“失败后恢复”分开；恢复仍使用原生会话与保存的 run/卡片。若做自动恢复，须有明确同 run、幂等、审批和在途请求边界。",
+      "acceptance": "耗尽额度后保留已完成卡片、计划和会话；指定 run 恢复不重复派发；明确告知旧在途请求和已启动 Sisters 不随 LO 一起换模型。",
+      "boundary": "没有保证任意供应商/任意时点无缝不断；这是一条必须说明的边界，不是已观测的本次新崩溃。",
+      "tests": []
+    },
+    {
+      "id": "T01",
+      "title": "旧面板测试可能触及真实消息库",
+      "status": "测试侧已有修复",
+      "kind": "测试隔离缺陷",
+      "priority": "P1",
+      "symptom": "最初一次旧 pane 测试可懒初始化默认 messages.db，触发超过 7 天已投递消息的清理。",
+      "cause": "测试 fixture 未完全隔离 HOME/mailbox/roster/session 路径，部分 SQLite fixture 没关闭连接。",
+      "locations": [
+        [
+          "tests/test_card_pane_reuse.py",
+          1,
+          80
+        ],
+        [
+          "tests/test_sister_steering_by_mail.py",
+          1,
+          55
+        ]
+      ],
+      "evidence": "final-repair-validation.md 的 Live-runtime boundary and test-isolation incident；实际是否删除及删除几行没有证据。",
+      "fix": "已修 fixture；最终组合验证使用独立 HOME/邮箱/roster/session/agent 目录，关闭自己持有的连接。",
+      "acceptance": "隔离组合 507 passed/49 subtests under -W error；今后产品测试不会写默认用户数据路径。",
+      "boundary": "这是先前测试的已披露事故风险，不是用户运行时产品 bug；本轮汇总未运行该类产品测试。",
+      "tests": []
+    },
+    {
+      "id": "D01",
+      "title": "历史产物有登记却找不到文件",
+      "status": "待核实归因",
+      "kind": "数据异常",
+      "priority": "P2",
+      "symptom": "13:12–13:16 快照中，两个旧 run 共 7 个已登记产物路径缺失。",
+      "cause": "文件缺失已确认，删除原因未定；当前目录创建时间晚于旧 run，与工作区曾被清理/重建相容，但不足以归责程序。",
+      "locations": [],
+      "evidence": "early-live-audit.md：r_1a0d3ae829、r_17bb43afd3；后者 final_artifact=a_4fc744f5d9 指向异常 ni/Users/... 路径。当前 run 的 question 文件当时存在且 hash 正确。",
+      "fix": "只读核对旧 artifact 登记、工作区迁移/清理历史与备份；确定原因前不改登记或伪造恢复。",
+      "acceptance": "逐项记录 7 条的正确位置、是否可恢复及缺失原因；恢复操作另行明确授权。",
+      "boundary": "不是本轮 19 张卡已丢失，也不计为已证实 MISAKA 删除文件的 bug。",
+      "tests": []
+    },
+    {
+      "id": "U07",
+      "title": "来源引用被注册为本卡交付物或红队评语",
+      "status": "待修",
+      "kind": "已确认产品问题",
+      "priority": "P1",
+      "symptom": "5 条跨卡来源被附加为引用者的 task_output/critique。",
+      "cause": "build_submission 混合 findings source_file 与 artifacts，Research 注册仅按 nodes/final 和当前角色分类。",
+      "locations": [
+        [
+          "misaka/core/network/worker.py",
+          595,
+          602
+        ],
+        [
+          "misaka/core/research/workflow.py",
+          512,
+          538
+        ],
+        [
+          "misaka/core/research/report.py",
+          67,
+          81
+        ]
+      ],
+      "evidence": "/Users/makiko/Projects/misaka/docs/audits/misaka-recheck-2026-09-20-2110/probes.json",
+      "fix": "保留来源依赖，区分自有产物与引用文件，维护真正所有者。",
+      "acceptance": "红队引用 C17 不进入 critique 正文集合，正常跨卡引用保持。",
+      "boundary": "不等于任务派发或 write/edit 跑串。",
+      "tests": []
+    },
+    {
+      "id": "D02",
+      "title": "计划交付字段维修后登记哈希失配",
+      "status": "待处理",
+      "kind": "数据异常",
+      "priority": "P2",
+      "symptom": "plan.json 与 a_2ea3413351 登记 SHA 不一致，strict artifact_text 可复现拒绝读取。",
+      "cause": "LO 15:19 直接改 18 项 deliverable；备份仍匹配登记 SHA。",
+      "locations": [
+        [
+          "misaka/core/research/runs.py",
+          1233,
+          1238
+        ]
+      ],
+      "evidence": "/Users/makiko/Projects/misaka/docs/audits/misaka-recheck-2026-09-20-2110/event-anchors.json",
+      "fix": "经受控计划发布入口同步投影/登记；不盲目合法化任意修改。",
+      "acceptance": "批准计划/磁盘投影/登记一致，完整性校验保留。",
+      "boundary": "已定位为运行期间直接文件维修的后遗状态，不认定底层随机损坏。",
+      "tests": []
+    },
+    {
+      "id": "Q01",
+      "title": "材料索引159条标题错误处理Unicode转义",
+      "status": "待修交付物",
+      "kind": "交付质量缺陷",
+      "priority": "P2",
+      "symptom": "CSV 标题出现 u00e9/u2013 等文字替代实际字符。",
+      "cause": "LO 即时脚本正则抓原始 title 后进行字符串替换，而未解码前置信息。",
+      "locations": [],
+      "evidence": "/Users/makiko/Projects/misaka/docs/audits/misaka-recheck-2026-09-20-2110/event-anchors.json LO 原生行759；/Users/makiko/Projects/misaka/docs/audits/misaka-recheck-2026-09-20-2110/probes.json",
+      "fix": "复用前置信息解析器解码标题，保留完整原值。",
+      "acceptance": "带重音、引号及符号的标题一致；原站本就损坏的字符不伪造。",
+      "boundary": "不是 Web 缓存模块新 bug。",
+      "tests": []
+    },
+    {
+      "id": "Q02",
+      "title": "材料索引用URL前70字符串配引用",
+      "status": "待修交付物",
+      "kind": "交付质量缺陷",
+      "priority": "P2",
+      "symptom": "不同的法普/法俄提尔西特条约被互相匹配；12 对只凭短前缀的候选关系。",
+      "cause": "LO 即时生成脚本截短URL并按子串匹配，把候选来源关系提升为引用。",
+      "locations": [],
+      "evidence": "/Users/makiko/Projects/misaka/docs/audits/misaka-recheck-2026-09-20-2110/event-anchors.json LO 原生行761；/Users/makiko/Projects/misaka/docs/audits/misaka-recheck-2026-09-20-2110/probes.json",
+      "fix": "完整规范化URL/明确文件/doc ID；区分候选、正文引用、实际阅读。",
+      "acceptance": "不同条约不混，同页别名有明确依据；来源清单出现不等于通读。",
+      "boundary": "12 对中部分是同页别名，不宣称全部12对均错。",
+      "tests": []
+    }
+  ],
+  "evidence_manifest": [
+    {
+      "file": "session-parse-proof.json",
+      "original": "/private/tmp/misaka-session-parse-proof-20260920.json",
+      "sha256": "5dcad86a64279f5f21da5975ff893eba95b31fd28a345b7849adf06fe4505238",
+      "bytes": 1919
+    },
+    {
+      "file": "tool-probe-result.json",
+      "original": "/private/tmp/misaka-bug-audit-20260920-1840/probe-result.json",
+      "sha256": "837e3260c7687e232ac10f45d3d3bda01f324cbc31b135902ca0e45dbbbcaa77",
+      "bytes": 1202
+    },
+    {
+      "file": "early-live-audit.md",
+      "original": "/private/tmp/misaka-live-audit-20260920/report.md",
+      "sha256": "e845a92434043a5af7c1b4888acc2d88154ea244fdf6227b7fb7836015236185",
+      "bytes": 6356
+    },
+    {
+      "file": "late-live-audit.md",
+      "original": "/private/tmp/misaka-bug-audit-20260920-1840/audit-report.md",
+      "sha256": "b77a87645d6a7ee089fc1f4b7b18b5c237b82c0bf0c87930468ba17e08bb0e38",
+      "bytes": 5353
+    },
+    {
+      "file": "focus-audit.md",
+      "original": "/private/tmp/misaka-focus-audit-20260920/audit-report.md",
+      "sha256": "ab07edcb59e6ff2d3b96a879b7589d000643beab15a3a6b4829f25ad1606f6cb",
+      "bytes": 15996
+    },
+    {
+      "file": "final-repair-validation.md",
+      "original": "/private/tmp/misaka-final-bugfixes-20260920/validation.md",
+      "sha256": "df0d0dc4f8e79e172b9cc3b6a4e1798ecef2cd56615e96dfa0995b483dd4bb8c",
+      "bytes": 3353
+    },
+    {
+      "file": "runtime-repair-smoke.log",
+      "original": "/private/tmp/misaka-runtime-repairs-20260920/main-smoke.log",
+      "sha256": "d326cfd02f4eda62871d372d76e8b48a3341aab584b479610e47980b0a228b4d",
+      "bytes": 308
+    },
+    {
+      "file": "sister-parallel-focused.log",
+      "original": "/private/tmp/misaka-sister-parallel-20260920/focused-tests.log",
+      "sha256": "22daf7add2f4fda99fe9200ee93753431db5c0de28cd46b6f4d776a2495fadd5",
+      "bytes": 180
+    }
+  ],
+  "count_history": [
+    {
+      "captured_at": "2026-09-20T19:50:34.697190+09:00",
+      "counts": {
+        "confirmed_product_issues": 17,
+        "unfixed": 6,
+        "source_fixed": 11,
+        "other_tracked": 4,
+        "total_tracked": 21
+      }
+    },
+    {
+      "captured_at": "2026-09-20T21:19:32.229227+09:00",
+      "counts": {
+        "confirmed_product_issues": 18,
+        "unfixed": 7,
+        "source_fixed": 11,
+        "other_tracked": 7,
+        "total_tracked": 25
+      }
+    },
+    {
+      "captured_at": "2026-09-21T13:28:45.465451+09:00",
+      "counts": {
+        "confirmed_product_issues": 18,
+        "unfixed": 5,
+        "source_fixed": 13,
+        "other_tracked": 7,
+        "total_tracked": 25
+      }
+    }
+  ],
+  "updated_at": "2026-09-21T18:47:08.958264+09:00"
+}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import logging
 import os
 import signal
 import socket
@@ -11,6 +12,10 @@ import time
 from dataclasses import dataclass
 
 import psutil
+
+_LOG = logging.getLogger(__name__)
+_REPORTED: set[tuple] = set()      # liveness anomalies already logged by this process (one line each)
+_SELF_IDENTITY: str | None = None  # what this process computed for itself the first time it checked
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,25 +48,62 @@ def identity(pid: int | None) -> str | None:
     return f"{host}:{int(pid)}:{started}" if started else None
 
 
-def identity_is_alive(pid: int | None, expected: str | None) -> bool:
+def explain_liveness(pid: int | None, expected: str | None) -> tuple[bool, str]:
+    """``identity_is_alive`` with its reason: what the check saw, in words a log can carry.
+
+    2026-09-18 (B20/B33): a three-hour-old daemon judged every session dead and a same-age
+    driver's node processes found their own claims "superseded", while fresh processes
+    computing the same identities agreed with each other. The verdicts left no trace of
+    *why*, so the mechanism could not be pinned before the restart cleared it. Every
+    verdict that is not "the PID is gone" now says what it compared.
+    """
     if not pid or not expected:
-        return False
+        return False, "no pid or no recorded identity"
     current = identity(pid)
     if current is None:
         # An unreadable identity does not prove death; stay conservative while the PID exists.
         try:
-            return psutil.pid_exists(int(pid))
+            exists = psutil.pid_exists(int(pid))
         except ValueError:
-            return False
+            return False, f"pid {pid!r} is not a number"
+        return exists, ("identity unreadable, pid exists" if exists else "pid gone")
     if current != expected:
-        return False
+        return False, f"identity mismatch: recorded {expected!r}, now {current!r}"
     try:
-        return psutil.Process(int(pid)).status() not in {
-            psutil.STATUS_DEAD,
-            psutil.STATUS_ZOMBIE,
-        }
-    except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
-        return False
+        status = psutil.Process(int(pid)).status()
+    except psutil.NoSuchProcess:
+        return False, "pid gone"
+    except (psutil.AccessDenied, ValueError) as error:
+        return False, f"status unreadable ({type(error).__name__}: {error})"
+    if status in {psutil.STATUS_DEAD, psutil.STATUS_ZOMBIE}:
+        return False, f"status {status}"
+    return True, "alive"
+
+
+def _self_check() -> None:
+    """This process's own identity must not drift: if it does, every comparison it makes is suspect."""
+    global _SELF_IDENTITY
+    current = identity(os.getpid())
+    if _SELF_IDENTITY is None:
+        _SELF_IDENTITY = current
+        return
+    if current != _SELF_IDENTITY and ("self-drift",) not in _REPORTED:
+        _REPORTED.add(("self-drift",))
+        _LOG.warning("process identity drifted inside this process: first %r, now %r "
+                     "(every liveness verdict it makes is suspect; see runtime-bugs-2026-09-18 B20/B33)",
+                     _SELF_IDENTITY, current)
+
+
+def identity_is_alive(pid: int | None, expected: str | None) -> bool:
+    alive, reason = explain_liveness(pid, expected)
+    if not alive and reason not in ("pid gone", "no pid or no recorded identity"):
+        # A gone PID is the normal way a session ends; anything else is the anomaly to keep.
+        key = (int(pid) if pid else None, reason.split(":")[0])
+        if key not in _REPORTED:
+            _REPORTED.add(key)
+            _self_check()
+            _LOG.warning("process %s judged not alive: %s", pid, reason)
+    return alive
 
 
 def _group_exists(pgid: int) -> bool:
@@ -157,11 +199,15 @@ def _resolve(tokens: list[ProcessToken]) -> list[psutil.Process]:
     return result
 
 
-def terminate(pid: int, captured: list[ProcessToken] | None = None) -> None:
+def terminate(
+    pid: int, captured: list[ProcessToken] | None = None, *, reap_root: bool = True,
+) -> None:
     """Suspend, then terminate a whole recursive tree.
 
     ``captured`` keeps independently-sessioned descendants addressable even if
     the root exits and the OS reparents them before cleanup begins.
+    Set ``reap_root=False`` when asyncio owns the direct child: its watcher
+    must be the only waiter, and the caller handles its wait/kill fallback.
     """
 
     tokens = list(captured or [])
@@ -199,7 +245,8 @@ def terminate(pid: int, captured: list[ProcessToken] | None = None) -> None:
             process.resume()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
-    _, alive = psutil.wait_procs(processes, timeout=2)
+    waitable = processes if reap_root else [process for process in processes if process.pid != pid]
+    _, alive = psutil.wait_procs(waitable, timeout=2)
     for process in alive:
         try:
             process.kill()

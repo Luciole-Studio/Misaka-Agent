@@ -1,0 +1,603 @@
+........................................................................ [ 13%]
+........................................................................ [ 26%]
+........................................................................ [ 40%]
+........................................................................ [ 53%]
+........................................................................ [ 66%]
+........E......F...............F............................E..E........ [ 80%]
+...F.................................................................... [ 93%]
+...................................                                      [100%]
+==================================== ERRORS ====================================
+_____ ERROR at setup of test_a_finished_run_leaves_the_conversation_alone ______
+  + Exception Group Traceback (most recent call last):
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 361, in from_call
+  |     result: TResult | None = func()
+  |                              ~~~~^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 250, in <lambda>
+  |     lambda: runtest_hook(item=item, **kwds),
+  |             ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+  |     return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  |            ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+  |     return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  |            ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 167, in _multicall
+  |     raise exception
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+  |     teardown.throw(exception)
+  |     ~~~~~~~~~~~~~~^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/logging.py", line 858, in pytest_runtest_setup
+  |     yield
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+  |     teardown.throw(exception)
+  |     ~~~~~~~~~~~~~~^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/capture.py", line 895, in pytest_runtest_setup
+  |     return (yield)
+  |             ^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+  |     res = hook_impl.function(*args)
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 178, in pytest_runtest_setup
+  |     collect_unraisable(item.config)
+  |     ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 81, in collect_unraisable
+  |     raise ExceptionGroup("multiple unraisable exception warnings", errors)
+  | ExceptionGroup: multiple unraisable exception warnings (7 sub-exceptions)
+  +-+---------------- 1 ----------------
+    | Traceback (most recent call last):
+    |   File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/checkout/misaka/core/platform/tasks.py", line 170, in execute
+    |     return super().execute(sql, parameters)
+    |            ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+    | ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x11089d550>
+    | 
+    | The above exception was the direct cause of the following exception:
+    | 
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 67, in collect_unraisable
+    |     warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+    |     ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    | pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x11089d550>
+    | Enable tracemalloc to get traceback where the object was allocated.
+    | See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    +---------------- 2 ----------------
+    | Traceback (most recent call last):
+    |   File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/checkout/misaka/core/platform/tasks.py", line 170, in execute
+    |     return super().execute(sql, parameters)
+    |            ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+    | ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x11089f850>
+    | 
+    | The above exception was the direct cause of the following exception:
+    | 
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 67, in collect_unraisable
+    |     warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+    |     ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    | pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x11089f850>
+    | Enable tracemalloc to get traceback where the object was allocated.
+    | See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    +---------------- 3 ----------------
+    | Traceback (most recent call last):
+    |   File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/checkout/misaka/core/platform/tasks.py", line 170, in execute
+    |     return super().execute(sql, parameters)
+    |            ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+    | ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x11089e550>
+    | 
+    | The above exception was the direct cause of the following exception:
+    | 
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 67, in collect_unraisable
+    |     warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+    |     ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    | pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x11089e550>
+    | Enable tracemalloc to get traceback where the object was allocated.
+    | See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    +---------------- 4 ----------------
+    | Traceback (most recent call last):
+    |   File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/checkout/misaka/core/platform/tasks.py", line 170, in execute
+    |     return super().execute(sql, parameters)
+    |            ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+    | ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x11089d850>
+    | 
+    | The above exception was the direct cause of the following exception:
+    | 
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 67, in collect_unraisable
+    |     warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+    |     ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    | pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x11089d850>
+    | Enable tracemalloc to get traceback where the object was allocated.
+    | See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    +---------------- 5 ----------------
+    | Traceback (most recent call last):
+    |   File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/checkout/misaka/core/platform/tasks.py", line 170, in execute
+    |     return super().execute(sql, parameters)
+    |            ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+    | ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x11089df50>
+    | 
+    | The above exception was the direct cause of the following exception:
+    | 
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 67, in collect_unraisable
+    |     warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+    |     ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    | pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x11089df50>
+    | Enable tracemalloc to get traceback where the object was allocated.
+    | See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    +---------------- 6 ----------------
+    | Traceback (most recent call last):
+    |   File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/checkout/misaka/core/platform/tasks.py", line 170, in execute
+    |     return super().execute(sql, parameters)
+    |            ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+    | ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x11089db50>
+    | 
+    | The above exception was the direct cause of the following exception:
+    | 
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 67, in collect_unraisable
+    |     warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+    |     ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    | pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x11089db50>
+    | Enable tracemalloc to get traceback where the object was allocated.
+    | See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    +---------------- 7 ----------------
+    | Traceback (most recent call last):
+    |   File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/checkout/misaka/core/platform/tasks.py", line 170, in execute
+    |     return super().execute(sql, parameters)
+    |            ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+    | ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x11089c050>
+    | 
+    | The above exception was the direct cause of the following exception:
+    | 
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 67, in collect_unraisable
+    |     warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+    |     ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    | pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x11089c050>
+    | Enable tracemalloc to get traceback where the object was allocated.
+    | See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    +------------------------------------
+__ ERROR at setup of test_a_run_nobody_drives_needs_last_order_woken[stopped] __
+  + Exception Group Traceback (most recent call last):
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 361, in from_call
+  |     result: TResult | None = func()
+  |                              ~~~~^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 250, in <lambda>
+  |     lambda: runtest_hook(item=item, **kwds),
+  |             ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+  |     return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  |            ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+  |     return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  |            ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 167, in _multicall
+  |     raise exception
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+  |     teardown.throw(exception)
+  |     ~~~~~~~~~~~~~~^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/logging.py", line 858, in pytest_runtest_setup
+  |     yield
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+  |     teardown.throw(exception)
+  |     ~~~~~~~~~~~~~~^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/capture.py", line 895, in pytest_runtest_setup
+  |     return (yield)
+  |             ^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+  |     res = hook_impl.function(*args)
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 178, in pytest_runtest_setup
+  |     collect_unraisable(item.config)
+  |     ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 81, in collect_unraisable
+  |     raise ExceptionGroup("multiple unraisable exception warnings", errors)
+  | ExceptionGroup: multiple unraisable exception warnings (2 sub-exceptions)
+  +-+---------------- 1 ----------------
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/inspect.py", line 3098, in <genexpr>
+    |     params = OrderedDict((param.name, param) for param in parameters)
+    |     
+    | ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x1109a8050>
+    | 
+    | The above exception was the direct cause of the following exception:
+    | 
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 67, in collect_unraisable
+    |     warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+    |     ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    | pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x1109a8050>
+    | Enable tracemalloc to get traceback where the object was allocated.
+    | See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    +---------------- 2 ----------------
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/inspect.py", line 3098, in <genexpr>
+    |     params = OrderedDict((param.name, param) for param in parameters)
+    |     
+    | ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x1109ab950>
+    | 
+    | The above exception was the direct cause of the following exception:
+    | 
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 67, in collect_unraisable
+    |     warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+    |     ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    | pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x1109ab950>
+    | Enable tracemalloc to get traceback where the object was allocated.
+    | See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    +------------------------------------
+_____ ERROR at setup of test_a_running_sister_is_steered_through_her_inbox _____
+  + Exception Group Traceback (most recent call last):
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 361, in from_call
+  |     result: TResult | None = func()
+  |                              ~~~~^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 250, in <lambda>
+  |     lambda: runtest_hook(item=item, **kwds),
+  |             ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+  |     return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  |            ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+  |     return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  |            ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 167, in _multicall
+  |     raise exception
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+  |     teardown.throw(exception)
+  |     ~~~~~~~~~~~~~~^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/logging.py", line 858, in pytest_runtest_setup
+  |     yield
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+  |     teardown.throw(exception)
+  |     ~~~~~~~~~~~~~~^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/capture.py", line 895, in pytest_runtest_setup
+  |     return (yield)
+  |             ^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+  |     res = hook_impl.function(*args)
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 178, in pytest_runtest_setup
+  |     collect_unraisable(item.config)
+  |     ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 81, in collect_unraisable
+  |     raise ExceptionGroup("multiple unraisable exception warnings", errors)
+  | ExceptionGroup: multiple unraisable exception warnings (2 sub-exceptions)
+  +-+---------------- 1 ----------------
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pydantic/_internal/_schema_generation_shared.py", line 31, in __init__
+    |     def __init__(self, generate_json_schema: GenerateJsonSchema, handler_override: HandlerOverride | None) -> None:
+    |     
+    | ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x1109a9a50>
+    | 
+    | The above exception was the direct cause of the following exception:
+    | 
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 67, in collect_unraisable
+    |     warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+    |     ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    | pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x1109a9a50>
+    | Enable tracemalloc to get traceback where the object was allocated.
+    | See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    +---------------- 2 ----------------
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pydantic/_internal/_schema_generation_shared.py", line 31, in __init__
+    |     def __init__(self, generate_json_schema: GenerateJsonSchema, handler_override: HandlerOverride | None) -> None:
+    |     
+    | ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x1109a9750>
+    | 
+    | The above exception was the direct cause of the following exception:
+    | 
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 67, in collect_unraisable
+    |     warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+    |     ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    | pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x1109a9750>
+    | Enable tracemalloc to get traceback where the object was allocated.
+    | See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    +------------------------------------
+=================================== FAILURES ===================================
+_____ test_appended_bookkeeping_is_preserved_in_archive_and_branch[False] ______
+  + Exception Group Traceback (most recent call last):
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 361, in from_call
+  |     result: TResult | None = func()
+  |                              ~~~~^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 250, in <lambda>
+  |     lambda: runtest_hook(item=item, **kwds),
+  |             ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+  |     return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  |            ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+  |     return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  |            ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 167, in _multicall
+  |     raise exception
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+  |     teardown.throw(exception)
+  |     ~~~~~~~~~~~~~~^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/logging.py", line 865, in pytest_runtest_call
+  |     yield
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+  |     teardown.throw(exception)
+  |     ~~~~~~~~~~~~~~^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/capture.py", line 900, in pytest_runtest_call
+  |     return (yield)
+  |             ^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+  |     teardown.throw(exception)
+  |     ~~~~~~~~~~~~~~^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/skipping.py", line 268, in pytest_runtest_call
+  |     return (yield)
+  |             ^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+  |     res = hook_impl.function(*args)
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 183, in pytest_runtest_call
+  |     collect_unraisable(item.config)
+  |     ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 81, in collect_unraisable
+  |     raise ExceptionGroup("multiple unraisable exception warnings", errors)
+  | ExceptionGroup: multiple unraisable exception warnings (4 sub-exceptions)
+  +-+---------------- 1 ----------------
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/pathlib/_local.py", line 289, in drive
+    |     @property
+    |     
+    | ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x10e51e550>
+    | 
+    | The above exception was the direct cause of the following exception:
+    | 
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 67, in collect_unraisable
+    |     warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+    |     ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    | pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x10e51e550>
+    | Enable tracemalloc to get traceback where the object was allocated.
+    | See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    +---------------- 2 ----------------
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/pathlib/_local.py", line 289, in drive
+    |     @property
+    |     
+    | ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x11089c450>
+    | 
+    | The above exception was the direct cause of the following exception:
+    | 
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 67, in collect_unraisable
+    |     warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+    |     ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    | pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x11089c450>
+    | Enable tracemalloc to get traceback where the object was allocated.
+    | See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    +---------------- 3 ----------------
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/pathlib/_local.py", line 289, in drive
+    |     @property
+    |     
+    | ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x11089f850>
+    | 
+    | The above exception was the direct cause of the following exception:
+    | 
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 67, in collect_unraisable
+    |     warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+    |     ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    | pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x11089f850>
+    | Enable tracemalloc to get traceback where the object was allocated.
+    | See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    +---------------- 4 ----------------
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/pathlib/_local.py", line 231, in __str__
+    |     return self._str
+    |            ^^^^^^^^^
+    | AttributeError: 'pathlib._local.PosixPath' object has no attribute '_str'
+    | 
+    | During handling of the above exception, another exception occurred:
+    | 
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/pathlib/_local.py", line 289, in drive
+    |     @property
+    |     
+    | ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x11089db50>
+    | 
+    | The above exception was the direct cause of the following exception:
+    | 
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 67, in collect_unraisable
+    |     warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+    |     ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    | pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x11089db50>
+    | Enable tracemalloc to get traceback where the object was allocated.
+    | See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    +------------------------------------
+_________ test_real_changes_never_publish_a_stale_summary[compaction] __________
+
+self = <unittest.mock.MagicProxy object at 0x111971b50>, name = '__aenter__'
+parent = <AsyncMock id='4589911216'>
+
+>   def __init__(self, name, parent):
+E   ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x110f84b50>
+
+/Users/makiko/.local/share/uv/python/cpython-3.13.11-macos-aarch64-none/lib/python3.13/unittest/mock.py:2247: ResourceWarning
+
+The above exception was the direct cause of the following exception:
+
+cls = <class '_pytest.runner.CallInfo'>
+func = <function call_and_report.<locals>.<lambda> at 0x11178f7e0>
+when = 'call'
+reraise = (<class '_pytest.outcomes.Exit'>, <class 'KeyboardInterrupt'>)
+
+    @classmethod
+    def from_call(
+        cls,
+        func: Callable[[], TResult],
+        when: Literal["collect", "setup", "call", "teardown"],
+        reraise: type[BaseException] | tuple[type[BaseException], ...] | None = None,
+    ) -> CallInfo[TResult]:
+        """Call func, wrapping the result in a CallInfo.
+    
+        :param func:
+            The function to call. Called without arguments.
+        :type func: Callable[[], _pytest.runner.TResult]
+        :param when:
+            The phase in which the function is called.
+        :param reraise:
+            Exception or exceptions that shall propagate if raised by the
+            function, instead of being wrapped in the CallInfo.
+        """
+        excinfo = None
+        instant = timing.Instant()
+        try:
+>           result: TResult | None = func()
+                                     ^^^^^^
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:361: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:250: in <lambda>
+    lambda: runtest_hook(item=item, **kwds),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_hooks.py:512: in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_manager.py:120: in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/logging.py:865: in pytest_runtest_call
+    yield
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/capture.py:900: in pytest_runtest_call
+    return (yield)
+            ^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/skipping.py:268: in pytest_runtest_call
+    return (yield)
+            ^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:183: in pytest_runtest_call
+    collect_unraisable(item.config)
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:79: in collect_unraisable
+    raise errors[0]
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+config = <_pytest.config.Config object at 0x109226120>
+
+    def collect_unraisable(config: Config) -> None:
+        pop_unraisable = config.stash[unraisable_exceptions].pop
+        errors: list[pytest.PytestUnraisableExceptionWarning | RuntimeError] = []
+        meta = None
+        hook_error = None
+        try:
+            while True:
+                try:
+                    meta = pop_unraisable()
+                except IndexError:
+                    break
+    
+                if isinstance(meta, BaseException):
+                    hook_error = RuntimeError("Failed to process unraisable exception")
+                    hook_error.__cause__ = meta
+                    errors.append(hook_error)
+                    continue
+    
+                msg = meta.msg
+                try:
+>                   warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+E                   pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x110f84b50>
+E                   Enable tracemalloc to get traceback where the object was allocated.
+E                   See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning
+_____________ test_a_requeued_card_runs_in_the_window_it_left_open _____________
+
+self = <ruamel.yaml.reader.Reader object at 0x110b14110>, index = 0
+
+>   def peek(self, index: int = 0) -> Text:
+E   ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x1109a8550>
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/ruamel/yaml/reader.py:122: ResourceWarning
+
+The above exception was the direct cause of the following exception:
+
+cls = <class '_pytest.runner.CallInfo'>
+func = <function call_and_report.<locals>.<lambda> at 0x1117480e0>
+when = 'call'
+reraise = (<class '_pytest.outcomes.Exit'>, <class 'KeyboardInterrupt'>)
+
+    @classmethod
+    def from_call(
+        cls,
+        func: Callable[[], TResult],
+        when: Literal["collect", "setup", "call", "teardown"],
+        reraise: type[BaseException] | tuple[type[BaseException], ...] | None = None,
+    ) -> CallInfo[TResult]:
+        """Call func, wrapping the result in a CallInfo.
+    
+        :param func:
+            The function to call. Called without arguments.
+        :type func: Callable[[], _pytest.runner.TResult]
+        :param when:
+            The phase in which the function is called.
+        :param reraise:
+            Exception or exceptions that shall propagate if raised by the
+            function, instead of being wrapped in the CallInfo.
+        """
+        excinfo = None
+        instant = timing.Instant()
+        try:
+>           result: TResult | None = func()
+                                     ^^^^^^
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:361: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:250: in <lambda>
+    lambda: runtest_hook(item=item, **kwds),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_hooks.py:512: in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_manager.py:120: in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/logging.py:865: in pytest_runtest_call
+    yield
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/capture.py:900: in pytest_runtest_call
+    return (yield)
+            ^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/skipping.py:268: in pytest_runtest_call
+    return (yield)
+            ^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:183: in pytest_runtest_call
+    collect_unraisable(item.config)
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:79: in collect_unraisable
+    raise errors[0]
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+config = <_pytest.config.Config object at 0x109226120>
+
+    def collect_unraisable(config: Config) -> None:
+        pop_unraisable = config.stash[unraisable_exceptions].pop
+        errors: list[pytest.PytestUnraisableExceptionWarning | RuntimeError] = []
+        meta = None
+        hook_error = None
+        try:
+            while True:
+                try:
+                    meta = pop_unraisable()
+                except IndexError:
+                    break
+    
+                if isinstance(meta, BaseException):
+                    hook_error = RuntimeError("Failed to process unraisable exception")
+                    hook_error.__cause__ = meta
+                    errors.append(hook_error)
+                    continue
+    
+                msg = meta.msg
+                try:
+>                   warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+E                   pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x1109a8550>
+E                   Enable tracemalloc to get traceback where the object was allocated.
+E                   See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning
+=========================== short test summary info ============================
+FAILED tests/test_compaction_source_guard.py::test_appended_bookkeeping_is_preserved_in_archive_and_branch[False]
+FAILED tests/test_compaction_source_guard.py::test_real_changes_never_publish_a_stale_summary[compaction]
+FAILED tests/test_card_pane_reuse.py::test_a_requeued_card_runs_in_the_window_it_left_open
+ERROR tests/test_research_mode_notice.py::test_a_finished_run_leaves_the_conversation_alone
+ERROR tests/test_sister_notification_wakes_lo.py::test_a_run_nobody_drives_needs_last_order_woken[stopped]
+ERROR tests/test_sister_steering_by_mail.py::test_a_running_sister_is_steered_through_her_inbox
+3 failed, 533 passed, 3 errors in 44.60s

@@ -15,7 +15,7 @@ from typing import Any, Literal, NotRequired, TypedDict, cast
 from pathspec import GitIgnoreSpec
 from wcmatch import glob as wc_glob
 
-from misaka.config import CONFIG_DIR_NAME
+from misaka.config import home
 from misaka.core.settings_manager import SettingsManager
 from misaka.core.source_info import SourceScope
 from misaka.utils.paths import (
@@ -382,9 +382,11 @@ class DefaultPackageManager:
         accumulator = _Accumulator()
         global_settings = self.settingsManager.getGlobalSettings()
         project_settings = self.settingsManager.getProjectSettings()
-        project_trusted = self.settingsManager.isProjectTrusted()
+        # A directory whose config directory is the home has no project scope to trust.
+        project_dir = home.project_dir(self.cwd)
+        project_trusted = self.settingsManager.isProjectTrusted() and project_dir is not None
         global_base_dir = self.agentDir
-        project_base_dir = os.path.join(self.cwd, CONFIG_DIR_NAME)
+        project_base_dir = str(project_dir) if project_dir is not None else self.cwd
         for resource_type in RESOURCE_TYPES:
             target = self._get_target_map(accumulator, resource_type)
             if project_trusted and resource_type != "extensions":
@@ -436,7 +438,7 @@ class DefaultPackageManager:
 
     def _get_base_dir_for_scope(self, scope: SourceScope) -> str:
         if scope == "project":
-            return os.path.join(self.cwd, CONFIG_DIR_NAME)
+            return str(home.project_dir(self.cwd) or self.cwd)
         if scope == "user":
             return self.agentDir
         return self.cwd

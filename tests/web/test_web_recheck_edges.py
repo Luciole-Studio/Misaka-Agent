@@ -4,17 +4,16 @@ from pathlib import Path
 
 import httpx
 import pytest
+from webconf import write_web
 
 from misaka.config.product import CFG
-from misaka.core.tools._web import bounded, website_policy
-from misaka.core.web import cache, config, extract
+from misaka.core.web import bounded, cache, config, extract, website_policy
 
 URL = "https://example.org/paper"
 
 
 @pytest.fixture(autouse=True)
 def isolated_web(monkeypatch, tmp_path):
-    monkeypatch.setitem(CFG, "web_config", str(tmp_path / "web.json"))
     monkeypatch.setitem(CFG, "web_cache", str(tmp_path / "cache"))
     for name in config._CREDENTIAL_VARS + config._ENDPOINT_VARS:
         monkeypatch.delenv(name, raising=False)
@@ -24,7 +23,7 @@ def isolated_web(monkeypatch, tmp_path):
 
 
 def configure(**values):
-    Path(CFG["web_config"]).write_text(json.dumps(values))
+    write_web(values)
     website_policy.invalidate_cache()
 
 

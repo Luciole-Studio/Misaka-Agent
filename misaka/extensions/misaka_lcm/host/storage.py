@@ -14,6 +14,7 @@ from pathlib import Path
 
 from filelock import FileLock, ReadWriteLock, Timeout
 
+from misaka.config import home
 from misaka.utils.values import read_field
 
 logger = logging.getLogger(__name__)
@@ -51,8 +52,17 @@ def context(ctx, workspace):
     return ProjectContext(ctx, workspace)
 
 
+def plugin_home() -> Path:
+    """This plugin's own corner of the home: the one place it keeps anything that is not a
+    project's. The core knows only that plugins have such directories, not what is in them."""
+    return home.path("plugins") / "misaka-lcm"
+
+
 def directory(workspace: Path) -> Path:
-    return workspace / ".misaka" / "lcm"
+    """The project's own store; a workspace that is no project (its config directory is the
+    home) keeps it in the plugin's own directory instead."""
+    project_dir = home.project_dir(workspace)
+    return project_dir / "lcm" if project_dir is not None else plugin_home() / "lcm"
 
 
 def _paths(workspace):

@@ -1,0 +1,22 @@
+{
+  "misaka/core/web/extract.py": {
+    "before_sha256": "75e5bf78e08e7d1af99a20d6a8bf99c44c2490cd25e82f789100f96d37496104",
+    "after_sha256": "cf03ab3675fdc28ce0dc0c4481a0abbc71d55f2df5a3190ecfbdd60d1ee05859"
+  },
+  "tests/web/test_web_extract_result_status.py": {
+    "before_sha256": null,
+    "after_sha256": "c715ad67636caa92006beae1cfe4e6e645b048d3a82dbe5d38ecce2e824fb3b4"
+  },
+  "tests/web/test_web_hermes_origin.py": {
+    "before_sha256": "038f46cae14846cc28748783438ad93594ddba9c268fb51815db5a3761233d35",
+    "after_sha256": "234a8dff16b8c7d3e7d1664cec72880af7e1149a3676a26653035e869f9fa234"
+  },
+  "tests/web/test_web_debug.py": {
+    "before_sha256": "dcd723a8d2806a1133c701a5f9d19f0822365e638a9f4ea388242214f1f5e883",
+    "after_sha256": "7ebee102c2b91c7b7058d1f41d6dc8334f31f21352cad328e23faba2146eaa3a"
+  },
+  "tests/web/test_web_network_policy.py": {
+    "before_sha256": "15f09d9ec8779d68b5d8b009316700bbcf9dca144eea6ab4910e1186712287bc",
+    "after_sha256": "954146c8ab76386d65147c9a90e45afd8520b4c7abd1a9f0786ef228eef0376b"
+  }
+}

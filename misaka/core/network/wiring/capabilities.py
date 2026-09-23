@@ -4,6 +4,7 @@ from contextlib import contextmanager
 
 from misaka.core.network.roster import coordinator_profile, routing_catalog
 from misaka.core.platform import prompt_guard
+from misaka.core.research.tool_policy import DRIVER_OWNED_TOOLS
 
 
 class SisterCapabilitiesPart:
@@ -19,6 +20,16 @@ class SisterCapabilitiesPart:
     def attach(self, session):
         self.session = session
 
+    def project_tools(self, tools):
+        if self.research_context and self.sister_id is None:
+            return [tool for tool in tools if tool.name not in DRIVER_OWNED_TOOLS]
+        return tools
+
+    async def tool_call(self, event, ctx):
+        if (self.research_context and self.sister_id is None
+                and event["toolName"] in DRIVER_OWNED_TOOLS):
+            return {"block": True, "reason": "Research's driver owns this workflow; use the current research phase tools."}
+
     @contextmanager
     def snapshot(self, catalog=None):
         """Publish Research context and, when supplied, the validator's exact catalog."""
@@ -27,15 +38,20 @@ class SisterCapabilitiesPart:
             self.catalog = catalog
         self.research_context = True
         try:
+            if self.session is not None and not previous[1]:
+                self.session.refreshTools()
             yield
         finally:
             self.catalog, self.research_context = previous
+            if self.session is not None and not previous[1]:
+                self.session.refreshTools()
 
     async def before_agent_start(self, event, ctx):
         system_prompt = event["systemPrompt"].rstrip()
-        if self.research_context and self.sister_id is None:
+        if self.research_context:
             from misaka.core.research.prompting import system_context
-            common = system_context(self.session, self.session.getActiveToolNames(), system_prompt)
+            common = system_context(self.session, self.session.getActiveToolNames(), system_prompt,
+                                    sister_id=self.sister_id)
             if common:
                 system_prompt += "\n\n" + common
         compact = ([coordinator_profile(entry) for entry in self.catalog]

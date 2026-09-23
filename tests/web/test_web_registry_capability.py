@@ -12,11 +12,10 @@ own capability flags, which is the whole subject.
 
 from __future__ import annotations
 
-import json
-
 import pytest
+from webconf import write_web
 
-from misaka.config.product import CFG
+from misaka.config import home
 from misaka.core.web import keyless, registry
 from misaka.core.web.provider import WebSearchProvider
 
@@ -37,8 +36,7 @@ def web_home(monkeypatch, tmp_path):
     """A throwaway web config and an empty vendor environment for every test."""
     for name in _VENDOR_ENV:
         monkeypatch.delenv(name, raising=False)
-    path = tmp_path / "web.json"
-    monkeypatch.setitem(CFG, "web_config", str(path))
+    path = home.path("settings")           # the "web" section lives here now
     registry.reset_for_tests()
     # The ring cursor is random per process; pin it so the keyless walk order is assertable.
     monkeypatch.setattr(keyless.current_scope(), "cursor", [0])
@@ -46,8 +44,8 @@ def web_home(monkeypatch, tmp_path):
     registry.reset_for_tests()
 
 
-def write_config(path, **keys) -> None:
-    path.write_text(json.dumps(keys), encoding="utf-8")
+def write_config(_path, **keys) -> None:
+    write_web(keys)
 
 
 class _Fake(WebSearchProvider):
@@ -134,31 +132,24 @@ def test_a_configured_search_only_backend_resolves_to_nothing_for_extract(web_ho
     assert registry.active_search_provider().name == "searxng"
 
 
-def test_a_half_split_config_leaves_the_other_capability_on_the_default(web_home, monkeypatch):
-    """Setting one capability's key configures the section; the other one stops laddering.
-
-    The user pointed search at their own index and never named an extract backend. The
-    credential ladder would answer "searxng" here -- ``SEARXNG_URL`` is set, that is what
-    makes the index reachable -- and web_extract would then refuse every call as
-    search-only, for want of exactly the renderer the default names. So a configured
-    section takes the default instead of reading the environment.
-    """
+def test_a_half_split_config_keeps_the_other_capability_on_autodetect(web_home, monkeypatch):
+    """Hermes #113017: a per-capability key no longer pins the shared default."""
     monkeypatch.setenv("SEARXNG_URL", "http://localhost:8080")
     write_config(web_home, search_backend="searxng")
     assert registry.search_backend_name() == "searxng"
-    assert registry.extract_backend_name() == "firecrawl"
+    assert registry.extract_backend_name() == "searxng"
 
 
-def test_the_extract_half_alone_stops_the_search_side_laddering_too(web_home, monkeypatch):
-    """The same branch, from the other direction: the gate is the section, not the key."""
+def test_the_extract_half_alone_keeps_the_search_side_laddering(web_home, monkeypatch):
+    """The extract selection does not replace search autodetect with Firecrawl."""
     monkeypatch.setenv("TAVILY_API_KEY", "t")
     write_config(web_home, extract_backend="firecrawl")
     assert registry.extract_backend_name() == "firecrawl"
-    assert registry.search_backend_name() == "firecrawl"
+    assert registry.search_backend_name() == "tavily"
 
 
 def test_a_never_configured_install_still_runs_the_credential_ladder(web_home, monkeypatch):
-    """The bound on the branch above: nothing stored means the environment still decides."""
+    """A never-configured install retains the same credential priority."""
     monkeypatch.setenv("SEARXNG_URL", "http://localhost:8080")
     assert registry.selection_stored() is False
     assert registry.search_backend_name() == "searxng"

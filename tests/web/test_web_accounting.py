@@ -11,19 +11,18 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 import pytest
+from webconf import write_web
 
 from misaka.config.product import CFG
 from misaka.core.platform import tasks
 from misaka.core.tools import download_file, web_fetch
-from misaka.core.tools._web import bounded, negative_cache
 from misaka.core.tools.download_file import create_download_file_tool_definition
 from misaka.core.tools.web_fetch import create_web_fetch_tool_definition
-from misaka.core.web import cache, registry, tool
+from misaka.core.web import bounded, cache, negative_cache, registry, tool
 
 PUBLIC = "93.184.216.34"
 PAGE = (
@@ -45,7 +44,6 @@ def _offline(monkeypatch, tmp_path):
     negative_cache.clear()
     cache.search_memo.clear()
     registry.reset_for_tests()
-    monkeypatch.setitem(CFG, "web_config", str(tmp_path / "web.json"))
 
     async def _resolve_host(_host, _port):
         return [PUBLIC]
@@ -282,7 +280,7 @@ def _vendor_wire(monkeypatch, handler):
 async def test_batched_extract_costs_one_request_and_cache_costs_zero(monkeypatch, ledger, tmp_path):
     from misaka.core.web import extract
     monkeypatch.setitem(CFG, "web_cache", str(tmp_path / "cache"))
-    Path(CFG["web_config"]).write_text(json.dumps({"extract_backend": "exa"}))
+    write_web({"extract_backend": "exa"})
     monkeypatch.setenv("EXA_API_KEY", "fixture-exa-key")
     urls = [f"https://example.com/{i}" for i in range(5)]
     calls = _vendor_wire(monkeypatch, lambda _: httpx.Response(200, json={
@@ -296,7 +294,7 @@ async def test_batched_extract_costs_one_request_and_cache_costs_zero(monkeypatc
 
 async def test_failed_vendor_and_rescue_are_separate_attempts(monkeypatch, ledger, tmp_path):
     from misaka.core.web import extract, keyless
-    Path(CFG["web_config"]).write_text(json.dumps({"extract_backend": "tavily", "cache_enabled": False}))
+    write_web({"extract_backend": "tavily", "cache_enabled": False})
     monkeypatch.setenv("TAVILY_API_KEY", "fixture-key")
     urls = ["https://example.com/a", "https://example.com/b"]
     def handle(request):

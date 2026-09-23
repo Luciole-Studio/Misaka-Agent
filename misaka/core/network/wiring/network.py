@@ -17,6 +17,7 @@ from misaka.core.network.sister_runtime import SisterRuntime
 from misaka.core.platform import budget, toolkit
 from misaka.core.platform import tasks as db
 from misaka.core.platform.prompt_guard import untrusted
+from misaka.core.research.tool_policy import DRIVER_OWNED_TOOLS
 from misaka.core.wiring import ToolCollector
 
 _CON = None
@@ -29,6 +30,18 @@ def _session_id(ctx):
     """This conversation's session id: stamped on the cards it creates, so a resumed
     conversation knows which Sisters are hers."""
     return getattr(getattr(ctx, "sessionManager", None), "sessionId", None) or None
+
+
+def _mail_running_card(row, text, summary, sender_session):
+    """A note for the attempt now running a card, from Last Order, through the card's inbox."""
+    from misaka.core.network import messages
+    con = messages.connect()
+    try:
+        return messages.send(con, row["assignee"], text, summary=summary, sender="last-order",
+                             to_task=row["id"], generation=int(row["generation"]),
+                             workspace=row["workspace"], sender_session=sender_session)
+    finally:
+        con.close()
 
 
 def _session_line(ctx, limit=10):
@@ -60,10 +73,15 @@ def _card_log(workspace, task_id, author, text):
 
 
 def _pane_for_card(task_id):
-    """The live pane running or showing this card, if any (panel mode only)."""
+    """The live pane running or showing this card, if any (panel mode only).
+
+    The pane holding the card's claim wins. A pane that is only showing the card's saved
+    session is a reader: anything steered into it is swallowed, so it must never be mistaken
+    for the attempt (2026-09-18, B14)."""
     from misaka.ui.panel import client as net
-    return next((p for p in net.request("panes.list")["panes"]
-                 if p.get("card") == task_id and p.get("alive")), None)
+    panes = [p for p in net.request("panes.list")["panes"]
+             if p.get("card") == task_id and p.get("alive")]
+    return next((p for p in panes if p.get("claimed")), panes[0] if panes else None)
 
 
 def _cfg():
@@ -126,6 +144,23 @@ def _require_project_tasks(ctx, args):
             raise ValueError(f"Task card not found in this project: {task_id}")
 
 
+def _require_ordinary_tasks(task_ids):
+    """A normal Board entry point must not take over cards owned by a research run."""
+    if not task_ids:
+        return
+    from misaka.core.research import runs
+
+    contexts = runs.task_contexts(_con())
+    for task_id in task_ids:
+        context = contexts.get(task_id)
+        if context:
+            raise ValueError(
+                f"Card {task_id} belongs to research run {context['run_id']}; its driver owns "
+                "assignment, dependencies and review. Use the current research phase tools, "
+                f"or ask the user to run /research resume {context['run_id']} for a paused run."
+            )
+
+
 def _register(harn, name, label, description, parameters, snippet=None, guidelines=None):
     """Decorator: register ``fn`` as a harness tool whose raw arguments are parsed into ``parameters``.
 
@@ -133,11 +168,16 @@ def _register(harn, name, label, description, parameters, snippet=None, guidelin
     array while missing from the prompt inventory. What this file adds on top is its
     own schema conversion and the project-ownership check, which has to run on the
     parsed arguments and before the handler sees them."""
+    def before(ctx, args):
+        _require_project_tasks(ctx, args)
+        if name in DRIVER_OWNED_TOOLS:
+            _require_ordinary_tasks(_task_ids(args))
+
     return toolkit.register_tool(
         harn,
         name=name, label=label, description=description, parameters=parameters,
         snippet=snippet, guidelines=guidelines,
-        schema=_schema, before=_require_project_tasks,
+        schema=_schema, before=before,
     )
 
 
@@ -183,7 +223,7 @@ def _install(harn, runtime):
         lines = [f"{'*' if r['origin_session'] in mine else ' '} {r['id']}  "
                  f"{r['status']:<10} {r['assignee']:<14} {r['title'][:50]}"
                  + (f"  [{r['signal']}]" if r.get("signal") else "")
-                 + ("  (no card file: run `misaka init --migrate`)" if r.get("missing_file") else "")
+                 + ("  (no card file in the project)" if r.get("missing_file") else "")
                  for r in rows]
         if total > len(rows):
             lines.insert(0, f"(showing the last {len(rows)} of {total} cards)")
@@ -380,16 +420,13 @@ def _install(harn, runtime):
         if os.environ.get("MISAKA_NET_PANE"):
             # Start worker cards in visible panes, a tab each.
             from misaka.ui.panel import client as net
-            wanted = set(params.task_ids or [])
+            wanted = set(params.task_ids) if params.task_ids is not None else None
             lines, started = [], 0
-            # fair_ready reconciles every card file in the project before it picks, and in panel
-            # mode this is usually a fresh Last Order's first pass -- a cold mtime cache, so the
-            # full read-and-parse plus an UPDATE per drifted row. That is filesystem work, so it
-            # goes off the loop the way the net.request below already does.
+            # Reconciliation is filesystem work; keep it off the session's loop.
             picked = await asyncio.to_thread(db.fair_ready, con, lane="workers", workspace=workspace)
+            picked = [row for row in picked if wanted is None or row["id"] in wanted]
+            _require_ordinary_tasks([row["id"] for row in picked])
             for row in picked:
-                if wanted and row["id"] not in wanted:
-                    continue
                 try:
                     out = await asyncio.to_thread(
                         net.request, "pane.run_card",
@@ -405,6 +442,7 @@ def _install(harn, runtime):
             on_update=on_update,
             task_ids=params.task_ids,
             workspace=workspace,
+            validate_tasks=_require_ordinary_tasks,
         )
         if not results:
             return _text("No cards were started.")
@@ -537,7 +575,7 @@ def _install(harn, runtime):
     @_register(
         harn,
         name="misaka_sister_message", label="Message Sister",
-        description="Steer a running Sister or continue its durable session with the same task ID, workspace, and transcript.",
+        description="Steer a running Sister through her inbox, or continue her durable session with the same task ID, workspace, and transcript.",
         snippet="Send guidance to an existing Sister task",
         parameters=SisterMessageParams)
     async def misaka_sister_message(tool_call_id, params, signal, on_update, ctx):
@@ -575,16 +613,28 @@ def _install(harn, runtime):
             row["status"] in {"blocked", "triage"}
             and row["block_kind"] == "needs_input"
         )
-        if row["status"] == "running" and pane:
-            # A running panel-owned card receives steering through its terminal.
-            from misaka.ui.panel import client as net
-            await asyncio.to_thread(
-                net.request, "pane.send",
-                {"id": pane["id"], "card": params.task_id,
-                 "text": params.message, "enter": True,
-                 "expected_generation": params.generation})
+        if row["status"] == "running" and pane and pane.get("claimed", True):
+            if row["executor"]:
+                # An ally runs a third-party CLI in its pane and reads no mailbox: keystrokes
+                # are the only channel it has.
+                from misaka.ui.panel import client as net
+                await asyncio.to_thread(
+                    net.request, "pane.send",
+                    {"id": pane["id"], "card": params.task_id,
+                     "text": params.message, "enter": True,
+                     "expected_generation": params.generation})
+                _card_log(row["workspace"], params.task_id, "last-order", f"[steer] {params.message}")
+                return _text(f"Message typed into card {params.task_id}'s pane.")
+            # A running Sister is steered through her own inbox, addressed to this attempt: the
+            # note is durable, lands at her next tool boundary as a follow-up rather than as
+            # keystrokes in her editor, and does not depend on the pane's input queue
+            # (2026-09-18: pane.send lost the Enter behind a full pty queue, B1, and could
+            # land in a reader pane, B14). The pane stays the way to *see* her.
+            mid = await asyncio.to_thread(
+                _mail_running_card, row, params.message, params.summary, _session_id(ctx))
             _card_log(row["workspace"], params.task_id, "last-order", f"[steer] {params.message}")
-            return _text(f"Message sent to card {params.task_id}'s pane.")
+            return _text(f"Message #{mid} queued for card {params.task_id} (attempt {row['generation']}); "
+                         "her session reads it at its next tool boundary.")
         if row["status"] != "running" and (in_panel or pane or help_reply):
             # The daemon drains any old pane/headless runner, then owns the new attempt beyond
             # this contact turn. A finished card still only restarts on the user's nod.
@@ -603,6 +653,10 @@ def _install(harn, runtime):
                 request["place"] = {"grid": os.environ["MISAKA_NET_PANE"]}
             out = await asyncio.to_thread(net.request, "pane.continue_card", request)
             _card_log(row["workspace"], params.task_id, "last-order", f"[message] {params.message}")
+            if not row["session_file"]:
+                return _text(f"Card {params.task_id} had never run, so its first attempt started in "
+                             f"pane {out['pane_id']} from its contract, with your note mailed to it "
+                             "for its first tool boundary.")
             return _text(f"Continued card {params.task_id} in persistent runner {out['pane_id']} "
                          "(a new attempt under the daemon's claim) and delivered the message.")
         result = await runtime.message(
@@ -644,8 +698,8 @@ def _install(harn, runtime):
     @_register(
         harn,
         name="misaka_sister_resume", label="Reopen Sister session",
-        description="Reopen a finished, failed, stopped, or blocked card's saved Sister session in a tab of its own, without starting a model turn. Steer her afterwards with misaka_sister_message.",
-        snippet="Reopen a finished Sister task's session in its own tab",
+        description="Show a finished, failed, stopped, or blocked card's saved Sister session in a pane, as a reader: no model turn, no claim, nothing typed there reaches her. Continue her afterwards with misaka_sister_message, which takes over that same pane.",
+        snippet="Show a finished Sister task's saved session",
         guidelines=["After a resumed conversation, bring back only the cards listed as yours in the <resume-briefing>; a card that is already open in a pane is not reopened."],
         parameters=SisterResumeParams)
     async def misaka_sister_resume(tool_call_id, params, signal, on_update, ctx):
@@ -656,10 +710,21 @@ def _install(harn, runtime):
         if live:
             return _text(f"Card {params.task_id} is already open in pane {live['id']}.")
         from misaka.ui.panel import client as net
+        row = db.get(_con(), params.task_id)
+        if row is not None and not row["session_file"]:
+            from misaka.config import sessions as session_roots
+            from misaka.core.session_manager import find_most_recent_session
+            if find_most_recent_session(session_roots.card_session_dir(row)) is None:
+                return _text(f"Card {params.task_id} never ran: it was stopped before its first turn, so "
+                             "there is no session to show. misaka_sister_message (confirmed=true) starts "
+                             "its first attempt with your note; misaka_card_requeue puts it back in the "
+                             "queue for misaka_dispatch.")
         out = await asyncio.to_thread(
             net.request, "pane.open_card_session",
             {"task_id": params.task_id, "place": {"grid": os.environ["MISAKA_NET_PANE"]}})
-        return _text(f"Reopened card {params.task_id}'s session in pane {out['pane_id']} (a tab of its own).")
+        return _text(f"Card {params.task_id}'s saved session is in pane {out['pane_id']}, beside this one, "
+                     "as a reader. To continue her, send the next instruction with misaka_sister_message "
+                     "(confirmed=true); it takes that pane over.")
 
 
 
@@ -820,6 +885,52 @@ def _install(harn, runtime):
         return _text(f"Card {params.task_id} unblocked and returned to {row['status']}; work has not started.")
 
 
+    class CardRequeueParams(StrictParams):
+        task_id: TaskId = Field(description="Stopped or failed task-card ID to put back in the queue.")
+        confirmed: bool = Field(
+            description="True only when the user asked for this card to be opened for another attempt.")
+
+    @_register(
+        harn,
+        name="misaka_card_requeue", label="Requeue task card",
+        description="Put a stopped or failed card back in the queue as a fresh attempt, the way the board "
+                    "reopens one itself. Research cards are not requeued here: their run is resumed by the "
+                    "user with /research resume.",
+        snippet="Requeue a stopped or failed card",
+        guidelines=[("Never write a card's status into the board's tables by hand: the card file is the "
+                     "contract, so a hand-written status is quietly put back. Requeue a stopped or failed "
+                     "card with misaka_card_requeue, and ask the user first. Requeueing only puts the card "
+                     "back in the queue; misaka_dispatch is what starts it.")],
+        parameters=CardRequeueParams)
+    async def misaka_card_requeue(tool_call_id, params, signal, on_update, ctx):
+        con = _con()
+        row = db.get(con, params.task_id)
+        if row is None:
+            raise ValueError(f"Card not found: {params.task_id}")
+        if row["status"] not in {"stopped", "failed"}:
+            raise ValueError(
+                f"Card {params.task_id} is {row['status']}; only a stopped or failed card is requeued. "
+                "Reopen a blocked one with misaka_card_unblock and continue a finished one with "
+                "misaka_sister_message."
+            )
+        if not params.confirmed:
+            raise ValueError(
+                f"Requeueing card {params.task_id} opens a new attempt on it. Ask the user, then call "
+                "again with confirmed=true."
+            )
+        if not db.reopen_task(con, params.task_id, expected_generation=row["generation"]):
+            raise ValueError(
+                f"Card {params.task_id} changed underneath the requeue; read it again before retrying."
+            )
+        row = db.get(con, params.task_id)
+        # Nothing polls for ready cards: every attempt is started by somebody asking for it.
+        waiting = ("Start it with misaka_dispatch once the user approves." if row["status"] == "ready"
+                   else "It waits at todo until the cards it depends on finish, then misaka_dispatch "
+                        "starts it.")
+        return _text(f"Card {params.task_id} is back at {row['status']} as attempt "
+                     f"{row['generation']}, and is not running yet. {waiting}")
+
+
     class CardDeleteParams(StrictParams):
         task_id: TaskId = Field(description="Task-card ID to delete.")
         confirmed: bool = Field(
@@ -872,9 +983,10 @@ class NetworkPart:
     # is announced within seconds of settling rather than at Last Order's next turn.
     PENDING_POLL_SECONDS = 5.0
 
-    def __init__(self):
+    def __init__(self, *, receive_notifications=True):
         self.session = None
         self.commands = []
+        self.receive_notifications = receive_notifications
         self._pending_watch = None
         self.runtime = SisterRuntime(None, _con, _cfg)
         collector = ToolCollector()
@@ -886,13 +998,16 @@ class NetworkPart:
         self.runtime.session = session
 
     async def session_start(self, event, ctx):
+        if not self.receive_notifications:
+            return  # branch/headless owners keep the tools but do not consume the root's inbox
         await self._resume_briefing(event, ctx)
         await self._settle_orphans()
         asyncio.ensure_future(self._collect_pending(ctx))
         self._pending_watch = asyncio.ensure_future(self._watch_pending(ctx))
 
     async def before_agent_start(self, event, ctx):
-        asyncio.ensure_future(self._collect_pending(ctx))   # a long-lived session hears about cards that finished meanwhile
+        if self.receive_notifications:
+            asyncio.ensure_future(self._collect_pending(ctx))
 
     async def session_shutdown(self, event, ctx):
         if self._pending_watch is not None:
@@ -988,4 +1103,4 @@ ROLES = {"last_order"}
 
 
 def part(spec):
-    return NetworkPart()
+    return NetworkPart(receive_notifications=spec.receive_messages)

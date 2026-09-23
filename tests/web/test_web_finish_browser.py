@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from webconf import read_web
 
-from misaka.config.product import CFG
 from misaka.core.subagent.policy import _permission_action
 from misaka.core.web import WebPart, config, dispatch, gateway, registry
 from misaka.core.web.browser import BrowserManager, settings
@@ -20,7 +20,6 @@ from misaka.core.wiring import SessionSpec
 
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
-    monkeypatch.setitem(CFG, 'web_config', str(tmp_path / 'shared.json'))
     for key in config.provider_variables() | {'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
             'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy', 'SSL_CERT_FILE', 'SSL_CERT_DIR'}:
         monkeypatch.delenv(key, raising=False)
@@ -504,7 +503,7 @@ def test_real_cli_browser_setup_and_explicit_install_flags(monkeypatch, isolated
     commands = []
     monkeypatch.setattr(web_browser.subprocess, 'run', lambda argv, **kw: commands.append(argv))
     app.main(['web', 'browser-setup', 'local', '--yes', '--profile', str(isolated)])
-    assert json.loads((isolated / 'web.json').read_text())['browser']['cloud_provider'] == 'local'
+    assert read_web(isolated)['browser']['cloud_provider'] == 'local'
     app.main(['web', 'browser-install', 'agent-browser', '--yes', '--profile', str(isolated)])
     assert commands[0][-1] == 'agent-browser@0.26.0'
     assert commands[1][-1] == 'install'

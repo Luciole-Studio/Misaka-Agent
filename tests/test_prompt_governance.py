@@ -1,6 +1,7 @@
 """Offline checks for role/personality separation and Research's actual prompt paths."""
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -49,9 +50,9 @@ class PromptGovernanceTests(unittest.TestCase):
             self.assertIn(identity.COORDINATOR_ROLE, identity.prompt_sections(directory, "last-order"))
 
     def test_existing_shared_personality_is_not_overwritten(self):
-        from misaka.config import CFG
-        with tempfile.TemporaryDirectory() as directory, patch.dict(CFG, {"roles_root": directory}):
-            path = Path(directory) / "MISAKA.md"
+        from misaka.config import home
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {home.ENV_HOME: directory}):
+            path = home.path("shared_soul")
             path.write_text("User's existing language and personality preferences.")
             before = path.read_bytes()
             self.assertEqual(profiles.shared_soul(), str(path))
@@ -82,15 +83,15 @@ class PromptGovernanceTests(unittest.TestCase):
         self.assertNotIn("Available tools:", prompt)
         self.assertTrue(prompt.endswith("Current working directory: /fixture\n"))
 
-    def test_research_bare_and_normal_share_duties_once(self):
+    def test_research_delta_does_not_reconstruct_or_duplicate_the_role_base(self):
         session = SimpleNamespace(getToolDefinition=lambda name: SimpleNamespace(
             promptGuidelines=["Navigate live state"] if name == "misaka_research_view" else ["Scan when useful"]))
         for initial in ("Custom bare prompt", "\n\n".join(identity.prompt_sections(None, "last_order"))):
             with self.subTest(initial=initial[:20]):
                 names = ["misaka_research_view", "coverage_scan"]
                 prompt = initial + "\n" + prompting.system_context(session, names, initial)
-                self.assertEqual(prompt.count(identity.COMMON_CHARTER), 1)
-                self.assertEqual(prompt.count(identity.COORDINATOR_ROLE), 1)
+                self.assertEqual(prompt.count(identity.COMMON_CHARTER), initial.count(identity.COMMON_CHARTER))
+                self.assertEqual(prompt.count(identity.COORDINATOR_ROLE), initial.count(identity.COORDINATOR_ROLE))
                 self.assertEqual(prompt.count(identity.COORDINATOR_APPROVAL), 1)
                 self.assertEqual(prompt.count(identity.COORDINATOR_RECEIPTS), 1)
                 self.assertEqual(prompting.system_context(session, names, prompt), "")
@@ -100,7 +101,7 @@ class PromptGovernanceTests(unittest.TestCase):
 
     def test_approval_policy_matches_driver_for_initial_and_followup_plans(self):
         run = {"id": "run", "root_session": "/fixture/session.jsonl",
-               "workspace": "/fixture", "question": "Question"}
+               "workspace": "/fixture", "question": "Question", "limits_json": "{}"}
         for parent in (None, "parent"):
             node = {"id": "node", "parent_id": parent, "depth": int(parent is not None),
                     "trigger_text": "Question", "session_file": None}
@@ -108,14 +109,14 @@ class PromptGovernanceTests(unittest.TestCase):
                 for resident in (True, False):
                     cfg = {"research_plan_approval": enabled}
                     worker = SimpleNamespace(session=object() if resident else None)
-                    expected = planner.PLAN_WAITS if enabled and resident else planner.PLAN_AUTOMATIC
+                    expected = planner.PLAN_WAITS if enabled else planner.PLAN_AUTOMATIC
                     with self.subTest(parent=parent, enabled=enabled, resident=resident), \
                             patch.object(planner, "_roster", return_value=[]), \
                             patch.object(planner, "_lo_session", return_value="/fixture"), \
                             patch.object(planner.runs, "limits", return_value={"max_depth": 3}), \
                             patch.object(planner, "_command", return_value=(
                                 {"payload": {}, "session_file": "/fixture/session.jsonl"}, "raw")) as command:
-                        self.assertEqual(planner.plan_approval_prompt(cfg, worker), expected)
+                        self.assertEqual(planner.plan_approval_prompt(cfg), expected)
                         planner.plan(run, cfg, worker, node, con=object())
                         self.assertIn(expected, command.call_args.args[5])
                     with patch.object(planner, "_lo_session", return_value="/fixture"), \
@@ -154,7 +155,7 @@ class PromptGovernanceTests(unittest.TestCase):
             self.assertIn(f"`{field}`", planner.ROOT_CONTRACT)
 
     def test_synthesis_followup_keeps_the_existing_assignment_window(self):
-        run = {"id": "run", "root_session": "/fixture/session.jsonl", "workspace": "/fixture"}
+        run = {"id": "run", "root_session": "/fixture/session.jsonl", "workspace": "/fixture", "limits_json": "{}"}
         node = {"id": "node", "parent_id": None, "trigger_text": "Question"}
         followup = object()
         for tool, round_number, left in ((followup, 1, 1), (None, 2, 0), (None, 1, 0)):

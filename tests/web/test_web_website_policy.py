@@ -16,10 +16,11 @@ import json
 import logging
 
 import pytest
+from webconf import write_web
 
-from misaka.config.product import CFG
-from misaka.core.tools._web import website_policy
-from misaka.core.tools._web.website_policy import (
+from misaka.config import home
+from misaka.core.web import website_policy
+from misaka.core.web.website_policy import (
     WebsitePolicyError,
     check_website_access,
     invalidate_cache,
@@ -36,15 +37,24 @@ def web_home(monkeypatch, tmp_path):
     clearing it on both sides keeps one test's policy from deciding the next one's fetches
     however the fast path is later rearranged.
     """
-    path = tmp_path / "web.json"
-    monkeypatch.setitem(CFG, "web_config", str(path))
+    path = tmp_path / "policy.json"        # a standalone document, read by explicit path
     invalidate_cache()
     yield path
     invalidate_cache()
 
 
 def write_policy(path, **blocklist) -> None:
-    path.write_text(json.dumps({"website_blocklist": blocklist}), encoding="utf-8")
+    """The session's policy when ``path`` is the settings file; a standalone document otherwise."""
+    if path == home.path("settings"):
+        write_web({"website_blocklist": blocklist})
+    else:
+        path.write_text(json.dumps({"website_blocklist": blocklist}), encoding="utf-8")
+
+
+@pytest.fixture
+def session_policy(web_home):
+    """The policy a real session reads: the ``web`` section of the home's settings."""
+    return home.path("settings")
 
 
 # --- enabled / disabled -------------------------------------------------------------
@@ -211,9 +221,9 @@ def test_an_explicit_path_propagates_a_parse_error(web_home):
         check_website_access("https://ads.example/", web_home)
 
 
-def test_a_session_fails_open_on_a_malformed_config(web_home, caplog):
+def test_a_session_fails_open_on_a_malformed_config(session_policy, caplog):
     """No explicit path means a real session: a config typo must not ground web tools."""
-    web_home.write_text("{not json", encoding="utf-8")
+    session_policy.write_text("{not json", encoding="utf-8")
     with caplog.at_level(logging.WARNING, logger=website_policy.__name__):
         assert check_website_access("https://ads.example/") is None
     assert "failing open" in caplog.text
@@ -222,20 +232,20 @@ def test_a_session_fails_open_on_a_malformed_config(web_home, caplog):
 # --- the cache ----------------------------------------------------------------------
 
 
-def test_an_edit_is_invisible_until_the_cache_is_invalidated(web_home):
-    write_policy(web_home, enabled=True, domains=["ads.example"])
+def test_an_edit_is_invisible_until_the_cache_is_invalidated(session_policy):
+    write_policy(session_policy, enabled=True, domains=["ads.example"])
     assert check_website_access("https://metrics.example/") is None
 
-    write_policy(web_home, enabled=True, domains=["ads.example", "metrics.example"])
+    write_policy(session_policy, enabled=True, domains=["ads.example", "metrics.example"])
     assert check_website_access("https://metrics.example/") is None
 
     invalidate_cache()
     assert check_website_access("https://metrics.example/") is not None
 
 
-def test_a_cached_disabled_policy_short_circuits_before_any_read(web_home, monkeypatch):
+def test_a_cached_disabled_policy_short_circuits_before_any_read(session_policy, monkeypatch):
     """The fast path in front of every fetch: disabled means no file read, no host parse."""
-    write_policy(web_home, enabled=False)
+    write_policy(session_policy, enabled=False)
     assert check_website_access("https://ads.example/") is None
 
     def explode(*_args, **_kwargs):
@@ -245,17 +255,17 @@ def test_a_cached_disabled_policy_short_circuits_before_any_read(web_home, monke
     assert check_website_access("https://ads.example/") is None
 
 
-def test_the_disabled_fast_path_expires_with_the_ttl(web_home, monkeypatch):
+def test_the_disabled_fast_path_expires_with_the_ttl(session_policy, monkeypatch):
     """Turning the blocklist on is the one transition every installation makes.
 
     ``enabled`` is opt-in, so every session starts in the cached-disabled state this fast
     path short-circuits. If it never expired, the user's first edit would never take
     effect -- and ``invalidate_cache()`` has no production caller to rescue them.
     """
-    write_policy(web_home, enabled=False)
+    write_policy(session_policy, enabled=False)
     assert check_website_access("https://ads.example/") is None
 
-    write_policy(web_home, enabled=True, domains=["ads.example"])
+    write_policy(session_policy, enabled=True, domains=["ads.example"])
     monkeypatch.setattr(
         website_policy,
         "_cached_policy_time",
@@ -264,12 +274,11 @@ def test_the_disabled_fast_path_expires_with_the_ttl(web_home, monkeypatch):
     assert check_website_access("https://ads.example/") is not None
 
 
-def test_the_disabled_fast_path_is_scoped_to_the_path_it_read(web_home, tmp_path, monkeypatch):
-    """``CFG["web_config"]`` is redirectable, so a cached verdict belongs to one path."""
-    write_policy(web_home, enabled=False)
+def test_the_disabled_fast_path_is_scoped_to_the_path_it_read(session_policy, tmp_path, monkeypatch):
+    """The home is redirectable (``MISAKA_HOME``), so a cached verdict belongs to one path."""
+    write_policy(session_policy, enabled=False)
     assert check_website_access("https://ads.example/") is None
 
-    other = tmp_path / "other-web.json"
-    write_policy(other, enabled=True, domains=["ads.example"])
-    monkeypatch.setitem(CFG, "web_config", str(other))
+    monkeypatch.setenv(home.ENV_HOME, str(tmp_path / "other-home"))
+    write_policy(home.path("settings"), enabled=True, domains=["ads.example"])
     assert check_website_access("https://ads.example/") is not None

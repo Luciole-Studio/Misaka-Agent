@@ -8,9 +8,21 @@ import sqlite3
 import time
 from contextlib import contextmanager, nullcontext
 
-DEFAULT_CAP = int(os.environ.get("MISAKA_TOKEN_CAP", "0"))
-BEAST_AT = float(os.environ.get("MISAKA_BEAST_AT", "0.85"))
-SUBAGENT_RESERVATION = int(os.environ.get("MISAKA_SUBAGENT_TOKEN_RESERVATION", "32768"))
+SUBAGENT_RESERVATION = int(os.environ.get("MISAKA_SUBAGENT_TOKEN_RESERVATION", "32768"))   # a parent's hand-off
+
+
+def default_cap():
+    """The run-wide token cap (0 = none): settings.json ``research.token_cap``."""
+    from misaka.config.product import setting
+
+    return setting("research", "token_cap", 0, int)
+
+
+def beast_at():
+    """The share of the cap at which cards switch to beast mode: settings.json ``research.beast_at``."""
+    from misaka.config.product import setting
+
+    return setting("research", "beast_at", 0.85, float)
 
 BEAST_SUFFIX = """
 
@@ -126,7 +138,7 @@ def reserved(con):
                 con.execute("RELEASE SAVEPOINT misaka_budget_expiry")
             else:
                 con.commit()
-        except sqlite3.OperationalError as e:
+        except sqlite3.OperationalError:
             try:
                 if nested:
                     con.execute("ROLLBACK TO SAVEPOINT misaka_budget_expiry")
@@ -135,26 +147,24 @@ def reserved(con):
                     con.rollback()
             except Exception:  # noqa: BLE001, S110 - preserve the original database error
                 pass
-            if "no such table" in str(e):
-                return 0   # caller-owned legacy/in-memory ledgers may lack the table
             raise
     return int(row[0] or 0)
 
 
 def exhausted(con, cap=None):
     """Whether running work must stop. Reserved capacity only blocks NEW admissions."""
-    cap = DEFAULT_CAP if cap is None else cap
+    cap = default_cap() if cap is None else cap
     return bool(cap) and spent(con) >= cap
 
 
 def status(con, cap=None):
-    cap = DEFAULT_CAP if cap is None else cap
+    cap = default_cap() if cap is None else cap
     held = reserved(con)
     used = spent(con)
     if not cap:
         return {"mode": "normal", "used": used, "reserved": held, "cap": 0, "ratio": 0.0}
     ratio = (used + held) / cap
-    mode = "stop" if ratio >= 1.0 else ("beast" if ratio >= BEAST_AT else "normal")
+    mode = "stop" if ratio >= 1.0 else ("beast" if ratio >= beast_at() else "normal")
     return {
         "mode": mode,
         "used": used,
@@ -172,7 +182,7 @@ def reserve_agent(con, cap, task_id, generation, ttl_seconds=1800):
     event is written before the reservation is released.
     """
 
-    cap = DEFAULT_CAP if cap is None else int(cap or 0)
+    cap = default_cap() if cap is None else int(cap or 0)
     if not cap:
         return {"allowed": True, "token": None, "tokens": 0, "mode": "normal"}
     now = int(time.time())
@@ -201,7 +211,7 @@ def reserve_agent(con, cap, task_id, generation, ttl_seconds=1800):
                     "cap": cap,
                 }
             ratio = (used + held) / cap
-            if ratio >= BEAST_AT:
+            if ratio >= beast_at():
                 amount = remaining
                 mode = "beast"
             else:

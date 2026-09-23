@@ -1,5 +1,4 @@
 """Host-wide worker admission limits shared by every LO and the net daemon."""
-import os
 
 import psutil
 
@@ -18,13 +17,15 @@ def limits():
     shape, and a lower per-Sister default just left admission slots idle: the cards were
     hers to run and nothing else wanted the slots. Both stay overridable.
     """
-    explicit = os.environ.get("MISAKA_MAX_CONCURRENT_SISTERS")
+    from misaka.config.product import setting
+
+    explicit = setting("network", "max_concurrent_sisters", None, int)
     if explicit is not None:
-        host = max(1, int(explicit))
+        host = max(1, explicit)
     else:
         by_memory = int(psutil.virtual_memory().available // PER_CARD_BYTES)
         host = max(HOST_FLOOR, min(HOST_CEILING, by_memory))
-    per_sister = max(1, int(os.environ.get("MISAKA_MAX_CONCURRENT_PER_SISTER", host)))
+    per_sister = max(1, setting("network", "max_concurrent_per_sister", host, int))
     return host, min(host, per_sister)
 
 

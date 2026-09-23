@@ -32,6 +32,7 @@ from .db_bootstrap import (
 from .config import LCMConfig
 from .ingest_protection import protect_message_for_ingest, protect_messages_for_ingest
 from .search_query import (
+    balanced_sql_expr,
     build_snippet,
     compute_search_candidate_cap,
     compute_directness_rank_bonus_upper_bound,
@@ -1472,7 +1473,7 @@ class MessageStore:
         for term in terms:
             like_clauses.append("content LIKE ? ESCAPE '\\'")
             args.append(f"%{escape_like(term)}%")
-        where.append("(" + " OR ".join(like_clauses) + ")")
+        where.append(balanced_sql_expr(like_clauses, "OR"))
         fetch_limit = compute_like_fallback_fetch_limit(limit, terms, phrases)
         base_args = list(args)
         normalized_sort = normalize_search_sort(sort)
@@ -1499,7 +1500,7 @@ class MessageStore:
                     expr, expr_args = count_expr(term)
                     score_exprs.append(expr)
                     order_args.extend(expr_args)
-            score_expr = " + ".join(score_exprs) if score_exprs else "0"
+            score_expr = balanced_sql_expr(score_exprs, "+")
 
             def build_unique_exprs(selected_terms: list[str]) -> tuple[str, list[Any]]:
                 parts: list[str] = []
@@ -1508,7 +1509,7 @@ class MessageStore:
                     expr, args_for_expr = count_expr(selected_term)
                     parts.append(f"CASE WHEN ({expr}) > 0 THEN 1 ELSE 0 END")
                     expr_args.extend(args_for_expr)
-                return (" + ".join(parts) if parts else "0", expr_args)
+                return (balanced_sql_expr(parts, "+"), expr_args)
 
             def build_total_exprs(selected_terms: list[str]) -> tuple[str, list[Any]]:
                 parts: list[str] = []
@@ -1517,7 +1518,7 @@ class MessageStore:
                     expr, args_for_expr = count_expr(selected_term)
                     parts.append(expr)
                     expr_args.extend(args_for_expr)
-                return (" + ".join(parts) if parts else "0", expr_args)
+                return (balanced_sql_expr(parts, "+"), expr_args)
 
             directness_args: list[Any] = []
             unique_score_expr, expr_args = build_unique_exprs(terms)
@@ -1528,7 +1529,7 @@ class MessageStore:
                 for phrase in phrases:
                     phrase_hit_exprs.append("CASE WHEN INSTR(LOWER(content), LOWER(?)) > 0 THEN 1 ELSE 0 END")
                     directness_args.append(phrase)
-                phrase_hit_expr = " + ".join(phrase_hit_exprs) if phrase_hit_exprs else "0"
+                phrase_hit_expr = balanced_sql_expr(phrase_hit_exprs, "+")
                 non_phrase_terms = [term for term in terms if term.strip().lower() not in normalized_phrases]
                 non_phrase_total_expr, expr_args = build_total_exprs(non_phrase_terms)
                 directness_args.extend(expr_args)
@@ -1628,7 +1629,7 @@ class MessageStore:
                     expr, expr_args = count_expr(term)
                     score_exprs.append(expr)
                     order_args.extend(expr_args)
-            score_expr = " + ".join(score_exprs) if score_exprs else "0"
+            score_expr = balanced_sql_expr(score_exprs, "+")
             exact_query = (query or "").strip()
             exact_expr = "CASE WHEN LOWER(content) = LOWER(?) THEN 1 ELSE 0 END" if exact_query else "0"
             exact_args: list[Any] = [exact_query] if exact_query else []

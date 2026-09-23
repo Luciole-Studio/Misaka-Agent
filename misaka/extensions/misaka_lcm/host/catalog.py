@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
-from misaka.config import get_agent_dir
+from misaka.config import home
 from misaka.utils.atomic import write_text
 
 from . import llm
@@ -52,7 +52,7 @@ def catalog_url(provider):
 
 
 def cache_path(name):
-    return Path(get_agent_dir()) / 'cache' / name
+    return home.path('engine_cache') / name
 
 
 def _read_json_cache(path, **_):

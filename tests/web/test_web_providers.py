@@ -13,8 +13,9 @@ import sys
 
 import httpx
 import pytest
+from webconf import write_web
 
-from misaka.config.product import CFG
+from misaka.config import home
 from misaka.core.web import config, dispatch, keyless, registry
 from misaka.core.web.backends import (
     brave_free,
@@ -50,8 +51,7 @@ def web_home(monkeypatch, tmp_path):
     """A throwaway web config and an empty vendor environment for every test."""
     for name in _VENDOR_ENV:
         monkeypatch.delenv(name, raising=False)
-    path = tmp_path / "web.json"
-    monkeypatch.setitem(CFG, "web_config", str(path))
+    path = home.path("settings")           # the "web" section lives here now
     registry.reset_for_tests()
     # The ring cursor is random per process; pin it so walk order is assertable.
     monkeypatch.setattr(keyless.current_scope(), "cursor", [0])
@@ -59,8 +59,8 @@ def web_home(monkeypatch, tmp_path):
     registry.reset_for_tests()
 
 
-def write_config(path, **keys) -> None:
-    path.write_text(json.dumps(keys), encoding="utf-8")
+def write_config(_path, **keys) -> None:
+    write_web(keys)
 
 
 # ---------------------------------------------------------------------------
@@ -1123,7 +1123,7 @@ async def test_dispatch_names_a_selection_that_matches_nothing(web_home):
 
     assert result["success"] is False
     assert "ghost-vendor" in result["error"]
-    assert "~/.misaka/web.json" in result["error"]
+    assert config.config_label() in result["error"]      # the file in effect, not a fixed spelling
 
 
 async def test_dispatch_reports_when_nothing_can_serve(web_home, monkeypatch):

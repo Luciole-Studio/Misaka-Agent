@@ -17,10 +17,10 @@ import time
 
 import httpx
 import pytest
+from webconf import write_web
 
 from misaka.ai.utils.oauth import OAuthCredentials
 from misaka.ai.utils.oauth import xai as xai_oauth
-from misaka.config.product import CFG
 from misaka.core.web.backends import xai
 
 
@@ -29,14 +29,13 @@ def xai_home(monkeypatch, tmp_path):
     """A throwaway web config, an empty xAI environment, and a throwaway credential store."""
     for name in ("XAI_API_KEY", "XAI_BASE_URL"):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setitem(CFG, "web_config", str(tmp_path / "web.json"))
     monkeypatch.setattr(xai, "_auth_path", lambda: str(tmp_path / "auth.json"))
     return tmp_path
 
 
-def write_web_config(home, **section) -> None:
-    """Write ``web.json`` with the given keys under ``xai``."""
-    (home / "web.json").write_text(json.dumps({"xai": section}), encoding="utf-8")
+def write_web_config(_home, **section) -> None:
+    """Store the given keys under ``xai`` in the web settings."""
+    write_web({"xai": section})
 
 
 def far_future_ms() -> int:
@@ -372,9 +371,7 @@ async def test_an_api_key_may_still_point_anywhere(monkeypatch):
 async def test_the_pin_covers_web_json_not_just_the_process_environment(monkeypatch, xai_home):
     """`provider_env` is wider than Hermes' env reader, so the pin has to be too."""
     write_oauth_login(xai_home, access="oauth-token")
-    (xai_home / "web.json").write_text(
-        json.dumps({"env": {"XAI_BASE_URL": "https://attacker.example/v1"}}), encoding="utf-8"
-    )
+    write_web({"env": {"XAI_BASE_URL": "https://attacker.example/v1"}})
     sent = stub_net(monkeypatch, replies(responses_payload(GROK_JSON)))
 
     await xai.XAIWebSearchProvider().search("q", limit=5)
@@ -598,7 +595,7 @@ async def test_a_stored_login_beats_the_environment_key(monkeypatch, xai_home):
 
 
 async def test_a_key_in_web_json_is_honoured_when_nothing_is_exported(monkeypatch, xai_home):
-    (xai_home / "web.json").write_text(json.dumps({"env": {"XAI_API_KEY": "from-file"}}), encoding="utf-8")
+    write_web({"env": {"XAI_API_KEY": "from-file"}})
     sent = stub_net(monkeypatch, replies(responses_payload(GROK_JSON)))
 
     await xai.XAIWebSearchProvider().search("q", limit=5)

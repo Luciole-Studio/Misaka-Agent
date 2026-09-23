@@ -1048,7 +1048,7 @@ async def hook_tool_permission(session, context, name, tool_input, workspace, *,
     )
 
     permissions = [*await refresh_inherited_permissions(), *permission_settings(session)]
-    decision = permission_decision(permissions, name, tool_input)
+    decision = permission_decision(permissions, name, tool_input, workspace=workspace)
     if decision in {"deny", "ask"}:
         return "deny", "Agent hook tool is restricted by current permission settings"
     if transcript_read:
@@ -1642,7 +1642,8 @@ class AgentPolicy:
 
         if permissions is None:
             permissions = [*self.inherited_permissions, *permission_settings(self.session)]
-        return permission_decision(permissions, name, tool_input)
+        return permission_decision(permissions, name, tool_input,
+                                   workspace=getattr(self.context, "workspace", None) or os.getcwd())
 
     async def _publish_hook_context(self, results: Sequence[Mapping[str, Any]]) -> None:
         context = [str(result["additional_context"]) for result in results if result.get("additional_context")]

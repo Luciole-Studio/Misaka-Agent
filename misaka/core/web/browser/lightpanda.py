@@ -8,9 +8,9 @@ from pathlib import Path
 
 import httpx
 
-from misaka.core.tools._web.url_safety import allow_private_urls
 from misaka.core.web.config import provider_env
 from misaka.core.web.network import proxy_environment, proxy_for_url
+from misaka.core.web.url_safety import allow_private_urls
 from misaka.utils.async_lifecycle import settle
 
 

@@ -1,0 +1,52 @@
+{
+  "all_failed": {
+    "isError": false,
+    "details": {
+      "saved_paths": []
+    }
+  },
+  "partial_success": {
+    "isError": false,
+    "details": {
+      "saved_paths": []
+    }
+  },
+  "success": {
+    "isError": false,
+    "details": {
+      "saved_paths": []
+    }
+  },
+  "bash_policy": [
+    {
+      "command": "rg -n 'alpha|beta' notes.md",
+      "action": "allow",
+      "reason": null
+    },
+    {
+      "command": "rg -n 'alpha|beta' notes.md | head -40",
+      "action": "ask",
+      "reason": "Workspace safety requires approval: bash command has an external, protected, or ambiguous path"
+    },
+    {
+      "command": "cat notes.md",
+      "action": "allow",
+      "reason": null
+    },
+    {
+      "command": "cat notes.md; cat other.md",
+      "action": "ask",
+      "reason": "Workspace safety requires approval: bash command has an external, protected, or ambiguous path"
+    },
+    {
+      "command": "sed -n '1,10p' notes.md",
+      "action": "allow",
+      "reason": null
+    },
+    {
+      "command": "cat {notes.md,other.md}",
+      "action": "ask",
+      "reason": "Workspace safety requires approval: bash command has an external, protected, or ambiguous path"
+    }
+  ]
+}

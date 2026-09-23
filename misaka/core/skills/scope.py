@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from misaka.config import home
 from misaka.utils import atomic
 
 from . import index, layers
@@ -137,10 +138,10 @@ def locally_deleted_skills():
 
 
 def profile_home():
-    home = current_scope().storage or current_scope().profile
-    if home is None:
+    root = current_scope().storage or current_scope().profile
+    if root is None:
         raise ValueError("Skill maintenance requires a role profile.")
-    return home
+    return root
 
 
 def _skills_dir():
@@ -241,8 +242,10 @@ def referenced_skill_names():
     # Protect raw declarations AND all matching physical role identities. Ambiguous
     # names are never guessed, and staged removal cannot erase its own references.
     result = set(scope.references.referenced_skill_names()) if scope.references is not None else set()
-    for root in (scope.profile / "agents", scope.workspace / ".misaka" / "agents"):
-        if not root.is_dir():
+    project_dir = home.project_dir(scope.workspace)
+    for root in (home.path("subagents", scope.profile),
+                 project_dir / home.SUBAGENTS_DIR if project_dir is not None else None):
+        if root is None or not root.is_dir():
             continue
         for path in root.rglob("*.md"):
             fm, _ = index.parse_skill_markdown(path.read_text(encoding="utf-8-sig"))

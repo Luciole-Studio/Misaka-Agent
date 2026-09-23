@@ -1,0 +1,160 @@
+{
+  "at": "2026-09-21T15:32:23.774933+09:00",
+  "source_and_tests": [
+    {
+      "path": "misaka/cli/chat.py",
+      "sha256": "5f6f5bc65187495a6f571e70e1d5edf03c90e67bccd66ee3ab03581480f54b93",
+      "anchors": [
+        {
+          "name": "follow_session",
+          "start": 189,
+          "end": 358
+        }
+      ]
+    },
+    {
+      "path": "misaka/core/research/window.py",
+      "sha256": "1e9dea4742212b4c377086fe4e28bc1675563742a99aea097bf173c2fc85e040",
+      "anchors": [
+        {
+          "name": "node_description",
+          "start": 19,
+          "end": 26
+        },
+        {
+          "name": "_execute",
+          "start": 97,
+          "end": 101
+        }
+      ]
+    },
+    {
+      "path": "misaka/core/research/wiring/node.py",
+      "sha256": "e3d7aeb12522046c34ac244ed0a9b43738ac6b79f12998e2f19347ae2adfd7a2",
+      "anchors": []
+    },
+    {
+      "path": "misaka/core/research/workflow.py",
+      "sha256": "612e58029e9864e5c1433226c5e0fda20450585d0aeac900812a340eb69d6b34",
+      "anchors": []
+    },
+    {
+      "path": "misaka/core/session_control.py",
+      "sha256": "947f3e850ae9b025c56d4947db167d6919df90459ec9a5f18643b710fd4ab3f2",
+      "anchors": [
+        {
+          "name": "_stream_event",
+          "start": 65,
+          "end": 67
+        },
+        {
+          "name": "_execute",
+          "start": 155,
+          "end": 217
+        }
+      ]
+    },
+    {
+      "path": "misaka/ui/tui/interactive/conversation.py",
+      "sha256": "fb4cbac2833adea94ee8ea446b3b8dd5385022b0e53bfd9fce3b34c7fbefcd8e",
+      "anchors": [
+        {
+          "name": "updateStreaming",
+          "start": 132,
+          "end": 147
+        }
+      ]
+    },
+    {
+      "path": "tests/test_prompt_assembly_integration.py",
+      "sha256": "37024df8e7eabf10dc558a858e60199da72ab9801e57c08f8c6ab51b5bc55bd0",
+      "anchors": []
+    },
+    {
+      "path": "tests/test_research_edge_repairs.py",
+      "sha256": "e62dca860cbebb978689016e99fdb18d0bc78c0c7a2e2a6b3ebb0e1d3751cf5d",
+      "anchors": []
+    },
+    {
+      "path": "tests/test_research_node_control_cleanup.py",
+      "sha256": "70a526e16f17eb95f3d746d227d970cf78aaa4fafefd323c7272fc3649aba757",
+      "anchors": []
+    },
+    {
+      "path": "tests/test_research_root_lifecycle.py",
+      "sha256": "181e23f7ffcf9d302b6a1db6cd8a8fc15563c3b81efab4a8e73f40ee514a680f",
+      "anchors": []
+    },
+    {
+      "path": "tests/test_research_sweep_repairs.py",
+      "sha256": "23d0f48aa0754d1d9b5e062165e337ad9b3c6d88504a83bfb1e849c69d8e7a38",
+      "anchors": []
+    },
+    {
+      "path": "tests/test_session_snapshot_branch.py",
+      "sha256": "b5b1fc218263208f7d76922e8f62da594897c7e0c0d270771a1ba79a4910cbf7",
+      "anchors": []
+    },
+    {
+      "path": "tests/test_session_streaming_snapshot.py",
+      "sha256": "57d9cbe9ecfb9bdff869a15b7cecbec79486b9025d32c760bf5c5616d0df9d3d",
+      "anchors": []
+    },
+    {
+      "path": "tests/test_session_live_viewer.py",
+      "sha256": "a35add09dfe0782c6bfad6d98ddd5ab49f1766a9d62960c86e36333a54d7711c",
+      "anchors": []
+    },
+    {
+      "path": "tests/test_research_workflow_description.py",
+      "sha256": "f98bc70505cab567d68061cca4e46c2d3313e853956a1abdbf0f6be28ad05e4b",
+      "anchors": []
+    }
+  ],
+  "evidence": [
+    {
+      "file": "apply-proof.json",
+      "sha256": "d0ef258e67a191c893ace1b14433588edcdbddbee3242ac8cc8a424e5da56787"
+    },
+    {
+      "file": "repair.patch",
+      "sha256": "badd898f9ba3c07c7b872bf34629e5133b7939c02c76d8af8f773e6cafd848b5"
+    },
+    {
+      "file": "focused.log",
+      "sha256": "d0983179c158b9626d16e369f3758f2ec0450d88e64787ff77d49e8bd58f4fdb"
+    },
+    {
+      "file": "main-final.log",
+      "sha256": "5e6db334e17a98715432606c2c8b3e204ab600583596afe3ed4a8bb66fc67758"
+    },
+    {
+      "file": "main-lint.log",
+      "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+    },
+    {
+      "file": "focused-files.txt",
+      "sha256": "8a8ba002cc800dccf2dc06d295c486d1721b9e094e231f4583a2c917aee812c1"
+    },
+    {
+      "file": "combined.log",
+      "sha256": "739b1bc2b40e2da154531cff999dd75fbfc8675e65cf1e4bfdd697889c99dadf"
+    },
+    {
+      "file": "leak-attribution.md",
+      "sha256": "3bf7082f09298305bfa7867f4eb5daa48eee67ed514b5e16bdc167e9777701d8"
+    },
+    {
+      "file": "leak-comparison.json",
+      "sha256": "8e20a7bb5cd5f4ed6c73519e33a8192b60658d60d5e7c0da6882edbed4726570"
+    },
+    {
+      "file": "leak-baseline.log",
+      "sha256": "8e2444471e01fda044b0f26cc5195e36bf03c3d4894f46a6a594e89645f92841"
+    },
+    {
+      "file": "leak-patched.log",
+      "sha256": "d31f97f0043cd22748c15a488579b65bf849d070d9617a6ee9629001e74b44e6"
+    }
+  ]
+}

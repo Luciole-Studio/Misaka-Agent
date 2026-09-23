@@ -50,7 +50,7 @@ from urllib.parse import urlparse
 import httpx
 
 from misaka.ai.utils.oauth.xai import with_http_options
-from misaka.config import get_auth_path
+from misaka.config import home
 from misaka.core.auth_storage import AuthStorage
 from misaka.core.web.accounting import account_call
 from misaka.core.web.config import provider_env, web_config
@@ -95,14 +95,14 @@ _BOTH_DOMAIN_FILTERS_ERROR = (
 def _auth_path() -> str:
     """Where the credential store lives.
 
-    Its own function rather than a call to ``get_auth_path()`` at each of the two use
+    Its own function rather than a lookup at each of the two use
     sites, because those two sites must never disagree: :meth:`is_available` reads the
     file raw and :func:`_resolve_credentials` opens it through ``AuthStorage``, and a
     probe that says "configured" about a different file than the search then opens is
     worse than either answer alone. It is also the seam the tests move.
     """
     profile = current_scope().profile_dir
-    return str(Path(profile) / "auth.json") if profile is not None else get_auth_path()
+    return str(Path(profile) / "auth.json" if profile is not None else home.path("auth"))
 
 
 def _xai_config() -> dict[str, Any]:

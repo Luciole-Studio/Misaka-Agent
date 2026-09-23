@@ -1,0 +1,97 @@
+{
+  "at": "2026-09-21T13:28:45.465451+09:00",
+  "scope": "U01/U02 source repair; no live session, DB, process control, restart or resume.",
+  "files": [
+    {
+      "path": "misaka/core/session_manager.py",
+      "sha256": "4bea3592ae378a14bad40831484940c2e77a4bc273b0e9d402ce8d014b934f26",
+      "functions": [
+        {
+          "name": "_parse_jsonl_entries",
+          "start": 1203,
+          "end": 1219
+        }
+      ]
+    },
+    {
+      "path": "misaka/core/subagent/runtime.py",
+      "sha256": "b14f2153bcc488e9ed50eecb582762fa79594c89f97d8625d505c698d6736b32",
+      "functions": [
+        {
+          "name": "read_resume_transcript",
+          "start": 696,
+          "end": 723
+        }
+      ]
+    },
+    {
+      "path": "misaka/core/network/sister_runtime.py",
+      "sha256": "19acf1b8e51fc651e174de7bfa9dff5492f0391db5d63faaf5320c5fdcbe00f9",
+      "functions": [
+        {
+          "name": "transcript_tail",
+          "start": 120,
+          "end": 171
+        }
+      ]
+    },
+    {
+      "path": "misaka/core/research/bundle.py",
+      "sha256": "2971490329ff44ae1ca4d5155ab0723a14c3503f8a482359dd38b87ca94fac90",
+      "functions": [
+        {
+          "name": "consulted_in_session",
+          "start": 323,
+          "end": 365
+        }
+      ]
+    },
+    {
+      "path": "misaka/workspace.py",
+      "sha256": "ce2c20cc13f8b81eefb3999ca055bc018676c77b49501cb3ed21251496dd399a",
+      "functions": [
+        {
+          "name": "_artifact_node",
+          "start": 30,
+          "end": 65
+        }
+      ]
+    },
+    {
+      "path": "tests/test_session_jsonl_record_boundaries.py",
+      "sha256": "7050215771e2e9f00e018306184e9a2d37fd8321bdd9355207c46e8699315526",
+      "functions": []
+    },
+    {
+      "path": "tests/test_workspace_artifact_outline.py",
+      "sha256": "222978d83d9422ebbeb668ab63c4e9eacfe33c101baa909c4b7b74060638abf2",
+      "functions": []
+    }
+  ],
+  "evidence": [
+    {
+      "file": "live-input-proof.json",
+      "sha256": "fac345178e3ebf505682dd9e2537c5df6938923c3bd23812acec53c12b9ac7c3"
+    },
+    {
+      "file": "apply-proof.json",
+      "sha256": "67c2ac4330c81148bd4a8c29aa84771cc750240fafc6606b81dbf8042320abd1"
+    },
+    {
+      "file": "repair.patch",
+      "sha256": "fde467dace1f73f4be59941c856fe6a188295917dc39bb2be61326daec728e13"
+    },
+    {
+      "file": "isolated-final.log",
+      "sha256": "087f6f448d5a07584932bb0d31f6836648303f30561286de8201be218452723b"
+    },
+    {
+      "file": "main-final.log",
+      "sha256": "ba358925c28080fa3daa35cfd7f67aa70a69931b1c9f807ce737bc3513cd9ebd"
+    },
+    {
+      "file": "lint.log",
+      "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+    }
+  ]
+}

@@ -2,8 +2,10 @@
 
 Hermes splits this across two files a user edits by hand: ``~/.hermes/config.yaml``
 carries the ``web:`` section (which backend, whether the keyless tier is on, per-vendor
-tier pins) and ``~/.hermes/.env`` carries the vendor API keys. MISAKA has neither file,
-so both halves live in one JSON document, ``~/.misaka/web.json``:
+tier pins) and ``~/.hermes/.env`` carries the vendor API keys. MISAKA keeps the same
+split: the ``web`` section of ``settings.json`` (global, and a role's own overlay) and the
+vendor keys in the home's ``.env`` (``config.env``; a role's own ``.env`` overlays it). This
+module still works on one merged document, the way Hermes' web code sees it:
 
     {
       "backend": "tavily",            // shared fallback selection
@@ -23,12 +25,19 @@ so both halves live in one JSON document, ``~/.misaka/web.json``:
       "env": {"TAVILY_API_KEY": "tvly-..."}
     }
 
-Every key is optional and the file itself is optional: with no file at all the keyless
-ring serves searches, which is the whole point of porting it.
+Every key is optional and so is the section: with nothing configured the keyless ring
+serves searches, which is the whole point of porting it.
 
-Sessions overlay ``<profile_dir>/web.json`` on these shared defaults. Mappings merge;
-lists and scalar values replace. Unsetting a profile key reveals the shared default.
-Writes change only the selected layer, never copy shared credentials into a profile.
+A role's ``web`` section overlays the global one (``settings_manager.ROLE_KEYS``). Mappings
+merge; lists and scalar values replace. Unsetting a role key reveals the shared value.
+Writes change only the selected layer.
+
+``env`` is split by what a name is: a credential (``TAVILY_API_KEY``, anything shaped like
+a key or token) lives in ``.env`` -- the home's, or the role's own when set with
+``--profile``; a proxy, a CA bundle or an endpoint (``HTTPS_PROXY``, ``SSL_CERT_FILE``,
+``SEARXNG_URL``) is a setting, in the ``web`` section. Both layer the same way, role over
+home. ``misaka web set env.X`` routes by the same rule. Readers see one ``env`` mapping
+either way; of the ``.env`` files only the credential-shaped names are the web layer's.
 
 ``env`` exists for the same reason Hermes reads ``~/.hermes/.env``: a credential set
 through the config layer has to be visible to sessions that never had it exported --
@@ -39,51 +48,107 @@ process environment still wins, so an export always overrides the file.
 from __future__ import annotations
 
 import json
+import logging
 import os
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from misaka.config.product import CFG
+from misaka.config import home
 from misaka.core.web.scope import current_scope
+
+logger = logging.getLogger(__name__)
+
+
+def _manager():
+    from misaka.core.settings_manager import SettingsManager
+
+    return SettingsManager.forRole(current_scope().profile_dir)
 
 
 def _config_path() -> str:
+    """The settings file the current scope's ``web`` section is in: the role's, else the home's."""
     profile = current_scope().profile_dir
-    return str(Path(profile) / "web.json") if profile is not None else os.path.expanduser(CFG["web_config"])
-
-
-def _read_document(path: str) -> dict:
+    if profile is not None:
+        return str(Path(profile) / "settings.json")
     try:
-        with open(path, encoding="utf-8") as handle:
-            loaded = json.load(handle)
-    except FileNotFoundError:
+        return str(home.path("settings"))
+    except RuntimeError:            # no home directory at all: nothing is configured anywhere
+        return ""
+
+
+def _credentials_path(profile_dir: str | None = None) -> str:
+    """The file a layer's vendor credentials are in: the role's own ``.env``, else the home's."""
+    from misaka.config import env
+
+    return str(env.path(profile_dir))
+
+
+def config_label() -> str:
+    """The settings file in effect, the way a user would type it -- for messages."""
+    return home.display(_config_path())
+
+
+def _read_credentials(profile_dir: str | None = None) -> dict:
+    """The credential-shaped names one layer's ``.env`` holds (the rest of that file is other
+    code's business). A file that cannot be read counts as holding none."""
+    from misaka.config import env
+
+    try:
+        stored = env.read(profile_dir)
+    except env.EnvFileError as error:
+        logger.warning("%s", error)
         return {}
-    if not isinstance(loaded, dict):
-        raise ValueError(f"Web config root must be a mapping: {path}")  # noqa: TRY004 - malformed file, not caller type
-    return loaded
+    return {name: value for name, value in stored.items() if is_credential_var(name)}
+
+
+def is_credential_var(name: str) -> bool:
+    """Whether an ``env`` entry is a credential (kept in the credentials file) rather than a
+    setting such as a proxy or endpoint (kept with the other web settings)."""
+    upper = name.upper()
+    if upper in _PUBLIC_VARS or upper in _ENDPOINT_VARS:
+        return False
+    return upper in _CREDENTIAL_VARS or upper.endswith(_SECRET_NAME_SUFFIXES)
+
+
+def own_section() -> dict:
+    """The current scope's ``web`` section as its own file holds it (no inherited values)."""
+    from misaka.core.settings_manager import SettingsManager
+
+    profile = current_scope().profile_dir
+    manager = SettingsManager.forRole(profile)
+    return manager.getScopedSection("role" if profile is not None else "global", "web")
 
 
 def load_config(profile_dir: str | None = None) -> dict:
-    """Shared defaults, then the profile layer. Bad documents are never writable defaults."""
-    from misaka.core.settings_manager import deep_merge_settings
+    """The global ``web`` section, then the role's own, then the user's credentials.
 
-    paths = [os.path.expanduser(CFG["web_config"])]
-    if profile_dir is not None:
-        paths.append(str(Path(profile_dir) / "web.json"))
-    result = {}
-    for path in dict.fromkeys(paths):
-        doc = _read_document(path)
+    An unreadable settings file is an error, never a writable empty default.
+    """
+    from misaka.core.settings_manager import SettingsManager, deep_merge_settings
+
+    manager = SettingsManager.forRole(profile_dir)
+    if manager.globalSettingsLoadError is not None:
+        raise ValueError(f"{home.path('settings')}: {manager.globalSettingsLoadError}")
+    if manager.roleSettingsLoadError is not None:
+        raise ValueError(f"{profile_dir}/settings.json: {manager.roleSettingsLoadError}")
+    result: dict = {}
+    for scope, base in (("global", str(home.home())), ("role", profile_dir)):
+        if base is None:
+            continue
+        doc = manager.getScopedSection(scope, "web")
         policy = doc.get("website_blocklist")
         if isinstance(policy, dict) and isinstance(policy.get("shared_files"), list):
             # Resolve in the declaring layer before merging. An inherited global list
             # does not become relative to whichever profile happens to read it.
             policy["shared_files"] = [
-                str((Path(path).parent / Path(item).expanduser()).resolve())
+                str((Path(base) / Path(item).expanduser()).resolve())
                 if isinstance(item, str) and item.strip() else item
                 for item in policy["shared_files"]
             ]
         result = deep_merge_settings(result, doc)
+    credentials = {**_read_credentials(), **(_read_credentials(profile_dir) if profile_dir else {})}
+    if credentials:
+        result["env"] = {**(result.get("env") if isinstance(result.get("env"), dict) else {}), **credentials}
     return result
 
 
@@ -96,7 +161,7 @@ def web_config(*, strict: bool = False) -> dict:
         return scope.config
     try:
         return load_config(scope.profile_dir)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RuntimeError):     # RuntimeError: no home directory at all
         if strict:
             raise
         return {}
@@ -413,14 +478,6 @@ def _coerce_nested(section: str, key: str, value: str) -> Any:
     return value.strip() if section == "provider_tier" else value
 
 
-def _write(doc: dict) -> str:
-    from misaka.utils import atomic
-
-    path = _config_path()
-    atomic.write_text(path, json.dumps(doc, indent=2, ensure_ascii=False) + "\n", mode=0o600)
-    return path
-
-
 def _set_value(doc: dict, dotted_key: str, value: str) -> None:
     """Update one document value, addressed by ``key`` or ``section.key``.
 
@@ -460,7 +517,7 @@ def _set_value(doc: dict, dotted_key: str, value: str) -> None:
                 tiers.pop(str(doc[parts[0]]), None)
                 if not tiers:
                     doc.pop("provider_tier", None)
-            if current_scope().profile_dir is not None:
+            if current_scope().profile_dir is not None and doc[parts[0]]:
                 # Override an inherited pin too, without copying shared credentials.
                 doc.setdefault("provider_tier", {})[str(doc[parts[0]])] = "auto"
     else:
@@ -470,34 +527,42 @@ def _set_value(doc: dict, dotted_key: str, value: str) -> None:
         section[parts[1]] = _coerce_nested(parts[0], parts[1], value)
 
 
-@contextmanager
-def _edit_config():
-    """Lock the read-modify-replace transaction, not merely the final rename."""
-    from filelock import FileLock
+def _remove_key(doc: dict, key: str) -> None:
+    parts = key.split(".")
+    if len(parts) == 1:
+        doc.pop(parts[0], None)
+    elif len(parts) == 2 and isinstance(doc.get(parts[0]), dict):
+        doc[parts[0]].pop(parts[1], None)
+        if not doc[parts[0]]:
+            doc.pop(parts[0], None)
+    elif len(parts) > 2:
+        raise ValueError("a config key nests at most one level (section.key)")
 
-    path = _config_path()
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    with FileLock(path + ".lock", timeout=10):
-        doc = _read_document(path)
-        yield doc
-        _write(doc)
+
+def _to_credentials(key: str) -> bool:
+    section, _, name = key.partition(".")
+    return section == "env" and bool(name) and is_credential_var(name)
 
 
 def update_config(changes: dict[str, str], *, remove: tuple[str, ...] = ()) -> str:
-    """Commit one setup transaction; preserve concurrent writers and malformed files."""
-    with _edit_config() as doc:
-        for key in remove:
-            parts = key.split(".")
-            if len(parts) == 1:
-                doc.pop(parts[0], None)
-            elif len(parts) == 2 and isinstance(doc.get(parts[0]), dict):
-                doc[parts[0]].pop(parts[1], None)
-                if not doc[parts[0]]:
-                    doc.pop(parts[0], None)
-            elif len(parts) > 2:
-                raise ValueError("a config key nests at most one level (section.key)")
-        for key, value in changes.items():
-            _set_value(doc, key, value)
+    """Commit one setup transaction. A credential (``env.<KEY>``) goes to the credentials
+    file; everything else to the ``web`` section of the scope in effect. Returns the
+    settings file."""
+    if any(_to_credentials(key) for key in (*changes, *remove)):
+        from misaka.config import env
+
+        env.write({key.partition(".")[2]: value for key, value in changes.items() if _to_credentials(key)},
+                  current_scope().profile_dir,
+                  remove=tuple(key.partition(".")[2] for key in remove if _to_credentials(key)))
+    settings_changes = {key: value for key, value in changes.items() if not _to_credentials(key)}
+    settings_removes = tuple(key for key in remove if not _to_credentials(key))
+    if settings_changes or settings_removes:
+        def mutate(section: dict) -> None:
+            for key in settings_removes:
+                _remove_key(section, key)
+            for key, value in settings_changes.items():
+                _set_value(section, key, value)
+        _manager().updateSection("web", mutate)
     return _config_path()
 
 
@@ -516,13 +581,16 @@ def provider_disabled(name: str) -> bool:
 
 
 def set_provider_enabled(name: str, enabled: bool) -> str:
-    with _edit_config() as doc:
-        disabled = web_config(strict=True).get("disabled_providers") or []
-        if not isinstance(disabled, list) or any(not isinstance(name, str) for name in disabled):
-            raise ValueError("disabled_providers must be a list")
-        names = set(disabled)
-        names.discard(name) if enabled else names.add(name)
-        doc["disabled_providers"] = sorted(names)
+    disabled = web_config(strict=True).get("disabled_providers") or []
+    if not isinstance(disabled, list) or any(not isinstance(item, str) for item in disabled):
+        raise ValueError("disabled_providers must be a list")
+    names = set(disabled)
+    names.discard(name) if enabled else names.add(name)
+
+    def mutate(section: dict) -> None:
+        section["disabled_providers"] = sorted(names)
+
+    _manager().updateSection("web", mutate)
     return _config_path()
 
 
@@ -530,23 +598,25 @@ def credential_status() -> list[tuple[str, bool, str]]:
     """``(var, is_set, source)`` for every vendor credential, without revealing the value.
 
     ``source`` is ``env`` when the process environment supplies it (an export wins over the
-    file) or ``web.json`` when the file does, so a user can see why an export is or is not
-    taking effect.
+    file) or the credentials file when it does, so a user can see why an export is or is
+    not taking effect.
     """
     rows: list[tuple[str, bool, str]] = []
     file_env = web_config().get("env")
     file_env = file_env if isinstance(file_env, dict) else {}
-    profile = current_scope().profile_dir
-    profile_env = _read_document(_config_path()).get("env") if profile is not None else {}
-    profile_env = profile_env if isinstance(profile_env, dict) else {}
     environment = current_scope().environment
     environment = os.environ if environment is None else environment
     for name in sorted(provider_variables()):
         if name in environment:
             rows.append((name, bool(environment[name].strip()), "env"))
         elif name in file_env:
-            source = (_config_path() if name in profile_env else os.path.expanduser(CFG["web_config"])) if profile else "web.json"
-            rows.append((name, bool(str(file_env.get(name) or "").strip()), source))
+            profile = current_scope().profile_dir
+            if is_credential_var(name):
+                own = name in _read_credentials(profile) if profile else False
+                source = _credentials_path(profile if own else None)
+            else:
+                source = _config_path()
+            rows.append((name, bool(str(file_env.get(name) or "").strip()), home.display(source)))
         else:
             rows.append((name, False, ""))
     return rows

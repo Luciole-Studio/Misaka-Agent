@@ -112,6 +112,7 @@ class CreateAgentSessionOptions(TypedDict, total=False):
     resourceLoader: ResourceLoader
     sessionManager: SessionManager
     settingsManager: SettingsManager
+    modelProfile: str
     sessionStartEvent: SessionStartEvent
 
 
@@ -142,12 +143,19 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
     )
     resource_loader = resolved_options.get("resourceLoader")
 
-    auth_path = os.path.join(agent_dir, "auth.json") if resolved_options.get("agentDir") else None
-    models_path = os.path.join(agent_dir, "models.json") if resolved_options.get("agentDir") else None
+    # The home lays credentials out under credentials/; a custom agent directory keeps the same
+    # shape (config.home.path: a directory laying out what it keeps the way the home does).
+    from misaka.config import home
+
+    custom_dir = resolved_options.get("agentDir")
+    auth_path = str(home.path("auth", agent_dir)) if custom_dir else None
+    models_path = str(home.path("models", agent_dir)) if custom_dir else None
     auth_storage = resolved_options.get("authStorage") or AuthStorage.create(auth_path)
     settings_manager = resolved_options.get("settingsManager") or SettingsManager.create(cwd, agent_dir)
     applyHttpProxySettings(settings_manager.getGlobalSettings().get("httpProxy"))
     model_registry = resolved_options.get("modelRegistry") or ModelRegistry.create(auth_storage, models_path)
+    if resolved_options.get("modelProfile"):
+        settings_manager.bindModelProfile(resolved_options["modelProfile"], model_registry)
     # The engine home only decides the session store when the caller named one; otherwise
     # sessions go to the product tree (config.sessions), where /resume and the panel look.
     session_manager = explicit_session_manager or SessionManager.create(
@@ -175,13 +183,29 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
                 f'Could not restore model {existing_session.model["provider"]}/{existing_session.model["modelId"]}'
             )
 
+    if model is None and getattr(settings_manager, "getModelProfile", lambda: None)():
+        from misaka.config import profiles
+
+        pin = profiles.pinned_model(settings_manager.getModelProfile(), strict=True)
+        if pin and pin != "inherit":
+            provider, model_id = settings_manager.getDefaultModelPair()
+            model = model_registry.find(provider, model_id)
+            if model is None:
+                raise RuntimeError(f"Role default model is not available: {provider}/{model_id}")
+            if not model_registry.hasConfiguredAuth(model):
+                model_fallback_message = (
+                    f"No configured authentication for role default {provider}/{model_id}. "
+                    "Use /login or misaka setup; the selected provider has not been changed."
+                )
+
     if model is None:
+        default_provider, default_model = settings_manager.getDefaultModelPair()
         result = await findInitialModel(
             {
                 "scopedModels": [],
                 "isContinuing": has_existing_session,
-                "defaultProvider": settings_manager.getDefaultProvider(),
-                "defaultModelId": settings_manager.getDefaultModel(),
+                "defaultProvider": default_provider,
+                "defaultModelId": default_model,
                 "defaultThinkingLevel": settings_manager.getDefaultThinkingLevel(),
                 "modelThinkingLevels": settings_manager.getAllModelThinkingLevels(),
                 "modelRegistry": model_registry,

@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from misaka import workspace as workspace_index
 from misaka.config import CFG
 from misaka.core.extensions.types import ToolDefinition
+from misaka.core.platform import tasks as task_store
 from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.research import ledger, runs
 
@@ -38,7 +39,7 @@ def register(harn):
         # Own the reader in this thread. Inspection neither creates/migrates a board nor
         # shares the driver's writer; closing also releases the short WAL read snapshot.
         with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as con:
-            con.row_factory = sqlite3.Row
+            con.row_factory = task_store.Row
             con.execute("PRAGMA query_only=ON")
             con.execute("BEGIN")
             if not con.execute("SELECT 1 FROM sqlite_master WHERE name='research_runs' AND type='table'").fetchone():

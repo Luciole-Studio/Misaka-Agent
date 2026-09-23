@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import httpx
 
-from misaka.config import get_agent_dir
+from misaka.config import get_agent_dir, home
 from misaka.core.web import config, dispatch, registry
 from misaka.core.web.scope import WebScope, current_scope
 
@@ -108,9 +108,10 @@ def _status():
     print("Credentials (presence only; process env overrides files, including empty exports):")
     for name, is_set, source in config.credential_status():
         print(f"  {'✓' if is_set else '·'} {name}" + (f"  ({source})" if source else ""))
-    print(f"\nConfig file: {config._config_path()}")
+    print(f"\nSettings: \"web\" in {config.config_label()}")
     if current_scope().profile_dir is not None:
-        print(f"Shared defaults: {os.path.expanduser(config.CFG['web_config'])}")
+        print(f"Shared defaults: \"web\" in {home.display(home.path('settings'))}")
+    print(f"Credentials: {home.display(home.path('env'))} (a role's own .env overlays it)")
 
 
 def _select(rows, prompt):
@@ -147,7 +148,9 @@ def _post_setup(row, args):
             "xai", SimpleNamespace(onDeviceCode=show_code, signal=None)))
 
 
-def _setup(args):
+def _setup(args, *, interactive=False):
+    from misaka.cli import setup_ui as ui
+
     providers = registry.list_providers(include_disabled=True)
     name = args.key
     if name is None:
@@ -167,7 +170,14 @@ def _setup(args):
             raise ValueError(f"Provider '{name}' has no {args.tier} setup row")
         row = rows[-1] if row is None else row
     else:
-        row = _select(rows, "Tier") if len(rows) > 1 and not args.yes else rows[0]
+        if interactive:
+            tier = config.provider_tier(name)
+            if any(item.get("web_tier") for item in rows):
+                rows = [*rows, dict(rows[-1], name="Automatic tier (use existing credentials when present)", web_tier="auto")]
+            default = next((i for i, item in enumerate(rows) if item.get("web_tier") == tier), 0)
+            row = rows[ui.prompt_choice("Service tier", [item["name"] for item in rows], default)]
+        else:
+            row = _select(rows, "Tier") if len(rows) > 1 and not args.yes else rows[0]
     capabilities = [cap for cap in ("search", "extract") if getattr(provider, f"supports_{cap}")()]
     selected = capabilities if args.capability is None else (
         ["search", "extract"] if args.capability == "both" else [args.capability])
@@ -180,14 +190,27 @@ def _setup(args):
     tier = args.tier if args.tier is not None else row.get("web_tier")
     if tier is not None:
         changes[f"provider_tier.{name}"] = tier
+    if interactive and tier == "free":
+        changes["keyless_fallback"] = "true"
     if not args.yes and not args.login:
         for variable in row.get("env_vars", []):
             key = variable["key"]
             if variable.get("url"):
                 print(f"{key}: {variable['url']}")
-            value = getpass.getpass(f"{variable.get('prompt', key)} (Enter keeps current): ").strip()
+            if interactive:
+                value = ui.prompt(f"{variable.get('prompt', key)} (Enter keeps current)", password=True)
+            else:
+                value = getpass.getpass(f"{variable.get('prompt', key)} (Enter keeps current): ").strip()
             if value:
+                config.remember_secret(value)
                 changes[f"env.{key}"] = value
+                if key in os.environ:
+                    print(f"{key} is overridden by the process environment, even if its export is empty.")
+    if interactive:
+        from misaka.cli.web_setup import save
+
+        save(changes)
+        return
     _post_setup(row, args)
     path = config.update_config(changes)
     print(f"Saved {', '.join(selected)} selection in {path}")
@@ -218,7 +241,14 @@ def _accounts(args):
         print(f"Saved xAI account {account or '(default)'}")
 
 
-def run(args):
+def run(args, *, from_setup=False):
+    from misaka.cli import setup_ui as ui
+
+    if args.op is None:
+        args.op = "configure" if sys.stdin.isatty() and sys.stdout.isatty() else "status"
+    if args.op == "configure" and not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print("Web settings need a terminal. Use `misaka web status`, `providers`, `setup`, or `set` for scripts.", file=sys.stderr)
+        raise SystemExit(2)
     with WebScope(args.profile).activate():
         try:
             if args.op != "setup" and any((args.capability, args.tier, args.install, args.login)):
@@ -259,7 +289,10 @@ def run(args):
                     print(config.redact_secrets(f"Extension {error['path']}: {error['error']}"), file=sys.stderr)
                 current_scope().browser_providers = {name: provider for extension in result.extensions
                                                      for name, provider in getattr(extension, "browserProviders", {}).items()}
-                if args.op.startswith("browser-"):
+                if args.op == "configure":
+                    from misaka.cli.web_setup import configure
+                    configure()
+                elif args.op.startswith("browser-"):
                     from misaka.cli.web_browser import run
                     run(args)
                 elif args.op == "setup":
@@ -275,6 +308,10 @@ def run(args):
                     _status()
             finally:
                 result.runtime.invalidate()
+        except (ui.SetupCancelled, ui.SetupGoBack, KeyboardInterrupt, EOFError):
+            if from_setup:
+                raise
+            print("Web settings closed; completed saves are kept.")
         except (ValueError, RuntimeError, OSError, subprocess.CalledProcessError, httpx.HTTPError) as error:
             print(config.redact_secrets(str(error)), file=sys.stderr)
             raise SystemExit(2) from error

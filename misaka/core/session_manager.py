@@ -162,53 +162,16 @@ def generate_id(existing: Mapping[str, Any] | set[str]) -> str:
     return uuid.uuid4().hex
 
 
-def migrate_v1_to_v2(entries: list[FileEntry]) -> None:
-    existing_ids: set[str] = set()
-    previous_id: str | None = None
+def require_current_version(entries: list[FileEntry], file_path: str) -> None:
+    """A session file is version 3 or it is refused.
 
-    for entry in entries:
-        if entry.get("type") == "session":
-            entry["version"] = 2
-            continue
-
-        entry["id"] = generate_id(existing_ids)
-        existing_ids.add(str(entry["id"]))
-        entry["parentId"] = previous_id
-        previous_id = str(entry["id"])
-
-        if entry.get("type") == "compaction" and isinstance(entry.get("firstKeptEntryIndex"), int):
-            first_kept_entry_index = entry["firstKeptEntryIndex"]
-            target_entry = entries[first_kept_entry_index] if 0 <= first_kept_entry_index < len(entries) else None
-            if isinstance(target_entry, dict) and target_entry.get("type") != "session" and isinstance(
-                target_entry.get("id"), str
-            ):
-                entry["firstKeptEntryId"] = target_entry["id"]
-            entry.pop("firstKeptEntryIndex", None)
-
-
-def migrate_v2_to_v3(entries: list[FileEntry]) -> None:
-    for entry in entries:
-        if entry.get("type") == "session":
-            entry["version"] = 3
-            continue
-
-        if entry.get("type") == "message":
-            message = entry.get("message")
-            if _message_role(message) == "hookMessage":
-                _set_message_role(message, "custom")
-
-
-def _migrate_to_current_version(entries: list[FileEntry]) -> bool:
+    pi carries v1->v2->v3 rewrites for files its own older releases wrote; MISAKA never wrote
+    an earlier version, so a file at one was made by something else and is not reshaped here.
+    """
     header = next((entry for entry in entries if entry.get("type") == "session"), None)
     version = int(header.get("version", 1)) if isinstance(header, dict) else 1
-    if version >= CURRENT_SESSION_VERSION:
-        return False
-
-    if version < 2:
-        migrate_v1_to_v2(entries)
-    if version < 3:
-        migrate_v2_to_v3(entries)
-    return True
+    if version != CURRENT_SESSION_VERSION:
+        raise InvalidSessionFileError(file_path, f"session version {version}; this build reads v{CURRENT_SESSION_VERSION}")
 
 
 def get_latest_compaction_entry(entries: list[SessionEntry]) -> SessionEntry | None:
@@ -216,6 +179,49 @@ def get_latest_compaction_entry(entries: list[SessionEntry]) -> SessionEntry | N
         if entry.get("type") == "compaction":
             return entry
     return None
+
+
+_FENCE = re.compile(r'\A<<<([A-Z-]+) name="[^"]*">>>\n(.*)\n<<<END-\1>>>\n.*\Z', re.DOTALL)
+
+
+def _unfenced(text: str) -> str:
+    """The text inside a prompt-guard fence, or the text itself: the fence is for the model."""
+    match = _FENCE.match(text)
+    return match.group(2) if match else text
+
+
+def _content_text(message: Any) -> str:
+    content = read_field(message, "content")
+    if isinstance(content, str):
+        return content
+    return "\n".join(str(read_field(block, "text") or "") for block in (content or [])
+                     if read_field(block, "type") == "text")
+
+
+def session_entry_to_display_messages(entry: SessionEntry) -> list[AgentMessage]:
+    """What the transcript shows for one entry.
+
+    The same as the model's view, with one exception. A compaction whose engine wrote a
+    complete context (``contextMessages``) carries that engine's summaries as user turns,
+    because that is where the model expects them; on screen they are compaction summaries,
+    shown the way pi shows its own and never remembered as something the user typed
+    (2026-09-18, B30: the LCM summaries were being replayed into the editor's input
+    history on every reopen). The engine names its own messages by index in
+    ``details``; nothing here reads their text to guess.
+    """
+    if entry.get("type") != "compaction" or entry.get("contextMessages") is None:
+        return session_entry_to_context_messages(entry)
+    details = entry.get("details") or {}
+    scaffolds = set((details.get("lcm") or {}).get("scaffolds") or []) if isinstance(details, dict) else set()
+    shown: list[AgentMessage] = []
+    for index, message in enumerate(_copy_context_messages(entry["contextMessages"])):
+        if index in scaffolds and _message_role(message) == "user":
+            shown.append(create_compaction_summary_message(
+                _unfenced(_content_text(message)), int(entry.get("tokensBefore", 0) or 0),
+                entry.get("timestamp")))
+        else:
+            shown.append(message)
+    return shown
 
 
 def _entry_starts_transcript(entry: SessionEntry) -> bool:
@@ -432,9 +438,8 @@ def sessions_root_of(session_dir: str | None) -> str | None:
 
     Chats pass a cwd bucket (``--<slug>-<sha256>--``, see :func:`encode_cwd`), so the
     same role's other folders are its siblings: the store is the bucket's parent.
-    Flat directories -- DM, cards, settings ``sessionDir`` and
-    ``$MISAKA_CODING_AGENT_SESSION_DIR`` -- stay as they are. ``None`` keeps the
-    engine default.
+    Flat directories -- DM, cards and the ``sessionDir`` setting -- stay as they are.
+    ``None`` keeps the engine default.
 
     Both ends of "all sessions" go through here: the CLI picker (``cli/engine.py``) and the TUI
     ``/resume`` selector (``ui/tui/interactive/interactive_mode.py``), which is why it lives with
@@ -569,8 +574,7 @@ class SessionManager:
                 if isinstance(header, dict) and header.get("id")
                 else create_session_id()
             )
-            if _migrate_to_current_version(self.fileEntries):
-                self._rewriteFile()
+            require_current_version(self.fileEntries, self.sessionFile)
             self._buildIndex()
             self.flushed = True
             return
@@ -1044,7 +1048,7 @@ class SessionManager:
         manager = cls.inMemory(cwd)
         manager.fileEntries = entries
         manager.sessionId = str(header["id"]) if header.get("id") else create_session_id()
-        _migrate_to_current_version(manager.fileEntries)
+        require_current_version(manager.fileEntries, resolved_path)
         manager._buildIndex()
         return manager
 
@@ -1159,7 +1163,8 @@ class SessionManager:
 
 def _parse_jsonl_entries(content: str, *, strict: bool = False) -> list[FileEntry]:
     entries: list[FileEntry] = []
-    for line in content.splitlines():
+    # JSONL records end at LF; U+0085/U+2028/U+2029 are valid JSON string content.
+    for line in content.split("\n"):
         if not line.strip():
             continue
         try:

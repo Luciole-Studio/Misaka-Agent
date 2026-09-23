@@ -115,7 +115,7 @@ class WebPart:
         self._restart_on_configure = False
 
     async def session_shutdown(self, event, ctx):
-        from misaka.core.tools._web.negative_cache import clear
+        from misaka.core.web.negative_cache import clear
         from misaka.core.web.registry import replace_extension_providers
 
         self._restart_on_configure = False

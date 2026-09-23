@@ -45,6 +45,7 @@ COMMON_CHARTER = """# Shared working agreement
 - Researchable uncertainty belongs in the work. Ask for a decision or pause only when the missing input materially changes the action or is indispensable.
 - Deliverables must remain accessible in the project. Follow the current task or phase's output contract: a workflow that saves the response owns that write. Ordinary conversation does not require a new artifact.
 - The current working directory is the project root. Keep its board and brief there; use subdirectories for materials and outputs rather than silently creating a different project root.
+- The MISAKA home belongs to the program. Do not create files or folders of your own in it: material that several cards need goes in its `shared` directory, and a card's own work stays in the project.
 
 ## Research and reasoning
 
@@ -143,3 +144,13 @@ def prompt_sections(profile_dir, role=None):
     if charter:
         sections.append(charter)
     return sections
+
+
+def base_prompt_sources(profile_dir, role=None):
+    """The ordinary role base, shared by interactive and headless sessions.
+
+    Keep file inputs as paths so the resource loader retains reload/provenance behavior.
+    Research changes the mode overlay, never the identity stack.
+    """
+    from misaka.config import profiles
+    return [profiles.shared_soul(), *prompt_sections(profile_dir, role)]

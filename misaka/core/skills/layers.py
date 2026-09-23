@@ -1,8 +1,8 @@
 """Skill discovery: the layers a role sees and the rules for walking them.
 
 Layers, in precedence order: the project folder's ``skills/``, the role's
-``skills/``, the shared ``profiles/skills/``, then the read-only external
-directories listed in ``~/.misaka/skills.json`` (hermes ``skills.external_dirs``).
+``skills/``, the home's shared ``skills/``, then the read-only external
+directories listed under ``skills.external_dirs`` in settings.json (hermes).
 Turning them into an index (one entry per name, the system-prompt section,
 lookups) is :mod:`misaka.core.skills.index`; this module only says where skills live
 and which directories count, plus the project-tier quarantine chokepoint.
@@ -14,65 +14,58 @@ import os
 from pathlib import Path
 from stat import S_ISLNK
 
-from misaka.config import CFG
-from misaka.utils import atomic
+from misaka.config import CFG, home
 
 logger = logging.getLogger(__name__)
 
 
-def home():
-    """``~/.misaka`` at call time (tests move HOME)."""
-    return os.path.expanduser("~/.misaka")
-
-
 def config_path():
-    return os.path.join(home(), "skills.json")
+    """Where the skills settings live: the ``skills`` section of the global settings.json."""
+    return str(home.path("settings"))
 
 
 class SkillsConfigError(RuntimeError):
-    """skills.json is on disk but cannot be parsed, so it must not be overwritten."""
+    """settings.json is on disk but cannot be parsed, so it must not be overwritten."""
+
+
+def _settings():
+    from misaka.core.settings_manager import SettingsManager
+
+    return SettingsManager.forRole(None)
 
 
 def read_skills_config():
-    """Read skills.json as three states: ``(cfg, reason)``.
-
-    Missing file -> ``({}, None)``: nothing to lose, safe to write over. So is a
-    file that holds no settings — zero bytes, whitespace only, a lone BOM, or a
-    literal ``null``; refusing to write those would wedge every setting change
-    behind a file with nothing in it to protect.
-    Parsed -> ``(cfg, None)``. Present but unreadable, malformed, or not a JSON
-    object -> ``({}, reason)``: read-only callers fall back to the empty mapping,
-    while a read-modify-write caller must refuse to overwrite (see
-    write_skills_config). ``utf-8-sig`` matches write.py's ``_config``: a BOM
-    must not read as content.
-    """
-    path = config_path()
-    try:
-        with open(path, encoding="utf-8-sig") as f:
-            text = f.read()
-    except FileNotFoundError:
-        return {}, None
-    except (OSError, UnicodeDecodeError) as error:
-        return {}, f"{path}: {error}"
-    if not text.strip():
-        return {}, None
-    try:
-        raw = json.loads(text)
-    except ValueError as error:
-        return {}, f"{path}: {error}"
-    if raw is None:
-        return {}, None
-    if not isinstance(raw, dict):
-        return {}, f"{path}: expected a JSON object, found {type(raw).__name__}"
-    return raw, None
+    """The ``skills`` section as ``(cfg, reason)``: ``reason`` names an unreadable settings.json,
+    in which case read-only callers get ``{}`` and a read-modify-write caller must refuse."""
+    manager = _settings()
+    if manager.globalSettingsLoadError is not None:
+        return {}, f"{config_path()}: {manager.globalSettingsLoadError}"
+    return manager.getScopedSection("global", "skills"), None
 
 
 def load_skills_config():
-    """Load the skills configuration, treating invalid files as empty."""
+    """Load the skills configuration, treating an unreadable settings.json as empty."""
     cfg, reason = read_skills_config()
     if reason:
         logger.warning("Ignoring unreadable skills configuration: %s", reason)
     return cfg
+
+
+def write_skills_config(cfg):
+    """Replace the ``skills`` section, refusing when settings.json exists and does not parse:
+    overwriting it would silently destroy every other setting in the file."""
+    manager = _settings()
+    if manager.globalSettingsLoadError is not None:
+        raise SkillsConfigError(
+            f"Refusing to overwrite the settings: {config_path()}: {manager.globalSettingsLoadError}. "
+            "Fix or remove the file, then try again."
+        )
+
+    def replace(section):
+        section.clear()
+        section.update(cfg)
+
+    manager.updateSection("skills", replace)
 
 
 def disabled_skill_names(platform=None):
@@ -89,21 +82,6 @@ def disabled_skill_names(platform=None):
         disabled |= _normalize_string_set(platforms.get(platform))
     return disabled
 
-
-def write_skills_config(cfg):
-    """Replace skills.json, refusing when the file on disk exists and does not parse.
-
-    Every caller reads the config, changes one key, and writes the whole file back, so
-    overwriting an unparseable file would silently destroy the user's ``disabled`` list
-    and ``external_dirs``.
-    """
-    reason = read_skills_config()[1]
-    if reason:
-        raise SkillsConfigError(
-            f"Refusing to overwrite the skills configuration: {reason}. "
-            "Fix or remove the file, then try again."
-        )
-    atomic.write_text(config_path(), json.dumps(cfg, ensure_ascii=False, indent=2))
 
 
 EXCLUDED_SKILL_DIRS = frozenset((
@@ -154,12 +132,6 @@ def iter_skill_files(root, filename="SKILL.md"):
                        if filename in files))
 
 
-def iter_skill_documents(root):
-    """Directory skills plus legacy flat documents (explicit reads only)."""
-    return iter(sorted(Path(here) / name for here, files in walk_skill_tree(root)
-        for name in files if name.endswith(".md") and name != "DESCRIPTION.md"))
-
-
 _PROJECT_SCAN_SOURCE = "project-local"
 
 
@@ -190,7 +162,7 @@ def is_quarantined_project_skill(skill_md):
         # `skill_inline_shell` is medium, so on its own it leaves the verdict at safe, and
         # that is right for a project skill too: `preprocess_skill_content` expands `!`cmd``
         # only in the user's own layers, so here the snippet is inert text whatever
-        # skills.json says, and quarantining inert text would only cost the user a skill.
+        # the skills settings say, and quarantining inert text would only cost the user a skill.
         return False
     logger.warning("Project skill quarantined: %s - %s", skill_dir, summary)
     return True
@@ -198,7 +170,7 @@ def is_quarantined_project_skill(skill_md):
 
 def iter_project_skill_files(root):
     """Yield project SKILL.md files through the single quarantine chokepoint."""
-    return (path for path in iter_skill_documents(root) if not is_quarantined_project_skill(path))
+    return (path for path in iter_skill_files(root) if not is_quarantined_project_skill(path))
 
 
 def project_skill_tree_fingerprint(root):
@@ -240,7 +212,7 @@ def project_skill_tree_fingerprint(root):
 def external_skills_dirs():
     """The read-only external directories: ``~/.agents/skills`` (the cross-harness global
     location pi mounts, always on when it exists) followed by whatever ``external_dirs``
-    in skills.json lists (hermes get_external_skills_dirs): ``~`` and ``$VAR`` expanded, a
+    in the ``skills`` section of settings.json lists (hermes get_external_skills_dirs): ``~`` and ``$VAR`` expanded, a
     relative path taken from ``~/.misaka``, only directories that exist, duplicates and the
     shared layer dropped. They appear in the index; new skills are always written to the
     role's own layer."""
@@ -256,7 +228,7 @@ def external_skills_dirs():
         if not text:
             continue
         path = Path(os.path.expanduser(os.path.expandvars(text)))
-        path = (path if path.is_absolute() else Path(home()) / path).resolve()
+        path = (path if path.is_absolute() else home.home() / path).resolve()
         if path == shared or path in seen or not path.is_dir():
             continue
         seen.add(path)
@@ -265,7 +237,7 @@ def external_skills_dirs():
 
 
 def shared_skills_dir():
-    return os.path.join(os.path.expanduser(CFG["roles_root"]), "skills")
+    return str(home.path("shared_skills"))
 
 
 PERSONAL_LAYERS = frozenset(("role", "shared"))   # the layers the user edits: snapshotted (hermes "local")
@@ -274,7 +246,7 @@ PERSONAL_LAYERS = frozenset(("role", "shared"))   # the layers the user edits: s
 def skill_roots(profile_dir, cwd=None, *, extension_paths=()):
     """The layer roots a role sees, as ``(layer, root)`` in precedence order: the project
     folder's ``skills/`` (the folder MISAKA runs in is the project; never a directory under
-    the profiles tree), the role's ``skills/``, the shared ``profiles/skills``, the external
+    the profiles tree), the role's ``skills/``, the home's shared ``skills/``, the external
     directories. Only directories that exist are listed, each once."""
     out, seen = [], set()
 
@@ -317,7 +289,34 @@ def protected_skill_roots(profile_dir, cwd=None, *, extension_paths=()):
     if not (workspace / "skills").resolve().is_relative_to(roles.resolve()):
         roots.append(workspace / "skills")
     roots.extend(Path(root) for _, root in skill_roots(profile_dir, cwd, extension_paths=extension_paths))
-    return {str(p) for root in roots for p in (root.absolute(), root.resolve())}
+    protected = {str(p) for root in roots for p in (root.absolute(), root.resolve())}
+    # A skill kept as a symlink (a library elsewhere, linked into a root) really lives where the
+    # link points; the guards compare real paths, so that place must be protected too.
+    for root in roots:
+        protected.update(_linked_skill_targets(root))
+    return protected
+
+
+_LINKED_TARGETS = {}     # root -> (directory mtimes seen, real locations): the guard asks on every tool call
+
+
+def _linked_skill_targets(root):
+    """Real locations of the symlinked directories inside a skills root (any nesting level;
+    the walk does not enter the links themselves). Resolving a few hundred links costs more
+    than a tool call should, so the answer is kept until a directory in the root changes."""
+    if not root.is_dir():
+        return set()
+    stamps, links = [], []
+    for here, dirs, _files in os.walk(root):
+        stamps.append((here, os.stat(here).st_mtime_ns))
+        links.extend(Path(here) / name for name in dirs if (Path(here) / name).is_symlink())
+    key = str(root)
+    cached = _LINKED_TARGETS.get(key)
+    if cached is not None and cached[0] == stamps:
+        return cached[1]
+    targets = {os.path.realpath(link) for link in links}
+    _LINKED_TARGETS[key] = (stamps, targets)
+    return targets
 
 
 def extension_resources(loader):

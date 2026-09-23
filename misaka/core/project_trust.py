@@ -12,7 +12,7 @@ from typing import Any, TypedDict, TypeVar
 
 from filelock import FileLock, Timeout
 
-from misaka.config import APP_NAME, CONFIG_DIR_NAME
+from misaka.config import APP_NAME, home
 from misaka.utils import atomic
 from misaka.utils.paths import canonicalize_path, resolve_path
 
@@ -110,25 +110,23 @@ def get_project_trust_options(
 
 def has_trust_requiring_project_resources(cwd: str) -> bool:
     current = Path(_normalize_cwd(cwd))
-    config_dir = current / CONFIG_DIR_NAME
-    if any(
+    config_dir = home.project_dir(current)
+    if config_dir is not None and any(
         (config_dir / entry).exists()
         for entry in ("settings.json", "prompts", "themes")
     ):
         return True
 
-    home = Path(_normalize_cwd(str(Path.home())))
-    # pi trust-manager.ts:187/197: the user's *own* global agents directory is a
-    # trusted user resource, never a project resource. Without this exclusion the
-    # walk reaches $HOME, sees ~/<CONFIG_DIR_NAME>/agents (which most users have)
-    # and asks "Trust project folder?" in every non-git directory under $HOME --
-    # training users to click Trust reflexively.
-    user_agents_dir = home / CONFIG_DIR_NAME / "agents"
+    user_home = Path(_normalize_cwd(str(Path.home())))
+    # pi trust-manager.ts:187/197 excludes the user's *own* global directory from this walk:
+    # without that it reaches $HOME, finds the user's own definitions, and asks "Trust project
+    # folder?" in every non-git directory under $HOME -- training users to click Trust
+    # reflexively. Here ``project_dir`` is what draws that line: the home is never a project.
     while True:
-        agents_dir = current / CONFIG_DIR_NAME / "agents"
-        if agents_dir != user_agents_dir and agents_dir.is_dir():
+        config_dir = home.project_dir(current)
+        if config_dir is not None and (config_dir / home.SUBAGENTS_DIR).is_dir():
             return True
-        if (current / ".git").exists() or current == home or current.parent == current:
+        if (current / ".git").exists() or current == user_home or current.parent == current:
             return False
         current = current.parent
 
@@ -175,7 +173,10 @@ def _write_trust_file(path: str, data: dict[str, ProjectTrustDecision]) -> None:
 
 class ProjectTrustStore:
     def __init__(self, agent_dir: str) -> None:
-        self.trust_path = str(Path(resolve_path(agent_dir)) / "trust.json")
+        # pi keeps trust.json in the agent directory. The home keeps it with its state; an
+        # embedder's own engine directory still gets it beside its settings.
+        directory = Path(os.path.realpath(resolve_path(agent_dir)))
+        self.trust_path = str(home.path("trust") if directory == home.home() else directory / "trust.json")
         self.trustPath = self.trust_path
 
     def _acquire_lock(self) -> FileLock:
@@ -237,9 +238,9 @@ class ProjectTrustStore:
 def _format_project_trust_prompt(cwd: str) -> str:
     return (
         f"Trust project folder?\n{cwd}\n\n"
-        f"This allows {APP_NAME} to load {CONFIG_DIR_NAME}/settings.json, "
-        f"{CONFIG_DIR_NAME}/prompts, {CONFIG_DIR_NAME}/themes, and Sisters project "
-        f"agent definitions from {CONFIG_DIR_NAME}/agents."
+        f"This allows {APP_NAME} to load {home.DIR_NAME}/settings.json, "
+        f"{home.DIR_NAME}/prompts, {home.DIR_NAME}/themes, and Sisters project "
+        f"agent definitions from {home.DIR_NAME}/{home.SUBAGENTS_DIR}."
     )
 
 

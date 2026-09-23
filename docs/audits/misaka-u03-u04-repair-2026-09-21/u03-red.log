@@ -1,0 +1,465 @@
+..F.FFF...FF.F.FFFFFF.......F.FFF...FF.F.FFFFFF.......                   [100%]
+=================================== FAILURES ===================================
+______ test_extract_adapter_classifies_without_changing_body[all-failed] _______
+
+scope = PosixPath('/private/var/folders/8x/dy20j6qj72g384486hndmcq80000gn/T/pytest-of-makiko/pytest-436/test_extract_adapter_classifie2')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10bd28e20>
+payload = {'results': [{'content': '', 'error': 'timeout'}, {'content': '', 'error': '403'}]}
+failure = True, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_adapter_classifies_without_changing_body(scope, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        collector = ToolCollector()
+        extract.register(collector, str(scope))
+        result = await collector.tools[0].execute('extract-status', {'urls': ['https://page.example/']}, None, None, None)
+>       assert result['isError'] is failure
+E       assert False is True
+
+tests/web/test_web_extract_result_status.py:60: AssertionError
+_____ test_extract_adapter_classifies_without_changing_body[error-content] _____
+
+scope = PosixPath('/private/var/folders/8x/dy20j6qj72g384486hndmcq80000gn/T/pytest-of-makiko/pytest-436/test_extract_adapter_classifie4')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10bcbe6c0>
+payload = {'results': [{'content': 'error response', 'error': '403'}]}
+failure = True, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_adapter_classifies_without_changing_body(scope, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        collector = ToolCollector()
+        extract.register(collector, str(scope))
+        result = await collector.tools[0].execute('extract-status', {'urls': ['https://page.example/']}, None, None, None)
+>       assert result['isError'] is failure
+E       assert False is True
+
+tests/web/test_web_extract_result_status.py:60: AssertionError
+_____ test_extract_adapter_classifies_without_changing_body[empty-content] _____
+
+scope = PosixPath('/private/var/folders/8x/dy20j6qj72g384486hndmcq80000gn/T/pytest-of-makiko/pytest-436/test_extract_adapter_classifie5')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10bdf8e50>
+payload = {'results': [{'content': ''}]}, failure = True, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_adapter_classifies_without_changing_body(scope, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        collector = ToolCollector()
+        extract.register(collector, str(scope))
+        result = await collector.tools[0].execute('extract-status', {'urls': ['https://page.example/']}, None, None, None)
+>       assert result['isError'] is failure
+E       assert False is True
+
+tests/web/test_web_extract_result_status.py:60: AssertionError
+__ test_extract_adapter_classifies_without_changing_body[whitespace-content] ___
+
+scope = PosixPath('/private/var/folders/8x/dy20j6qj72g384486hndmcq80000gn/T/pytest-of-makiko/pytest-436/test_extract_adapter_classifie6')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10bce5610>
+payload = {'results': [{'content': ' \n\t'}]}, failure = True, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_adapter_classifies_without_changing_body(scope, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        collector = ToolCollector()
+        extract.register(collector, str(scope))
+        result = await collector.tools[0].execute('extract-status', {'urls': ['https://page.example/']}, None, None, None)
+>       assert result['isError'] is failure
+E       assert False is True
+
+tests/web/test_web_extract_result_status.py:60: AssertionError
+_ test_extract_adapter_classifies_without_changing_body[invalid-path-valid-content] _
+
+scope = PosixPath('/private/var/folders/8x/dy20j6qj72g384486hndmcq80000gn/T/pytest-of-makiko/pytest-436/test_extract_adapter_classifie10')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10bdce0d0>
+payload = {'results': [{'content': 'Page text', 'saved_path': {'invalid': 'path'}}]}
+failure = False, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_adapter_classifies_without_changing_body(scope, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        collector = ToolCollector()
+        extract.register(collector, str(scope))
+        result = await collector.tools[0].execute('extract-status', {'urls': ['https://page.example/']}, None, None, None)
+>       assert result['isError'] is failure
+E       assert True is False
+
+tests/web/test_web_extract_result_status.py:60: AssertionError
+____ test_extract_adapter_classifies_without_changing_body[invalid-content] ____
+
+scope = PosixPath('/private/var/folders/8x/dy20j6qj72g384486hndmcq80000gn/T/pytest-of-makiko/pytest-436/test_extract_adapter_classifie11')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10bd715c0>
+payload = {'results': [{'content': ['invalid']}]}, failure = True, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_adapter_classifies_without_changing_body(scope, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        collector = ToolCollector()
+        extract.register(collector, str(scope))
+        result = await collector.tools[0].execute('extract-status', {'urls': ['https://page.example/']}, None, None, None)
+>       assert result['isError'] is failure
+E       assert False is True
+
+tests/web/test_web_extract_result_status.py:60: AssertionError
+______ test_extract_adapter_classifies_without_changing_body[blank-path] _______
+
+scope = PosixPath('/private/var/folders/8x/dy20j6qj72g384486hndmcq80000gn/T/pytest-of-makiko/pytest-436/test_extract_adapter_classifie13')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10bd71b00>
+payload = {'results': [{'saved_path': ' \t'}]}, failure = True, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_adapter_classifies_without_changing_body(scope, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        collector = ToolCollector()
+        extract.register(collector, str(scope))
+        result = await collector.tools[0].execute('extract-status', {'urls': ['https://page.example/']}, None, None, None)
+>       assert result['isError'] is failure
+E       assert False is True
+
+tests/web/test_web_extract_result_status.py:60: AssertionError
+____ test_extract_adapter_classifies_without_changing_body[no-valid-entry] _____
+
+scope = PosixPath('/private/var/folders/8x/dy20j6qj72g384486hndmcq80000gn/T/pytest-of-makiko/pytest-436/test_extract_adapter_classifie15')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10bd71e10>
+payload = {'results': [None, 1, 'invalid', {}]}, failure = True, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_adapter_classifies_without_changing_body(scope, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        collector = ToolCollector()
+        extract.register(collector, str(scope))
+        result = await collector.tools[0].execute('extract-status', {'urls': ['https://page.example/']}, None, None, None)
+>       assert result['isError'] is failure
+E       assert False is True
+
+tests/web/test_web_extract_result_status.py:60: AssertionError
+_____ test_extract_adapter_classifies_without_changing_body[empty-results] _____
+
+scope = PosixPath('/private/var/folders/8x/dy20j6qj72g384486hndmcq80000gn/T/pytest-of-makiko/pytest-436/test_extract_adapter_classifie16')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10bd71630>
+payload = {'results': []}, failure = True, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_adapter_classifies_without_changing_body(scope, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        collector = ToolCollector()
+        extract.register(collector, str(scope))
+        result = await collector.tools[0].execute('extract-status', {'urls': ['https://page.example/']}, None, None, None)
+>       assert result['isError'] is failure
+E       assert False is True
+
+tests/web/test_web_extract_result_status.py:60: AssertionError
+_____ test_extract_adapter_classifies_without_changing_body[empty-success] _____
+
+scope = PosixPath('/private/var/folders/8x/dy20j6qj72g384486hndmcq80000gn/T/pytest-of-makiko/pytest-436/test_extract_adapter_classifie17')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10bd71940>
+payload = {'success': True, 'results': []}, failure = True, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_adapter_classifies_without_changing_body(scope, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        collector = ToolCollector()
+        extract.register(collector, str(scope))
+        result = await collector.tools[0].execute('extract-status', {'urls': ['https://page.example/']}, None, None, None)
+>       assert result['isError'] is failure
+E       assert False is True
+
+tests/web/test_web_extract_result_status.py:60: AssertionError
+____ test_extract_adapter_classifies_without_changing_body[invalid-results] ____
+
+scope = PosixPath('/private/var/folders/8x/dy20j6qj72g384486hndmcq80000gn/T/pytest-of-makiko/pytest-436/test_extract_adapter_classifie18')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10bd714e0>
+payload = {'results': {}}, failure = True, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_adapter_classifies_without_changing_body(scope, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        collector = ToolCollector()
+        extract.register(collector, str(scope))
+        result = await collector.tools[0].execute('extract-status', {'urls': ['https://page.example/']}, None, None, None)
+>       assert result['isError'] is failure
+E       assert False is True
+
+tests/web/test_web_extract_result_status.py:60: AssertionError
+____ test_extract_adapter_classifies_without_changing_body[string-results] _____
+
+scope = PosixPath('/private/var/folders/8x/dy20j6qj72g384486hndmcq80000gn/T/pytest-of-makiko/pytest-436/test_extract_adapter_classifie19')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10bd50590>
+payload = {'results': 'invalid'}, failure = True, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_adapter_classifies_without_changing_body(scope, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        collector = ToolCollector()
+        extract.register(collector, str(scope))
+        result = await collector.tools[0].execute('extract-status', {'urls': ['https://page.example/']}, None, None, None)
+>       assert result['isError'] is failure
+E       assert False is True
+
+tests/web/test_web_extract_result_status.py:60: AssertionError
+____ test_extract_adapter_classifies_without_changing_body[missing-results] ____
+
+scope = PosixPath('/private/var/folders/8x/dy20j6qj72g384486hndmcq80000gn/T/pytest-of-makiko/pytest-436/test_extract_adapter_classifie20')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10bd50440>
+payload = {'success': True}, failure = True, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_adapter_classifies_without_changing_body(scope, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        collector = ToolCollector()
+        extract.register(collector, str(scope))
+        result = await collector.tools[0].execute('extract-status', {'urls': ['https://page.example/']}, None, None, None)
+>       assert result['isError'] is failure
+E       assert False is True
+
+tests/web/test_web_extract_result_status.py:60: AssertionError
+_____________ test_extract_status_reaches_native_host[all-failed] ______________
+
+web_session = <misaka.core.agent_session.AgentSession object at 0x10c20bc50>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10c15dd30>
+payload = {'results': [{'content': '', 'error': 'timeout'}, {'content': '', 'error': '403'}]}
+failure = True, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_status_reaches_native_host(web_session, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        batch, events = await _tool_batch(web_session, [ToolCall(
+            id='extract-status', name='web_extract', arguments={'urls': ['https://page.example/']})])
+        result = batch.messages[0]
+>       assert result.isError is failure
+E       AssertionError: assert False is True
+E        +  where False = ToolResultMessage(role='toolResult', toolCallId='extract-status', toolName='web_extract', content=[TextContent(type='t...Signature=None)], details={'saved_paths': []}, usage=None, addedToolNames=None, isError=False, timestamp=1789983201588).isError
+
+tests/web/test_web_extract_result_status.py:71: AssertionError
+____________ test_extract_status_reaches_native_host[error-content] ____________
+
+web_session = <misaka.core.agent_session.AgentSession object at 0x10c210e10>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10c15dfd0>
+payload = {'results': [{'content': 'error response', 'error': '403'}]}
+failure = True, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_status_reaches_native_host(web_session, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        batch, events = await _tool_batch(web_session, [ToolCall(
+            id='extract-status', name='web_extract', arguments={'urls': ['https://page.example/']})])
+        result = batch.messages[0]
+>       assert result.isError is failure
+E       AssertionError: assert False is True
+E        +  where False = ToolResultMessage(role='toolResult', toolCallId='extract-status', toolName='web_extract', content=[TextContent(type='t...Signature=None)], details={'saved_paths': []}, usage=None, addedToolNames=None, isError=False, timestamp=1789983201601).isError
+
+tests/web/test_web_extract_result_status.py:71: AssertionError
+____________ test_extract_status_reaches_native_host[empty-content] ____________
+
+web_session = <misaka.core.agent_session.AgentSession object at 0x10c211950>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10c15dc50>
+payload = {'results': [{'content': ''}]}, failure = True, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_status_reaches_native_host(web_session, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        batch, events = await _tool_batch(web_session, [ToolCall(
+            id='extract-status', name='web_extract', arguments={'urls': ['https://page.example/']})])
+        result = batch.messages[0]
+>       assert result.isError is failure
+E       AssertionError: assert False is True
+E        +  where False = ToolResultMessage(role='toolResult', toolCallId='extract-status', toolName='web_extract', content=[TextContent(type='t...Signature=None)], details={'saved_paths': []}, usage=None, addedToolNames=None, isError=False, timestamp=1789983201609).isError
+
+tests/web/test_web_extract_result_status.py:71: AssertionError
+_________ test_extract_status_reaches_native_host[whitespace-content] __________
+
+web_session = <misaka.core.agent_session.AgentSession object at 0x10c2120d0>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10c1ba820>
+payload = {'results': [{'content': ' \n\t'}]}, failure = True, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_status_reaches_native_host(web_session, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        batch, events = await _tool_batch(web_session, [ToolCall(
+            id='extract-status', name='web_extract', arguments={'urls': ['https://page.example/']})])
+        result = batch.messages[0]
+>       assert result.isError is failure
+E       AssertionError: assert False is True
+E        +  where False = ToolResultMessage(role='toolResult', toolCallId='extract-status', toolName='web_extract', content=[TextContent(type='t...Signature=None)], details={'saved_paths': []}, usage=None, addedToolNames=None, isError=False, timestamp=1789983201616).isError
+
+tests/web/test_web_extract_result_status.py:71: AssertionError
+_____ test_extract_status_reaches_native_host[invalid-path-valid-content] ______
+
+web_session = <misaka.core.agent_session.AgentSession object at 0x10c20bed0>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10c32cfa0>
+payload = {'results': [{'content': 'Page text', 'saved_path': {'invalid': 'path'}}]}
+failure = False, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_status_reaches_native_host(web_session, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        batch, events = await _tool_batch(web_session, [ToolCall(
+            id='extract-status', name='web_extract', arguments={'urls': ['https://page.example/']})])
+        result = batch.messages[0]
+>       assert result.isError is failure
+E       AssertionError: assert True is False
+E        +  where True = ToolResultMessage(role='toolResult', toolCallId='extract-status', toolName='web_extract', content=[TextContent(type='t...t format.\n', textSignature=None)], details={}, usage=None, addedToolNames=None, isError=True, timestamp=1789983201662).isError
+
+tests/web/test_web_extract_result_status.py:71: AssertionError
+___________ test_extract_status_reaches_native_host[invalid-content] ___________
+
+web_session = <misaka.core.agent_session.AgentSession object at 0x10c07ec10>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10bd71be0>
+payload = {'results': [{'content': ['invalid']}]}, failure = True, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_status_reaches_native_host(web_session, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        batch, events = await _tool_batch(web_session, [ToolCall(
+            id='extract-status', name='web_extract', arguments={'urls': ['https://page.example/']})])
+        result = batch.messages[0]
+>       assert result.isError is failure
+E       AssertionError: assert False is True
+E        +  where False = ToolResultMessage(role='toolResult', toolCallId='extract-status', toolName='web_extract', content=[TextContent(type='t...Signature=None)], details={'saved_paths': []}, usage=None, addedToolNames=None, isError=False, timestamp=1789983201670).isError
+
+tests/web/test_web_extract_result_status.py:71: AssertionError
+_____________ test_extract_status_reaches_native_host[blank-path] ______________
+
+web_session = <misaka.core.agent_session.AgentSession object at 0x10c2091d0>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1095f83d0>
+payload = {'results': [{'saved_path': ' \t'}]}, failure = True, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_status_reaches_native_host(web_session, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        batch, events = await _tool_batch(web_session, [ToolCall(
+            id='extract-status', name='web_extract', arguments={'urls': ['https://page.example/']})])
+        result = batch.messages[0]
+>       assert result.isError is failure
+E       AssertionError: assert False is True
+E        +  where False = ToolResultMessage(role='toolResult', toolCallId='extract-status', toolName='web_extract', content=[TextContent(type='t...ture=None)], details={'saved_paths': [' \t']}, usage=None, addedToolNames=None, isError=False, timestamp=1789983201683).isError
+
+tests/web/test_web_extract_result_status.py:71: AssertionError
+___________ test_extract_status_reaches_native_host[no-valid-entry] ____________
+
+web_session = <misaka.core.agent_session.AgentSession object at 0x10c2087d0>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1095b8c90>
+payload = {'results': [None, 1, 'invalid', {}]}, failure = True, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_status_reaches_native_host(web_session, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        batch, events = await _tool_batch(web_session, [ToolCall(
+            id='extract-status', name='web_extract', arguments={'urls': ['https://page.example/']})])
+        result = batch.messages[0]
+>       assert result.isError is failure
+E       AssertionError: assert False is True
+E        +  where False = ToolResultMessage(role='toolResult', toolCallId='extract-status', toolName='web_extract', content=[TextContent(type='t...Signature=None)], details={'saved_paths': []}, usage=None, addedToolNames=None, isError=False, timestamp=1789983201696).isError
+
+tests/web/test_web_extract_result_status.py:71: AssertionError
+____________ test_extract_status_reaches_native_host[empty-results] ____________
+
+web_session = <misaka.core.agent_session.AgentSession object at 0x10c208050>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1095d0750>
+payload = {'results': []}, failure = True, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_status_reaches_native_host(web_session, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        batch, events = await _tool_batch(web_session, [ToolCall(
+            id='extract-status', name='web_extract', arguments={'urls': ['https://page.example/']})])
+        result = batch.messages[0]
+>       assert result.isError is failure
+E       AssertionError: assert False is True
+E        +  where False = ToolResultMessage(role='toolResult', toolCallId='extract-status', toolName='web_extract', content=[TextContent(type='t...Signature=None)], details={'saved_paths': []}, usage=None, addedToolNames=None, isError=False, timestamp=1789983201703).isError
+
+tests/web/test_web_extract_result_status.py:71: AssertionError
+____________ test_extract_status_reaches_native_host[empty-success] ____________
+
+web_session = <misaka.core.agent_session.AgentSession object at 0x10c20afd0>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10c32d4e0>
+payload = {'success': True, 'results': []}, failure = True, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_status_reaches_native_host(web_session, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        batch, events = await _tool_batch(web_session, [ToolCall(
+            id='extract-status', name='web_extract', arguments={'urls': ['https://page.example/']})])
+        result = batch.messages[0]
+>       assert result.isError is failure
+E       AssertionError: assert False is True
+E        +  where False = ToolResultMessage(role='toolResult', toolCallId='extract-status', toolName='web_extract', content=[TextContent(type='t...Signature=None)], details={'saved_paths': []}, usage=None, addedToolNames=None, isError=False, timestamp=1789983201713).isError
+
+tests/web/test_web_extract_result_status.py:71: AssertionError
+___________ test_extract_status_reaches_native_host[invalid-results] ___________
+
+web_session = <misaka.core.agent_session.AgentSession object at 0x10c07e990>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10c27c050>
+payload = {'results': {}}, failure = True, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_status_reaches_native_host(web_session, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        batch, events = await _tool_batch(web_session, [ToolCall(
+            id='extract-status', name='web_extract', arguments={'urls': ['https://page.example/']})])
+        result = batch.messages[0]
+>       assert result.isError is failure
+E       AssertionError: assert False is True
+E        +  where False = ToolResultMessage(role='toolResult', toolCallId='extract-status', toolName='web_extract', content=[TextContent(type='t...Signature=None)], details={'saved_paths': []}, usage=None, addedToolNames=None, isError=False, timestamp=1789983201720).isError
+
+tests/web/test_web_extract_result_status.py:71: AssertionError
+___________ test_extract_status_reaches_native_host[string-results] ____________
+
+web_session = <misaka.core.agent_session.AgentSession object at 0x10c07e490>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10c27e0b0>
+payload = {'results': 'invalid'}, failure = True, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_status_reaches_native_host(web_session, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        batch, events = await _tool_batch(web_session, [ToolCall(
+            id='extract-status', name='web_extract', arguments={'urls': ['https://page.example/']})])
+        result = batch.messages[0]
+>       assert result.isError is failure
+E       AssertionError: assert False is True
+E        +  where False = ToolResultMessage(role='toolResult', toolCallId='extract-status', toolName='web_extract', content=[TextContent(type='t...Signature=None)], details={'saved_paths': []}, usage=None, addedToolNames=None, isError=False, timestamp=1789983201728).isError
+
+tests/web/test_web_extract_result_status.py:71: AssertionError
+___________ test_extract_status_reaches_native_host[missing-results] ___________
+
+web_session = <misaka.core.agent_session.AgentSession object at 0x10c209090>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10c27e6d0>
+payload = {'success': True}, failure = True, paths = []
+
+    @pytest.mark.parametrize('payload,failure,paths', CASES)
+    async def test_extract_status_reaches_native_host(web_session, monkeypatch, payload, failure, paths):
+        raw = _reply(monkeypatch, payload)
+        batch, events = await _tool_batch(web_session, [ToolCall(
+            id='extract-status', name='web_extract', arguments={'urls': ['https://page.example/']})])
+        result = batch.messages[0]
+>       assert result.isError is failure
+E       AssertionError: assert False is True
+E        +  where False = ToolResultMessage(role='toolResult', toolCallId='extract-status', toolName='web_extract', content=[TextContent(type='t...Signature=None)], details={'saved_paths': []}, usage=None, addedToolNames=None, isError=False, timestamp=1789983201735).isError
+
+tests/web/test_web_extract_result_status.py:71: AssertionError
+=========================== short test summary info ============================
+FAILED tests/web/test_web_extract_result_status.py::test_extract_adapter_classifies_without_changing_body[all-failed]
+FAILED tests/web/test_web_extract_result_status.py::test_extract_adapter_classifies_without_changing_body[error-content]
+FAILED tests/web/test_web_extract_result_status.py::test_extract_adapter_classifies_without_changing_body[empty-content]
+FAILED tests/web/test_web_extract_result_status.py::test_extract_adapter_classifies_without_changing_body[whitespace-content]
+FAILED tests/web/test_web_extract_result_status.py::test_extract_adapter_classifies_without_changing_body[invalid-path-valid-content]
+FAILED tests/web/test_web_extract_result_status.py::test_extract_adapter_classifies_without_changing_body[invalid-content]
+FAILED tests/web/test_web_extract_result_status.py::test_extract_adapter_classifies_without_changing_body[blank-path]
+FAILED tests/web/test_web_extract_result_status.py::test_extract_adapter_classifies_without_changing_body[no-valid-entry]
+FAILED tests/web/test_web_extract_result_status.py::test_extract_adapter_classifies_without_changing_body[empty-results]
+FAILED tests/web/test_web_extract_result_status.py::test_extract_adapter_classifies_without_changing_body[empty-success]
+FAILED tests/web/test_web_extract_result_status.py::test_extract_adapter_classifies_without_changing_body[invalid-results]
+FAILED tests/web/test_web_extract_result_status.py::test_extract_adapter_classifies_without_changing_body[string-results]
+FAILED tests/web/test_web_extract_result_status.py::test_extract_adapter_classifies_without_changing_body[missing-results]
+FAILED tests/web/test_web_extract_result_status.py::test_extract_status_reaches_native_host[all-failed]
+FAILED tests/web/test_web_extract_result_status.py::test_extract_status_reaches_native_host[error-content]
+FAILED tests/web/test_web_extract_result_status.py::test_extract_status_reaches_native_host[empty-content]
+FAILED tests/web/test_web_extract_result_status.py::test_extract_status_reaches_native_host[whitespace-content]
+FAILED tests/web/test_web_extract_result_status.py::test_extract_status_reaches_native_host[invalid-path-valid-content]
+FAILED tests/web/test_web_extract_result_status.py::test_extract_status_reaches_native_host[invalid-content]
+FAILED tests/web/test_web_extract_result_status.py::test_extract_status_reaches_native_host[blank-path]
+FAILED tests/web/test_web_extract_result_status.py::test_extract_status_reaches_native_host[no-valid-entry]
+FAILED tests/web/test_web_extract_result_status.py::test_extract_status_reaches_native_host[empty-results]
+FAILED tests/web/test_web_extract_result_status.py::test_extract_status_reaches_native_host[empty-success]
+FAILED tests/web/test_web_extract_result_status.py::test_extract_status_reaches_native_host[invalid-results]
+FAILED tests/web/test_web_extract_result_status.py::test_extract_status_reaches_native_host[string-results]
+FAILED tests/web/test_web_extract_result_status.py::test_extract_status_reaches_native_host[missing-results]
+26 failed, 28 passed in 0.73s

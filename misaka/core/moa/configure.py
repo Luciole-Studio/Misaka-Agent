@@ -13,17 +13,15 @@ that fails at fan-out. ``moa`` is never offered: an MoA preset cannot aggregate 
 
 from __future__ import annotations
 
-import json
-import os
 from typing import Any
 
+from misaka.config import home
 from misaka.core.moa.provider import (
-    MOA_CONFIG_PATH,
     load_moa_config,
     normalize_moa_config,
+    save_moa_config,
     slot_label,
 )
-from misaka.utils import atomic
 
 
 def available_slots() -> list[tuple[str, list[str]]]:
@@ -71,9 +69,9 @@ def _pick_slot(providers: list[tuple[str, list[str]]], current: dict[str, Any] |
     return {"provider": provider, "model": model}
 
 
-def describe(config: dict[str, Any], path: str, out) -> None:
+def describe(config: dict[str, Any], out) -> None:
     """Print every preset the way ``misaka moa list`` does."""
-    out(f"MoA presets in {path}")
+    out(f"MoA presets (\"moa\" in {home.display(home.path('settings'))})")
     out("Use /model to select MoA·<preset>; every turn then runs the mixture until you switch away.")
     privacy = config.get("privacy_filter") or ""
     if privacy:
@@ -90,8 +88,7 @@ def describe(config: dict[str, Any], path: str, out) -> None:
 
 
 def configure(name: str | None = None, *, ask=input, out=print) -> str:
-    """Walk one preset's slots and write the file back. Returns the preset name."""
-    path = os.path.expanduser(MOA_CONFIG_PATH)
+    """Walk one preset's slots and write the section back. Returns the preset name."""
     config = load_moa_config()
     preset_name = (name or config["default_preset"]).strip() or config["default_preset"]
     current = config["presets"].get(preset_name) or config["presets"][config["default_preset"]]
@@ -101,7 +98,7 @@ def configure(name: str | None = None, *, ask=input, out=print) -> str:
         raise RuntimeError(
             "No model provider has credentials, so there is nothing to build a mixture from. "
             "Add one with `/login <provider>` in a session, or define it in "
-            f"{os.path.expanduser('~/.misaka/agent/models.json')}.")
+            f"{home.display(home.path('models'))}.")
 
     out(f"Configure MoA preset: {preset_name}")
     out("Pick at least one reference model; choose Done when finished.")
@@ -130,9 +127,9 @@ def configure(name: str | None = None, *, ask=input, out=print) -> str:
         "presets": presets,
         "default_preset": config["default_preset"] if config["default_preset"] in presets else preset_name,
     })
-    atomic.write_text(path, json.dumps(written, ensure_ascii=False, indent=2) + "\n")
+    save_moa_config(written)
     out(f"Saved MoA preset: {preset_name}")
-    describe(written, path, out)
+    describe(written, out)
     return preset_name
 
 

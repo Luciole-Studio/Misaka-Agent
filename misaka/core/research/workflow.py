@@ -40,8 +40,8 @@ RESEARCH_DISCIPLINE = """[Research Workflow active]
 Last Order is now in Research mode. Each node of the research tree runs the same routine: Last Order plans and assigns
 Sisters (each Sister plans and executes within its own task session); once their cards are back she either writes the
 node's conclusion or sends Sisters out for another round first (up to the run's follow-up limit), and the red-team
-Sister she named returns her review to that Last Order. Follow the current plan-approval policy: when enabled for a
-resident session, each root, fork or follow-up plan waits for its own approval; otherwise the driver proceeds after
+Sister she named returns her review to that Last Order. Follow the current plan-approval policy: when enabled, each
+root, fork or follow-up plan waits for its own approval; otherwise the driver proceeds after
 an accepted ready plan. Last Order explicitly dispatches a fork of her session for each material issue;
 each fork IS a child node at depth + 1 and performs the same full routine with its own Sisters and red team.
 There is no preliminary investigation or second fork. The tree expands breadth-first; max_depth is the
@@ -52,6 +52,16 @@ Code enforces phase order, depth, persistence, and artifact integrity. The model
 Sister selection, source quality, task count, and what shakes a conclusion. Planning produces a design, not an answer.
 Node synthesis produces a working conclusion for independent review. Final adjudication produces the report for delivery,
 keeping competing conclusions side by side wherever the evidence cannot decide between them.
+While research or required review remains unfinished, including while waiting for clarification, do not deliver an
+answer to the research question to the user; internal working conclusions and drafts are not delivered answers.
+"""
+
+RESEARCH_PAUSED = """[Research Workflow paused]
+Research run {run_ids} of this conversation is paused ({statuses}); its driver is not running. Only the user can
+continue it, with `/research resume <run id>` in this window. Until then: do not continue, restart or rework its
+research cards yourself, do not change the board or its files by hand, and do not stand in for the driver.
+You may report status, explain the plan or pause, and discuss other topics. Do not deliver an answer to the unfinished
+research question or resume its investigation. Wait for the user.
 """
 
 
@@ -261,7 +271,7 @@ async def _submit_tasks(con, run, node, specs, *, kind, progress=None, round=1, 
         # A resume replays this pass over the cards of the first attempt: a node that failed after
         # its research was done comes back through `planning` with every card already finished, and
         # an edge that never reached one of those is history now -- nothing is left to wait for. So
-        # skip it, the same guard and the same reason as `runs._backfill_dependencies`. `running`
+        # skip it (`runs.SETTLED_TASK_STATUSES` is that guard). `running`
         # is deliberately not in that set: a card someone claimed between its creation here and
         # this pass still has its whole job ahead of it, so a *missing* edge on it is a real
         # ordering fault and `link_tasks` should say so out loud. (An edge it already carries
@@ -408,7 +418,14 @@ async def _drive_tasks_inner(con, cfg, runner, run_id, *, scope, context=None,
         for row in linked:
             previous = captured.get(row["id"])
             if previous is not None and previous["generation"] != row["generation"]:
-                raise ValueError(f"Research card {row['id']} changed generation")
+                # A new attempt on the same card: Last Order or the user stopped and continued
+                # it, or sent a finished card back for rework. That is what the Sister tools
+                # offer, not a takeover. Raising here (2026-09-18, B13) failed the run and
+                # stopped every other card in the scope. Follow the card to its new attempt.
+                await _progress(progress, "tasks",
+                                f"Card {row['id']} moved to attempt {row['generation']} "
+                                f"(was {previous['generation']}); the run follows it.",
+                                run, task_ids=[row["id"]])
             captured[row["id"]] = row
         snapshot = tuple((row["id"], row["status"]) for row in linked)
         if snapshot != last_snapshot:
@@ -433,7 +450,7 @@ async def _drive_tasks_inner(con, cfg, runner, run_id, *, scope, context=None,
         linked = [row for row in runs.tasks(con, run_id) if row["id"] in scope]
         waiting = [row["id"] for row in linked if _help_waiting(con, row)]
         # Per-node Sister slots are independent of the run's LO-node parallelism.
-        free = max(0, max(1, int(cfg.get("research_parallel", 4)))
+        free = max(0, runs.limits(run)["sister_parallel"]
                    - len(flying | {row["id"] for row in linked if row["status"] in ACTIVE_TASKS}
                          | set(waiting)))
         ready = [row["id"] for row in linked if row["status"] == "ready"][:free]
@@ -484,14 +501,15 @@ def _register_task_artifacts(con, run, task, submitted):
     if not link or not task["workspace"]:
         return
     node = runs.node(con, link["branch_id"])
+    digests = submitted.get("artifact_digests")
+    if not isinstance(digests, dict):        # every submission records them (dispatch._submitted)
+        raise ValueError(f"Card {task['id']}: its submission carries no artifact digests.")  # noqa: TRY004 - a bad submission, not a bad type
     for rel in submitted.get("artifacts") or []:
         source = Path(task["workspace"], str(rel)).resolve()
         try:
             inside = source.relative_to(Path(run["workspace"]).resolve())
         except ValueError as error:
-            if (submitted.get("artifact_digests") or {}).get(str(rel)) is not None:
-                raise ValueError(f"Accepted artifact moved outside the workspace: {rel}") from error
-            continue
+            raise ValueError(f"Accepted artifact moved outside the workspace: {rel}") from error
         if inside.parts[:1] not in {(root,) for root in ARTIFACT_ROOTS}:
             task_store.add_event(con, task["id"], "artifact_outside_layout", {"path": str(rel)},
                                  generation=int(dict(task).get("generation") or 1))
@@ -499,11 +517,9 @@ def _register_task_artifacts(con, run, task, submitted):
         try:
             raw = source.read_bytes()
         except OSError as error:
-            if "artifact_digests" in submitted:
-                raise ValueError(f"Accepted artifact is missing: {rel}") from error
-            continue
+            raise ValueError(f"Accepted artifact is missing: {rel}") from error
         digest = hashlib.sha256(raw).hexdigest()
-        if "artifact_digests" in submitted and submitted["artifact_digests"].get(str(rel)) != digest:
+        if digests.get(str(rel)) != digest:
             raise ValueError(f"Accepted artifact changed before Research registration: {rel}")
         try:
             raw.decode("utf-8")
@@ -516,9 +532,7 @@ def _register_task_artifacts(con, run, task, submitted):
         runs.register_file(con, run["id"], kind, f"[{task['id']}] {source.name}",
                            str(source), sha256=digest,
                            branch_id=_bid(node), task_id=task["id"],
-                           metadata={"source_file": str(rel),
-                                     "submission_digest_verified": "artifact_digests" in submitted,
-                                     **({"binary": True} if binary else {})})
+                           metadata={"source_file": str(rel), **({"binary": True} if binary else {})})
 
 
 def _clear_task_outputs(con, run_id, task_id):
@@ -774,7 +788,7 @@ async def _expand_owned(con, cfg, runner, worker, run, node, *, context, tool_ca
                 set_node(status="waiting_input")
                 return {"reason": "waiting_input", "questions": plan["clarifying_questions"],
                         "run": runs.summary(con, run["id"])}
-            if planner.plan_waits_for_user(cfg, worker) and not runs.plan_started(con, run["id"], nid):
+            if planner.plan_waits_for_user(cfg, run) and not runs.plan_started(con, run["id"], nid):
                 halted = await _await_approval(con, cfg, runner, worker, run, node, round=round,
                                                poll_seconds=poll_seconds, progress=progress)
                 if halted == "skipped":
@@ -946,7 +960,7 @@ async def _await_approval(con, cfg, runner, worker, run, node, *, poll_seconds, 
     tools = commands.review_tools(con, run, current, validate=lambda value: planner.validate_plan(value, roster),
                                   session_file=session_file, round=round)
     plan = runs.action(con, run["id"], nid, runs.plan_key(round))
-    if node["parent_id"] is None:
+    if node["parent_id"] is None and not getattr(worker, "headless", False):
         where = "in this window"
     elif getattr(runner, "home", None):
         where = "in its own tab"
@@ -1258,10 +1272,23 @@ def _reap_orphan_runner(con, table, row):
     _clear_runner(con, table, row["id"])
 
 
-def _runner_error(label, row):
+def _runner_error(label, row, tail=None):
     reason = row["last_error"] or ("no exception was recorded (the process may have been killed externally, "
                                    "or its window closed)")
+    if tail:
+        reason += f"; its last output: {tail}"
     return RuntimeError(f"{label} ended while {row['status']}: {reason}; resume the run to retry it.")
+
+
+def _pane_tail(spawner, handle):
+    """What the node's window showed last, when the spawner can read it (a pane; not a process)."""
+    read = getattr(spawner, "tail", None)
+    if not callable(read):
+        return None
+    try:
+        return read(handle)
+    except Exception:  # noqa: BLE001 - the tail decorates an error already being raised
+        return None
 
 
 async def _expand_level(con, cfg, spawner, run, level, *, poll_seconds, progress, driver_lock=None):
@@ -1344,7 +1371,7 @@ async def _wait_level(con, cfg, spawner, run, handles, *, poll_seconds, progress
                     _clear_runner(con, "research_branches", nid, key=keys[nid])
                     hold = hold or node["status"] == "waiting_input"   # the run is about to pause for the user
                 else:
-                    raise _runner_error(f"Node {nid}'s process", node)
+                    raise _runner_error(f"Node {nid}'s process", node, tail=_pane_tail(spawner, handle))
         await top_up()
     if runs.stop_requested(con, run["id"]):
         return "stopped"
@@ -1365,10 +1392,11 @@ async def _settle_stopped_tasks(con, cfg, run_id):
     await asyncio.to_thread(_stop_pending, con, runs.tasks(con, run_id))
 
 
-async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, progress=None,
+async def run(con, cfg, spawner, *, run_id, poll_seconds=POLL_SECONDS, progress=None,
               resume=False, clarification="", origin_session=None, session=None):
     """Advance one persisted research run until it finishes, stops, or needs user input.
-    With ``session``, that existing window is the root LO. Child node LOs are processes; ``spawner`` starts one and says whether it lives."""
+    Reuse the supplied root session or own one headless root through final adjudication.
+    Only fork node LOs are processes managed by ``spawner``."""
     runs.init(con)
     run = runs.get(con, run_id)
     if not run:
@@ -1387,7 +1415,7 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
                            f"(lease {run['driver_lock']}); wait for it or stop that process.")
     cfg = dict(cfg)
     halts = {"stopped": "The user requested a stop.", "budget": "The shared token budget limit was reached."}
-    window = root_runner = None
+    window = root_runner = root_context = None
     lost = asyncio.Event()
     keeper = asyncio.create_task(_keep_lease(con, run_id, driver_lock, lost))
     def check_active(*, allow_stop=False):
@@ -1436,19 +1464,25 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
             return partial(halts["stopped"])
         if budget.exhausted(con, cfg.get("token_cap")):
             return partial(halts["budget"])
-        if session is not None:
-            from misaka.core.research.node import HeadlessRunner, PaneRunner
-            from misaka.core.research.window import WindowLO
-            window = WindowLO(session, check_active)
+        from misaka.core.research.node import HeadlessRunner, PaneRunner
+        from misaka.core.research.window import WindowLO, node_description, node_session
+        root = next(n for n in runs.nodes(con, run_id) if n["parent_id"] is None)
+        # The driver owns the root in-process; never register it as a killable child.
+        with runs.owned_txn(con, run):
+            runs.prepare_runner(con, "research_branches", root["id"])
+        pane = os.environ.get("MISAKA_NET_PANE") if session is not None else None
+        if session is None:
+            context = node_session(con, cfg, runs.get(con, run_id), runs.node(con, root["id"]))
+            window = await context.__aenter__()
+            root_context = context
+            session = window.session
+        else:
+            window = WindowLO(session, check_active, describe=lambda: node_description(con, root["id"]))
+        check_active()
+        with runs.owned_txn(con, run):
             runs.set_state(con, run_id, root_session=window.session_file, driver_lock=driver_lock)
-            root = next(n for n in runs.nodes(con, run_id) if n["parent_id"] is None)
-            # A window is not a killable node subprocess. The driver epoch fences its
-            # commands without storing this foreground process as a child runner.
-            with runs.owned_txn(con, run):
-                runs.prepare_runner(con, "research_branches", root["id"])
-                runs.set_node(con, root["id"], session_file=window.session_file)
-            pane = os.environ.get("MISAKA_NET_PANE")
-            root_runner = PaneRunner(con, cfg, run_id, pane) if pane else HeadlessRunner(con, cfg)
+            runs.set_node(con, root["id"], session_file=window.session_file)
+        root_runner = PaneRunner(con, cfg, run_id, pane) if pane else HeadlessRunner(con, cfg)
         run = runs.get(con, run_id)
         if run["phase"] == "created":
             runs.set_state(con, run_id, phase="active", driver_lock=driver_lock)
@@ -1461,7 +1495,7 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
             runs.set_state(con, run_id, wave=level[0]["depth"], driver_lock=driver_lock)
             await _progress(progress, "level", f"Depth {level[0]['depth']}: {len(level)} node(s) expanding.", run,
                             nodes=[n["id"] for n in level])
-            if window is not None and level[0]["parent_id"] is None:
+            if level[0]["parent_id"] is None:
                 result = await _expand(
                     con, cfg, root_runner, window, run, level[0], context=None,
                     tool_call_id=f"research:{run_id}:{level[0]['id']}", poll_seconds=poll_seconds, progress=progress,
@@ -1485,7 +1519,7 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
             return partial(unfinished, status="failed")
         runs.set_state(con, run_id, phase="finalizing", driver_lock=driver_lock)
         await _progress(progress, "finalizing", "Every node is closed; Last Order is drafting the report for independent red-team review.", run)
-        draft = await asyncio.to_thread(report.prepare, con, runs.get(con, run_id), cfg, window or worker,
+        draft = await asyncio.to_thread(report.prepare, con, runs.get(con, run_id), cfg, window,
                                         check_active=check_active)
         check_active()
         root = next(n for n in runs.nodes(con, run_id) if n["parent_id"] is None)
@@ -1501,9 +1535,6 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
             task_store.add_event(con, review_id, "research_review_target", target)
         elif json.loads(previous) != target:
             raise ValueError("Final red-team card belongs to a different draft.")
-        if root_runner is None:
-            from misaka.core.research.node import HeadlessRunner
-            root_runner = HeadlessRunner(con, cfg)
         await _progress(progress, "final_review", "The independent red team is reviewing the saved report draft.", run,
                         task_id=review_id, draft_path=draft["path"])
         outcome = await _drive_tasks(con, cfg, root_runner, run_id, scope={review_id},
@@ -1523,7 +1554,7 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
             return partial(str(error), status="failed")
         check_active()
         await _progress(progress, "adjudicating", "Last Order is weighing the final red team's objections; objections are not automatic verdicts.", run)
-        result = await asyncio.to_thread(report.finalize, con, runs.get(con, run_id), cfg, window or worker,
+        result = await asyncio.to_thread(report.finalize, con, runs.get(con, run_id), cfg, window,
                                          review_task_id=review_id, check_active=check_active)
         check_active()
         runs.set_state(con, run_id, phase="done", status="done", final_artifact=result["artifact"],
@@ -1551,11 +1582,15 @@ async def run(con, cfg, spawner, worker, *, run_id, poll_seconds=POLL_SECONDS, p
         raise
     finally:
         try:
-            if window is not None:
+            if root_context is not None:
+                await root_context.__aexit__(*sys.exc_info())
+            elif window is not None:
                 await window.close()
-            if root_runner is not None and hasattr(root_runner, "close"):
-                await asyncio.to_thread(root_runner.close)
         finally:
-            keeper.cancel()
-            await asyncio.gather(keeper, return_exceptions=True)
-            runs.release_driver(con, run_id, driver_lock)
+            try:
+                if root_runner is not None and hasattr(root_runner, "close"):
+                    await asyncio.to_thread(root_runner.close)
+            finally:
+                keeper.cancel()
+                await asyncio.gather(keeper, return_exceptions=True)
+                runs.release_driver(con, run_id, driver_lock)

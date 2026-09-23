@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Literal, TextIO
 
 from misaka.ai.types import ModelThinkingLevel
-from misaka.config import APP_NAME, CONFIG_DIR_NAME, ENV_AGENT_DIR, ENV_SESSION_DIR
+from misaka.config import APP_NAME, home
 from misaka.core.extensions.types import ExtensionFlag
 
 Mode = Literal["text", "json"]
@@ -387,7 +387,7 @@ Examples:
   {APP_NAME} --tools read,grep,find,ls -p "Review the code in src/"
 
   # Export a session file to HTML
-  {APP_NAME} --export ~/{CONFIG_DIR_NAME}/agent/sessions/--path--/session.jsonl
+  {APP_NAME} --export {home.display(home.path('sessions'))}/last-order/--path--/session.jsonl
   {APP_NAME} --export session.jsonl output.html
 
 Environment Variables:
@@ -426,8 +426,7 @@ Environment Variables:
   AWS_SECRET_ACCESS_KEY            - AWS secret key for Amazon Bedrock
   AWS_BEARER_TOKEN_BEDROCK         - Bedrock API key (bearer token)
   AWS_REGION                       - AWS region for Amazon Bedrock (e.g., us-east-1)
-  {ENV_AGENT_DIR.ljust(32)} - Config directory (default: ~/{CONFIG_DIR_NAME}/agent)
-  {ENV_SESSION_DIR.ljust(32)} - Session storage directory (overridden by --session-dir)
+  {home.ENV_HOME.ljust(32)} - Where {APP_NAME} keeps everything (default: {home.display()})
 
 Built-in Tool Names:
   read       - Read file contents

@@ -17,7 +17,7 @@ from misaka.cli.args import Args, parse_args, print_help
 from misaka.cli.file_processor import ProcessFileOptions, process_file_arguments
 from misaka.cli.initial_message import build_initial_message
 from misaka.cli.list_models import list_models
-from misaka.config import ENV_SESSION_DIR, VERSION, expand_tilde_path, get_agent_dir
+from misaka.config import VERSION, get_agent_dir
 from misaka.core.agent_session_runtime import (
     CreateAgentSessionRuntimeResult,
     create_agent_session_runtime,
@@ -106,6 +106,8 @@ class BuildSessionOptionsResult:
 
 class MainOptions(TypedDict, total=False):
     extensionFactories: list[Any]
+    modelProfile: str
+    modelDefaultsReadOnly: bool
 
 
 SelectSessionFn = Callable[
@@ -489,9 +491,12 @@ def build_session_options(
                 options["thinkingLevel"] = resolved.thinkingLevel
                 cli_thinking_from_model = True
 
-    if "model" not in options and scoped_models and not has_existing_session:
-        saved_provider = settings_manager.getDefaultProvider()
-        saved_model_id = settings_manager.getDefaultModel()
+    role_default = bool(
+        "model" not in options and scoped_models and not has_existing_session and not parsed.models
+        and getattr(settings_manager, "hasPinnedModelDefault", lambda: False)()
+    )
+    if "model" not in options and scoped_models and not has_existing_session and (parsed.models or not role_default):
+        saved_provider, saved_model_id = settings_manager.getDefaultModelPair()
         saved_model = model_registry.find(saved_provider, saved_model_id) if saved_provider and saved_model_id else None
         saved_in_scope = (
             next(
@@ -545,6 +550,8 @@ def create_runtime_factory(
     extension_factories: list[Any] | None = None,
     custom_tools: list[Any] | None = None,
     parts: list[Any] | None = None,
+    model_profile: str | None = None,
+    model_defaults_read_only: bool = False,
     app_mode: AppMode = "print",
     startup_settings_manager: SettingsManager | None = None,
 ) -> Callable[[dict[str, Any]], Awaitable[CreateAgentSessionRuntimeResult]]:
@@ -666,6 +673,10 @@ def create_runtime_factory(
         if parsed.useTheme is not None:   # Override for this run only; never written back to settings (pi #7722).
             settings_manager.applyOverrides({"theme": parsed.useTheme})
         model_registry = services.modelRegistry
+        if model_profile:
+            settings_manager.bindModelProfile(model_profile, model_registry)
+        if model_defaults_read_only:
+            settings_manager.restrictModelDefaults()
         resource_loader = services.resourceLoader
 
         diagnostics: list[AgentSessionRuntimeDiagnostic] = [
@@ -891,8 +902,6 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
     session_dir = (
         normalize_path(parsed.sessionDir)
         if parsed.sessionDir
-        else expand_tilde_path(os.environ[ENV_SESSION_DIR])
-        if os.environ.get(ENV_SESSION_DIR)
         else startup_settings_manager.getSessionDir()
     )
     try:
@@ -956,6 +965,8 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
             extension_factories=options.get("extensionFactories") if options else None,
             custom_tools=options.get("customTools") if options else None,
             parts=options.get("parts") if options else None,
+            model_profile=options.get("modelProfile") if options else None,
+            model_defaults_read_only=bool(options.get("modelDefaultsReadOnly")) if options else False,
             app_mode=(
                 "print"
                 if parsed.help or parsed.listModels is not None

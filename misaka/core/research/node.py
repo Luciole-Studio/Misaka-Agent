@@ -18,7 +18,7 @@ import sys
 import time
 import traceback
 
-from misaka.config import CFG, current_config
+from misaka.config import CFG, current_config, home
 from misaka.core.platform import processes
 from misaka.core.platform import tasks as task_store
 from misaka.core.research import runs
@@ -93,6 +93,16 @@ class PaneSpawner:
 
     def alive(self, handle):
         return processes.identity_is_alive(handle.pid, handle.identity)
+
+    def tail(self, handle, lines=6):
+        """The last lines the node wrote to its pane, for the driver's error when it dies: the
+        process prints why it stopped ("superseded execution: ...") and nothing else keeps it."""
+        from misaka.ui.panel import client as net
+        try:
+            text = net.request("pane.read", {"id": handle.pane_id, "lines": lines, "strip": True})["text"]
+        except (RuntimeError, OSError, KeyError, TypeError):
+            return None
+        return text.strip() or None
 
     def stop(self, handle):
         """Close the node's pane, which ends its process tree; if the panel cannot be reached,
@@ -178,7 +188,7 @@ CARD_ARGV = [sys.executable, "-m", "misaka.cli.research_node", "--run-card"]   #
 class HeadlessRunner:
     """No panel: every ready card becomes a child process of its own, so a node's batch runs at
     the width the run asked for and the drive loop keeps watching stop and budget while the
-    cards run. Running them inline made ``research_parallel`` a number with no effect: a batch
+    cards run. Running them inline made the per-node Sister limit a number with no effect: a batch
     was one thread running one card to the end of its turn before starting the next.
 
     Threads are not the alternative -- ``platform.session`` serialises sessions inside one
@@ -293,7 +303,6 @@ class HeadlessRunner:
 
 def _run(label, routine, *, row_id, runner_key):
     """Node process shell: connect, report, run the coroutine, map its result to an exit code."""
-    from misaka.core.network import worker
     con = task_store.connect(os.path.expanduser(CFG["db"]))
     runner, failure = None, None
 
@@ -320,11 +329,12 @@ def _run(label, routine, *, row_id, runner_key):
     try:
         runs.init(con)
         if not runs.claim_runner(con, "research_branches", row_id, runner_key):
-            print(f"{label}: superseded execution", flush=True)
+            print(f"{label}: superseded execution: "
+                  f"{runs.note_claim_failure(con, 'research_branches', row_id, runner_key)}", flush=True)
             return 1
         cfg = current_config()
         runner = HeadlessRunner(con, cfg)
-        result = asyncio.run(routine(con, cfg, runner, worker, progress))
+        result = asyncio.run(routine(con, cfg, runner, progress))
     except Exception as error:  # noqa: BLE001 - the persisted attempt names the actual cause
         failed(error)
         failure = error
@@ -383,24 +393,22 @@ def run_interactive(run_id, node_id, *, runner_key):
     that waits for a go-ahead, a word mid-run, a question about her conclusion once the routine
     is over and the window stays open. The node row is claimed here and released to the parent
     driver by the part when the routine ends; a window closed before that ends the node."""
-    from misaka.config import identity, profiles
     from misaka.core.research import planner
     con = task_store.connect(os.path.expanduser(CFG["db"]))
     try:
         runs.init(con)
         if not runs.claim_runner(con, "research_branches", node_id, runner_key):
-            print(f"node {node_id}: superseded execution", flush=True)
+            print(f"node {node_id}: superseded execution: "
+                  f"{runs.note_claim_failure(con, 'research_branches', node_id, runner_key)}", flush=True)
             return 1
         run, node = runs.get(con, run_id), runs.node(con, node_id)
     finally:
         con.close()
     cfg = current_config()
     profile = os.path.join(cfg["roles_root"], "last_order")
-    role = profiles.role_of(profile)
-    flags = ["--provider", cfg["provider"], "--model", cfg["lo_model"], "--thinking", "high",
-             "--append-system-prompt", profiles.shared_soul()]
-    for section in identity.prompt_sections(profile, role):
-        flags += ["--append-system-prompt", section]
+    from misaka.core.wiring import role_session_setup
+
+    flags, assembly, env = role_session_setup(profile, run["workspace"], research_context=True)
     flags += ["--session-dir", planner._lo_session(run, node)]
     if node["session_file"] and os.path.exists(node["session_file"]):
         flags += ["--session", node["session_file"]]    # a resumed node goes on in its own conversation
@@ -411,21 +419,12 @@ def run_interactive(run_id, node_id, *, runner_key):
         "MISAKA_TAGLINE": (f"Last Order of research node {node_id} (depth {node['depth']}, run {run_id}). "
                            "When plan approval is enabled, discuss this node's plan here and approve it before "
                            "execution. Her Sisters open beside this window."),
-        "MISAKA_WHO": "last-order",
-        "MISAKA_MCP_ROLE": "last-order",
-        "MISAKA_PROFILE_DIR": profile,
-        "MISAKA_WORKSPACE": run["workspace"],
-        "MISAKA_INPUT_HISTORY": os.path.expanduser("~/.misaka/input-history/last-order.json"),
+        **env,
+        "MISAKA_INPUT_HISTORY": str(home.path("input_history") / "last-order.json"),
         "MISAKA_CODING_AGENT": "true",
         # Her tools' spending counts against the run, as a card's counts against its card.
         "MISAKA_USAGE_DB": str(cfg["db"]), "MISAKA_USAGE_TASK_ID": run_id,
         "MISAKA_USAGE_GENERATION": "1", "MISAKA_USAGE_TOKEN_CAP": str(cfg.get("token_cap") or 0)})
-    from misaka.core.wiring import SessionSpec, assemble
-    # The root window's assembly, less the Last Order mailbox: what is addressed to Last Order
-    # is the root's to read, and this node's cards report through the run itself.
-    assembly = assemble(SessionSpec(
-        profile_dir=profile, role=role, workspace=run["workspace"], kind="foreground",
-        sender="last-order", mcp_role="last-order", receive_messages=False, research_context=True))
     from misaka.cli.engine import main as engine_main
     try:
         return asyncio.run(engine_main(flags, assembly.engine_options()))
@@ -446,7 +445,7 @@ def run_headless(run_id, node_id, *, runner_key):
     from misaka.core.research import workflow
     from misaka.core.research.window import node_session
 
-    async def routine(con, cfg, runner, _worker, progress):
+    async def routine(con, cfg, runner, progress):
         async with node_session(con, cfg, runs.get(con, run_id), runs.node(con, node_id)) as owner:
             return await workflow.expand_node(
                 con, cfg, runner, owner, run_id=run_id, node_id=node_id, progress=progress, session=owner.session)

@@ -9,12 +9,14 @@ read-only sandbox a card runs against (``SessionSpec.skill_roots``).
 import asyncio
 import json
 import os
+import re
 import shlex
 import tempfile
 import threading
 from pathlib import Path
 
 from misaka.core.moments import CoreCommand
+from misaka.core.platform import home_guard
 from misaka.core.skills import bundles, reader, sandbox, visibility
 from misaka.core.skills import index as skill_index
 from misaka.core.skills.layers import (
@@ -228,17 +230,28 @@ class SkillsPart:
 
         # Live skill trees change only through skill_manage (gate, scan, ledger): the generic file
         # and shell tools are refused on them in every kind of session. A card's sandbox copies are
-        # not live trees, so reading them stays possible.
+        # not live trees, so reading them stays possible. Unresolvable shell substitution is refused
+        # as well, but only where no one is watching the command (see `_command_touches`).
         live_roots = self._live_roots
         self._refresh_roots()
 
+        # A window with a person in it is the only attended session: a card, a child, a DM turn
+        # and a bare one-shot all run with this guard as the only reader of the command. Naming
+        # the attended kind rather than the unattended ones keeps a new kind safe by default.
+        unattended = kind != "foreground"
+
         def _touches_live_skills(tool, args):
+            """Why this call is refused -- "path", "dynamic", or the home's own sentence -- or None."""
             if tool in ("write", "edit"):
                 target = os.path.realpath(os.path.join(workspace, os.path.expanduser(str(args.get("path") or ""))))
-                return any(target == root or target.startswith(root + os.sep) for root in live_roots)
+                if any(target == root or target.startswith(root + os.sep) for root in live_roots):
+                    return "path"
+                # The one place a file tool's target is resolved, so the home's rule is asked here too.
+                return home_guard.refusal(target, workspace, kind)
             if tool in {"bash", "powershell"}:
-                return _command_touches(str(args.get("command") or ""), workspace, live_roots, shell=tool)
-            return False
+                return _command_touches(str(args.get("command") or ""), workspace, live_roots,
+                                        shell=tool, unattended=unattended)
+            return None
 
         async def guard_live_skills(event, _ctx):
             args = event.get("input") if isinstance(event, dict) else getattr(event, "input", None)
@@ -251,16 +264,25 @@ class SkillsPart:
                 parsed, path, ops = prepare_office_input(args, workspace)
                 # Pass the very ops we checked onward; re-reading @ops could change destinations.
                 prepared = {"path": path, "ops": ops, "overwrite": parsed.overwrite}
-                protected = any(_touches_live_skills("write", {"path": path})
-                                for path in output_paths(path, ops))
+                protected = next(filter(None, (_touches_live_skills("write", {"path": path})
+                                               for path in output_paths(path, ops))), None)
             else:
                 protected = _touches_live_skills(str(tool or ""), args)
+            if protected == "dynamic":
+                return {"block": True, "reason": (
+                    "This session runs unattended, so a shell command carrying substitution "
+                    "($(...), backticks or ${...}) is refused: the guard that keeps live skill trees "
+                    "read-only here cannot resolve where the expansion would point. Rewrite it with "
+                    "literal paths. Skills themselves are read with skill_view and changed with skill_manage."
+                )}
+            if protected and protected != "path":
+                return {"block": True, "reason": protected}
             if protected:
                 return {"block": True, "reason": (
                     "Live skill trees change only through skill_manage (approval, scan, ledger). "
-                    "write, edit and office are refused on output paths inside them; bash and powershell are refused "
-                    "when they mention one or contain dynamic syntax whose target this guard cannot verify. "
-                    "Use skill_view for skill reads; use literal paths for unrelated commands."
+                    "This call reaches a path inside one; write, edit and office are refused on output "
+                    "paths there, and bash and powershell on commands that name one. "
+                    "Use skill_view to read skills and skill_manage to change them."
                 )}
             return {"updatedInput": prepared} if prepared is not None else None
 
@@ -470,7 +492,7 @@ class SkillsPart:
             try:
                 skill_layers.write_skills_config(cfg)
             except skill_layers.SkillsConfigError as error:
-                # A skills.json the user broke by hand is their file to fix; the
+                # A settings.json the user broke by hand is their file to fix; the
                 # refusal is the point, so say it rather than crash the command.
                 ctx.ui.notify(str(error), "error")
                 return
@@ -995,12 +1017,17 @@ class SkillsPart:
 SESSION_KINDS = {"foreground", "dm", "card", "child", "bare"}
 
 
+# Command substitution, parameter expansion and a bare variable: everything whose value this
+# guard cannot know. PowerShell spells its variables the same way.
+_SUBSTITUTION = re.compile(r"\$[({A-Za-z_]|`")
+
+
 def _has_dynamic_shell_syntax(command, shell):
     # PowerShell has different quoting/escape rules. Keep its conservative policy;
     # this Bash-only literal recognition is not a cross-shell permission parser.
     if shell != "bash":
-        return any(token in command for token in ("$(", "`", "${"))
-    if not any(token in command for token in ("$(", "`", "${")):
+        return bool(_SUBSTITUTION.search(command))
+    if not _SUBSTITUTION.search(command):
         return False
     quote = None
     i = 0
@@ -1016,7 +1043,10 @@ def _has_dynamic_shell_syntax(command, shell):
             quote = None
         elif quote is None and char in ("'", '"'):
             quote = char
-        elif char == "`" or command[i:i + 2] in ("$(", "${"):
+        elif char == "`" or command[i:i + 2] in ("$(", "${") or (
+                char == "$" and (command[i + 1:i + 2].isalpha() or command[i + 1:i + 2] == "_")):
+            # A bare `$HOME` hides a path exactly as `${HOME}` does; the quote state above is
+            # what keeps a single-quoted dollar sign literal.
             return True
         i += 1
     if quote is not None:
@@ -1035,8 +1065,8 @@ def _has_dynamic_shell_syntax(command, shell):
             or any(token and all(c in ";&|()<>" for c in token) for token in argv))
 
 
-def _command_touches(command, workspace, live_roots, *, shell="bash"):
-    """True when a shell command names a path inside a live skill tree.
+def _command_touches(command, workspace, live_roots, *, shell="bash", unattended=True):
+    """Why a shell command is refused near a live skill tree: "path", "dynamic", or None.
 
     The literal substring test this replaces read the command as text, so only the
     expanded absolute form was caught: `cd ~/.misaka/profiles/<role>/skills`, or any
@@ -1045,32 +1075,52 @@ def _command_touches(command, workspace, live_roots, *, shell="bash"):
 
     Every token that could be a path is resolved the way the shell would resolve it --
     `~` expanded, relatives taken against the workspace, symlinks followed -- and
-    compared as a path, not as text. Tokens are taken from `shlex`; a command `shlex`
-    cannot parse, or one carrying substitution (`$(...)`, backticks) whose expansion is
-    unknowable here, is treated as touching a tree. Refusing a command the guard cannot
-    read is the safe direction: `skill_view` reads skills, and `skill_manage` writes
-    them, so nothing legitimate needs the shell to reach one.
+    compared as a path, not as text. Tokens are taken from `shlex`.
+
+    A command carrying substitution (`$(...)`, backticks, `${...}`), or one `shlex` cannot
+    parse at all, hides where it would point. Where nobody is watching -- ``unattended``, a
+    card or a child -- refusing it is the safe direction: `skill_view` reads skills and
+    `skill_manage` writes them, so nothing legitimate needs the shell to reach one. In a
+    conversation with a person in it, that verdict costs more than it buys and only a path
+    the guard can actually resolve is refused.
     """
     if not command.strip():
-        return False
-    if _has_dynamic_shell_syntax(command, shell):
-        return True
+        return None
     if any(root in command for root in live_roots):
-        return True
+        return "path"
+    # Substitution is only a reason by itself where nobody is watching. In a card or a child
+    # the guard is the only reader of the command, so an expansion it cannot resolve is refused
+    # (2026-09-18, B23: that verdict was reaching Last Order too, where it killed
+    # `cp board.db board.db.bak-$(date +%s)` and read as if a skill tree were involved).
+    dynamic = _has_dynamic_shell_syntax(command, shell)
+    # shlex neither expands ${HOME} nor evaluates $(...), so the token scan below cannot see
+    # through substitution; refusing it is what keeps an unattended session out of a tree it
+    # could otherwise name indirectly.
     try:
         argv = shlex.split(command)
     except ValueError:
-        return True
-    for item in argv:
+        return "dynamic" if unattended else None
+    pending = list(argv)
+    while pending:
+        item = pending.pop()
         if not item or item.startswith("-"):
+            continue
+        if item.strip() != item or any(char.isspace() for char in item):
+            # A token that is itself a command line -- `bash -c "..."`, `eval "..."`, a
+            # `find -exec` payload -- hides its paths one level down.
+            try:
+                pending.extend(shlex.split(item))
+            except ValueError:
+                if unattended:
+                    return "dynamic"
             continue
         candidate = os.path.expanduser(item)
         if not os.path.isabs(candidate):
             candidate = os.path.join(workspace, candidate)
         for resolved in (os.path.abspath(candidate), os.path.realpath(candidate)):
             if any(resolved == root or resolved.startswith(root + os.sep) for root in live_roots):
-                return True
-    return False
+                return "path"
+    return "dynamic" if dynamic and unattended else None
 
 
 def part(spec):

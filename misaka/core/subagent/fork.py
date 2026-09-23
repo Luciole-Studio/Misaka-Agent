@@ -24,10 +24,12 @@ PLACEHOLDER = "Fork started — processing in background"
 
 
 def enabled(context: Any) -> bool:
+    from misaka.config.product import setting
+
     return (
         _truthy(os.environ.get("MISAKA_FORK_SUBAGENT"))
         and bool(getattr(context, "hasUI", False))
-        and not _truthy(os.environ.get("MISAKA_COORDINATOR_MODE"))
+        and not setting("subagents", "coordinator_mode", False, bool)
         and not background_disabled()
     )
 

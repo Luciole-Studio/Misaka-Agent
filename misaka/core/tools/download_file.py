@@ -46,10 +46,10 @@ from misaka.core.documents.prompt import (
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.tools._common import run_with_abort
-from misaka.core.tools._web.bounded import UnsafeUrlError, open_checked_stream
-from misaka.core.tools._web.evidence import citable_url
-from misaka.core.tools._web.screening import screen_url
 from misaka.core.tools.path_utils import DOWNLOAD_DIR_NAME, resolve_to_cwd
+from misaka.core.web.bounded import UnsafeUrlError, open_checked_stream
+from misaka.core.web.evidence import citable_url
+from misaka.core.web.screening import screen_url
 from misaka.utils.async_lifecycle import run_in_thread
 from misaka.utils.values import signal_aborted
 
@@ -100,6 +100,8 @@ _OLE_HEADS = (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",)
 # is not accepted at all.
 _SIGNATURES: dict[str, tuple[int, tuple[bytes, ...]]] = {
     ".pdf": (0, (b"%PDF-",)),
+    # DjVu is how CADAL and Wikimedia carry most scanned Chinese classics (2026-09-18, B10).
+    ".djvu": (0, (b"AT&TFORM",)),
     ".gz": (0, (b"\x1f\x8b",)),
     ".png": (0, (b"\x89PNG\r\n\x1a\n",)),
     ".jpg": (0, (b"\xff\xd8\xff",)),

@@ -130,7 +130,7 @@ def invalid_cards():
     """``{card path: why it could not be used}`` for every card skipped since process start.
 
     Cards with no file at all are not in here; ``board`` lists their index rows as
-    ``missing_file`` instead, which says the repairable thing (``misaka init --migrate``).
+    ``missing_file`` instead: the project folder has no file for that row.
     """
     return {path: reason for path, (kind, reason) in _INVALID.items() if kind != "missing"}
 
@@ -432,34 +432,6 @@ def remove(con, workspace, task_id):
     return ok, msg
 
 
-def migrate(con):
-    """One-shot: write a card file for every index row that lacks one (pre-file era).
-    Returns ``(written, existed, no_folder)``; run again, it writes nothing."""
-    written = existed = no_folder = 0
-    for row in con.execute("SELECT * FROM tasks ORDER BY created_at"):
-        workspace = row["workspace"]
-        if not workspace or not os.path.isdir(workspace):   # pre-NOT-NULL era rows may be bare
-            no_folder += 1
-            continue
-        path = card_path(workspace, row["id"])
-        if os.path.exists(path):
-            existed += 1
-            continue
-        fields = {"id": row["id"], "title": row["title"], "status": row["status"],
-                  "generation": max(1, int(row["generation"])),
-                  "assignee": row["assignee"], "reviewer": row["reviewer"],
-                  "executor": json.loads(row["executor"]) if row["executor"] else None,
-                  "model": row["model"],
-                  "priority": row["priority"],
-                  "origin_session": row["origin_session"],
-                  "created_at": _now_iso(row["created_at"])}
-        body = ((row["body"] or "").strip()
-                + f"\n\n{LOG_HEADING}\n- {_now_iso()} misaka: migrated from board.db\n")
-        _write_file(path, _dump(fields, body))
-        written += 1
-    return written, existed, no_folder
-
-
 def _card_values(fields, body):
     status = str(fields.get("status") or "ready")
     if status not in _AT_REST_STATUSES:
@@ -530,9 +502,7 @@ def reconcile_one(con, workspace, task_id):
     ).fetchone()
     if row is None:
         return card if tasks.insert_index_row(con, fields, body, workspace=workspace) else None
-    # The stored workspace is written canonical; re-resolving it is for rows an older build
-    # left behind, so only a string that differs is worth another walk of the filesystem.
-    if row["workspace"] != workspace and tasks.canonical_workspace(row["workspace"]) != workspace:
+    if row["workspace"] != workspace:           # the stored workspace is written canonical
         return None
     if row["status"] in {"running", "review"}:
         return card                         # an in-flight contract is immutable until it rests again
@@ -545,11 +515,18 @@ def reconcile_one(con, workspace, task_id):
     # worker makes afterwards fails, nobody can re-claim it, and the round's work is lost. Zero
     # rows affected is that case, and it is not an error: the file's at-rest status is only ever
     # a mirror of the live state, and the next pass reads both again.
-    con.execute(
+    changed = con.execute(
         "UPDATE tasks SET title=?,body=?,assignee=?,reviewer=?,executor=?,model=?,priority=?,"
         "origin_session=?,status=?,generation=? WHERE id=? AND status=?",
         (*(values[column] for column in _MIRRORED), task_id, row["status"]),
-    )
+    ).rowcount
+    if changed and row["status"] != values["status"]:
+        # The file is the contract: an index status edited by hand (2026-09-18, B24: Last Order
+        # wrote `UPDATE tasks SET status='ready'` twice and saw it undone twice, in silence) is
+        # put back, and the put-back is on the record so nobody has to guess who did it.
+        tasks.add_event(con, task_id, "reconciled",
+                        {"from": row["status"], "to": values["status"], "source": "card file"},
+                        generation=values.get("generation"))
     return card
 
 

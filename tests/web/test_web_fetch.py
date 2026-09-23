@@ -10,13 +10,14 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from webconf import write_web
 
 from misaka.core.tools import web_fetch
-from misaka.core.tools._web import bounded, negative_cache
 from misaka.core.tools.web_fetch import (
     WebFetchToolInput,
     create_web_fetch_tool_definition,
 )
+from misaka.core.web import bounded, negative_cache
 
 PUBLIC = "93.184.216.34"
 
@@ -598,7 +599,8 @@ async def test_saved_pages_remain_readable_and_declarations_are_not_filtered(mon
         ("t1", run["id"], node["id"], "explore"),
     )
     task = {"id": "t1", "workspace": str(workspace)}
-    workflow._register_task_artifacts(con, run, task, {"artifacts": [saved]})
+    digest = hashlib.sha256((workspace / saved).read_bytes()).hexdigest()
+    workflow._register_task_artifacts(con, run, task, {"artifacts": [saved], "artifact_digests": {saved: digest}})
 
     # 同一条线上再抓一次同一个页面(姐妹回头复核是常事):登记过的那份证据必须还是它自己,
     # 否则 artifact_text 抛 "changed since it was registered",引用连同 URL 一起没了。
@@ -826,15 +828,9 @@ async def test_a_presigned_url_is_still_fetched(monkeypatch):
 
 
 async def test_a_blocklisted_host_is_refused_without_dialling(monkeypatch, tmp_path):
-    from misaka.config.product import CFG
-    from misaka.core.tools._web import website_policy
+    from misaka.core.web import website_policy
 
-    config = tmp_path / "web.json"
-    config.write_text(
-        json.dumps({"website_blocklist": {"enabled": True, "domains": ["example.com"]}}),
-        encoding="utf-8",
-    )
-    monkeypatch.setitem(CFG, "web_config", str(config))
+    write_web({"website_blocklist": {"enabled": True, "domains": ["example.com"]}})
     website_policy.invalidate_cache()
     try:
         sent = _net(monkeypatch, _html("<html><body>x</body></html>"))

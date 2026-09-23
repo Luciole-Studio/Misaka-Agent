@@ -21,6 +21,26 @@
 | `compaction/` | pi 的压缩 |
 | `export_html/` | pi 的会话导出（`template` 未移植） |
 
+## 用户目录：和 pi 的有意分叉（2026-09-21，对齐 pi 时**不要**带回来）
+
+pi 把全局文件放在 `~/.pi/agent/`，这一层的真实作用是让全局目录不和 `$HOME` 下的项目目录 `<cwd>/.pi/`
+重合。misaka 改用一个平铺的 home（`misaka/config/home.py`：唯一的根 `MISAKA_HOME`、一张登记表），
+用 Hermes 的做法隔开两者：`home.project_dir()` —— home 永远不是项目目录。台账见
+`docs/plans/home-governance-2026-09-21.md`。对齐 pi 时注意：
+
+- `get_agent_dir()` 保留，返回 **home 根**。pi 代码自己拼的 `settings.json` / `models.json` /
+  `keybindings.json` / `themes` / `prompts` / `extensions` 因此无需改动，别改回 `<home>/agent`。
+- pi 放在 agent 目录、但不属于"用户编辑"类的几样，这里各走登记表：`auth.json` → `credentials/`，
+  `trust.json`、`models-store.json` → `state/`，日志 → `logs/`，`bin` → `cache/`。
+  `ProjectTrustStore` 和 `ModelRegistry` 只在传入的目录/文件**就是 home 那份**时才这么放；
+  嵌入方自己的引擎目录仍按 pi 的方式放在其设置旁。
+- 凡是 pi 写 `join(cwd, CONFIG_DIR_NAME, ...)` 的地方，这里一律是 `home.project_dir(cwd)`，可能为 `None`：
+  `settings_manager.FileSettingsStorage`、`package_manager.resolve`、`project_trust`、`prompt_templates`。
+  pi `trust-manager` 里对 `~/.agents/skills` 的特判，在这里由 `project_dir` 统一承担。
+- 已删除、不要恢复：`PI_CODING_AGENT_DIR` / `PI_CODING_AGENT_SESSION_DIR` 的对应物（布局环境变量只剩
+  `MISAKA_HOME`）、`config/migrations.py`（pi 的旧版迁移，misaka 从未发布过那些旧布局）。
+- `tests/test_home_governance.py` 会拦住带回来的字面量路径、`CONFIG_DIR_NAME` 和旧环境变量。
+
 ## misaka 新增
 
 ### 顶层文件
@@ -35,7 +55,7 @@
 
 ### `tools/` 里的 misaka 文件
 
-`_common.py` `download_file.py` `powershell.py` `web_fetch.py` `_web/`
+`_common.py` `download_file.py` `powershell.py` `web_fetch.py`（抓取工具的安全层原在 `tools/_web/`，2026-09-18 并入 `core/web/`）
 
 ### `extensions/` 里的 misaka 文件
 
@@ -50,7 +70,7 @@
 | `research/` | `misaka/research/` + `extensions/last_order/research.py` | 研究流程；`wiring/research.py` 是 Last Order 的 `misaka_research_view` |
 | `subagent/` | `extensions/sisters/subagent/` | 子代理运行时（runtime/child/policy/hooks/agents 与内置定义） |
 | `skills/` | `misaka/skills/` + `extensions/skills.py` | 分层技能索引，**整体替换**了 pi 的 `core/skills.ts`（审计 A-10）；`wiring/skills.py` 是三个工具与守卫 |
-| `web/` | `extensions/web/` | 搜索后端、注册表、分发、抓取、抽取；`tools/_web/` 是抓取工具用的安全层 |
+| `web/` | `extensions/web/` | 搜索后端、注册表、分发、抓取、抽取，以及抓取工具用的安全层（`bounded`、`url_safety`、`screening`、`website_policy`、`evidence`、`negative_cache`、`single_flight`、`academic`，2026-09-18 自 `tools/_web/` 并入） |
 | `documents/` | `misaka/documents/` + `extensions/documents.py` | 语料索引与工作区；`pageindex/` 是 vendored 的 PageIndex（自带 MIT 许可） |
 | `ask_user/` | `extensions/ask_user/` | `AskUserQuestion` 工具 |
 
@@ -126,4 +146,4 @@ misaka/extensions/last_order/research.py
 
 - `core/agent_session.py:235` 懒 import `core.skills.wiring.skills.parse_skill_invocation_message`：内核 import 一个 wiring 模块。
   解析器与写侧 `build_skill_message` 共用五个脚手架常量，干净拆分要把写侧一起挪成 `core/skills/invocation.py`。
-- `core/web/` 与 `core/tools/_web/` 是两个 web 目录；后者是 misaka 加进 pi 工具树的，可以并入前者。
+- ~~`core/web/` 与 `core/tools/_web/` 是两个 web 目录；后者是 misaka 加进 pi 工具树的，可以并入前者。~~ 2026-09-18 已并入。

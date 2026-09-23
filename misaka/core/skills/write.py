@@ -16,6 +16,7 @@ import time
 import uuid
 from pathlib import Path
 
+from misaka.config import home
 from misaka.utils import atomic
 
 WRITE_MODES = ("off", "forbid", "ask", "allow")
@@ -26,9 +27,6 @@ MUTATING_ACTIONS = ("create", "edit", "patch", "delete", "write_file", "remove_f
 def agent_session():
     """Best-effort workflow marker set by Sister, card, and child processes."""
     return bool(os.environ.get("MISAKA_WHO") or os.environ.get("MISAKA_USAGE_TASK_ID"))
-
-def _root():
-    return Path(os.path.expanduser("~/.misaka"))
 
 
 def _config():
@@ -50,11 +48,11 @@ def current_origin():
 # Review ledger
 
 def _ledger_path():
-    return _root() / "skills" / ".ledger-v2.jsonl"
+    return home.path("skills_state") / ".ledger.jsonl"
 
 
 def _blob_dir():
-    return _root() / "cache" / "skill_blobs"
+    return home.path("skill_blobs")
 
 
 def _store_blob(path):
@@ -297,7 +295,7 @@ def mutation_lock():
     """The one lock every live-skill mutation (apply, approve, rollback) runs under, so snapshot,
     write, scan and ledger happen as a unit. ponytail: one lock for all roles; per role if it contends."""
     from filelock import FileLock
-    path = _root() / ".skills-write.lock"
+    path = home.path("skills_lock")
     path.parent.mkdir(parents=True, exist_ok=True)
     return FileLock(str(path), is_singleton=True)  # Native reentrancy for nested metadata transactions.
 
@@ -349,25 +347,11 @@ def entries(limit=None):
                     continue
     except OSError:
         pass
-    legacy = _root() / "skills" / ".ledger.jsonl"
-    if legacy != _ledger_path():
-        legacy_entries = []
-        try:
-            for line in legacy.read_text().splitlines():
-                try:
-                    item = json.loads(line)
-                    if isinstance(item, dict):
-                        legacy_entries.append(item)
-                except ValueError:
-                    continue
-        except OSError:
-            pass
-        out = legacy_entries + out
     return out[-limit:] if limit else out
 
 
 def _journal_dir():
-    return _root() / "skills" / ".transactions"
+    return home.path("skills_state") / ".transactions"
 
 
 def _save_journal(journal):
@@ -460,7 +444,7 @@ def rollback(entry_id, skill_root=None):
             return False, f"Ledger entry {entry_id} is not a change that can be rolled back."
         changes = target.get("changes")
         if not changes:
-            return False, "Legacy ledger entry has no bound root identity; review and rebind its original source before rollback."
+            return False, f"Ledger entry {entry_id} records no file changes to restore."
         try:
             # Validate before-images before creating the rollback journal.
             for change in changes:
@@ -477,7 +461,7 @@ def rollback(entry_id, skill_root=None):
 # ── Write gate (after hermes write_approval.py) ─────────────────────────────
 
 def _pending_dir():
-    return _root() / "pending" / "skills"
+    return home.path("skills_pending")
 
 
 _PENDING_FILE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")

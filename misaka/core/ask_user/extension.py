@@ -93,7 +93,15 @@ def register(harn: Any) -> None:
     ) -> dict[str, Any]:
         params = raw if isinstance(raw, AskUserQuestionParams) else AskUserQuestionParams.model_validate(raw)
         if ctx is None or not bool(getattr(ctx, "hasUI", False)):
-            raise RuntimeError("AskUserQuestion requires an interactive MISAKA session")
+            # The same role can run without a terminal. Preserve the questions in
+            # its transcript, but never invent a human answer or block on stdin.
+            return _text_result(
+                "No interactive dialog is attached; these questions are unanswered. "
+                "Show them to the user in your response. If an answer is required to proceed, "
+                "use the workflow's clarification/waiting path; do not assume approval.\n"
+                + _format_answers(params.questions, {}, {}, include_unanswered=True),
+                {"action": "unanswered", "questions": [q.model_dump() for q in params.questions],
+                 "answers": {}, "annotations": {}, "imageCount": 0}, [])
 
         result = await ctx.ui.custom(
             lambda tui, _theme, keybindings, done: AskUserQuestionComponent(

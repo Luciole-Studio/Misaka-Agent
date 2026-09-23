@@ -25,15 +25,16 @@ from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape
 
+from misaka.config import home
+
 
 def _log_warning(message: str) -> None:
-    """Append a timestamped warning to ``<agent dir>/misaka-warnings.log``.
+    """Append a timestamped warning to the warnings log.
 
     The manager runs inside the TUI process, so stderr is not a usable channel.
     """
     try:
-        from misaka.config import get_agent_dir
-        path = Path(get_agent_dir()) / "misaka-warnings.log"
+        path = home.path("warnings_log")
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [subagent] {message}\n")
@@ -78,7 +79,7 @@ async def _reap_process_tree(
             await asyncio.wait_for(process.wait(), graceful_timeout)
         except TimeoutError:
             pass
-    await asyncio.to_thread(process_tree.terminate, process.pid, captured)
+    await asyncio.to_thread(process_tree.terminate, process.pid, captured, reap_root=False)
     if process.returncode is None:
         try:
             await asyncio.wait_for(process.wait(), 2)
@@ -547,10 +548,10 @@ def format_task_output(data: Mapping[str, Any]) -> str:
     if task.get("output"):
         output = str(task["output"])
         try:
-            # Prefixed: an unprefixed TASK_MAX_OUTPUT_LENGTH picks up whatever the
-            # surrounding environment happens to mean by that name.
-            maximum = min(160_000, max(1, int(os.environ.get("MISAKA_TASK_MAX_OUTPUT", "32000"))))
-        except ValueError:
+            from misaka.config.product import setting
+
+            maximum = min(160_000, max(1, setting("subagents", "task_max_output", 32_000, int)))
+        except SystemExit:
             maximum = 32_000
         if len(output) > maximum:
             header = "[Truncated. Read the task output file for the full transcript.]\n\n"
@@ -700,10 +701,10 @@ def read_resume_transcript(path: Path | str) -> list[dict[str, Any]]:
     if not transcript.is_file():
         raise ValueError(f"Sub-agent transcript does not exist: {transcript}")
     try:
-        raw_lines = transcript.read_text(encoding="utf-8").splitlines()
+        raw_lines = transcript.read_text(encoding="utf-8").split("\n")
     except (OSError, UnicodeError) as error:
         raise ValueError(f"Could not read sub-agent transcript: {error}") from error
-    if not raw_lines:
+    if raw_lines == [""]:
         raise ValueError(f"Sub-agent transcript is empty: {transcript}")
 
     entries: list[dict[str, Any]] = []
@@ -724,7 +725,7 @@ def read_resume_transcript(path: Path | str) -> list[dict[str, Any]]:
 
 
 def clean_resume_transcript(path: Path | str) -> list[dict[str, Any]]:
-    """Validate and sanitize a persisted side-chain for legacy Sister adoption.
+    """Validate and sanitize a persisted side-chain before it is resumed.
 
     Interrupted turns can leave whitespace/thinking-only assistant messages or
     tool calls without results.  Those entries are invalid model context.  The
@@ -1164,7 +1165,9 @@ class SubagentManager:
         # The session this manager serves; None until the part that owns it is attached.
         self.session = session
         self.role_context = role_context or RoleContext.capture()
-        limit = max(1, int(os.environ.get("MISAKA_MAX_CONCURRENT_SUBAGENTS", DEFAULT_MAX_CONCURRENCY)))
+        from misaka.config.product import setting
+
+        limit = max(1, setting("subagents", "max_concurrent", DEFAULT_MAX_CONCURRENCY, int))
         self._semaphore = asyncio.Semaphore(limit)
         self._tasks: dict[str, AgentTask] = {}
         self._shell_tasks: dict[str, Any] = {}
@@ -1304,6 +1307,29 @@ class SubagentManager:
         # waiting on the parent's MCP pool is wrong when an agent owns its own
         # ``mcpServers``.
 
+    async def _resolve_task_model(self, context: Any, call_model: str | None, definition_model: str | None) -> tuple[str, str]:
+        registry = context.modelRegistry
+        models = registry.getAll()
+        if inspect.isawaitable(models):
+            models = await models
+        model_env = (
+            {"MISAKA_SUBAGENT_MODEL": self.role_context.model_override}
+            if self.role_context.model_override
+            else {}
+        )
+        # Provider identity comes from the complete catalog, not the subset
+        # authenticated now: a missing login must not retarget the parent API.
+        provider, model_id = resolve_model_spec(
+            model_env, call_model, definition_model, context.model, list(models),
+            permission_mode=self._current_permission_mode(),
+        )
+        selected = registry.find(provider, normalize_model_for_api(model_id))
+        if selected is None:
+            raise ValueError(f"Unknown sub-agent model: {provider}/{model_id}")
+        if not registry.hasConfiguredAuth(selected):
+            raise ValueError(f"No configured authentication for sub-agent model: {provider}/{model_id}")
+        return provider, model_id
+
     async def create_task(
         self,
         *,
@@ -1393,22 +1419,7 @@ class SubagentManager:
 
             if definition.name in denied_agent_types(self.session, cwd=effective_cwd, include_project=project_trusted):
                 raise ValueError(f"Agent type '{definition.name}' is denied by the current permission settings")
-            available_models = context.modelRegistry.getAvailable()
-            if inspect.isawaitable(available_models):
-                available_models = await available_models
-            model_env = (
-                {"MISAKA_SUBAGENT_MODEL": self.role_context.model_override}
-                if self.role_context.model_override
-                else {}
-            )
-            provider, model_id = resolve_model_spec(
-                model_env,
-                model,
-                definition.model,
-                context.model,
-                list(available_models),
-                permission_mode=self._current_permission_mode(),
-            )
+            provider, model_id = await self._resolve_task_model(context, model, definition.model)
             transcript_dir = self._session_dir(context)
             if self._parent_session_id is None:  # pragma: no cover - _session_dir sets it
                 raise RuntimeError("Parent session ID is unavailable")
@@ -2285,12 +2296,11 @@ class SubagentManager:
             ready = False
             accepted = False
             # The child prints nothing before child_ready, and it may first wait for required
-            # MCP servers (MISAKA_MCP_REQUIRED_WAIT can exceed 30s), so the handshake window
+            # MCP servers (settings mcp.required_wait can exceed 30s), so the handshake window
             # must grow with that setting.
-            handshake = max(
-                30.0,
-                float(os.environ.get("MISAKA_MCP_REQUIRED_WAIT") or 30) + 15,
-            )
+            from misaka.config.product import setting
+
+            handshake = max(30.0, setting("mcp", "required_wait", 30.0, float) + 15)
             while True:
                 if accepted:
                     line = await process.stdout.readline()
@@ -2587,10 +2597,12 @@ class SubagentManager:
         return {}
 
     def _child_starts_new_session(self, _task: AgentTask) -> bool:
+        from misaka.config.product import setting
+
         return bool(
             os.name == "posix"
             and not self.role_context.parent_agent_id
-            and os.environ.get("MISAKA_INHERIT_PROCESS_GROUP") != "1"
+            and not setting("subagents", "inherit_process_group", False, bool)
         )
 
     async def _read_turn_messages(self, task: AgentTask, event: Mapping[str, Any]) -> list[Any]:
@@ -2687,10 +2699,10 @@ class SubagentManager:
             if profile:
                 from misaka.config import identity
                 from misaka.config import profiles as _profiles
-                # Shared soul first, then the identity slot and duty sections (same order as Hermes); SOUL.md may be empty.
+                from misaka.core.resource_loader import resolve_prompt_input
                 system_prompt = "\n\n".join(
-                    [Path(_profiles.shared_soul()).read_text(encoding="utf-8")]
-                    + identity.prompt_sections(profile, _profiles.role_of(profile)))
+                    resolve_prompt_input(source, "role system prompt")
+                    for source in identity.base_prompt_sources(profile, _profiles.role_of(profile)))
         if task.definition.memory and self._memory_enabled(task):
             system_prompt += "\n\n" + self._memory_prompt(task)
         # Temp file, chmod, rename -- the same shape as child._atomic_write_json and
@@ -2944,12 +2956,15 @@ class SubagentManager:
         name = _safe_component(task.agent_type.replace(":", "-"))
         workspace = Path(task.worktree.repo if task.worktree is not None else task.cwd).expanduser().resolve()
         # Keep MISAKA's home-based project buckets, including worktree continuations.
-        remote = os.environ.get("MISAKA_REMOTE_MEMORY_DIR")
-        home = Path(os.environ.get("MISAKA_AGENT_MEMORY_HOME") or (Path(remote) / "agent-memory" if remote else Path.home() / ".misaka" / "agent-memory")).expanduser().resolve()
+        from misaka.config.product import setting
+
+        remote = os.environ.get("MISAKA_REMOTE_MEMORY_DIR")            # a remote runner's hand-off
+        memory_home = Path(setting("subagents", "memory_home", None, str)
+                           or (Path(remote) / "agent-memory" if remote else home.path("agent_memory"))).expanduser().resolve()
         if task.definition.memory == "user":
-            return home / name
+            return memory_home / name
         suffix = f"{name}-local" if task.definition.memory == "local" else name
-        return home / encode_cwd(str(workspace)) / suffix
+        return memory_home / encode_cwd(str(workspace)) / suffix
 
     def _memory_prompt(self, task: AgentTask) -> str:
         from misaka.core.tools.truncate import TruncationOptions, truncate_head
@@ -2961,14 +2976,19 @@ class SubagentManager:
             "local": "Tailor these local memories to this project and machine.",
         }[task.definition.memory]
         directory.mkdir(parents=True, exist_ok=True)
-        from misaka.core.subagent.background import _truthy
 
-        if task.project_trusted and _truthy(os.environ.get("MISAKA_AGENT_MEMORY_SNAPSHOT")):
-            from misaka.core.subagent.memory import check_snapshot, copy_snapshot
+        from misaka.config.product import setting
+
+        if task.project_trusted and setting("subagents", "memory_snapshot", False, bool):
+            from misaka.core.subagent.memory import (
+                check_snapshot,
+                copy_snapshot,
+                snapshot_dir,
+            )
 
             project = Path(task.worktree.repo if task.worktree is not None else task.cwd)
-            snapshot = project / ".misaka" / "agent-memory-snapshots" / _safe_component(task.agent_type)
-            state = check_snapshot(snapshot, directory)
+            snapshot = snapshot_dir(project, _safe_component(task.agent_type))
+            state = check_snapshot(snapshot, directory) if snapshot is not None else {"action": "none"}
             if state["action"] == "initialize":
                 copy_snapshot(snapshot, directory, state["snapshotTimestamp"])
             elif state["action"] == "prompt-update":
@@ -3448,22 +3468,7 @@ class SubagentManager:
         task.definition = definition
         task.allowed_agent_types = self._allowed_agent_types(definition)
 
-        available_models = context.modelRegistry.getAvailable()
-        if inspect.isawaitable(available_models):
-            available_models = await available_models
-        model_env = (
-            {"MISAKA_SUBAGENT_MODEL": self.role_context.model_override}
-            if self.role_context.model_override
-            else {}
-        )
-        task.model_provider, task.model_id = resolve_model_spec(
-            model_env,
-            None,
-            definition.model,
-            context.model,
-            list(available_models),
-            permission_mode=self._current_permission_mode(),
-        )
+        task.model_provider, task.model_id = await self._resolve_task_model(context, None, definition.model)
         if task.worktree is not None:
             await asyncio.to_thread(os.utime, task.worktree.path, None)
         await task.persist()
@@ -3632,7 +3637,7 @@ class SubagentManager:
             await self.cleanup_stale_worktrees()
         repo = await canonical_root(task.cwd, _run)
         branch = f"misaka-agent-{task.id}"
-        root = Path(os.environ.get("MISAKA_WORKTREE_DIR", "~/.misaka/worktrees")).expanduser()
+        root = home.path("worktrees")
         path = root / _safe_component(task.metadata_path.parent.name) / task.id
         settings = {}
         for layer in settings_layers(self.session, cwd=task.cwd, include_project=task.project_trusted):
@@ -3670,7 +3675,7 @@ class SubagentManager:
             repo = await canonical_root(cwd, _run)
         except ValueError:
             return 0
-        root = Path(os.environ.get('MISAKA_WORKTREE_DIR', '~/.misaka/worktrees'))
+        root = home.path("worktrees")
         return await cleanup_stale(repo, root, time.time() - days * 86400, _run, _log_warning, current=cwd)
 
     async def _cleanup_worktree(self, task: AgentTask) -> None:

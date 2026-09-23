@@ -11,11 +11,11 @@ import pytest
 
 from misaka.core.documents import index as corpus
 from misaka.core.tools import download_file
-from misaka.core.tools._web import bounded
 from misaka.core.tools.download_file import (
     DownloadFileToolInput,
     create_download_file_tool_definition,
 )
+from misaka.core.web import bounded
 
 PUBLIC = "93.184.216.34"
 PDF = b"%PDF-1.7\n" + b"x" * 200
@@ -534,3 +534,35 @@ async def test_symlinked_download_directory_is_rejected_before_request(tmp_path,
     result = await _run(workspace, url=URL)
     assert 'outside the workspace' in _text(result)
     assert list(outside.iterdir()) == []
+
+
+DJVU = b"AT&TFORM" + b"\x00\x00\x00\xe0" + b"DJVMDIRM" + b"\x00" * 64
+
+
+async def test_a_djvu_scan_is_a_downloadable_type(serve, workspace):
+    """2026-09-18 (B10): CADAL and Wikimedia carry the scanned classics as DjVu, and the tool
+    turned them away as "not a downloadable type" while the machine had djvulibre installed."""
+    serve(_static(DJVU, content_type="image/vnd.djvu"))
+
+    result = await _run(workspace, url="https://upload.wikimedia.org/wikipedia/commons/x/CADAL06070838.djvu")
+
+    assert "not a downloadable type" not in _text(result)
+    assert _downloads(workspace) == ["CADAL06070838.djvu"]
+    assert result.details["path"].endswith(".djvu")
+
+
+async def test_an_extensionless_djvu_takes_its_suffix_from_the_declared_type(serve, workspace):
+    serve(_static(DJVU, content_type="image/vnd.djvu"))
+
+    await _run(workspace, url="https://cadal.example/book/06070838")
+
+    assert _downloads(workspace) == ["06070838.djvu"]
+
+
+async def test_a_file_wearing_djvu_without_its_magic_is_rejected(serve, workspace):
+    serve(_static(b"<!DOCTYPE html><html><body>Sign in", content_type="image/vnd.djvu"))
+
+    result = await _run(workspace, url="https://files.example/book.djvu")
+
+    assert _downloads(workspace) == []
+    assert "not .djvu content" in _text(result)

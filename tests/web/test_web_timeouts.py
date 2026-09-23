@@ -2,12 +2,13 @@
 
 import asyncio
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 import pytest
+from webconf import write_web
 
+from misaka.config import home
 from misaka.config.product import CFG
 from misaka.core.web import WebPart, cache, config, registry
 from misaka.core.web.provider import WebSearchProvider
@@ -23,9 +24,8 @@ def isolated(tmp_path, monkeypatch):
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"):
         monkeypatch.delenv(name, raising=False)
         monkeypatch.delenv(name.lower(), raising=False)
-    monkeypatch.setitem(CFG, "web_config", str(tmp_path / "web.json"))
     monkeypatch.setitem(CFG, "web_cache", str(tmp_path / "cache"))
-    monkeypatch.setenv("MISAKA_CODING_AGENT_DIR", str(tmp_path / "agent"))
+    monkeypatch.setenv("MISAKA_HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     write(keyless_fallback=False, keyless_rescue=False)
     cache.search_memo.clear()
@@ -36,7 +36,7 @@ def isolated(tmp_path, monkeypatch):
 
 
 def write(**settings):
-    Path(CFG["web_config"]).write_text(json.dumps(settings))
+    write_web(settings)
 
 
 def part(tmp_path, provider=None):
@@ -183,10 +183,10 @@ async def test_ring_transports_use_vendor_policy_not_pool_label(name, extract, t
     ("operation_timeout", "web_search", float("inf")), ("operation_timeout", "typo", 3),
 ])
 def test_cli_rejects_invalid_values_without_replacing_config(section, key, value):
-    before = Path(CFG["web_config"]).read_bytes()
+    before = home.path("settings").read_bytes()
     with pytest.raises(ValueError):
         config.set_config(f"{section}.{key}", json.dumps(value))
-    assert Path(CFG["web_config"]).read_bytes() == before
+    assert home.path("settings").read_bytes() == before
 
 
 async def test_hand_edited_invalid_config_stops_before_provider_or_rescue(tmp_path):
@@ -462,7 +462,7 @@ async def test_whole_fetch_deadline_includes_stalled_headers(stalled_server, tmp
 
 
 async def test_transfer_timeout_closes_stream_and_deletes_partial_file(tmp_path, monkeypatch):
-    from misaka.core.tools._web import bounded
+    from misaka.core.web import bounded
 
     write(operation_timeout={"download_transfer": 0.02},
           http_timeout={"direct": {"read": None}})
@@ -519,7 +519,7 @@ async def test_ddgs_worker_receives_profile_scalar_timeout_as_data(tmp_path, mon
     monkeypatch.setenv("PARALLEL_API_KEY", "should-not-reach-worker")
     profile = tmp_path / "profile"
     profile.mkdir()
-    (profile / "web.json").write_text(json.dumps({"http_timeout": {"ddgs": 7.5}}))
+    write_web({"http_timeout": {"ddgs": 7.5}}, profile=profile)
     owner = WebRuntime(WebScope(str(profile)))
     try:
         result = await owner.run(ddgs._run_ddgs_search_bounded, "q", 1)

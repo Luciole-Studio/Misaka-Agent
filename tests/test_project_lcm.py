@@ -20,8 +20,7 @@ from misaka.extensions.misaka_lcm.vendor.dag import SummaryNode
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
     ce.close_all()
-    monkeypatch.setenv("MISAKA_CODING_AGENT_DIR", str(tmp_path / "agent"))
-    monkeypatch.setenv("MISAKA_SESSIONS", str(tmp_path / "sessions"))
+    monkeypatch.setenv("MISAKA_HOME", str(tmp_path))
     monkeypatch.delenv("MISAKA_SUBAGENT_PARENT_SESSION_ID", raising=False)
     yield
     ce.close_all()
@@ -73,6 +72,19 @@ def test_project_paths_ignore_global_overrides_and_bind_all_content(tmp_path, mo
     assert Path(conf.extraction_output_path).parent == root
     assert Path(conf.large_output_externalization_path).parent == root
     assert not root.exists()  # resolving a path is not opening a runtime
+
+
+def test_misaka_gives_lcm_grep_thirty_seconds_unless_the_env_says_otherwise(tmp_path, monkeypatch):
+    """2026-09-18 (B32): upstream's 3 s embedding deadline also cuts the full-text arm, which a
+    20 MB research lcm.db overran again and again. The knob stays upstream's; the default is ours."""
+    monkeypatch.delenv("LCM_EMBEDDING_QUERY_TIMEOUT_S", raising=False)
+    conf = config_bridge.load_config(ctx=session(tmp_path / "project"))
+    assert conf.embedding_query_timeout_s == 30.0
+    assert conf.config_sources["embedding_query_timeout_s"] == "misaka.default"
+    monkeypatch.setenv("LCM_EMBEDDING_QUERY_TIMEOUT_S", "4.5")
+    conf = config_bridge.load_config(ctx=session(tmp_path / "project"))
+    assert conf.embedding_query_timeout_s == 4.5
+    assert conf.config_sources.get("embedding_query_timeout_s") != "misaka.default"
 
 
 def test_project_isolation_shared_roles_and_session_switch(tmp_path):
@@ -394,14 +406,19 @@ def test_operator_import_keeps_payloads_scoped_and_live_owner_intact(tmp_path, m
     assert not root.exists() and source.read_bytes() == saved
 
 
-def test_core_changed_only_at_existing_namespace_import_seams():
+def test_core_matches_namespace_import_seams_and_documented_fixes():
     root = Path(__file__).resolve().parents[1] / "misaka/extensions/misaka_lcm"
     manifest = json.loads((root / "CORE_INTEGRITY.json").read_text())
+    fixes = manifest.get("documented_fixes", {})
+    assert fixes.keys() <= manifest["files"].keys()
+    for fix in fixes.values():
+        assert isinstance(fix.get("reason"), str) and fix["reason"].strip()
     for name, digest in manifest["files"].items():
         content = (root / name).read_bytes()
         normalized = content.replace(b"misaka.extensions.misaka_lcm", b"misaka.extensions.hermes_lcm")
         normalized = normalized.replace(b"misaka/extensions/misaka_lcm", b"misaka/extensions/hermes_lcm")
-        assert hashlib.sha256(normalized).hexdigest() == digest, name
+        expected = fixes[name]["sha256"] if name in fixes else digest
+        assert hashlib.sha256(normalized).hexdigest() == expected, name
 
 
 def test_audit_carry_target_preserves_project_and_visible_context(tmp_path):

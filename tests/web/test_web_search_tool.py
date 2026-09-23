@@ -14,8 +14,9 @@ import re
 from pathlib import Path
 
 import pytest
+from webconf import write_web
 
-from misaka.config.product import CFG
+from misaka.config import home
 from misaka.core.web import cache, registry, tool
 from misaka.core.web.provider import WebSearchProvider
 from misaka.core.wiring import SessionSpec, parts_for, tools_for
@@ -41,8 +42,7 @@ def web_home(monkeypatch, tmp_path):
     """A throwaway web config, an empty vendor environment, and an empty memo."""
     for name in _VENDOR_ENV:
         monkeypatch.delenv(name, raising=False)
-    path = tmp_path / "web.json"
-    monkeypatch.setitem(CFG, "web_config", str(path))
+    path = home.path("settings")           # the "web" section lives here now
     registry.reset_for_tests()
     cache.search_memo.clear()
     yield path
@@ -347,7 +347,7 @@ async def test_a_rescued_response_is_never_cached(monkeypatch, web_home):
 
 
 async def test_the_memo_can_be_switched_off_in_the_config(monkeypatch, web_home):
-    web_home.write_text(json.dumps({"cache_enabled": False}), encoding="utf-8")
+    write_web({"cache_enabled": False})
     calls: list = []
     stub(monkeypatch, hit(2), calls=calls)
     await tool.web_search_tool("q")
@@ -357,11 +357,11 @@ async def test_the_memo_can_be_switched_off_in_the_config(monkeypatch, web_home)
 
 def test_the_ttl_comes_from_the_config_and_is_clamped(web_home):
     assert cache.ttl_seconds() == cache.DEFAULT_TTL_MINUTES * 60
-    web_home.write_text(json.dumps({"cache_ttl_minutes": 5}), encoding="utf-8")
+    write_web({"cache_ttl_minutes": 5})
     assert cache.ttl_seconds() == 300
-    web_home.write_text(json.dumps({"cache_ttl_minutes": 99999}), encoding="utf-8")
+    write_web({"cache_ttl_minutes": 99999})
     assert cache.ttl_seconds() == 1440 * 60
-    web_home.write_text(json.dumps({"cache_ttl_minutes": "nonsense"}), encoding="utf-8")
+    write_web({"cache_ttl_minutes": "nonsense"})
     assert cache.ttl_seconds() == cache.DEFAULT_TTL_MINUTES * 60
 
 
@@ -520,7 +520,7 @@ def test_the_tool_registers_with_no_credentials_anywhere(web_home):
 
 
 def test_the_tool_is_withheld_when_nothing_can_serve(monkeypatch, web_home):
-    web_home.write_text(json.dumps({"keyless_fallback": False}), encoding="utf-8")
+    write_web({"keyless_fallback": False})
     monkeypatch.setattr(registry, "ddgs_package_importable", lambda: False)
 
     import misaka.core.web as extension
@@ -588,10 +588,7 @@ async def test_a_reflected_request_body_cannot_carry_the_api_key_to_the_model(
     and every backend hands a non-2xx body straight through. So a body a provider returns
     is treated as capable of containing the key that was sent with the request.
     """
-    web_home.write_text(
-        json.dumps({"backend": "tavily", "env": {"TAVILY_API_KEY": SECRET}}),
-        encoding="utf-8",
-    )
+    write_web({"backend": "tavily", "env": {"TAVILY_API_KEY": SECRET}})
     reflected = {
         "success": False,
         "error": (
@@ -617,10 +614,7 @@ async def test_a_searxng_instance_password_does_not_reach_the_model(
     reach; only the password goes.
     """
     url = f"http://admin:{SECRET}@searx.internal:8080"
-    web_home.write_text(
-        json.dumps({"backend": "searxng", "env": {"SEARXNG_URL": url}}),
-        encoding="utf-8",
-    )
+    write_web({"backend": "searxng", "env": {"SEARXNG_URL": url}})
     stub(
         monkeypatch,
         {"success": False, "error": f"Could not reach SearXNG at {url}: refused"},
@@ -639,10 +633,7 @@ async def test_a_secret_survives_neither_the_result_body_nor_the_size_trim(
     in ``_bound_result_size`` -- which re-serializes the original dict -- cannot re-emit
     an unredacted copy, and no cut can leave half a key behind.
     """
-    web_home.write_text(
-        json.dumps({"backend": "tavily", "env": {"TAVILY_API_KEY": SECRET}}),
-        encoding="utf-8",
-    )
+    write_web({"backend": "tavily", "env": {"TAVILY_API_KEY": SECRET}})
     huge = {
         "success": True,
         "data": {
@@ -670,10 +661,7 @@ async def test_a_secret_too_short_to_be_a_key_does_not_blank_the_message(
 ):
     """A two-character credential would redact half of every sentence; no real key is
     that short, so the redactor ignores anything under eight characters."""
-    web_home.write_text(
-        json.dumps({"backend": "tavily", "env": {"TAVILY_API_KEY": "ab"}}),
-        encoding="utf-8",
-    )
+    write_web({"backend": "tavily", "env": {"TAVILY_API_KEY": "ab"}})
     stub(
         monkeypatch,
         {"success": False, "error": "unable to reach the backend"},
@@ -703,9 +691,7 @@ def test_the_keyless_ring_is_one_cache_identity_not_five(web_home):
             == dispatch.KEYLESS_MEMO_IDENTITY
         )
     # A ring vendor with a key of its own is a backend in its own right again.
-    web_home.write_text(
-        json.dumps({"env": {"TAVILY_API_KEY": SECRET}}), encoding="utf-8"
-    )
+    write_web({"env": {"TAVILY_API_KEY": SECRET}})
     assert dispatch.memo_identity(registry.get_provider("tavily")) == "tavily"
     # And a backend that was never in the ring keeps its name either way.
     assert dispatch.memo_identity(registry.get_provider("searxng")) == "searxng"
@@ -744,10 +730,7 @@ async def test_a_repeated_query_is_paid_for_once_on_a_zero_key_install(
 async def test_a_rescued_response_still_never_lands_in_the_memo(monkeypatch, web_home):
     """The rescue rule survives the shared keyless identity: a rescue is served by the
     ring on behalf of a *keyed* backend, so its cache key is that keyed backend's."""
-    web_home.write_text(
-        json.dumps({"backend": "tavily", "env": {"TAVILY_API_KEY": SECRET}}),
-        encoding="utf-8",
-    )
+    write_web({"backend": "tavily", "env": {"TAVILY_API_KEY": SECRET}})
     calls: list = []
     rescued = hit(1)
     rescued["data"]["rescued_from"] = "tavily"

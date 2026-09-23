@@ -17,13 +17,19 @@ def load_auxiliary_config() -> dict:
     The auxiliary call binds this snapshot through route resolution and dispatch.
     No config file is created, migrated, or written on this read path.
     """
-    from misaka.config import get_agent_dir
-    from misaka.config.product import _json
+    import json
+
+    from misaka.config import home
 
     config = _AUXILIARY_CONFIG.get()
     if config is not None:
         return config
-    settings = _json(os.path.join(get_agent_dir(), "settings.json"))
+    try:
+        settings = json.loads(home.path("settings").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        settings = {}
+    if not isinstance(settings, dict):
+        settings = {}
     raw = settings.get("auxiliary", {})
     auxiliary = dict(raw) if isinstance(raw, dict) else {}
     return {**settings, "auxiliary": auxiliary}
@@ -60,6 +66,13 @@ def load_config(*, database=None, home=None, ctx=None) -> LCMConfig:
     """Keep upstream algorithm settings; the host owns all content paths."""
     from . import settings
     config = settings.apply(LCMConfig.from_env(host_config=load_auxiliary_config()))
+    if "LCM_EMBEDDING_QUERY_TIMEOUT_S" not in os.environ:
+        # Upstream's 3 s deadline also bounds lcm_grep's full-text arm (it interrupts the
+        # SQLite query through a progress handler), and a research project's lcm.db runs to
+        # tens of megabytes, where that arm regularly overran it and was dropped in silence
+        # (2026-09-18, B32). The knob is upstream's own; only misaka's default differs.
+        config.embedding_query_timeout_s = 30.0
+        config.config_sources["embedding_query_timeout_s"] = "misaka.default"
     config.database_path = str(database) if database is not None else database_path(ctx)
     directory = str(home) if home is not None else os.path.dirname(config.database_path)
     config.large_output_externalization_path = os.path.join(directory, "lcm-large-outputs")

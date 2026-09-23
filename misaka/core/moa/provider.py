@@ -28,6 +28,7 @@ from misaka.ai.types import (
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import provider_headers_to_record
+from misaka.config import home
 from misaka.config.product import current_config
 from misaka.core.moa.privacy import (
     coerce_privacy_filter,
@@ -35,19 +36,34 @@ from misaka.core.moa.privacy import (
     redact_outputs,
 )
 
-MOA_CONFIG_PATH = "~/.misaka/moa.json"
 DEFAULT_MOA_PRESET_NAME = "default"
 
 def _default_slots():
-    """Follow the current product model settings; override these in ~/.misaka/moa.json."""
+    """Follow the current product model settings; override these in the MoA config file."""
+    from misaka.ai.models import get_providers
+
     cfg = current_config()
-    return (
-        [
-            {"provider": cfg["provider"], "model": cfg["lo_model"]},
-            {"provider": cfg["provider"], "model": cfg["default_model"]},
-        ],
-        {"provider": cfg["provider"], "model": cfg["lo_model"]},
-    )
+    default = {"provider": cfg["provider"], "model": cfg["default_model"]}
+    reference = cfg["lo_model"]
+    lo = dict(default)
+    if reference and reference not in {"inherit", cfg["default_model"]}:
+        lo["model"] = reference
+        provider, slash, model = reference.partition("/")
+        if slash and model:
+            # Registry construction calls this function. Read provider names
+            # without constructing another registry (or splitting raw slash IDs).
+            providers = set(get_providers()) | {cfg["provider"]}
+            try:
+                with open(home.path("models"), encoding="utf-8") as handle:
+                    configured = json.load(handle)
+                configured = configured.get("providers") if isinstance(configured, dict) else None
+                if isinstance(configured, dict):
+                    providers.update(configured)
+            except (OSError, ValueError):
+                pass
+            if provider in providers:
+                lo = {"provider": provider, "model": model}
+    return [dict(lo), default], lo
 
 # Head+tail preview budget per tool result in the advisor view.
 TOOL_RESULT_BUDGET = 4000
@@ -206,13 +222,29 @@ def normalize_moa_config(raw) -> dict[str, Any]:
     }
 
 
-def load_moa_config(path: str | None = None) -> dict[str, Any]:
-    p = os.path.expanduser(path or MOA_CONFIG_PATH)
+def raw_moa_config() -> dict[str, Any]:
+    """The ``moa`` section of the global settings as written: no invented preset, no defaults."""
+    from misaka.core.settings_manager import SettingsManager
+
     try:
-        with open(p, encoding="utf-8") as f:
-            return normalize_moa_config(json.load(f))
-    except (OSError, ValueError):
-        return normalize_moa_config({})
+        return SettingsManager.forRole(None).getScopedSection("global", "moa")
+    except Exception:  # noqa: BLE001 - an unreadable settings file reads as no MoA configuration
+        return {}
+
+
+def load_moa_config() -> dict[str, Any]:
+    return normalize_moa_config(raw_moa_config())
+
+
+def save_moa_config(config: dict[str, Any]) -> None:
+    """Replace the ``moa`` section of the global settings."""
+    from misaka.core.settings_manager import SettingsManager
+
+    def replace(section: dict[str, Any]) -> None:
+        section.clear()
+        section.update(config)
+
+    SettingsManager.forRole(None).updateSection("moa", replace)
 
 
 def resolve_moa_preset(name: str | None = None, *, config=None) -> tuple[str, dict[str, Any]]:
@@ -551,7 +583,7 @@ def _save_trace(cfg, session_id, preset_name, advisor_traces, agg_slot,
     if not cfg.get("save_traces"):
         return
     try:
-        base = os.path.expanduser(cfg.get("trace_dir") or "~/.misaka/moa-traces")
+        base = os.path.expanduser(cfg.get("trace_dir") or "") or str(home.path("moa_traces"))
         os.makedirs(base, exist_ok=True)
         sid = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in str(session_id or "unknown-session"))
         record = {
@@ -856,4 +888,3 @@ def preset_models(configured=None, find=None) -> list[Model]:
             maxTokens=agg.maxTokens if agg else 32_000,
         ))
     return out
-

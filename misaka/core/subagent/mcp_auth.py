@@ -16,7 +16,6 @@ import os
 import secrets
 import time
 from contextlib import asynccontextmanager
-from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
@@ -35,7 +34,7 @@ from mcp.shared.auth import (
     OAuthToken,
 )
 
-from misaka.config import get_agent_dir
+from misaka.config import home
 from misaka.core.auth_storage import FileAuthStorageBackend, LockResult
 from misaka.utils.async_lifecycle import settle
 
@@ -62,9 +61,9 @@ class McpTokenStorage:
         self.cfg = cfg
         self.key = server_key(name, cfg)
         role = hashlib.sha256(context.role.encode()).hexdigest()[:16]
-        root = Path(context.profile_dir) if context.profile_dir else Path(get_agent_dir())
         # Server names and roles are data, never filesystem components.
-        self.path = root / "mcp-auth" / role / (hashlib.sha256(self.key.encode()).hexdigest() + ".json")
+        self.path = (home.path("mcp_auth", context.profile_dir) / role
+                     / (hashlib.sha256(self.key.encode()).hexdigest() + ".json"))
         self.backend = FileAuthStorageBackend(str(self.path))
         self.generation = None
         self.metadata = None

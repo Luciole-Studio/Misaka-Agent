@@ -14,7 +14,7 @@ import hashlib
 import json
 import os
 
-from misaka.core.tools._web.evidence import frontmatter_line_count, save_page
+from misaka.core.web.evidence import frontmatter_line_count, save_page
 
 PROVENANCE = {
     "source_url": "https://example.com/page",

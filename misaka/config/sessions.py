@@ -7,12 +7,13 @@ SessionManager owns transcript storage; the catalog adds identity and live state
 
 import os
 
-ENV = "MISAKA_SESSIONS"
+from misaka.config import home
+
 COORDINATOR = "last-order"
 
 
 def sessions_root() -> str:
-    return os.path.expanduser(os.environ.get("MISAKA_SESSIONS") or "~/.misaka/sessions")
+    return str(home.path("sessions"))
 
 
 def role_dir(role: str | None = None) -> str:
@@ -50,5 +51,5 @@ def subagent_session_dir(parent_id: str, parent_file: str | None = None) -> str:
     return os.path.join(sessions_root(), "subagents", parent_id)
 
 
-__all__ = ["COORDINATOR", "ENV", "card_session_dir", "chat_dir", "dm_dir", "role_dir",
+__all__ = ["COORDINATOR", "card_session_dir", "chat_dir", "dm_dir", "role_dir",
            "sessions_root", "subagent_session_dir"]

@@ -26,11 +26,11 @@ from typing import Any
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.tools._common import run_with_abort
-from misaka.core.tools._web.single_flight import single_flight
 from misaka.core.web import cache, debug
 from misaka.core.web.config import redact_secrets, redact_values
 from misaka.core.web.dispatch import memo_identity, resolve_provider
 from misaka.core.web.dispatch import web_search as dispatch_search
+from misaka.core.web.single_flight import single_flight
 from misaka.utils.values import signal_aborted
 
 # Verbatim from Hermes tools/web_tools.py:1655-1676. Do not reword: the operator sentence

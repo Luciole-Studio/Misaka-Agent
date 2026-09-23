@@ -3,7 +3,7 @@ import os
 import shutil
 from pathlib import Path
 
-from misaka.config import get_agent_dir
+from misaka.config import home
 from misaka.core.web.config import provider_env, web_config
 from misaka.core.web.scope import current_scope
 
@@ -45,7 +45,7 @@ def executable(name):
         if not isinstance(custom, str):
             raise ValueError(f'browser.{key} must be an executable path (not a shell command)')
         return shutil.which(str(Path(custom).expanduser()))
-    managed = Path(current_scope().profile_dir or get_agent_dir()) / 'web-tools' / 'node_modules' / '.bin'
+    managed = home.path('web_tools', current_scope().profile_dir) / 'node_modules' / '.bin'
     return shutil.which(name, path=str(managed)) or shutil.which(name)
 
 

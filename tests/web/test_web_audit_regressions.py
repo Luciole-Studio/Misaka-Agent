@@ -12,18 +12,27 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from webconf import write_web
 
 from misaka.config.product import CFG
 from misaka.core.tools import download_file, web_fetch
-from misaka.core.tools._web import bounded, negative_cache, website_policy
-from misaka.core.web import cache, config, dispatch, extract, keyless, tool
+from misaka.core.web import (
+    bounded,
+    cache,
+    config,
+    dispatch,
+    extract,
+    keyless,
+    negative_cache,
+    tool,
+    website_policy,
+)
 
 URL = "https://example.org/paper"
 
 
 @pytest.fixture(autouse=True)
 def isolated_web(monkeypatch, tmp_path):
-    monkeypatch.setitem(CFG, "web_config", str(tmp_path / "web.json"))
     monkeypatch.setitem(CFG, "web_cache", str(tmp_path / "cache"))
     for key in config._CREDENTIAL_VARS + config._ENDPOINT_VARS:
         monkeypatch.delenv(key, raising=False)
@@ -53,8 +62,7 @@ async def no_dns(_url, *, proxy=None):
 
 
 def configure(**values):
-    from misaka.config.product import CFG
-    Path(CFG["web_config"]).write_text(json.dumps(values))
+    write_web(values)
 
 
 def extractor(monkeypatch, page):

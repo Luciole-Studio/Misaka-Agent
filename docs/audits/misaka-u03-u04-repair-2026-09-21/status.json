@@ -1,0 +1,11 @@
+{
+  "u03": "Applied to main source; both isolated U03-only and main verification: 2378 passed, 1 skipped (-W error).",
+  "u04": "validated candidate only; NOT applied; historical field handling awaits user choice",
+  "runtime": "No live process, database, session, credentials or provider call modified",
+  "pi_commit": "c7cdb460aa8a0cebef3446c4166729b8a0d97ead",
+  "hermes_audit_commit": "8863b36fd663c50d3b794c48a6505ff6c7c3c91b",
+  "partial_json_version": "0.1.7",
+  "historical_field": "argumentsError",
+  "history_policy": "No migration or compatibility code introduced; no user history accessed. Synthetic reproduction only.",
+  "candidate_validation": "3580 passed, 1 skipped (-W error); U04 remains unapplied"
+}

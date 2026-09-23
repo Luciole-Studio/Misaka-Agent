@@ -10,10 +10,13 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
+import socket
+import time
 from pathlib import Path
 
 from misaka.ai.session_resources import register_session_resource_cleanup
-from misaka.config import get_sessions_dir, sessions
+from misaka.config import get_sessions_dir, home, sessions
 from misaka.core.platform import processes
 from misaka.core.session_manager import iter_session_files, read_session_header
 from misaka.core.wiring import KINDS, sender_address
@@ -23,11 +26,21 @@ SESSION_KINDS = KINDS
 
 
 def _object(path):
+    """One record. Its transcript pointer is kept home-relative on disk and is a real path here."""
     try:
         value = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    return value if isinstance(value, dict) else {}
+    if not isinstance(value, dict):
+        return {}
+    if isinstance(value.get("path"), str):
+        value["path"] = str(home.from_stored(value["path"]))
+    return value
+
+
+def _write(record, value):
+    stored = {**value, "path": home.stored(value["path"])} if value.get("path") else value
+    atomic.write_text(str(record), json.dumps(stored, ensure_ascii=False), mode=0o600)
 
 
 def _role(value):
@@ -42,6 +55,111 @@ def _index_dir():
 def owner_record(path):
     key = os.path.realpath(path)
     return _object(_index_dir() / (hashlib.sha256(key.encode()).hexdigest() + ".json"))
+
+
+# Where SessionControl puts its socket directory (a short path: macOS sockaddr_un is 104 bytes).
+_CONTROL_PARENTS = {"/tmp", os.path.realpath("/tmp")}
+
+
+def _release_control(value):
+    """Remove the control socket directory a session left behind, once its process is gone."""
+    control = str(value.get("control") or "")
+    if not control:
+        return
+    if os.path.islink(os.path.dirname(control)):
+        return              # the recorded name, not whatever it currently points at
+    directory = os.path.dirname(os.path.realpath(control))
+    if (os.path.basename(directory).startswith("misaka-session-")
+            and os.path.dirname(directory) in _CONTROL_PARENTS):
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def _live_socket(path):
+    """Whether a session is still listening on this control socket."""
+    if not os.path.exists(path):
+        return False
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(0.2)
+    try:
+        probe.connect(path)
+        return True
+    except OSError:
+        return False        # refused or unreachable: the process that bound it is gone
+    finally:
+        probe.close()
+
+
+def _sweep_orphan_controls(spoken_for):
+    """Remove control directories no record names and nothing is listening in.
+
+    A record is unlinked as soon as its session has no transcript, which leaves its socket
+    directory with nobody to name it -- 24 of the 27 directories in /tmp on the day this was
+    written. A session binds its socket straight after making the directory, so one younger
+    than a minute is left alone whatever the socket says.
+    """
+    removed, cutoff = 0, time.time() - 60
+    for parent in {os.path.realpath(p) for p in _CONTROL_PARENTS}:
+        try:
+            names = os.listdir(parent)
+        except OSError:
+            continue
+        for name in names:
+            directory = os.path.join(parent, name)
+            if not name.startswith("misaka-session-") or directory in spoken_for:
+                continue
+            try:
+                if not os.path.isdir(directory) or os.path.getmtime(directory) > cutoff:
+                    continue
+            except OSError:
+                continue
+            if _live_socket(os.path.join(directory, "control.sock")):
+                continue
+            shutil.rmtree(directory, ignore_errors=True)
+            removed += 1
+    return removed
+
+
+def sweep_dead():
+    """Retire the records of sessions whose process is gone; return how many were swept.
+
+    A pane the panel closes is sent SIGTERM and killed two seconds later, and a runtime that
+    has not finished `session_shutdown` by then never unlinks its own record. The index filled
+    up with pointers to dead processes and their control sockets stayed in /tmp
+    (2026-09-18, B3: 18 of 19 records were dead, with eight abandoned socket directories).
+
+    Only an owner that is *gone* is swept. An identity that merely disagrees is left alone:
+    that verdict has been wrong before (B20) and the cost of being wrong here -- deleting a
+    live session's pointer -- is higher than the cost of one stale record.
+    """
+    swept, spoken_for = 0, set()
+    for file in _index_dir().glob("*.json"):
+        value = _object(file)
+        pid = value.get("pid")
+        control = str(value.get("control") or "")
+        path = value.get("path")
+        if not pid:
+            continue
+        if value.get("state") == "saved" and not control and path and os.path.isfile(path):
+            continue                          # already retired by its own runtime: no probe needed
+        alive, reason = processes.explain_liveness(pid, value.get("identity"))
+        if alive or reason != "pid gone":
+            if control:
+                spoken_for.add(os.path.dirname(os.path.realpath(control)))
+            continue
+        if _object(file) != value:
+            continue                          # republished while we looked: its new owner wins
+        if path and os.path.isfile(path):
+            _release_control(value)
+            value["state"] = "saved"
+            value.pop("control", None)
+            value.pop("paused", None)
+            _write(file, value)
+        else:
+            _release_control(value)
+            file.unlink(missing_ok=True)      # a pointer to a transcript that was never written
+        swept += 1
+    _sweep_orphan_controls(spoken_for)
+    return swept
 
 
 def _inbox(spec):
@@ -69,6 +187,36 @@ def live_inbox(address, *, workspace=None):
         if processes.identity_is_alive(value.get("pid"), value.get("identity")):
             return True
     return False
+
+
+def live_session(session_id):
+    """The catalog record of a live session with this id, or None.
+
+    A session is the most precise address there is -- a specific Last Order window in a
+    research tree, one attempt at one card -- and its id is what the panel shows and what a
+    message carries as its sender, so a reply can go back to exactly that conversation."""
+    if not session_id:
+        return None
+    for file in _index_dir().glob("*.json"):
+        value = _object(file)
+        if value.get("id") != session_id or value.get("state") == "saved":
+            continue
+        if processes.identity_is_alive(value.get("pid"), value.get("identity")):
+            return value
+    return None
+
+
+def live_card_session(task_id):
+    """The catalog record of the live session running this card, or None."""
+    if not task_id:
+        return None
+    for file in _index_dir().glob("*.json"):
+        value = _object(file)
+        if value.get("task_id") != task_id or value.get("state") == "saved" or not value.get("inbox"):
+            continue
+        if processes.identity_is_alive(value.get("pid"), value.get("identity")):
+            return value
+    return None
 
 
 class CatalogPart:
@@ -122,7 +270,7 @@ class CatalogPart:
                  "pid": self.pid, "identity": self.identity, "instance": self.instance, "state": state}
         if self.control is not None and self.control.path:
             value.update(control=self.control.path, paused=self.control.paused)
-        atomic.write_text(str(record), json.dumps(value, ensure_ascii=False), mode=0o600)
+        _write(record, value)
         self.record = record
 
     async def session_start(self, _event, ctx):
@@ -172,7 +320,7 @@ class CatalogPart:
             value["state"] = "saved"
             value.pop("control", None)
             value.pop("paused", None)
-            atomic.write_text(str(record), json.dumps(value, ensure_ascii=False), mode=0o600)
+            _write(record, value)
         else:
             record.unlink(missing_ok=True)
 
@@ -295,7 +443,10 @@ def list_entries(con, *, extra_paths=()):
         child = _object(Path(path).with_suffix(".meta.json"))
         if child or "subagents" in Path(path).parts:
             row.update(kind="child", role=_role(child.get("agentType") or record.get("role")),
-                       title=child.get("description") or Path(path).stem)
+                       title=child.get("description") or Path(path).stem,
+                       child_status=child.get("status"))
+            if "task_status" in row:
+                row["parent_task_status"] = row.pop("task_status")
             worktree = child.get("worktree")
             if isinstance(worktree, dict) and worktree.get("repo"):
                 row["workspace"] = worktree["repo"]

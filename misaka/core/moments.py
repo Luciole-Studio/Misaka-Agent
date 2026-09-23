@@ -27,6 +27,14 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# What a part may say about a custom message it sends, in the message's ``details`` -- the one
+# vocabulary a context engine (an extension that archives and summarises the conversation) reads,
+# so that neither side has to know the other's message types.
+MEMORY = "memory"   # False: a feed entry the model is never shown again (a status tick); an engine
+                    # keeps it out of what it archives and summarises.
+TURN = "turn"       # True: the message opens a turn the way a user prompt does (a work order); an
+                    # engine that keys its per-turn work on ingress counts it as one.
+
 _MISSING = object()
 
 

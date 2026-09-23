@@ -38,22 +38,29 @@ def register(harn):
     @_register(
         harn,
         name="misaka_ally_list", label="List allies",
-        description="List every live pane in the panel and what is running in it: Sister card panes, "
+        description="List every pane in the panel and what is running in it: Sister card panes, "
                     "shell windows, and third-party agents (codex/claude/gemini, ...) the user started by hand. "
-                    "The foreground process name is reported as-is; you decide whether it is an agent.",
+                    "The foreground process name is reported as-is; you decide whether it is an agent. "
+                    "A card pane that is not claimed is a leftover -- a finished attempt or a reader -- and "
+                    "misaka_ally_close will close it.",
         snippet="List all panes and the agents running in them",
         parameters=ListParams)
     async def misaka_ally_list(tool_call_id, params, signal, on_update, ctx):
         out = await asyncio.to_thread(_net().request, "panes.list")
         rows = []
         for p in out["panes"]:
-            if not p["alive"]:
+            # A card pane whose program has exited is exactly the leftover Last Order needs to
+            # see and close; other dead panes the panel reaps by itself.
+            if not p["alive"] and not p["card"]:
                 continue
             fg = p.get("foreground") or {}
             rows.append({
                 "pane": p["id"], "title": p["title"],
                 "foreground_process": fg.get("name") or "?",
                 "command_line": fg.get("cmdline") or "",
+                "alive": bool(p["alive"]),
+                # An older daemon does not say; then a card pane counts as the attempt.
+                "claimed": bool(p.get("claimed", True)) if p["card"] else False,
                 "busy": p.get("busy", False),
                 "type": ("card" if p["card"] else
                          "ally" if p.get("ally") else
@@ -211,8 +218,9 @@ def register(harn):
     @_register(
         harn,
         name="misaka_ally_close", label="Close ally pane",
-        description="Close a pane, killing the process inside it. Only for ally and shell panes; "
-                    "a Sister's card pane must be stopped with misaka_sister_stop.",
+        description="Close a pane, killing the process inside it. A pane running a card must be stopped "
+                    "with misaka_sister_stop instead; a leftover pane that is only showing a card's "
+                    "session can be closed here.",
         snippet="Close an ally pane",
         parameters=CloseParams)
     async def misaka_ally_close(tool_call_id, params, signal, on_update, ctx):
@@ -222,10 +230,14 @@ def register(harn):
         target = next((p for p in panes["panes"] if p["id"] == params.pane_id), None)
         if target is None:
             raise ValueError(f"No such pane: {params.pane_id}")
-        if target["card"]:
+        # An older daemon does not say which pane holds the claim; then every card pane is
+        # treated as the attempt, which is what this tool used to do.
+        if target["card"] and target.get("claimed", True):
+            # Only the attempt itself is refused. A finished or read-only card pane is exactly
+            # what Last Order was reduced to killing by PID (2026-09-18, B22).
             raise ValueError(
-                f"Pane {params.pane_id} is a Sister's card pane; stop the card with "
-                "misaka_sister_stop instead."
+                f"Pane {params.pane_id} is running card {target['card']}; stop the card with "
+                "misaka_sister_stop instead of closing its pane."
             )
         await asyncio.to_thread(_net().request, "pane.close", {"id": params.pane_id})
         return _text(f"Closed pane {params.pane_id} ({target['title']}).")

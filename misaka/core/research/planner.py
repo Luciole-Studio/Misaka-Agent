@@ -11,6 +11,8 @@ import re
 import time
 from pathlib import Path
 
+from misaka.ai.utils.overflow import hit_output_limit
+from misaka.core.network.card_contract import format_deliverable, split_deliverable
 from misaka.core.platform import budget, prompt_guard
 from misaka.core.platform import tasks as task_store
 from misaka.core.research import commands, ledger, runs
@@ -82,25 +84,11 @@ You are one researcher on a research tree that Last Order coordinates. How to wo
 
 
 def session_tools(worker, tools=RESEARCH_TOOLS):
-    """Keep already-enabled execution/extension capabilities, not Board/library mutation tools.
+    """Inherit enabled tools in session order; new registrations join the next phase."""
+    from misaka.core.research.tool_policy import research_tools
 
-    New registrations are considered on the NEXT phase, not allowed to widen a running one.
-    The registry still enforces the owning session's role/user permission ceiling.
-    """
     session = getattr(worker, "session", None)
-    # A new bare coordinator has no prior selection to inherit. Bootstrap the
-    # same execution capabilities for one-shot calls and resident nodes.
-    extra = ["bash", "office"] if session is None else []
-    if session is not None:
-        active = set(session.getActiveToolNames())
-        for tool in session.getAllTools():
-            if tool.name in active and (
-                tool.name in {"bash", "powershell", "office", "browser_exec", "AskUserQuestion"}
-                or tool.name.startswith("mcp__")
-                or tool.sourceInfo.source not in {"builtin", "sdk"}
-            ):
-                extra.append(tool.name)
-    return tuple(dict.fromkeys((*tools, *extra)))
+    return research_tools(session.getActiveToolNames() if session is not None else tools)
 
 SOURCES_FOOTER = """
 End with a `## Sources` section listing every source this text rests on, one per line: the file's path inside the
@@ -191,14 +179,13 @@ def _catalog_text(items):
 
 def _call(worker, cfg, prompt, *, cwd, session_dir, continue_session=False,
           profile="last_order", tools=RESEARCH_TOOLS, raw=False, task_id=None,
-          thinking="high", model=None, extra_tools=(), con=None, session_file=None, sister_catalog=None):
+          model=None, extra_tools=(), con=None, session_file=None, sister_catalog=None):
     kwargs = {
         "cwd": cwd, "tools": list(session_tools(worker, tools)),
-        "timeout": None, "soul": False, "research_context": True,
+        "timeout": None, "research_context": True,
         "raw": raw, "usage_db": cfg.get("db"), "usage_task_id": task_id,
         "usage_generation": 1, "usage_token_cap": cfg.get("token_cap"),
         "session_dir": session_dir, "continue_session": continue_session,
-        "thinking": thinking,
     }
     if session_file:
         kwargs["session_file"] = session_file
@@ -248,6 +235,7 @@ def _validate_task(raw, roster, index):
         if not isinstance(task.get(key), str) or not task[key].strip():
             raise ValueError(f"Task {index} is missing {key!r}.")
         task[key] = task[key].strip()
+    split_deliverable(task["deliverable"])  # validate the artifact gate before any cards are created
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", task["local_id"]):
         raise ValueError(
             f"Task {index} local_id may contain only letters, digits, dots, underscores, and hyphens."
@@ -337,11 +325,10 @@ def _lo_session(run, node, *parts):
     return runs.session_dir(run, "root-lo" if node["parent_id"] is None else f"node-{node['id']}", *parts)
 
 
-def plan_waits_for_user(cfg, worker):
-    """Whether an accepted plan waits for the user's go-ahead before its cards are created: on by
-    configuration, and only where the Last Order has a live conversation the user can join (a
-    window, or a node's resident session); a one-shot headless call has nowhere to talk."""
-    return bool(cfg.get("research_plan_approval", True)) and getattr(worker, "session", None) is not None
+def plan_waits_for_user(cfg, run=None):
+    """Persisted run policy wins for every root, fork and follow-up, including resume."""
+    saved = runs.limits(run) if run is not None else {}
+    return saved.get("plan_approval", bool(cfg.get("research_plan_approval", True)))
 
 
 PLAN_WAITS = """
@@ -370,9 +357,9 @@ research is complete. A genuine clarification, pause or change of scope still ne
 """
 
 
-def plan_approval_prompt(cfg, worker):
+def plan_approval_prompt(cfg, run=None):
     """Describe the same gate the driver applies, including follow-up plans."""
-    return PLAN_WAITS if plan_waits_for_user(cfg, worker) else PLAN_AUTOMATIC
+    return PLAN_WAITS if plan_waits_for_user(cfg, run) else PLAN_AUTOMATIC
 
 
 def plan(run, cfg, worker, node, *, con, context_path=None):
@@ -381,7 +368,8 @@ def plan(run, cfg, worker, node, *, con, context_path=None):
     roster = _roster({**cfg, "workspace": run["workspace"]})
     prompt = ROOT_CONTRACT + "\n# Artifact layout\nWithin the current workspace, every node's files live under " \
         "nodes/<node>/ and each of its cards under nodes/<node>/cards/<card>/; run-level products go to final/. " \
-        "The runtime assigns these paths. Use simple deliverable filenames, not directories.\n" \
+        "The runtime assigns these paths. Put one deliverable filename on the first line, not a directory; " \
+        "use backticks for spaces. Put requirements on following lines.\n" \
         + f"\n# Current node depth\n{node['depth']} (root = 0; max_depth = {runs.limits(run)['max_depth']})\n"
     if node["parent_id"] is None:
         brief = Path(run["workspace"]) / "PROJECT.md"
@@ -413,7 +401,7 @@ This is a targeted research node. Investigate the red-team issue against the par
     prompt += navigation(run["id"]) + """
 Read the live workspace view before planning.
 """
-    prompt += plan_approval_prompt(cfg, worker)
+    prompt += plan_approval_prompt(cfg, run)
     action, raw = _command(
         con, run, cfg, worker, node, prompt, key="plan", name="misaka_research_assign",
         description="Last Order: assign the research plan and choose its red-team Sister",
@@ -439,9 +427,27 @@ def _command(con, run, cfg, worker, node, prompt, *, key, name, description, mod
         session_file=session_file,
     )
     accepted = runs.action(con, run["id"], node["id"], key)
+    if not accepted and hit_output_limit(err):
+        # The reply spent the whole output cap (thinking included) before calling the
+        # command. Pausing the run here cost a manual resume and a misread ("the request
+        # was too long"); one more turn in the same session, told exactly what happened,
+        # is what the phase needs. A second miss pauses the run as before.
+        _obj, text, err = _call(
+            worker, cfg, output_limit_nudge(name), cwd=run["workspace"], session_dir=session_dir,
+            tools=tools, extra_tools=(command,), raw=True, sister_catalog=sister_catalog,
+            continue_session=True, task_id=run["id"], con=con, session_file=session_file,
+        )
+        accepted = runs.action(con, run["id"], node["id"], key)
     if not accepted:
         raise RuntimeError(f"Last Order did not call {name} for {key}: {err or 'no command accepted'}")
     return accepted, text
+
+
+def output_limit_nudge(name):
+    """The follow-up prompt after a reply that hit the output cap without calling ``name``."""
+    return (f"Your previous reply reached the model's output token limit before it called `{name}`; "
+            f"nothing was recorded. Call `{name}` now. Keep any reasoning brief and the payload "
+            "compact: the work you already did is in this conversation, so do not redo it.")
 
 
 def task_sources(con, run, rows):
@@ -549,7 +555,7 @@ def synthesize(con, run, cfg, worker, node, task_rows, *, followup=None, round=1
     if followup is not None:
         rounds = (SYNTHESIS_FOLLOWUP.format(round=round, left=left)
                   + "\nThe following approval policy applies only if you submit a follow-up plan; "
-                  "it does not block writing the current conclusion.\n" + plan_approval_prompt(cfg, worker))
+                  "it does not block writing the current conclusion.\n" + plan_approval_prompt(cfg, run))
     elif round > 1:
         rounds = SYNTHESIS_LAST_ROUND.format(round=round)
     else:
@@ -703,7 +709,7 @@ when evidence warrants it and explain why. No separate planning submission, file
 {methods}{larger}{company}
 {approach}
 ## deliverable
-{task['deliverable']}
+{format_deliverable(task['deliverable'])}
 Write it under the deliverable location the card names; successful writes and fetched source files are recorded
 automatically.
 

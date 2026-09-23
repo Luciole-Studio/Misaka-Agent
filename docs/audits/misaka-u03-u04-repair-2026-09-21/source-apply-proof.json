@@ -1,0 +1,22 @@
+{
+  "applied": "U03 only",
+  "target_files": [
+    "misaka/core/web/extract.py",
+    "tests/web/test_web_extract_result_status.py",
+    "tests/web/test_web_hermes_origin.py",
+    "tests/web/test_web_debug.py",
+    "tests/web/test_web_network_policy.py"
+  ],
+  "targets_match_tested_copy": true,
+  "u04_16_targets_remain_at_original_baseline": true,
+  "live_process_actions": [],
+  "other_baseline_entries_unchanged": 2012,
+  "git_index_unchanged": true,
+  "main_validation": "2378 passed, 1 skipped -W error",
+  "docs_updated": [
+    "docs/audits/misaka-issue-register-2026-09-20/register.json",
+    "docs/audits/misaka-issue-register-2026-09-20.md",
+    "docs/audits/misaka-u03-u04-repair-2026-09-21.md",
+    "docs/audits/misaka-u03-u04-repair-2026-09-21"
+  ]
+}

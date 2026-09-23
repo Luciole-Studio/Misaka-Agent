@@ -390,7 +390,7 @@ async def test_panel_root_shutdown_stops_owned_running_cards(
     monkeypatch.setattr(
         window,
         "WindowLO",
-        lambda session, check: SimpleNamespace(
+        lambda session, check, *, describe: SimpleNamespace(
             session_file=str(Path(run["workspace"]) / "session.jsonl"),
             close=AsyncMock(),
         ),
@@ -408,7 +408,6 @@ async def test_panel_root_shutdown_stops_owned_running_cards(
             con,
             {},
             SimpleNamespace(),
-            None,
             run_id=run["id"],
             session=object(),
             poll_seconds=0.001,
@@ -779,7 +778,7 @@ async def test_cancel_after_assignment_before_drive_stops_new_card(state, monkey
     with pytest.raises(asyncio.CancelledError):
         await workflow._expand(
             con,
-            {},
+            {"research_plan_approval": False},
             runner,
             None,
             run,
@@ -832,7 +831,7 @@ async def test_office_executes_the_approved_ops_not_later_file_bytes(
     assert protected.read_text() == "keep"
 
 
-@pytest.mark.parametrize("change", ["deleted", "outside", "legacy", "forged"])
+@pytest.mark.parametrize("change", ["deleted", "outside", "undigested", "forged"])
 def test_attachment_manifest_boundary(state, change):
     import json
 
@@ -860,7 +859,7 @@ def test_attachment_manifest_boundary(state, change):
     )
     payload = json.loads(tasks.latest_payload(con, tid, "submitted", generation=1))
     assert payload["artifact_digests"][rel] == hashlib.sha256(b"accepted").hexdigest()
-    if change == "legacy":
+    if change == "undigested":                 # a submission another build wrote: refused, not trusted
         payload.pop("artifact_digests")
         con.execute(
             "UPDATE events SET payload=? WHERE task_id=? AND kind='submitted'",
@@ -872,16 +871,14 @@ def test_attachment_manifest_boundary(state, change):
         path.unlink()
         # The target need not exist: the path escape must be rejected before any read.
         path.symlink_to(Path(run["workspace"]).parent / "outside-fixture.md")
-    if change in {"deleted", "outside"}:
-        with pytest.raises(ValueError, match="Accepted artifact"):
+    if change in {"deleted", "outside", "undigested"}:
+        with pytest.raises(ValueError, match="Accepted artifact|no artifact digests"):
             workflow.settle_done_tasks(con, run_id=run["id"])
         assert not runs.artifacts(con, run["id"], task_id=tid)
     else:
         workflow.settle_done_tasks(con, run_id=run["id"])
         artifact = runs.artifacts(con, run["id"], task_id=tid)[0]
-        assert json.loads(artifact["metadata_json"])["submission_digest_verified"] is (
-            change != "legacy"
-        )
+        assert "submission_digest_verified" not in json.loads(artifact["metadata_json"])
 
 
 def test_read_only_artifact_lookup_never_recovers_files(state):

@@ -9,24 +9,23 @@ from __future__ import annotations
 import json
 
 import pytest
+from webconf import write_web
 
-from misaka.config.product import CFG
-from misaka.core.tools._web import website_policy
-from misaka.core.tools._web.screening import screen_url
+from misaka.core.web import website_policy
+from misaka.core.web.screening import screen_url
 
 
 @pytest.fixture(autouse=True)
 def web_home(tmp_path, monkeypatch):
     """A throwaway web.json, with the policy cache cleared either side of the test."""
     path = tmp_path / "web.json"
-    monkeypatch.setitem(CFG, "web_config", str(path))
     website_policy.invalidate_cache()
     yield path
     website_policy.invalidate_cache()
 
 
-def write_policy(path, **blocklist):
-    path.write_text(json.dumps({"website_blocklist": blocklist}), encoding="utf-8")
+def write_policy(_path, **blocklist):
+    write_web({"website_blocklist": blocklist})
     website_policy.invalidate_cache()
 
 
@@ -105,7 +104,7 @@ def test_a_disabled_blocklist_allows_everything(web_home):
 
 def test_a_broken_policy_config_fails_open(web_home):
     """A typo in a blocklist must not take every web tool down with it."""
-    web_home.write_text('{"website_blocklist": {"domains": "not-a-list"}}', encoding="utf-8")
+    write_web(json.loads('{"website_blocklist": {"domains": "not-a-list"}}'))
     website_policy.invalidate_cache()
     assert screen_url("https://example.com/page").allowed is True
 

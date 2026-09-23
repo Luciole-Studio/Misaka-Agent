@@ -8,7 +8,9 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from webconf import write_web
 
+from misaka.config import home
 from misaka.config.product import CFG
 from misaka.core.session_manager import SessionManager
 from misaka.core.web import WebPart, cache, config, registry
@@ -20,9 +22,8 @@ def isolated(tmp_path, monkeypatch):
     for name in (*config._CREDENTIAL_VARS, *config._ENDPOINT_VARS, "WEB_TOOLS_DEBUG",
                  "MISAKA_USAGE_DB", "MISAKA_USAGE_TASK_ID", "MISAKA_USAGE_GENERATION"):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setitem(CFG, "web_config", str(tmp_path / "web.json"))
     monkeypatch.setitem(CFG, "web_cache", str(tmp_path / "cache"))
-    monkeypatch.setenv("MISAKA_CODING_AGENT_DIR", str(tmp_path / "agent"))
+    monkeypatch.setenv("MISAKA_HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     write()
     cache.search_memo.clear()
@@ -33,10 +34,10 @@ def isolated(tmp_path, monkeypatch):
 
 
 def write(**overrides):
-    Path(CFG["web_config"]).write_text(json.dumps({
+    write_web({
         "backend": "parallel", "keyless_rescue": False,
         "env": {"PARALLEL_API_KEY": "fixture-secret-token"}, **overrides,
-    }))
+    })
 
 
 def owner(tmp_path, profile="profile"):
@@ -139,7 +140,7 @@ async def test_environment_precedence_and_keyword_signature_preserve_ids(tmp_pat
     *[(name, True) for name in ("parallel", "exa", "firecrawl", "keenable", "tavily")],
 ])
 async def test_every_http_provider_records_actual_attempts(name, extract, tmp_path, monkeypatch):
-    from misaka.core.tools._web import bounded
+    from misaka.core.web import bounded
     from misaka.core.web.backends import xai
 
     monkeypatch.setattr(xai, "_auth_path", lambda: str(tmp_path / "auth.json"))
@@ -149,7 +150,8 @@ async def test_every_http_provider_records_actual_attempts(name, extract, tmp_pa
     keys = {key: "fixture-secret-token" for key in config._CREDENTIAL_VARS}
     keys["SEARXNG_URL"] = "https://search.example"
     write(backend=name, env=keys, debug_enabled=True)
-    doc = {"url": "https://example.org/", "title": "private title", "content": "private body", "text": "private body"}
+    doc = {"url": "https://example.org/", "title": "private title", "content": "private body",
+           "text": "private body", "full_content": "private body"}
     requests = transport(monkeypatch, lambda _r: httpx.Response(200, json={
         "success": True, "results": [doc], "content": "private body",
         "data": {"web": [], "markdown": "private body"}, "web": {"results": []}, "output": [],
@@ -158,7 +160,9 @@ async def test_every_http_provider_records_actual_attempts(name, extract, tmp_pa
     try:
         if extract:
             tool = next(t for t in part.tools if t.name == "web_extract")
-            await tool.execute("extract", {"urls": [doc["url"]]}, None, None, None)
+            result = await tool.execute("extract", {"urls": [doc["url"]]}, None, None, None)
+            assert result["isError"] is False and result["details"]["saved_paths"]
+            assert all(doc["content"] in Path(path).read_text() for path in result["details"]["saved_paths"])
         else:
             await search(part)
     finally:
@@ -173,7 +177,7 @@ async def test_every_http_provider_records_actual_attempts(name, extract, tmp_pa
 @pytest.mark.parametrize("name", ["parallel", "exa", "firecrawl", "keenable"])
 @pytest.mark.parametrize("extract", [False, True])
 async def test_keyless_attempts_are_not_double_recorded(name, extract, tmp_path, monkeypatch):
-    from misaka.core.tools._web import bounded
+    from misaka.core.web import bounded
 
     async def resolve(*_args):
         return ["93.184.216.34"]
@@ -181,6 +185,10 @@ async def test_keyless_attempts_are_not_double_recorded(name, extract, tmp_path,
     write(backend=name, env={}, debug_enabled=True, keyless_fallback=True)
     doc = {"url": "https://example.org/", "title": "fixture", "content": "body"}
     def reply(request):
+        if name == "keenable" and extract:
+            assert request.method == "GET" and request.url.path == "/v1/fetch/public"
+            assert request.url.params["url"] == doc["url"]
+            return httpx.Response(200, json=doc)
         data = {"results": [doc], "content": "body", "data": {"markdown": "body"}, "success": True}
         if json.loads(request.content).get("method") == "tools/call":
             value = json.dumps(data) if name == "parallel" else "Title: fixture\nURL: https://example.org/\nHighlights:\nbody"
@@ -191,7 +199,9 @@ async def test_keyless_attempts_are_not_double_recorded(name, extract, tmp_path,
     try:
         if extract:
             tool = next(t for t in part.tools if t.name == "web_extract")
-            await tool.execute("extract", {"urls": [doc["url"]]}, None, None, None)
+            result = await tool.execute("extract", {"urls": [doc["url"]]}, None, None, None)
+            assert result["isError"] is False and result["details"]["saved_paths"]
+            assert all(doc["content"] in Path(path).read_text() for path in result["details"]["saved_paths"])
         else:
             await search(part)
     finally:
@@ -233,7 +243,7 @@ async def test_retry_attempt_ids_join_the_existing_ledger_once(tmp_path, monkeyp
 
 
 async def test_extract_cache_and_truncation_metrics_do_not_duplicate_material(tmp_path, monkeypatch):
-    from misaka.core.tools._web import bounded
+    from misaka.core.web import bounded
 
     write(debug_enabled=True)
     async def resolve(*_args):
@@ -523,7 +533,7 @@ async def test_keyed_failure_and_real_keyless_rescue_have_one_trace(tmp_path, mo
 
 
 async def test_invalid_policy_and_negative_cache_are_not_misreported_as_network_calls(tmp_path, monkeypatch):
-    from misaka.core.tools._web import bounded, negative_cache
+    from misaka.core.web import bounded, negative_cache
 
     write(debug_enabled=True)
     async def resolve(host, _port):
@@ -563,10 +573,10 @@ def test_cli_profile_settings_and_validation_are_consumed(tmp_path, capsys):
     app.main(["web", "unset", "debug_enabled", "--profile", profile])
     with WebScope(profile).activate(snapshot=True):
         assert debug.enabled()
-    original = Path(CFG["web_config"]).read_bytes()
+    original = home.path("settings").read_bytes()
     with pytest.raises(ValueError, match="true/false"):
         config.set_config("debug_enabled", "invalid")
-    assert Path(CFG["web_config"]).read_bytes() == original
+    assert home.path("settings").read_bytes() == original
     assert not (tmp_path / "profile/logs").exists()
 
 
@@ -695,7 +705,7 @@ async def test_inflight_keeps_debug_snapshot_and_nested_disabled_owner_does_not_
     write(debug_enabled=True)
     a, b = WebRuntime(WebScope(str(tmp_path / "a"))), WebRuntime(WebScope(str(tmp_path / "b")))
     (tmp_path / "b").mkdir()
-    (tmp_path / "b/web.json").write_text('{"debug_enabled": false}')
+    write_web(json.loads('{"debug_enabled": false}'), profile=tmp_path / 'b')
     async def child():
         async with account_call("web_search", "fixture", "child secret"):
             pass
@@ -723,12 +733,14 @@ async def test_recursive_invalid_parameters_stay_bounded_without_changing_valida
     part = owner(tmp_path)
     try:
         tool = next(t for t in part.tools if t.name == "web_extract")
-        result = await tool.execute("invalid", {"urls": recursive}, None, None, None)
+        with pytest.raises(RuntimeError, match="Invalid URL item at index 0") as caught:
+            await tool.execute("invalid", {"urls": recursive}, None, None, None)
     finally:
         await part.session_shutdown({}, None)
     row, = records(tmp_path)
     assert row["attempt_count"] == 0 and row["parameters"]["urls"]["count"] == 1
-    assert len(json.dumps(row)) < debug.MAX_BYTES and result["content"]
+    assert len(json.dumps(row)) < debug.MAX_BYTES
+    assert "expected a URL string" in str(caught.value)
 
 
 @pytest.mark.parametrize("value", [None, "false", 0, []])

@@ -182,11 +182,14 @@ def test_rebuild_keeps_cited_bundle_link(state, monkeypatch, cite_bundle):
 async def test_node_session_restores_environment_on_disposal_cancellation(
     state, monkeypatch, cancel_disposal
 ):
+    from misaka.core import wiring
     from misaka.core.platform import session as platform_session
 
     con, run, root = state
     keys = [
         "MISAKA_AUDIT_MARKER",
+        "MISAKA_NET_PANE",
+        "MISAKA_RESEARCH_NODE",
         "MISAKA_USAGE_DB",
         "MISAKA_USAGE_TASK_ID",
         "MISAKA_USAGE_GENERATION",
@@ -210,8 +213,8 @@ async def test_node_session_restores_environment_on_disposal_cancellation(
     )
     monkeypatch.setattr(planner, "_lo_session", lambda *a: run["workspace"])
     monkeypatch.setattr(
-        window.worker,
-        "bare_session_setup",
+        wiring,
+        "role_session_setup",
         lambda *a, **k: ([], None, {"MISAKA_AUDIT_MARKER": "inside"}),
     )
     monkeypatch.setattr(
@@ -228,7 +231,8 @@ async def test_node_session_restores_environment_on_disposal_cancellation(
 
     async def invoke():
         async with window.node_session(con, cfg, run, root):
-            pass
+            assert "MISAKA_NET_PANE" not in os.environ
+            assert "MISAKA_RESEARCH_NODE" not in os.environ
 
     owner = asyncio.create_task(invoke())
     try:
@@ -390,7 +394,7 @@ def test_bundle_name_collision_never_changes_original_source_bytes(
 
 @pytest.mark.parametrize("restricted", [False, True])
 def test_bundle_honors_shared_private_material_boundary(state, monkeypatch, restricted):
-    from misaka.core.tools._web.evidence import check_material_read
+    from misaka.core.web.evidence import check_material_read
 
     con, run, _root = state
     monkeypatch.setattr(bundle.corpus, "docs", lambda **k: [])

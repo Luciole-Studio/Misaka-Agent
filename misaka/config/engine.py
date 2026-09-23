@@ -1,16 +1,15 @@
-"""Engine-side (formerly harn/pi) configuration: paths, package metadata, identity.
+"""Engine-side (formerly harn/pi) configuration: package metadata and the engine's path accessors.
 
-The identity is now MISAKA's: dist metadata is looked up under ``misaka``, the
-config directory is ``~/.misaka/``, and agent assets live in ``~/.misaka/agent/``.
-Product-side CFG lives in misaka/config/product.py.
+Every location comes from the one table in :mod:`misaka.config.home`; the functions here keep
+the names pi's code calls them by. Product-side CFG lives in misaka/config/product.py.
 """
 
 from __future__ import annotations
 
-import os
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 
+from misaka.config import home
 from misaka.utils.paths import normalize_path
 
 # MISAKA is not white-labelled: these were read out of a package.json / [tool.harn]
@@ -18,9 +17,7 @@ from misaka.utils.paths import normalize_path
 # fallback. The version is the one value with a real source.
 APP_NAME = "misaka"
 APP_TITLE = "misaka"
-CONFIG_DIR_NAME = ".misaka"
-ENV_AGENT_DIR = "MISAKA_CODING_AGENT_DIR"
-ENV_SESSION_DIR = "MISAKA_CODING_AGENT_SESSION_DIR"
+CONFIG_DIR_NAME = home.DIR_NAME
 
 try:
     VERSION = importlib_metadata.version("misaka")
@@ -33,31 +30,64 @@ def expand_tilde_path(path: str) -> str:
 
 
 def get_agent_dir() -> str:
-    env_dir = os.environ.get(ENV_AGENT_DIR)
-    if env_dir:
-        return expand_tilde_path(env_dir)
-    return str(Path.home() / CONFIG_DIR_NAME / "agent")
+    return str(home.path("agent"))
 
 
 def get_custom_themes_dir() -> str:
-    return str(Path(get_agent_dir()) / "themes")
+    return str(home.path("themes"))
 
 
 def get_models_path() -> str:
-    return str(Path(get_agent_dir()) / "models.json")
+    return str(home.path("models"))
 
 
 def get_auth_path() -> str:
-    return str(Path(get_agent_dir()) / "auth.json")
+    return str(home.path("auth"))
 
 
 def get_debug_log_path() -> str:
     """Where /debug writes. Named after the app so a user can find it without reading source."""
-    return str(Path(get_agent_dir()) / f"{APP_NAME}-debug.log")
+    return str(home.path("debug_log"))
+
+
+def get_log_path() -> str:
+    """Where warnings and errors from every misaka process go."""
+    return str(home.path("log"))
+
+
+def configure_logging() -> str | None:
+    """Give the root logger a file so ``logger.warning`` never reaches the terminal.
+
+    Without a handler Python's last-resort handler prints every warning to stderr, and a
+    TUI's stderr is its own screen: the text lands wherever the cursor is, usually the input
+    box (2026-09-18, B6). One rotating file per user, shared by the panel, the daemon and
+    every session process, at WARNING and above. Idempotent; a failure to open the file
+    leaves logging as it was rather than stopping the program.
+    """
+    import logging
+    from logging.handlers import RotatingFileHandler
+
+    root = logging.getLogger()
+    path = get_log_path()
+    for handler in root.handlers:
+        if getattr(handler, "baseFilename", None) == path:
+            return path
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        handler = RotatingFileHandler(path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+    except OSError:
+        return None
+    handler.setLevel(logging.WARNING)
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s pid=%(process)d %(name)s: %(message)s"))
+    root.addHandler(handler)
+    if root.level == logging.NOTSET or root.level > logging.WARNING:
+        root.setLevel(logging.WARNING)
+    return path
 
 
 def get_bin_dir() -> str:
-    return str(Path(get_agent_dir()) / "bin")
+    return str(home.path("bin"))
 
 
 def _get_package_module_dir() -> Path:
@@ -85,12 +115,8 @@ def get_sessions_dir() -> str:
 
     pi's is ``<agent dir>/sessions``. MISAKA's is the coordinator's root in the product
     tree (``config.sessions``): a session that names no role is Last Order's, and it has
-    to land where ``/resume`` and the panel look. ``MISAKA_CODING_AGENT_SESSION_DIR``
-    still overrides, as in pi.
+    to land where ``/resume`` and the panel look.
     """
-    env_dir = os.environ.get(ENV_SESSION_DIR)
-    if env_dir:
-        return expand_tilde_path(env_dir)
     from misaka.config import sessions
 
     return sessions.role_dir()
@@ -100,7 +126,5 @@ __all__ = [
     "APP_NAME",
     "APP_TITLE",
     "CONFIG_DIR_NAME",
-    "ENV_AGENT_DIR",
-    "ENV_SESSION_DIR",
     "VERSION",
     ]

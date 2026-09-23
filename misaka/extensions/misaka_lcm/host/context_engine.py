@@ -568,6 +568,32 @@ class Prepared:
     replay_changed: bool
 
 
+def _aligned(native, original_native):
+    """The live view with its positions in the saved view -- reconciled, never refused.
+
+    Raising here (2026-09-18, B11) failed every turn of a session after one aborted
+    turn had left the two views disagreeing on one message: nothing could advance the
+    session, so nothing could ever bring the views back together. Upstream's stance is
+    that the list handed to it is what the model is sent and the store re-anchors
+    itself to it (``_reconcile_ingest_cursor_from_store``). Same here: an unalignable
+    live view of the same length keeps its messages and takes the saved view's
+    positions one for one; a live view of a different length falls back to the saved
+    view for this turn. Either way the difference is logged, once per shape, so the
+    next occurrence says what actually differed instead of only that something did.
+    """
+    positions = ingest.align_sources(native, original_native)
+    if positions is not None:
+        return native, positions
+    detail = ingest.describe_mismatch(native, original_native)
+    if len(native) == len(original_native):
+        logger.warning('LCM live context and transcript disagree; keeping the live messages '
+                       'with one-for-one positions (%s)', detail)
+        return native, list(range(len(native)))
+    logger.warning('LCM live context and transcript disagree in length; sending the transcript '
+                   'view for this turn (%s)', detail)
+    return original_native, list(range(len(original_native)))
+
+
 def prepare(event, ctx, *, transcript=None):
     """Original engine policy, without consulting Pi thresholds or cut points."""
     from misaka.core.session_manager import build_session_context
@@ -577,7 +603,7 @@ def prepare(event, ctx, *, transcript=None):
     native = read_field(event, 'messages')
     if native is None:
         native = original_native
-    positions = ingest.source_indices(native, original_native)
+    native, positions = _aligned(native, original_native)
     built = bound_engine(ctx)
     messages = _messages(transcript, built)
     # Establish the new branch rows before selecting its source scope. Ingest

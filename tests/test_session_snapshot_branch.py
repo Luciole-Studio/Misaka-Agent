@@ -15,7 +15,9 @@ async def test_snapshot_tracks_selected_and_empty_leaf():
     manager.branch(root)
     right = manager.appendMessage({"role": "user", "content": "right", "timestamp": 2})
     session = SimpleNamespace(sessionManager=manager, sessionId=manager.sessionId, isIdle=True,
-                              getSteeringMessages=list, getFollowUpMessages=list)
+                              getSteeringMessages=list, getFollowUpMessages=list,
+                              state=SimpleNamespace(streamingMessage=None),
+                              subscribe=lambda callback: lambda: None)
     control = SessionControl(session, None)
     for leaf, expected in ((right, [root, right]), (left, [root, left]), (None, [])):
         manager.resetLeaf() if leaf is None else manager.branch(leaf)
@@ -36,7 +38,9 @@ async def test_snapshot_does_not_read_another_branches_checkpoint():
         {"role": "user", "content": "right summary", "timestamp": 2}])
     manager.branch(left)
     session = SimpleNamespace(sessionManager=manager, sessionId=manager.sessionId, isIdle=True,
-                              getSteeringMessages=list, getFollowUpMessages=list)
+                              getSteeringMessages=list, getFollowUpMessages=list,
+                              state=SimpleNamespace(streamingMessage=None),
+                              subscribe=lambda callback: lambda: None)
     snapshot = await SessionControl(session, None)._execute({"operation": "snapshot"})
     assert snapshot["entries"] == manager.buildContextEntries()
 
@@ -48,7 +52,9 @@ async def test_snapshot_socket_still_fences_session_owner(tmp_path):
     path = tmp_path / "catalog.json"
     path.write_text(json.dumps(record))
     session = SimpleNamespace(sessionManager=manager, sessionId=manager.sessionId, isIdle=True,
-                              getSteeringMessages=list, getFollowUpMessages=list)
+                              getSteeringMessages=list, getFollowUpMessages=list,
+                              state=SimpleNamespace(streamingMessage=None),
+                              subscribe=lambda callback: lambda: None)
     catalog = SimpleNamespace(record=str(path), instance="original", spec=None)
     control = SessionControl(session, catalog)
     await control.start()

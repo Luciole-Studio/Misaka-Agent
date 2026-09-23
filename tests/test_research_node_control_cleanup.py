@@ -1,13 +1,13 @@
 """A resident window must not keep its completed runner's database callbacks."""
 import asyncio
 import sqlite3
+from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 
+from misaka.core.network.wiring.capabilities import SisterCapabilitiesPart
 from misaka.core.research import runs, workflow
-from misaka.core.research.window import WindowLO
 from misaka.core.research.wiring import node
 from misaka.core.session_control import SessionControl
 
@@ -17,16 +17,17 @@ async def test_runner_restores_only_its_callbacks_and_closes_connection(monkeypa
     con = sqlite3.connect(":memory:")
     con.row_factory = sqlite3.Row
     con.executescript("""
-        CREATE TABLE research_runs(id, stop_requested, driver_lock);
-        INSERT INTO research_runs VALUES('run', 0, 'driver');
-        CREATE TABLE research_branches(id, runner_key, depth, status, last_error);
-        INSERT INTO research_branches VALUES('node', 'key', 1, 'executing', NULL);
+        CREATE TABLE research_runs(id, stop_requested, driver_lock, phase, status);
+        INSERT INTO research_runs VALUES('run', 0, 'driver', 'active', 'active');
+        CREATE TABLE research_branches(id, runner_key, depth, status, last_error, run_id);
+        INSERT INTO research_branches VALUES('node', 'key', 1, 'executing', NULL, 'run');
     """)
     session = SimpleNamespace(
         sessionManager=SimpleNamespace(sessionFile="/tmp/unused-fixture.jsonl"),
-        moments=SimpleNamespace(parts=[], send_message=lambda *args: None))
+        moments=SimpleNamespace(parts=[SisterCapabilitiesPart("/tmp")], send_message=lambda *args: None))
     control = SessionControl(session, None)
     previous_check, previous_describe = control.check_active, control.describe
+    previous_input = control.on_input
     replacement_check = lambda: None
     replacement_describe = lambda: {"owner": "replacement"}
     session.moments.parts.append(SimpleNamespace(control=control))
@@ -35,7 +36,8 @@ async def test_runner_restores_only_its_callbacks_and_closes_connection(monkeypa
 
     async def expand(*args, **kwargs):
         control.check_active()
-        assert control.describe() == {"node": "node", "depth": 1, "phase": "executing"}
+        assert control.describe() == {"run_id": "run", "node": "node", "depth": 1,
+                                      "run_phase": "active", "run_status": "active", "node_phase": "executing"}
         con.execute("UPDATE research_branches SET runner_key='other'")
         with pytest.raises(RuntimeError, match="changed owners"):
             control.check_active()
@@ -65,7 +67,11 @@ async def test_runner_restores_only_its_callbacks_and_closes_connection(monkeypa
     monkeypatch.setattr(runs, "release_runner", release)
     monkeypatch.setattr(workflow, "expand_node", expand)
     if outcome == "close_error":
-        monkeypatch.setattr(WindowLO, "close", AsyncMock(side_effect=RuntimeError("close failure")))
+        @contextmanager
+        def broken_snapshot():
+            yield
+            raise RuntimeError("close failure")
+        monkeypatch.setattr(session.moments.parts[0], "snapshot", broken_snapshot)
     try:
         if outcome == "cancelled":
             with pytest.raises(asyncio.CancelledError):
@@ -78,6 +84,7 @@ async def test_runner_restores_only_its_callbacks_and_closes_connection(monkeypa
         assert released == [("research_branches", "node", "key")]
         assert control.check_active is (replacement_check if outcome == "replaced" else previous_check)
         assert control.describe is (replacement_describe if outcome == "replaced" else previous_describe)
+        assert control.on_input is previous_input
         control.check_active()
         control.describe()
         with pytest.raises(sqlite3.ProgrammingError, match="closed database"):

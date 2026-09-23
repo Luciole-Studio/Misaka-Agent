@@ -1,0 +1,1589 @@
+..E..E.E.E.E.E.E.E.E.E...E.E.E.E.E                                       [100%]
+==================================== ERRORS ====================================
+__ ERROR at teardown of test_a_board_without_research_tables_is_not_a_failure __
+  + Exception Group Traceback (most recent call last):
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 361, in from_call
+  |     result: TResult | None = func()
+  |                              ~~~~^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 250, in <lambda>
+  |     lambda: runtest_hook(item=item, **kwds),
+  |             ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+  |     return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  |            ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+  |     return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  |            ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 167, in _multicall
+  |     raise exception
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+  |     teardown.throw(exception)
+  |     ~~~~~~~~~~~~~~^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/logging.py", line 873, in pytest_runtest_teardown
+  |     yield
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+  |     teardown.throw(exception)
+  |     ~~~~~~~~~~~~~~^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/capture.py", line 905, in pytest_runtest_teardown
+  |     return (yield)
+  |             ^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+  |     res = hook_impl.function(*args)
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 188, in pytest_runtest_teardown
+  |     collect_unraisable(item.config)
+  |     ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 81, in collect_unraisable
+  |     raise ExceptionGroup("multiple unraisable exception warnings", errors)
+  | ExceptionGroup: multiple unraisable exception warnings (2 sub-exceptions)
+  +-+---------------- 1 ----------------
+    | Traceback (most recent call last):
+    |   File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/leak_gc.py", line 7, in collect_after_each_test
+    |     gc.collect()
+    |     ~~~~~~~~~~^^
+    | ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x10e31d150>
+    | 
+    | The above exception was the direct cause of the following exception:
+    | 
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 67, in collect_unraisable
+    |     warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+    |     ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    | pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x10e31d150>
+    | 
+    | Object allocated at:
+    |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120
+    |     return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+    |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121
+    |     res = hook_impl.function(*args)
+    |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/python.py", line 167
+    |     result = testfunction(**testargs)
+    |   File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/tests/test_research_mode_notice.py", line 41
+    |     con = tasks.connect(str(tmp_path / "plain.db"))
+    |   File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/misaka/core/platform/tasks.py", line 374
+    |     con = sqlite3.connect(
+    +---------------- 2 ----------------
+    | Traceback (most recent call last):
+    |   File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/leak_gc.py", line 7, in collect_after_each_test
+    |     gc.collect()
+    |     ~~~~~~~~~~^^
+    | ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x10e31d250>
+    | 
+    | The above exception was the direct cause of the following exception:
+    | 
+    | Traceback (most recent call last):
+    |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 67, in collect_unraisable
+    |     warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+    |     ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    | pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x10e31d250>
+    | 
+    | Object allocated at:
+    |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121
+    |     res = hook_impl.function(*args)
+    |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1328
+    |     result = call_fixture_func(fixturefunc, request, kwargs)
+    |   File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1005
+    |     fixture_result = fixturefunc(**kwargs)
+    |   File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/tests/test_research_mode_notice.py", line 22
+    |     con = tasks.connect(str(tmp_path / "board.db"))
+    |   File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/misaka/core/platform/tasks.py", line 374
+    |     con = sqlite3.connect(
+    +------------------------------------
+_____ ERROR at teardown of test_an_active_run_puts_the_discipline_in_front _____
+
+    @pytest.fixture(autouse=True)
+    def collect_after_each_test():
+        yield
+>       gc.collect()
+E       ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x10e31e850>
+
+../leak_gc.py:7: ResourceWarning
+
+The above exception was the direct cause of the following exception:
+
+cls = <class '_pytest.runner.CallInfo'>
+func = <function call_and_report.<locals>.<lambda> at 0x10e3b2200>
+when = 'teardown'
+reraise = (<class '_pytest.outcomes.Exit'>, <class 'KeyboardInterrupt'>)
+
+    @classmethod
+    def from_call(
+        cls,
+        func: Callable[[], TResult],
+        when: Literal["collect", "setup", "call", "teardown"],
+        reraise: type[BaseException] | tuple[type[BaseException], ...] | None = None,
+    ) -> CallInfo[TResult]:
+        """Call func, wrapping the result in a CallInfo.
+    
+        :param func:
+            The function to call. Called without arguments.
+        :type func: Callable[[], _pytest.runner.TResult]
+        :param when:
+            The phase in which the function is called.
+        :param reraise:
+            Exception or exceptions that shall propagate if raised by the
+            function, instead of being wrapped in the CallInfo.
+        """
+        excinfo = None
+        instant = timing.Instant()
+        try:
+>           result: TResult | None = func()
+                                     ^^^^^^
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:361: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:250: in <lambda>
+    lambda: runtest_hook(item=item, **kwds),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_hooks.py:512: in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_manager.py:120: in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/logging.py:873: in pytest_runtest_teardown
+    yield
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/capture.py:905: in pytest_runtest_teardown
+    return (yield)
+            ^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:188: in pytest_runtest_teardown
+    collect_unraisable(item.config)
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:79: in collect_unraisable
+    raise errors[0]
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+config = <_pytest.config.Config object at 0x10b08a120>
+
+    def collect_unraisable(config: Config) -> None:
+        pop_unraisable = config.stash[unraisable_exceptions].pop
+        errors: list[pytest.PytestUnraisableExceptionWarning | RuntimeError] = []
+        meta = None
+        hook_error = None
+        try:
+            while True:
+                try:
+                    meta = pop_unraisable()
+                except IndexError:
+                    break
+    
+                if isinstance(meta, BaseException):
+                    hook_error = RuntimeError("Failed to process unraisable exception")
+                    hook_error.__cause__ = meta
+                    errors.append(hook_error)
+                    continue
+    
+                msg = meta.msg
+                try:
+>                   warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+E                   pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x10e31e850>
+E                   
+E                   Object allocated at:
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121
+E                       res = hook_impl.function(*args)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1328
+E                       result = call_fixture_func(fixturefunc, request, kwargs)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1005
+E                       fixture_result = fixturefunc(**kwargs)
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/tests/test_research_mode_notice.py", line 22
+E                       con = tasks.connect(str(tmp_path / "board.db"))
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/misaka/core/platform/tasks.py", line 374
+E                       con = sqlite3.connect(
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning
+____ ERROR at teardown of test_waiting_for_the_user_still_counts_as_driven _____
+
+    @pytest.fixture(autouse=True)
+    def collect_after_each_test():
+        yield
+>       gc.collect()
+E       ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x10e31d150>
+
+../leak_gc.py:7: ResourceWarning
+
+The above exception was the direct cause of the following exception:
+
+cls = <class '_pytest.runner.CallInfo'>
+func = <function call_and_report.<locals>.<lambda> at 0x10e408ae0>
+when = 'teardown'
+reraise = (<class '_pytest.outcomes.Exit'>, <class 'KeyboardInterrupt'>)
+
+    @classmethod
+    def from_call(
+        cls,
+        func: Callable[[], TResult],
+        when: Literal["collect", "setup", "call", "teardown"],
+        reraise: type[BaseException] | tuple[type[BaseException], ...] | None = None,
+    ) -> CallInfo[TResult]:
+        """Call func, wrapping the result in a CallInfo.
+    
+        :param func:
+            The function to call. Called without arguments.
+        :type func: Callable[[], _pytest.runner.TResult]
+        :param when:
+            The phase in which the function is called.
+        :param reraise:
+            Exception or exceptions that shall propagate if raised by the
+            function, instead of being wrapped in the CallInfo.
+        """
+        excinfo = None
+        instant = timing.Instant()
+        try:
+>           result: TResult | None = func()
+                                     ^^^^^^
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:361: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:250: in <lambda>
+    lambda: runtest_hook(item=item, **kwds),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_hooks.py:512: in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_manager.py:120: in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/logging.py:873: in pytest_runtest_teardown
+    yield
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/capture.py:905: in pytest_runtest_teardown
+    return (yield)
+            ^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:188: in pytest_runtest_teardown
+    collect_unraisable(item.config)
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:79: in collect_unraisable
+    raise errors[0]
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+config = <_pytest.config.Config object at 0x10b08a120>
+
+    def collect_unraisable(config: Config) -> None:
+        pop_unraisable = config.stash[unraisable_exceptions].pop
+        errors: list[pytest.PytestUnraisableExceptionWarning | RuntimeError] = []
+        meta = None
+        hook_error = None
+        try:
+            while True:
+                try:
+                    meta = pop_unraisable()
+                except IndexError:
+                    break
+    
+                if isinstance(meta, BaseException):
+                    hook_error = RuntimeError("Failed to process unraisable exception")
+                    hook_error.__cause__ = meta
+                    errors.append(hook_error)
+                    continue
+    
+                msg = meta.msg
+                try:
+>                   warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+E                   pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x10e31d150>
+E                   
+E                   Object allocated at:
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121
+E                       res = hook_impl.function(*args)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1328
+E                       result = call_fixture_func(fixturefunc, request, kwargs)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1005
+E                       fixture_result = fixturefunc(**kwargs)
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/tests/test_research_mode_notice.py", line 22
+E                       con = tasks.connect(str(tmp_path / "board.db"))
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/misaka/core/platform/tasks.py", line 374
+E                       con = sqlite3.connect(
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning
+_ ERROR at teardown of test_a_paused_run_tells_lo_to_wait_for_the_user[failed] _
+
+    @pytest.fixture(autouse=True)
+    def collect_after_each_test():
+        yield
+>       gc.collect()
+E       ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x10e31d450>
+
+../leak_gc.py:7: ResourceWarning
+
+The above exception was the direct cause of the following exception:
+
+cls = <class '_pytest.runner.CallInfo'>
+func = <function call_and_report.<locals>.<lambda> at 0x10e408900>
+when = 'teardown'
+reraise = (<class '_pytest.outcomes.Exit'>, <class 'KeyboardInterrupt'>)
+
+    @classmethod
+    def from_call(
+        cls,
+        func: Callable[[], TResult],
+        when: Literal["collect", "setup", "call", "teardown"],
+        reraise: type[BaseException] | tuple[type[BaseException], ...] | None = None,
+    ) -> CallInfo[TResult]:
+        """Call func, wrapping the result in a CallInfo.
+    
+        :param func:
+            The function to call. Called without arguments.
+        :type func: Callable[[], _pytest.runner.TResult]
+        :param when:
+            The phase in which the function is called.
+        :param reraise:
+            Exception or exceptions that shall propagate if raised by the
+            function, instead of being wrapped in the CallInfo.
+        """
+        excinfo = None
+        instant = timing.Instant()
+        try:
+>           result: TResult | None = func()
+                                     ^^^^^^
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:361: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:250: in <lambda>
+    lambda: runtest_hook(item=item, **kwds),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_hooks.py:512: in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_manager.py:120: in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/logging.py:873: in pytest_runtest_teardown
+    yield
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/capture.py:905: in pytest_runtest_teardown
+    return (yield)
+            ^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:188: in pytest_runtest_teardown
+    collect_unraisable(item.config)
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:79: in collect_unraisable
+    raise errors[0]
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+config = <_pytest.config.Config object at 0x10b08a120>
+
+    def collect_unraisable(config: Config) -> None:
+        pop_unraisable = config.stash[unraisable_exceptions].pop
+        errors: list[pytest.PytestUnraisableExceptionWarning | RuntimeError] = []
+        meta = None
+        hook_error = None
+        try:
+            while True:
+                try:
+                    meta = pop_unraisable()
+                except IndexError:
+                    break
+    
+                if isinstance(meta, BaseException):
+                    hook_error = RuntimeError("Failed to process unraisable exception")
+                    hook_error.__cause__ = meta
+                    errors.append(hook_error)
+                    continue
+    
+                msg = meta.msg
+                try:
+>                   warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+E                   pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x10e31d450>
+E                   
+E                   Object allocated at:
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121
+E                       res = hook_impl.function(*args)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1328
+E                       result = call_fixture_func(fixturefunc, request, kwargs)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1005
+E                       fixture_result = fixturefunc(**kwargs)
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/tests/test_research_mode_notice.py", line 22
+E                       con = tasks.connect(str(tmp_path / "board.db"))
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/misaka/core/platform/tasks.py", line 374
+E                       con = sqlite3.connect(
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning
+_ ERROR at teardown of test_a_paused_run_tells_lo_to_wait_for_the_user[stopped] _
+
+    @pytest.fixture(autouse=True)
+    def collect_after_each_test():
+        yield
+>       gc.collect()
+E       ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x10e31eb50>
+
+../leak_gc.py:7: ResourceWarning
+
+The above exception was the direct cause of the following exception:
+
+cls = <class '_pytest.runner.CallInfo'>
+func = <function call_and_report.<locals>.<lambda> at 0x10e408180>
+when = 'teardown'
+reraise = (<class '_pytest.outcomes.Exit'>, <class 'KeyboardInterrupt'>)
+
+    @classmethod
+    def from_call(
+        cls,
+        func: Callable[[], TResult],
+        when: Literal["collect", "setup", "call", "teardown"],
+        reraise: type[BaseException] | tuple[type[BaseException], ...] | None = None,
+    ) -> CallInfo[TResult]:
+        """Call func, wrapping the result in a CallInfo.
+    
+        :param func:
+            The function to call. Called without arguments.
+        :type func: Callable[[], _pytest.runner.TResult]
+        :param when:
+            The phase in which the function is called.
+        :param reraise:
+            Exception or exceptions that shall propagate if raised by the
+            function, instead of being wrapped in the CallInfo.
+        """
+        excinfo = None
+        instant = timing.Instant()
+        try:
+>           result: TResult | None = func()
+                                     ^^^^^^
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:361: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:250: in <lambda>
+    lambda: runtest_hook(item=item, **kwds),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_hooks.py:512: in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_manager.py:120: in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/logging.py:873: in pytest_runtest_teardown
+    yield
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/capture.py:905: in pytest_runtest_teardown
+    return (yield)
+            ^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:188: in pytest_runtest_teardown
+    collect_unraisable(item.config)
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:79: in collect_unraisable
+    raise errors[0]
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+config = <_pytest.config.Config object at 0x10b08a120>
+
+    def collect_unraisable(config: Config) -> None:
+        pop_unraisable = config.stash[unraisable_exceptions].pop
+        errors: list[pytest.PytestUnraisableExceptionWarning | RuntimeError] = []
+        meta = None
+        hook_error = None
+        try:
+            while True:
+                try:
+                    meta = pop_unraisable()
+                except IndexError:
+                    break
+    
+                if isinstance(meta, BaseException):
+                    hook_error = RuntimeError("Failed to process unraisable exception")
+                    hook_error.__cause__ = meta
+                    errors.append(hook_error)
+                    continue
+    
+                msg = meta.msg
+                try:
+>                   warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+E                   pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x10e31eb50>
+E                   
+E                   Object allocated at:
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121
+E                       res = hook_impl.function(*args)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1328
+E                       result = call_fixture_func(fixturefunc, request, kwargs)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1005
+E                       fixture_result = fixturefunc(**kwargs)
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/tests/test_research_mode_notice.py", line 22
+E                       con = tasks.connect(str(tmp_path / "board.db"))
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/misaka/core/platform/tasks.py", line 374
+E                       con = sqlite3.connect(
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning
+____ ERROR at teardown of test_a_finished_run_leaves_the_conversation_alone ____
+
+    @pytest.fixture(autouse=True)
+    def collect_after_each_test():
+        yield
+>       gc.collect()
+E       ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x10e31d650>
+
+../leak_gc.py:7: ResourceWarning
+
+The above exception was the direct cause of the following exception:
+
+cls = <class '_pytest.runner.CallInfo'>
+func = <function call_and_report.<locals>.<lambda> at 0x10e4085e0>
+when = 'teardown'
+reraise = (<class '_pytest.outcomes.Exit'>, <class 'KeyboardInterrupt'>)
+
+    @classmethod
+    def from_call(
+        cls,
+        func: Callable[[], TResult],
+        when: Literal["collect", "setup", "call", "teardown"],
+        reraise: type[BaseException] | tuple[type[BaseException], ...] | None = None,
+    ) -> CallInfo[TResult]:
+        """Call func, wrapping the result in a CallInfo.
+    
+        :param func:
+            The function to call. Called without arguments.
+        :type func: Callable[[], _pytest.runner.TResult]
+        :param when:
+            The phase in which the function is called.
+        :param reraise:
+            Exception or exceptions that shall propagate if raised by the
+            function, instead of being wrapped in the CallInfo.
+        """
+        excinfo = None
+        instant = timing.Instant()
+        try:
+>           result: TResult | None = func()
+                                     ^^^^^^
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:361: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:250: in <lambda>
+    lambda: runtest_hook(item=item, **kwds),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_hooks.py:512: in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_manager.py:120: in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/logging.py:873: in pytest_runtest_teardown
+    yield
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/capture.py:905: in pytest_runtest_teardown
+    return (yield)
+            ^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:188: in pytest_runtest_teardown
+    collect_unraisable(item.config)
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:79: in collect_unraisable
+    raise errors[0]
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+config = <_pytest.config.Config object at 0x10b08a120>
+
+    def collect_unraisable(config: Config) -> None:
+        pop_unraisable = config.stash[unraisable_exceptions].pop
+        errors: list[pytest.PytestUnraisableExceptionWarning | RuntimeError] = []
+        meta = None
+        hook_error = None
+        try:
+            while True:
+                try:
+                    meta = pop_unraisable()
+                except IndexError:
+                    break
+    
+                if isinstance(meta, BaseException):
+                    hook_error = RuntimeError("Failed to process unraisable exception")
+                    hook_error.__cause__ = meta
+                    errors.append(hook_error)
+                    continue
+    
+                msg = meta.msg
+                try:
+>                   warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+E                   pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x10e31d650>
+E                   
+E                   Object allocated at:
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121
+E                       res = hook_impl.function(*args)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1328
+E                       result = call_fixture_func(fixturefunc, request, kwargs)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1005
+E                       fixture_result = fixturefunc(**kwargs)
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/tests/test_research_mode_notice.py", line 22
+E                       con = tasks.connect(str(tmp_path / "board.db"))
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/misaka/core/platform/tasks.py", line 374
+E                       con = sqlite3.connect(
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning
+_____ ERROR at teardown of test_the_discipline_wins_over_a_paused_sibling ______
+
+    @pytest.fixture(autouse=True)
+    def collect_after_each_test():
+        yield
+>       gc.collect()
+E       ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x10e31f150>
+
+../leak_gc.py:7: ResourceWarning
+
+The above exception was the direct cause of the following exception:
+
+cls = <class '_pytest.runner.CallInfo'>
+func = <function call_and_report.<locals>.<lambda> at 0x10e408ae0>
+when = 'teardown'
+reraise = (<class '_pytest.outcomes.Exit'>, <class 'KeyboardInterrupt'>)
+
+    @classmethod
+    def from_call(
+        cls,
+        func: Callable[[], TResult],
+        when: Literal["collect", "setup", "call", "teardown"],
+        reraise: type[BaseException] | tuple[type[BaseException], ...] | None = None,
+    ) -> CallInfo[TResult]:
+        """Call func, wrapping the result in a CallInfo.
+    
+        :param func:
+            The function to call. Called without arguments.
+        :type func: Callable[[], _pytest.runner.TResult]
+        :param when:
+            The phase in which the function is called.
+        :param reraise:
+            Exception or exceptions that shall propagate if raised by the
+            function, instead of being wrapped in the CallInfo.
+        """
+        excinfo = None
+        instant = timing.Instant()
+        try:
+>           result: TResult | None = func()
+                                     ^^^^^^
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:361: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:250: in <lambda>
+    lambda: runtest_hook(item=item, **kwds),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_hooks.py:512: in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_manager.py:120: in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/logging.py:873: in pytest_runtest_teardown
+    yield
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/capture.py:905: in pytest_runtest_teardown
+    return (yield)
+            ^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:188: in pytest_runtest_teardown
+    collect_unraisable(item.config)
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:79: in collect_unraisable
+    raise errors[0]
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+config = <_pytest.config.Config object at 0x10b08a120>
+
+    def collect_unraisable(config: Config) -> None:
+        pop_unraisable = config.stash[unraisable_exceptions].pop
+        errors: list[pytest.PytestUnraisableExceptionWarning | RuntimeError] = []
+        meta = None
+        hook_error = None
+        try:
+            while True:
+                try:
+                    meta = pop_unraisable()
+                except IndexError:
+                    break
+    
+                if isinstance(meta, BaseException):
+                    hook_error = RuntimeError("Failed to process unraisable exception")
+                    hook_error.__cause__ = meta
+                    errors.append(hook_error)
+                    continue
+    
+                msg = meta.msg
+                try:
+>                   warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+E                   pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x10e31f150>
+E                   
+E                   Object allocated at:
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121
+E                       res = hook_impl.function(*args)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1328
+E                       result = call_fixture_func(fixturefunc, request, kwargs)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1005
+E                       fixture_result = fixturefunc(**kwargs)
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/tests/test_research_mode_notice.py", line 22
+E                       con = tasks.connect(str(tmp_path / "board.db"))
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/misaka/core/platform/tasks.py", line 374
+E                       con = sqlite3.connect(
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning
+_____ ERROR at teardown of test_context_hook_prepends_an_ephemeral_notice ______
+
+    @pytest.fixture(autouse=True)
+    def collect_after_each_test():
+        yield
+>       gc.collect()
+E       ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x10e31d350>
+
+../leak_gc.py:7: ResourceWarning
+
+The above exception was the direct cause of the following exception:
+
+cls = <class '_pytest.runner.CallInfo'>
+func = <function call_and_report.<locals>.<lambda> at 0x10e408180>
+when = 'teardown'
+reraise = (<class '_pytest.outcomes.Exit'>, <class 'KeyboardInterrupt'>)
+
+    @classmethod
+    def from_call(
+        cls,
+        func: Callable[[], TResult],
+        when: Literal["collect", "setup", "call", "teardown"],
+        reraise: type[BaseException] | tuple[type[BaseException], ...] | None = None,
+    ) -> CallInfo[TResult]:
+        """Call func, wrapping the result in a CallInfo.
+    
+        :param func:
+            The function to call. Called without arguments.
+        :type func: Callable[[], _pytest.runner.TResult]
+        :param when:
+            The phase in which the function is called.
+        :param reraise:
+            Exception or exceptions that shall propagate if raised by the
+            function, instead of being wrapped in the CallInfo.
+        """
+        excinfo = None
+        instant = timing.Instant()
+        try:
+>           result: TResult | None = func()
+                                     ^^^^^^
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:361: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:250: in <lambda>
+    lambda: runtest_hook(item=item, **kwds),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_hooks.py:512: in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_manager.py:120: in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/logging.py:873: in pytest_runtest_teardown
+    yield
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/capture.py:905: in pytest_runtest_teardown
+    return (yield)
+            ^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:188: in pytest_runtest_teardown
+    collect_unraisable(item.config)
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:79: in collect_unraisable
+    raise errors[0]
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+config = <_pytest.config.Config object at 0x10b08a120>
+
+    def collect_unraisable(config: Config) -> None:
+        pop_unraisable = config.stash[unraisable_exceptions].pop
+        errors: list[pytest.PytestUnraisableExceptionWarning | RuntimeError] = []
+        meta = None
+        hook_error = None
+        try:
+            while True:
+                try:
+                    meta = pop_unraisable()
+                except IndexError:
+                    break
+    
+                if isinstance(meta, BaseException):
+                    hook_error = RuntimeError("Failed to process unraisable exception")
+                    hook_error.__cause__ = meta
+                    errors.append(hook_error)
+                    continue
+    
+                msg = meta.msg
+                try:
+>                   warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+E                   pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x10e31d350>
+E                   
+E                   Object allocated at:
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121
+E                       res = hook_impl.function(*args)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1328
+E                       result = call_fixture_func(fixturefunc, request, kwargs)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1005
+E                       fixture_result = fixturefunc(**kwargs)
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/tests/test_research_mode_notice.py", line 22
+E                       con = tasks.connect(str(tmp_path / "board.db"))
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/misaka/core/platform/tasks.py", line 374
+E                       con = sqlite3.connect(
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning
+________ ERROR at teardown of test_context_hook_is_silent_without_a_run ________
+
+    @pytest.fixture(autouse=True)
+    def collect_after_each_test():
+        yield
+>       gc.collect()
+E       ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x10e31eb50>
+
+../leak_gc.py:7: ResourceWarning
+
+The above exception was the direct cause of the following exception:
+
+cls = <class '_pytest.runner.CallInfo'>
+func = <function call_and_report.<locals>.<lambda> at 0x10e409940>
+when = 'teardown'
+reraise = (<class '_pytest.outcomes.Exit'>, <class 'KeyboardInterrupt'>)
+
+    @classmethod
+    def from_call(
+        cls,
+        func: Callable[[], TResult],
+        when: Literal["collect", "setup", "call", "teardown"],
+        reraise: type[BaseException] | tuple[type[BaseException], ...] | None = None,
+    ) -> CallInfo[TResult]:
+        """Call func, wrapping the result in a CallInfo.
+    
+        :param func:
+            The function to call. Called without arguments.
+        :type func: Callable[[], _pytest.runner.TResult]
+        :param when:
+            The phase in which the function is called.
+        :param reraise:
+            Exception or exceptions that shall propagate if raised by the
+            function, instead of being wrapped in the CallInfo.
+        """
+        excinfo = None
+        instant = timing.Instant()
+        try:
+>           result: TResult | None = func()
+                                     ^^^^^^
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:361: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:250: in <lambda>
+    lambda: runtest_hook(item=item, **kwds),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_hooks.py:512: in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_manager.py:120: in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/logging.py:873: in pytest_runtest_teardown
+    yield
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/capture.py:905: in pytest_runtest_teardown
+    return (yield)
+            ^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:188: in pytest_runtest_teardown
+    collect_unraisable(item.config)
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:79: in collect_unraisable
+    raise errors[0]
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+config = <_pytest.config.Config object at 0x10b08a120>
+
+    def collect_unraisable(config: Config) -> None:
+        pop_unraisable = config.stash[unraisable_exceptions].pop
+        errors: list[pytest.PytestUnraisableExceptionWarning | RuntimeError] = []
+        meta = None
+        hook_error = None
+        try:
+            while True:
+                try:
+                    meta = pop_unraisable()
+                except IndexError:
+                    break
+    
+                if isinstance(meta, BaseException):
+                    hook_error = RuntimeError("Failed to process unraisable exception")
+                    hook_error.__cause__ = meta
+                    errors.append(hook_error)
+                    continue
+    
+                msg = meta.msg
+                try:
+>                   warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+E                   pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x10e31eb50>
+E                   
+E                   Object allocated at:
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121
+E                       res = hook_impl.function(*args)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1328
+E                       result = call_fixture_func(fixturefunc, request, kwargs)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1005
+E                       fixture_result = fixturefunc(**kwargs)
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/tests/test_research_mode_notice.py", line 22
+E                       con = tasks.connect(str(tmp_path / "board.db"))
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/misaka/core/platform/tasks.py", line 374
+E                       con = sqlite3.connect(
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning
+________ ERROR at teardown of test_context_hook_survives_a_broken_board ________
+
+    @pytest.fixture(autouse=True)
+    def collect_after_each_test():
+        yield
+>       gc.collect()
+E       ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x10e31d150>
+
+../leak_gc.py:7: ResourceWarning
+
+The above exception was the direct cause of the following exception:
+
+cls = <class '_pytest.runner.CallInfo'>
+func = <function call_and_report.<locals>.<lambda> at 0x10e409ee0>
+when = 'teardown'
+reraise = (<class '_pytest.outcomes.Exit'>, <class 'KeyboardInterrupt'>)
+
+    @classmethod
+    def from_call(
+        cls,
+        func: Callable[[], TResult],
+        when: Literal["collect", "setup", "call", "teardown"],
+        reraise: type[BaseException] | tuple[type[BaseException], ...] | None = None,
+    ) -> CallInfo[TResult]:
+        """Call func, wrapping the result in a CallInfo.
+    
+        :param func:
+            The function to call. Called without arguments.
+        :type func: Callable[[], _pytest.runner.TResult]
+        :param when:
+            The phase in which the function is called.
+        :param reraise:
+            Exception or exceptions that shall propagate if raised by the
+            function, instead of being wrapped in the CallInfo.
+        """
+        excinfo = None
+        instant = timing.Instant()
+        try:
+>           result: TResult | None = func()
+                                     ^^^^^^
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:361: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:250: in <lambda>
+    lambda: runtest_hook(item=item, **kwds),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_hooks.py:512: in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_manager.py:120: in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/logging.py:873: in pytest_runtest_teardown
+    yield
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/capture.py:905: in pytest_runtest_teardown
+    return (yield)
+            ^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:188: in pytest_runtest_teardown
+    collect_unraisable(item.config)
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:79: in collect_unraisable
+    raise errors[0]
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+config = <_pytest.config.Config object at 0x10b08a120>
+
+    def collect_unraisable(config: Config) -> None:
+        pop_unraisable = config.stash[unraisable_exceptions].pop
+        errors: list[pytest.PytestUnraisableExceptionWarning | RuntimeError] = []
+        meta = None
+        hook_error = None
+        try:
+            while True:
+                try:
+                    meta = pop_unraisable()
+                except IndexError:
+                    break
+    
+                if isinstance(meta, BaseException):
+                    hook_error = RuntimeError("Failed to process unraisable exception")
+                    hook_error.__cause__ = meta
+                    errors.append(hook_error)
+                    continue
+    
+                msg = meta.msg
+                try:
+>                   warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+E                   pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x10e31d150>
+E                   
+E                   Object allocated at:
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121
+E                       res = hook_impl.function(*args)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1328
+E                       result = call_fixture_func(fixturefunc, request, kwargs)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1005
+E                       fixture_result = fixturefunc(**kwargs)
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/tests/test_research_mode_notice.py", line 22
+E                       con = tasks.connect(str(tmp_path / "board.db"))
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/misaka/core/platform/tasks.py", line 374
+E                       con = sqlite3.connect(
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning
+_________ ERROR at teardown of test_a_driven_run_reads_its_own_results _________
+
+    @pytest.fixture(autouse=True)
+    def collect_after_each_test():
+        yield
+>       gc.collect()
+E       ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x10e31e950>
+
+../leak_gc.py:7: ResourceWarning
+
+The above exception was the direct cause of the following exception:
+
+cls = <class '_pytest.runner.CallInfo'>
+func = <function call_and_report.<locals>.<lambda> at 0x10e3d3c40>
+when = 'teardown'
+reraise = (<class '_pytest.outcomes.Exit'>, <class 'KeyboardInterrupt'>)
+
+    @classmethod
+    def from_call(
+        cls,
+        func: Callable[[], TResult],
+        when: Literal["collect", "setup", "call", "teardown"],
+        reraise: type[BaseException] | tuple[type[BaseException], ...] | None = None,
+    ) -> CallInfo[TResult]:
+        """Call func, wrapping the result in a CallInfo.
+    
+        :param func:
+            The function to call. Called without arguments.
+        :type func: Callable[[], _pytest.runner.TResult]
+        :param when:
+            The phase in which the function is called.
+        :param reraise:
+            Exception or exceptions that shall propagate if raised by the
+            function, instead of being wrapped in the CallInfo.
+        """
+        excinfo = None
+        instant = timing.Instant()
+        try:
+>           result: TResult | None = func()
+                                     ^^^^^^
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:361: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:250: in <lambda>
+    lambda: runtest_hook(item=item, **kwds),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_hooks.py:512: in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_manager.py:120: in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/logging.py:873: in pytest_runtest_teardown
+    yield
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/capture.py:905: in pytest_runtest_teardown
+    return (yield)
+            ^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:188: in pytest_runtest_teardown
+    collect_unraisable(item.config)
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:79: in collect_unraisable
+    raise errors[0]
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+config = <_pytest.config.Config object at 0x10b08a120>
+
+    def collect_unraisable(config: Config) -> None:
+        pop_unraisable = config.stash[unraisable_exceptions].pop
+        errors: list[pytest.PytestUnraisableExceptionWarning | RuntimeError] = []
+        meta = None
+        hook_error = None
+        try:
+            while True:
+                try:
+                    meta = pop_unraisable()
+                except IndexError:
+                    break
+    
+                if isinstance(meta, BaseException):
+                    hook_error = RuntimeError("Failed to process unraisable exception")
+                    hook_error.__cause__ = meta
+                    errors.append(hook_error)
+                    continue
+    
+                msg = meta.msg
+                try:
+>                   warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+E                   pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x10e31e950>
+E                   
+E                   Object allocated at:
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121
+E                       res = hook_impl.function(*args)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1328
+E                       result = call_fixture_func(fixturefunc, request, kwargs)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1005
+E                       fixture_result = fixturefunc(**kwargs)
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/tests/test_research_mode_notice.py", line 22
+E                       con = tasks.connect(str(tmp_path / "board.db"))
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/misaka/core/platform/tasks.py", line 374
+E                       con = sqlite3.connect(
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning
+_ ERROR at teardown of test_a_run_nobody_drives_needs_last_order_woken[failed] _
+
+    @pytest.fixture(autouse=True)
+    def collect_after_each_test():
+        yield
+>       gc.collect()
+E       ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x10e31d650>
+
+../leak_gc.py:7: ResourceWarning
+
+The above exception was the direct cause of the following exception:
+
+cls = <class '_pytest.runner.CallInfo'>
+func = <function call_and_report.<locals>.<lambda> at 0x10e40a520>
+when = 'teardown'
+reraise = (<class '_pytest.outcomes.Exit'>, <class 'KeyboardInterrupt'>)
+
+    @classmethod
+    def from_call(
+        cls,
+        func: Callable[[], TResult],
+        when: Literal["collect", "setup", "call", "teardown"],
+        reraise: type[BaseException] | tuple[type[BaseException], ...] | None = None,
+    ) -> CallInfo[TResult]:
+        """Call func, wrapping the result in a CallInfo.
+    
+        :param func:
+            The function to call. Called without arguments.
+        :type func: Callable[[], _pytest.runner.TResult]
+        :param when:
+            The phase in which the function is called.
+        :param reraise:
+            Exception or exceptions that shall propagate if raised by the
+            function, instead of being wrapped in the CallInfo.
+        """
+        excinfo = None
+        instant = timing.Instant()
+        try:
+>           result: TResult | None = func()
+                                     ^^^^^^
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:361: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:250: in <lambda>
+    lambda: runtest_hook(item=item, **kwds),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_hooks.py:512: in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_manager.py:120: in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/logging.py:873: in pytest_runtest_teardown
+    yield
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/capture.py:905: in pytest_runtest_teardown
+    return (yield)
+            ^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:188: in pytest_runtest_teardown
+    collect_unraisable(item.config)
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:79: in collect_unraisable
+    raise errors[0]
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+config = <_pytest.config.Config object at 0x10b08a120>
+
+    def collect_unraisable(config: Config) -> None:
+        pop_unraisable = config.stash[unraisable_exceptions].pop
+        errors: list[pytest.PytestUnraisableExceptionWarning | RuntimeError] = []
+        meta = None
+        hook_error = None
+        try:
+            while True:
+                try:
+                    meta = pop_unraisable()
+                except IndexError:
+                    break
+    
+                if isinstance(meta, BaseException):
+                    hook_error = RuntimeError("Failed to process unraisable exception")
+                    hook_error.__cause__ = meta
+                    errors.append(hook_error)
+                    continue
+    
+                msg = meta.msg
+                try:
+>                   warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+E                   pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x10e31d650>
+E                   
+E                   Object allocated at:
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121
+E                       res = hook_impl.function(*args)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1328
+E                       result = call_fixture_func(fixturefunc, request, kwargs)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1005
+E                       fixture_result = fixturefunc(**kwargs)
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/tests/test_sister_notification_wakes_lo.py", line 16
+E                       con = tasks.connect(str(tmp_path / "board.db"))
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/misaka/core/platform/tasks.py", line 374
+E                       con = sqlite3.connect(
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning
+_ ERROR at teardown of test_a_run_nobody_drives_needs_last_order_woken[stopped] _
+
+    @pytest.fixture(autouse=True)
+    def collect_after_each_test():
+        yield
+>       gc.collect()
+E       ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x10e31f250>
+
+../leak_gc.py:7: ResourceWarning
+
+The above exception was the direct cause of the following exception:
+
+cls = <class '_pytest.runner.CallInfo'>
+func = <function call_and_report.<locals>.<lambda> at 0x10e40a700>
+when = 'teardown'
+reraise = (<class '_pytest.outcomes.Exit'>, <class 'KeyboardInterrupt'>)
+
+    @classmethod
+    def from_call(
+        cls,
+        func: Callable[[], TResult],
+        when: Literal["collect", "setup", "call", "teardown"],
+        reraise: type[BaseException] | tuple[type[BaseException], ...] | None = None,
+    ) -> CallInfo[TResult]:
+        """Call func, wrapping the result in a CallInfo.
+    
+        :param func:
+            The function to call. Called without arguments.
+        :type func: Callable[[], _pytest.runner.TResult]
+        :param when:
+            The phase in which the function is called.
+        :param reraise:
+            Exception or exceptions that shall propagate if raised by the
+            function, instead of being wrapped in the CallInfo.
+        """
+        excinfo = None
+        instant = timing.Instant()
+        try:
+>           result: TResult | None = func()
+                                     ^^^^^^
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:361: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:250: in <lambda>
+    lambda: runtest_hook(item=item, **kwds),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_hooks.py:512: in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_manager.py:120: in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/logging.py:873: in pytest_runtest_teardown
+    yield
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/capture.py:905: in pytest_runtest_teardown
+    return (yield)
+            ^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:188: in pytest_runtest_teardown
+    collect_unraisable(item.config)
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:79: in collect_unraisable
+    raise errors[0]
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+config = <_pytest.config.Config object at 0x10b08a120>
+
+    def collect_unraisable(config: Config) -> None:
+        pop_unraisable = config.stash[unraisable_exceptions].pop
+        errors: list[pytest.PytestUnraisableExceptionWarning | RuntimeError] = []
+        meta = None
+        hook_error = None
+        try:
+            while True:
+                try:
+                    meta = pop_unraisable()
+                except IndexError:
+                    break
+    
+                if isinstance(meta, BaseException):
+                    hook_error = RuntimeError("Failed to process unraisable exception")
+                    hook_error.__cause__ = meta
+                    errors.append(hook_error)
+                    continue
+    
+                msg = meta.msg
+                try:
+>                   warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+E                   pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x10e31f250>
+E                   
+E                   Object allocated at:
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121
+E                       res = hook_impl.function(*args)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1328
+E                       result = call_fixture_func(fixturefunc, request, kwargs)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1005
+E                       fixture_result = fixturefunc(**kwargs)
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/tests/test_sister_notification_wakes_lo.py", line 16
+E                       con = tasks.connect(str(tmp_path / "board.db"))
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/misaka/core/platform/tasks.py", line 374
+E                       con = sqlite3.connect(
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning
+__ ERROR at teardown of test_a_run_nobody_drives_needs_last_order_woken[done] __
+
+    @pytest.fixture(autouse=True)
+    def collect_after_each_test():
+        yield
+>       gc.collect()
+E       ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x10e31d450>
+
+../leak_gc.py:7: ResourceWarning
+
+The above exception was the direct cause of the following exception:
+
+cls = <class '_pytest.runner.CallInfo'>
+func = <function call_and_report.<locals>.<lambda> at 0x10e40afc0>
+when = 'teardown'
+reraise = (<class '_pytest.outcomes.Exit'>, <class 'KeyboardInterrupt'>)
+
+    @classmethod
+    def from_call(
+        cls,
+        func: Callable[[], TResult],
+        when: Literal["collect", "setup", "call", "teardown"],
+        reraise: type[BaseException] | tuple[type[BaseException], ...] | None = None,
+    ) -> CallInfo[TResult]:
+        """Call func, wrapping the result in a CallInfo.
+    
+        :param func:
+            The function to call. Called without arguments.
+        :type func: Callable[[], _pytest.runner.TResult]
+        :param when:
+            The phase in which the function is called.
+        :param reraise:
+            Exception or exceptions that shall propagate if raised by the
+            function, instead of being wrapped in the CallInfo.
+        """
+        excinfo = None
+        instant = timing.Instant()
+        try:
+>           result: TResult | None = func()
+                                     ^^^^^^
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:361: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:250: in <lambda>
+    lambda: runtest_hook(item=item, **kwds),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_hooks.py:512: in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_manager.py:120: in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/logging.py:873: in pytest_runtest_teardown
+    yield
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/capture.py:905: in pytest_runtest_teardown
+    return (yield)
+            ^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:188: in pytest_runtest_teardown
+    collect_unraisable(item.config)
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:79: in collect_unraisable
+    raise errors[0]
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+config = <_pytest.config.Config object at 0x10b08a120>
+
+    def collect_unraisable(config: Config) -> None:
+        pop_unraisable = config.stash[unraisable_exceptions].pop
+        errors: list[pytest.PytestUnraisableExceptionWarning | RuntimeError] = []
+        meta = None
+        hook_error = None
+        try:
+            while True:
+                try:
+                    meta = pop_unraisable()
+                except IndexError:
+                    break
+    
+                if isinstance(meta, BaseException):
+                    hook_error = RuntimeError("Failed to process unraisable exception")
+                    hook_error.__cause__ = meta
+                    errors.append(hook_error)
+                    continue
+    
+                msg = meta.msg
+                try:
+>                   warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+E                   pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x10e31d450>
+E                   
+E                   Object allocated at:
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121
+E                       res = hook_impl.function(*args)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1328
+E                       result = call_fixture_func(fixturefunc, request, kwargs)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1005
+E                       fixture_result = fixturefunc(**kwargs)
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/tests/test_sister_notification_wakes_lo.py", line 16
+E                       con = tasks.connect(str(tmp_path / "board.db"))
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/misaka/core/platform/tasks.py", line 374
+E                       con = sqlite3.connect(
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning
+_____ ERROR at teardown of test_missing_context_or_board_wakes_last_order ______
+
+    @pytest.fixture(autouse=True)
+    def collect_after_each_test():
+        yield
+>       gc.collect()
+E       ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x10e31f750>Traceback (most recent call last):
+  File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 33, in gc_collect_harder
+    gc.collect()
+    ~~~~~~~~~~^^
+ResourceWarning: unclosed database in <misaka.core.platform.tasks.SerializedConnection object at 0x10e31f150>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pytest/__main__.py", line 9, in <module>
+    raise SystemExit(_console_main())
+                     ~~~~~~~~~~~~~^^
+  File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/config/__init__.py", line 253, in _console_main
+    code = _main(prog=_get_prog_name(sys.argv))
+  File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/config/__init__.py", line 229, in _main
+    ret: ExitCode | int = config.hook.pytest_cmdline_main(config=config)
+                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 167, in _multicall
+    raise exception
+  File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/main.py", line 377, in pytest_cmdline_main
+    return wrap_session(config, _main)
+  File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/main.py", line 372, in wrap_session
+    config._ensure_unconfigure()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/config/__init__.py", line 1212, in _ensure_unconfigure
+    self.hook.pytest_unconfigure(config=self)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 167, in _multicall
+    raise exception
+  File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 173, in pytest_unconfigure
+    collect_unraisable(config)
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 79, in collect_unraisable
+    raise errors[0]
+  File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py", line 67, in collect_unraisable
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x10e31f150>
+
+Object allocated at:
+  File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121
+    res = hook_impl.function(*args)
+  File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1328
+    result = call_fixture_func(fixturefunc, request, kwargs)
+  File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1005
+    fixture_result = fixturefunc(**kwargs)
+  File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/tests/test_sister_notification_wakes_lo.py", line 16
+    con = tasks.connect(str(tmp_path / "board.db"))
+  File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/misaka/core/platform/tasks.py", line 374
+    con = sqlite3.connect(
+
+
+../leak_gc.py:7: ResourceWarning
+
+The above exception was the direct cause of the following exception:
+
+cls = <class '_pytest.runner.CallInfo'>
+func = <function call_and_report.<locals>.<lambda> at 0x10e40ac00>
+when = 'teardown'
+reraise = (<class '_pytest.outcomes.Exit'>, <class 'KeyboardInterrupt'>)
+
+    @classmethod
+    def from_call(
+        cls,
+        func: Callable[[], TResult],
+        when: Literal["collect", "setup", "call", "teardown"],
+        reraise: type[BaseException] | tuple[type[BaseException], ...] | None = None,
+    ) -> CallInfo[TResult]:
+        """Call func, wrapping the result in a CallInfo.
+    
+        :param func:
+            The function to call. Called without arguments.
+        :type func: Callable[[], _pytest.runner.TResult]
+        :param when:
+            The phase in which the function is called.
+        :param reraise:
+            Exception or exceptions that shall propagate if raised by the
+            function, instead of being wrapped in the CallInfo.
+        """
+        excinfo = None
+        instant = timing.Instant()
+        try:
+>           result: TResult | None = func()
+                                     ^^^^^^
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:361: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/runner.py:250: in <lambda>
+    lambda: runtest_hook(item=item, **kwds),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_hooks.py:512: in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_manager.py:120: in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/logging.py:873: in pytest_runtest_teardown
+    yield
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/capture.py:905: in pytest_runtest_teardown
+    return (yield)
+            ^^^^^
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:188: in pytest_runtest_teardown
+    collect_unraisable(item.config)
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:79: in collect_unraisable
+    raise errors[0]
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+config = <_pytest.config.Config object at 0x10b08a120>
+
+    def collect_unraisable(config: Config) -> None:
+        pop_unraisable = config.stash[unraisable_exceptions].pop
+        errors: list[pytest.PytestUnraisableExceptionWarning | RuntimeError] = []
+        meta = None
+        hook_error = None
+        try:
+            while True:
+                try:
+                    meta = pop_unraisable()
+                except IndexError:
+                    break
+    
+                if isinstance(meta, BaseException):
+                    hook_error = RuntimeError("Failed to process unraisable exception")
+                    hook_error.__cause__ = meta
+                    errors.append(hook_error)
+                    continue
+    
+                msg = meta.msg
+                try:
+>                   warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+E                   pytest.PytestUnraisableExceptionWarning: Exception ignored in: <misaka.core.platform.tasks.SerializedConnection object at 0x10e31f750>
+E                   
+E                   Object allocated at:
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121
+E                       res = hook_impl.function(*args)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1328
+E                       result = call_fixture_func(fixturefunc, request, kwargs)
+E                     File "/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1005
+E                       fixture_result = fixturefunc(**kwargs)
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/tests/test_sister_notification_wakes_lo.py", line 16
+E                       con = tasks.connect(str(tmp_path / "board.db"))
+E                     File "/private/tmp/misaka-u05-u06-20260921-3qlqqihr/u06-red-overlay/misaka/core/platform/tasks.py", line 374
+E                       con = sqlite3.connect(
+
+/Users/makiko/Projects/misaka/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning
+=========================== short test summary info ============================
+ERROR tests/test_research_mode_notice.py::test_a_board_without_research_tables_is_not_a_failure
+ERROR tests/test_research_mode_notice.py::test_an_active_run_puts_the_discipline_in_front
+ERROR tests/test_research_mode_notice.py::test_waiting_for_the_user_still_counts_as_driven
+ERROR tests/test_research_mode_notice.py::test_a_paused_run_tells_lo_to_wait_for_the_user[failed]
+ERROR tests/test_research_mode_notice.py::test_a_paused_run_tells_lo_to_wait_for_the_user[stopped]
+ERROR tests/test_research_mode_notice.py::test_a_finished_run_leaves_the_conversation_alone
+ERROR tests/test_research_mode_notice.py::test_the_discipline_wins_over_a_paused_sibling
+ERROR tests/test_research_mode_notice.py::test_context_hook_prepends_an_ephemeral_notice
+ERROR tests/test_research_mode_notice.py::test_context_hook_is_silent_without_a_run
+ERROR tests/test_research_mode_notice.py::test_context_hook_survives_a_broken_board
+ERROR tests/test_sister_notification_wakes_lo.py::test_a_driven_run_reads_its_own_results
+ERROR tests/test_sister_notification_wakes_lo.py::test_a_run_nobody_drives_needs_last_order_woken[failed]
+ERROR tests/test_sister_notification_wakes_lo.py::test_a_run_nobody_drives_needs_last_order_woken[stopped]
+ERROR tests/test_sister_notification_wakes_lo.py::test_a_run_nobody_drives_needs_last_order_woken[done]
+ERROR tests/test_sister_notification_wakes_lo.py::test_missing_context_or_board_wakes_last_order
+19 passed, 15 errors in 28.84s

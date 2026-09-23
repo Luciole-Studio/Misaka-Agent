@@ -13,7 +13,7 @@ import os
 import secrets
 import socket
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -133,7 +133,7 @@ def transcript_tail(session_file: str, limit: int = 40) -> str | None:
     except OSError:
         return None
     out: list[str] = []
-    for line in raw.splitlines():
+    for line in raw.split("\n"):
         try:
             entry = json.loads(line)
         except ValueError:
@@ -183,6 +183,15 @@ def _adoptable_transcript(task) -> str | None:
     except ValueError:
         return None
     return found
+
+
+def _research_run_active(con, research: Mapping[str, Any] | None) -> bool:
+    """Whether the research run a card belongs to still has a driver reading its results."""
+    from misaka.core.research import runs
+    try:
+        return runs.is_active(con, (research or {}).get("run_id"))
+    except Exception:  # noqa: BLE001 - a broken board must not silence the notification; wake LO
+        return False
 
 
 def _sister_notification(data: Mapping[str, Any]) -> str:
@@ -237,14 +246,52 @@ class _SisterManager(SubagentManager):
         self.records_usage = True
         self.beast = False
         self.research = dict(row).get("_research")
-        model = row["model"]
-        if not model:
-            try:
-                with open(os.path.join(self.profile_dir, "config.json"), encoding="utf-8") as handle:
-                    model = json.load(handle).get("model")
-            except (OSError, ValueError, AttributeError):
-                model = None
-        self.model = str(model or cfg.get("default_model") or "") or None
+        from misaka.core.model_resolver import findExactModelReferenceMatch
+        from misaka.core.subagent.model import (
+            normalize_model_for_api,
+            resolve_model_spec,
+        )
+
+        registry = session.modelRegistry
+        models = registry.getAll()
+        override = profiles.explicit_model_override(self.profile_dir, row["model"])
+        normalized = normalize_model_for_api(override or "")
+        explicit = findExactModelReferenceMatch(normalized, models)
+        self.thinking_override = None
+        if override and explicit is None:
+            from misaka.cli.args import is_valid_thinking_level
+
+            prefix, separator, level = override.rpartition(":")
+            if separator and is_valid_thinking_level(level):
+                # Keep native :level overrides separate from registry model IDs.
+                override, self.thinking_override = prefix, level
+                normalized = normalize_model_for_api(override)
+                explicit = findExactModelReferenceMatch(normalized, models)
+        if explicit and normalized.casefold() == f"{explicit.provider}/{explicit.id}".casefold():
+            # An explicit complete pair can repair a launch even while the old
+            # profile pin is malformed, unknown or ambiguous.
+            parent = explicit
+        else:
+            reference = profiles.pinned_model(self.profile_dir, strict=True)
+            if not reference or reference == "inherit":
+                reference = f"{cfg['provider']}/{cfg['default_model']}"
+            canonical = profiles.resolve_model_reference(
+                reference, registry,
+                fallback_provider=cfg["provider"] if reference == cfg["default_model"] else None,
+            )
+            provider, model_id = canonical.split("/", 1)
+            parent = {"provider": provider, "id": model_id}
+        # Preserve native aliases/inherit and bare-ID endpoint semantics, but
+        # inherit from this Sister's pair rather than Last Order's model.
+        provider, model_id = resolve_model_spec({}, override, None, parent, models)
+        self.model = f"{provider}/{model_id}"
+        selected = registry.find(provider, normalize_model_for_api(model_id))
+        if selected is None:
+            raise ValueError(f"Unknown Sister model: {self.model}")
+        if not registry.hasConfiguredAuth(selected):
+            # The generic runtime resolves against authenticated providers. An
+            # absent provider there must not turn this pin into a bare LO ID.
+            raise ValueError(f"No configured authentication for Sister model: {self.model}")
         role = profiles.role_of(self.profile_dir)
         super().__init__(
             session,
@@ -287,10 +334,11 @@ class _SisterManager(SubagentManager):
             raise ValueError(f"Sister card cannot change identity to {requested!r}")
         # Identity comes first, followed by mandatory role instructions.
         from misaka.config import identity
+        from misaka.core.resource_loader import resolve_prompt_input
         soul = "\n\n".join(
-            [Path(profiles.shared_soul()).read_text(encoding="utf-8")]
-            + identity.prompt_sections(self.profile_dir,
-                                       profiles.role_of(self.profile_dir)))
+            resolve_prompt_input(source, "role system prompt")
+            for source in identity.base_prompt_sources(self.profile_dir,
+                                                        profiles.role_of(self.profile_dir)))
         # The same stack a card in a pane sees (project, role, shared), as read-only copies.
         skill_sandbox.snapshot_stack(self.profile_dir, cwd or self.role_context.workspace, self.skill_root)
         return AgentDefinition(
@@ -308,6 +356,12 @@ class _SisterManager(SubagentManager):
         # Keep the saved personality but use the normal builder for active tools'
         # guidance, just like a pane/headless card. The generic runtime is unchanged.
         flags = await super()._child_flags(task)
+        # A Sister root follows native defaults/resume, not generic children's forced off.
+        if "--thinking" in flags:
+            index = flags.index("--thinking")
+            del flags[index:index + 2]
+        if (thinking := getattr(self, "thinking_override", None)) is not None:
+            flags += ["--thinking", thinking]
         flags[flags.index("--system-prompt")] = "--append-system-prompt"
         from misaka.config.identity import COMMON_CHARTER, SISTER_ROLE
         # Older persisted definitions predate the independent duty sections.
@@ -315,11 +369,12 @@ class _SisterManager(SubagentManager):
         for section in (COMMON_CHARTER, SISTER_ROLE):
             if section not in task.definition.prompt:
                 flags += ["--append-system-prompt", section]
-        return flags + worker.research_addendum_flags({"_research": self.research})
+        return flags
 
     def child_env_extra(self, _task: AgentTask) -> dict[str, str]:
         # The child indexes the read-only copies this manager made, never the live trees.
-        return {"MISAKA_SKILL_SANDBOX": self.skill_root}
+        return {"MISAKA_SKILL_SANDBOX": self.skill_root,
+                "MISAKA_RESEARCH_CONTEXT": "1" if self.research else "0"}
 
     def _child_tool_vocabulary(self) -> list[str] | None:
         """A Sister card is a root of her own, not a worker inside Last Order's pool.
@@ -524,7 +579,7 @@ class SisterRuntime:
         base = row["workspace"] or self._workspace(row["id"])
         task["_attachments"] = cards.attachment_list(base, row["id"], workspace=row["workspace"])
         task["_handoffs"] = worker.card_handoffs(self.con, row)
-        task.update(worker.card_extras(self.con, row, self.cfg, include_colleagues=False))
+        task.update(worker.card_extras(self.con, row, self.cfg))
         reading = budget.status(self.con, self.cfg.get("token_cap"))
         if reading["mode"] == "stop":
             if db.back_to_ready(
@@ -768,6 +823,7 @@ class SisterRuntime:
         on_update: Any = None,
         task_ids: list[str] | None = None,
         workspace: str | None = None,
+        validate_tasks: Callable[[list[str]], None] | None = None,
     ) -> list[dict[str, Any]]:
         if task_ids == []:
             return []
@@ -787,6 +843,10 @@ class SisterRuntime:
         wanted = list(dict.fromkeys(task_ids if task_ids is not None else default_ready))
         if not wanted:
             return []
+        # Check the scheduler's actual selection before any claim/model work. The
+        # Research driver and ordinary Board callers retain their own contracts.
+        if validate_tasks is not None:
+            validate_tasks(wanted)
 
         # Take a slot before taking a lease: cards that do not fit stay ready for
         # the next round instead of holding a lease they cannot run under.
@@ -1156,7 +1216,10 @@ class SisterRuntime:
         data = self._snapshot_row(frozen)
         # Research phases already consume successful results. Keep their receipt visible
         # and durable without starting another LO turn; failures/help still need attention.
-        trigger_turn = status != "done" or data.get("research") is None
+        # That holds only while a driver is advancing the run: once it is paused or failed
+        # (2026-09-18, B26) nobody reads the result unless Last Order is woken for it.
+        trigger_turn = (status != "done" or data.get("research") is None
+                        or not _research_run_active(self.con, data["research"]))
         def persisted():
             delivery["_onPersist"]()
             db.add_event(self.con, task_id, "notified", {"status": data["status"], "collected": True},
@@ -1400,6 +1463,18 @@ class SisterRuntime:
         data = self._snapshot_row(row)
         return {"retrieval_status": retrieval, "task": data}
 
+    @staticmethod
+    def _mail_card(row, text, summary):
+        """A note for one attempt at a card, from its Last Order, read by the card's inbox."""
+        from misaka.core.network import messages
+        con = messages.connect()
+        try:
+            messages.send(con, row["assignee"], text, summary=summary, sender="last-order",
+                          to_task=row["id"], generation=int(row["generation"]),
+                          workspace=row["workspace"])
+        finally:
+            con.close()
+
     async def _restore(self, task_id: str, context: Any) -> SisterHandle:
         row = db.get(self.con, task_id)
         if row is None:
@@ -1411,7 +1486,7 @@ class SisterRuntime:
             raise ValueError(f"Card {task_id} has no resumable Sister session.")
         prepared = dict(row)
         prepared.update(worker.card_extras(
-            self.con, row, self.cfg, include_colleagues=False, include_materials=False))
+            self.con, row, self.cfg, include_materials=False))
         manager = _SisterManager(self.session, self.cfg, prepared, row["workspace"])
         manager._semaphore = self._sister_semaphore
         manager._session_dir(context)
@@ -1459,6 +1534,23 @@ class SisterRuntime:
                 and observed["claim_lock"] not in self._owned_claims
             ):
                 raise ValueError("This card belongs to another Last Order session; send the message from its owning session.")
+            never_ran = (observed["status"] in TERMINAL_BOARD_STATUSES
+                         and not observed["agent_id"] and not observed["session_file"])
+            if never_ran:
+                # Stopped before its first turn (2026-09-18, B16): there is nothing to resume,
+                # so this is the card's first attempt, from its contract, with the note mailed
+                # to that attempt's inbox for its first tool boundary (B8's card address).
+                if not confirmed:
+                    raise ValueError("User confirmation is required to start a Sister card with a new model turn.")
+                if not db.reopen_task(self.con, task_id, expected_generation=expected_generation):
+                    raise RuntimeError("The Sister session changed; try again.")
+                started = await self.launch(task_id, context=context, tool_call_id="message")
+                row = db.get(self.con, task_id)
+                await asyncio.to_thread(self._mail_card, row, message, summary)
+                handle = self._handles.get(task_id)
+                if handle is not None:
+                    self._event(handle, "message", {"summary": summary, "mode": "first-attempt"})
+                return {"success": True, "mode": "first-attempt", **started}
             handle = await self._restore(task_id, context)
         if not handle.manager or not handle.agent:
             raise ValueError(f"Card {task_id} has no resumable Sister session.")

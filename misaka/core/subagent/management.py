@@ -14,6 +14,7 @@ from pathlib import Path
 
 from filelock import FileLock
 
+from misaka.config import home
 from misaka.core.subagent.agents import COLORS, AgentDefinition, _user_agents_dir, parse
 from misaka.utils.atomic import write_text
 
@@ -40,12 +41,15 @@ def writable_root(scope: str, ctx, role_context) -> Path:
     if scope == 'user':
         return _user_agents_dir().resolve()
     if scope == 'role' and role_context.profile_dir:
-        return (Path(role_context.profile_dir) / 'agents').resolve()
+        return home.path('subagents', role_context.profile_dir).resolve()
     if scope == 'project':
         if not ctx.isProjectTrusted():
             raise ValueError('Project agent editing requires project trust')
         workspace = Path(ctx.cwd).resolve()
-        root = (workspace / '.misaka' / 'agents').resolve()
+        project_dir = home.project_dir(workspace)
+        if project_dir is None:
+            raise ValueError('This directory has no project scope: its config directory is the MISAKA home')
+        root = (project_dir / home.SUBAGENTS_DIR).resolve()
         if not root.is_relative_to(workspace):
             raise ValueError('Project agent directory resolves outside the project')
         return root
@@ -161,7 +165,12 @@ async def memory_command(argv, manager, ctx):
     """Source snapshot initialize/replace/keep decisions via native /agents UI."""
     import asyncio
 
-    from misaka.core.subagent.memory import check_snapshot, copy_snapshot, mark_synced
+    from misaka.core.subagent.memory import (
+        check_snapshot,
+        copy_snapshot,
+        mark_synced,
+        snapshot_dir,
+    )
     from misaka.core.subagent.runtime import TERMINAL_STATUSES, _safe_component
     from misaka.utils.async_lifecycle import run_in_thread
 
@@ -174,7 +183,9 @@ async def memory_command(argv, manager, ctx):
         raise ValueError('Agent memory and project trust are required for snapshot management')
     local = manager._memory_directory(task)
     project = Path(task.worktree.repo if task.worktree else task.cwd)
-    snapshot = project / '.misaka' / 'agent-memory-snapshots' / _safe_component(task.agent_type)
+    snapshot = snapshot_dir(project, _safe_component(task.agent_type))
+    if snapshot is None:
+        raise ValueError('This directory has no project scope: its config directory is the MISAKA home')
     state = await asyncio.to_thread(check_snapshot, snapshot, local)
     operation = argv[1] if len(argv) == 2 else 'status'
     if operation == 'status' or state['action'] == 'none':
